@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Model-facing browser tools over `ctx.browser`: `browser_open`,
  * `browser_snapshot`, `browser_execute`, `browser_content`,
  * `browser_screenshot`, and tab management (`browser_list_tabs`,
@@ -65,7 +65,9 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.systemPrompt.section({
     name: 'tool:browser',
-    order: 110,
+    // Tool guidance band is 100-199; 150 keeps clear of the common 110/120
+    // tool sections so ordering does not depend on plugin load sequence.
+    order: 150,
     text: 'Use the browser_* tools to operate a real shared browser the human can see and take over. Locate elements by snapshot reference numbers (browser_snapshot) and drive them with browser_execute (DOM-referenced JS, native setters for framework inputs). browser_screenshot is for visual confirmation, not primary targeting. Keep the human informed of what you are doing on the page.',
   })
 
