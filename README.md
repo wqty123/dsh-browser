@@ -2,20 +2,21 @@
 
 [English](README.en.md) | 中文
 
-面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的共享真实浏览器插件:一个用户可见、可随时接管的浏览器,由 agent 通过 CDP 驱动。
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的共享真实浏览器能力插件:一个用户可见、可随时接管的浏览器,由 agent 通过 CDP 驱动。
+
+本插件提供 **host 侧能力**(浏览器 seam、Electron CDP provider、`browser_*` 模型工具)。浏览器本身的**原生视图**由宿主(桌面外壳)通过 `ctx.electronViewHost` 提供;插件不包含浏览器界面 UI。
 
 ## 功能
 
-- **真实视图,而非转播。** 浏览器是原生 `WebContentsView`,用户可直接看到并操作;agent 驱动的是同一个页面。
+- **真实视图,而非转播。** 浏览器是原生视图(`WebContentsView`),用户可直接看到并操作;agent 驱动的是同一个页面。视图由宿主外壳提供,插件负责驱动。
 - **DOM 引用,而非猜坐标。** `browser_snapshot` 返回带编号的交互元素;`browser_execute` 在页面里执行 JS(框架输入用原生 setter),在 React/Vue 页面上也能可靠交互。
 - **多标签会话。** 并行打开 URL、查看/切换/关闭/重置标签,状态保持。
 - **多格式内容。** 以 html / markdown / txt / json 抓取页面,支持 selector 限定、长度与超时上限。
-- **GUI 中的浏览器列。** 在桌面外壳下运行时,浏览器作为对话旁的列出现(sidebar | browser | conversation | details),原生视图与列对齐。
 
 ## 环境要求
 
 - DeepSeek Harness(dsh)且安装了 `web` profile
-- 提供 `ctx.electronViewHost` 的桌面外壳(持有真实 Electron `WebContentsView` 的主机)。没有它时,插件只挂载 seam,provider 与工具保持禁用——纯 `dsh web` 不受影响。
+- 提供 `ctx.electronViewHost` 的宿主(持有真实 Electron `WebContentsView` 的主机,如 dsh 的桌面外壳)。没有它时,插件只挂载 seam,provider 与工具保持禁用——纯 `dsh web` 不受影响。
 
 ## 安装
 
@@ -41,7 +42,7 @@ provider 与工具以 `ctx.get('electronViewHost')` 是否存在为门控,因此
 
 | 行 | 配置项 | 类型 | 默认 | 说明 |
 |---|---|---|---|---|
-| `browser-electron` | `viewHost` | 对象 | 必填 | 桌面外壳提供的 `ElectronBrowserViewHost` 实例(通常 `!!js ctx.get('electronViewHost')`) |
+| `browser-electron` | `viewHost` | 对象 | 必填 | 宿主提供的 `ElectronBrowserViewHost` 实例(通常 `!!js ctx.get('electronViewHost')`) |
 | `browser-electron` | `httpOnly` | 布尔 | `true` | 仅允许 HTTP(S) 导航;其余协议(如 `file:`/`data:`)拒绝(`BROWSER_NAVIGATION_BLOCKED`) |
 | `browser-electron` | `snapshotMaxElements` | 数字 | `60` | 快照最多收录的交互元素数,超出截断 |
 | `browser-electron` | `contentMaxChars` | 数字 | `100000` | 内容抓取默认字符上限 |
@@ -65,18 +66,23 @@ provider 与工具以 `ctx.get('electronViewHost')` 是否存在为门控,因此
 agent (browser_* 工具)
   → ctx.browser (seam, dsh-browser/browser)
   → dsh-browser/browser-electron (provider)
-  → ElectronBrowserViewHost (由桌面外壳提供)
+  → ElectronBrowserViewHost (由宿主外壳提供)
   → WebContentsView + webContents.debugger (CDP)
 ```
 
 provider 按构造与 Electron 解耦:它通过 `ElectronBrowserViewHost` 接缝操作(创建/销毁/显示视图、`sendCommand`),由真实外壳用 Electron 对象实现。同一接缝也让未来的转播 provider(无头 Chromium 截图流)服务远程部署,而无需改动工具。
+
+## 与桌面外壳的分工
+
+浏览器**可见视图**、**浏览器列布局**、**列与视图的对齐**都属于宿主外壳(如 dsh 的 `apps/desktop`),不在本插件内。本插件只消费外壳提供的 `electronViewHost`,负责 seam、provider 与工具。若你只装插件而没有配套外壳,插件功能保持禁用。
 
 ## 已知限制
 
 - 截图仅 PNG(CDP JPEG 在 Electron 43 上挂起);JPEG 等待非 CDP 转换路径。
 - 部分主机在软件合成下 `fullPage` 截图不稳定。
 - 会话生命周期为插件级(模型共享一个会话),尚未做到按 agent 隔离。
-- 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于 host 层,本插件不承诺。
+- 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于宿主层,本插件不承诺。
+- 本插件不含浏览器列 UI——那是宿主外壳的配套,别把"浏览器列"当成插件能力。
 
 ## 许可证
 
