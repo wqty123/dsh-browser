@@ -1,11 +1,10 @@
 /**
  * Electron-backed browser provider: `WebContentsView` sessions driven over
- * `webContents.debugger` (CDP). The provider itself does not import Electron —
- * it operates through the {@link ElectronBrowserViewHost} seam, which the
+ * `webContents.debugger` (CDP). The provider itself does not import Electron 鈥? * it operates through the {@link ElectronBrowserViewHost} seam, which the
  * desktop shell implements with real Electron objects. That keeps this
  * package testable under plain Node and leaves the Electron dependency to the
  * shell that owns the `BrowserWindow`.
- * @module @deepseek-ai/dsh-browser-electron
+ * @module dsh-browser/browser-electron
  */
 import type { BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab } from '../browser/types.ts';
 /** Stable provider id registered with `ctx.browser`. */

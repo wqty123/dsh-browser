@@ -3,14 +3,14 @@
  * provider registration, session lifecycle, cancellation, errors, and product
  * configuration; providers differ only in what backs a session (an Electron
  * `WebContentsView` in the desktop shell, a headless Chromium relay for
- * remote deployments, …).
- * @module @deepseek-ai/dsh-browser/types
+ * remote deployments, 鈥?.
+ * @module dsh-browser/browser/types
  */
 import { HarnessError } from '@deepseek-ai/dsh-llm';
 /**
  * Stable identity of one browser session, resolved by the Host through a
  * Typert `LookupMap` to the live session object (the same mechanism
- * `Agent → agentId` uses). The id is opaque to the wire; only the provider
+ * `Agent 鈫?agentId` uses). The id is opaque to the wire; only the provider
  * and its host binding can interpret it.
  */
 export type BrowserSessionId = string;
@@ -25,7 +25,7 @@ export interface BrowserNavigateRequest {
 }
 /**
  * Click at viewport coordinates. Coordinates are viewport-relative pixels in
- * the session's own coordinate space — the same space the human interacts
+ * the session's own coordinate space 鈥?the same space the human interacts
  * with, so a real view and a relay agree without scaling.
  */
 export interface BrowserClickRequest {
@@ -55,7 +55,7 @@ export interface BrowserScreenshotRequest {
 }
 /**
  * Execute arbitrary JavaScript in the session's page context. This is the
- * primary interaction path — DOM-referenced, not screen-coordinate-based:
+ * primary interaction path 鈥?DOM-referenced, not screen-coordinate-based:
  * focus/input/click go through the page's own JS (native setters for
  * framework-controlled inputs), matching how a human-driven agent operates.
  */
@@ -95,7 +95,7 @@ export interface BrowserSnapshotElement {
 }
 /**
  * AI-friendly page snapshot: a compact, numbered inventory of interactive
- * elements plus page facts. Not raw HTML — the model dialogues with this.
+ * elements plus page facts. Not raw HTML 鈥?the model dialogues with this.
  */
 export interface BrowserSnapshotResult {
     /** Final page URL. */
@@ -161,7 +161,7 @@ export interface BrowserProvider {
     available(): boolean;
     /**
      * Open a new session. The provider mints the session id and prepares its
-     * backing surface (a view, a headless page, …). Sessions are isolated from
+     * backing surface (a view, a headless page, 鈥?. Sessions are isolated from
      * each other; a session must not be visible to any other session's caller.
      */
     open(): Promise<BrowserSessionId>;
@@ -169,7 +169,7 @@ export interface BrowserProvider {
     openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void>;
     /** List the session's tabs. */
     listTabs(session: BrowserSessionId): Promise<readonly BrowserTab[]>;
-    /** Switch to a tab by id. Unknown id → `BROWSER_TAB_UNKNOWN`. */
+    /** Switch to a tab by id. Unknown id 鈫?`BROWSER_TAB_UNKNOWN`. */
     switchTab(session: BrowserSessionId, tabId: string): Promise<void>;
     /** Close one tab. Closing the active tab activates the next. */
     closeTab(session: BrowserSessionId, tabId: string): Promise<void>;

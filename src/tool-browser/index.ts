@@ -1,15 +1,15 @@
-/**
+﻿/**
  * Model-facing browser tools over `ctx.browser`: `browser_open`,
  * `browser_snapshot`, `browser_execute`, `browser_content`,
  * `browser_screenshot`, and tab management (`browser_list_tabs`,
  * `browser_switch_tab`, `browser_close_tab`, `browser_reset`).
  *
  * The tool layer owns only the model-facing schema, argument validation, and
- * result formatting — never provider selection or page driving, which belong
+ * result formatting 鈥?never provider selection or page driving, which belong
  * to the seam. Session lifecycle is owned here at the plugin level: the
  * first `browser_open` (or any tool when no session exists) opens a session;
  * later tools reuse it. Per-agent isolation is a follow-up.
- * @module @deepseek-ai/dsh-tool-browser
+ * @module dsh-browser/tool-browser
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -244,7 +244,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_screenshot',
-    description: 'Capture the current shared-browser page as a PNG screenshot. Use for visual confirmation of layout, charts, designs, or CAPTCHAs — not as the primary way to locate elements (use browser_snapshot for that). Supports optional full-page capture.',
+    description: 'Capture the current shared-browser page as a PNG screenshot. Use for visual confirmation of layout, charts, designs, or CAPTCHAs 鈥?not as the primary way to locate elements (use browser_snapshot for that). Supports optional full-page capture.',
     parameters: {
       fullPage: { type: 'boolean', description: 'Capture the full scrollable page instead of the viewport (default false).' },
     },
@@ -381,3 +381,4 @@ export const internals = {
   get session(): BrowserSessionId | undefined { return currentSession },
   clearSession(): void { currentSession = undefined },
 }
+

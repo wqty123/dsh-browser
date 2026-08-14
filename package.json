@@ -1,7 +1,7 @@
 {
   "name": "dsh-browser",
   "version": "0.1.0",
-  "description": "Shared real browser for DeepSeek Harness: a visible WebContentsView the human watches and can take over, driven by the agent over CDP (snapshot/execute/content/tab management), with a browser column in the GUI",
+  "description": "Shared real browser capability for DeepSeek Harness: a visible browser the human watches and can take over, driven by the agent over CDP (snapshot/execute/content/tab management); host-side seam, provider, and browser_* tools",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
