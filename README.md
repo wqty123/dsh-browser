@@ -1,65 +1,83 @@
-# dsh-browser
+# dsh-browser（DeepSeek Harness 共享真实浏览器插件）
 
-Shared real browser for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): a visible browser the human watches and can take over, driven by the agent over CDP.
+[English](README.en.md) | 中文
 
-- **Real view, not a relay.** The browser is a native `WebContentsView` the human can see and operate directly; the agent drives the very same page.
-- **DOM-referenced, not coordinate-guessing.** `browser_snapshot` returns numbered interactive elements; `browser_execute` runs JS in the page (native setters for framework inputs), so interaction works on React/Vue pages.
-- **Multi-tab sessions.** Open URLs in parallel tabs, list/switch/close/reset, all keeping state.
-- **Multi-format content.** Fetch pages as html / markdown / txt / json, scoped by selector, capped by length and timeout.
-- **Browser column in the GUI.** When running under the desktop shell, the browser appears as a column beside the conversation (sidebar | browser | conversation | details), with the native view aligned to the column.
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的共享真实浏览器插件:一个用户可见、可随时接管的浏览器,由 agent 通过 CDP 驱动。
 
-## Requirements
+## 功能
 
-- DeepSeek Harness (dsh) with the `web` profile
-- A desktop shell that provides `ctx.electronViewHost` (a host with real Electron `WebContentsView`s). Without one, the plugin mounts the seam but the provider and tools stay disabled — plain `dsh web` is unaffected.
+- **真实视图,而非转播。** 浏览器是原生 `WebContentsView`,用户可直接看到并操作;agent 驱动的是同一个页面。
+- **DOM 引用,而非猜坐标。** `browser_snapshot` 返回带编号的交互元素;`browser_execute` 在页面里执行 JS(框架输入用原生 setter),在 React/Vue 页面上也能可靠交互。
+- **多标签会话。** 并行打开 URL、查看/切换/关闭/重置标签,状态保持。
+- **多格式内容。** 以 html / markdown / txt / json 抓取页面,支持 selector 限定、长度与超时上限。
+- **GUI 中的浏览器列。** 在桌面外壳下运行时,浏览器作为对话旁的列出现(sidebar | browser | conversation | details),原生视图与列对齐。
 
-## Install
+## 环境要求
+
+- DeepSeek Harness(dsh)且安装了 `web` profile
+- 提供 `ctx.electronViewHost` 的桌面外壳(持有真实 Electron `WebContentsView` 的主机)。没有它时,插件只挂载 seam,provider 与工具保持禁用——纯 `dsh web` 不受影响。
+
+## 安装
 
 ```sh
-dsh plugin --profile web add dsh-browser        # from npm once published
-# or from a checkout:
-dsh plugin --profile web add <path-to-this-repo>
+dsh plugin --profile web add dsh-browser        # 发布到 npm 后
+# 或从源码目录(独立仓库,一插件一仓库):
+dsh plugin --profile web add <本仓库路径>
 ```
 
-This links the plugin, adds `dsh-browser` to the profile's bundle layer, and mounts:
+这会链接插件、把 `dsh-browser` 加入 profile 的 bundle 层,并挂载:
 
-| Row | Subpath | Role |
+| 行 | 子路径 | 角色 |
 |---|---|---|
-| `browser` | `dsh-browser/browser` | `ctx.browser` capability seam (always mounted) |
-| `browser-electron` | `dsh-browser/browser-electron` | Electron CDP provider (needs `electronViewHost`) |
-| `tool-browser` | `dsh-browser/tool-browser` | `browser_*` model-facing tools |
+| `browser` | `dsh-browser/browser` | `ctx.browser` 能力 seam(始终挂载) |
+| `browser-electron` | `dsh-browser/browser-electron` | Electron CDP provider(需要 `electronViewHost`) |
+| `tool-browser` | `dsh-browser/tool-browser` | `browser_*` 模型侧工具 |
 
-The provider and tools are gated on `ctx.get('electronViewHost')` being present, so a composition without a desktop shell simply keeps the seam and nothing else.
+provider 与工具以 `ctx.get('electronViewHost')` 是否存在为门控,因此没有桌面外壳的组合只会保留 seam,其余不启用。
 
-## Tools
+## 配置
 
-| Tool | Purpose |
+插件通过 `cordis.patch.yml` 挂载,各行的配置:
+
+| 行 | 配置项 | 类型 | 默认 | 说明 |
+|---|---|---|---|---|
+| `browser-electron` | `viewHost` | 对象 | 必填 | 桌面外壳提供的 `ElectronBrowserViewHost` 实例(通常 `!!js ctx.get('electronViewHost')`) |
+| `browser-electron` | `httpOnly` | 布尔 | `true` | 仅允许 HTTP(S) 导航;其余协议(如 `file:`/`data:`)拒绝(`BROWSER_NAVIGATION_BLOCKED`) |
+| `browser-electron` | `snapshotMaxElements` | 数字 | `60` | 快照最多收录的交互元素数,超出截断 |
+| `browser-electron` | `contentMaxChars` | 数字 | `100000` | 内容抓取默认字符上限 |
+| `tool-browser` | `timeoutMs` | 数字 | `60000` | 工具协作超时(ms) |
+| `tool-browser` | `tabTools` | 布尔 | `true` | 是否注册标签管理工具(`browser_list_tabs` 等) |
+
+## 工具
+
+| 工具 | 用途 |
 |---|---|
-| `browser_open` | Open a URL (optionally a new tab); returns a snapshot |
-| `browser_snapshot` | Numbered inventory of interactive elements (inputs/buttons/links) |
-| `browser_execute` | Run JS in the page; args arrive as `arguments[0..n]` |
-| `browser_content` | Fetch the page as html / markdown / txt / json (selector, maxChars, timeoutMs) |
-| `browser_screenshot` | PNG capture, optional `fullPage` |
-| `browser_list_tabs` / `browser_switch_tab` / `browser_close_tab` / `browser_reset` | Multi-tab session management |
+| `browser_open` | 打开 URL(可选新标签);返回快照 |
+| `browser_snapshot` | 交互元素(输入框/按钮/链接)带编号清单 |
+| `browser_execute` | 在页面执行 JS;参数以 `arguments[0..n]` 传入 |
+| `browser_content` | 以 html / markdown / txt / json 抓取页面(selector、maxChars、timeoutMs) |
+| `browser_screenshot` | PNG 截图,可选 `fullPage` |
+| `browser_list_tabs` / `browser_switch_tab` / `browser_close_tab` / `browser_reset` | 多标签会话管理 |
 
-## How it works
+## 工作原理
 
 ```
-agent (browser_* tools)
+agent (browser_* 工具)
   → ctx.browser (seam, dsh-browser/browser)
   → dsh-browser/browser-electron (provider)
-  → ElectronBrowserViewHost (supplied by the desktop shell)
+  → ElectronBrowserViewHost (由桌面外壳提供)
   → WebContentsView + webContents.debugger (CDP)
 ```
 
-The provider is Electron-agnostic by construction: it operates through the `ElectronBrowserViewHost` seam (create/destroy/show views, `sendCommand`), which a real shell implements with Electron objects. The same seam lets a future relay provider (headless Chromium screenshot stream) serve remote deployments without touching the tools.
+provider 按构造与 Electron 解耦:它通过 `ElectronBrowserViewHost` 接缝操作(创建/销毁/显示视图、`sendCommand`),由真实外壳用 Electron 对象实现。同一接缝也让未来的转播 provider(无头 Chromium 截图流)服务远程部署,而无需改动工具。
 
-## Known limitations
+## 已知限制
 
-- Screenshots are PNG-only (CDP JPEG hangs on Electron 43); JPEG awaits a non-CDP conversion path.
-- `fullPage` capture is flaky under software compositing on some hosts.
-- Session lifecycle is plugin-level (one session shared by the model), not per-agent yet.
+- 截图仅 PNG(CDP JPEG 在 Electron 43 上挂起);JPEG 等待非 CDP 转换路径。
+- 部分主机在软件合成下 `fullPage` 截图不稳定。
+- 会话生命周期为插件级(模型共享一个会话),尚未做到按 agent 隔离。
+- 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于 host 层,本插件不承诺。
 
-## License
+## 许可证
 
 MIT

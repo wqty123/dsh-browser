@@ -29,7 +29,7 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
-    "README.zh-CN.md",
+    "README.en.md",
     "LICENSE"
   ],
   "scripts": {
@@ -44,11 +44,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/sunshine-lang/dsh-browser.git"
+    "url": "git+https://github.com/wqty123/dsh-browser.git"
   },
-  "homepage": "https://github.com/sunshine-lang/dsh-browser",
+  "homepage": "https://github.com/wqty123/dsh-browser",
   "bugs": {
-    "url": "https://github.com/sunshine-lang/dsh-browser/issues"
+    "url": "https://github.com/wqty123/dsh-browser/issues"
   },
   "engines": {
     "node": ">=22.19"

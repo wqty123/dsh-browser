@@ -150,8 +150,6 @@ export interface BrowserOpenRequest {
     readonly url: string;
     /** Open in a new tab (parallel). Default false (reuse the active tab). */
     readonly newTab?: boolean;
-    /** Use a private/incognito profile for this tab. Default false. */
-    readonly privateMode?: boolean;
 }
 /**
  * A browser-capable backend. Registered with `ctx.browser.registerBrowserProvider`.
