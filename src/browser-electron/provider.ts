@@ -184,7 +184,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const result: BrowserTab[] = []
     for (let i = 0; i < s.tabs.length; i++) {
-      const tab = s.tabs[i] as Tab
+      const tab = s.tabs[i]
+      if (tab === undefined) continue // defensive: array can shift under concurrency
       result.push({
         id: tab.id,
         url: await this.currentUrl(tab.handle).catch(() => ''),
@@ -219,9 +220,14 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (s.tabs.length === 0) {
       // Session keeps one blank tab so it stays usable.
       this.newTab(s)
+    } else if (index < s.activeIndex) {
+      // Closing a tab before the active one shifts the array left; keep the
+      // same tab active by decrementing the index.
+      s.activeIndex -= 1
+    } else if (s.activeIndex >= s.tabs.length) {
+      // The active tab itself was closed; activate the last remaining one.
+      s.activeIndex = s.tabs.length - 1
     }
-    if (s.activeIndex >= s.tabs.length) s.activeIndex = s.tabs.length - 1
-    if (index <= s.activeIndex && s.activeIndex > 0 && s.tabs.length > 0) s.activeIndex = Math.min(s.activeIndex, s.tabs.length - 1)
     this.showActive(s)
     return Promise.resolve()
   }
@@ -261,14 +267,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const { handle } = this.activeTab(this.session(session))
     signal?.throwIfAborted()
     try {
-      // Inject request.args as `arguments[0..n]`: build a Function whose body
-      // IS the caller's script and apply the args, so the script reads
-      // `arguments[i]`. JSON-serializable args are embedded as a JSON array
-      // literal; args that cannot serialize degrade to null members.
+      // Always wrap the script in a Function so `return` statements are legal
+      // and request.args arrive as `arguments[0..n]`. A bare script handed to
+      // CDP Runtime.evaluate is an expression context — a leading `return`
+      // would be a syntax error. JSON-serializable args are embedded as a JSON
+      // array literal; args that cannot serialize degrade to null members.
       const hasArgs = request.args !== undefined && request.args.length > 0
       const expression = hasArgs
         ? `(function(){ const __dshArgs = ${JSON.stringify(request.args)}; return Function(${JSON.stringify(request.script)}).apply(null, __dshArgs) })()`
-        : request.script
+        : `(function(){ return Function(${JSON.stringify(request.script)})() })()`
       const result = await handle.sendCommand(CDP_RUNTIME_EVALUATE, {
         expression,
         returnByValue: true,
@@ -293,7 +300,6 @@ export class ElectronBrowserProvider implements BrowserProvider {
       const cap = ${String(this.snapshotMaxElements)}
       const url = location.href
       const title = document.title || undefined
-      const seen = new Set()
       const els = [...document.querySelectorAll('input, textarea, select, button, a[href], [role="button"], [role="searchbox"], [contenteditable="true"]')]
       const out = []
       for (const el of els) {
@@ -356,7 +362,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
         }
         if (root.nodeType === Node.TEXT_NODE) walk(root)
         else for (const child of root.childNodes) walk(child)
-        content = parts.join(' ')
+        // Join without a separator: each part already carries its own trailing
+        // newline, so a space join would smear headings/links into run-on text.
+        content = parts.join('')
       }
       const truncated = content.length > ${String(maxChars)}
       return { ok: true, content: content.slice(0, ${String(maxChars)}), truncated }
@@ -393,7 +401,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */
   async screenshot(
     session: BrowserSessionId,
-    request?: { readonly format?: 'png' | 'jpeg'; readonly quality?: number; readonly fullPage?: boolean },
+    request?: { readonly fullPage?: boolean },
     signal?: AbortSignal,
   ): Promise<{ readonly dataUrl: string }> {
     const { handle } = this.activeTab(this.session(session))

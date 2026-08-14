@@ -48,12 +48,8 @@ export interface BrowserScreenshotResult {
     /** Base64 data URL of the capture (PNG or JPEG per the request). */
     readonly dataUrl: string;
 }
-/** Screenshot capture options. */
+/** Screenshot capture options. PNG only (CDP JPEG hangs on Electron 43). */
 export interface BrowserScreenshotRequest {
-    /** Output format. Default 'png'. JPEG is lossy but smaller. */
-    readonly format?: 'png' | 'jpeg';
-    /** JPEG quality 0-100; only meaningful when `format` is 'jpeg'. Default 80. */
-    readonly quality?: number;
     /** Capture the full scrollable page instead of the viewport. Default false. */
     readonly fullPage?: boolean;
 }

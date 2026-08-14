@@ -144,8 +144,6 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     }, signal?: AbortSignal): Promise<void>;
     /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */
     screenshot(session: BrowserSessionId, request?: {
-        readonly format?: 'png' | 'jpeg';
-        readonly quality?: number;
         readonly fullPage?: boolean;
     }, signal?: AbortSignal): Promise<{
         readonly dataUrl: string;
