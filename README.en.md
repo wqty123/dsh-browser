@@ -60,6 +60,14 @@ The plugin mounts through `cordis.patch.yml`; per-row config:
 | `browser_screenshot` | PNG capture, optional `fullPage` |
 | `browser_list_tabs` / `browser_switch_tab` / `browser_close_tab` / `browser_reset` | Multi-tab session management |
 
+### Interaction discipline (clicking / filling forms)
+
+- **Prefer DOM semantics over coordinates**: submit forms with `form.requestSubmit()`, click with `element.click()`; coordinate clicks are the last resort.
+- **Target the right element**: pages often carry hidden copies (e.g. mobile buttons). Use `browser_execute` to filter visible elements (`getBoundingClientRect()` with width/height > 0, computed style not `display:none`) before reading coordinates.
+- **Click immediately after reading coordinates**: do not interleave other actions (filling, scrolling moves elements; stale coordinates fail instantly).
+- **Verify the hit before clicking**: `document.elementFromPoint(x, y)` confirms the coordinate actually lands on the target button/link before issuing a real click.
+- **Mind DPR**: CDP input uses CSS pixels; on high-DPI screens, calibrate with `elementFromPoint` instead of blind coordinate tries.
+
 ## How it works
 
 ```
