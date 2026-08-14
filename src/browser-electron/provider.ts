@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Electron-backed browser provider: `WebContentsView` sessions driven over
  * `webContents.debugger` (CDP). The provider itself does not import Electron 鈥? * it operates through the {@link ElectronBrowserViewHost} seam, which the
  * desktop shell implements with real Electron objects. That keeps this
@@ -161,8 +161,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
     return true
   }
 
-  /** Open a new session with one blank tab. */
+  /**
+   * Get the shared browser session: the one the host already owns, or a new
+   * one on first use. Shared-browser semantics (Cherry Studio's
+   * `getOrCreateWindow` pattern): the host's startup view and every later
+   * agent call must land on the SAME session and view, so opening again
+   * returns the existing session instead of creating a second view the human
+   * cannot see. Closing the session resets this; the next open starts fresh.
+   */
   open(): Promise<BrowserSessionId> {
+    const [existing] = this.sessions.keys()
+    if (existing !== undefined) return Promise.resolve(existing)
     const handle = this.host.createView()
     const id = `browser:${randomUUID()}`
     this.sessions.set(id, { id, tabs: [{ id: `tab:${randomUUID()}`, handle }], activeIndex: 0 })
@@ -266,15 +275,21 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const { handle } = this.activeTab(this.session(session))
     signal?.throwIfAborted()
     try {
-      // Always wrap the script in a Function so `return` statements are legal
-      // and request.args arrive as `arguments[0..n]`. A bare script handed to
-      // CDP Runtime.evaluate is an expression context 鈥?a leading `return`
-      // would be a syntax error. JSON-serializable args are embedded as a JSON
-      // array literal; args that cannot serialize degrade to null members.
+      // Wrap the script in a Function so `return` statements are legal and
+      // request.args arrive as `arguments[0..n]`. A bare script handed to CDP
+      // Runtime.evaluate is an expression context — a leading `return` would
+      // be a syntax error, and an object-literal script (`{...}`) would parse
+      // as a block. So: if the script already starts with `return`, use it as
+      // the body verbatim; otherwise wrap it as `return (expr)` so both
+      // expression and object-literal forms evaluate to their value. Args are
+      // embedded as a JSON array literal; unserializable members become null.
+      const body = /^\s*return\b/.test(request.script)
+        ? request.script
+        : `return (${request.script})`
       const hasArgs = request.args !== undefined && request.args.length > 0
       const expression = hasArgs
-        ? `(function(){ const __dshArgs = ${JSON.stringify(request.args)}; return Function(${JSON.stringify(request.script)}).apply(null, __dshArgs) })()`
-        : `(function(){ return Function(${JSON.stringify(request.script)})() })()`
+        ? `(function(){ const __dshArgs = ${JSON.stringify(request.args)}; return Function(${JSON.stringify(body)}).apply(null, __dshArgs) })()`
+        : `(function(){ return Function(${JSON.stringify(body)})() })()`
       const result = await handle.sendCommand(CDP_RUNTIME_EVALUATE, {
         expression,
         returnByValue: true,

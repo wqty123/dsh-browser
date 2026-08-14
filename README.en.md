@@ -1,4 +1,4 @@
-# dsh-browser (shared real browser plugin for DeepSeek Harness)
+# dsh-builtin-browser (built-in shared real browser plugin for DeepSeek Harness)
 
 中文 | [English](README.en.md)
 
@@ -21,18 +21,18 @@ This plugin provides the **host-side capability** (browser seam, Electron CDP pr
 ## Install
 
 ```sh
-dsh plugin --profile web add dsh-browser        # from npm once published
+dsh plugin --profile web add dsh-builtin-browser  # from npm once published
 # or from a checkout (one plugin, one repository):
 dsh plugin --profile web add <path-to-this-repo>
 ```
 
-This links the plugin, adds `dsh-browser` to the profile's bundle layer, and mounts:
+This links the plugin, adds `dsh-builtin-browser` to the profile's bundle layer, and mounts:
 
 | Row | Subpath | Role |
 |---|---|---|
-| `browser` | `dsh-browser/browser` | `ctx.browser` capability seam (always mounted) |
-| `browser-electron` | `dsh-browser/browser-electron` | Electron CDP provider (needs `electronViewHost`) |
-| `tool-browser` | `dsh-browser/tool-browser` | `browser_*` model-facing tools |
+| `browser` | `dsh-builtin-browser/browser` | `ctx.browser` capability seam (always mounted) |
+| `browser-electron` | `dsh-builtin-browser/browser-electron` | Electron CDP provider (needs `electronViewHost`) |
+| `tool-browser` | `dsh-builtin-browser/tool-browser` | `browser_*` model-facing tools |
 
 The provider and tools are gated on `ctx.get('electronViewHost')` being present, so a composition without a desktop shell simply keeps the seam and nothing else.
 
@@ -64,8 +64,8 @@ The plugin mounts through `cordis.patch.yml`; per-row config:
 
 ```
 agent (browser_* tools)
-  → ctx.browser (seam, dsh-browser/browser)
-  → dsh-browser/browser-electron (provider)
+  → ctx.browser (seam, dsh-builtin-browser/browser)
+  → dsh-builtin-browser/browser-electron (provider)
   → ElectronBrowserViewHost (supplied by the host shell)
   → WebContentsView + webContents.debugger (CDP)
 ```

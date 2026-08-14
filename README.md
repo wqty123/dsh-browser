@@ -1,4 +1,4 @@
-# dsh-browser（DeepSeek Harness 共享真实浏览器插件）
+# dsh-builtin-browser（DeepSeek Harness 内置共享真实浏览器插件）
 
 [English](README.en.md) | 中文
 
@@ -21,18 +21,18 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add dsh-browser        # 发布到 npm 后
+dsh plugin --profile web add dsh-builtin-browser   # 发布到 npm 后
 # 或从源码目录(独立仓库,一插件一仓库):
 dsh plugin --profile web add <本仓库路径>
 ```
 
-这会链接插件、把 `dsh-browser` 加入 profile 的 bundle 层,并挂载:
+这会链接插件、把 `dsh-builtin-browser` 加入 profile 的 bundle 层,并挂载:
 
 | 行 | 子路径 | 角色 |
 |---|---|---|
-| `browser` | `dsh-browser/browser` | `ctx.browser` 能力 seam(始终挂载) |
-| `browser-electron` | `dsh-browser/browser-electron` | Electron CDP provider(需要 `electronViewHost`) |
-| `tool-browser` | `dsh-browser/tool-browser` | `browser_*` 模型侧工具 |
+| `browser` | `dsh-builtin-browser/browser` | `ctx.browser` 能力 seam(始终挂载) |
+| `browser-electron` | `dsh-builtin-browser/browser-electron` | Electron CDP provider(需要 `electronViewHost`) |
+| `tool-browser` | `dsh-builtin-browser/tool-browser` | `browser_*` 模型侧工具 |
 
 provider 与工具以 `ctx.get('electronViewHost')` 是否存在为门控,因此没有桌面外壳的组合只会保留 seam,其余不启用。
 
@@ -64,8 +64,8 @@ provider 与工具以 `ctx.get('electronViewHost')` 是否存在为门控,因此
 
 ```
 agent (browser_* 工具)
-  → ctx.browser (seam, dsh-browser/browser)
-  → dsh-browser/browser-electron (provider)
+  → ctx.browser (seam, dsh-builtin-browser/browser)
+  → dsh-builtin-browser/browser-electron (provider)
   → ElectronBrowserViewHost (由宿主外壳提供)
   → WebContentsView + webContents.debugger (CDP)
 ```

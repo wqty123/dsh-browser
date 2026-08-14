@@ -110,7 +110,14 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     constructor(host: ElectronBrowserViewHost, config?: ElectronBrowserProviderConfig);
     /** Usable whenever the host can create views (always in the desktop shell). */
     available(): boolean;
-    /** Open a new session with one blank tab. */
+    /**
+     * Get the shared browser session: the one the host already owns, or a new
+     * one on first use. Shared-browser semantics (Cherry Studio's
+     * `getOrCreateWindow` pattern): the host's startup view and every later
+     * agent call must land on the SAME session and view, so opening again
+     * returns the existing session instead of creating a second view the human
+     * cannot see. Closing the session resets this; the next open starts fresh.
+     */
     open(): Promise<BrowserSessionId>;
     /** Open a URL in the active tab (default) or a new tab. */
     openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void>;
