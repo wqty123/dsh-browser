@@ -1,0 +1,77 @@
+{
+  "name": "dsh-browser",
+  "version": "0.1.0",
+  "description": "Shared real browser for DeepSeek Harness: a visible WebContentsView the human watches and can take over, driven by the agent over CDP (snapshot/execute/content/tab management), with a browser column in the GUI",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./browser": {
+      "types": "./lib/browser/runtime.d.ts",
+      "default": "./lib/browser/runtime.js"
+    },
+    "./browser-electron": {
+      "types": "./lib/browser-electron/entry.d.ts",
+      "default": "./lib/browser-electron/entry.js"
+    },
+    "./tool-browser": {
+      "types": "./lib/tool-browser/index.d.ts",
+      "default": "./lib/tool-browser/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "browser",
+    "cdp"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/sunshine-lang/dsh-browser.git"
+  },
+  "homepage": "https://github.com/sunshine-lang/dsh-browser",
+  "bugs": {
+    "url": "https://github.com/sunshine-lang/dsh-browser/issues"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "^0.0.1-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,65 @@
+# dsh-browser
+
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的共享真实浏览器:一个用户可见、可随时接管的浏览器,由 agent 通过 CDP 驱动。
+
+- **真实视图,而非转播。** 浏览器是原生 `WebContentsView`,用户可直接看到并操作;agent 驱动的是同一个页面。
+- **DOM 引用,而非猜坐标。** `browser_snapshot` 返回带编号的交互元素;`browser_execute` 在页面里执行 JS(框架输入用原生 setter),在 React/Vue 页面上也能可靠交互。
+- **多标签会话。** 并行打开 URL、查看/切换/关闭/重置标签,状态保持。
+- **多格式内容。** 以 html / markdown / txt / json 抓取页面,支持 selector 限定、长度与超时上限。
+- **GUI 中的浏览器列。** 在桌面外壳下运行时,浏览器作为对话旁的列出现(sidebar | browser | conversation | details),原生视图与列对齐。
+
+## 环境要求
+
+- 安装了 `web` profile 的 DeepSeek Harness(dsh)
+- 提供 `ctx.electronViewHost` 的桌面外壳(持有真实 Electron `WebContentsView` 的主机)。没有它时,插件只挂载 seam,provider 与工具保持禁用——纯 `dsh web` 不受影响。
+
+## 安装
+
+```sh
+dsh plugin --profile web add dsh-browser        # 发布到 npm 后
+# 或从源码目录:
+dsh plugin --profile web add <本仓库路径>
+```
+
+这会链接插件、把 `dsh-browser` 加入 profile 的 bundle 层,并挂载:
+
+| 行 | 子路径 | 角色 |
+|---|---|---|
+| `browser` | `dsh-browser/browser` | `ctx.browser` 能力 seam(始终挂载) |
+| `browser-electron` | `dsh-browser/browser-electron` | Electron CDP provider(需要 `electronViewHost`) |
+| `tool-browser` | `dsh-browser/tool-browser` | `browser_*` 模型侧工具 |
+
+provider 与工具以 `ctx.get('electronViewHost')` 是否存在为门控,因此没有桌面外壳的组合只会保留 seam,其余不启用。
+
+## 工具
+
+| 工具 | 用途 |
+|---|---|
+| `browser_open` | 打开 URL(可选新标签);返回快照 |
+| `browser_snapshot` | 交互元素(输入框/按钮/链接)带编号清单 |
+| `browser_execute` | 在页面执行 JS;参数以 `arguments[0..n]` 传入 |
+| `browser_content` | 以 html / markdown / txt / json 抓取页面(selector、maxChars、timeoutMs) |
+| `browser_screenshot` | PNG 截图,可选 `fullPage` |
+| `browser_list_tabs` / `browser_switch_tab` / `browser_close_tab` / `browser_reset` | 多标签会话管理 |
+
+## 工作原理
+
+```
+agent (browser_* 工具)
+  → ctx.browser (seam, dsh-browser/browser)
+  → dsh-browser/browser-electron (provider)
+  → ElectronBrowserViewHost (由桌面外壳提供)
+  → WebContentsView + webContents.debugger (CDP)
+```
+
+provider 按构造与 Electron 解耦:它通过 `ElectronBrowserViewHost` 接缝操作(创建/销毁/显示视图、`sendCommand`),由真实外壳用 Electron 对象实现。同一接缝也让未来的转播 provider(无头 Chromium 截图流)服务远程部署,而无需改动工具。
+
+## 已知限制
+
+- 截图仅 PNG(CDP JPEG 在 Electron 43 上挂起);JPEG 等待非 CDP 转换路径。
+- 部分主机在软件合成下 `fullPage` 截图不稳定。
+- 会话生命周期为插件级(模型共享一个会话),尚未做到按 agent 隔离。
+
+## 许可证
+
+MIT
