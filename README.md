@@ -16,7 +16,22 @@
 ## 环境要求
 
 - DeepSeek Harness(dsh)且安装了 `web` profile
-- 提供 `ctx.electronViewHost` 的宿主(持有真实 Electron `WebContentsView` 的主机,如 dsh 的桌面外壳)。没有它时,插件只挂载 seam,provider 与工具保持禁用——纯 `dsh web` 不受影响。
+- **Electron 运行时**(可选 peer 依赖):桌面外壳自带;纯 `dsh web` 下需要能定位到 Electron 二进制(见下)
+- 有桌面外壳(`ctx.electronViewHost`)时用外壳嵌入视图;没有时插件**自托管**:自己拉起一个 Electron 窗口,`browser_*` 工具照常可用
+
+**Electron 定位顺序**:① `require('electron')`(peer 依赖已装)→ ② DSH 安装锚点 → ③ `node_modules/.pnpm` 虚拟仓库 → ④ `ELECTRON_PATH` 环境变量。找不到时工具会报清晰的错误提示。
+
+### 验证过的版本
+
+| 组件 | 版本 |
+|---|---|
+| DeepSeek Harness(dsh) | `0.1.0-rc.5` |
+| Electron | `43.4.0` |
+| Node.js | `22.20.0` |
+| dsh-builtin-browser | `0.1.3` |
+| 操作系统 | Windows 10 (10.0.26200) |
+
+> 插件声明 `electron >= 30`;其他平台(如 macOS/Linux)按同一协议运行,但仅在上表 Windows 环境实测。
 
 ## 安装
 

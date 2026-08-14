@@ -16,7 +16,22 @@ This plugin provides the **host-side capability** (browser seam, Electron CDP pr
 ## Requirements
 
 - DeepSeek Harness (dsh) with the `web` profile
-- A host that provides `ctx.electronViewHost` (a machine holding real Electron `WebContentsView`s, e.g. dsh's desktop shell). Without one, the plugin mounts the seam but the provider and tools stay disabled — plain `dsh web` is unaffected.
+- **Electron runtime** (optional peer dependency): the desktop shell carries it; on plain `dsh web` the plugin must be able to locate an Electron binary (see below)
+- With a desktop shell (`ctx.electronViewHost`) the shell's embedded view is used; without one the plugin **self-hosts**: it spawns its own Electron window and the `browser_*` tools still work
+
+**Electron lookup order**: ① `require('electron')` (peer installed) → ② DSH install anchors → ③ `node_modules/.pnpm` virtual store → ④ `ELECTRON_PATH` env var. A clear error tells you when none is found.
+
+### Verified versions
+
+| Component | Version |
+|---|---|
+| DeepSeek Harness (dsh) | `0.1.0-rc.5` |
+| Electron | `43.4.0` |
+| Node.js | `22.20.0` |
+| dsh-builtin-browser | `0.1.3` |
+| OS | Windows 10 (10.0.26200) |
+
+> The plugin declares `electron >= 30`; other platforms (macOS/Linux) run the same protocol but were only verified on the Windows environment above.
 
 ## Install
 
