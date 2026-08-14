@@ -1,19 +1,17 @@
 # dsh-builtin-browser bundle patch: mounts the shared-browser capability into a
-# profile composition. The browser seam (ctx.browser) is always mounted; the
-# Electron provider activates only where the host provides `electronViewHost`
-# (the desktop shell or any host that supplies a view host through
-# `ctx.get('electronViewHost')`), and the model-facing tools ride the same
-# gate so plain `dsh web` (no native view) stays unaffected.
+# profile composition. The browser seam (ctx.browser) is always mounted. The
+# Electron provider and browser_* tools are ALWAYS registered: when the host
+# provides `electronViewHost` (the desktop shell) that embedded view is used,
+# and otherwise the plugin self-hosts its own Electron window, so installing
+# the plugin is enough for the browser to work anywhere.
 - insert:
     - id: browser
       name: dsh-builtin-browser/browser
 
     - id: browser-electron
       name: dsh-builtin-browser/browser-electron
-      disabled: !!js ctx.get('electronViewHost') === undefined
       config:
         viewHost: !!js ctx.get('electronViewHost')
 
     - id: tool-browser
       name: dsh-builtin-browser/tool-browser
-      disabled: !!js ctx.get('electronViewHost') === undefined
