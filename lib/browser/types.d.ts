@@ -64,6 +64,8 @@ export interface BrowserExecuteRequest {
     readonly script: string;
     /** Optional arguments injected into the script scope as `arguments[0..n]`. */
     readonly args?: readonly unknown[];
+    /** Evaluation budget in ms; a wedged page rejects with a timeout. Default 30000. */
+    readonly timeoutMs?: number;
 }
 /**
  * Result of an execute. Mirrors CDP `Runtime.evaluate` semantics: either a

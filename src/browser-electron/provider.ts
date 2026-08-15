@@ -296,11 +296,21 @@ export class ElectronBrowserProvider implements BrowserProvider {
       const expression = hasArgs
         ? `(function(){ const __dshArgs = ${JSON.stringify(request.args)}; return Function(${JSON.stringify(body)}).apply(null, __dshArgs) })()`
         : `(function(){ return Function(${JSON.stringify(body)})() })()`
-      const result = await handle.sendCommand(CDP_RUNTIME_EVALUATE, {
-        expression,
-        returnByValue: true,
-        awaitPromise: true,
-      } satisfies CdpEvaluateParams)
+      // CDP Runtime.evaluate can hang indefinitely on a not-yet-loaded page
+      // (navigate returned but the renderer has not committed). Bound it so a
+      // stuck call surfaces as BROWSER_EXECUTE_TIMEOUT instead of wedging the
+      // whole tool call. The caller's signal wins when it fires first.
+      const timeoutMs = request.timeoutMs ?? 30_000
+      const result = await withTimeout(
+        handle.sendCommand(CDP_RUNTIME_EVALUATE, {
+          expression,
+          returnByValue: true,
+          awaitPromise: true,
+        } satisfies CdpEvaluateParams),
+        timeoutMs,
+        signal,
+        `browser: execute timed out after ${timeoutMs}ms`,
+      )
       if (result.exceptionDetails !== undefined) {
         const detail = result.exceptionDetails as { text?: string; exception?: { description?: string } }
         return { ok: false, exception: detail.exception?.description ?? detail.text ?? 'unknown exception' }
@@ -345,7 +355,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
       }
       return { url, title, elements: out, truncated: out.length >= cap }
     })()`
-    const result = await handleSendEvaluate(tab.handle, script)
+    // Same hang guard as execute: a renderer that has not committed after
+    // navigate would otherwise block snapshot forever.
+    const timeoutMs = 30_000
+    const result = await withTimeout(
+      handleSendEvaluate(tab.handle, script),
+      timeoutMs,
+      signal,
+      `browser: snapshot timed out after ${timeoutMs}ms`,
+    )
     if (!result.ok) throw new BrowserError(`browser: snapshot evaluation failed: ${result.exception}`, 'BROWSER_SNAPSHOT_FAILED')
     const value = result.value as BrowserSnapshotResult
     return value
@@ -484,6 +502,50 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const result = await handleSendEvaluate(handle, 'location.href')
     return result.ok && typeof result.value === 'string' ? result.value : ''
   }
+}
+
+/**
+ * Bound a promise so a wedged CDP call surfaces as an error instead of
+ * hanging the tool call forever. The caller's signal, when provided, wins
+ * over the timeout if it fires first.
+ * @param promise - the operation to bound.
+ * @param ms - the timeout budget.
+ * @param signal - optional caller signal.
+ * @param message - the timeout error message.
+ * @returns the promise's value, or a rejected promise on timeout/abort.
+ */
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  signal: AbortSignal | undefined,
+  message: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let done = false
+    const timer = setTimeout(() => {
+      if (done) return
+      done = true
+      reject(new Error(message))
+    }, ms)
+    const finish = (fn: () => void): void => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+      fn()
+    }
+    const onAbort = (): void => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      reject(signal?.reason instanceof Error ? signal.reason : new Error('aborted'))
+    }
+    if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      value => finish(() => resolve(value)),
+      error => finish(() => reject(error)),
+    )
+  })
 }
 
 /**

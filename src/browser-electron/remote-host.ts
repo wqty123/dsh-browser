@@ -352,13 +352,19 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
 
 /** A view handle that waits for child readiness before issuing commands. */
 class DeferredRemoteView implements ElectronViewHandle {
+  private materialized: Promise<RemoteView> | undefined
+
   constructor(
     readonly id: string,
     private readonly materialize: () => Promise<RemoteView>,
   ) {}
 
   async sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const view = await this.materialize()
+    // Materialize once and cache: every sendCommand on the same handle must
+    // target the SAME child view. Re-materializing would re-run createView
+    // (duplicate window) and drop the established view.
+    this.materialized ??= this.materialize()
+    const view = await this.materialized
     return view.sendCommand(method, params)
   }
 }
