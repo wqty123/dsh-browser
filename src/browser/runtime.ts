@@ -114,7 +114,7 @@ export class BrowserRuntime extends Service {
       yield () => this.providers.delete(provider.id)
     }.bind(this), 'browser.registerProvider()')
     // ctx.effect's disposer returns Promise<void>; our disposer API is
-    // synchronous fire-and-forget 鈥?discard the (always-resolved) promise.
+    // synchronous fire-and-forget — discard the (always-resolved) promise.
     return () => void dispose()
   }
 

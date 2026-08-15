@@ -3,7 +3,7 @@
  * provider registration, session lifecycle, cancellation, errors, and product
  * configuration; providers differ only in what backs a session (an Electron
  * `WebContentsView` in the desktop shell, a headless Chromium relay for
- * remote deployments, 鈥?.
+ * remote deployments, and so on).
  * @module dsh-browser/browser/types
  */
 
@@ -29,7 +29,7 @@ export interface BrowserNavigateRequest {
 
 /**
  * Click at viewport coordinates. Coordinates are viewport-relative pixels in
- * the session's own coordinate space 鈥?the same space the human interacts
+ * the session's own coordinate space — the same space the human interacts
  * with, so a real view and a relay agree without scaling.
  */
 export interface BrowserClickRequest {
@@ -88,7 +88,7 @@ export interface ExportedCookie {
 
 /**
  * Execute arbitrary JavaScript in the session's page context. This is the
- * primary interaction path 鈥?DOM-referenced, not screen-coordinate-based:
+ * primary interaction path — DOM-referenced, not screen-coordinate-based:
  * focus/input/click go through the page's own JS (native setters for
  * framework-controlled inputs), matching how a human-driven agent operates.
  */
@@ -129,7 +129,7 @@ export interface BrowserSnapshotElement {
 
 /**
  * AI-friendly page snapshot: a compact, numbered inventory of interactive
- * elements plus page facts. Not raw HTML 鈥?the model dialogues with this.
+ * elements plus page facts. Not raw HTML — the model dialogues with this.
  */
 export interface BrowserSnapshotResult {
   /** Final page URL. */
@@ -201,7 +201,7 @@ export interface BrowserProvider {
   available(): boolean
   /**
    * Open a new session. The provider mints the session id and prepares its
-   * backing surface (a view, a headless page, 鈥?. Sessions are isolated from
+   * backing surface (a view, a headless page, and so on). Sessions are isolated from
    * each other; a session must not be visible to any other session's caller.
    */
   open(): Promise<BrowserSessionId>
