@@ -459,6 +459,24 @@ export class ElectronBrowserProvider implements BrowserProvider {
     this.record(s, 'type', { text: request.text.slice(0, 200) }, true)
   }
 
+  /**
+   * Download a URL to a local file, keeping the session's cookies/login.
+   * Requires the self-hosted host (which implements view-level download); the
+   * desktop shell's embedded views delegate downloads to the real browser UI.
+   */
+  async download(session: BrowserSessionId, request: { readonly url: string; readonly savePath: string }, signal?: AbortSignal): Promise<{ readonly path: string }> {
+    const s = this.session(session)
+    const { handle } = this.activeTab(s)
+    signal?.throwIfAborted()
+    const downloadable = handle as { download?(url: string, savePath: string): Promise<void> }
+    if (typeof downloadable.download !== 'function') {
+      throw new BrowserError('browser: download is only available on the self-hosted browser', 'BROWSER_DOWNLOAD_UNSUPPORTED')
+    }
+    await downloadable.download(request.url, request.savePath)
+    this.record(s, 'download', { url: request.url, savePath: request.savePath }, true, { result: request.savePath })
+    return { path: request.savePath }
+  }
+
   /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */
   async screenshot(
     session: BrowserSessionId,

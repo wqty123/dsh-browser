@@ -508,6 +508,28 @@ export function apply(ctx: Context, config: Config = {}): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'browser_download',
+    description: 'Download a URL to a local file, keeping the browser session\'s cookies and login state. Use for fetching files behind authentication or from the current page context. Available on the self-hosted browser; the desktop shell delegates downloads to the real browser UI.',
+    parameters: {
+      url: { type: 'string', required: true, description: 'The URL to download.' },
+      savePath: { type: 'string', required: true, description: 'Absolute path of the file to write.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { path: { type: 'string', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: `Downloaded to ${value.path}.` }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser)
+      const result = await browser.download(session, { url: args.url, savePath: args.savePath }, exec.signal)
+      return { path: result.path }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'browser_session',
     description: 'Show the shared browser session: its id, open tabs, and whether it is active. All agents in this process share one browser session (same cookies/login state), so this reflects what every caller drives.',
     parameters: {},

@@ -148,6 +148,17 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     type(session: BrowserSessionId, request: {
         readonly text: string;
     }, signal?: AbortSignal): Promise<void>;
+    /**
+     * Download a URL to a local file, keeping the session's cookies/login.
+     * Requires the self-hosted host (which implements view-level download); the
+     * desktop shell's embedded views delegate downloads to the real browser UI.
+     */
+    download(session: BrowserSessionId, request: {
+        readonly url: string;
+        readonly savePath: string;
+    }, signal?: AbortSignal): Promise<{
+        readonly path: string;
+    }>;
     /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */
     screenshot(session: BrowserSessionId, request?: {
         readonly fullPage?: boolean;

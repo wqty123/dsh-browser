@@ -12,10 +12,18 @@ declare module 'electron' {
     detach(): void
     sendCommand(method: string, params?: Record<string, unknown>): Promise<unknown>
   }
+  export interface DownloadItem {
+    setSavePath(path: string): void
+  }
+  export interface Session {
+    once(event: 'will-download', listener: (event: Event, item: DownloadItem) => void): void
+  }
   export interface WebContents {
     readonly id: number
     readonly debugger: WebContentsDebugger
+    readonly session: Session
     close(): void
+    downloadURL(url: string): void
   }
   export interface WebContentsView {
     readonly webContents: WebContents

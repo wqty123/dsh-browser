@@ -13,6 +13,7 @@ import type {
   BrowserClickRequest,
   BrowserContentRequest,
   BrowserContentResult,
+  BrowserDownloadRequest,
   BrowserExecuteRequest,
   BrowserExecuteResult,
   BrowserHistoryEntry,
@@ -36,6 +37,7 @@ export type {
   BrowserContentFormat,
   BrowserContentRequest,
   BrowserContentResult,
+  BrowserDownloadRequest,
   BrowserExecuteRequest,
   BrowserExecuteResult,
   BrowserHistoryEntry,
@@ -212,6 +214,11 @@ export class BrowserRuntime extends Service {
   /** Replay one recorded operation by sequence number through the provider. */
   async replay(session: BrowserSessionId, seq: number): Promise<void> {
     return this.resolveProvider().replay(session, seq)
+  }
+
+  /** Download a URL to a local file through the provider. */
+  async download(session: BrowserSessionId, request: BrowserDownloadRequest, signal?: AbortSignal): Promise<{ readonly path: string }> {
+    return this.resolveProvider().download(session, request, signal)
   }
 
   /** Close the session through the selected provider. Idempotent. */

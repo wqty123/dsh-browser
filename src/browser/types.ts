@@ -65,6 +65,14 @@ export interface BrowserScreenshotRequest {
   readonly savePath?: string
 }
 
+/** Download options: fetch a URL into a local file, keeping the session's cookies. */
+export interface BrowserDownloadRequest {
+  /** The URL to download. */
+  readonly url: string
+  /** Absolute path of the file to write. */
+  readonly savePath: string
+}
+
 /**
  * Execute arbitrary JavaScript in the session's page context. This is the
  * primary interaction path 鈥?DOM-referenced, not screen-coordinate-based:
@@ -208,6 +216,8 @@ export interface BrowserProvider {
   type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void>
   /** Capture the current page. Honor `signal` for cancellation. */
   screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult>
+  /** Download a URL to a local file. Honor `signal` for cancellation. */
+  download(session: BrowserSessionId, request: BrowserDownloadRequest, signal?: AbortSignal): Promise<{ readonly path: string }>
   /** Return the session's chronological operation log. */
   history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]>
   /** Replay one recorded operation by sequence number. */

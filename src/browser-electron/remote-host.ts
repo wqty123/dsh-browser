@@ -18,7 +18,7 @@
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
@@ -262,6 +262,12 @@ class RemoteView implements ElectronViewHandle {
       params: params ?? {},
     })
   }
+
+  /** Ask the child to download a URL to a local file (keeps cookies/login). */
+  async download(url: string, savePath: string): Promise<void> {
+    const result = await this.client.call<{ base64: string }>('download', { viewId: this.id, url, savePath })
+    writeFileSync(savePath, Buffer.from(result.base64, 'base64'))
+  }
 }
 
 /**
@@ -366,6 +372,12 @@ class DeferredRemoteView implements ElectronViewHandle {
     this.materialized ??= this.materialize()
     const view = await this.materialized
     return view.sendCommand(method, params)
+  }
+
+  async download(url: string, savePath: string): Promise<void> {
+    this.materialized ??= this.materialize()
+    const view = await this.materialized
+    return view.download(url, savePath)
   }
 }
 

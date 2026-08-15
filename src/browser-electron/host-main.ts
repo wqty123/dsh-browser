@@ -45,7 +45,7 @@ function reply(id: number, payload: Record<string, unknown>): void {
 }
 
 /** Handle one command. */
-async function handle(op: string, msg: { id: number; viewId?: string; method?: string; params?: Record<string, unknown> }): Promise<void> {
+async function handle(op: string, msg: { id: number; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string }): Promise<void> {
   try {
     switch (op) {
       case 'ping':
@@ -101,6 +101,40 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         reply(msg.id, { ok: true, result })
         return
       }
+      case 'download': {
+        const viewId = msg.viewId
+        const url = msg.url
+        const savePath = msg.savePath
+        if (viewId === undefined || typeof url !== 'string' || typeof savePath !== 'string') {
+          throw new Error('download missing viewId/url/savePath')
+        }
+        const entry = views.get(viewId)
+        if (entry === undefined) throw new Error(`download: unknown view ${viewId}`)
+        // Fetch the URL inside the page context (keeps cookies/login), read
+        // the body as base64, and return it; the parent writes the file. This
+        // avoids Electron's download pipeline entirely (CDP debugger attach
+        // can interfere with will-download).
+        const result = await entry.webContentsView.webContents.debugger.sendCommand('Runtime.evaluate', {
+          expression: `(async () => {
+            const r = await fetch(${JSON.stringify(url)}, { credentials: 'include' })
+            if (!r.ok) throw new Error('HTTP ' + r.status)
+            const b = await r.arrayBuffer()
+            const bytes = new Uint8Array(b)
+            let bin = ''
+            for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+            return btoa(bin)
+          })()`,
+          awaitPromise: true,
+          returnByValue: true,
+        })
+        const value = (result as { result?: { value?: unknown } }).result?.value
+        if (typeof value !== 'string') {
+          const detail = (result as { exceptionDetails?: { exception?: { description?: string } } }).exceptionDetails
+          throw new Error(`download failed: ${detail?.exception?.description ?? 'no data'}`)
+        }
+        reply(msg.id, { ok: true, result: { base64: value, savePath } })
+        return
+      }
       default:
         throw new Error(`unknown op ${op}`)
     }
@@ -130,7 +164,7 @@ void app.whenReady().then(() => {
   rl.on('line', line => {
     const text = line.trim()
     if (text === '') return
-    let msg: { id: number; op?: string; viewId?: string; method?: string; params?: Record<string, unknown> }
+    let msg: { id: number; op?: string; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string }
     try {
       msg = JSON.parse(text) as typeof msg
     } catch {
