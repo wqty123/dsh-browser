@@ -20,6 +20,7 @@ import type {
   BrowserSessionId,
   BrowserSnapshotResult,
   BrowserTab,
+  ExportedCookie,
 } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
 
@@ -475,6 +476,35 @@ export class ElectronBrowserProvider implements BrowserProvider {
     await downloadable.download(request.url, request.savePath)
     this.record(s, 'download', { url: request.url, savePath: request.savePath }, true, { result: request.savePath })
     return { path: request.savePath }
+  }
+
+  /**
+   * Export the session's cookies (login state) as serializable objects.
+   * Self-hosted only; the desktop shell's embedded views use the real profile.
+   */
+  async flushAuth(session: BrowserSessionId): Promise<readonly ExportedCookie[]> {
+    const s = this.session(session)
+    const { handle } = this.activeTab(s)
+    const host = handle as { flushAuth?(): Promise<ExportedCookie[]> }
+    if (typeof host.flushAuth !== 'function') {
+      throw new BrowserError('browser: auth export is only available on the self-hosted browser', 'BROWSER_AUTH_UNSUPPORTED')
+    }
+    const cookies = await host.flushAuth()
+    this.record(s, 'flushAuth', {}, true, { result: `${cookies.length} cookies` })
+    return cookies
+  }
+
+  /** Import cookies into the session (restore login state). Self-hosted only. */
+  async restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number> {
+    const s = this.session(session)
+    const { handle } = this.activeTab(s)
+    const host = handle as { restoreAuth?(cookies: readonly ExportedCookie[]): Promise<number> }
+    if (typeof host.restoreAuth !== 'function') {
+      throw new BrowserError('browser: auth restore is only available on the self-hosted browser', 'BROWSER_AUTH_UNSUPPORTED')
+    }
+    const restored = await host.restoreAuth(cookies)
+    this.record(s, 'restoreAuth', { count: cookies.length }, true, { result: `${restored} cookies` })
+    return restored
   }
 
   /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */

@@ -64,6 +64,18 @@ export interface BrowserDownloadRequest {
     /** Absolute path of the file to write. */
     readonly savePath: string;
 }
+/** A serializable cookie, exported from or imported into the browser session. */
+export interface ExportedCookie {
+    /** Cookie URL (scheme + domain + path), as accepted by cookies.set. */
+    readonly url: string;
+    readonly name: string;
+    readonly value: string;
+    readonly domain?: string;
+    readonly path?: string;
+    readonly secure?: boolean;
+    readonly httpOnly?: boolean;
+    readonly expirationDate?: number;
+}
 /**
  * Execute arbitrary JavaScript in the session's page context. This is the
  * primary interaction path 鈥?DOM-referenced, not screen-coordinate-based:
@@ -206,6 +218,10 @@ export interface BrowserProvider {
     download(session: BrowserSessionId, request: BrowserDownloadRequest, signal?: AbortSignal): Promise<{
         readonly path: string;
     }>;
+    /** Export the session's cookies (login state). */
+    flushAuth(session: BrowserSessionId): Promise<readonly ExportedCookie[]>;
+    /** Import cookies into the session (restore login state). */
+    restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number>;
     /** Return the session's chronological operation log. */
     history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]>;
     /** Replay one recorded operation by sequence number. */

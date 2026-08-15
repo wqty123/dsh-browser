@@ -6,7 +6,7 @@
  * shell that owns the `BrowserWindow`.
  * @module dsh-browser/browser-electron
  */
-import type { BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab } from '../browser/types.ts';
+import type { BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab, ExportedCookie } from '../browser/types.ts';
 /** Stable provider id registered with `ctx.browser`. */
 export declare const ELECTRON_BROWSER_PROVIDER_ID = "electron";
 /**
@@ -159,6 +159,13 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     }, signal?: AbortSignal): Promise<{
         readonly path: string;
     }>;
+    /**
+     * Export the session's cookies (login state) as serializable objects.
+     * Self-hosted only; the desktop shell's embedded views use the real profile.
+     */
+    flushAuth(session: BrowserSessionId): Promise<readonly ExportedCookie[]>;
+    /** Import cookies into the session (restore login state). Self-hosted only. */
+    restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number>;
     /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */
     screenshot(session: BrowserSessionId, request?: {
         readonly fullPage?: boolean;

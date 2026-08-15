@@ -26,6 +26,7 @@ import type {
   BrowserSnapshotResult,
   BrowserTab,
   BrowserTypeRequest,
+  ExportedCookie,
 } from './types.ts'
 import { BrowserError } from './types.ts'
 
@@ -51,6 +52,7 @@ export type {
   BrowserSnapshotResult,
   BrowserTab,
   BrowserTypeRequest,
+  ExportedCookie,
 } from './types.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -219,6 +221,16 @@ export class BrowserRuntime extends Service {
   /** Download a URL to a local file through the provider. */
   async download(session: BrowserSessionId, request: BrowserDownloadRequest, signal?: AbortSignal): Promise<{ readonly path: string }> {
     return this.resolveProvider().download(session, request, signal)
+  }
+
+  /** Export the session's cookies through the provider. */
+  async flushAuth(session: BrowserSessionId): Promise<readonly ExportedCookie[]> {
+    return this.resolveProvider().flushAuth(session)
+  }
+
+  /** Import cookies into the session through the provider. */
+  async restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number> {
+    return this.resolveProvider().restoreAuth(session, cookies)
   }
 
   /** Close the session through the selected provider. Idempotent. */

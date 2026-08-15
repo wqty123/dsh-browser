@@ -23,6 +23,7 @@ import { join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
+import type { ExportedCookie } from '../browser/types.ts'
 
 /** How long to wait for the child to signal readiness before failing. */
 const READY_TIMEOUT_MS = 20_000
@@ -268,6 +269,16 @@ class RemoteView implements ElectronViewHandle {
     const result = await this.client.call<{ base64: string }>('download', { viewId: this.id, url, savePath })
     writeFileSync(savePath, Buffer.from(result.base64, 'base64'))
   }
+
+  /** Export the session's cookies (login state). */
+  flushAuth(): Promise<ExportedCookie[]> {
+    return this.client.call<{ cookies: ExportedCookie[] }>('flushAuth', { viewId: this.id }).then(r => r.cookies)
+  }
+
+  /** Import cookies into the session (restore login state). */
+  restoreAuth(cookies: ExportedCookie[]): Promise<number> {
+    return this.client.call<{ restored: number }>('restoreAuth', { viewId: this.id, cookies }).then(r => r.restored)
+  }
 }
 
 /**
@@ -378,6 +389,18 @@ class DeferredRemoteView implements ElectronViewHandle {
     this.materialized ??= this.materialize()
     const view = await this.materialized
     return view.download(url, savePath)
+  }
+
+  async flushAuth(): Promise<ExportedCookie[]> {
+    this.materialized ??= this.materialize()
+    const view = await this.materialized
+    return view.flushAuth()
+  }
+
+  async restoreAuth(cookies: ExportedCookie[]): Promise<number> {
+    this.materialized ??= this.materialize()
+    const view = await this.materialized
+    return view.restoreAuth(cookies)
   }
 }
 

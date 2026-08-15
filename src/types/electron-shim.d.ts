@@ -15,8 +15,31 @@ declare module 'electron' {
   export interface DownloadItem {
     setSavePath(path: string): void
   }
+  export interface Cookie {
+    domain: string
+    path: string
+    secure: boolean
+    httpOnly: boolean
+    name: string
+    value: string
+    expirationDate?: number
+  }
+  export interface CookieSetter {
+    url: string
+    name: string
+    value: string
+    domain?: string
+    path?: string
+    secure?: boolean
+    httpOnly?: boolean
+    expirationDate?: number
+  }
   export interface Session {
     once(event: 'will-download', listener: (event: Event, item: DownloadItem) => void): void
+    readonly cookies: {
+      get(filter: Record<string, unknown>): Promise<Cookie[]>
+      set(details: CookieSetter): Promise<void>
+    }
   }
   export interface WebContents {
     readonly id: number

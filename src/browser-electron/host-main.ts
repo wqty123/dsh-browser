@@ -45,7 +45,7 @@ function reply(id: number, payload: Record<string, unknown>): void {
 }
 
 /** Handle one command. */
-async function handle(op: string, msg: { id: number; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string }): Promise<void> {
+async function handle(op: string, msg: { id: number; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[] }): Promise<void> {
   try {
     switch (op) {
       case 'ping':
@@ -135,6 +135,50 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         reply(msg.id, { ok: true, result: { base64: value, savePath } })
         return
       }
+      case 'flushAuth': {
+        const viewId = msg.viewId
+        if (viewId === undefined) throw new Error('flushAuth missing viewId')
+        const entry = views.get(viewId)
+        if (entry === undefined) throw new Error(`flushAuth: unknown view ${viewId}`)
+        // Export the session's cookies so login state can be saved/restored
+        // across browser hosts (or shared with another machine).
+        const cookies = await entry.webContentsView.webContents.session.cookies.get({})
+        const exported = cookies.map(c => ({
+          url: `http${c.secure ? 's' : ''}://${c.domain.startsWith('.') ? c.domain.slice(1) : c.domain}${c.path}`,
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path,
+          secure: c.secure,
+          httpOnly: c.httpOnly,
+          expirationDate: c.expirationDate,
+        }))
+        reply(msg.id, { ok: true, result: { cookies: exported } })
+        return
+      }
+      case 'restoreAuth': {
+        const viewId = msg.viewId
+        const cookies = msg.cookies
+        if (viewId === undefined) throw new Error('restoreAuth missing viewId')
+        const entry = views.get(viewId)
+        if (entry === undefined) throw new Error(`restoreAuth: unknown view ${viewId}`)
+        if (!Array.isArray(cookies)) throw new Error('restoreAuth missing cookies array')
+        for (const c of cookies as Array<{ url?: string; name?: string; value?: string; domain?: string; path?: string; secure?: boolean; httpOnly?: boolean; expirationDate?: number }>) {
+          if (typeof c.url !== 'string' || typeof c.name !== 'string' || typeof c.value !== 'string') continue
+          await entry.webContentsView.webContents.session.cookies.set({
+            url: c.url,
+            name: c.name,
+            value: c.value,
+            ...typeof c.domain === 'string' ? { domain: c.domain } : {},
+            ...typeof c.path === 'string' ? { path: c.path } : {},
+            ...typeof c.secure === 'boolean' ? { secure: c.secure } : {},
+            ...typeof c.httpOnly === 'boolean' ? { httpOnly: c.httpOnly } : {},
+            ...typeof c.expirationDate === 'number' ? { expirationDate: c.expirationDate } : {},
+          })
+        }
+        reply(msg.id, { ok: true, result: { restored: (cookies as unknown[]).length } })
+        return
+      }
       default:
         throw new Error(`unknown op ${op}`)
     }
@@ -164,7 +208,7 @@ void app.whenReady().then(() => {
   rl.on('line', line => {
     const text = line.trim()
     if (text === '') return
-    let msg: { id: number; op?: string; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string }
+    let msg: { id: number; op?: string; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[] }
     try {
       msg = JSON.parse(text) as typeof msg
     } catch {
