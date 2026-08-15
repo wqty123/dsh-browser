@@ -1,6 +1,6 @@
 {
   "name": "dsh-builtin-browser",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Shared real browser plugin for DeepSeek Harness: install-and-use — a visible native browser the human can take over, driven by the agent over CDP. DOM-level interaction (React/Vue safe), per-task session isolation, cookie persistence (browser_auth), CAPTCHA detection, batch form fill (browser_fill), authenticated download, history/replay, action restriction",
   "type": "module",
   "main": "lib/index.js",

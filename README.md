@@ -3,7 +3,7 @@
   <img src="https://img.shields.io/npm/v/dsh-builtin-browser?style=flat&amp;label=npm&amp;color=CB3837" alt="npm version">
   <img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License">
   <img src="https://img.shields.io/badge/DSH-Plugin-47848F?style=flat" alt="DeepSeek Harness plugin">
-  <img src="https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-4493F8?style=flat-square" alt="Platforms">
+  <img src="https://img.shields.io/badge/Platform-Windows-4493F8?style=flat-square" alt="Platform: Windows (verified)">
 </p>
 
 <p align="center"><sub>中文 · <a href="README.en.md">English</a></sub></p>
@@ -211,7 +211,7 @@ agent (browser_* 工具)
 | dsh-builtin-browser | `0.1.11` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
-> 插件声明 `electron >= 30`;其他平台(macOS/Linux)按同一协议运行,但仅在上表 Windows 环境实测。
+> 插件声明 `electron >= 30`;**当前仅在 Windows 环境实测**(macOS/Linux 未验证,暂不承诺)。
 
 ## 已知限制
 

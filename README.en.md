@@ -3,7 +3,7 @@
   <img src="https://img.shields.io/npm/v/dsh-builtin-browser?style=flat&amp;label=npm&amp;color=CB3837" alt="npm version">
   <img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License">
   <img src="https://img.shields.io/badge/DSH-Plugin-47848F?style=flat" alt="DeepSeek Harness plugin">
-  <img src="https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-4493F8?style=flat-square" alt="Platforms">
+  <img src="https://img.shields.io/badge/Platform-Windows-4493F8?style=flat-square" alt="Platform: Windows (verified)">
 </p>
 
 <p align="center"><a href="README.md">中文</a> · English</p>
@@ -211,7 +211,7 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 | dsh-builtin-browser | `0.1.11` |
 | OS | Windows 10 (10.0.26200) |
 
-> The plugin declares `electron >= 30`; other platforms (macOS/Linux) run the same protocol but were only verified on the Windows environment above.
+> The plugin declares `electron >= 30`; it has **only been verified on Windows** (macOS/Linux untested, not yet promised).
 
 ## Known limitations
 
