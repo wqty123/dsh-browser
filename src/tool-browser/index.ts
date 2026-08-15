@@ -28,10 +28,30 @@ export interface Config {
   readonly timeoutMs?: number
   /** Whether to offer tab-management tools. Default true. */
   readonly tabTools?: boolean
+  /** Optional initial allow-list of browser tool names; other tools are refused. */
+  readonly allowedActions?: readonly string[]
 }
 
 /** One plugin-level browser session, opened lazily. */
 let currentSession: BrowserSessionId | undefined
+
+/**
+ * Action restriction state: an allow-list of browser tool names, or undefined
+ * for unrestricted. When set, any browser_* tool not in the list is refused
+ * (browser_restrict itself is always allowed so the guard can be lifted).
+ */
+let restrictedTo: readonly string[] | undefined
+
+/**
+ * Guard one browser tool call against the active restriction. Refuses calls
+ * not on the allow-list when a restriction is in effect.
+ * @param toolName - the browser tool about to run.
+ */
+function assertAllowed(toolName: string): void {
+  if (restrictedTo === undefined) return
+  if (restrictedTo.includes(toolName)) return
+  throw new Error(`browser action "${toolName}" is restricted (allow-list: ${restrictedTo.join(', ')})`)
+}
 
 /**
  * Resolve the active session, opening one on first use.
@@ -62,6 +82,7 @@ function formatSnapshot(snapshot: {
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
   const timeoutMs = config.timeoutMs ?? 60_000
+  if (config.allowedActions !== undefined) restrictedTo = [...config.allowedActions]
 
   ctx.systemPrompt.section({
     name: 'tool:browser',
@@ -107,6 +128,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
+      assertAllowed('browser_open')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser)
@@ -192,6 +214,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // page JS can be stateful
     async execute(args, exec) {
+      assertAllowed('browser_execute')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser)
@@ -258,6 +281,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      assertAllowed('browser_click')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser)
@@ -279,6 +303,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      assertAllowed('browser_type')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser)
@@ -417,6 +442,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       timeoutMs,
       isConcurrencySafe: () => true,
       async execute(_args, _exec) {
+        assertAllowed('browser_reset')
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser)
@@ -499,6 +525,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, _exec) {
+      assertAllowed('browser_replay')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser)
@@ -521,6 +548,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      assertAllowed('browser_download')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser)
@@ -581,11 +609,35 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => true,
     async execute(_args, _exec) {
+      assertAllowed('browser_reset_session')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser)
       await browser.reset(session)
       return { reset: true }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_restrict',
+    description: 'Restrict which browser actions are allowed, to prevent stray clicks/navigation. Pass a list of browser tool names (e.g. ["browser_snapshot","browser_content","browser_click"]) — any other browser_* call is refused. Pass an empty list or omit to lift the restriction. Read-only tools (snapshot/content/screenshot/session) are never blocked.',
+    parameters: {
+      allowed: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Allow-list of browser tool names; empty clears the restriction.',
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { restrictedTo: { type: 'array', required: true, items: { type: 'string' } } } },
+      render: (_args, value) => [{ type: 'text', text: (value.restrictedTo as string[]).length > 0 ? `Restricted to: ${(value.restrictedTo as string[]).join(', ')}` : 'Restriction lifted.' }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false,
+    async execute(args, _exec) {
+      // Always allowed so the guard can be lifted.
+      restrictedTo = (args.allowed ?? []).filter((t: string) => t.startsWith('browser_'))
+      return { restrictedTo: [...restrictedTo] }
     },
   }))
 }

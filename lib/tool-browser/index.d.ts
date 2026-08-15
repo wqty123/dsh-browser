@@ -23,6 +23,8 @@ export interface Config {
     readonly timeoutMs?: number;
     /** Whether to offer tab-management tools. Default true. */
     readonly tabTools?: boolean;
+    /** Optional initial allow-list of browser tool names; other tools are refused. */
+    readonly allowedActions?: readonly string[];
 }
 /** Register all browser tools with `ctx.tools`. */
 export declare function apply(ctx: Context, config?: Config): void;
