@@ -245,6 +245,49 @@ export function apply(ctx: Context, config: Config = {}): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'browser_click',
+    description: 'Click at viewport coordinates (CSS pixels) in the shared browser. Use with browser_screenshot: have a vision model locate an element on the screenshot, then click its coordinates — this covers icons, image buttons, and canvas elements that DOM snapshots cannot target. Coordinates are relative to the visible viewport, same as the screenshot.',
+    parameters: {
+      x: { type: 'number', required: true, description: 'Viewport x coordinate (CSS px), e.g. from a vision model reading the screenshot.' },
+      y: { type: 'number', required: true, description: 'Viewport y coordinate (CSS px).' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { clicked: { type: 'boolean', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: value.clicked ? 'Clicked.' : 'Click failed.' }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser)
+      await browser.click(session, { x: args.x, y: args.y }, exec.signal)
+      return { clicked: true }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_type',
+    description: 'Type text into the focused element of the shared browser. Use after browser_execute focuses an input (e.g. el.focus()), or after a click lands in a field. Text is inserted at the current focus via CDP Input.insertText.',
+    parameters: {
+      text: { type: 'string', required: true, description: 'The text to insert.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { typed: { type: 'boolean', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: value.typed ? `Typed ${String(_args.text).length} chars.` : 'Type failed.' }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser)
+      await browser.type(session, { text: args.text }, exec.signal)
+      return { typed: true }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'browser_screenshot',
     description: 'Capture the current shared-browser page as a PNG screenshot. Use for visual confirmation of layout, charts, designs, or CAPTCHAs 鈥?not as the primary way to locate elements (use browser_snapshot for that). Supports optional full-page capture.',
     parameters: {
