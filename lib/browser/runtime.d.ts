@@ -8,9 +8,9 @@
  */
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-import type { BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserChallenge, ExportedCookie } from './types.ts';
+import type { BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserChallenge, ExportedCookie } from './types.ts';
 export { BrowserError, } from './types.ts';
-export type { BrowserChallenge, BrowserClickRequest, BrowserContentFormat, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, ExportedCookie, } from './types.ts';
+export type { BrowserChallenge, BrowserClickRequest, BrowserContentFormat, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillField, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, ExportedCookie, } from './types.ts';
 declare module '@deepseek-ai/cordis' {
     interface Context {
         browser: BrowserRuntime;
@@ -76,6 +76,8 @@ export declare class BrowserRuntime extends Service {
     click(session: BrowserSessionId, request: BrowserClickRequest, signal?: AbortSignal): Promise<void>;
     /** Type into the focused element through the selected provider. */
     type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void>;
+    /** Fill a form's fields in one batch through the selected provider. */
+    fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult>;
     /** Capture the current page through the selected provider. */
     screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult>;
     /** Check for a human-verification challenge on the active tab. */

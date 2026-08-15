@@ -39,6 +39,48 @@ export interface BrowserTypeRequest {
     /** The text to insert. */
     readonly text: string;
 }
+/** One field of a batch form fill. Match by selector, or by name/label/placeholder. */
+export interface BrowserFillField {
+    /** CSS selector; when present, candidates are scoped to it. */
+    readonly selector?: string;
+    /** Match by the field's `name` attribute. */
+    readonly name?: string;
+    /** Match by associated `<label>` text or `aria-label`. */
+    readonly label?: string;
+    /** Match by `placeholder` text. */
+    readonly placeholder?: string;
+    /** Field kind; defaults to text. */
+    readonly kind?: 'text' | 'textarea' | 'checkbox' | 'radio' | 'select';
+    /** Value to set: string, number, or boolean (checkbox/radio). For a
+     *  multi-select or radio group, the option value (or visible text). */
+    readonly value: string | number | boolean;
+}
+/** Batch form fill: set several fields, optionally submitting the form. */
+export interface BrowserFillRequest {
+    /** The fields to fill, in order. */
+    readonly fields: readonly BrowserFillField[];
+    /** Submit the containing form after filling. Default false. */
+    readonly submit?: boolean;
+    /** Per-field evaluation budget in ms. Default 30000. */
+    readonly timeoutMs?: number;
+}
+/** One field's outcome in a batch fill. */
+export interface BrowserFillFieldResult {
+    readonly ok: boolean;
+    /** The field description matched (selector/name/label/placeholder). */
+    readonly target: string;
+    /** How the value was applied: input | textarea | select | checkbox | radio | contenteditable. */
+    readonly method?: string;
+    /** Error text when the field could not be filled. */
+    readonly error?: string;
+}
+/** Outcome of a batch form fill. */
+export interface BrowserFillResult {
+    /** Per-field outcomes, in request order. */
+    readonly fields: readonly BrowserFillFieldResult[];
+    /** Whether the containing form was submitted. */
+    readonly submitted: boolean;
+}
 /**
  * A screenshot of the current page state. `dataUrl` is a base64 data URL the
  * tool layer renders directly; the live view itself never crosses the wire
@@ -229,6 +271,8 @@ export interface BrowserProvider {
     click(session: BrowserSessionId, request: BrowserClickRequest, signal?: AbortSignal): Promise<void>;
     /** Type into the focused element (fallback path). Honor `signal` for cancellation. */
     type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void>;
+    /** Fill a form's fields in one batch. Honor `signal` for cancellation. */
+    fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult>;
     /** Capture the current page. Honor `signal` for cancellation. */
     screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult>;
     /** Download a URL to a local file. Honor `signal` for cancellation. */

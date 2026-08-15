@@ -80,6 +80,7 @@ provider 与工具以 `ctx.get('electronViewHost')` 是否存在为门控,因此
 | `browser_restrict` | 限制允许的浏览器动作,防误点/误导航 |
 | `browser_auth` | 导出/恢复 cookie,持久化登录态 |
 | `browser_challenge` | 检测人机验证(CAPTCHA / Cloudflare / reCAPTCHA / hCaptcha / Turnstile)是否拦截当前页 |
+| `browser_fill` | 批量填充表单(选择器/名称/标签匹配,支持受控输入、下拉、单选/复选,可选提交) |
 
 ### 操作纪律(点击/填表)
 

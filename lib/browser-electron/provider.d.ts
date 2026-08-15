@@ -6,7 +6,7 @@
  * shell that owns the `BrowserWindow`.
  * @module dsh-browser/browser-electron
  */
-import type { BrowserChallenge, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab, ExportedCookie } from '../browser/types.ts';
+import type { BrowserChallenge, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab, ExportedCookie } from '../browser/types.ts';
 /** Stable provider id registered with `ctx.browser`. */
 export declare const ELECTRON_BROWSER_PROVIDER_ID = "electron";
 /**
@@ -149,6 +149,14 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     type(session: BrowserSessionId, request: {
         readonly text: string;
     }, signal?: AbortSignal): Promise<void>;
+    /**
+     * Fill a form's fields in one batch. Runs one page-context script that
+     * resolves each field (selector, or name/label/placeholder among visible
+     * controls), sets its value with the native prototype setter (React/Vue
+     * controlled inputs included) plus input/change events, handles
+     * select/checkbox/radio/contenteditable, and optionally submits the form.
+     */
+    fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult>;
     /**
      * Download a URL to a local file, keeping the session's cookies/login.
      * Requires the self-hosted host (which implements view-level download); the

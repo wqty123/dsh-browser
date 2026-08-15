@@ -79,6 +79,14 @@ async function ensureSession(browser: NonNullable<Context['browser']>, key: stri
   return session
 }
 
+/** Coerce a tool-provided string value back to boolean/number when it looks like one. */
+function parseFillValue(v: string | undefined): string | number | boolean {
+  if (v === 'true') return true
+  if (v === 'false') return false
+  if (v !== undefined && /^-?\d+(\.\d+)?$/.test(v)) return Number(v)
+  return v ?? ''
+}
+
 /** Format a snapshot element list for the model. */
 function formatSnapshot(snapshot: {
   url: string
@@ -107,7 +115,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Tool guidance band is 100-199; 150 keeps clear of the common 110/120
     // tool sections so ordering does not depend on plugin load sequence.
     order: 150,
-    text: 'Use the browser_* tools to operate a real shared browser the human can see and take over. Locate elements by snapshot reference numbers (browser_snapshot) and drive them with browser_execute (DOM-referenced JS, native setters for framework inputs). browser_screenshot is for visual confirmation, not primary targeting. Keep the human informed of what you are doing on the page. Each task gets its own browser session: your tabs and history are isolated from other tasks, so do not assume another task\'s navigation state is visible to you. If a snapshot or browser_challenge reports a human-verification challenge (CAPTCHA), stop retrying and ask the human to complete it in the shared browser window, then re-check.',
+    text: 'Use the browser_* tools to operate a real shared browser the human can see and take over. Locate elements by snapshot reference numbers (browser_snapshot) and drive them with browser_execute (DOM-referenced JS, native setters for framework inputs). For form filling prefer browser_fill, which handles controlled inputs, selects, checkboxes and radio groups in one batch. browser_screenshot is for visual confirmation, not primary targeting. Keep the human informed of what you are doing on the page. Each task gets its own browser session: your tabs and history are isolated from other tasks, so do not assume another task\'s navigation state is visible to you. If a snapshot or browser_challenge reports a human-verification challenge (CAPTCHA), stop retrying and ask the human to complete it in the shared browser window, then re-check.',
   })
 
   ctx.tools.register(defineTool({
@@ -387,6 +395,89 @@ export function apply(ctx: Context, config: Config = {}): void {
       const session = await ensureSession(browser, taskKey(exec))
       await browser.type(session, { text: args.text }, exec.signal)
       return { typed: true }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_fill',
+    description: 'Fill a form in one batch: pass fields with a CSS selector or name/label/placeholder text and the value to set (string, number, or boolean for checkbox/radio; for selects or radio groups pass the option value or visible text). Values are applied with the native setter plus input/change events, so React/Vue controlled inputs update correctly. Optionally submit the containing form. Prefer this over hand-written browser_execute for form filling; per-field failures are reported instead of throwing.',
+    parameters: {
+      fields: {
+        type: 'array',
+        required: true,
+        items: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            selector: { type: 'string', description: 'CSS selector; when present, candidates are scoped to it.' },
+            name: { type: 'string', description: 'Match by the field\'s name attribute.' },
+            label: { type: 'string', description: 'Match by associated <label> text or aria-label.' },
+            placeholder: { type: 'string', description: 'Match by placeholder text.' },
+            kind: { type: 'string', enum: ['text', 'textarea', 'checkbox', 'radio', 'select'], description: 'Field kind; defaults to text.' },
+            value: { type: 'string', description: 'Value to set (string form; booleans/numbers accepted as strings).' },
+          },
+        },
+      },
+      submit: { type: 'boolean', description: 'Submit the containing form after filling (default false).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          fields: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                ok: { type: 'boolean', required: true },
+                target: { type: 'string', required: true },
+                method: { type: 'string' },
+                error: { type: 'string' },
+              },
+            },
+          },
+          submitted: { type: 'boolean', required: true },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: (() => {
+          const fields = value.fields as { ok: boolean; target: string; method?: string; error?: string }[]
+          const failed = fields.filter(f => !f.ok)
+          const lines = fields.map(f => `${f.ok ? 'OK' : 'FAIL'} ${f.target}${f.ok ? ` (${f.method ?? 'input'})` : `: ${f.error ?? 'unknown error'}`}`)
+          const head = failed.length === 0
+            ? `Filled ${fields.length}/${fields.length} fields${value.submitted ? ' and submitted the form' : ''}.`
+            : `Filled ${fields.length - failed.length}/${fields.length} fields; ${failed.length} failed:`
+          return head + '\n' + lines.join('\n')
+        })(),
+      }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      assertAllowed('browser_fill')
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, taskKey(exec))
+      const fields = (args.fields ?? []).map((f: { selector?: string; name?: string; label?: string; placeholder?: string; kind?: string; value?: string }) => ({
+        ...f.selector !== undefined ? { selector: f.selector } : {},
+        ...f.name !== undefined ? { name: f.name } : {},
+        ...f.label !== undefined ? { label: f.label } : {},
+        ...f.placeholder !== undefined ? { placeholder: f.placeholder } : {},
+        ...f.kind !== undefined ? { kind: f.kind as 'text' | 'textarea' | 'checkbox' | 'radio' | 'select' } : {},
+        value: parseFillValue(f.value),
+      }))
+      const result = await browser.fillForm(session, {
+        fields,
+        ...args.submit === true ? { submit: true } : {},
+      }, exec.signal)
+      return {
+        fields: result.fields.map(f => ({ ok: f.ok, target: f.target, ...f.method !== undefined ? { method: f.method } : {}, ...f.error !== undefined ? { error: f.error } : {} })),
+        submitted: result.submitted,
+      }
     },
   }))
 

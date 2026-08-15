@@ -15,6 +15,8 @@ import type {
   BrowserContentResult,
   BrowserExecuteRequest,
   BrowserExecuteResult,
+  BrowserFillRequest,
+  BrowserFillResult,
   BrowserHistoryEntry,
   BrowserOpenRequest,
   BrowserProvider,
@@ -504,6 +506,147 @@ export class ElectronBrowserProvider implements BrowserProvider {
     signal?.throwIfAborted()
     await handle.sendCommand('Input.insertText', { text: request.text } satisfies CdpInsertTextParams)
     this.record(s, 'type', { text: request.text.slice(0, 200) }, true)
+  }
+
+  /**
+   * Fill a form's fields in one batch. Runs one page-context script that
+   * resolves each field (selector, or name/label/placeholder among visible
+   * controls), sets its value with the native prototype setter (React/Vue
+   * controlled inputs included) plus input/change events, handles
+   * select/checkbox/radio/contenteditable, and optionally submits the form.
+   */
+  async fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult> {
+    const s = this.session(session)
+    const tab = this.activeTab(s)
+    signal?.throwIfAborted()
+    const specs = JSON.stringify(request.fields.map(f => ({
+      selector: f.selector ?? null,
+      name: f.name ?? null,
+      label: f.label ?? null,
+      placeholder: f.placeholder ?? null,
+      kind: f.kind ?? 'text',
+      value: f.value,
+    })))
+    const submitFlag = request.submit === true
+    const script = `(() => {
+      const specs = ${specs}
+      const out = []
+      const setNative = (el, proto, value) => {
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+        if (setter) setter.call(el, value)
+        else el.value = value
+      }
+      const visible = (el) => {
+        const r = el.getBoundingClientRect()
+        const cs = getComputedStyle(el)
+        return r.width >= 4 && r.height >= 4 && cs.visibility !== 'hidden' && cs.display !== 'none'
+      }
+      const describe = (spec) => spec.selector || spec.name || spec.label || spec.placeholder || '(unspecified)'
+      const matches = (el, spec) => {
+        if (spec.selector) { try { return el.matches(spec.selector) } catch { return false } }
+        if (spec.name && el.name === spec.name) return true
+        if (spec.placeholder && el.placeholder === spec.placeholder) return true
+        if (spec.label) {
+          if (el.getAttribute('aria-label') === spec.label) return true
+          if (el.id) {
+            const lbl = document.querySelector('label[for=' + JSON.stringify(el.id) + ']')
+            if (lbl && (lbl.textContent || '').trim() === spec.label) return true
+          }
+          const wrap = el.closest('label')
+          if (wrap && (wrap.textContent || '').trim() === spec.label) return true
+        }
+        return false
+      }
+      const candidates = (spec) => {
+        const all = spec.selector
+          ? [...document.querySelectorAll(spec.selector)]
+          : [...document.querySelectorAll('input, textarea, select, [contenteditable="true"]')].filter(el => matches(el, spec))
+        const vis = all.filter(visible)
+        return vis.length > 0 ? vis : all
+      }
+      for (const spec of specs) {
+        const els = candidates(spec)
+        if (els.length === 0) { out.push({ ok: false, error: 'field not found', target: describe(spec) }); continue }
+        const el = els[0]
+        const tag = el.tagName
+        const type = (el.type || '').toLowerCase()
+        try {
+          if (tag === 'SELECT') {
+            const wanted = String(spec.value)
+            if (el.multiple) {
+              const wantedList = wanted.split(',').map(x => x.trim())
+              let hit = false
+              for (const o of [...el.options]) {
+                o.selected = wantedList.includes(o.value) || wantedList.includes((o.textContent || '').trim())
+                if (o.selected) hit = true
+              }
+              if (!hit) { out.push({ ok: false, error: 'option not found: ' + wanted, target: describe(spec) }); continue }
+            } else {
+              let opt = [...el.options].find(o => o.value === wanted)
+              if (!opt) opt = [...el.options].find(o => (o.textContent || '').trim() === wanted)
+              if (!opt) { out.push({ ok: false, error: 'option not found: ' + wanted, target: describe(spec) }); continue }
+              setNative(el, HTMLSelectElement.prototype, opt.value)
+            }
+            el.dispatchEvent(new Event('input', { bubbles: true }))
+            el.dispatchEvent(new Event('change', { bubbles: true }))
+            out.push({ ok: true, method: 'select', target: describe(spec) })
+          } else if (type === 'file') {
+            out.push({ ok: false, error: 'file inputs cannot be set from script; use browser_download or ask the human', target: describe(spec) })
+          } else if (type === 'checkbox') {
+            const want = spec.value === true || spec.value === 'true' || spec.value === 'on'
+            if (el.checked !== want) el.click()
+            out.push({ ok: true, method: 'checkbox', target: describe(spec) })
+          } else if (type === 'radio') {
+            const wanted = String(spec.value)
+            const radio = [...document.querySelectorAll('input[type="radio"][name=' + JSON.stringify(el.name || '') + ']')]
+              .find(r => r.value === wanted || (r === el && (spec.value === true || spec.value === 'true')))
+            if (!radio) { out.push({ ok: false, error: 'radio option not found: ' + wanted, target: describe(spec) }); continue }
+            if (!radio.checked) radio.click()
+            out.push({ ok: true, method: 'radio', target: describe(spec) })
+          } else if (el.isContentEditable) {
+            el.textContent = String(spec.value)
+            el.dispatchEvent(new Event('input', { bubbles: true }))
+            out.push({ ok: true, method: 'contenteditable', target: describe(spec) })
+          } else if (tag === 'TEXTAREA') {
+            setNative(el, HTMLTextAreaElement.prototype, String(spec.value))
+            el.dispatchEvent(new Event('input', { bubbles: true }))
+            el.dispatchEvent(new Event('change', { bubbles: true }))
+            out.push({ ok: true, method: 'textarea', target: describe(spec) })
+          } else {
+            setNative(el, HTMLInputElement.prototype, String(spec.value))
+            el.dispatchEvent(new Event('input', { bubbles: true }))
+            el.dispatchEvent(new Event('change', { bubbles: true }))
+            out.push({ ok: true, method: 'input', target: describe(spec) })
+          }
+        } catch (e) {
+          out.push({ ok: false, error: String(e), target: describe(spec) })
+        }
+      }
+      let submitted = false
+      if (${submitFlag}) {
+        let last = null
+        for (const spec of specs) { const els = candidates(spec); if (els.length > 0) { last = els[0]; break } }
+        const form = last && (last.form || last.closest('form'))
+        if (form) { form.requestSubmit(); submitted = true }
+      }
+      return { fields: out, submitted }
+    })()`
+    const timeoutMs = request.timeoutMs ?? 30_000
+    const result = await withTimeout(
+      handleSendEvaluate(tab.handle, script),
+      timeoutMs,
+      signal,
+      `browser: fillForm timed out after ${timeoutMs}ms`,
+    )
+    if (!result.ok) {
+      throw new BrowserError(`browser: fillForm evaluation failed: ${result.exception}`, 'BROWSER_FILL_FAILED')
+    }
+    const value = result.value as BrowserFillResult
+    const okCount = value.fields.filter(f => f.ok).length
+    this.record(s, 'fill', { fields: request.fields.length, submit: submitFlag }, okCount === value.fields.length, {
+      result: `${okCount}/${value.fields.length} fields filled${value.submitted ? ', form submitted' : ''}`,
+    })
+    return { fields: value.fields, submitted: value.submitted === true }
   }
 
   /**

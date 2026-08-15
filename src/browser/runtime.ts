@@ -16,6 +16,8 @@ import type {
   BrowserDownloadRequest,
   BrowserExecuteRequest,
   BrowserExecuteResult,
+  BrowserFillRequest,
+  BrowserFillResult,
   BrowserHistoryEntry,
   BrowserNavigateRequest,
   BrowserOpenRequest,
@@ -43,6 +45,9 @@ export type {
   BrowserDownloadRequest,
   BrowserExecuteRequest,
   BrowserExecuteResult,
+  BrowserFillField,
+  BrowserFillRequest,
+  BrowserFillResult,
   BrowserHistoryEntry,
   BrowserNavigateRequest,
   BrowserOpenRequest,
@@ -203,6 +208,11 @@ export class BrowserRuntime extends Service {
   /** Type into the focused element through the selected provider. */
   async type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void> {
     return this.resolveProvider().type(session, request, signal)
+  }
+
+  /** Fill a form's fields in one batch through the selected provider. */
+  async fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult> {
+    return this.resolveProvider().fillForm(session, request, signal)
   }
 
   /** Capture the current page through the selected provider. */
