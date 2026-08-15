@@ -59,17 +59,13 @@
   "engines": {
     "node": ">=22.19"
   },
-  "dependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1",
-    "@deepseek-ai/dsh-system-prompt": "^0.0.1-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.1"
-  },
+  "dependencies": {},
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.1",
     "electron": ">= 30.0.0"
   },
   "peerDependenciesMeta": {
