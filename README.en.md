@@ -2,16 +2,34 @@
 
 中文 | [English](README.en.md)
 
-A shared real browser capability plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): a visible browser the human watches and can take over, driven by the agent over CDP.
+A shared **real browser** capability plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): install and it just works — the agent drives a real, visible browser over CDP that the human can watch and take over at any time. Human and agent operate the **very same page**.
 
-This plugin provides the **host-side capability** (browser seam, Electron CDP provider, `browser_*` model tools). The browser's **native view itself** is supplied by the host (a desktop shell) through `ctx.electronViewHost`; the plugin contains no browser UI.
+**Why this plugin**
+
+- **Install-and-use.** With a desktop shell the shell's embedded view is used; on plain `dsh web` the plugin **self-hosts** — it spawns its own Electron window with zero extra configuration.
+- **Real and visible, human-takeover friendly.** Not a headless screenshot or a relay: the user sees the page and can grab control directly.
+- **DOM-level driving, framework-friendly.** React/Vue controlled inputs fill reliably.
+- **Concurrency-safe.** Task-level browser session isolation — parallel tasks never fight over the page or pollute each other.
+- **Built for the real world.** CAPTCHA detection, login persistence, batch form filling, authenticated downloads, operation replay, and action restriction — all included.
 
 ## Features
+
+**Browser capability**
 
 - **Real view, not a relay.** The browser is a native view (`WebContentsView`) the human can see and operate directly; the agent drives the very same page. The view is provided by the host shell; the plugin drives it.
 - **DOM-referenced, not coordinate-guessing.** `browser_snapshot` returns numbered interactive elements; `browser_execute` runs JS in the page (native setters for framework inputs), so interaction works on React/Vue pages.
 - **Multi-tab sessions.** Open URLs in parallel tabs, list/switch/close/reset, all keeping state.
 - **Multi-format content.** Fetch pages as html / markdown / txt / json, scoped by selector, capped by length and timeout.
+
+**Engineering capability**
+
+- **Per-task isolation.** Each DSH task (session) gets its own browser session (own tabs and history); concurrent tasks never interfere, and calls within one task reuse the same session (`browser_session` / `browser_reset_session`).
+- **Login persistence.** `browser_auth` exports/restores cookies, so logins survive host restarts.
+- **CAPTCHA / bot-detection awareness.** Cloudflare, reCAPTCHA, hCaptcha, Turnstile and generic challenges are detected automatically (`browser_challenge`, and flagged in snapshots); instead of blindly retrying, the agent asks the human to complete it in the shared window.
+- **Batch form filling.** `browser_fill` sets many fields in one call — matched by selector/name/label, handling controlled inputs, selects, checkboxes and radio groups, with optional submit.
+- **Operation history & replay.** `browser_history` records operations; `browser_replay` re-runs one step.
+- **Authenticated downloads.** `browser_download` fetches a URL with the session's cookies straight to a local file.
+- **Safety restriction.** `browser_restrict` limits which browser actions are allowed, preventing stray clicks/navigation.
 
 ## Requirements
 
@@ -28,7 +46,7 @@ This plugin provides the **host-side capability** (browser seam, Electron CDP pr
 | DeepSeek Harness (dsh) | `0.1.0-rc.5` |
 | Electron | `43.4.0` |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.3` |
+| dsh-builtin-browser | `0.1.7` |
 | OS | Windows 10 (10.0.26200) |
 
 > The plugin declares `electron >= 30`; other platforms (macOS/Linux) run the same protocol but were only verified on the Windows environment above.

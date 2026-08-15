@@ -2,16 +2,34 @@
 
 [English](README.en.md) | 中文
 
-面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的共享真实浏览器能力插件:一个用户可见、可随时接管的浏览器,由 agent 通过 CDP 驱动。
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的**共享真实浏览器**能力插件:装好即可用——agent 通过 CDP 驱动一个真实、可见、可随时人工接管的浏览器,人与 agent 操作的是**同一个页面**。
 
-本插件提供 **host 侧能力**(浏览器 seam、Electron CDP provider、`browser_*` 模型工具)。浏览器本身的**原生视图**由宿主(桌面外壳)通过 `ctx.electronViewHost` 提供;插件不包含浏览器界面 UI。
+**我们的优势**
+
+- **装好即用**:有桌面外壳时嵌入外壳视图;纯 `dsh web` 也能**自托管**拉起自己的 Electron 窗口,不需要任何额外配置。
+- **真实可见、人工可接管**:不是无头截屏或转播,用户随时能看到页面并直接接手操作。
+- **DOM 级驱动,框架友好**:React/Vue 受控组件也能可靠填写。
+- **并发安全**:任务级浏览器会话隔离,多个任务并行互不抢页面、不互相污染。
+- **面向真实世界**:人机验证识别、登录态持久化、批量填表、带登录态下载、操作回放、动作限制,一应俱全。
 
 ## 功能
+
+**浏览器能力**
 
 - **真实视图,而非转播。** 浏览器是原生视图(`WebContentsView`),用户可直接看到并操作;agent 驱动的是同一个页面。视图由宿主外壳提供,插件负责驱动。
 - **DOM 引用,而非猜坐标。** `browser_snapshot` 返回带编号的交互元素;`browser_execute` 在页面里执行 JS(框架输入用原生 setter),在 React/Vue 页面上也能可靠交互。
 - **多标签会话。** 并行打开 URL、查看/切换/关闭/重置标签,状态保持。
 - **多格式内容。** 以 html / markdown / txt / json 抓取页面,支持 selector 限定、长度与超时上限。
+
+**工程化能力**
+
+- **按任务隔离。** 每个 DSH 任务(会话)拥有独立的浏览器会话(独立标签页与历史),并发任务互不干扰;同一任务内多次调用复用同一会话(`browser_session` / `browser_reset_session`)。
+- **登录态持久化。** `browser_auth` 导出/恢复 cookie,重启后登录态不丢。
+- **人机验证识别。** 自动检测 Cloudflare / reCAPTCHA / hCaptcha / Turnstile 等挑战(`browser_challenge`,快照也会标注),提示人工在共享窗口完成,不再盲目重试。
+- **批量表单填充。** `browser_fill` 一次填写多个字段:按选择器/名称/标签匹配,支持受控输入、下拉、单选/复选,可选提交。
+- **操作历史与回放。** `browser_history` 记录操作日志,`browser_replay` 可回放某一步。
+- **带登录态下载。** `browser_download` 用会话 cookie 把文件取到本地,登录后内容可直接落盘。
+- **安全限制。** `browser_restrict` 限制允许的浏览器动作,防误点/误导航。
 
 ## 环境要求
 
@@ -28,7 +46,7 @@
 | DeepSeek Harness(dsh) | `0.1.0-rc.5` |
 | Electron | `43.4.0` |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.3` |
+| dsh-builtin-browser | `0.1.7` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`;其他平台(如 macOS/Linux)按同一协议运行,但仅在上表 Windows 环境实测。

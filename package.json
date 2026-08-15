@@ -1,7 +1,7 @@
 {
   "name": "dsh-builtin-browser",
-  "version": "0.1.7",
-  "description": "Shared real browser capability for DeepSeek Harness: a visible browser the human watches and can take over, driven by the agent over CDP (snapshot/execute/content/tab management); host-side seam, provider, and browser_* tools",
+  "version": "0.1.8",
+  "description": "Shared real browser plugin for DeepSeek Harness: install-and-use — a visible native browser the human can take over, driven by the agent over CDP. DOM-level interaction (React/Vue safe), per-task session isolation, cookie persistence (browser_auth), CAPTCHA detection, batch form fill (browser_fill), authenticated download, history/replay, action restriction",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
