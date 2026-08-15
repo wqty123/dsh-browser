@@ -12,6 +12,16 @@
 
 <h4 align="center">agent 驱动一个真实、可见、可随时人工接管的浏览器——人与 agent 操作的是<b>同一个页面</b>。</h4>
 
+## 文档
+
+| 目标 | 入口 |
+| --- | --- |
+| 了解插件为什么存在、与无头方案的区别 | [为什么做共享真实浏览器](docs/why-browser.md) |
+| 安装、配置与日常使用 | [用户指南](docs/user-guide.md) |
+| 全部 20 个工具的参数、输出与示例 | [工具参考](docs/tool-reference.md) |
+| 了解 seam / provider / 工具三层与自托管实现 | [架构说明](docs/architecture.md) |
+| 查看全部文档与 README 分工 | [文档索引](docs/README.md) |
+
 ## 这是什么
 
 `dsh-builtin-browser` 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供浏览器能力:

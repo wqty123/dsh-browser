@@ -12,6 +12,16 @@
 
 <h4 align="center">The agent drives a real, visible browser the human can watch and take over at any time — both operate the <b>same page</b>.</h4>
 
+## Documentation
+
+| Goal | Entry |
+| --- | --- |
+| Why a shared real browser, and how it differs from headless approaches | [Why a shared real browser](docs/why-browser.md) |
+| Installation, configuration, day-to-day use | [User guide](docs/user-guide.md) |
+| All 20 tools: parameters, output, examples | [Tool reference](docs/tool-reference.md) |
+| How the seam / provider / tools layers and self-hosting work | [Architecture](docs/architecture.md) |
+| Documentation index and README split | [Docs index](docs/README.md) |
+
 ## What is this
 
 `dsh-builtin-browser` adds browser capability to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness):
