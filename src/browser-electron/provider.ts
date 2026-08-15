@@ -267,7 +267,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
       }
     }
     signal?.throwIfAborted()
-    await handle.sendCommand(CDP_PAGE_NAVIGATE, { url } satisfies CdpNavigateParams)
+    const result = await handle.sendCommand(CDP_PAGE_NAVIGATE, { url } satisfies CdpNavigateParams)
+    // Page.navigate resolves even when the navigation fails; surface the
+    // failure instead of leaving a silent white screen.
+    const errorText = (result as { errorText?: string }).errorText
+    if (typeof errorText === 'string' && errorText !== '') {
+      throw new BrowserError(`browser: navigation to "${url}" failed: ${errorText}`, 'BROWSER_NAVIGATION_FAILED')
+    }
   }
 
   /** Execute JS in the active tab's page context. */
