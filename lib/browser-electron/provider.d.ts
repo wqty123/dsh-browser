@@ -6,7 +6,7 @@
  * shell that owns the `BrowserWindow`.
  * @module dsh-browser/browser-electron
  */
-import type { BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab } from '../browser/types.ts';
+import type { BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab } from '../browser/types.ts';
 /** Stable provider id registered with `ctx.browser`. */
 export declare const ELECTRON_BROWSER_PROVIDER_ID = "electron";
 /**
@@ -156,6 +156,18 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
         readonly dataUrl: string;
         readonly path?: string;
     }>;
+    /** Append one operation to the session's history. */
+    private record;
+    /** Return the session's chronological operation log (newest last). */
+    history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]>;
+    /**
+     * Replay one recorded operation by sequence number. Navigate/click/type are
+     * re-issued against the current page; execute re-runs its script. The
+     * replayed step is appended to history as a new entry.
+     * @param session - the session id.
+     * @param seq - the recorded entry's sequence number to replay.
+     */
+    replay(session: BrowserSessionId, seq: number): Promise<void>;
     /** Close the session and destroy all its views. Idempotent. */
     close(session: BrowserSessionId): Promise<void>;
     /** Look up a session or throw the unknown-session error. */

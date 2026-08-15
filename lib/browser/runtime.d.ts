@@ -8,9 +8,9 @@
  */
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-import type { BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest } from './types.ts';
+import type { BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest } from './types.ts';
 export { BrowserError, } from './types.ts';
-export type { BrowserClickRequest, BrowserContentFormat, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, } from './types.ts';
+export type { BrowserClickRequest, BrowserContentFormat, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, } from './types.ts';
 declare module '@deepseek-ai/cordis' {
     interface Context {
         browser: BrowserRuntime;
@@ -78,6 +78,10 @@ export declare class BrowserRuntime extends Service {
     type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void>;
     /** Capture the current page through the selected provider. */
     screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult>;
+    /** Return the session's chronological operation log through the provider. */
+    history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]>;
+    /** Replay one recorded operation by sequence number through the provider. */
+    replay(session: BrowserSessionId, seq: number): Promise<void>;
     /** Close the session through the selected provider. Idempotent. */
     close(session: BrowserSessionId): Promise<void>;
 }

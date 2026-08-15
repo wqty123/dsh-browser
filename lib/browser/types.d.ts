@@ -195,8 +195,29 @@ export interface BrowserProvider {
     type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void>;
     /** Capture the current page. Honor `signal` for cancellation. */
     screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult>;
+    /** Return the session's chronological operation log. */
+    history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]>;
+    /** Replay one recorded operation by sequence number. */
+    replay(session: BrowserSessionId, seq: number): Promise<void>;
     /** Close the session and destroy its backing surface. Idempotent. */
     close(session: BrowserSessionId): Promise<void>;
+}
+/** One recorded browser operation, in chronological order (seq 1, 2, 3…). */
+export interface BrowserHistoryEntry {
+    /** Monotonic sequence number within the session. */
+    readonly seq: number;
+    /** The operation name: navigate | execute | click | type | replay. */
+    readonly action: string;
+    /** The operation's arguments. */
+    readonly params: Record<string, unknown>;
+    /** Whether the operation succeeded. */
+    readonly ok: boolean;
+    /** Truncated result text, when the operation returned one. */
+    readonly result?: string;
+    /** Error text, when the operation failed. */
+    readonly error?: string;
+    /** Epoch millis of the operation. */
+    readonly at: number;
 }
 /**
  * Typed browser error with a machine-routable, open-string `code` and chained

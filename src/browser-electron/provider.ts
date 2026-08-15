@@ -14,6 +14,7 @@ import type {
   BrowserContentResult,
   BrowserExecuteRequest,
   BrowserExecuteResult,
+  BrowserHistoryEntry,
   BrowserOpenRequest,
   BrowserProvider,
   BrowserSessionId,
@@ -81,6 +82,8 @@ interface Session {
   readonly id: BrowserSessionId
   readonly tabs: Tab[]
   activeIndex: number
+  /** Chronological operation log (navigate/execute/click/type/screenshot). */
+  readonly history: BrowserHistoryEntry[]
 }
 
 /** Provider config: navigation admission defaults and snapshot caps. */
@@ -175,7 +178,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (existing !== undefined) return Promise.resolve(existing)
     const handle = this.host.createView()
     const id = `browser:${randomUUID()}`
-    this.sessions.set(id, { id, tabs: [{ id: `tab:${randomUUID()}`, handle }], activeIndex: 0 })
+    this.sessions.set(id, { id, tabs: [{ id: `tab:${randomUUID()}`, handle }], activeIndex: 0, history: [] })
     return Promise.resolve(id)
   }
 
@@ -254,32 +257,43 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Navigate the active tab's view to a URL, honoring HTTP(S)-only admission. */
   async navigate(session: BrowserSessionId, request: { readonly url: string }, signal?: AbortSignal): Promise<void> {
-    const { handle } = this.activeTab(this.session(session))
+    const s = this.session(session)
+    const { handle } = this.activeTab(s)
     const url = request.url
-    if (this.httpOnly) {
-      let parsed: URL
-      try {
-        parsed = new URL(url)
-      } catch {
-        throw new BrowserError(`browser: refusing navigation to unparseable URL "${url}"`, 'BROWSER_NAVIGATION_BLOCKED')
+    try {
+      if (this.httpOnly) {
+        let parsed: URL
+        try {
+          parsed = new URL(url)
+        } catch {
+          throw new BrowserError(`browser: refusing navigation to unparseable URL "${url}"`, 'BROWSER_NAVIGATION_BLOCKED')
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new BrowserError(`browser: refusing navigation to non-HTTP(S) URL "${url}"`, 'BROWSER_NAVIGATION_BLOCKED')
+        }
       }
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        throw new BrowserError(`browser: refusing navigation to non-HTTP(S) URL "${url}"`, 'BROWSER_NAVIGATION_BLOCKED')
+      signal?.throwIfAborted()
+      const result = await handle.sendCommand(CDP_PAGE_NAVIGATE, { url } satisfies CdpNavigateParams)
+      // Page.navigate resolves even when the navigation fails; surface the
+      // failure instead of leaving a silent white screen.
+      const errorText = (result as { errorText?: string }).errorText
+      if (typeof errorText === 'string' && errorText !== '') {
+        this.record(s, 'navigate', { url }, false, { error: errorText })
+        throw new BrowserError(`browser: navigation to "${url}" failed: ${errorText}`, 'BROWSER_NAVIGATION_FAILED')
       }
-    }
-    signal?.throwIfAborted()
-    const result = await handle.sendCommand(CDP_PAGE_NAVIGATE, { url } satisfies CdpNavigateParams)
-    // Page.navigate resolves even when the navigation fails; surface the
-    // failure instead of leaving a silent white screen.
-    const errorText = (result as { errorText?: string }).errorText
-    if (typeof errorText === 'string' && errorText !== '') {
-      throw new BrowserError(`browser: navigation to "${url}" failed: ${errorText}`, 'BROWSER_NAVIGATION_FAILED')
+      this.record(s, 'navigate', { url }, true)
+    } catch (error) {
+      if (!(error instanceof BrowserError && (error as { code?: string }).code === 'BROWSER_NAVIGATION_BLOCKED')) {
+        this.record(s, 'navigate', { url }, false, { error: String(error) })
+      }
+      throw error
     }
   }
 
   /** Execute JS in the active tab's page context. */
   async execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
-    const { handle } = this.activeTab(this.session(session))
+    const s = this.session(session)
+    const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
     try {
       // Wrap the script in a Function so `return` statements are legal and
@@ -314,9 +328,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
       )
       if (result.exceptionDetails !== undefined) {
         const detail = result.exceptionDetails as { text?: string; exception?: { description?: string } }
-        return { ok: false, exception: detail.exception?.description ?? detail.text ?? 'unknown exception' }
+        const exception = detail.exception?.description ?? detail.text ?? 'unknown exception'
+        this.record(s, 'execute', { script: request.script }, false, { error: exception })
+        return { ok: false, exception }
       }
-      return { ok: true, value: (result.result as { value?: unknown } | undefined)?.value ?? null }
+      const value = (result.result as { value?: unknown } | undefined)?.value ?? null
+      this.record(s, 'execute', { script: request.script }, true, { result: typeof value === 'string' ? value.slice(0, 500) : JSON.stringify(value).slice(0, 500) })
+      return { ok: true, value }
     } catch (error) {
       throw new BrowserError(`browser: execute failed: ${String(error)}`, 'BROWSER_EXECUTE_FAILED', { cause: error })
     }
@@ -424,17 +442,21 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Click at viewport coordinates (CDP mousePressed + mouseReleased). */
   async click(session: BrowserSessionId, request: { readonly x: number; readonly y: number }, signal?: AbortSignal): Promise<void> {
-    const { handle } = this.activeTab(this.session(session))
+    const s = this.session(session)
+    const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
     await handle.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', x: request.x, y: request.y, button: 'left', clickCount: 1 } satisfies CdpMouseParams)
     await handle.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', x: request.x, y: request.y, button: 'left', clickCount: 1 } satisfies CdpMouseParams)
+    this.record(s, 'click', { x: request.x, y: request.y }, true)
   }
 
   /** Type into the focused element. */
   async type(session: BrowserSessionId, request: { readonly text: string }, signal?: AbortSignal): Promise<void> {
-    const { handle } = this.activeTab(this.session(session))
+    const s = this.session(session)
+    const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
     await handle.sendCommand('Input.insertText', { text: request.text } satisfies CdpInsertTextParams)
+    this.record(s, 'type', { text: request.text.slice(0, 200) }, true)
   }
 
   /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */
@@ -469,6 +491,81 @@ export class ElectronBrowserProvider implements BrowserProvider {
       }
     }
     return { dataUrl: `data:image/png;base64,${data}` }
+  }
+
+  /** Append one operation to the session's history. */
+  private record(
+    s: Session,
+    action: string,
+    params: Record<string, unknown>,
+    ok: boolean,
+    detail?: { result?: string; error?: string },
+  ): void {
+    const entry: BrowserHistoryEntry = {
+      seq: s.history.length + 1,
+      action,
+      params,
+      ok,
+      ...detail?.result !== undefined ? { result: detail.result } : {},
+      ...detail?.error !== undefined ? { error: detail.error } : {},
+      at: Date.now(),
+    }
+    s.history.push(entry)
+    // Bound memory: keep the last 500 operations.
+    if (s.history.length > 500) s.history.splice(0, s.history.length - 500)
+  }
+
+  /** Return the session's chronological operation log (newest last). */
+  async history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]> {
+    return this.session(session).history
+  }
+
+  /**
+   * Replay one recorded operation by sequence number. Navigate/click/type are
+   * re-issued against the current page; execute re-runs its script. The
+   * replayed step is appended to history as a new entry.
+   * @param session - the session id.
+   * @param seq - the recorded entry's sequence number to replay.
+   */
+  async replay(session: BrowserSessionId, seq: number): Promise<void> {
+    const s = this.session(session)
+    const entry = s.history.find(e => e.seq === seq)
+    if (entry === undefined) {
+      throw new BrowserError(`browser: no history entry with seq ${seq}`, 'BROWSER_HISTORY_UNKNOWN')
+    }
+    switch (entry.action) {
+      case 'navigate': {
+        const url = entry.params.url
+        if (typeof url !== 'string') throw new BrowserError(`browser: history seq ${seq} navigate has no url`, 'BROWSER_HISTORY_INVALID')
+        await this.navigate(session, { url })
+        this.record(s, 'replay', { seq, of: entry.action, url }, true)
+        return
+      }
+      case 'click': {
+        const x = entry.params.x
+        const y = entry.params.y
+        if (typeof x !== 'number' || typeof y !== 'number') throw new BrowserError(`browser: history seq ${seq} click has no coordinates`, 'BROWSER_HISTORY_INVALID')
+        await this.click(session, { x, y })
+        this.record(s, 'replay', { seq, of: entry.action, x, y }, true)
+        return
+      }
+      case 'type': {
+        const text = entry.params.text
+        if (typeof text !== 'string') throw new BrowserError(`browser: history seq ${seq} type has no text`, 'BROWSER_HISTORY_INVALID')
+        await this.type(session, { text })
+        this.record(s, 'replay', { seq, of: entry.action, text }, true)
+        return
+      }
+      case 'execute': {
+        const script = entry.params.script
+        if (typeof script !== 'string') throw new BrowserError(`browser: history seq ${seq} execute has no script`, 'BROWSER_HISTORY_INVALID')
+        const result = await this.execute(session, { script })
+        this.record(s, 'replay', { seq, of: entry.action, script }, result.ok, result.ok ? { result: String(result.value) } : { error: result.exception })
+        return
+      }
+      default:
+        throw new BrowserError(`browser: history seq ${seq} action "${entry.action}" is not replayable`, 'BROWSER_HISTORY_NOT_REPLAYABLE')
+    }
   }
 
   /** Close the session and destroy all its views. Idempotent. */

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Service Definition for the browser capability seam (`ctx.browser`): the
  * provider registry and provider-selecting execution for browser sessions.
  * Duplicate ids are rejected. At execution time, a configured provider must
@@ -15,6 +15,7 @@ import type {
   BrowserContentResult,
   BrowserExecuteRequest,
   BrowserExecuteResult,
+  BrowserHistoryEntry,
   BrowserNavigateRequest,
   BrowserOpenRequest,
   BrowserProvider,
@@ -37,6 +38,7 @@ export type {
   BrowserContentResult,
   BrowserExecuteRequest,
   BrowserExecuteResult,
+  BrowserHistoryEntry,
   BrowserNavigateRequest,
   BrowserOpenRequest,
   BrowserProvider,
@@ -200,6 +202,16 @@ export class BrowserRuntime extends Service {
   /** Capture the current page through the selected provider. */
   async screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult> {
     return this.resolveProvider().screenshot(session, request, signal)
+  }
+
+  /** Return the session's chronological operation log through the provider. */
+  async history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]> {
+    return this.resolveProvider().history(session)
+  }
+
+  /** Replay one recorded operation by sequence number through the provider. */
+  async replay(session: BrowserSessionId, seq: number): Promise<void> {
+    return this.resolveProvider().replay(session, seq)
   }
 
   /** Close the session through the selected provider. Idempotent. */
