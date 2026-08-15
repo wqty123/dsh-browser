@@ -32,12 +32,13 @@ const READY_TIMEOUT_MS = 20_000
 const MAX_RPC_BUFFER_BYTES = 512 * 1024 * 1024
 
 /**
- * Locate the Electron binary, trying, in order:
+ * Locate the Electron binary:
  *   1. require('electron') from this module (optional peer dependency),
- *   2. require.resolve('electron') against DSH install anchors (global dsh
- *      package, npm global root) — desktop-shell environments satisfy this,
- *   3. a pnpm virtual store under common workspace layouts,
- *   4. ELECTRON_PATH (explicit override).
+ *   2. ELECTRON_PATH (explicit override),
+ *   3. every DSH install anchor + pnpm virtual store candidate, choosing the
+ *      NEWEST version found. Older Electron releases (e.g. 33.x) have a
+ *      compositor defect that intermittently breaks page capture, so prefer
+ *      the newest binary available in the environment.
  * @returns the path to the Electron executable.
  */
 function resolveElectronPath(): string {
@@ -49,8 +50,14 @@ function resolveElectronPath(): string {
   } catch {
     // continue probing
   }
-  // 2. DSH install anchors: the global dsh package and the npm global root
-  // both carry electron junctions under pnpm layouts.
+  // 2. Explicit override (user intent wins).
+  const override = process.env.ELECTRON_PATH
+  if (typeof override === 'string' && override.length > 0 && existsSync(override)) return override
+  // 3. Collect every candidate (anchors + pnpm stores), then pick the newest.
+  const candidates: Array<{ version: string; path: string }> = []
+  const add = (version: string, path: string | undefined): void => {
+    if (path !== undefined) candidates.push({ version, path })
+  }
   const anchors: string[] = []
   const globalPrefix = process.env.npm_config_prefix ?? process.env.PREFIX
   if (globalPrefix !== undefined) {
@@ -64,19 +71,12 @@ function resolveElectronPath(): string {
     try {
       const resolved: unknown = require.resolve('electron', { paths: [anchor] })
       if (typeof resolved === 'string' && resolved.length > 0) {
-        // electron's index.js is not the binary; find the dist executable
-        // next to the package root.
-        const exe = electronExeBeside(resolved)
-        if (exe !== undefined) return exe
+        add(versionOf(resolved), electronExeBeside(resolved))
       }
     } catch {
       // continue probing
     }
   }
-  // 3. pnpm virtual store, walking up from several candidate roots: this
-  // module (its real path may differ from where the profile resolves it when
-  // installed via a junction/link), the process CWD, and the Node executable
-  // dir (DSH CLI typically runs from the workspace root).
   const roots = new Set<string>([
     fileURLToPath(new URL('.', import.meta.url)),
     process.cwd(),
@@ -87,21 +87,43 @@ function resolveElectronPath(): string {
     for (let depth = 0; depth < 8; depth++) {
       const store = join(dir, 'node_modules', '.pnpm')
       if (existsSync(store)) {
-        const exe = findElectronExe(store)
-        if (exe !== undefined) return exe
+        for (const entry of readdirSync(store)) {
+          if (!entry.startsWith('electron@')) continue
+          const exe = electronDistExe(join(store, entry, 'node_modules', 'electron'))
+          add(entry.slice('electron@'.length), exe)
+        }
       }
       const parent = join(dir, '..')
       if (parent === dir) break
       dir = parent
     }
   }
-  // 4. Explicit override.
-  const override = process.env.ELECTRON_PATH
-  if (typeof override === 'string' && override.length > 0 && existsSync(override)) return override
+  if (candidates.length > 0) {
+    candidates.sort((a, b) => compareVersions(b.version, a.version))
+    const best = candidates[0]
+    if (best !== undefined) return best.path
+  }
   throw new Error(
     'dsh-builtin-browser: cannot locate the Electron binary. Install electron in the host profile ' +
     '(e.g. `dsh plugin --profile web add electron`) or set ELECTRON_PATH to the electron executable.',
   )
+}
+
+/** Extract an electron version like "43.4.0" from a path containing it. */
+function versionOf(path: string): string {
+  const match = /electron@(\d+\.\d+\.\d+)/.exec(path)
+  return match?.[1] ?? '0.0.0'
+}
+
+/** Compare dotted numeric versions; higher wins. */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map(n => Number(n) || 0)
+  const pb = b.split('.').map(n => Number(n) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return 0
 }
 
 /** From an electron package entry file, find the dist executable beside it. */
@@ -118,28 +140,20 @@ function electronExeBeside(entry: string): string | undefined {
   return undefined
 }
 
+/** From an electron package root, find its dist executable. */
+function electronDistExe(pkgRoot: string): string | undefined {
+  for (const candidate of [join(pkgRoot, 'dist', 'electron.exe'), join(pkgRoot, 'dist', 'electron')]) {
+    if (existsSync(candidate)) return candidate
+  }
+  return undefined
+}
+
 /** dirname without importing node:path's dirname separately. */
 function dirname(p: string): string {
   const i = p.lastIndexOf('/')
   const j = p.lastIndexOf('\\')
   const k = Math.max(i, j)
   return k < 0 ? p : p.slice(0, k)
-}
-
-/** Search a pnpm virtual store for an Electron dist binary. */
-function findElectronExe(store: string): string | undefined {
-  const entries = existsSync(store) ? readdirSync(store) : []
-  for (const entry of entries) {
-    if (!entry.startsWith('electron@')) continue
-    const candidates = [
-      join(store, entry, 'node_modules', 'electron', 'dist', 'electron.exe'),
-      join(store, entry, 'node_modules', 'electron', 'dist', 'electron'),
-    ]
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) return candidate
-    }
-  }
-  return undefined
 }
 
 /** One RPC round-trip with the child. */
@@ -171,6 +185,7 @@ class ElectronChildClient {
     private readonly onExit?: () => void,
   ) {
     const electron = resolveElectronPath()
+    process.stderr.write(`[dsh-browser host] spawning electron: ${electron}\n`)
     // ELECTRON_RUN_AS_NODE (even an empty string) makes Electron run as plain
     // Node, breaking require('electron'); NODE_OPTIONS can inject flags that
     // break the child. Rebuild the env without either.
@@ -306,6 +321,11 @@ class RemoteView implements ElectronViewHandle {
   async download(url: string, savePath: string): Promise<void> {
     const result = await this.client.call<{ base64: string }>('download', { viewId: this.id, url, savePath })
     writeFileSync(savePath, Buffer.from(result.base64, 'base64'))
+  }
+
+  /** Native capturePage snapshot of the view (PNG base64 + size). */
+  capture(): Promise<{ base64: string; width: number; height: number }> {
+    return this.client.call<{ base64: string; width: number; height: number }>('capture', { viewId: this.id })
   }
 
   /** Export the session's cookies (login state). */
@@ -481,6 +501,11 @@ class DeferredRemoteView implements ElectronViewHandle {
   async download(url: string, savePath: string): Promise<void> {
     const view = await this.materializeOnce()
     return view.download(url, savePath)
+  }
+
+  async capture(): Promise<{ base64: string; width: number; height: number }> {
+    const view = await this.materializeOnce()
+    return view.capture()
   }
 
   async flushAuth(): Promise<ExportedCookie[]> {

@@ -41,12 +41,17 @@ declare module 'electron' {
       set(details: CookieSetter): Promise<void>
     }
   }
+  export interface NativeImage {
+    toPNG(): Buffer
+    getSize(): { width: number; height: number }
+  }
   export interface WebContents {
     readonly id: number
     readonly debugger: WebContentsDebugger
     readonly session: Session
     close(): void
     downloadURL(url: string): void
+    capturePage(): Promise<NativeImage>
   }
   export interface WebContentsView {
     readonly webContents: WebContents
@@ -62,6 +67,12 @@ declare module 'electron' {
       readonly children: WebContentsView[]
     }
     getContentSize(): [number, number]
+    isVisible(): boolean
+    isMinimized(): boolean
+    isFocused(): boolean
+    show(): void
+    restore(): void
+    focus(): void
     on(event: 'closed', listener: () => void): this
     on(event: 'resize', listener: () => void): this
     off(event: 'closed', listener: () => void): this
@@ -70,6 +81,8 @@ declare module 'electron' {
   export const app: {
     whenReady(): Promise<void>
     exit(code?: number): void
+    getPath(name: string): string
+    setPath(name: string, path: string): void
   }
   export interface BrowserWindowConstructor {
     new(options?: Record<string, unknown>): BrowserWindow

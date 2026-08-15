@@ -183,6 +183,8 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
         readonly dataUrl: string;
         readonly path?: string;
     }>;
+    /** Build the data URL and optionally write the PNG to disk. */
+    private saveScreenshot;
     /** Append one operation to the session's history. */
     private record;
     /** Return the session's chronological operation log (newest last). */

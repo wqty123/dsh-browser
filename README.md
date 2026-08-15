@@ -127,10 +127,15 @@ provider 按构造与 Electron 解耦:它通过 `ElectronBrowserViewHost` 接缝
 ## 已知限制
 
 - 截图仅 PNG(CDP JPEG 在 Electron 43 上挂起);JPEG 等待非 CDP 转换路径。
+- 自托管截图优先走 Electron 原生 `capturePage`(CDP `captureScreenshot` 在多视图下会挂起);截图前自动把目标标签置顶。
+- **Electron 版本建议 ≥ 40**:33.x 存在合成器缺陷,会间歇性导致截图失败("display surface not available")。插件会**自动选择环境中最新版本的 Electron**(peer 依赖 > `ELECTRON_PATH` > 锚点/pnpm store 中最新版)。
 - 部分主机在软件合成下 `fullPage` 截图不稳定。
 - 会话按任务隔离:每个调用方任务(DSH 会话)拥有独立的浏览器会话(独立标签页与历史),并发任务互不干扰;同一任务的多次调用复用同一会话。登录态(cookie)为共享,可用 `browser_auth` 导出/恢复。
 - 人机验证(CAPTCHA)无法自动解决:快照会标注检测到的挑战(`browser_challenge` 可显式检查),此时应请用户在共享窗口中人工完成,而不是反复重试。
 - 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于宿主层,本插件不承诺。
+- `browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;单文件上限 256MB。
+- `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie);仅自托管浏览器可用。
+- 自托管浏览器子进程崩溃后会自动重启,但崩溃前已打开的会话视图已失效,调用 `browser_reset_session` 重建即可。
 - 本插件不含浏览器列 UI——那是宿主外壳的配套,别把"浏览器列"当成插件能力。
 
 ## 许可证

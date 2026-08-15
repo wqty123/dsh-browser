@@ -120,9 +120,15 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 ## Known limitations
 
 - Screenshots are PNG-only (CDP JPEG hangs on Electron 43); JPEG awaits a non-CDP conversion path.
+- Self-hosted captures prefer Electron's native `capturePage` (CDP `captureScreenshot` can hang with multiple views in the window); the target tab is raised before capturing.
+- **Electron >= 40 is recommended**: 33.x has a compositor defect that intermittently breaks capture ("display surface not available"). The plugin automatically picks the newest Electron in the environment (peer dependency > `ELECTRON_PATH` > newest among anchors/pnpm store).
 - `fullPage` capture is flaky under software compositing on some hosts.
-- Session lifecycle is plugin-level (one session shared by the model), not per-agent yet.
+- Sessions are isolated per task (each DSH session gets its own browser session with own tabs/history; concurrent tasks never interfere; calls within one task reuse the same session). Logins (cookies) are shared and can be exported/restored with `browser_auth`.
+- CAPTCHA cannot be solved automatically: snapshots flag detected challenges (`browser_challenge` checks explicitly); ask the human to complete it in the shared window instead of retrying.
 - Private mode (`privateMode`) is not implemented: it needs Electron session partitioning, which is host-layer territory; this plugin does not promise it.
+- `browser_download` fetches in the page context (keeps logins) and is subject to same-origin/CORS constraints; single files are capped at 256 MB.
+- The `browser_auth` cookie round-trip does not preserve `hostOnly`/`sameSite` (host-only cookies come back as domain cookies); it is available on the self-hosted browser only.
+- After a self-hosted child crash the browser host restarts automatically, but sessions opened before the crash are gone — call `browser_reset_session` to rebuild.
 - This plugin contains no browser-column UI — that is host-shell territory; do not treat "browser column" as a plugin feature.
 
 ## License
