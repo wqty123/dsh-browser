@@ -75,12 +75,12 @@ export interface BrowserRuntimeConfig {
  * context).
  *
  * Selection semantics (resolved at execution time, never order-dependent):
- * - A configured id that is registered and `available()` 鈫?that provider.
- * - A configured id not registered 鈫?`BROWSER_PROVIDER_CONFIGURED_MISSING`.
- * - A configured id registered but unavailable 鈫? *   `BROWSER_PROVIDER_CONFIGURED_UNAVAILABLE`.
- * - No id configured, exactly one registered usable provider 鈫?that provider.
- * - No id configured, multiple usable providers 鈫?`BROWSER_PROVIDER_AMBIGUOUS`.
- * - No id configured, no usable provider 鈫?`BROWSER_PROVIDER_UNAVAILABLE`.
+ * - A configured id that is registered and `available()` → that provider.
+ * - A configured id not registered → `BROWSER_PROVIDER_CONFIGURED_MISSING`.
+ * - A configured id registered but unavailable → `BROWSER_PROVIDER_CONFIGURED_UNAVAILABLE`.
+ * - No id configured, exactly one registered usable provider → that provider.
+ * - No id configured, multiple usable providers → `BROWSER_PROVIDER_AMBIGUOUS`.
+ * - No id configured, no usable provider → `BROWSER_PROVIDER_UNAVAILABLE`.
  */
 export class BrowserRuntime extends Service {
   /** Provider selection config. */

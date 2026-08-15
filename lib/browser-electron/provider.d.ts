@@ -111,12 +111,11 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     /** Usable whenever the host can create views (always in the desktop shell). */
     available(): boolean;
     /**
-     * Get the shared browser session: the one the host already owns, or a new
-     * one on first use. Shared-browser semantics (Cherry Studio's
-     * `getOrCreateWindow` pattern): the host's startup view and every later
-     * agent call must land on the SAME session and view, so opening again
-     * returns the existing session instead of creating a second view the human
-     * cannot see. Closing the session resets this; the next open starts fresh.
+     * Open a NEW browser session with its own view. Every call mints a fresh
+     * session id and backing view; per-task reuse is owned by the caller (the
+     * tool layer caches one session per DSH task). Sessions are isolated from
+     * each other: each keeps its own tabs, active tab, and history, and only
+     * the active tab of a session is made visible.
      */
     open(): Promise<BrowserSessionId>;
     /** Open a URL in the active tab (default) or a new tab. */

@@ -12,7 +12,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 /**
  * Stable identity of one browser session, resolved by the Host through a
  * Typert `LookupMap` to the live session object (the same mechanism
- * `Agent 鈫?agentId` uses). The id is opaque to the wire; only the provider
+ * `Agent → agentId` uses). The id is opaque to the wire; only the provider
  * and its host binding can interpret it.
  */
 export type BrowserSessionId = string
@@ -209,7 +209,7 @@ export interface BrowserProvider {
   openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void>
   /** List the session's tabs. */
   listTabs(session: BrowserSessionId): Promise<readonly BrowserTab[]>
-  /** Switch to a tab by id. Unknown id 鈫?`BROWSER_TAB_UNKNOWN`. */
+  /** Switch to a tab by id. Unknown id -> `BROWSER_TAB_UNKNOWN`. */
   switchTab(session: BrowserSessionId, tabId: string): Promise<void>
   /** Close one tab. Closing the active tab activates the next. */
   closeTab(session: BrowserSessionId, tabId: string): Promise<void>

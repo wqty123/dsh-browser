@@ -1,14 +1,16 @@
 /**
  * Model-facing browser tools over `ctx.browser`: `browser_open`,
- * `browser_snapshot`, `browser_execute`, `browser_content`,
+ * `browser_snapshot`, `browserexecute`, `browser_content`,
  * `browser_screenshot`, and tab management (`browser_list_tabs`,
  * `browser_switch_tab`, `browser_close_tab`, `browser_reset`).
  *
  * The tool layer owns only the model-facing schema, argument validation, and
  * result formatting — never provider selection or page driving, which belong
- * to the seam. Session lifecycle is owned here at the plugin level: the
- * first `browser_open` (or any tool when no session exists) opens a session;
- * later tools reuse it. Per-agent isolation is a follow-up.
+ * to the seam. Session lifecycle is owned here at the plugin level: each
+ * calling task (a DSH session) gets its own browser session — the first
+ * `browser_open` (or any tool when no session exists) opens it, and later
+ * tools in the same task reuse it. Concurrent tasks therefore never fight
+ * over tabs, history, or navigation state.
  * @module dsh-browser/tool-browser
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -28,8 +30,10 @@ export interface Config {
 }
 /** Register all browser tools with `ctx.tools`. */
 export declare function apply(ctx: Context, config?: Config): void;
-/** Test hook: clear the plugin-level session (used by tests and on reset). */
+/** Test hook: inspect and reset the plugin-level session map (used by tests). */
 export declare const internals: {
-    readonly session: BrowserSessionId | undefined;
-    clearSession(): void;
+    /** The per-task session map (task key -> provider session id). */
+    readonly sessions: ReadonlyMap<string, BrowserSessionId>;
+    /** Drop one task's mapping without closing the provider session. */
+    clearSession(key?: string): void;
 };

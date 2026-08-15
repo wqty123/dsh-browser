@@ -74,6 +74,11 @@ provider 与工具以 `ctx.get('electronViewHost')` 是否存在为门控,因此
 | `browser_content` | 以 html / markdown / txt / json 抓取页面(selector、maxChars、timeoutMs) |
 | `browser_screenshot` | PNG 截图,可选 `fullPage` |
 | `browser_list_tabs` / `browser_switch_tab` / `browser_close_tab` / `browser_reset` | 多标签会话管理 |
+| `browser_session` / `browser_reset_session` | 查看/重置当前任务的浏览器会话(按任务隔离) |
+| `browser_history` / `browser_replay` | 查看操作记录并回放某一步 |
+| `browser_download` | 带会话 cookie 下载 URL 到本地文件 |
+| `browser_restrict` | 限制允许的浏览器动作,防误点/误导航 |
+| `browser_auth` | 导出/恢复 cookie,持久化登录态 |
 
 ### 操作纪律(点击/填表)
 
@@ -103,7 +108,7 @@ provider 按构造与 Electron 解耦:它通过 `ElectronBrowserViewHost` 接缝
 
 - 截图仅 PNG(CDP JPEG 在 Electron 43 上挂起);JPEG 等待非 CDP 转换路径。
 - 部分主机在软件合成下 `fullPage` 截图不稳定。
-- 会话生命周期为插件级(模型共享一个会话),尚未做到按 agent 隔离。
+- 会话按任务隔离:每个调用方任务(DSH 会话)拥有独立的浏览器会话(独立标签页与历史),并发任务互不干扰;同一任务的多次调用复用同一会话。登录态(cookie)为共享,可用 `browser_auth` 导出/恢复。
 - 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于宿主层,本插件不承诺。
 - 本插件不含浏览器列 UI——那是宿主外壳的配套,别把"浏览器列"当成插件能力。
 
