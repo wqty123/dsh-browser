@@ -294,7 +294,8 @@ export interface BrowserProvider {
 export interface BrowserHistoryEntry {
     /** Monotonic sequence number within the session. */
     readonly seq: number;
-    /** The operation name: navigate | execute | click | type | replay. */
+    /** The operation name. Replayable: navigate | execute | click | type.
+     *  Also recorded (non-replayable): fill | download | flushAuth | restoreAuth. */
     readonly action: string;
     /** The operation's arguments. */
     readonly params: Record<string, unknown>;

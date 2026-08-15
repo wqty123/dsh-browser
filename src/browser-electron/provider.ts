@@ -39,11 +39,11 @@ const CHALLENGE_DETECT_EXPRESSION = `(() => {
   const lower = (title + '\\n' + bodyText).toLowerCase()
   const frameSrcs = [...document.querySelectorAll('iframe')].map(f => f.src || '').join(' ')
   const framesLower = frameSrcs.toLowerCase()
-  const hasCfInterstitial = /just a moment|checking your browser|attention required|cf_chl|challenge-platform/i.test(lower)
+  const hasCfInterstitial = /just a moment|checking your browser|attention required|cf_chl/i.test(lower)
     || !!document.querySelector('#challenge-running, #challenge-stage, #cf-chl-container')
   const hasHCaptcha = !!window.hcaptcha || !!document.querySelector('.h-captcha') || /hcaptcha\\.com/i.test(framesLower)
   const hasRecaptcha = !!window.grecaptcha || !!document.querySelector('.g-recaptcha') || /recaptcha\\/api|google\\.com\\/recaptcha/i.test(framesLower)
-  const hasTurnstile = !!window.turnstile || /challenges\\.cloudflare\\.com/i.test(framesLower) || /turnstile/i.test(lower)
+  const hasTurnstile = !!window.turnstile || /challenges\\.cloudflare\\.com/i.test(framesLower) || /turnstile|challenge-platform/i.test(lower)
   const verifyWording = /verify you are human|verify you are not a robot|\\u4eba\\u673a\\u9a8c\\u8bc1|\\u5b89\\u5168\\u9a8c\\u8bc1|enable javascript and cookies|\\u8bf7.*\\u9a8c\\u8bc1/i.test(lower)
   if (hasCfInterstitial) return { blocked: true, kind: 'cloudflare', reason: 'Cloudflare "Just a moment" interstitial' }
   if (hasHCaptcha) return { blocked: true, kind: 'hcaptcha', reason: 'hCaptcha verification' }
@@ -114,8 +114,10 @@ interface Session {
   readonly id: BrowserSessionId
   readonly tabs: Tab[]
   activeIndex: number
-  /** Chronological operation log (navigate/execute/click/type/screenshot). */
+  /** Chronological operation log (navigate/execute/click/type/fill/download/auth). */
   readonly history: BrowserHistoryEntry[]
+  /** Monotonic sequence counter for history entries (survives truncation). */
+  nextSeq: number
 }
 
 /** Provider config: navigation admission defaults and snapshot caps. */
@@ -207,7 +209,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   open(): Promise<BrowserSessionId> {
     const handle = this.host.createView()
     const id = `browser:${randomUUID()}`
-    this.sessions.set(id, { id, tabs: [{ id: `tab:${randomUUID()}`, handle }], activeIndex: 0, history: [] })
+    this.sessions.set(id, { id, tabs: [{ id: `tab:${randomUUID()}`, handle }], activeIndex: 0, history: [], nextSeq: 1 })
     return Promise.resolve(id)
   }
 
@@ -302,15 +304,24 @@ export class ElectronBrowserProvider implements BrowserProvider {
         }
       }
       signal?.throwIfAborted()
-      const result = await handle.sendCommand(CDP_PAGE_NAVIGATE, { url } satisfies CdpNavigateParams)
+      // Page.navigate can hang on an unreachable/slow host; bound it like the
+      // evaluate paths so a wedged navigation surfaces as an error instead of
+      // blocking the tool call forever.
+      const timeoutMs = 30_000
+      const result = await withTimeout(
+        handle.sendCommand(CDP_PAGE_NAVIGATE, { url } satisfies CdpNavigateParams),
+        timeoutMs,
+        signal,
+        `browser: navigation timed out after ${timeoutMs}ms`,
+      )
       // Page.navigate resolves even when the navigation fails; surface the
       // failure instead of leaving a silent white screen.
       const errorText = (result as { errorText?: string }).errorText
       if (typeof errorText === 'string' && errorText !== '') {
-        this.record(s, 'navigate', { url }, false, { error: errorText })
         throw new BrowserError(`browser: navigation to "${url}" failed: ${errorText}`, 'BROWSER_NAVIGATION_FAILED')
       }
       this.record(s, 'navigate', { url }, true)
+      this.showActive(s)
     } catch (error) {
       if (!(error instanceof BrowserError && (error as { code?: string }).code === 'BROWSER_NAVIGATION_BLOCKED')) {
         this.record(s, 'navigate', { url }, false, { error: String(error) })
@@ -362,9 +373,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
         return { ok: false, exception }
       }
       const value = (result.result as { value?: unknown } | undefined)?.value ?? null
-      this.record(s, 'execute', { script: request.script }, true, { result: typeof value === 'string' ? value.slice(0, 500) : JSON.stringify(value).slice(0, 500) })
+      this.record(s, 'execute', {
+        script: request.script,
+        ...request.args !== undefined && request.args.length > 0 ? { args: request.args } : {},
+      }, true, { result: typeof value === 'string' ? value.slice(0, 500) : JSON.stringify(value).slice(0, 500) })
       return { ok: true, value }
     } catch (error) {
+      if (error instanceof Error && error.name === 'TimeoutError') {
+        throw new BrowserError(`browser: execute timed out after ${request.timeoutMs ?? 30_000}ms`, 'BROWSER_EXECUTE_TIMEOUT', { cause: error })
+      }
       throw new BrowserError(`browser: execute failed: ${String(error)}`, 'BROWSER_EXECUTE_FAILED', { cause: error })
     }
   }
@@ -476,13 +493,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
       return { ok: true, content: content.slice(0, ${String(maxChars)}), truncated }
     })()`
     // Honor a per-call timeout: content evaluation can hang on a heavy page,
-    // so a caller-supplied budget bounds it. AbortSignal.any merges the
-    // caller's signal with a timeout.
+    // so a caller-supplied budget bounds it. Unlike a bare signal entry check,
+    // withTimeout also interrupts a call already in flight.
     const timeoutMs = request.timeoutMs ?? 30_000
-    const timeoutSignal = AbortSignal.timeout(timeoutMs)
-    const result = signal !== undefined
-      ? await handleSendEvaluate(tab.handle, script, AbortSignal.any([signal, timeoutSignal]))
-      : await handleSendEvaluate(tab.handle, script, timeoutSignal)
+    const result = await withTimeout(
+      handleSendEvaluate(tab.handle, script),
+      timeoutMs,
+      signal,
+      `browser: content timed out after ${timeoutMs}ms`,
+    )
     if (!result.ok) throw new BrowserError(`browser: content evaluation failed: ${result.exception}`, 'BROWSER_CONTENT_FAILED')
     const value = result.value as { ok: boolean; reason?: string; content?: string; truncated?: boolean }
     if (!value.ok) throw new BrowserError(`browser: content fetch failed: ${value.reason ?? 'unknown'}`, 'BROWSER_CONTENT_FAILED')
@@ -505,7 +524,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
     await handle.sendCommand('Input.insertText', { text: request.text } satisfies CdpInsertTextParams)
-    this.record(s, 'type', { text: request.text.slice(0, 200) }, true)
+    // Store the full text so replay re-issues the same input; the history
+    // tool truncates long values when rendering.
+    this.record(s, 'type', { text: request.text }, true)
   }
 
   /**
@@ -565,7 +586,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
         return vis.length > 0 ? vis : all
       }
       for (const spec of specs) {
-        const els = candidates(spec)
+        let els
+        try {
+          els = candidates(spec)
+        } catch (e) {
+          // A malformed selector must not abort the whole batch; report the
+          // field as failed and continue with the rest.
+          out.push({ ok: false, error: String(e), target: describe(spec) })
+          continue
+        }
         if (els.length === 0) { out.push({ ok: false, error: 'field not found', target: describe(spec) }); continue }
         const el = els[0]
         const tag = el.tagName
@@ -625,7 +654,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
       let submitted = false
       if (${submitFlag}) {
         let last = null
-        for (const spec of specs) { const els = candidates(spec); if (els.length > 0) { last = els[0]; break } }
+        for (const spec of specs) {
+          try { const els = candidates(spec); if (els.length > 0) { last = els[0]; break } } catch { /* skip */ }
+        }
         const form = last && (last.form || last.closest('form'))
         if (form) { form.requestSubmit(); submitted = true }
       }
@@ -710,7 +741,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // a clip this yields the full-page image (CDP default is the viewport).
       params.captureBeyondViewport = true
     }
-    const result = await handle.sendCommand(CDP_PAGE_CAPTURE_SCREENSHOT, params)
+    // Bound the capture: a view that has not painted can wedge
+    // Page.captureScreenshot indefinitely (observed after view re-showing).
+    const timeoutMs = 30_000
+    const result = await withTimeout(
+      handle.sendCommand(CDP_PAGE_CAPTURE_SCREENSHOT, params),
+      timeoutMs,
+      signal,
+      `browser: screenshot timed out after ${timeoutMs}ms`,
+    )
     const data = result.data
     if (typeof data !== 'string') {
       throw new BrowserError('browser: screenshot returned no image data', 'BROWSER_SCREENSHOT_FAILED')
@@ -739,7 +778,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     detail?: { result?: string; error?: string },
   ): void {
     const entry: BrowserHistoryEntry = {
-      seq: s.history.length + 1,
+      seq: s.nextSeq++,
       action,
       params,
       ok,
@@ -796,8 +835,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
       case 'execute': {
         const script = entry.params.script
         if (typeof script !== 'string') throw new BrowserError(`browser: history seq ${seq} execute has no script`, 'BROWSER_HISTORY_INVALID')
-        const result = await this.execute(session, { script })
-        this.record(s, 'replay', { seq, of: entry.action, script }, result.ok, result.ok ? { result: String(result.value) } : { error: result.exception })
+        const recordedArgs = entry.params.args
+        const args = Array.isArray(recordedArgs) ? recordedArgs.filter((a): a is string => typeof a === 'string') : undefined
+        const result = await this.execute(session, { script, ...args !== undefined && args.length > 0 ? { args } : {} })
+        this.record(s, 'replay', { seq, of: entry.action, script, ...args !== undefined && args.length > 0 ? { args } : {} }, result.ok, result.ok ? { result: String(result.value) } : { error: result.exception })
         return
       }
       default:
@@ -872,7 +913,12 @@ function withTimeout<T>(
     const timer = setTimeout(() => {
       if (done) return
       done = true
-      reject(new Error(message))
+      // A fired timeout must also release the abort listener; { once: true }
+      // only releases it on the next abort, which may never come.
+      if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+      const error = new Error(message)
+      error.name = 'TimeoutError'
+      reject(error)
     }, ms)
     const finish = (fn: () => void): void => {
       if (done) return

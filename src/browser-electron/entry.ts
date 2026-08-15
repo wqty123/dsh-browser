@@ -49,10 +49,15 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // External host (desktop shell) wins; otherwise self-host. The self-hosted
   // child is disposed with the fiber, mirroring the shell's lifetime.
   const host: ElectronBrowserViewHost = config.viewHost ?? new RemoteElectronViewHost(defaultHostMainPath())
+  // Own the disposer on THIS plugin's fiber: registerBrowserProvider's effect
+  // is bound to the seam's own fiber (the browser row), so a reload of this
+  // row would otherwise collide with the still-registered provider
+  // (BROWSER_DUPLICATE_PROVIDER) or leave a stale provider behind.
+  const unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, { httpOnly: config.httpOnly }))
   ctx.effect(() => () => {
+    unregister()
     if (config.viewHost === undefined && host instanceof RemoteElectronViewHost) {
       host.dispose()
     }
   })
-  ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, { httpOnly: config.httpOnly }))
 }

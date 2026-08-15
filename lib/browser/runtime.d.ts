@@ -94,7 +94,8 @@ export declare class BrowserRuntime extends Service {
     flushAuth(session: BrowserSessionId): Promise<readonly ExportedCookie[]>;
     /** Import cookies into the session through the provider. */
     restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number>;
-    /** Close the session through the selected provider. Idempotent. */
+    /** Close the session through the selected provider. Idempotent; a missing
+     *  provider is treated as already-closed so teardown paths stay no-ops. */
     close(session: BrowserSessionId): Promise<void>;
 }
 export default BrowserRuntime;

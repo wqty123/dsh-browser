@@ -2,9 +2,9 @@
  * Self-hosted Electron browser host (parent side): an
  * {@link ElectronBrowserViewHost} implementation that spawns the plugin's own
  * Electron child process (host-main.js) and drives it over line-delimited
- * JSON-RPC on stdio. This is what makes the plugin work on surfaces without a
- * desktop shell's electronViewHost (plain dsh web): installing the plugin is
- * enough — the browser window appears on first use.
+ * JSON-RPC on a loopback TCP socket. This is what makes the plugin work on
+ * surfaces without a desktop shell's electronViewHost (plain dsh web):
+ * installing the plugin is enough — the browser window appears on first use.
  *
  * Protocol (one JSON object per line, both directions):
  *   -> { id, op: 'createView' } | { id, op: 'destroyView', viewId } |
@@ -28,10 +28,13 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
     private pendingSocket;
     private readonly views;
     private readyPromise;
+    private disposed;
     constructor(hostMainPath: string);
-    /** Ensure the child is up and ready (lazy on first use). */
+    /** Ensure the child is up and ready (lazy on first use; restarts after a crash). */
     private ready;
     private start;
+    /** The child died: tear down so the next use starts a fresh child. */
+    private onChildExit;
     createView(): ElectronViewHandle;
     private ensureView;
     showView(handle: ElectronViewHandle): void;

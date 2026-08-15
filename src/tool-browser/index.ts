@@ -36,6 +36,8 @@ export interface Config {
 
 /** Per-task browser sessions, keyed by the calling DSH session id. */
 const sessionsByTask = new Map<string, BrowserSessionId>()
+/** In-flight first-open per task key, so concurrent first calls share one session. */
+const pendingOpens = new Map<string, Promise<BrowserSessionId>>()
 
 /**
  * Action restriction state: an allow-list of browser tool names, or undefined
@@ -66,24 +68,29 @@ function taskKey(exec: { agent?: { id?: string } } | undefined): string {
 
 /**
  * Resolve the calling task's browser session, opening one on first use.
+ * Concurrent first calls for the same key share a single open.
  * @param browser - the seam service.
  * @param key - the task key (see {@link taskKey}).
  * @returns the task's session id.
  */
 async function ensureSession(browser: NonNullable<Context['browser']>, key: string): Promise<BrowserSessionId> {
-  let session = sessionsByTask.get(key)
-  if (session === undefined) {
-    session = await browser.open()
-    sessionsByTask.set(key, session)
-  }
-  return session
+  const existing = sessionsByTask.get(key)
+  if (existing !== undefined) return existing
+  const pending = pendingOpens.get(key)
+  if (pending !== undefined) return pending
+  const opening = browser.open().then(
+    session => { sessionsByTask.set(key, session); pendingOpens.delete(key); return session },
+    error => { pendingOpens.delete(key); throw error },
+  )
+  pendingOpens.set(key, opening)
+  return opening
 }
 
-/** Coerce a tool-provided string value back to boolean/number when it looks like one. */
+/** Coerce a tool-provided string value back to boolean/number only when lossless. */
 function parseFillValue(v: string | undefined): string | number | boolean {
   if (v === 'true') return true
   if (v === 'false') return false
-  if (v !== undefined && /^-?\d+(\.\d+)?$/.test(v)) return Number(v)
+  if (v !== undefined && /^-?\d+(\.\d+)?$/.test(v) && String(Number(v)) === v) return Number(v)
   return v ?? ''
 }
 
@@ -108,7 +115,8 @@ function formatSnapshot(snapshot: {
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
   const timeoutMs = config.timeoutMs ?? 60_000
-  if (config.allowedActions !== undefined) restrictedTo = [...config.allowedActions]
+  // Re-apply resets the restriction: an omitted allowedActions lifts it.
+  restrictedTo = config.allowedActions !== undefined ? [...config.allowedActions] : undefined
 
   ctx.systemPrompt.section({
     name: 'tool:browser',
@@ -132,6 +140,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         properties: {
           url: { type: 'string', required: true },
           title: { type: 'string' },
+          truncated: { type: 'boolean' },
           elements: {
             type: 'array',
             required: true,
@@ -193,6 +202,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         properties: {
           url: { type: 'string', required: true },
           title: { type: 'string' },
+          truncated: { type: 'boolean' },
           elements: {
             type: 'array',
             required: true,
@@ -571,6 +581,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       timeoutMs,
       isConcurrencySafe: () => true,
       async execute(args, exec) {
+        assertAllowed('browser_switch_tab')
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, taskKey(exec))
@@ -653,9 +664,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (entries.length === 0) return [{ type: 'text', text: '(no recorded operations yet)' }]
         return [{
           type: 'text',
-          text: entries.map(e =>
-            `#${e.seq} ${e.action} ${e.ok ? 'ok' : 'FAIL'} ${JSON.stringify(e.params)}${e.result !== undefined ? ` -> ${e.result}` : ''}${e.error !== undefined ? ` !! ${e.error}` : ''}`,
-          ).join('\n'),
+          text: entries.map(e => {
+            const rawParams = JSON.stringify(e.params)
+            const shownParams = rawParams.length > 300 ? rawParams.slice(0, 300) + '…' : rawParams
+            return `#${e.seq} ${e.action} ${e.ok ? 'ok' : 'FAIL'} ${shownParams}${e.result !== undefined ? ` -> ${e.result}` : ''}${e.error !== undefined ? ` !! ${e.error}` : ''}`
+          }).join('\n'),
         }]
       },
     },
@@ -761,9 +774,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     async execute(_args, exec) {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const key = taskKey(exec)
-      const session = sessionsByTask.get(key) ?? await browser.open()
-      sessionsByTask.set(key, session)
+      const session = await ensureSession(browser, taskKey(exec))
       const tabs = await browser.listTabs(session)
       return { session, tabs: tabs.map(t => ({ id: t.id, url: t.url, active: t.active })) }
     },
@@ -786,8 +797,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       const key = taskKey(exec)
       const session = sessionsByTask.get(key)
       if (session !== undefined) {
-        await browser.close(session)
-        sessionsByTask.delete(key)
+        try {
+          await browser.close(session)
+        } finally {
+          // Always forget the mapping so the next call opens a fresh session,
+          // even if the provider close threw (the session is half-closed).
+          sessionsByTask.delete(key)
+        }
       }
       return { reset: true }
     },
@@ -811,8 +827,15 @@ export function apply(ctx: Context, config: Config = {}): void {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       // Always allowed so the guard can be lifted.
-      restrictedTo = (args.allowed ?? []).filter((t: string) => t.startsWith('browser_'))
-      return { restrictedTo: [...restrictedTo] }
+      const allowed = args.allowed ?? []
+      const unknown = allowed.filter((t: string) => !t.startsWith('browser_'))
+      if (unknown.length > 0) {
+        throw new Error(`browser_restrict: unknown tool name(s) ${unknown.map(t => `"${t}"`).join(', ')} (must start with "browser_")`)
+      }
+      // Empty list (or omitted) lifts the restriction; a non-empty list is the
+      // new allow-list.
+      restrictedTo = allowed.length === 0 ? undefined : [...allowed]
+      return { restrictedTo: restrictedTo === undefined ? [] : [...restrictedTo] }
     },
   }))
 
@@ -854,8 +877,8 @@ export function apply(ctx: Context, config: Config = {}): void {
 
 /** Test hook: inspect and reset the plugin-level session map (used by tests). */
 export const internals = {
-  /** The per-task session map (task key -> provider session id). */
-  get sessions(): ReadonlyMap<string, BrowserSessionId> { return sessionsByTask },
+  /** A copy of the per-task session map (task key -> provider session id). */
+  get sessions(): ReadonlyMap<string, BrowserSessionId> { return new Map(sessionsByTask) },
   /** Drop one task's mapping without closing the provider session. */
   clearSession(key = 'default'): void { sessionsByTask.delete(key) },
 }

@@ -32,7 +32,7 @@ export interface Config {
 export declare function apply(ctx: Context, config?: Config): void;
 /** Test hook: inspect and reset the plugin-level session map (used by tests). */
 export declare const internals: {
-    /** The per-task session map (task key -> provider session id). */
+    /** A copy of the per-task session map (task key -> provider session id). */
     readonly sessions: ReadonlyMap<string, BrowserSessionId>;
     /** Drop one task's mapping without closing the provider session. */
     clearSession(key?: string): void;

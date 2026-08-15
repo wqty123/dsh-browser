@@ -2,9 +2,9 @@
  * Self-hosted Electron browser host (parent side): an
  * {@link ElectronBrowserViewHost} implementation that spawns the plugin's own
  * Electron child process (host-main.js) and drives it over line-delimited
- * JSON-RPC on stdio. This is what makes the plugin work on surfaces without a
- * desktop shell's electronViewHost (plain dsh web): installing the plugin is
- * enough — the browser window appears on first use.
+ * JSON-RPC on a loopback TCP socket. This is what makes the plugin work on
+ * surfaces without a desktop shell's electronViewHost (plain dsh web):
+ * installing the plugin is enough — the browser window appears on first use.
  *
  * Protocol (one JSON object per line, both directions):
  *   -> { id, op: 'createView' } | { id, op: 'destroyView', viewId } |
@@ -159,10 +159,13 @@ class ElectronChildClient {
   private socket: import('node:net').Socket | undefined
   private connected = false
   private outbox: string[] = []
+  /** Set once the child has exited; further calls fail fast instead of queueing. */
+  private dead = false
 
   constructor(
     private readonly hostMainPath: string,
     private readonly port: number,
+    private readonly onExit?: () => void,
   ) {
     const electron = resolveElectronPath()
     // ELECTRON_RUN_AS_NODE (even an empty string) makes Electron run as plain
@@ -181,11 +184,26 @@ class ElectronChildClient {
       // Diagnostics only; never parse stderr as protocol.
       process.stderr.write(`[dsh-browser host] ${String(chunk)}`)
     })
-    this.child.on('exit', (code, signal) => {
-      const err = new Error(`dsh-builtin-browser: browser host exited (code=${String(code)} signal=${String(signal)})`)
-      for (const pending of this.pending.values()) pending.reject(err)
-      this.pending.clear()
+    // A failed spawn (bad/corrupt binary) emits 'error' — without a listener
+    // that would crash the whole DSH process.
+    this.child.on('error', error => {
+      process.stderr.write(`[dsh-browser host] spawn error: ${String(error)}\n`)
+      this.fail(new Error(`dsh-builtin-browser: browser host failed to start: ${String(error)}`))
     })
+    this.child.on('exit', (code, signal) => {
+      this.fail(new Error(`dsh-builtin-browser: browser host exited (code=${String(code)} signal=${String(signal)})`))
+    })
+  }
+
+  /** Reject everything in flight, mark the client dead, and notify the host. */
+  private fail(err: Error): void {
+    if (this.dead) return
+    this.dead = true
+    this.connected = false
+    for (const pending of this.pending.values()) pending.reject(err)
+    this.pending.clear()
+    this.outbox = []
+    this.onExit?.()
   }
 
   /** Accept the child's connection (called by the server). */
@@ -193,12 +211,18 @@ class ElectronChildClient {
     this.socket = socket
     this.connected = true
     socket.setEncoding('utf8')
+    // Without an 'error' listener a remote reset (ECONNRESET/EPIPE) throws an
+    // uncaught 'error' event and crashes the whole DSH process; 'close' below
+    // does the cleanup.
+    socket.on('error', error => {
+      process.stderr.write(`[dsh-browser host] socket error: ${String(error)}\n`)
+    })
     socket.on('data', chunk => this.onData(chunk))
     socket.on('close', () => {
       this.connected = false
-      const err = new Error('dsh-builtin-browser: browser host connection closed')
-      for (const pending of this.pending.values()) pending.reject(err)
-      this.pending.clear()
+      if (!this.dead) {
+        this.fail(new Error('dsh-builtin-browser: browser host connection closed'))
+      }
     })
     // Flush anything queued while disconnected.
     if (this.outbox.length > 0) {
@@ -232,6 +256,9 @@ class ElectronChildClient {
 
   /** Send one command and await the reply. */
   call<T = unknown>(op: string, payload: Record<string, unknown> = {}): Promise<T> {
+    if (this.dead) {
+      return Promise.reject(new Error('dsh-builtin-browser: browser host is not running'))
+    }
     const id = this.nextId++
     const line = JSON.stringify({ id, op, ...payload })
     return new Promise<T>((resolve, reject) => {
@@ -292,10 +319,11 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   private pendingSocket: Socket | undefined
   private readonly views = new Map<string, ElectronViewHandle>()
   private readyPromise: Promise<void> | undefined
+  private disposed = false
 
   constructor(private readonly hostMainPath: string) {}
 
-  /** Ensure the child is up and ready (lazy on first use). */
+  /** Ensure the child is up and ready (lazy on first use; restarts after a crash). */
   private ready(): Promise<void> {
     if (this.readyPromise !== undefined) return this.readyPromise
     this.readyPromise = this.start()
@@ -312,16 +340,33 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
       server.once('error', reject)
       server.listen(0, '127.0.0.1', () => resolve())
     })
+    // A later server error (rare on a loopback ephemeral port) must not crash
+    // the process; the client's fail path handles the actual recovery.
+    server.on('error', error => {
+      process.stderr.write(`[dsh-browser host] rpc server error: ${String(error)}\n`)
+    })
     const address = server.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
     this.server = server
-    this.client = new ElectronChildClient(this.hostMainPath, port)
+    this.client = new ElectronChildClient(this.hostMainPath, port, () => this.onChildExit())
     if (this.pendingSocket !== undefined) {
       this.client.attach(this.pendingSocket)
       this.pendingSocket = undefined
     }
     // Wait for the child's connection + readiness ping.
     await withTimeout(this.client.call('ping'), READY_TIMEOUT_MS, 'browser host did not become ready')
+  }
+
+  /** The child died: tear down so the next use starts a fresh child. */
+  private onChildExit(): void {
+    if (this.disposed) return
+    this.client = undefined
+    this.server?.close()
+    this.server = undefined
+    this.pendingSocket = undefined
+    this.readyPromise = undefined
+    // Keep the views map: handles still resolve to ids; a fresh child simply
+    // has no such views yet, and reset_session reopens clean sessions.
   }
 
   createView(): ElectronViewHandle {
@@ -344,7 +389,11 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   }
 
   showView(handle: ElectronViewHandle): void {
-    void this.ready().then(() => this.client?.call('showView', { viewId: handle.id }))
+    // Fire-and-forget by design (visibility is best-effort), but a rejected
+    // promise must not become an unhandled rejection (crash on Node >= 15).
+    void this.ready()
+      .then(() => this.client?.call('showView', { viewId: handle.id }))
+      .catch(() => { /* host unavailable */ })
   }
 
   destroyView(handle: ElectronViewHandle): void {
@@ -358,6 +407,7 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
 
   /** Shut the child and the RPC server down. */
   dispose(): void {
+    this.disposed = true
     this.client?.kill()
     this.client = undefined
     this.server?.close()

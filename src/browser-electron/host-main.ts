@@ -59,11 +59,13 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
           window.on('closed', () => { window = undefined })
         }
         const view = new WebContentsView()
+        // New views start hidden: with several sessions/tabs only the shown
+        // one may be visible (they stack in contentView child order).
         view.setVisible(false)
         window.contentView.addChildView(view)
         const [width, height] = window.getContentSize()
         view.setBounds({ x: 0, y: 0, width: width ?? 0, height: height ?? 0 })
-        view.setVisible(true)
+        if (views.size === 0) view.setVisible(true)
         view.webContents.debugger.attach(CDP_VERSION)
         views.set(viewId, { webContentsView: view })
         reply(msg.id, { ok: true })
@@ -86,7 +88,19 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         const viewId = msg.viewId
         if (viewId === undefined) throw new Error('showView missing viewId')
         const entry = views.get(viewId)
-        if (entry !== undefined) entry.webContentsView.setVisible(true)
+        if (entry !== undefined) {
+          // Hide every other view, then show and RAISE the target so the
+          // human actually sees the active tab/session (topmost child wins).
+          for (const v of views.values()) {
+            if (v === entry) continue
+            try { v.webContentsView.setVisible(false) } catch { /* destroyed */ }
+          }
+          entry.webContentsView.setVisible(true)
+          if (window !== undefined) {
+            window.contentView.removeChildView(entry.webContentsView)
+            window.contentView.addChildView(entry.webContentsView)
+          }
+        }
         reply(msg.id, { ok: true })
         return
       }
@@ -219,6 +233,12 @@ void app.whenReady().then(() => {
   })
   socket.on('error', error => {
     process.stderr.write(`[dsh-browser host] socket error: ${String(error)}\n`)
+  })
+  // The parent owns our lifetime: when it closes the socket (dispose) or dies
+  // without cleanup, exit so no zombie Electron window is left behind.
+  socket.on('close', () => {
+    process.stderr.write('[dsh-browser host] parent connection closed, exiting\n')
+    app.exit(0)
   })
   // Keep the process alive until the parent closes the socket or kills us.
 })

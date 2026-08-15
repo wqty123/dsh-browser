@@ -250,9 +250,21 @@ export class BrowserRuntime extends Service {
     return this.resolveProvider().restoreAuth(session, cookies)
   }
 
-  /** Close the session through the selected provider. Idempotent. */
+  /** Close the session through the selected provider. Idempotent; a missing
+   *  provider is treated as already-closed so teardown paths stay no-ops. */
   async close(session: BrowserSessionId): Promise<void> {
-    return this.resolveProvider().close(session)
+    try {
+      await this.resolveProvider().close(session)
+    } catch (error) {
+      const code = error instanceof BrowserError ? (error as { code?: string }).code : undefined
+      if (code === 'BROWSER_PROVIDER_UNAVAILABLE'
+        || code === 'BROWSER_PROVIDER_CONFIGURED_MISSING'
+        || code === 'BROWSER_PROVIDER_CONFIGURED_UNAVAILABLE'
+        || code === 'BROWSER_PROVIDER_AMBIGUOUS') {
+        return // provider gone; nothing to close
+      }
+      throw error
+    }
   }
 }
 
