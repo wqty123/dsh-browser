@@ -506,6 +506,66 @@ export function apply(ctx: Context, config: Config = {}): void {
       return { replayed: true }
     },
   }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_session',
+    description: 'Show the shared browser session: its id, open tabs, and whether it is active. All agents in this process share one browser session (same cookies/login state), so this reflects what every caller drives.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          session: { type: 'string', required: true },
+          tabs: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                url: { type: 'string', required: true },
+                active: { type: 'boolean', required: true },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: `Session ${value.session}\n${(value.tabs as { id: string; url: string; active: boolean }[]).map(t => `${t.active ? '*' : ' '} ${t.id} ${t.url}`).join('\n')}`,
+      }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(_args, _exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser)
+      const tabs = await browser.listTabs(session)
+      return { session, tabs: tabs.map(t => ({ id: t.id, url: t.url, active: t.active })) }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_reset_session',
+    description: 'Reset the shared browser session: close every tab and start fresh with one blank tab. Use when a session is in a bad state or you want a clean slate (the shared session stays the same id, so other agents pick it up too).',
+    parameters: {},
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { reset: { type: 'boolean', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: value.reset ? 'Browser session reset.' : 'Failed.' }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(_args, _exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser)
+      await browser.reset(session)
+      return { reset: true }
+    },
+  }))
 }
 
 /** Test hook: clear the plugin-level session (used by tests and on reset). */
