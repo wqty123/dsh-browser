@@ -1,6 +1,6 @@
 /**
  * Model-facing browser tools over `ctx.browser`: `browser_open`,
- * `browser_snapshot`, `browserexecute`, `browser_content`,
+ * `browser_snapshot`, `browser_execute`, `browser_content`,
  * `browser_screenshot`, and tab management (`browser_list_tabs`,
  * `browser_switch_tab`, `browser_close_tab`, `browser_reset`).
  *
@@ -85,12 +85,16 @@ function formatSnapshot(snapshot: {
   title?: string
   elements: readonly { ref: number; kind: string; label: string; x: number; y: number }[]
   truncated?: boolean
+  challenge?: { blocked: boolean; kind?: string; reason?: string }
 }): string {
   const lines = snapshot.elements.map(el => `[${el.ref}] ${el.kind}: ${el.label} (${el.x},${el.y})`)
   const header = `URL: ${snapshot.url}${snapshot.title !== undefined ? `\nTitle: ${snapshot.title}` : ''}`
   const body = lines.length > 0 ? lines.join('\n') : '(no interactive elements found)'
   const tail = snapshot.truncated === true ? '\n(snapshot truncated)' : ''
-  return `${header}\n\n${body}${tail}`
+  const banner = snapshot.challenge?.blocked === true
+    ? `\n\nCHALLENGE: ${snapshot.challenge.reason ?? 'human-verification'}. Do NOT keep retrying — ask the human to complete it in the shared browser window, then re-snapshot.`
+    : ''
+  return `${header}\n\n${body}${tail}${banner}`
 }
 
 /** Register all browser tools with `ctx.tools`. */
@@ -135,6 +139,15 @@ export function apply(ctx: Context, config: Config = {}): void {
               },
             },
           },
+          challenge: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              blocked: { type: 'boolean', required: true },
+              kind: { type: 'string' },
+              reason: { type: 'string' },
+            },
+          },
         },
       },
       render: (_args, value) => [{ type: 'text', text: formatSnapshot(value) }],
@@ -156,6 +169,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
         elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, x: el.x, y: el.y })),
         truncated: snapshot.truncated,
+        ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
       }
     },
   }))
@@ -207,7 +221,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browserexecute',
+    name: 'browser_execute',
     description: 'Execute JavaScript in the shared-browser page context. This is the primary way to interact with page elements: focus, fill inputs (use the native value setter for framework-controlled inputs, then dispatch an input event), click buttons (element.click() or a constructed MouseEvent). Returns the evaluation result by value, or the exception text.',
     parameters: {
       script: { type: 'string', required: true, description: 'The JavaScript expression to evaluate in the page context.' },
@@ -228,7 +242,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // page JS can be stateful
     async execute(args, exec) {
-      assertAllowed('browserexecute')
+      assertAllowed('browser_execute')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, taskKey(exec))
@@ -306,7 +320,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_type',
-    description: 'Type text into the focused element of the shared browser. Use after browserexecute focuses an input (e.g. el.focus()), or after a click lands in a field. Text is inserted at the current focus via CDP Input.insertText.',
+    description: 'Type text into the focused element of the shared browser. Use after browser_execute focuses an input (e.g. el.focus()), or after a click lands in a field. Text is inserted at the current focus via CDP Input.insertText.',
     parameters: {
       text: { type: 'string', required: true, description: 'The text to insert.' },
     },
