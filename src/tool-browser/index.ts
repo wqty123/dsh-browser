@@ -289,9 +289,10 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_screenshot',
-    description: 'Capture the current shared-browser page as a PNG screenshot. Use for visual confirmation of layout, charts, designs, or CAPTCHAs 鈥?not as the primary way to locate elements (use browser_snapshot for that). Supports optional full-page capture.',
+    description: 'Capture the current shared-browser page as a PNG screenshot. Use for visual confirmation of layout, charts, designs, or CAPTCHAs, or to feed a vision tool (read_image) that locates elements visually. Supports optional full-page capture and optional save-to-file (the saved path can be passed to read_image for vision-based element location).',
     parameters: {
       fullPage: { type: 'boolean', description: 'Capture the full scrollable page instead of the viewport (default false).' },
+      savePath: { type: 'string', description: 'Absolute file path to also save the PNG to (e.g. for read_image vision location).' },
     },
     output: {
       schema: {
@@ -299,9 +300,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         additionalProperties: false,
         properties: {
           dataUrl: { type: 'string', required: true, description: 'Base64 PNG data URL of the screenshot.' },
+          path: { type: 'string', description: 'The file path the screenshot was saved to, when savePath was given.' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: `Screenshot captured (${Math.round(value.dataUrl.length * 3 / 4 / 1024)} KiB). View it in the shared browser panel or open the data URL.` }],
+      render: (_args, value) => [{ type: 'text', text: `Screenshot captured (${Math.round(value.dataUrl.length * 3 / 4 / 1024)} KiB)${value.path !== undefined ? ` saved to ${value.path}` : ''}.` }],
     },
     timeoutMs,
     isConcurrencySafe: () => true,
@@ -311,8 +313,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       const session = await ensureSession(browser)
       const shot = await browser.screenshot(session, {
         ...args.fullPage === true ? { fullPage: true } : {},
+        ...args.savePath !== undefined ? { savePath: args.savePath } : {},
       }, exec.signal)
-      return { dataUrl: shot.dataUrl }
+      return {
+        dataUrl: shot.dataUrl,
+        ...shot.path !== undefined ? { path: shot.path } : {},
+      }
     },
   }))
 

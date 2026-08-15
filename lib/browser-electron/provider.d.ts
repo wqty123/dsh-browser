@@ -151,8 +151,10 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */
     screenshot(session: BrowserSessionId, request?: {
         readonly fullPage?: boolean;
+        readonly savePath?: string;
     }, signal?: AbortSignal): Promise<{
         readonly dataUrl: string;
+        readonly path?: string;
     }>;
     /** Close the session and destroy all its views. Idempotent. */
     close(session: BrowserSessionId): Promise<void>;

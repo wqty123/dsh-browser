@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { writeFileSync } from 'node:fs'
 import type {
   BrowserContentRequest,
   BrowserContentResult,
@@ -439,9 +440,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */
   async screenshot(
     session: BrowserSessionId,
-    request?: { readonly fullPage?: boolean },
+    request?: { readonly fullPage?: boolean; readonly savePath?: string },
     signal?: AbortSignal,
-  ): Promise<{ readonly dataUrl: string }> {
+  ): Promise<{ readonly dataUrl: string; readonly path?: string }> {
     const { handle } = this.activeTab(this.session(session))
     signal?.throwIfAborted()
     const params: Record<string, unknown> = {}
@@ -454,6 +455,18 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const data = result.data
     if (typeof data !== 'string') {
       throw new BrowserError('browser: screenshot returned no image data', 'BROWSER_SCREENSHOT_FAILED')
+    }
+    // Optional disk write so a vision tool (e.g. modlens read_image) can read
+    // the screenshot from a file path. Fire-and-forget: a write failure must
+    // not fail the capture.
+    if (request?.savePath !== undefined) {
+      try {
+        writeFileSync(request.savePath, Buffer.from(data, 'base64'))
+        return { dataUrl: `data:image/png;base64,${data}`, path: request.savePath }
+      } catch (error) {
+        // Report the write problem but keep the capture usable.
+        throw new BrowserError(`browser: screenshot save to "${request.savePath}" failed: ${String(error)}`, 'BROWSER_SCREENSHOT_SAVE_FAILED', { cause: error })
+      }
     }
     return { dataUrl: `data:image/png;base64,${data}` }
   }

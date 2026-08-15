@@ -47,11 +47,15 @@ export interface BrowserTypeRequest {
 export interface BrowserScreenshotResult {
     /** Base64 data URL of the capture (PNG or JPEG per the request). */
     readonly dataUrl: string;
+    /** File path the capture was also saved to, when the request asked for it. */
+    readonly path?: string;
 }
 /** Screenshot capture options. PNG only (CDP JPEG hangs on Electron 43). */
 export interface BrowserScreenshotRequest {
     /** Capture the full scrollable page instead of the viewport. Default false. */
     readonly fullPage?: boolean;
+    /** Absolute file path to also save the PNG to (for vision-tool reads). */
+    readonly savePath?: string;
 }
 /**
  * Execute arbitrary JavaScript in the session's page context. This is the
