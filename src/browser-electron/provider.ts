@@ -10,6 +10,7 @@
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import type {
+  BrowserChallenge,
   BrowserContentRequest,
   BrowserContentResult,
   BrowserExecuteRequest,
@@ -23,6 +24,34 @@ import type {
   ExportedCookie,
 } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
+
+/**
+ * Page-context human-verification (CAPTCHA / bot-detection) detection. Runs
+ * inside the page; returns `{ blocked, kind?, reason? }`. Marker-based and
+ * best-effort: checks for Cloudflare's interstitial, hCaptcha, reCAPTCHA,
+ * Turnstile, and generic challenge wording.
+ */
+const CHALLENGE_DETECT_EXPRESSION = `(() => {
+  const title = (document.title || '').trim()
+  const bodyText = (document.body && document.body.innerText || '').slice(0, 4000)
+  const lower = (title + '\\n' + bodyText).toLowerCase()
+  const frameSrcs = [...document.querySelectorAll('iframe')].map(f => f.src || '').join(' ')
+  const framesLower = frameSrcs.toLowerCase()
+  const hasCfInterstitial = /just a moment|checking your browser|attention required|cf_chl|challenge-platform/i.test(lower)
+    || !!document.querySelector('#challenge-running, #challenge-stage, #cf-chl-container')
+  const hasHCaptcha = !!window.hcaptcha || !!document.querySelector('.h-captcha') || /hcaptcha\\.com/i.test(framesLower)
+  const hasRecaptcha = !!window.grecaptcha || !!document.querySelector('.g-recaptcha') || /recaptcha\\/api|google\\.com\\/recaptcha/i.test(framesLower)
+  const hasTurnstile = !!window.turnstile || /challenges\\.cloudflare\\.com/i.test(framesLower) || /turnstile/i.test(lower)
+  const verifyWording = /verify you are human|verify you are not a robot|\\u4eba\\u673a\\u9a8c\\u8bc1|\\u5b89\\u5168\\u9a8c\\u8bc1|enable javascript and cookies|\\u8bf7.*\\u9a8c\\u8bc1/i.test(lower)
+  if (hasCfInterstitial) return { blocked: true, kind: 'cloudflare', reason: 'Cloudflare "Just a moment" interstitial' }
+  if (hasHCaptcha) return { blocked: true, kind: 'hcaptcha', reason: 'hCaptcha verification' }
+  if (hasRecaptcha) return { blocked: true, kind: 'recaptcha', reason: 'Google reCAPTCHA verification' }
+  if (hasTurnstile) return { blocked: true, kind: 'turnstile', reason: 'Cloudflare Turnstile verification' }
+  if (verifyWording && /challenge|captcha|verification|security check|access denied|blocked|\\u9a8c\\u8bc1/i.test(lower)) {
+    return { blocked: true, kind: 'generic', reason: 'Human-verification challenge' }
+  }
+  return { blocked: false }
+})()`
 
 /** Stable provider id registered with `ctx.browser`. */
 export const ELECTRON_BROWSER_PROVIDER_ID = 'electron'
@@ -370,7 +399,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
           y: Math.round(r.y + r.height / 2),
         })
       }
-      return { url, title, elements: out, truncated: out.length >= cap }
+      const challenge = ${CHALLENGE_DETECT_EXPRESSION}
+      return { url, title, elements: out, truncated: out.length >= cap, challenge }
     })()`
     // Same hang guard as execute: a renderer that has not committed after
     // navigate would otherwise block snapshot forever.
@@ -384,6 +414,25 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (!result.ok) throw new BrowserError(`browser: snapshot evaluation failed: ${result.exception}`, 'BROWSER_SNAPSHOT_FAILED')
     const value = result.value as BrowserSnapshotResult
     return value
+  }
+
+  /** Check whether a human-verification challenge is blocking the active tab. */
+  async detectChallenge(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserChallenge> {
+    const s = this.session(session)
+    const tab = this.activeTab(s)
+    signal?.throwIfAborted()
+    const timeoutMs = 15_000
+    const result = await withTimeout(
+      handleSendEvaluate(tab.handle, CHALLENGE_DETECT_EXPRESSION),
+      timeoutMs,
+      signal,
+      `browser: challenge detection timed out after ${timeoutMs}ms`,
+    )
+    if (!result.ok) {
+      throw new BrowserError(`browser: challenge detection failed: ${result.exception}`, 'BROWSER_CHALLENGE_DETECT_FAILED')
+    }
+    const value = result.value as BrowserChallenge
+    return { blocked: value.blocked === true, kind: value.kind, reason: value.reason }
   }
 
   /** Fetch page content in a requested format. */

@@ -140,6 +140,22 @@ export interface BrowserSnapshotResult {
   readonly elements: readonly BrowserSnapshotElement[]
   /** True when the snapshot was truncated (element cap reached). */
   readonly truncated: boolean
+  /** Human-verification challenge blocking the page, when one is detected. */
+  readonly challenge?: BrowserChallenge
+}
+
+/**
+ * A detected human-verification (bot-detection / CAPTCHA) challenge blocking
+ * the page. Detection is best-effort and marker-based; a clean result is not a
+ * guarantee that no challenge exists.
+ */
+export interface BrowserChallenge {
+  /** Whether a challenge currently blocks the page. */
+  readonly blocked: boolean
+  /** Machine-readable kind: cloudflare | hcaptcha | recaptcha | turnstile | generic. */
+  readonly kind?: string
+  /** Short human-readable description, e.g. 'Cloudflare "Just a moment" interstitial'. */
+  readonly reason?: string
 }
 
 /**
@@ -221,6 +237,8 @@ export interface BrowserProvider {
   execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult>
   /** Produce an AI-friendly snapshot of the active tab. */
   snapshot(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserSnapshotResult>
+  /** Check whether a human-verification challenge is blocking the active tab. */
+  detectChallenge(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserChallenge>
   /** Fetch page content in a requested format. */
   content(session: BrowserSessionId, request: BrowserContentRequest, signal?: AbortSignal): Promise<BrowserContentResult>
   /** Click at viewport coordinates (fallback path; execute is preferred). Honor `signal` for cancellation. */

@@ -107,7 +107,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Tool guidance band is 100-199; 150 keeps clear of the common 110/120
     // tool sections so ordering does not depend on plugin load sequence.
     order: 150,
-    text: 'Use the browser_* tools to operate a real shared browser the human can see and take over. Locate elements by snapshot reference numbers (browser_snapshot) and drive them with browser_execute (DOM-referenced JS, native setters for framework inputs). browser_screenshot is for visual confirmation, not primary targeting. Keep the human informed of what you are doing on the page. Each task gets its own browser session: your tabs and history are isolated from other tasks, so do not assume another task\'s navigation state is visible to you.',
+    text: 'Use the browser_* tools to operate a real shared browser the human can see and take over. Locate elements by snapshot reference numbers (browser_snapshot) and drive them with browser_execute (DOM-referenced JS, native setters for framework inputs). browser_screenshot is for visual confirmation, not primary targeting. Keep the human informed of what you are doing on the page. Each task gets its own browser session: your tabs and history are isolated from other tasks, so do not assume another task\'s navigation state is visible to you. If a snapshot or browser_challenge reports a human-verification challenge (CAPTCHA), stop retrying and ask the human to complete it in the shared browser window, then re-check.',
   })
 
   ctx.tools.register(defineTool({
@@ -200,6 +200,15 @@ export function apply(ctx: Context, config: Config = {}): void {
               },
             },
           },
+          challenge: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              blocked: { type: 'boolean', required: true },
+              kind: { type: 'string' },
+              reason: { type: 'string' },
+            },
+          },
         },
       },
       render: (_args, value) => [{ type: 'text', text: formatSnapshot(value) }],
@@ -216,6 +225,47 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
         elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, x: el.x, y: el.y })),
         truncated: snapshot.truncated,
+        ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_challenge',
+    description: 'Check whether a human-verification challenge (CAPTCHA / bot detection: Cloudflare "Just a moment", reCAPTCHA, hCaptcha, Turnstile) is blocking the current page. When blocked, do NOT keep retrying automated steps — ask the human to complete the verification in the shared browser window, then re-check with browser_snapshot.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          blocked: { type: 'boolean', required: true },
+          kind: { type: 'string' },
+          reason: { type: 'string' },
+          hint: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.blocked
+          ? `Challenge detected: ${value.reason ?? value.kind ?? 'human-verification'}. ${value.hint ?? ''}`
+          : 'No human-verification challenge detected.',
+      }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(_args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, taskKey(exec))
+      const challenge = await browser.detectChallenge(session, exec.signal)
+      return {
+        blocked: challenge.blocked,
+        ...challenge.kind !== undefined ? { kind: challenge.kind } : {},
+        ...challenge.reason !== undefined ? { reason: challenge.reason } : {},
+        hint: challenge.blocked
+          ? 'Ask the human to complete the verification in the shared browser window (the page is visible to them), then re-check with browser_snapshot.'
+          : '',
       }
     },
   }))

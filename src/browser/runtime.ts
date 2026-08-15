@@ -26,6 +26,7 @@ import type {
   BrowserSnapshotResult,
   BrowserTab,
   BrowserTypeRequest,
+  BrowserChallenge,
   ExportedCookie,
 } from './types.ts'
 import { BrowserError } from './types.ts'
@@ -34,6 +35,7 @@ export {
   BrowserError,
 } from './types.ts'
 export type {
+  BrowserChallenge,
   BrowserClickRequest,
   BrowserContentFormat,
   BrowserContentRequest,
@@ -206,6 +208,11 @@ export class BrowserRuntime extends Service {
   /** Capture the current page through the selected provider. */
   async screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult> {
     return this.resolveProvider().screenshot(session, request, signal)
+  }
+
+  /** Check for a human-verification challenge on the active tab. */
+  async detectChallenge(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserChallenge> {
+    return this.resolveProvider().detectChallenge(session, signal)
   }
 
   /** Return the session's chronological operation log through the provider. */

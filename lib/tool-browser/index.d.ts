@@ -1,6 +1,6 @@
 /**
  * Model-facing browser tools over `ctx.browser`: `browser_open`,
- * `browser_snapshot`, `browserexecute`, `browser_content`,
+ * `browser_snapshot`, `browser_execute`, `browser_content`,
  * `browser_screenshot`, and tab management (`browser_list_tabs`,
  * `browser_switch_tab`, `browser_close_tab`, `browser_reset`).
  *
