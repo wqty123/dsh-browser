@@ -21,6 +21,9 @@ import { createConnection } from 'node:net'
 /** CDP protocol version attached to every view's debugger. */
 const CDP_VERSION = '1.3'
 
+/** Download cap: the body is shipped base64 as one JSON line; bound the memory. */
+const MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024
+
 /** One view: the Electron object plus its CDP-backed surface. */
 interface HostView {
   readonly webContentsView: WebContentsView
@@ -59,6 +62,9 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
           window.on('closed', () => { window = undefined })
         }
         const view = new WebContentsView()
+        // Attach the debugger BEFORE the view can be seen: an attach failure
+        // then leaves nothing in the window (no visible ghost view).
+        view.webContents.debugger.attach(CDP_VERSION)
         // New views start hidden: with several sessions/tabs only the shown
         // one may be visible (they stack in contentView child order).
         view.setVisible(false)
@@ -66,7 +72,6 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         const [width, height] = window.getContentSize()
         view.setBounds({ x: 0, y: 0, width: width ?? 0, height: height ?? 0 })
         if (views.size === 0) view.setVisible(true)
-        view.webContents.debugger.attach(CDP_VERSION)
         views.set(viewId, { webContentsView: view })
         reply(msg.id, { ok: true })
         return
@@ -134,6 +139,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
             if (!r.ok) throw new Error('HTTP ' + r.status)
             const b = await r.arrayBuffer()
             const bytes = new Uint8Array(b)
+            if (bytes.length > ${String(MAX_DOWNLOAD_BYTES)}) throw new Error('download too large (limit ' + ${String(MAX_DOWNLOAD_BYTES)} + ' bytes, got ' + bytes.length + ')')
             let bin = ''
             for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
             return btoa(bin)
@@ -157,16 +163,21 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         // Export the session's cookies so login state can be saved/restored
         // across browser hosts (or shared with another machine).
         const cookies = await entry.webContentsView.webContents.session.cookies.get({})
-        const exported = cookies.map(c => ({
-          url: `http${c.secure ? 's' : ''}://${c.domain.startsWith('.') ? c.domain.slice(1) : c.domain}${c.path}`,
-          name: c.name,
-          value: c.value,
-          domain: c.domain,
-          path: c.path,
-          secure: c.secure,
-          httpOnly: c.httpOnly,
-          expirationDate: c.expirationDate,
-        }))
+        const exported = cookies.map(c => {
+          const host = c.domain.startsWith('.') ? c.domain.slice(1) : c.domain
+          // IPv6 literal domains need brackets in a URL (e.g. http://[::1]/).
+          const hostPart = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+          return {
+            url: `http${c.secure ? 's' : ''}://${hostPart}${c.path}`,
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path,
+            secure: c.secure,
+            httpOnly: c.httpOnly,
+            expirationDate: c.expirationDate,
+          }
+        })
         reply(msg.id, { ok: true, result: { cookies: exported } })
         return
       }
@@ -177,6 +188,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         const entry = views.get(viewId)
         if (entry === undefined) throw new Error(`restoreAuth: unknown view ${viewId}`)
         if (!Array.isArray(cookies)) throw new Error('restoreAuth missing cookies array')
+        let restored = 0
         for (const c of cookies as Array<{ url?: string; name?: string; value?: string; domain?: string; path?: string; secure?: boolean; httpOnly?: boolean; expirationDate?: number }>) {
           if (typeof c.url !== 'string' || typeof c.name !== 'string' || typeof c.value !== 'string') continue
           await entry.webContentsView.webContents.session.cookies.set({
@@ -189,8 +201,9 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
             ...typeof c.httpOnly === 'boolean' ? { httpOnly: c.httpOnly } : {},
             ...typeof c.expirationDate === 'number' ? { expirationDate: c.expirationDate } : {},
           })
+          restored++
         }
-        reply(msg.id, { ok: true, result: { restored: (cookies as unknown[]).length } })
+        reply(msg.id, { ok: true, result: { restored } })
         return
       }
       default:

@@ -28,6 +28,9 @@ import type { ExportedCookie } from '../browser/types.ts'
 /** How long to wait for the child to signal readiness before failing. */
 const READY_TIMEOUT_MS = 20_000
 
+/** Safety cap on a single RPC reply line (base64 downloads are the big ones). */
+const MAX_RPC_BUFFER_BYTES = 512 * 1024 * 1024
+
 /**
  * Locate the Electron binary, trying, in order:
  *   1. require('electron') from this module (optional peer dependency),
@@ -233,6 +236,14 @@ class ElectronChildClient {
 
   private onData(chunk: string | Buffer): void {
     this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    // Safety net: a pathological child (or a reply larger than expected)
+    // must not grow the parent's memory without bound. The child caps
+    // downloads at 256 MiB, so a healthy stream never approaches this.
+    if (this.buffer.length > MAX_RPC_BUFFER_BYTES) {
+      this.buffer = ''
+      this.fail(new Error(`dsh-builtin-browser: RPC reply exceeded ${MAX_RPC_BUFFER_BYTES} bytes`))
+      return
+    }
     let nl: number
     while ((nl = this.buffer.indexOf('\n')) >= 0) {
       const line = this.buffer.slice(0, nl).trim()
@@ -326,8 +337,22 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   /** Ensure the child is up and ready (lazy on first use; restarts after a crash). */
   private ready(): Promise<void> {
     if (this.readyPromise !== undefined) return this.readyPromise
-    this.readyPromise = this.start()
-    return this.readyPromise
+    const started = this.start()
+    const wrapped = started.catch(error => {
+      // A failed startup must not poison the host forever: tear down whatever
+      // was half-created and let the next call retry from scratch.
+      if (this.readyPromise === wrapped) {
+        this.readyPromise = undefined
+        this.client?.kill()
+        this.client = undefined
+        this.server?.close()
+        this.server = undefined
+        this.pendingSocket = undefined
+      }
+      throw error
+    })
+    this.readyPromise = wrapped
+    return wrapped
   }
 
   private async start(): Promise<void> {
@@ -383,6 +408,11 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     const client = this.client
     if (client === undefined) throw new Error('browser host unavailable')
     await client.call('createView', { viewId: id })
+    // If the view was destroyed while the createView RPC was in flight, do
+    // not re-insert a stale entry that would resurrect a dead child view.
+    if (this.views.get(id) === undefined) {
+      throw new Error('browser: view destroyed while starting')
+    }
     const view = new RemoteView(id, client)
     this.views.set(id, view)
     return view
@@ -426,30 +456,40 @@ class DeferredRemoteView implements ElectronViewHandle {
     private readonly materialize: () => Promise<RemoteView>,
   ) {}
 
+  /**
+   * Materialize once and cache: every sendCommand on the same handle must
+   * target the SAME child view (re-materializing would re-run createView and
+   * duplicate the window). A FAILED materialization is reset so a later call
+   * (e.g. after the host restarted) can retry instead of being poisoned.
+   */
+  private materializeOnce(): Promise<RemoteView> {
+    if (this.materialized === undefined) {
+      const pending = this.materialize()
+      this.materialized = pending.catch(error => {
+        if (this.materialized === pending) this.materialized = undefined
+        throw error
+      })
+    }
+    return this.materialized
+  }
+
   async sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
-    // Materialize once and cache: every sendCommand on the same handle must
-    // target the SAME child view. Re-materializing would re-run createView
-    // (duplicate window) and drop the established view.
-    this.materialized ??= this.materialize()
-    const view = await this.materialized
+    const view = await this.materializeOnce()
     return view.sendCommand(method, params)
   }
 
   async download(url: string, savePath: string): Promise<void> {
-    this.materialized ??= this.materialize()
-    const view = await this.materialized
+    const view = await this.materializeOnce()
     return view.download(url, savePath)
   }
 
   async flushAuth(): Promise<ExportedCookie[]> {
-    this.materialized ??= this.materialize()
-    const view = await this.materialized
+    const view = await this.materializeOnce()
     return view.flushAuth()
   }
 
   async restoreAuth(cookies: ExportedCookie[]): Promise<number> {
-    this.materialized ??= this.materialize()
-    const view = await this.materialized
+    const view = await this.materializeOnce()
     return view.restoreAuth(cookies)
   }
 }

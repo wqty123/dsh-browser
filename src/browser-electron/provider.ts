@@ -693,7 +693,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (typeof downloadable.download !== 'function') {
       throw new BrowserError('browser: download is only available on the self-hosted browser', 'BROWSER_DOWNLOAD_UNSUPPORTED')
     }
-    await downloadable.download(request.url, request.savePath)
+    // The child fetches in-page with awaitPromise; a slow/hung network can
+    // block it well past the tool budget, so bound it like every other call.
+    const timeoutMs = 60_000
+    await withTimeout(
+      downloadable.download(request.url, request.savePath),
+      timeoutMs,
+      signal,
+      `browser: download timed out after ${timeoutMs}ms`,
+    )
     this.record(s, 'download', { url: request.url, savePath: request.savePath }, true, { result: request.savePath })
     return { path: request.savePath }
   }
@@ -709,7 +717,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (typeof host.flushAuth !== 'function') {
       throw new BrowserError('browser: auth export is only available on the self-hosted browser', 'BROWSER_AUTH_UNSUPPORTED')
     }
-    const cookies = await host.flushAuth()
+    const timeoutMs = 30_000
+    const cookies = await withTimeout(host.flushAuth(), timeoutMs, undefined, `browser: auth export timed out after ${timeoutMs}ms`)
     this.record(s, 'flushAuth', {}, true, { result: `${cookies.length} cookies` })
     return cookies
   }
@@ -722,7 +731,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (typeof host.restoreAuth !== 'function') {
       throw new BrowserError('browser: auth restore is only available on the self-hosted browser', 'BROWSER_AUTH_UNSUPPORTED')
     }
-    const restored = await host.restoreAuth(cookies)
+    const timeoutMs = 30_000
+    const restored = await withTimeout(host.restoreAuth(cookies), timeoutMs, undefined, `browser: auth restore timed out after ${timeoutMs}ms`)
     this.record(s, 'restoreAuth', { count: cookies.length }, true, { result: `${restored} cookies` })
     return restored
   }
@@ -887,7 +897,14 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Read the current URL of a view through CDP. */
   private async currentUrl(handle: ElectronViewHandle): Promise<string> {
-    const result = await handleSendEvaluate(handle, 'location.href')
+    // Bound the read: a wedged renderer would otherwise hang listTabs.
+    const timeoutMs = 10_000
+    const result = await withTimeout(
+      handleSendEvaluate(handle, 'location.href'),
+      timeoutMs,
+      undefined,
+      `browser: url read timed out after ${timeoutMs}ms`,
+    )
     return result.ok && typeof result.value === 'string' ? result.value : ''
   }
 }
