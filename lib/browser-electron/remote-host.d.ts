@@ -9,13 +9,22 @@
  * Protocol (one JSON object per line, both directions):
  *   -> { id, op: 'createView' } | { id, op: 'destroyView', viewId } |
  *      { id, op: 'showView', viewId } | { id, op: 'command', viewId, method, params }
+ *   <- { id, op: 'hello', token } (the child's FIRST message — authenticates it)
  *   <- { id, ok: true, result? } | { id, ok: false, err }
  *
  * The child is Electron's main process; host-main.js owns the BrowserWindow,
  * WebContentsViews, and webContents.debugger (CDP).
+ *
+ * Security: the RPC server accepts exactly ONE connection, and only after
+ * that connection proves knowledge of the random per-spawn token (passed to
+ * the child via `--rpc-token`, never printed). A local process that connects
+ * to the loopback port without the token can neither impersonate the child
+ * nor inject replies — it is disconnected immediately. Commands are only
+ * written after the hello authenticates, so a spoofed socket never sees
+ * traffic.
  * @module dsh-browser/browser-electron/remote-host
  */
-import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts';
+import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js';
 /**
  * Self-hosted view host: spawns the plugin's Electron child on first use and
  * keeps it alive until dispose(). Fallback when no desktop shell provides

@@ -12,17 +12,17 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { BrowserRuntime } from '../browser/runtime.ts'
-import { ElectronBrowserProvider } from './provider.ts'
-import type { ElectronBrowserViewHost } from './provider.ts'
-import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.ts'
+import type { BrowserRuntime } from '../browser/runtime.js'
+import { ElectronBrowserProvider } from './provider.js'
+import type { ElectronBrowserViewHost } from './provider.js'
+import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.js'
 
 export {
   ELECTRON_BROWSER_PROVIDER_ID,
   ElectronBrowserProvider,
-} from './provider.ts'
-export type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
-export { RemoteElectronViewHost, defaultHostMainPath } from './remote-host.ts'
+} from './provider.js'
+export type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
+export { RemoteElectronViewHost, defaultHostMainPath } from './remote-host.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'browser-electron'
@@ -36,12 +36,20 @@ export interface Config {
   readonly viewHost?: ElectronBrowserViewHost
   /** Allow navigation only to HTTP(S) URLs. Default true. */
   readonly httpOnly?: boolean
+  /**
+   * When set, `browser_download` save paths must resolve inside this
+   * directory (prevents a prompt-injected agent from writing arbitrary
+   * machine paths). Default: unset (absolute paths allowed, relative
+   * rejected).
+   */
+  readonly downloadDir?: string
 }
 
 export const Config: z<Config> = z.object({
   // Absent on surfaces without a desktop shell; the plugin self-hosts then.
   viewHost: z.any(),
   httpOnly: z.boolean().default(true),
+  downloadDir: z.string(),
 })
 
 /** Register the Electron browser provider with `ctx.browser`. */
@@ -53,7 +61,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // is bound to the seam's own fiber (the browser row), so a reload of this
   // row would otherwise collide with the still-registered provider
   // (BROWSER_DUPLICATE_PROVIDER) or leave a stale provider behind.
-  const unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, { httpOnly: config.httpOnly }))
+  const unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, { httpOnly: config.httpOnly, downloadDir: config.downloadDir }))
   ctx.effect(() => () => {
     unregister()
     if (config.viewHost === undefined && host instanceof RemoteElectronViewHost) {

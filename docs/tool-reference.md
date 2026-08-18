@@ -37,7 +37,7 @@
 | --- | --- | --- | --- | --- |
 | `browser_history` | – | `{ entries[] }` | – | 操作日志(最新在后),含 seq/action/ok/params/result/error |
 | `browser_replay` | `seq`(必填) | `{ replayed }` | ✅ | 按序号回放某一步(navigate/execute/click/type) |
-| `browser_download` | `url`(必填), `savePath`(必填) | `{ path }` | ✅ | 带会话 cookie 下载到本地(上限 256MB,受 CORS 约束) |
+| `browser_download` | `url`(必填), `savePath`(必填) | `{ path }` | ✅ | 带会话 cookie 下载到本地(仅 http(s);`savePath` 必须为绝对路径,配置 `downloadDir` 后限定在该目录内;上限 256MB,受 CORS 约束) |
 
 ## 登录态与安全
 

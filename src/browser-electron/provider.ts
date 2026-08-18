@@ -9,6 +9,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
+import { isAbsolute, resolve, sep } from 'node:path'
 import type {
   BrowserChallenge,
   BrowserContentRequest,
@@ -24,8 +25,8 @@ import type {
   BrowserSnapshotResult,
   BrowserTab,
   ExportedCookie,
-} from '../browser/types.ts'
-import { BrowserError } from '../browser/types.ts'
+} from '../browser/types.js'
+import { BrowserError } from '../browser/types.js'
 
 /**
  * Page-context human-verification (CAPTCHA / bot-detection) detection. Runs
@@ -128,6 +129,13 @@ export interface ElectronBrowserProviderConfig {
   readonly snapshotMaxElements?: number
   /** Maximum content characters before truncation when no maxChars is given. Default 100_000. */
   readonly contentMaxChars?: number
+  /**
+   * When set, `browser_download` save paths must resolve inside this
+   * directory. Unset (default) keeps the tool's absolute-path contract but
+   * still rejects relative paths. Set this to confine downloads to one
+   * folder and prevent a (prompt-injected) agent from writing elsewhere.
+   */
+  readonly downloadDir?: string
 }
 
 /**
@@ -184,6 +192,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   private readonly httpOnly: boolean
   private readonly snapshotMaxElements: number
   private readonly contentMaxChars: number
+  private readonly downloadDir: string | undefined
 
   constructor(
     private readonly host: ElectronBrowserViewHost,
@@ -192,6 +201,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     this.httpOnly = config.httpOnly ?? true
     this.snapshotMaxElements = config.snapshotMaxElements ?? 60
     this.contentMaxChars = config.contentMaxChars ?? 100_000
+    this.downloadDir = config.downloadDir
   }
 
   /** Usable whenever the host can create views (always in the desktop shell). */
@@ -267,9 +277,11 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // Closing a tab before the active one shifts the array left; keep the
       // same tab active by decrementing the index.
       s.activeIndex -= 1
-    } else if (s.activeIndex >= s.tabs.length) {
-      // The active tab itself was closed; activate the last remaining one.
-      s.activeIndex = s.tabs.length - 1
+    } else if (index === s.activeIndex) {
+      // The active tab itself was closed; activate the next tab (the one that
+      // shifted into its place), or the last one when the closed tab was the
+      // last.
+      s.activeIndex = Math.min(index, s.tabs.length - 1)
     }
     this.showActive(s)
     return Promise.resolve()
@@ -313,6 +325,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
         timeoutMs,
         signal,
         `browser: navigation timed out after ${timeoutMs}ms`,
+        // Best-effort: cancel the in-flight navigation so a wedged load does
+        // not leave the debugger queue busy.
+        () => { void handle.sendCommand('Page.stopLoading').catch(() => {}) },
       )
       // Page.navigate resolves even when the navigation fails; surface the
       // failure instead of leaving a silent white screen.
@@ -365,6 +380,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
         timeoutMs,
         signal,
         `browser: execute timed out after ${timeoutMs}ms`,
+        // Best-effort: kill the wedged page script so the renderer (and the
+        // debugger queue) is not stuck behind a busy loop forever.
+        () => terminatePage(handle),
       )
       if (result.exceptionDetails !== undefined) {
         const detail = result.exceptionDetails as { text?: string; exception?: { description?: string } }
@@ -413,7 +431,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
           ref: out.length + 1,
           kind,
           label,
-          selector: el.id ? '#' + el.id : (el.name ? '[name=' + JSON.stringify(el.name) + ']' : ''),
+          selector: el.id ? '#' + CSS.escape(el.id) : (el.name ? '[name=' + JSON.stringify(el.name) + ']' : ''),
           x: Math.round(r.x + r.width / 2),
           y: Math.round(r.y + r.height / 2),
         })
@@ -429,6 +447,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       timeoutMs,
       signal,
       `browser: snapshot timed out after ${timeoutMs}ms`,
+      () => terminatePage(tab.handle),
     )
     if (!result.ok) throw new BrowserError(`browser: snapshot evaluation failed: ${result.exception}`, 'BROWSER_SNAPSHOT_FAILED')
     const value = result.value as BrowserSnapshotResult
@@ -446,6 +465,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       timeoutMs,
       signal,
       `browser: challenge detection timed out after ${timeoutMs}ms`,
+      () => terminatePage(tab.handle),
     )
     if (!result.ok) {
       throw new BrowserError(`browser: challenge detection failed: ${result.exception}`, 'BROWSER_CHALLENGE_DETECT_FAILED')
@@ -501,6 +521,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       timeoutMs,
       signal,
       `browser: content timed out after ${timeoutMs}ms`,
+      () => terminatePage(tab.handle),
     )
     if (!result.ok) throw new BrowserError(`browser: content evaluation failed: ${result.exception}`, 'BROWSER_CONTENT_FAILED')
     const value = result.value as { ok: boolean; reason?: string; content?: string; truncated?: boolean }
@@ -513,8 +534,25 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
-    await handle.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', x: request.x, y: request.y, button: 'left', clickCount: 1 } satisfies CdpMouseParams)
-    await handle.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', x: request.x, y: request.y, button: 'left', clickCount: 1 } satisfies CdpMouseParams)
+    const press = (type: 'mousePressed' | 'mouseReleased'): Promise<Record<string, unknown>> =>
+      handle.sendCommand('Input.dispatchMouseEvent', { type, x: request.x, y: request.y, button: 'left', clickCount: 1 } satisfies CdpMouseParams)
+    const timeoutMs = 30_000
+    try {
+      await withTimeout(press('mousePressed'), timeoutMs, signal, `browser: click press timed out after ${timeoutMs}ms`)
+    } catch (error) {
+      // The press may still land late; release best-effort so the button is
+      // never left in a stuck pressed state.
+      void press('mouseReleased').catch(() => {})
+      throw new BrowserError(`browser: click failed: ${String(error)}`, 'BROWSER_CLICK_FAILED', { cause: error })
+    }
+    try {
+      await withTimeout(press('mouseReleased'), timeoutMs, signal, `browser: click release timed out after ${timeoutMs}ms`)
+    } catch (error) {
+      // The press already landed; retry the release so the button is not
+      // left pressed before surfacing the failure.
+      void press('mouseReleased').catch(() => {})
+      throw new BrowserError(`browser: click failed: ${String(error)}`, 'BROWSER_CLICK_FAILED', { cause: error })
+    }
     this.record(s, 'click', { x: request.x, y: request.y }, true)
   }
 
@@ -523,7 +561,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
-    await handle.sendCommand('Input.insertText', { text: request.text } satisfies CdpInsertTextParams)
+    const timeoutMs = 30_000
+    try {
+      await withTimeout(
+        handle.sendCommand('Input.insertText', { text: request.text } satisfies CdpInsertTextParams),
+        timeoutMs,
+        signal,
+        `browser: type timed out after ${timeoutMs}ms`,
+      )
+    } catch (error) {
+      throw new BrowserError(`browser: type failed: ${String(error)}`, 'BROWSER_TYPE_FAILED', { cause: error })
+    }
     // Store the full text so replay re-issues the same input; the history
     // tool truncates long values when rendering.
     this.record(s, 'type', { text: request.text }, true)
@@ -668,6 +716,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       timeoutMs,
       signal,
       `browser: fillForm timed out after ${timeoutMs}ms`,
+      () => terminatePage(tab.handle),
     )
     if (!result.ok) {
       throw new BrowserError(`browser: fillForm evaluation failed: ${result.exception}`, 'BROWSER_FILL_FAILED')
@@ -684,11 +733,39 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * Download a URL to a local file, keeping the session's cookies/login.
    * Requires the self-hosted host (which implements view-level download); the
    * desktop shell's embedded views delegate downloads to the real browser UI.
+   * Admission: only HTTP(S) targets (the in-page fetch cannot meaningfully
+   * fetch anything else), and the save path must be absolute — confined to
+   * `downloadDir` when one is configured, so a prompt-injected agent cannot
+   * write arbitrary machine paths.
    */
   async download(session: BrowserSessionId, request: { readonly url: string; readonly savePath: string }, signal?: AbortSignal): Promise<{ readonly path: string }> {
     const s = this.session(session)
     const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
+    // URL admission: HTTP(S) only (mirrors the navigation guard). The seam
+    // intentionally does not block private/localhost targets — a shared real
+    // browser legitimately reaches local dev servers.
+    let parsed: URL
+    try {
+      parsed = new URL(request.url)
+    } catch {
+      throw new BrowserError(`browser: refusing download of unparseable URL "${request.url}"`, 'BROWSER_DOWNLOAD_BLOCKED')
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new BrowserError(`browser: refusing download of non-HTTP(S) URL "${request.url}"`, 'BROWSER_DOWNLOAD_BLOCKED')
+    }
+    // savePath admission: must be absolute; when downloadDir is configured it
+    // must resolve inside it (no ..-escape).
+    if (!isAbsolute(request.savePath)) {
+      throw new BrowserError('browser: download savePath must be an absolute path', 'BROWSER_DOWNLOAD_BLOCKED')
+    }
+    if (this.downloadDir !== undefined) {
+      const dir = resolve(this.downloadDir)
+      const file = resolve(request.savePath)
+      if (file !== dir && !file.startsWith(dir + sep)) {
+        throw new BrowserError(`browser: download savePath must be inside downloadDir "${dir}"`, 'BROWSER_DOWNLOAD_BLOCKED')
+      }
+    }
     const downloadable = handle as { download?(url: string, savePath: string): Promise<void> }
     if (typeof downloadable.download !== 'function') {
       throw new BrowserError('browser: download is only available on the self-hosted browser', 'BROWSER_DOWNLOAD_UNSUPPORTED')
@@ -869,7 +946,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
         const script = entry.params.script
         if (typeof script !== 'string') throw new BrowserError(`browser: history seq ${seq} execute has no script`, 'BROWSER_HISTORY_INVALID')
         const recordedArgs = entry.params.args
-        const args = Array.isArray(recordedArgs) ? recordedArgs.filter((a): a is string => typeof a === 'string') : undefined
+        const args = Array.isArray(recordedArgs)
+          ? recordedArgs.filter((a): a is string | number | boolean => typeof a === 'string' || typeof a === 'number' || typeof a === 'boolean')
+          : undefined
         const result = await this.execute(session, { script, ...args !== undefined && args.length > 0 ? { args } : {} })
         this.record(s, 'replay', { seq, of: entry.action, script, ...args !== undefined && args.length > 0 ? { args } : {} }, result.ok, result.ok ? { result: String(result.value) } : { error: result.exception })
         return
@@ -927,6 +1006,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       timeoutMs,
       undefined,
       `browser: url read timed out after ${timeoutMs}ms`,
+      () => terminatePage(handle),
     )
     return result.ok && typeof result.value === 'string' ? result.value : ''
   }
@@ -947,6 +1027,7 @@ function withTimeout<T>(
   ms: number,
   signal: AbortSignal | undefined,
   message: string,
+  onCancel?: () => void,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let done = false
@@ -959,6 +1040,8 @@ function withTimeout<T>(
       const error = new Error(message)
       error.name = 'TimeoutError'
       reject(error)
+      // Best-effort interrupt of the underlying CDP call (see onCancel).
+      onCancel?.()
     }, ms)
     const finish = (fn: () => void): void => {
       if (done) return
@@ -972,6 +1055,7 @@ function withTimeout<T>(
       done = true
       clearTimeout(timer)
       reject(signal?.reason instanceof Error ? signal.reason : new Error('aborted'))
+      onCancel?.()
     }
     if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true })
     promise.then(
@@ -979,6 +1063,18 @@ function withTimeout<T>(
       error => finish(() => reject(error)),
     )
   })
+}
+
+/**
+ * Best-effort interrupt of a wedged page-script evaluation. `Runtime.evaluate`
+ * with `awaitPromise` can hold the renderer (and the target's debugger queue)
+ * behind a busy loop or a never-settling promise; terminating kills the
+ * running script so subsequent commands are not stuck forever. Fire-and-forget:
+ * if the interrupt itself hangs, it is ignored.
+ * @param handle - the view handle to terminate in.
+ */
+function terminatePage(handle: ElectronViewHandle): void {
+  void handle.sendCommand('Runtime.terminateExecution').catch(() => {})
 }
 
 /**

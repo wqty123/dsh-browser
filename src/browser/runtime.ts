@@ -30,12 +30,12 @@ import type {
   BrowserTypeRequest,
   BrowserChallenge,
   ExportedCookie,
-} from './types.ts'
-import { BrowserError } from './types.ts'
+} from './types.js'
+import { BrowserError } from './types.js'
 
 export {
   BrowserError,
-} from './types.ts'
+} from './types.js'
 export type {
   BrowserChallenge,
   BrowserClickRequest,
@@ -60,7 +60,7 @@ export type {
   BrowserTab,
   BrowserTypeRequest,
   ExportedCookie,
-} from './types.ts'
+} from './types.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {

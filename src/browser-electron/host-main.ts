@@ -8,6 +8,8 @@
  *   <- { id, op: 'ping' } | { id, op: 'createView', viewId } |
  *      { id, op: 'destroyView', viewId } | { id, op: 'showView', viewId } |
  *      { id, op: 'command', viewId, method, params }
+ *   -> { id: 0, op: 'hello', token } (our FIRST message — proves we know the
+ *      parent's `--rpc-token`; the parent refuses the connection otherwise)
  *   -> { id, ok: true, result? } | { id, ok: false, err }
  *
  * The parent never parses stderr, so diagnostics may go there freely.
@@ -18,6 +20,10 @@ import { app, BrowserWindow, WebContentsView } from 'electron'
 import { createInterface } from 'node:readline'
 import { createConnection } from 'node:net'
 import { join } from 'node:path'
+
+/** The spawn token the parent passed via `--rpc-token`; must be echoed in our hello. */
+const tokenArg = process.argv.indexOf('--rpc-token')
+const RPC_TOKEN = tokenArg >= 0 ? process.argv[tokenArg + 1] ?? '' : ''
 
 // Isolate this host's profile from the DSH app's default Electron userData:
 // several Electron instances sharing Roaming\Electron fight over the GPU
@@ -73,8 +79,28 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         if (window === undefined) {
           window = new BrowserWindow({ width: 1400, height: 900, show: true, title: 'dsh-browser' })
           window.on('closed', () => { window = undefined })
+          // Views are positioned once at creation; keep them filling the
+          // window as the human resizes it (otherwise the page stays at the
+          // original size and the layout breaks).
+          window.on('resize', () => {
+            const [width, height] = window?.getContentSize() ?? [0, 0]
+            for (const v of views.values()) {
+              try { v.webContentsView.setBounds({ x: 0, y: 0, width: width ?? 0, height: height ?? 0 }) } catch { /* destroyed */ }
+            }
+          })
         }
         const view = new WebContentsView()
+        // Route popups (window.open / target=_blank) back into THIS view
+        // instead of letting Electron open untracked native windows that would
+        // diverge from the session/tab model. The URL is loaded directly with
+        // the page's own navigation (http/https only); the agent re-snapshots
+        // and sees the new page as the active tab's content.
+        view.webContents.setWindowOpenHandler(({ url }) => {
+          try {
+            if (/^https?:/i.test(url)) void view.webContents.loadURL(url).catch(() => { /* navigation failures surface on the next snapshot */ })
+          } catch { /* synchronous failures are no-ops too */ }
+          return { action: 'deny' }
+        })
         // Attach the debugger BEFORE the view can be seen: an attach failure
         // then leaves nothing in the window (no visible ghost view).
         view.webContents.debugger.attach(CDP_VERSION)
@@ -214,12 +240,40 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         // avoids Electron's download pipeline entirely (CDP debugger attach
         // can interfere with will-download).
         const result = await entry.webContentsView.webContents.debugger.sendCommand('Runtime.evaluate', {
+          // Stream the body through a reader so the size cap is enforced as
+          // bytes arrive — never buffer an unbounded download into memory
+          // before checking the limit (a huge URL would otherwise OOM the
+          // renderer). The declared Content-Length short-circuits large files
+          // before any body is read.
           expression: `(async () => {
             const r = await fetch(${JSON.stringify(url)}, { credentials: 'include' })
             if (!r.ok) throw new Error('HTTP ' + r.status)
-            const b = await r.arrayBuffer()
-            const bytes = new Uint8Array(b)
-            if (bytes.length > ${String(MAX_DOWNLOAD_BYTES)}) throw new Error('download too large (limit ' + ${String(MAX_DOWNLOAD_BYTES)} + ' bytes, got ' + bytes.length + ')')
+            const declared = Number(r.headers.get('content-length') || 0)
+            if (declared > ${String(MAX_DOWNLOAD_BYTES)}) throw new Error('download too large (limit ' + ${String(MAX_DOWNLOAD_BYTES)} + ' bytes, declared ' + declared + ')')
+            if (!r.body || typeof r.body.getReader !== 'function') {
+              const b = await r.arrayBuffer()
+              const bytes = new Uint8Array(b)
+              if (bytes.length > ${String(MAX_DOWNLOAD_BYTES)}) throw new Error('download too large (limit ' + ${String(MAX_DOWNLOAD_BYTES)} + ' bytes, got ' + bytes.length + ')')
+              let bin = ''
+              for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+              return btoa(bin)
+            }
+            const reader = r.body.getReader()
+            const chunks = []
+            let total = 0
+            for (;;) {
+              const { done, value } = await reader.read()
+              if (done) break
+              total += value.length
+              if (total > ${String(MAX_DOWNLOAD_BYTES)}) {
+                await reader.cancel()
+                throw new Error('download too large (limit ' + ${String(MAX_DOWNLOAD_BYTES)} + ' bytes, got ' + total + ')')
+              }
+              chunks.push(value)
+            }
+            const bytes = new Uint8Array(total)
+            let off = 0
+            for (const c of chunks) { bytes.set(c, off); off += c.length }
             let bin = ''
             for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
             return btoa(bin)
@@ -311,6 +365,9 @@ void app.whenReady().then(() => {
   const socket = createConnection({ host: '127.0.0.1', port })
   rpcSocket = socket
   socket.setEncoding('utf8')
+  // Prove we know the parent's spawn token before anything else; the parent
+  // refuses a connection whose first line is not this hello.
+  socket.write(JSON.stringify({ id: 0, op: 'hello', token: RPC_TOKEN }) + '\n')
   const rl = createInterface({ input: socket })
   rl.on('line', line => {
     const text = line.trim()

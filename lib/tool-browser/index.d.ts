@@ -14,7 +14,7 @@
  * @module dsh-browser/tool-browser
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { BrowserSessionId } from '../browser/types.ts';
+import type { BrowserSessionId } from '../browser/types.js';
 /** Plugin name used by loader diagnostics. */
 export declare const name = "tool-browser";
 /** The tool registry, browser seam, and system-prompt registry this tool layer consumes. */
@@ -30,10 +30,10 @@ export interface Config {
 }
 /** Register all browser tools with `ctx.tools`. */
 export declare function apply(ctx: Context, config?: Config): void;
-/** Test hook: inspect and reset the plugin-level session map (used by tests). */
+/** Test hook: inspect and reset session mappings across every live plugin apply. */
 export declare const internals: {
-    /** A copy of the per-task session map (task key -> provider session id). */
+    /** A copy of every live apply's per-task session map (task key -> provider session id). */
     readonly sessions: ReadonlyMap<string, BrowserSessionId>;
-    /** Drop one task's mapping without closing the provider session. */
+    /** Drop one task's mapping (across live applies) without closing the provider session. */
     clearSession(key?: string): void;
 };

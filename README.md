@@ -146,7 +146,7 @@ dsh plugin --profile web add <本仓库路径>
 | `browser_reset_session` | 关闭并重建本任务的浏览器会话 | ✅ |
 | `browser_history` | 操作日志(最新在后),含成功/失败与结果摘要 | – |
 | `browser_replay` | 按序号回放某一步(navigate/execute/click/type) | ✅ |
-| `browser_download` | 带会话 cookie 下载 URL 到本地文件(上限 256MB) | ✅ |
+| `browser_download` | 带会话 cookie 下载 HTTP(S) URL 到本地文件(`savePath` 必须绝对路径,上限 256MB) | ✅ |
 | `browser_auth` | 导出/恢复 cookie(登录态持久化,自托管可用) | ✅ |
 | `browser_challenge` | 检测人机验证(CAPTCHA / Cloudflare / reCAPTCHA / hCaptcha / Turnstile) | – |
 | `browser_restrict` | 限制允许的浏览器动作(白名单;空列表解除) | – |
@@ -171,6 +171,7 @@ dsh plugin --profile web add <本仓库路径>
 | `browser-electron` | `httpOnly` | 布尔 | `true` | 仅允许 HTTP(S) 导航;其余协议(如 `file:`/`data:`)拒绝(`BROWSER_NAVIGATION_BLOCKED`) |
 | `browser-electron` | `snapshotMaxElements` | 数字 | `60` | 快照最多收录的交互元素数,超出截断 |
 | `browser-electron` | `contentMaxChars` | 数字 | `100000` | 内容抓取默认字符上限 |
+| `browser-electron` | `downloadDir` | 字符串 | 未设置 | 限定 `browser_download` 保存路径必须位于该目录内(防 agent 写任意路径);未设置时仍要求绝对路径 |
 | `tool-browser` | `timeoutMs` | 数字 | `60000` | 工具协作超时(ms) |
 | `tool-browser` | `tabTools` | 布尔 | `true` | 是否注册标签管理工具(`browser_list_tabs` 等) |
 
@@ -208,7 +209,7 @@ agent (browser_* 工具)
 | DeepSeek Harness(dsh) | `0.1.0-rc.5` |
 | Electron | `43.4.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.11` |
+| dsh-builtin-browser | `0.1.15` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`;**当前仅在 Windows 环境实测**(macOS/Linux 未验证,暂不承诺)。
@@ -220,7 +221,8 @@ agent (browser_* 工具)
 - 部分主机在软件合成下 `fullPage` 截图不稳定。
 - 人机验证(CAPTCHA)无法自动解决:快照会标注检测到的挑战,此时应请用户在共享窗口中人工完成,而不是反复重试。
 - 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于宿主层,本插件不承诺。
-- `browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;单文件上限 256MB。
+- `browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;仅允许 HTTP(S) 目标;`savePath` 必须为绝对路径(配置 `downloadDir` 后限定在该目录内);单文件上限 256MB(流式限流,按 Content-Length 提前拒绝)。
+- 页面弹窗(`window.open` / `target=_blank`)会被重定向到当前标签页内打开,不创建独立窗口,以免破坏标签/会话模型。
 - `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie);仅自托管浏览器可用。
 - 自托管浏览器子进程崩溃后会自动重启,但崩溃前已打开的会话视图已失效,调用 `browser_reset_session` 重建即可。
 - 本插件不含浏览器列 UI——那是宿主外壳的配套,别把"浏览器列"当成插件能力。
@@ -230,9 +232,9 @@ agent (browser_* 工具)
 ```sh
 # 类型检查 + 构建(lib/)
 pnpm run build
-
-# 功能测试:启动本地页面服务器 + Electron probe(见仓库测试脚本)
 ```
+
+> 仓库当前未附带自动化测试套件(类型检查 + 构建即可验证本插件的 TypeScript 侧)。
 
 代码结构:
 

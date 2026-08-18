@@ -11,11 +11,11 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-import type { BrowserRuntime } from '../browser/runtime.ts';
-import type { ElectronBrowserViewHost } from './provider.ts';
-export { ELECTRON_BROWSER_PROVIDER_ID, ElectronBrowserProvider, } from './provider.ts';
-export type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts';
-export { RemoteElectronViewHost, defaultHostMainPath } from './remote-host.ts';
+import type { BrowserRuntime } from '../browser/runtime.js';
+import type { ElectronBrowserViewHost } from './provider.js';
+export { ELECTRON_BROWSER_PROVIDER_ID, ElectronBrowserProvider, } from './provider.js';
+export type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js';
+export { RemoteElectronViewHost, defaultHostMainPath } from './remote-host.js';
 /** Cordis plugin name used by loader diagnostics. */
 export declare const name = "browser-electron";
 /** The browser seam this provider registers into. */
@@ -26,6 +26,13 @@ export interface Config {
     readonly viewHost?: ElectronBrowserViewHost;
     /** Allow navigation only to HTTP(S) URLs. Default true. */
     readonly httpOnly?: boolean;
+    /**
+     * When set, `browser_download` save paths must resolve inside this
+     * directory (prevents a prompt-injected agent from writing arbitrary
+     * machine paths). Default: unset (absolute paths allowed, relative
+     * rejected).
+     */
+    readonly downloadDir?: string;
 }
 export declare const Config: z<Config>;
 /** Register the Electron browser provider with `ctx.browser`. */

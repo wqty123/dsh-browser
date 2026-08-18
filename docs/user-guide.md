@@ -79,7 +79,7 @@ dsh plugin --profile web add <本仓库路径>
 窗口标题为 `dsh-browser`(自托管)。若子进程崩溃会自动重启;重启后旧会话失效,调用 `browser_reset_session` 重建。
 
 **Q:下载报 CORS 错误?**
-`browser_download` 在页面上下文内 `fetch`,受同源/CORS 约束;跨域文件请先在同源页面内操作,或直接请求用户提供。
+`browser_download` 在页面上下文内 `fetch`,受同源/CORS 约束;跨域文件请先在同源页面内操作,或直接请求用户提供。仅支持 HTTP(S) URL;`savePath` 必须为绝对路径(配置 `downloadDir` 后限定在该目录内)。
 
 **Q:如何禁止 agent 乱点?**
 `browser_restrict` 设置白名单(如只允许 `browser_snapshot`/`browser_content`);传空列表解除。

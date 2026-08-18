@@ -17,7 +17,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import type { BrowserSessionId } from '../browser/types.ts'
+import type { BrowserSessionId } from '../browser/types.js'
 
 /** Plugin name used by loader diagnostics. */
 export const name = 'tool-browser'
@@ -34,27 +34,52 @@ export interface Config {
   readonly allowedActions?: readonly string[]
 }
 
-/** Per-task browser sessions, keyed by the calling DSH session id. */
-const sessionsByTask = new Map<string, BrowserSessionId>()
-/** In-flight first-open per task key, so concurrent first calls share one session. */
-const pendingOpens = new Map<string, Promise<BrowserSessionId>>()
+/** Per-apply (per-context) tool state: sessions, in-flight opens, restriction. */
+interface ToolBrowserState {
+  /** Per-task browser sessions, keyed by the calling DSH session id. */
+  readonly sessionsByTask: Map<string, BrowserSessionId>
+  /** In-flight first-open per task key, so concurrent first calls share one session. */
+  readonly pendingOpens: Map<string, Promise<BrowserSessionId>>
+  /**
+   * Action restriction: an allow-list of browser tool names, or undefined for
+   * unrestricted. When set, any browser_* tool not in the list is refused
+   * (browser_restrict itself is always allowed so the guard can be lifted).
+   * Scoped to one plugin apply (one context), so a restriction set by one
+   * task never leaks into another context.
+   */
+  restrictedTo: readonly string[] | undefined
+}
 
-/**
- * Action restriction state: an allow-list of browser tool names, or undefined
- * for unrestricted. When set, any browser_* tool not in the list is refused
- * (browser_restrict itself is always allowed so the guard can be lifted).
- */
-let restrictedTo: readonly string[] | undefined
+function createState(): ToolBrowserState {
+  return { sessionsByTask: new Map(), pendingOpens: new Map(), restrictedTo: undefined }
+}
+
+/** Every live state, for the test hook (introspection only, never shared). */
+const liveStates = new Set<ToolBrowserState>()
 
 /**
  * Guard one browser tool call against the active restriction. Refuses calls
  * not on the allow-list when a restriction is in effect.
+ * @param state - the calling context's tool state.
  * @param toolName - the browser tool about to run.
  */
-function assertAllowed(toolName: string): void {
+function assertAllowed(state: ToolBrowserState, toolName: string): void {
+  const { restrictedTo } = state
   if (restrictedTo === undefined) return
   if (restrictedTo.includes(toolName)) return
   throw new Error(`browser action "${toolName}" is restricted (allow-list: ${restrictedTo.join(', ')})`)
+}
+
+/** The agent view a tool execution carries (id + agent-scoped context). */
+interface ExecAgent {
+  readonly id?: string
+  /** Agent-scoped Cordis context; its effects unwind on agent disposal. */
+  readonly ctx?: Context
+}
+
+/** Extract the agent from a tool-execution context, when one exists. */
+function agentOf(exec: unknown): ExecAgent | undefined {
+  return (exec as { agent?: ExecAgent } | undefined)?.agent
 }
 
 /**
@@ -68,21 +93,46 @@ function taskKey(exec: { agent?: { id?: string } } | undefined): string {
 
 /**
  * Resolve the calling task's browser session, opening one on first use.
- * Concurrent first calls for the same key share a single open.
+ * Concurrent first calls for the same key share a single open. When the call
+ * carries an agent, the session's lifetime is tied to the agent's scoped
+ * context: it closes automatically when the agent (DSH session) is disposed,
+ * so sessions and their windows never leak after a task ends.
  * @param browser - the seam service.
+ * @param state - the calling context's tool state.
  * @param key - the task key (see {@link taskKey}).
+ * @param agent - the calling agent, when any (its ctx owns the session).
  * @returns the task's session id.
  */
-async function ensureSession(browser: NonNullable<Context['browser']>, key: string): Promise<BrowserSessionId> {
-  const existing = sessionsByTask.get(key)
+async function ensureSession(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string, agent?: ExecAgent): Promise<BrowserSessionId> {
+  const existing = state.sessionsByTask.get(key)
   if (existing !== undefined) return existing
-  const pending = pendingOpens.get(key)
+  const pending = state.pendingOpens.get(key)
   if (pending !== undefined) return pending
   const opening = browser.open().then(
-    session => { sessionsByTask.set(key, session); pendingOpens.delete(key); return session },
-    error => { pendingOpens.delete(key); throw error },
+    session => {
+      // Tie the session's lifetime to the agent's scoped context FIRST: when
+      // the agent (and its DSH session) is disposed, the effect's disposer
+      // runs and closes the browser session. Registration happens once per
+      // session (only on first open for the key). If the agent is already
+      // gone, close the fresh session instead of leaking it.
+      try {
+        agent?.ctx?.effect(() => () => {
+          const current = state.sessionsByTask.get(key)
+          if (current === undefined) return
+          state.sessionsByTask.delete(key)
+          void browser.close(current).catch(() => {})
+        })
+      } catch (error) {
+        void browser.close(session).catch(() => {})
+        throw error
+      }
+      state.sessionsByTask.set(key, session)
+      state.pendingOpens.delete(key)
+      return session
+    },
+    error => { state.pendingOpens.delete(key); throw error },
   )
-  pendingOpens.set(key, opening)
+  state.pendingOpens.set(key, opening)
   return opening
 }
 
@@ -115,8 +165,14 @@ function formatSnapshot(snapshot: {
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
   const timeoutMs = config.timeoutMs ?? 60_000
+  // Per-context state: sessions, in-flight opens, and the restriction are
+  // scoped to THIS plugin apply, so parallel contexts never share sessions
+  // or leak restrictions into each other.
+  const state = createState()
+  liveStates.add(state)
+  ctx.effect(() => () => { liveStates.delete(state) })
   // Re-apply resets the restriction: an omitted allowedActions lifts it.
-  restrictedTo = config.allowedActions !== undefined ? [...config.allowedActions] : undefined
+  state.restrictedTo = config.allowedActions !== undefined ? [...config.allowedActions] : undefined
 
   ctx.systemPrompt.section({
     name: 'tool:browser',
@@ -170,12 +226,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       render: (_args, value) => [{ type: 'text', text: formatSnapshot(value) }],
     },
     timeoutMs,
-    isConcurrencySafe: () => true,
+    isConcurrencySafe: () => false, // opens tabs / navigates; exclusive within a task
     async execute(args, exec) {
-      assertAllowed('browser_open')
+      assertAllowed(state, 'browser_open')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       await browser.openUrl(session, {
         url: args.url,
         ...args.newTab === true ? { newTab: true } : {},
@@ -236,7 +292,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     async execute(_args, exec) {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const snapshot = await browser.snapshot(session, exec.signal)
       return {
         url: snapshot.url,
@@ -275,7 +331,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     async execute(_args, exec) {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const challenge = await browser.detectChallenge(session, exec.signal)
       return {
         blocked: challenge.blocked,
@@ -310,10 +366,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // page JS can be stateful
     async execute(args, exec) {
-      assertAllowed('browser_execute')
+      assertAllowed(state, 'browser_execute')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const result = await browser.execute(session, {
         script: args.script,
         args: args.args ?? [],
@@ -352,7 +408,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     async execute(args, exec) {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const result = await browser.content(session, {
         format: args.format,
         ...args.selector !== undefined ? { selector: args.selector } : {},
@@ -377,10 +433,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed('browser_click')
+      assertAllowed(state, 'browser_click')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       await browser.click(session, { x: args.x, y: args.y }, exec.signal)
       return { clicked: true }
     },
@@ -399,10 +455,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed('browser_type')
+      assertAllowed(state, 'browser_type')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       await browser.type(session, { text: args.text }, exec.signal)
       return { typed: true }
     },
@@ -468,10 +524,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed('browser_fill')
+      assertAllowed(state, 'browser_fill')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const fields = (args.fields ?? []).map((f: { selector?: string; name?: string; label?: string; placeholder?: string; kind?: string; value?: string }) => ({
         ...f.selector !== undefined ? { selector: f.selector } : {},
         ...f.name !== undefined ? { name: f.name } : {},
@@ -514,7 +570,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     async execute(args, exec) {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const shot = await browser.screenshot(session, {
         ...args.fullPage === true ? { fullPage: true } : {},
         ...args.savePath !== undefined ? { savePath: args.savePath } : {},
@@ -562,7 +618,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       async execute(_args, exec) {
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-        const session = await ensureSession(browser, taskKey(exec))
+        const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
         const tabs = await browser.listTabs(session)
         return { tabs: tabs.map(t => ({ id: t.id, url: t.url, active: t.active })) }
       },
@@ -579,12 +635,12 @@ export function apply(ctx: Context, config: Config = {}): void {
         render: (_args, value) => [{ type: 'text', text: value.switched ? 'Switched.' : 'Tab not found.' }],
       },
       timeoutMs,
-      isConcurrencySafe: () => true,
+      isConcurrencySafe: () => false, // mutates the active tab; exclusive within a task
       async execute(args, exec) {
-        assertAllowed('browser_switch_tab')
+        assertAllowed(state, 'browser_switch_tab')
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-        const session = await ensureSession(browser, taskKey(exec))
+        const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
         await browser.switchTab(session, args.tabId)
         return { switched: true }
       },
@@ -601,11 +657,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         render: (_args, value) => [{ type: 'text', text: value.closed ? 'Closed.' : 'Tab not found.' }],
       },
       timeoutMs,
-      isConcurrencySafe: () => true,
+      isConcurrencySafe: () => false, // mutates the tab list; exclusive within a task
       async execute(args, exec) {
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-        const session = await ensureSession(browser, taskKey(exec))
+        const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
         await browser.closeTab(session, args.tabId)
         return { closed: true }
       },
@@ -620,12 +676,12 @@ export function apply(ctx: Context, config: Config = {}): void {
         render: (_args, value) => [{ type: 'text', text: value.reset ? 'Browser reset.' : 'Failed.' }],
       },
       timeoutMs,
-      isConcurrencySafe: () => true,
+      isConcurrencySafe: () => false, // closes every tab; exclusive within a task
       async execute(_args, exec) {
-        assertAllowed('browser_reset')
+        assertAllowed(state, 'browser_reset')
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-        const session = await ensureSession(browser, taskKey(exec))
+        const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
         await browser.reset(session)
         return { reset: true }
       },
@@ -677,14 +733,21 @@ export function apply(ctx: Context, config: Config = {}): void {
     async execute(_args, exec) {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const entries = await browser.history(session)
       const rendered = entries.map(e => {
+        const params = JSON.parse(JSON.stringify(e.params)) as Record<string, unknown>
+        // Typed text (possibly passwords) is kept verbatim in the provider's
+        // history so replay can re-issue it, but must not be echoed back to
+        // the model: mask it in the tool output, preserving the length.
+        if (e.action === 'type' && typeof params.text === 'string') {
+          params.text = '*'.repeat(Math.min(params.text.length, 64)) + ` (${params.text.length} chars)`
+        }
         const row: { seq: number; action: string; ok: boolean; params: unknown; result?: string; error?: string } = {
           seq: e.seq,
           action: e.action,
           ok: e.ok,
-          params: JSON.parse(JSON.stringify(e.params)),
+          params,
         }
         if (e.result !== undefined) row.result = e.result
         if (e.error !== undefined) row.error = e.error
@@ -707,10 +770,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed('browser_replay')
+      assertAllowed(state, 'browser_replay')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       await browser.replay(session, args.seq)
       return { replayed: true }
     },
@@ -730,10 +793,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed('browser_download')
+      assertAllowed(state, 'browser_download')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const result = await browser.download(session, { url: args.url, savePath: args.savePath }, exec.signal)
       return { path: result.path }
     },
@@ -774,7 +837,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     async execute(_args, exec) {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const tabs = await browser.listTabs(session)
       return { session, tabs: tabs.map(t => ({ id: t.id, url: t.url, active: t.active })) }
     },
@@ -789,20 +852,20 @@ export function apply(ctx: Context, config: Config = {}): void {
       render: (_args, value) => [{ type: 'text', text: value.reset ? 'This task\'s browser session was closed; the next call starts fresh.' : 'Failed.' }],
     },
     timeoutMs,
-    isConcurrencySafe: () => true,
+    isConcurrencySafe: () => false, // closes the whole session; exclusive within a task
     async execute(_args, exec) {
-      assertAllowed('browser_reset_session')
+      assertAllowed(state, 'browser_reset_session')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const key = taskKey(exec)
-      const session = sessionsByTask.get(key)
+      const session = state.sessionsByTask.get(key)
       if (session !== undefined) {
         try {
           await browser.close(session)
         } finally {
           // Always forget the mapping so the next call opens a fresh session,
           // even if the provider close threw (the session is half-closed).
-          sessionsByTask.delete(key)
+          state.sessionsByTask.delete(key)
         }
       }
       return { reset: true }
@@ -833,15 +896,15 @@ export function apply(ctx: Context, config: Config = {}): void {
         throw new Error(`browser_restrict: unknown tool name(s) ${unknown.map(t => `"${t}"`).join(', ')} (must start with "browser_")`)
       }
       // Empty list (or omitted) lifts the restriction; a non-empty list is the
-      // new allow-list.
-      restrictedTo = allowed.length === 0 ? undefined : [...allowed]
-      return { restrictedTo: restrictedTo === undefined ? [] : [...restrictedTo] }
+      // new allow-list. Scoped to this plugin apply (this context) only.
+      state.restrictedTo = allowed.length === 0 ? undefined : [...allowed]
+      return { restrictedTo: state.restrictedTo === undefined ? [] : [...state.restrictedTo] }
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'browser_auth',
-    description: 'Export or restore the browser session\'s cookies (login state). Use "flush" to get a JSON cookie list (save it to a file to persist logins), or "restore" with that list to put logins back (e.g. after the browser host restarted). Available on the self-hosted browser.',
+    description: 'Export or restore the browser session\'s cookies (login state). Use "flush" to get a JSON cookie list (save it to a private file to persist logins), or "restore" with that list to put logins back (e.g. after the browser host restarted). Available on the self-hosted browser. Exported cookies are LIVE CREDENTIALS: treat them as secrets — do not echo them into the conversation, keep them out of logs, and store the list in a private file.',
     parameters: {
       action: { type: 'string', required: true, enum: ['flush', 'restore'], description: 'flush = export cookies; restore = import cookies.' },
       cookies: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Cookie list to restore (required when action=restore).' },
@@ -855,15 +918,15 @@ export function apply(ctx: Context, config: Config = {}): void {
           restored: { type: 'number' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: value.cookies !== undefined ? `Exported ${(value.cookies as unknown[]).length} cookies.` : `Restored ${value.restored} cookies.` }],
+      render: (_args, value) => [{ type: 'text', text: value.cookies !== undefined ? `Exported ${(value.cookies as unknown[]).length} cookies — LIVE CREDENTIALS; store privately and never echo them.` : `Restored ${value.restored} cookies.` }],
     },
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed('browser_auth')
+      assertAllowed(state, 'browser_auth')
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, taskKey(exec))
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       if (args.action === 'flush') {
         const cookies = await browser.flushAuth(session)
         return { cookies: cookies.map(c => ({ ...c })) as never }
@@ -875,11 +938,19 @@ export function apply(ctx: Context, config: Config = {}): void {
   }))
 }
 
-/** Test hook: inspect and reset the plugin-level session map (used by tests). */
+/** Test hook: inspect and reset session mappings across every live plugin apply. */
 export const internals = {
-  /** A copy of the per-task session map (task key -> provider session id). */
-  get sessions(): ReadonlyMap<string, BrowserSessionId> { return new Map(sessionsByTask) },
-  /** Drop one task's mapping without closing the provider session. */
-  clearSession(key = 'default'): void { sessionsByTask.delete(key) },
+  /** A copy of every live apply's per-task session map (task key -> provider session id). */
+  get sessions(): ReadonlyMap<string, BrowserSessionId> {
+    const merged = new Map<string, BrowserSessionId>()
+    for (const state of liveStates) {
+      for (const [key, session] of state.sessionsByTask) merged.set(key, session)
+    }
+    return merged
+  },
+  /** Drop one task's mapping (across live applies) without closing the provider session. */
+  clearSession(key = 'default'): void {
+    for (const state of liveStates) state.sessionsByTask.delete(key)
+  },
 }
 

@@ -6,7 +6,7 @@
  * shell that owns the `BrowserWindow`.
  * @module dsh-browser/browser-electron
  */
-import type { BrowserChallenge, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab, ExportedCookie } from '../browser/types.ts';
+import type { BrowserChallenge, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab, ExportedCookie } from '../browser/types.js';
 /** Stable provider id registered with `ctx.browser`. */
 export declare const ELECTRON_BROWSER_PROVIDER_ID = "electron";
 /**
@@ -60,6 +60,13 @@ export interface ElectronBrowserProviderConfig {
     readonly snapshotMaxElements?: number;
     /** Maximum content characters before truncation when no maxChars is given. Default 100_000. */
     readonly contentMaxChars?: number;
+    /**
+     * When set, `browser_download` save paths must resolve inside this
+     * directory. Unset (default) keeps the tool's absolute-path contract but
+     * still rejects relative paths. Set this to confine downloads to one
+     * folder and prevent a (prompt-injected) agent from writing elsewhere.
+     */
+    readonly downloadDir?: string;
 }
 /**
  * CDP method/params for `Page.navigate`, as sent to {@link ElectronViewHandle.sendCommand}.
@@ -107,6 +114,7 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     private readonly httpOnly;
     private readonly snapshotMaxElements;
     private readonly contentMaxChars;
+    private readonly downloadDir;
     constructor(host: ElectronBrowserViewHost, config?: ElectronBrowserProviderConfig);
     /** Usable whenever the host can create views (always in the desktop shell). */
     available(): boolean;
@@ -161,6 +169,10 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
      * Download a URL to a local file, keeping the session's cookies/login.
      * Requires the self-hosted host (which implements view-level download); the
      * desktop shell's embedded views delegate downloads to the real browser UI.
+     * Admission: only HTTP(S) targets (the in-page fetch cannot meaningfully
+     * fetch anything else), and the save path must be absolute — confined to
+     * `downloadDir` when one is configured, so a prompt-injected agent cannot
+     * write arbitrary machine paths.
      */
     download(session: BrowserSessionId, request: {
         readonly url: string;

@@ -8,6 +8,8 @@
  *   <- { id, op: 'ping' } | { id, op: 'createView', viewId } |
  *      { id, op: 'destroyView', viewId } | { id, op: 'showView', viewId } |
  *      { id, op: 'command', viewId, method, params }
+ *   -> { id: 0, op: 'hello', token } (our FIRST message — proves we know the
+ *      parent's `--rpc-token`; the parent refuses the connection otherwise)
  *   -> { id, ok: true, result? } | { id, ok: false, err }
  *
  * The parent never parses stderr, so diagnostics may go there freely.

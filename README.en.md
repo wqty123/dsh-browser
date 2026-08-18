@@ -146,7 +146,7 @@ See the full list in [Tool reference](#tool-reference).
 | `browser_reset_session` | Close and rebuild this task's browser session | ✅ |
 | `browser_history` | Operation log (newest last), with per-step success/error and result summary | – |
 | `browser_replay` | Replay one step by sequence number (navigate/execute/click/type) | ✅ |
-| `browser_download` | Download a URL with session cookies to a local file (256 MB cap) | ✅ |
+| `browser_download` | Download an HTTP(S) URL with session cookies to a local file (absolute `savePath`, 256 MB cap) | ✅ |
 | `browser_auth` | Export/restore cookies (login persistence, self-hosted) | ✅ |
 | `browser_challenge` | Detect a human-verification challenge (CAPTCHA / Cloudflare / reCAPTCHA / hCaptcha / Turnstile) | – |
 | `browser_restrict` | Restrict allowed browser actions (allow-list; empty list lifts it) | – |
@@ -171,6 +171,7 @@ The plugin mounts through `cordis.patch.yml` (three rows); per-row config:
 | `browser-electron` | `httpOnly` | boolean | `true` | Allow HTTP(S) navigation only; other protocols (e.g. `file:`/`data:`) rejected (`BROWSER_NAVIGATION_BLOCKED`) |
 | `browser-electron` | `snapshotMaxElements` | number | `60` | Max snapshot elements before truncation |
 | `browser-electron` | `contentMaxChars` | number | `100000` | Default content character cap |
+| `browser-electron` | `downloadDir` | string | unset | Confine `browser_download` save paths to this directory (stops a prompt-injected agent writing arbitrary paths); when unset, absolute paths are still required |
 | `tool-browser` | `timeoutMs` | number | `60000` | Cooperative tool timeout (ms) |
 | `tool-browser` | `tabTools` | boolean | `true` | Register tab-management tools (`browser_list_tabs` etc.) |
 
@@ -208,7 +209,7 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 | DeepSeek Harness (dsh) | `0.1.0-rc.5` |
 | Electron | `43.4.0` (≥ 40 recommended; 33.x has a compositor defect) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.11` |
+| dsh-builtin-browser | `0.1.15` |
 | OS | Windows 10 (10.0.26200) |
 
 > The plugin declares `electron >= 30`; it has **only been verified on Windows** (macOS/Linux untested, not yet promised).
@@ -220,7 +221,8 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 - `fullPage` capture is flaky under software compositing on some hosts.
 - CAPTCHA cannot be solved automatically: snapshots flag detected challenges; ask the human to complete it in the shared window instead of retrying.
 - Private mode (`privateMode`) is not implemented: it needs Electron session partitioning, which is host-layer territory; this plugin does not promise it.
-- `browser_download` fetches in the page context (keeps logins) and is subject to same-origin/CORS constraints; single files are capped at 256 MB.
+- `browser_download` fetches in the page context (keeps logins) and is subject to same-origin/CORS constraints; HTTP(S) targets only; `savePath` must be absolute (confined to `downloadDir` when configured); single files are capped at 256 MB (streamed with a Content-Length early reject).
+- Popups (`window.open` / `target=_blank`) are re-routed into the current tab instead of opening untracked native windows, so the tab/session model stays intact.
 - The `browser_auth` cookie round-trip does not preserve `hostOnly`/`sameSite` (host-only cookies come back as domain cookies); it is available on the self-hosted browser only.
 - After a self-hosted child crash the browser host restarts automatically, but sessions opened before the crash are gone — call `browser_reset_session` to rebuild.
 - This plugin contains no browser-column UI — that is host-shell territory; do not treat "browser column" as a plugin feature.
@@ -230,9 +232,9 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 ```sh
 # Type-check + build (lib/)
 pnpm run build
-
-# Functional tests: start a local page server + Electron probe (see repo test scripts)
 ```
+
+> The repo does not currently ship an automated test suite (type-check + build verifies the TypeScript side).
 
 Code layout:
 

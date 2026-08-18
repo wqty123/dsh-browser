@@ -9,8 +9,6 @@
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "allowImportingTsExtensions": true,
-    "rewriteRelativeImportExtensions": true,
     "types": [
       "node"
     ]

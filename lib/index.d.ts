@@ -8,9 +8,9 @@
  * the composition surface.
  * @module dsh-builtin-browser
  */
-export { BrowserError } from './browser/types.ts';
-export type { BrowserChallenge, BrowserClickRequest, BrowserContentFormat, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillField, BrowserFillRequest, BrowserFillResult, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, ExportedCookie, } from './browser/types.ts';
-export { BrowserRuntime } from './browser/runtime.ts';
-export { ElectronBrowserProvider } from './browser-electron/provider.ts';
-export type { ElectronBrowserViewHost, ElectronViewHandle } from './browser-electron/provider.ts';
-export { RemoteElectronViewHost, defaultHostMainPath } from './browser-electron/remote-host.ts';
+export { BrowserError } from './browser/types.js';
+export type { BrowserChallenge, BrowserClickRequest, BrowserContentFormat, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillField, BrowserFillRequest, BrowserFillResult, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, ExportedCookie, } from './browser/types.js';
+export { BrowserRuntime } from './browser/runtime.js';
+export { ElectronBrowserProvider } from './browser-electron/provider.js';
+export type { ElectronBrowserViewHost, ElectronViewHandle } from './browser-electron/provider.js';
+export { RemoteElectronViewHost, defaultHostMainPath } from './browser-electron/remote-host.js';

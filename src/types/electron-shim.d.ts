@@ -52,6 +52,8 @@ declare module 'electron' {
     close(): void
     downloadURL(url: string): void
     capturePage(): Promise<NativeImage>
+    loadURL(url: string): Promise<void>
+    setWindowOpenHandler(handler: (details: { url: string }) => { action: 'deny' }): void
   }
   export interface WebContentsView {
     readonly webContents: WebContents

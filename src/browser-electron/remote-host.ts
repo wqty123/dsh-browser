@@ -9,21 +9,31 @@
  * Protocol (one JSON object per line, both directions):
  *   -> { id, op: 'createView' } | { id, op: 'destroyView', viewId } |
  *      { id, op: 'showView', viewId } | { id, op: 'command', viewId, method, params }
+ *   <- { id, op: 'hello', token } (the child's FIRST message — authenticates it)
  *   <- { id, ok: true, result? } | { id, ok: false, err }
  *
  * The child is Electron's main process; host-main.js owns the BrowserWindow,
  * WebContentsViews, and webContents.debugger (CDP).
+ *
+ * Security: the RPC server accepts exactly ONE connection, and only after
+ * that connection proves knowledge of the random per-spawn token (passed to
+ * the child via `--rpc-token`, never printed). A local process that connects
+ * to the loopback port without the token can neither impersonate the child
+ * nor inject replies — it is disconnected immediately. Commands are only
+ * written after the hello authenticates, so a spoofed socket never sees
+ * traffic.
  * @module dsh-browser/browser-electron/remote-host
  */
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { existsSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
-import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
-import type { ExportedCookie } from '../browser/types.ts'
+import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
+import type { ExportedCookie } from '../browser/types.js'
 
 /** How long to wait for the child to signal readiness before failing. */
 const READY_TIMEOUT_MS = 20_000
@@ -178,10 +188,18 @@ class ElectronChildClient {
   private outbox: string[] = []
   /** Set once the child has exited; further calls fail fast instead of queueing. */
   private dead = false
+  /**
+   * True until the first message proves the child knows the spawn token.
+   * Commands are queued (not written) until then, so a spoofed socket never
+   * sees any traffic.
+   */
+  private awaitingHello = true
+  private helloTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
     private readonly hostMainPath: string,
     private readonly port: number,
+    private readonly token: string,
     private readonly onExit?: () => void,
   ) {
     const electron = resolveElectronPath()
@@ -192,7 +210,7 @@ class ElectronChildClient {
     const env: Record<string, string | undefined> = { ...process.env }
     delete env.ELECTRON_RUN_AS_NODE
     delete env.NODE_OPTIONS
-    this.child = spawn(electron, [hostMainPath, '--rpc-port', String(port)], {
+    this.child = spawn(electron, [hostMainPath, '--rpc-port', String(port), '--rpc-token', token], {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: false,
       env,
@@ -224,10 +242,23 @@ class ElectronChildClient {
     this.onExit?.()
   }
 
-  /** Accept the child's connection (called by the server). */
+  /** Whether a connection (authenticated or still authenticating) is held. */
+  isAttached(): boolean {
+    return this.socket !== undefined
+  }
+
+  /**
+   * Accept the child's connection (called by the server). Exactly one socket
+   * is ever attached; the server drops any further connection. Commands stay
+   * queued until the child's first line authenticates with the spawn token.
+   */
   attach(socket: import('node:net').Socket): void {
+    if (this.socket !== undefined) {
+      // Already attached: this is a second connection; reject it.
+      socket.destroy()
+      return
+    }
     this.socket = socket
-    this.connected = true
     socket.setEncoding('utf8')
     // Without an 'error' listener a remote reset (ECONNRESET/EPIPE) throws an
     // uncaught 'error' event and crashes the whole DSH process; 'close' below
@@ -242,11 +273,14 @@ class ElectronChildClient {
         this.fail(new Error('dsh-builtin-browser: browser host connection closed'))
       }
     })
-    // Flush anything queued while disconnected.
-    if (this.outbox.length > 0) {
-      for (const line of this.outbox) socket.write(line + '\n')
-      this.outbox = []
-    }
+    // The child must authenticate within the readiness budget; otherwise the
+    // connection is treated as hostile and torn down.
+    this.helloTimer = setTimeout(() => {
+      if (this.awaitingHello) {
+        socket.destroy()
+        this.fail(new Error('dsh-builtin-browser: browser host did not authenticate'))
+      }
+    }, READY_TIMEOUT_MS)
   }
 
   private onData(chunk: string | Buffer): void {
@@ -264,11 +298,34 @@ class ElectronChildClient {
       const line = this.buffer.slice(0, nl).trim()
       this.buffer = this.buffer.slice(nl + 1)
       if (line === '') continue
-      let msg: { id?: number; ok?: boolean; result?: unknown; err?: string }
+      let msg: { id?: number; op?: string; token?: string; ok?: boolean; result?: unknown; err?: string }
       try {
         msg = JSON.parse(line) as typeof msg
       } catch {
         // Non-protocol line; ignore.
+        continue
+      }
+      if (this.awaitingHello) {
+        // The FIRST line must be the child's hello carrying the spawn token.
+        // Anything else (or a wrong token) means a spoofed connection: drop
+        // it and fail every pending call rather than trust the line.
+        this.awaitingHello = false
+        if (this.helloTimer !== undefined) {
+          clearTimeout(this.helloTimer)
+          this.helloTimer = undefined
+        }
+        if (msg.op !== 'hello' || msg.token !== this.token) {
+          this.socket?.destroy()
+          this.fail(new Error('dsh-builtin-browser: browser host authentication failed'))
+          return
+        }
+        this.connected = true
+        // Flush anything queued while disconnected — now that the peer is
+        // authenticated, it is safe to send commands.
+        if (this.outbox.length > 0) {
+          for (const line of this.outbox) this.socket?.write(line + '\n')
+          this.outbox = []
+        }
         continue
       }
       if (typeof msg.id !== 'number') continue
@@ -320,6 +377,9 @@ class RemoteView implements ElectronViewHandle {
   /** Ask the child to download a URL to a local file (keeps cookies/login). */
   async download(url: string, savePath: string): Promise<void> {
     const result = await this.client.call<{ base64: string }>('download', { viewId: this.id, url, savePath })
+    // Create the target directory so a fresh downloads folder works out of
+    // the box; writing into an existing file is the tool's contract.
+    mkdirSync(dirname(savePath), { recursive: true })
     writeFileSync(savePath, Buffer.from(result.base64, 'base64'))
   }
 
@@ -376,10 +436,25 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   }
 
   private async start(): Promise<void> {
-    // Listen on an ephemeral loopback port; the child connects back.
+    // Listen on an ephemeral loopback port; the child connects back. The
+    // server accepts exactly one connection: the child's. Any further
+    // connection (a local process probing the port) is destroyed at once.
     const server = createServer(socket => {
-      if (this.client !== undefined) this.client.attach(socket)
-      else this.pendingSocket = socket
+      if (this.client !== undefined && this.client.isAttached()) {
+        // A live child connection already exists — reject the extra one.
+        socket.destroy()
+        return
+      }
+      if (this.client !== undefined) {
+        // The child's first connection arrived after the client was created.
+        this.client.attach(socket)
+        return
+      }
+      if (this.pendingSocket !== undefined) {
+        // Only one connection may wait for the client; drop the older one.
+        this.pendingSocket.destroy()
+      }
+      this.pendingSocket = socket
     })
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject)
@@ -393,12 +468,17 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     const address = server.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
     this.server = server
-    this.client = new ElectronChildClient(this.hostMainPath, port, () => this.onChildExit())
+    // Random per-spawn token: the child must prove knowledge of it (via the
+    // --rpc-token argv) before any command is written to the socket.
+    const token = randomBytes(24).toString('hex')
+    this.client = new ElectronChildClient(this.hostMainPath, port, token, () => this.onChildExit())
     if (this.pendingSocket !== undefined) {
       this.client.attach(this.pendingSocket)
       this.pendingSocket = undefined
     }
-    // Wait for the child's connection + readiness ping.
+    // Wait for the child's connection + authentication + readiness ping. The
+    // ping is queued until the hello authenticates, so a spoofed socket
+    // never observes it.
     await withTimeout(this.client.call('ping'), READY_TIMEOUT_MS, 'browser host did not become ready')
   }
 

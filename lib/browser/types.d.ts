@@ -20,7 +20,11 @@ export type BrowserSessionId = string;
  * minimal so a provider swap never changes how the model asks.
  */
 export interface BrowserNavigateRequest {
-    /** The URL to open. Admission (HTTP(S) only, no credentials/private targets) is provider-owned. */
+    /**
+     * The URL to open. Admission (HTTP(S) only) is provider-owned; the seam
+     * itself does not police credentials or private/localhost targets — a
+     * shared real browser legitimately reaches local dev servers.
+     */
     readonly url: string;
 }
 /**

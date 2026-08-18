@@ -41,7 +41,9 @@ agent (browser_* 工具)
 
 - 会话缓存 `sessionsByTask`:同一任务复用同一会话,并发首开去重;
 - `browser_reset_session` 关闭本任务会话并遗忘映射(即使 close 抛错也清除,下次调用重建);
-- `browser_restrict` 维护模块级白名单,守卫所有非只读工具;
+- 会话生命周期绑定 agent 作用域 ctx:agent(DSH 会话)销毁时自动关闭对应浏览器会话,任务结束后不再泄漏窗口/视图;
+- 会话/开启动态/白名单都是**每插件实例(每 context)作用域**的,多 context 互不共享、互不污染;
+- `browser_restrict` 维护本实例白名单,守卫所有非只读工具;
 - 输出 schema 与返回值严格一致(DSH 运行时会校验,`additionalProperties: false` 下多一个字段都会报错)。
 
 ## 自托管实现(纯 `dsh web`)
@@ -57,8 +59,9 @@ RemoteElectronViewHost  ──TCP JSON-RPC──▶  host-main.js
 ```
 
 - **协议**:本机 loopback TCP,每行一个 JSON(`{ id, op, ... }` ↔ `{ id, ok, result|err }`);
+- **认证**:每次 spawn 生成随机 token(经 `--rpc-token` 传入),子进程首条消息必须回传该 token(`hello`);服务端只接受**一个**连接,其余连接直接断开——本机其他进程无法伪冒子进程或注入回复;
 - **Electron 定位**:① peer 依赖 → ② `ELECTRON_PATH` → ③ 锚点与 pnpm store 中**版本最新**者(33.x 有合成器缺陷,建议 ≥ 40);
-- **稳健性**:子进程/套接字都有 `error` 监听(否则未捕获事件会炸掉整个 DSH 进程);子进程退出自动重启;物化失败可重试;下载有 256MB 上限与 60s 超时;cookie 导出/恢复有 30s 超时;
+- **稳健性**:子进程/套接字都有 `error` 监听(否则未捕获事件会炸掉整个 DSH 进程);子进程退出自动重启;物化失败可重试;下载仅限 HTTP(S)、`savePath` 必须绝对路径(可配置 `downloadDir` 限定目录)、流式限流 + Content-Length 提前拒绝、256MB 上限与 60s 超时;cookie 导出/恢复有 30s 超时;
 - **视图可见性**:多标签/多会话时,`showView` 隐藏其他视图并把目标视图置顶(remove+re-add),确保用户看到的是活动标签;
 - **孤儿防护**:父进程断开时子进程自动退出,不留僵尸窗口;
 - **cookie 落盘**:子进程使用独立 userData 目录(`<DSH_HOME>/dsh-builtin-browser-host`),登录态跨重启保留(另有 `browser_auth` 手动导出/恢复)。
