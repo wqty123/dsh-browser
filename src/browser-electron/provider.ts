@@ -9,7 +9,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { isAbsolute, resolve, sep } from 'node:path'
+import { homedir } from 'node:os'
+import { isAbsolute, join, resolve, sep } from 'node:path'
 import type {
   BrowserChallenge,
   BrowserContentRequest,
@@ -24,6 +25,11 @@ import type {
   BrowserSessionId,
   BrowserSnapshotResult,
   BrowserTab,
+  BrowserWaitRequest,
+  BrowserWaitResult,
+  BrowserScrollRequest,
+  BrowserKeyRequest,
+  BrowserScreenshotRequest,
   ExportedCookie,
 } from '../browser/types.js'
 import { BrowserError } from '../browser/types.js'
@@ -37,7 +43,33 @@ import { BrowserError } from '../browser/types.js'
 const CHALLENGE_DETECT_EXPRESSION = `(() => {
   const title = (document.title || '').trim()
   const bodyText = (document.body && document.body.innerText || '').slice(0, 4000)
-  const lower = (title + '\\n' + bodyText).toLowerCase()
+  // Challenge widgets often live in same-origin iframes or shadow roots;
+  // scan those too (cross-origin frames stay opaque).
+  let extraText = ''
+  try {
+    const seen = new Set()
+    const scan = (doc) => {
+      if (seen.has(doc)) return
+      seen.add(doc)
+      for (const el of doc.querySelectorAll('*')) {
+        if (el.shadowRoot) {
+          extraText += (el.shadowRoot.textContent || '').slice(0, 2000)
+          scan(el.shadowRoot)
+        }
+        if (el.tagName === 'IFRAME') {
+          try {
+            const d = el.contentDocument
+            if (d) {
+              extraText += ((d.body && d.body.innerText) || '').slice(0, 2000)
+              scan(d)
+            }
+          } catch { /* cross-origin */ }
+        }
+      }
+    }
+    scan(document)
+  } catch { /* never fail the challenge check */ }
+  const lower = (title + '\\n' + bodyText + '\\n' + extraText).toLowerCase()
   const frameSrcs = [...document.querySelectorAll('iframe')].map(f => f.src || '').join(' ')
   const framesLower = frameSrcs.toLowerCase()
   const hasCfInterstitial = /just a moment|checking your browser|attention required|cf_chl/i.test(lower)
@@ -82,8 +114,19 @@ export interface ElectronBrowserViewHost {
    * Optional: a host without visible-tab switching treats every view as
    * always present (acceptable for headless/probe hosts).
    * @param handle - the handle to make visible.
+   * @param label - human-readable session/task label, when the provider knows
+   * one; the host may surface it (e.g. in the window title) so a human can
+   * tell which task's page is currently visible.
    */
-  showView?(handle: ElectronViewHandle): void
+  showView?(handle: ElectronViewHandle, label?: string): void
+  /**
+   * Optional cheap usability probe (no network): whether the host can back
+   * views at all right now. The self-hosted host checks for a usable Electron
+   * binary; a host without the probe is assumed usable. Lets the seam's
+   * provider selection (BROWSER_PROVIDER_UNAVAILABLE etc.) be real instead
+   * of failing only at first use.
+   */
+  available?(): boolean
 }
 
 /**
@@ -113,6 +156,8 @@ interface Tab {
 /** One live browser session: an ordered list of tabs, one active. */
 interface Session {
   readonly id: BrowserSessionId
+  /** Human-readable label (usually the DSH task/session id) for the window title. */
+  readonly label?: string
   readonly tabs: Tab[]
   activeIndex: number
   /** Chronological operation log (navigate/execute/click/type/fill/download/auth). */
@@ -130,10 +175,11 @@ export interface ElectronBrowserProviderConfig {
   /** Maximum content characters before truncation when no maxChars is given. Default 100_000. */
   readonly contentMaxChars?: number
   /**
-   * When set, `browser_download` save paths must resolve inside this
-   * directory. Unset (default) keeps the tool's absolute-path contract but
-   * still rejects relative paths. Set this to confine downloads to one
-   * folder and prevent a (prompt-injected) agent from writing elsewhere.
+   * Directory `browser_download` save paths must resolve inside (prevents a
+   * prompt-injected agent from writing arbitrary machine paths). Default:
+   * the user's Downloads folder — the natural, human-visible place for a
+   * browser's files; override to confine downloads elsewhere (e.g. a sandbox
+   * dir). Relative save paths are always rejected.
    */
   readonly downloadDir?: string
 }
@@ -170,6 +216,14 @@ export interface CdpEvaluateParams {
 
 /** CDP method for a full-page screenshot capture. */
 export const CDP_PAGE_CAPTURE_SCREENSHOT = 'Page.captureScreenshot'
+
+/** Native capture options the self-hosted view handle understands. */
+export interface ScreenshotOptions {
+  readonly format?: 'png' | 'jpeg'
+  readonly quality?: number
+  readonly maxWidth?: number
+  readonly maxHeight?: number
+}
 /** CDP method for runtime evaluation (the execute path). */
 export const CDP_RUNTIME_EVALUATE = 'Runtime.evaluate'
 /** CDP method for navigation. */
@@ -177,6 +231,27 @@ export const CDP_PAGE_NAVIGATE = 'Page.navigate'
 
 /** Cap on content returned by a snapshot fetch to keep the wire bounded. */
 const SNAPSHOT_LABEL_MAX = 120
+
+/** Named-key table for `key()`: CDP key/code names + Windows virtual key codes. */
+const KEY_SPECS: Readonly<Record<string, { readonly key: string; readonly code: string; readonly vk: number }>> = {
+  Enter: { key: 'Enter', code: 'Enter', vk: 13 },
+  Tab: { key: 'Tab', code: 'Tab', vk: 9 },
+  Escape: { key: 'Escape', code: 'Escape', vk: 27 },
+  Backspace: { key: 'Backspace', code: 'Backspace', vk: 8 },
+  Delete: { key: 'Delete', code: 'Delete', vk: 46 },
+  ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', vk: 38 },
+  ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', vk: 40 },
+  ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', vk: 37 },
+  ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', vk: 39 },
+  Home: { key: 'Home', code: 'Home', vk: 36 },
+  End: { key: 'End', code: 'End', vk: 35 },
+  PageUp: { key: 'PageUp', code: 'PageUp', vk: 33 },
+  PageDown: { key: 'PageDown', code: 'PageDown', vk: 34 },
+  Space: { key: ' ', code: 'Space', vk: 32 },
+}
+
+/** Supported key names, exported for the tool's enum and error messages. */
+export const BROWSER_KEY_NAMES: readonly string[] = Object.keys(KEY_SPECS)
 
 /**
  * Browser provider over Electron views. Sessions hold an ordered list of
@@ -201,12 +276,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
     this.httpOnly = config.httpOnly ?? true
     this.snapshotMaxElements = config.snapshotMaxElements ?? 60
     this.contentMaxChars = config.contentMaxChars ?? 100_000
-    this.downloadDir = config.downloadDir
+    // Confine downloads to a dedicated directory by default: the OS Downloads
+    // folder is the human-visible, browser-natural place for downloaded files.
+    this.downloadDir = config.downloadDir ?? join(homedir(), 'Downloads')
   }
 
-  /** Usable whenever the host can create views (always in the desktop shell). */
+  /**
+   * Usable when the host says it can back views (the self-hosted host probes
+   * for a usable Electron binary; the desktop shell is assumed usable).
+   */
   available(): boolean {
-    return true
+    return this.host.available?.() ?? true
   }
 
   /**
@@ -215,11 +295,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * tool layer caches one session per DSH task). Sessions are isolated from
    * each other: each keeps its own tabs, active tab, and history, and only
    * the active tab of a session is made visible.
+   * @param label - optional human-readable label (e.g. the DSH task id) shown
+   * in the window title so a human can tell which task's page is visible.
    */
-  open(): Promise<BrowserSessionId> {
+  open(label?: string): Promise<BrowserSessionId> {
     const handle = this.host.createView()
     const id = `browser:${randomUUID()}`
-    this.sessions.set(id, { id, tabs: [{ id: `tab:${randomUUID()}`, handle }], activeIndex: 0, history: [], nextSeq: 1 })
+    this.sessions.set(id, { id, label, tabs: [{ id: `tab:${randomUUID()}`, handle }], activeIndex: 0, history: [], nextSeq: 1 })
     return Promise.resolve(id)
   }
 
@@ -404,6 +486,70 @@ export class ElectronBrowserProvider implements BrowserProvider {
     }
   }
 
+  /**
+   * Poll until the active tab's page is ready (and optional URL/selector
+   * match), or the budget runs out. Returns a verdict instead of throwing on
+   * timeout — the caller (model) decides what a miss means. Polling evaluates
+   * in the CURRENT document, so after a navigation the old document may
+   * briefly answer; pass the expected `url` to disambiguate.
+   */
+  async waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult> {
+    const tab = this.activeTab(this.session(session))
+    signal?.throwIfAborted()
+    const timeoutMs = request.timeoutMs ?? 30_000
+    const deadline = Date.now() + timeoutMs
+    const url = request.url ?? ''
+    const selector = request.selector ?? ''
+    const checkLoaded = request.loaded !== false
+    const expression = `(() => {
+      const wantUrl = ${JSON.stringify(url)}
+      const wantSelector = ${JSON.stringify(selector)}
+      const inDoc = (doc, sel) => {
+        if (doc.querySelector(sel)) return true
+        for (const el of doc.querySelectorAll('iframe')) {
+          try { const d = el.contentDocument; if (d && inDoc(d, sel)) return true } catch { /* cross-origin */ }
+        }
+        return false
+      }
+      const href = location.href
+      const urlOk = wantUrl === '' || href === wantUrl || href.startsWith(wantUrl)
+      const loadedOk = document.readyState === 'complete' || document.readyState === 'interactive'
+      const foundOk = wantSelector === '' || inDoc(document, wantSelector)
+      return { urlOk, loadedOk, foundOk }
+    })()`
+    for (;;) {
+      const result = await withTimeout(
+        handleSendEvaluate(tab.handle, expression),
+        Math.min(5_000, Math.max(250, deadline - Date.now())),
+        signal,
+        'browser: wait poll timed out',
+        () => terminatePage(tab.handle),
+      )
+      if (!result.ok) {
+        throw new BrowserError(`browser: wait failed: ${result.exception}`, 'BROWSER_WAIT_FAILED')
+      }
+      const state = result.value as { urlOk: boolean; loadedOk: boolean; foundOk: boolean }
+      const urlOk = url === '' || state.urlOk === true
+      const loadedOk = !checkLoaded || state.loadedOk === true
+      const foundOk = selector === '' || state.foundOk === true
+      if (urlOk && loadedOk && foundOk) {
+        return { ready: true, reason: 'condition met' }
+      }
+      if (Date.now() >= deadline) {
+        const misses: string[] = []
+        if (!urlOk) misses.push(`url not yet "${url}"`)
+        if (!loadedOk) misses.push('page not loaded')
+        if (!foundOk) misses.push(`selector "${selector}" not found`)
+        return { ready: false, reason: misses.join('; ') }
+      }
+      // Sleep between polls, abortable by the caller.
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 200)
+        signal?.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason ?? new Error('aborted')) }, { once: true })
+      })
+    }
+  }
+
   /** Produce an AI-friendly snapshot of the active tab. */
   async snapshot(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserSnapshotResult> {
     const s = this.session(session)
@@ -413,13 +559,50 @@ export class ElectronBrowserProvider implements BrowserProvider {
       const cap = ${String(this.snapshotMaxElements)}
       const url = location.href
       const title = document.title || undefined
-      const els = [...document.querySelectorAll('input, textarea, select, button, a[href], [role="button"], [role="searchbox"], [contenteditable="true"]')]
+      // Collect interactive elements from the top document AND from shadow
+      // roots and same-origin iframes (cross-origin iframes stay opaque — the
+      // browser forbids reading them, and so does this snapshot). Elements
+      // inside iframes carry a frame flag so the model knows DOM selectors
+      // are frame-scoped; coordinates below are always top-document.
+      const SELECTOR = 'input, textarea, select, button, a[href], [role="button"], [role="searchbox"], [contenteditable="true"]'
+      const els = []
+      const seen = new Set()
+      const collect = (doc, inFrame) => {
+        if (seen.has(doc)) return
+        seen.add(doc)
+        const hosts = []
+        for (const el of doc.querySelectorAll('*')) {
+          if (el.matches(SELECTOR)) els.push({ el, inFrame })
+          if (el.shadowRoot) hosts.push({ doc: el.shadowRoot, inFrame })
+          if (el.tagName === 'IFRAME') {
+            try { const d = el.contentDocument; if (d) hosts.push({ doc: d, inFrame: true }) } catch { /* cross-origin */ }
+          }
+        }
+        for (const h of hosts) collect(h.doc, h.inFrame)
+      }
+      collect(document, false)
+      // Absolute viewport coordinates in the TOP document: iframe content is
+      // offset by each ancestor iframe's rect, so coordinate clicks land on
+      // the right element no matter which frame it lives in.
+      const absRect = (el, doc) => {
+        const r = el.getBoundingClientRect()
+        let x = r.x, y = r.y
+        let d = doc
+        while (d && d.defaultView && d.defaultView.frameElement) {
+          const fr = d.defaultView.frameElement.getBoundingClientRect()
+          x += fr.x; y += fr.y
+          d = d.defaultView.frameElement.ownerDocument
+        }
+        return { x, y, w: r.width, h: r.height }
+      }
       const out = []
-      for (const el of els) {
+      for (const { el, inFrame } of els) {
         if (out.length >= cap) break
         const r = el.getBoundingClientRect()
+        // Cheap layout check first; only force style recalc when it passes.
+        if (r.width < 4 || r.height < 4) continue
         const cs = getComputedStyle(el)
-        if (r.width < 4 || r.height < 4 || cs.visibility === 'hidden' || cs.display === 'none') continue
+        if (cs.visibility === 'hidden' || cs.display === 'none') continue
         const kind = el.tagName === 'INPUT' ? (el.type === 'checkbox' ? 'checkbox' : (el.type === 'submit' || el.type === 'button' ? 'button' : 'input'))
           : el.tagName === 'TEXTAREA' ? 'textarea'
           : el.tagName === 'SELECT' ? 'select'
@@ -427,13 +610,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
           : el.tagName === 'A' ? 'link' : 'other'
         const label = (el.getAttribute('aria-label') || el.placeholder || el.textContent || el.value || el.name || el.id || '').toString().replace(/\\s+/g, ' ').trim().slice(0, ${String(SNAPSHOT_LABEL_MAX)})
         if (!label && kind !== 'link') continue
+        const a = absRect(el, el.ownerDocument)
         out.push({
           ref: out.length + 1,
           kind,
           label,
           selector: el.id ? '#' + CSS.escape(el.id) : (el.name ? '[name=' + JSON.stringify(el.name) + ']' : ''),
-          x: Math.round(r.x + r.width / 2),
-          y: Math.round(r.y + r.height / 2),
+          x: Math.round(a.x + a.w / 2),
+          y: Math.round(a.y + a.h / 2),
+          ...inFrame ? { frame: true } : {},
         })
       }
       const challenge = ${CHALLENGE_DETECT_EXPRESSION}
@@ -485,8 +670,26 @@ export class ElectronBrowserProvider implements BrowserProvider {
       const root = ${selector === '' ? 'document.body' : `document.querySelector(${JSON.stringify(selector)})`}
       if (!root) return { ok: false, reason: 'selector not found' }
       const fmt = ${JSON.stringify(format)}
+      // Both walkers pierce shadow roots and same-origin iframes (cross-origin
+      // iframes stay opaque — the browser forbids reading them).
       let content = ''
-      if (fmt === 'txt') content = root.innerText || ''
+      if (fmt === 'txt') {
+        const parts = []
+        const textWalk = (node) => {
+          if (node.nodeType === Node.TEXT_NODE) { const t = (node.textContent || '').trim(); if (t) parts.push(t); return }
+          if (node.nodeType !== Node.ELEMENT_NODE) return
+          const tag = node.tagName.toLowerCase()
+          if (tag === 'script' || tag === 'style' || tag === 'noscript') return
+          if (tag === 'iframe') {
+            try { const d = node.contentDocument; if (d && d.body) for (const c of d.body.childNodes) textWalk(c) } catch { /* cross-origin */ }
+            return
+          }
+          if (node.shadowRoot) for (const c of node.shadowRoot.childNodes) textWalk(c)
+          for (const child of node.childNodes) textWalk(child)
+        }
+        textWalk(root)
+        content = parts.join(' ')
+      }
       else if (fmt === 'html') content = root.outerHTML || ''
       else if (fmt === 'json') content = JSON.stringify(root)
       else {
@@ -497,14 +700,18 @@ export class ElectronBrowserProvider implements BrowserProvider {
           if (node.nodeType !== Node.ELEMENT_NODE) return
           const tag = node.tagName.toLowerCase()
           if (tag === 'script' || tag === 'style' || tag === 'noscript') return
+          if (tag === 'iframe') {
+            try { const d = node.contentDocument; if (d && d.body) for (const c of d.body.childNodes) walk(c) } catch { /* cross-origin */ }
+            return
+          }
+          if (node.shadowRoot) for (const c of node.shadowRoot.childNodes) walk(c)
           if (tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4') parts.push('\\n' + '#'.repeat(Number(tag[1])) + ' ' + (node.textContent || '').trim() + '\\n')
           else if (tag === 'a') { const t = (node.textContent || '').trim(); if (t) parts.push('[' + t + '](' + (node.href || '') + ')') }
           else if (tag === 'li') parts.push('  - ' + (node.textContent || '').trim())
           else if (tag === 'p' || tag === 'div' || tag === 'section' || tag === 'article') { const t = (node.textContent || '').trim(); if (t) parts.push(t + '\\n') }
           else { for (const child of node.childNodes) walk(child) }
         }
-        if (root.nodeType === Node.TEXT_NODE) walk(root)
-        else for (const child of root.childNodes) walk(child)
+        walk(root)
         // Join without a separator: each part already carries its own trailing
         // newline, so a space join would smear headings/links into run-on text.
         content = parts.join('')
@@ -575,6 +782,103 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // Store the full text so replay re-issues the same input; the history
     // tool truncates long values when rendering.
     this.record(s, 'type', { text: request.text }, true)
+  }
+
+  /** Scroll the page: by deltas, to a selector, or to top/bottom. */
+  async scroll(session: BrowserSessionId, request: BrowserScrollRequest, signal?: AbortSignal): Promise<void> {
+    const s = this.session(session)
+    const tab = this.activeTab(s)
+    signal?.throwIfAborted()
+    const selector = request.selector ?? ''
+    const script = `(() => {
+      const sel = ${JSON.stringify(selector)}
+      if (sel !== '') {
+        const el = document.querySelector(sel)
+        if (!el) return { ok: false, reason: 'selector not found' }
+        el.scrollIntoView({ behavior: 'instant', block: 'center' })
+        return { ok: true }
+      }
+      if (${request.toTop === true}) { window.scrollTo(0, 0); return { ok: true } }
+      if (${request.toBottom === true}) { window.scrollTo(0, document.body.scrollHeight); return { ok: true } }
+      window.scrollBy({ top: ${request.deltaY ?? 0}, left: ${request.deltaX ?? 0} })
+      return { ok: true }
+    })()`
+    const timeoutMs = 15_000
+    const result = await withTimeout(
+      handleSendEvaluate(tab.handle, script),
+      timeoutMs,
+      signal,
+      `browser: scroll timed out after ${timeoutMs}ms`,
+      () => terminatePage(tab.handle),
+    )
+    if (!result.ok) throw new BrowserError(`browser: scroll failed: ${result.exception}`, 'BROWSER_SCROLL_FAILED')
+    const value = result.value as { ok?: boolean; reason?: string }
+    if (value.ok !== true) throw new BrowserError(`browser: scroll failed: ${value.reason ?? 'unknown'}`, 'BROWSER_SCROLL_FAILED')
+    this.record(s, 'scroll', { ...request }, true)
+  }
+
+  /** Go back (-1) or forward (+1) in the active tab's navigation history. */
+  private async historyStep(session: BrowserSessionId, direction: -1 | 1, signal?: AbortSignal): Promise<void> {
+    const s = this.session(session)
+    const { handle } = this.activeTab(s)
+    signal?.throwIfAborted()
+    const timeoutMs = 30_000
+    const hist = await withTimeout(
+      handle.sendCommand('Page.getNavigationHistory'),
+      timeoutMs,
+      signal,
+      `browser: history read timed out after ${timeoutMs}ms`,
+    ) as { entries?: Array<{ id?: number }>; currentIndex?: number }
+    const entries = hist.entries ?? []
+    const currentIndex = hist.currentIndex ?? -1
+    const target = currentIndex + direction
+    if (target < 0 || target >= entries.length) {
+      // Nothing to step to; treat it as a successful no-op so the agent can
+      // proceed without an error dance.
+      this.record(s, direction === -1 ? 'back' : 'forward', {}, true)
+      return
+    }
+    const entry = entries[target]
+    if (entry?.id === undefined) throw new BrowserError('browser: history entry missing id', 'BROWSER_HISTORY_INVALID')
+    await withTimeout(
+      handle.sendCommand('Page.navigateToHistoryEntry', { entryId: entry.id }),
+      timeoutMs,
+      signal,
+      `browser: history navigation timed out after ${timeoutMs}ms`,
+      () => { void handle.sendCommand('Page.stopLoading').catch(() => {}) },
+    )
+    this.record(s, direction === -1 ? 'back' : 'forward', {}, true)
+    this.showActive(s)
+  }
+
+  /** Go back in the active tab's history. */
+  async back(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+    return this.historyStep(session, -1, signal)
+  }
+
+  /** Go forward in the active tab's history. */
+  async forward(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+    return this.historyStep(session, 1, signal)
+  }
+
+  /** Press one named key (Enter/Tab/arrows/…) via CDP key events. */
+  async key(session: BrowserSessionId, request: BrowserKeyRequest, signal?: AbortSignal): Promise<void> {
+    const s = this.session(session)
+    const { handle } = this.activeTab(s)
+    signal?.throwIfAborted()
+    const spec = KEY_SPECS[request.key]
+    if (spec === undefined) {
+      throw new BrowserError(`browser: unsupported key "${request.key}" (supported: ${BROWSER_KEY_NAMES.join(', ')})`, 'BROWSER_KEY_UNSUPPORTED')
+    }
+    const params = { key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.vk, nativeVirtualKeyCode: spec.vk }
+    const timeoutMs = 15_000
+    try {
+      await withTimeout(handle.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', ...params }), timeoutMs, signal, `browser: key press timed out after ${timeoutMs}ms`)
+      await withTimeout(handle.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...params }), timeoutMs, signal, `browser: key release timed out after ${timeoutMs}ms`)
+    } catch (error) {
+      throw new BrowserError(`browser: key "${request.key}" failed: ${String(error)}`, 'BROWSER_KEY_FAILED', { cause: error })
+    }
+    this.record(s, 'key', { key: request.key }, true)
   }
 
   /**
@@ -814,26 +1118,33 @@ export class ElectronBrowserProvider implements BrowserProvider {
     return restored
   }
 
-  /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */
+  /** Capture the current page, optionally full-page, PNG or JPEG, scalable. */
   async screenshot(
     session: BrowserSessionId,
-    request?: { readonly fullPage?: boolean; readonly savePath?: string },
+    request?: BrowserScreenshotRequest,
     signal?: AbortSignal,
   ): Promise<{ readonly dataUrl: string; readonly path?: string }> {
     const s = this.session(session)
     const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
+    const format = request?.format ?? 'png'
     // Native capturePage path (self-hosted): CDP Page.captureScreenshot can
     // hang indefinitely on a view once another (hidden) WebContentsView exists
     // in the window; capturePage is fast for visible views and resolves
-    // immediately (empty) for hidden ones.
-    const capturable = handle as { capture?(): Promise<{ base64: string; width: number; height: number }> }
+    // immediately (empty) for hidden ones. JPEG and downscaling are encoded
+    // in the child from the NativeImage, so this path is the only one that
+    // can produce JPEG (CDP JPEG hangs on Electron 43).
+    const capturable = handle as { capture?(opts?: ScreenshotOptions): Promise<{ base64: string; mime: string }> }
     if (request?.fullPage !== true && typeof capturable.capture === 'function') {
       // Ensure the target view is the visible one before capturing.
       this.showActive(s)
       const timeoutMs = 30_000
       const shot = await withTimeout(
-        capturable.capture(),
+        capturable.capture({
+          ...format === 'jpeg' ? { format, quality: request?.quality } : {},
+          ...request?.maxWidth !== undefined ? { maxWidth: request.maxWidth } : {},
+          ...request?.maxHeight !== undefined ? { maxHeight: request.maxHeight } : {},
+        }),
         timeoutMs,
         signal,
         `browser: screenshot timed out after ${timeoutMs}ms`,
@@ -841,10 +1152,11 @@ export class ElectronBrowserProvider implements BrowserProvider {
       if (shot.base64 === '') {
         throw new BrowserError('browser: capture returned an empty image (view not painted); retry shortly', 'BROWSER_SCREENSHOT_FAILED')
       }
-      return this.saveScreenshot(shot.base64, request?.savePath)
+      return this.saveScreenshot(shot.base64, request?.savePath, shot.mime ?? 'image/png')
     }
     // Fallback: a desktop-shell handle (no capture()) or a full-page capture
-    // uses CDP; full-page needs `captureBeyondViewport` which capturePage lacks.
+    // uses CDP; full-page needs `captureBeyondViewport` which capturePage
+    // lacks. PNG only — the JPEG hang is a CDP-on-Electron-43 defect.
     const params: Record<string, unknown> = {}
     if (request?.fullPage === true) {
       // `captureBeyondViewport` captures the full scrollable content; without
@@ -862,21 +1174,21 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (typeof data !== 'string') {
       throw new BrowserError('browser: screenshot returned no image data', 'BROWSER_SCREENSHOT_FAILED')
     }
-    return this.saveScreenshot(data, request?.savePath)
+    return this.saveScreenshot(data, request?.savePath, 'image/png')
   }
 
-  /** Build the data URL and optionally write the PNG to disk. */
-  private saveScreenshot(base64: string, savePath?: string): { dataUrl: string; path?: string } {
+  /** Build the data URL and optionally write the image to disk. */
+  private saveScreenshot(base64: string, savePath: string | undefined, mime: string): { dataUrl: string; path?: string } {
     if (savePath !== undefined) {
       try {
         writeFileSync(savePath, Buffer.from(base64, 'base64'))
-        return { dataUrl: `data:image/png;base64,${base64}`, path: savePath }
+        return { dataUrl: `data:${mime};base64,${base64}`, path: savePath }
       } catch (error) {
         // Report the write problem but keep the capture usable.
         throw new BrowserError(`browser: screenshot save to "${savePath}" failed: ${String(error)}`, 'BROWSER_SCREENSHOT_SAVE_FAILED', { cause: error })
       }
     }
-    return { dataUrl: `data:image/png;base64,${base64}` }
+    return { dataUrl: `data:${mime};base64,${base64}` }
   }
 
   /** Append one operation to the session's history. */
@@ -942,6 +1254,18 @@ export class ElectronBrowserProvider implements BrowserProvider {
         this.record(s, 'replay', { seq, of: entry.action, text }, true)
         return
       }
+      case 'scroll': {
+        await this.scroll(session, entry.params as BrowserScrollRequest)
+        this.record(s, 'replay', { seq, of: entry.action }, true)
+        return
+      }
+      case 'key': {
+        const key = entry.params.key
+        if (typeof key !== 'string') throw new BrowserError(`browser: history seq ${seq} key has no key`, 'BROWSER_HISTORY_INVALID')
+        await this.key(session, { key })
+        this.record(s, 'replay', { seq, of: entry.action, key }, true)
+        return
+      }
       case 'execute': {
         const script = entry.params.script
         if (typeof script !== 'string') throw new BrowserError(`browser: history seq ${seq} execute has no script`, 'BROWSER_HISTORY_INVALID')
@@ -992,9 +1316,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
     this.showActive(s)
   }
 
-  /** Ask the host to show the active tab's view. */
+  /** Ask the host to show the active tab's view, carrying the session label. */
   private showActive(s: Session): void {
-    this.host.showView?.(this.activeTab(s).handle)
+    this.host.showView?.(this.activeTab(s).handle, s.label)
   }
 
   /** Read the current URL of a view through CDP. */

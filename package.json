@@ -39,6 +39,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test \"tests/*.test.mjs\"",
     "prepack": "npm run build"
   },
   "keywords": [

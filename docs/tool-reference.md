@@ -1,13 +1,14 @@
 # 工具参考
 
-全部 20 个 `browser_*` 工具。守卫列:✅ 表示该动作受 `browser_restrict` 白名单约束;只读工具永不拦截。
+全部 25 个 `browser_*` 工具。守卫列:✅ 表示该动作受 `browser_restrict` 白名单约束;只读工具永不拦截。
 
 ## 页面与导航
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
 | `browser_open` | `url`(必填), `newTab?` | 快照(url/title/elements/truncated/challenge) | ✅ | 打开 URL,返回带编号元素的快照;`newTab: true` 在新标签打开 |
-| `browser_snapshot` | – | 快照 | – | 交互元素(输入框/按钮/链接)编号清单,供定位与点击 |
+| `browser_wait` | `timeoutMs?`, `url?`, `selector?` | `{ ready, reason }` | – | 等待页面加载完成(可选期望 URL / CSS 选择器);未就绪不抛错,返回原因 |
+| `browser_snapshot` | – | 快照 | – | 交互元素(输入框/按钮/链接)编号清单,供定位与点击;穿透同源 iframe 与 Shadow DOM,iframe 内元素标注 `frame` |
 | `browser_content` | `format`(html/markdown/txt/json,必填), `selector?`, `maxChars?`, `timeoutMs?` | `{ content, truncated }` | – | 抓取页面内容;`selector` 限定区域 |
 | `browser_challenge` | – | `{ blocked, kind?, reason?, hint? }` | – | 检测人机验证(CAPTCHA/Cloudflare/reCAPTCHA/hCaptcha/Turnstile);阻塞时请用户处理 |
 
@@ -18,6 +19,10 @@
 | `browser_execute` | `script`(必填), `args?` | `{ ok, value? / exception? }` | ✅ | 在页面执行 JS;脚本以 `return` 开头或作为表达式;`args` 以 `arguments[0..n]` 传入 |
 | `browser_click` | `x`, `y`(必填) | `{ clicked }` | ✅ | 视口坐标点击(配合截图做视觉定位) |
 | `browser_type` | `text`(必填) | `{ typed }` | ✅ | 向聚焦元素输入文本(CDP `Input.insertText`) |
+| `browser_key` | `key`(必填,枚举) | `{ pressed }` | ✅ | 按命名按键:Enter/Tab/Escape/Backspace/Delete/方向键/Home/End/PageUp/PageDown/Space |
+| `browser_scroll` | `deltaX?`, `deltaY?`, `selector?`, `toTop?`, `toBottom?` | `{ scrolled }` | ✅ | 滚动页面:像素增量 / 选择器定位 / 顶部底部 |
+| `browser_back` | – | `{ back }` | ✅ | 页面历史后退一步(无前项时为空操作) |
+| `browser_forward` | – | `{ forward }` | ✅ | 页面历史前进一步(无后项时为空操作) |
 | `browser_fill` | `fields`(必填,数组), `submit?` | `{ fields[], submitted }` | ✅ | 批量填表;字段按 `selector`/`name`/`label`/`placeholder` 匹配,值支持字符串/数字/布尔;单个字段失败不影响其余;`submit: true` 提交表单 |
 
 ## 标签与会话
@@ -36,27 +41,27 @@
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
 | `browser_history` | – | `{ entries[] }` | – | 操作日志(最新在后),含 seq/action/ok/params/result/error |
-| `browser_replay` | `seq`(必填) | `{ replayed }` | ✅ | 按序号回放某一步(navigate/execute/click/type) |
-| `browser_download` | `url`(必填), `savePath`(必填) | `{ path }` | ✅ | 带会话 cookie 下载到本地(仅 http(s);`savePath` 必须为绝对路径,配置 `downloadDir` 后限定在该目录内;上限 256MB,受 CORS 约束) |
+| `browser_replay` | `seq`(必填) | `{ replayed }` | ✅ | 按序号回放某一步(navigate/execute/click/type/scroll/key) |
+| `browser_download` | `url`(必填), `savePath`(必填) | `{ path }` | ✅ | 带会话 cookie 下载到本地(仅 http(s);`savePath` 必须为绝对路径,默认限定在 `~/Downloads`,可用 `downloadDir` 覆盖;上限 256MB,受 CORS 约束;由子进程直接落盘) |
 
 ## 登录态与安全
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
 | `browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出/恢复 cookie(自托管可用);flush 返回 cookie 列表,restore 带列表写回 |
-| `browser_restrict` | `allowed?` | `{ restrictedTo[] }` | – | 设置动作白名单;空列表解除;未知工具名报错 |
+| `browser_restrict` | `allowed?` | `{ restrictedTo[] }` | – | 设置动作白名单;空列表解除;未知工具名报错。**软护栏**——模型可自行解除,非安全边界 |
 
 ## 截图
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_screenshot` | `fullPage?`, `savePath?` | `{ dataUrl, path? }` | – | PNG 截图;`savePath` 落盘供视觉模型读取 |
+| `browser_screenshot` | `fullPage?`, `savePath?`, `format?`(png/jpeg), `quality?`, `maxWidth?`, `maxHeight?` | `{ dataUrl, path? }` | – | 截图;PNG 默认,JPEG 仅自托管原生路径;`maxWidth`/`maxHeight` 等比缩放降低视觉模型开销;`savePath` 落盘供视觉模型读取 |
 
 ## 常用组合
 
 **调研一个网站**
 ```
-browser_open https://site → browser_content format=markdown → browser_snapshot → 逐页浏览
+browser_open https://site → browser_wait(url=...) → browser_content format=markdown → browser_snapshot → 逐页浏览
 ```
 
 **登录并下载文件**

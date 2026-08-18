@@ -18,7 +18,7 @@
 | --- | --- |
 | Why a shared real browser, and how it differs from headless approaches | [Why a shared real browser](docs/why-browser.md) |
 | Installation, configuration, day-to-day use | [User guide](docs/user-guide.md) |
-| All 20 tools: parameters, output, examples | [Tool reference](docs/tool-reference.md) |
+| All 25 tools: parameters, output, examples | [Tool reference](docs/tool-reference.md) |
 | How the seam / provider / tools layers and self-hosting work | [Architecture](docs/architecture.md) |
 | Documentation index and README split | [Docs index](docs/README.md) |
 
@@ -28,7 +28,7 @@
 
 - **A real view, not a relay**: the browser is a native `WebContentsView`; the human sees every step the agent takes and can grab control at any time;
 - **Install-and-use**: with a desktop shell the shell's embedded view is used; on plain `dsh web` the plugin **self-hosts** — it spawns its own Electron window with zero extra configuration;
-- **One plugin, one toolset**: after install the agent automatically gets 20 `browser_*` tools (open, inspect, interact, fill forms, screenshot, download, auth management…).
+- **One plugin, one toolset**: after install the agent automatically gets 25 `browser_*` tools (open, wait, inspect, interact, scroll, back/forward, fill forms, press keys, screenshot, download, auth management…).
 
 In one sentence: **installing the plugin gives you a real browser that is shared with the user and drivable by the agent.**
 
@@ -131,13 +131,18 @@ See the full list in [Tool reference](#tool-reference).
 | Tool | Purpose | Guard |
 | --- | --- | --- |
 | `browser_open` | Open a URL (optionally in a new tab); returns a page snapshot | ✅ |
-| `browser_snapshot` | Numbered inventory of interactive elements (inputs/buttons/links) | – |
+| `browser_wait` | Wait for page load (optional expected URL / CSS selector), returns readiness | – |
+| `browser_snapshot` | Numbered inventory of interactive elements (inputs/buttons/links; pierces same-origin iframes and Shadow DOM) | – |
 | `browser_execute` | Run JS in the page; args arrive as `arguments[0..n]` | ✅ |
 | `browser_content` | Fetch the page as html / markdown / txt / json (selector, maxChars, timeoutMs) | – |
 | `browser_click` | Click at viewport coordinates (for vision-located targets) | ✅ |
 | `browser_type` | Type text into the focused element (CDP `Input.insertText`) | ✅ |
+| `browser_key` | Press a named key (Enter/Tab/arrows/Home/End…) | ✅ |
+| `browser_scroll` | Scroll the page (pixel deltas / selector / top-bottom) | ✅ |
+| `browser_back` | One step back in page history (no-op at the start) | ✅ |
+| `browser_forward` | One step forward in page history (no-op at the end) | ✅ |
 | `browser_fill` | Batch form fill (selector/name/label matching, controlled inputs, selects, checkbox/radio, optional submit) | ✅ |
-| `browser_screenshot` | PNG capture, optional `fullPage` and `savePath` | – |
+| `browser_screenshot` | Capture, optional `fullPage`, `savePath`, JPEG (`format`/`quality`) and scaling (`maxWidth`/`maxHeight`) | – |
 | `browser_list_tabs` | List the session's tabs | – |
 | `browser_switch_tab` | Switch to a tab by id (also switches the visible view when self-hosted) | ✅ |
 | `browser_close_tab` | Close a tab by id; closing the active tab activates the next | – |
@@ -149,9 +154,14 @@ See the full list in [Tool reference](#tool-reference).
 | `browser_download` | Download an HTTP(S) URL with session cookies to a local file (absolute `savePath`, 256 MB cap) | ✅ |
 | `browser_auth` | Export/restore cookies (login persistence, self-hosted) | ✅ |
 | `browser_challenge` | Detect a human-verification challenge (CAPTCHA / Cloudflare / reCAPTCHA / hCaptcha / Turnstile) | – |
-| `browser_restrict` | Restrict allowed browser actions (allow-list; empty list lifts it) | – |
+| `browser_restrict` | Restrict allowed browser actions (allow-list; empty list lifts it). **Soft guardrail** — the model can lift it itself; not a security boundary | – |
 
 > "Guard" column: ✅ actions are governed by the `browser_restrict` allow-list; read-only tools (snapshot/content/screenshot/list_tabs/session/challenge/history) are never blocked.
+
+### Waiting for the page
+
+- **After `browser_open`, before `browser_snapshot`, call `browser_wait` on slow sites**: pass `url` (what you opened) and an optional `selector`, and wait for `ready: true` — otherwise you snapshot the old document or a white screen.
+- **Content you cannot see may live in an iframe / Shadow DOM**: snapshots pierce same-origin iframes and shadow roots and mark them `(iframe)`; coordinates are always top-document, so `browser_click` works directly. DOM selectors are frame-scoped — reach them via `iframe.contentDocument` in `browser_execute`.
 
 ### Operating discipline (click/fill)
 
@@ -171,7 +181,7 @@ The plugin mounts through `cordis.patch.yml` (three rows); per-row config:
 | `browser-electron` | `httpOnly` | boolean | `true` | Allow HTTP(S) navigation only; other protocols (e.g. `file:`/`data:`) rejected (`BROWSER_NAVIGATION_BLOCKED`) |
 | `browser-electron` | `snapshotMaxElements` | number | `60` | Max snapshot elements before truncation |
 | `browser-electron` | `contentMaxChars` | number | `100000` | Default content character cap |
-| `browser-electron` | `downloadDir` | string | unset | Confine `browser_download` save paths to this directory (stops a prompt-injected agent writing arbitrary paths); when unset, absolute paths are still required |
+| `browser-electron` | `downloadDir` | string | `~/Downloads` | Confine `browser_download` save paths to this directory (stops a prompt-injected agent writing arbitrary paths); defaults to the OS Downloads folder, override for a sandbox dir |
 | `tool-browser` | `timeoutMs` | number | `60000` | Cooperative tool timeout (ms) |
 | `tool-browser` | `tabTools` | boolean | `true` | Register tab-management tools (`browser_list_tabs` etc.) |
 
@@ -187,9 +197,9 @@ agent (browser_* tools)
 
 - **Seam** (`browser` row): provides the `ctx.browser` service — provider registration, session lifecycle, error codes — decoupled from any implementation.
 - **Provider** (`browser-electron` row): operates views through the `ElectronBrowserViewHost` seam (create/destroy/show, `sendCommand`), implemented with real Electron objects by the shell.
-- **Tools** (`tool-browser` row): the 20 model-facing `browser_*` tools, maintaining one browser session per calling task (DSH session).
+- **Tools** (`tool-browser` row): the 25 model-facing `browser_*` tools, maintaining one browser session per calling task (DSH session).
 
-**Self-hosted mode**: without a desktop shell, the plugin spawns its own Electron child process (`host-main.js`) and drives it over loopback TCP JSON-RPC (window title `dsh-browser`). The child auto-restarts after a crash; screenshots prefer Electron's native `capturePage` (CDP capture can hang with multiple views in the window); the plugin automatically picks the **newest** Electron in the environment (33.x has a compositor defect; ≥ 40 recommended).
+**Self-hosted mode**: without a desktop shell, the plugin spawns its own Electron child process (`host-main.js`) and drives it over loopback TCP JSON-RPC (authenticated with a per-spawn token). The child auto-restarts after a crash; screenshots prefer Electron's native `capturePage` (CDP capture can hang with multiple views in the window); the plugin automatically picks the **newest** Electron in the environment (33.x has a compositor defect; ≥ 40 recommended). The window title always shows which task's page is currently visible (session label + page title/URL), and views follow the window size on resize.
 
 **Electron lookup order**: ① `require('electron')` (peer dependency) → ② `ELECTRON_PATH` (explicit override) → ③ the newest among DSH install anchors and pnpm virtual stores. A clear error tells you when none is found.
 
@@ -216,12 +226,14 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 
 ## Known limitations
 
-- Screenshots are PNG-only (CDP JPEG hangs on Electron 43); JPEG awaits a non-CDP conversion path.
+- JPEG screenshots are available only on the self-hosted native path (`capturePage` `toJPEG`); the desktop shell's CDP fallback stays PNG (CDP JPEG hangs on Electron 43).
 - Self-hosted captures prefer Electron's native `capturePage` (CDP `captureScreenshot` can hang with multiple views in the window); the target tab is raised before capturing.
 - `fullPage` capture is flaky under software compositing on some hosts.
 - CAPTCHA cannot be solved automatically: snapshots flag detected challenges; ask the human to complete it in the shared window instead of retrying.
 - Private mode (`privateMode`) is not implemented: it needs Electron session partitioning, which is host-layer territory; this plugin does not promise it.
-- `browser_download` fetches in the page context (keeps logins) and is subject to same-origin/CORS constraints; HTTP(S) targets only; `savePath` must be absolute (confined to `downloadDir` when configured); single files are capped at 256 MB (streamed with a Content-Length early reject).
+- `browser_download` fetches in the page context (keeps logins) and is subject to same-origin/CORS constraints; HTTP(S) targets only; `savePath` must be absolute (default confined to `~/Downloads`, override with `downloadDir`); single files are capped at 256 MB (streamed with a Content-Length early reject) and are written by the browser child itself (temp file + atomic rename).
+- The self-hosted browser's cookies are stored in plaintext on disk (Electron default); deployments that need encrypted-at-rest should integrate a system keychain / DPAPI at the host layer.
+- `browser_restrict` is a **soft guardrail** against accidental actions, not a security boundary: the model can lift it itself.
 - Popups (`window.open` / `target=_blank`) are re-routed into the current tab instead of opening untracked native windows, so the tab/session model stays intact.
 - The `browser_auth` cookie round-trip does not preserve `hostOnly`/`sameSite` (host-only cookies come back as domain cookies); it is available on the self-hosted browser only.
 - After a self-hosted child crash the browser host restarts automatically, but sessions opened before the crash are gone — call `browser_reset_session` to rebuild.

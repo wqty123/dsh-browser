@@ -33,6 +33,7 @@ dsh plugin --profile web add <本仓库路径>
 | `browser-electron` | `httpOnly` | 布尔 | `true` | 仅允许 HTTP(S) 导航;`file:`/`data:` 等拒绝 |
 | `browser-electron` | `snapshotMaxElements` | 数字 | `60` | 快照最多收录的交互元素数 |
 | `browser-electron` | `contentMaxChars` | 数字 | `100000` | 内容抓取默认字符上限 |
+| `browser-electron` | `downloadDir` | 字符串 | `~/Downloads` | 限定 `browser_download` 保存路径必须位于该目录内;默认收敛到系统下载目录,可改沙箱目录 |
 | `tool-browser` | `timeoutMs` | 数字 | `60000` | 工具协作超时(ms) |
 | `tool-browser` | `tabTools` | 布尔 | `true` | 是否注册标签管理工具 |
 
@@ -40,11 +41,12 @@ dsh plugin --profile web add <本仓库路径>
 
 ```
 1. browser_open 打开 https://example.com
-2. browser_snapshot 查看页面有哪些可交互元素(带编号)
+2. 慢站点先 browser_wait(url=…) 等页面就绪,再 browser_snapshot 查看可交互元素
 3. 需要填表时用 browser_fill(按 name/label/placeholder 匹配,一次填多个字段)
-4. 需要截图确认时用 browser_screenshot(可 savePath 存文件)
-5. 遇到验证码(browser_challenge 或快照标注 CHALLENGE)时,停下请用户处理
-6. 每次操作后告知用户你在页面上做了什么
+4. 需要截图确认时用 browser_screenshot(可 savePath 存文件,大页面用 maxWidth 缩小)
+5. 需要滚动/回退/按键时用 browser_scroll / browser_back / browser_forward / browser_key
+6. 遇到验证码(browser_challenge 或快照标注 CHALLENGE)时,停下请用户处理
+7. 每次操作后告知用户你在页面上做了什么
 ```
 
 ## 操作纪律
@@ -82,7 +84,7 @@ dsh plugin --profile web add <本仓库路径>
 `browser_download` 在页面上下文内 `fetch`,受同源/CORS 约束;跨域文件请先在同源页面内操作,或直接请求用户提供。仅支持 HTTP(S) URL;`savePath` 必须为绝对路径(配置 `downloadDir` 后限定在该目录内)。
 
 **Q:如何禁止 agent 乱点?**
-`browser_restrict` 设置白名单(如只允许 `browser_snapshot`/`browser_content`);传空列表解除。
+`browser_restrict` 设置白名单(如只允许 `browser_snapshot`/`browser_content`);传空列表解除。注意它是防误操作的**软护栏**,模型可自行解除,不是安全边界。
 
 ## 故障排查
 

@@ -28,6 +28,10 @@ import type {
   BrowserSnapshotResult,
   BrowserTab,
   BrowserTypeRequest,
+  BrowserWaitRequest,
+  BrowserWaitResult,
+  BrowserScrollRequest,
+  BrowserKeyRequest,
   BrowserChallenge,
   ExportedCookie,
 } from './types.js'
@@ -40,6 +44,10 @@ export type {
   BrowserChallenge,
   BrowserClickRequest,
   BrowserContentFormat,
+  BrowserWaitRequest,
+  BrowserWaitResult,
+  BrowserScrollRequest,
+  BrowserKeyRequest,
   BrowserContentRequest,
   BrowserContentResult,
   BrowserDownloadRequest,
@@ -151,8 +159,8 @@ export class BrowserRuntime extends Service {
   }
 
   /** Open a new browser session through the selected provider. */
-  async open(): Promise<BrowserSessionId> {
-    return this.resolveProvider().open()
+  async open(label?: string): Promise<BrowserSessionId> {
+    return this.resolveProvider().open(label)
   }
 
   /** Open a URL through the selected provider, optionally in a new tab. */
@@ -190,6 +198,11 @@ export class BrowserRuntime extends Service {
     return this.resolveProvider().execute(session, request, signal)
   }
 
+  /** Wait until the session's page is ready (and optional URL/selector match). */
+  async waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult> {
+    return this.resolveProvider().waitFor(session, request, signal)
+  }
+
   /** Produce an AI-friendly snapshot of the session's page. */
   async snapshot(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserSnapshotResult> {
     return this.resolveProvider().snapshot(session, signal)
@@ -208,6 +221,26 @@ export class BrowserRuntime extends Service {
   /** Type into the focused element through the selected provider. */
   async type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void> {
     return this.resolveProvider().type(session, request, signal)
+  }
+
+  /** Scroll the session's page through the selected provider. */
+  async scroll(session: BrowserSessionId, request: BrowserScrollRequest, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().scroll(session, request, signal)
+  }
+
+  /** Go back in the session's page history through the selected provider. */
+  async back(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().back(session, signal)
+  }
+
+  /** Go forward in the session's page history through the selected provider. */
+  async forward(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().forward(session, signal)
+  }
+
+  /** Press one named key through the selected provider. */
+  async key(session: BrowserSessionId, request: BrowserKeyRequest, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().key(session, request, signal)
   }
 
   /** Fill a form's fields in one batch through the selected provider. */

@@ -38,7 +38,17 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
     private readonly views;
     private readyPromise;
     private disposed;
+    /** Cached probe result so `available()` stays cheap after the first call. */
+    private electronAvailable;
     constructor(hostMainPath: string);
+    /**
+     * Cheap usability probe: can we find an Electron binary to spawn? The scan
+     * is filesystem-only (no network), per the seam's contract, and the result
+     * is cached for the host's lifetime — a missing binary surfaces as
+     * `BROWSER_PROVIDER_UNAVAILABLE` at provider selection instead of a
+     * confusing spawn failure on first use.
+     */
+    available(): boolean;
     /** Ensure the child is up and ready (lazy on first use; restarts after a crash). */
     private ready;
     private start;
@@ -46,7 +56,7 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
     private onChildExit;
     createView(): ElectronViewHandle;
     private ensureView;
-    showView(handle: ElectronViewHandle): void;
+    showView(handle: ElectronViewHandle, label?: string): void;
     destroyView(handle: ElectronViewHandle): void;
     /** Shut the child and the RPC server down. */
     dispose(): void;

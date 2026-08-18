@@ -49,6 +49,26 @@ export interface BrowserTypeRequest {
   readonly text: string
 }
 
+/** Scroll the page: by pixel deltas, to an element, or to top/bottom. */
+export interface BrowserScrollRequest {
+  /** Horizontal delta in CSS pixels. */
+  readonly deltaX?: number
+  /** Vertical delta in CSS pixels. */
+  readonly deltaY?: number
+  /** Scroll the given selector's element into view (top document; same-origin iframes reachable via execute). */
+  readonly selector?: string
+  /** Scroll to the top of the page. */
+  readonly toTop?: boolean
+  /** Scroll to the bottom of the page. */
+  readonly toBottom?: boolean
+}
+
+/** Press one named key (Enter, Tab, arrows, …). */
+export interface BrowserKeyRequest {
+  /** Key name from the supported set (see the browser_key tool). */
+  readonly key: string
+}
+
 /** One field of a batch form fill. Match by selector, or by name/label/placeholder. */
 export interface BrowserFillField {
   /** CSS selector; when present, candidates are scoped to it. */
@@ -95,6 +115,29 @@ export interface BrowserFillResult {
   readonly submitted: boolean
 }
 
+/** Wait request: poll until the page is ready (and optional URL/selector). */
+export interface BrowserWaitRequest {
+  /** Maximum wait in ms. Default 30000. */
+  readonly timeoutMs?: number
+  /**
+   * Optional URL the top document must show (exact or prefix match). Pass the
+   * URL you navigated to — this distinguishes the NEW document from the old
+   * one still on screen while navigation is in flight.
+   */
+  readonly url?: string
+  /** Optional CSS selector that must exist (top document or same-origin frames). */
+  readonly selector?: string
+  /** Wait for the page load (readyState complete). Default true. */
+  readonly loaded?: boolean
+}
+
+/** Outcome of a wait: whether the condition was met before the budget ran out. */
+export interface BrowserWaitResult {
+  readonly ready: boolean
+  /** Why the wait ended: 'condition met' or a short explanation of the miss. */
+  readonly reason: string
+}
+
 /**
  * A screenshot of the current page state. `dataUrl` is a base64 data URL the
  * tool layer renders directly; the live view itself never crosses the wire
@@ -107,12 +150,24 @@ export interface BrowserScreenshotResult {
   readonly path?: string
 }
 
-/** Screenshot capture options. PNG only (CDP JPEG hangs on Electron 43). */
+/** Screenshot capture options. */
 export interface BrowserScreenshotRequest {
   /** Capture the full scrollable page instead of the viewport. Default false. */
   readonly fullPage?: boolean
-  /** Absolute file path to also save the PNG to (for vision-tool reads). */
+  /** Absolute file path to also save the image to (for vision-tool reads). */
   readonly savePath?: string
+  /**
+   * Image format. Default 'png'. JPEG is only available on the self-hosted
+   * native capture path; the desktop-shell CDP fallback always returns PNG
+   * (CDP JPEG hangs on Electron 43 — a documented platform defect).
+   */
+  readonly format?: 'png' | 'jpeg'
+  /** JPEG quality 1-100 (default 80); ignored for PNG. */
+  readonly quality?: number
+  /** Downscale to fit within this width (aspect preserved). */
+  readonly maxWidth?: number
+  /** Downscale to fit within this height (aspect preserved). */
+  readonly maxHeight?: number
 }
 
 /** Download options: fetch a URL into a local file, keeping the session's cookies. */
@@ -175,6 +230,12 @@ export interface BrowserSnapshotElement {
   /** Viewport-relative center, for coordinate fallbacks. */
   readonly x: number
   readonly y: number
+  /**
+   * True when the element lives inside an (same-origin) iframe: coordinates
+   * are still top-document, but DOM selectors are frame-scoped — reach the
+   * element via `iframe.contentDocument` in browser_execute.
+   */
+  readonly frame?: boolean
 }
 
 /**
@@ -269,8 +330,11 @@ export interface BrowserProvider {
    * Open a new session. The provider mints the session id and prepares its
    * backing surface (a view, a headless page, and so on). Sessions are isolated from
    * each other; a session must not be visible to any other session's caller.
+   * @param label - optional human-readable label (e.g. the calling DSH task
+   * id) the provider may surface on the visible surface (window title) so a
+   * human can tell which task's page is currently shown.
    */
-  open(): Promise<BrowserSessionId>
+  open(label?: string): Promise<BrowserSessionId>
   /** Open a URL, optionally in a new tab. Honor `signal` for cancellation. */
   openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void>
   /** List the session's tabs. */
@@ -285,6 +349,8 @@ export interface BrowserProvider {
   navigate(session: BrowserSessionId, request: BrowserNavigateRequest, signal?: AbortSignal): Promise<void>
   /** Execute JS in the active tab's page context. */
   execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult>
+  /** Wait until the page is ready (and optional URL/selector match). Honor `signal` for cancellation. */
+  waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult>
   /** Produce an AI-friendly snapshot of the active tab. */
   snapshot(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserSnapshotResult>
   /** Check whether a human-verification challenge is blocking the active tab. */
@@ -295,6 +361,14 @@ export interface BrowserProvider {
   click(session: BrowserSessionId, request: BrowserClickRequest, signal?: AbortSignal): Promise<void>
   /** Type into the focused element (fallback path). Honor `signal` for cancellation. */
   type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void>
+  /** Scroll the active tab. Honor `signal` for cancellation. */
+  scroll(session: BrowserSessionId, request: BrowserScrollRequest, signal?: AbortSignal): Promise<void>
+  /** Go back in the active tab's history. Honor `signal` for cancellation. */
+  back(session: BrowserSessionId, signal?: AbortSignal): Promise<void>
+  /** Go forward in the active tab's history. Honor `signal` for cancellation. */
+  forward(session: BrowserSessionId, signal?: AbortSignal): Promise<void>
+  /** Press one named key (Enter/Tab/arrows/…). Honor `signal` for cancellation. */
+  key(session: BrowserSessionId, request: BrowserKeyRequest, signal?: AbortSignal): Promise<void>
   /** Fill a form's fields in one batch. Honor `signal` for cancellation. */
   fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult>
   /** Capture the current page. Honor `signal` for cancellation. */

@@ -28,11 +28,11 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
-import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
+import type { ElectronBrowserViewHost, ElectronViewHandle, ScreenshotOptions } from './provider.js'
 import type { ExportedCookie } from '../browser/types.js'
 
 /** How long to wait for the child to signal readiness before failing. */
@@ -87,10 +87,13 @@ function resolveElectronPath(): string {
       // continue probing
     }
   }
+  // Scan ONLY the plugin's own install tree (plus the explicit DSH anchors
+  // above). Never cwd or the executable's directory: those can sit inside an
+  // unrelated project whose node_modules may hold a different electron, and
+  // executing the newest random binary in the filesystem is a supply-chain
+  // hazard with no benefit.
   const roots = new Set<string>([
     fileURLToPath(new URL('.', import.meta.url)),
-    process.cwd(),
-    dirname(process.execPath),
   ])
   for (const root of roots) {
     let dir = root
@@ -156,14 +159,6 @@ function electronDistExe(pkgRoot: string): string | undefined {
     if (existsSync(candidate)) return candidate
   }
   return undefined
-}
-
-/** dirname without importing node:path's dirname separately. */
-function dirname(p: string): string {
-  const i = p.lastIndexOf('/')
-  const j = p.lastIndexOf('\\')
-  const k = Math.max(i, j)
-  return k < 0 ? p : p.slice(0, k)
 }
 
 /** One RPC round-trip with the child. */
@@ -376,16 +371,15 @@ class RemoteView implements ElectronViewHandle {
 
   /** Ask the child to download a URL to a local file (keeps cookies/login). */
   async download(url: string, savePath: string): Promise<void> {
-    const result = await this.client.call<{ base64: string }>('download', { viewId: this.id, url, savePath })
-    // Create the target directory so a fresh downloads folder works out of
-    // the box; writing into an existing file is the tool's contract.
-    mkdirSync(dirname(savePath), { recursive: true })
-    writeFileSync(savePath, Buffer.from(result.base64, 'base64'))
+    // The child writes the file itself (temp + rename); only a small
+    // confirmation crosses the RPC, so large downloads never balloon the
+    // parent's memory or hit the single-line cap.
+    await this.client.call<{ path: string }>('download', { viewId: this.id, url, savePath })
   }
 
-  /** Native capturePage snapshot of the view (PNG base64 + size). */
-  capture(): Promise<{ base64: string; width: number; height: number }> {
-    return this.client.call<{ base64: string; width: number; height: number }>('capture', { viewId: this.id })
+  /** Native capturePage snapshot of the view (base64 + mime). */
+  capture(opts?: ScreenshotOptions): Promise<{ base64: string; mime: string }> {
+    return this.client.call<{ base64: string; mime: string }>('capture', { viewId: this.id, ...opts ?? {} })
   }
 
   /** Export the session's cookies (login state). */
@@ -411,8 +405,29 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   private readonly views = new Map<string, ElectronViewHandle>()
   private readyPromise: Promise<void> | undefined
   private disposed = false
+  /** Cached probe result so `available()` stays cheap after the first call. */
+  private electronAvailable: boolean | undefined
 
   constructor(private readonly hostMainPath: string) {}
+
+  /**
+   * Cheap usability probe: can we find an Electron binary to spawn? The scan
+   * is filesystem-only (no network), per the seam's contract, and the result
+   * is cached for the host's lifetime — a missing binary surfaces as
+   * `BROWSER_PROVIDER_UNAVAILABLE` at provider selection instead of a
+   * confusing spawn failure on first use.
+   */
+  available(): boolean {
+    if (this.electronAvailable === undefined) {
+      try {
+        resolveElectronPath()
+        this.electronAvailable = true
+      } catch {
+        this.electronAvailable = false
+      }
+    }
+    return this.electronAvailable
+  }
 
   /** Ensure the child is up and ready (lazy on first use; restarts after a crash). */
   private ready(): Promise<void> {
@@ -518,11 +533,13 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     return view
   }
 
-  showView(handle: ElectronViewHandle): void {
+  showView(handle: ElectronViewHandle, label?: string): void {
     // Fire-and-forget by design (visibility is best-effort), but a rejected
     // promise must not become an unhandled rejection (crash on Node >= 15).
+    // The label (session/task id) rides along so the child can show it in the
+    // window title — a human can then tell which task's page is visible.
     void this.ready()
-      .then(() => this.client?.call('showView', { viewId: handle.id }))
+      .then(() => this.client?.call('showView', { viewId: handle.id, ...label !== undefined ? { label } : {} }))
       .catch(() => { /* host unavailable */ })
   }
 
@@ -583,9 +600,9 @@ class DeferredRemoteView implements ElectronViewHandle {
     return view.download(url, savePath)
   }
 
-  async capture(): Promise<{ base64: string; width: number; height: number }> {
+  async capture(opts?: ScreenshotOptions): Promise<{ base64: string; mime: string }> {
     const view = await this.materializeOnce()
-    return view.capture()
+    return view.capture(opts)
   }
 
   async flushAuth(): Promise<ExportedCookie[]> {

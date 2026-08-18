@@ -27,10 +27,9 @@ export interface Config {
     /** Allow navigation only to HTTP(S) URLs. Default true. */
     readonly httpOnly?: boolean;
     /**
-     * When set, `browser_download` save paths must resolve inside this
-     * directory (prevents a prompt-injected agent from writing arbitrary
-     * machine paths). Default: unset (absolute paths allowed, relative
-     * rejected).
+     * Directory `browser_download` save paths must resolve inside (prevents a
+     * prompt-injected agent from writing arbitrary machine paths). Default:
+     * the user's Downloads folder; override to confine downloads elsewhere.
      */
     readonly downloadDir?: string;
 }

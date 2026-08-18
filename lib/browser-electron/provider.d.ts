@@ -6,7 +6,7 @@
  * shell that owns the `BrowserWindow`.
  * @module dsh-browser/browser-electron
  */
-import type { BrowserChallenge, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab, ExportedCookie } from '../browser/types.js';
+import type { BrowserChallenge, BrowserContentRequest, BrowserContentResult, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserSessionId, BrowserSnapshotResult, BrowserTab, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserScreenshotRequest, ExportedCookie } from '../browser/types.js';
 /** Stable provider id registered with `ctx.browser`. */
 export declare const ELECTRON_BROWSER_PROVIDER_ID = "electron";
 /**
@@ -32,8 +32,19 @@ export interface ElectronBrowserViewHost {
      * Optional: a host without visible-tab switching treats every view as
      * always present (acceptable for headless/probe hosts).
      * @param handle - the handle to make visible.
+     * @param label - human-readable session/task label, when the provider knows
+     * one; the host may surface it (e.g. in the window title) so a human can
+     * tell which task's page is currently visible.
      */
-    showView?(handle: ElectronViewHandle): void;
+    showView?(handle: ElectronViewHandle, label?: string): void;
+    /**
+     * Optional cheap usability probe (no network): whether the host can back
+     * views at all right now. The self-hosted host checks for a usable Electron
+     * binary; a host without the probe is assumed usable. Lets the seam's
+     * provider selection (BROWSER_PROVIDER_UNAVAILABLE etc.) be real instead
+     * of failing only at first use.
+     */
+    available?(): boolean;
 }
 /**
  * A CDP-capable view handle. This is the subset of Electron's
@@ -61,10 +72,11 @@ export interface ElectronBrowserProviderConfig {
     /** Maximum content characters before truncation when no maxChars is given. Default 100_000. */
     readonly contentMaxChars?: number;
     /**
-     * When set, `browser_download` save paths must resolve inside this
-     * directory. Unset (default) keeps the tool's absolute-path contract but
-     * still rejects relative paths. Set this to confine downloads to one
-     * folder and prevent a (prompt-injected) agent from writing elsewhere.
+     * Directory `browser_download` save paths must resolve inside (prevents a
+     * prompt-injected agent from writing arbitrary machine paths). Default:
+     * the user's Downloads folder — the natural, human-visible place for a
+     * browser's files; override to confine downloads elsewhere (e.g. a sandbox
+     * dir). Relative save paths are always rejected.
      */
     readonly downloadDir?: string;
 }
@@ -96,10 +108,19 @@ export interface CdpEvaluateParams {
 }
 /** CDP method for a full-page screenshot capture. */
 export declare const CDP_PAGE_CAPTURE_SCREENSHOT = "Page.captureScreenshot";
+/** Native capture options the self-hosted view handle understands. */
+export interface ScreenshotOptions {
+    readonly format?: 'png' | 'jpeg';
+    readonly quality?: number;
+    readonly maxWidth?: number;
+    readonly maxHeight?: number;
+}
 /** CDP method for runtime evaluation (the execute path). */
 export declare const CDP_RUNTIME_EVALUATE = "Runtime.evaluate";
 /** CDP method for navigation. */
 export declare const CDP_PAGE_NAVIGATE = "Page.navigate";
+/** Supported key names, exported for the tool's enum and error messages. */
+export declare const BROWSER_KEY_NAMES: readonly string[];
 /**
  * Browser provider over Electron views. Sessions hold an ordered list of
  * tabs; each tab is one view created by the host. The active tab receives
@@ -116,7 +137,10 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     private readonly contentMaxChars;
     private readonly downloadDir;
     constructor(host: ElectronBrowserViewHost, config?: ElectronBrowserProviderConfig);
-    /** Usable whenever the host can create views (always in the desktop shell). */
+    /**
+     * Usable when the host says it can back views (the self-hosted host probes
+     * for a usable Electron binary; the desktop shell is assumed usable).
+     */
     available(): boolean;
     /**
      * Open a NEW browser session with its own view. Every call mints a fresh
@@ -124,8 +148,10 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
      * tool layer caches one session per DSH task). Sessions are isolated from
      * each other: each keeps its own tabs, active tab, and history, and only
      * the active tab of a session is made visible.
+     * @param label - optional human-readable label (e.g. the DSH task id) shown
+     * in the window title so a human can tell which task's page is visible.
      */
-    open(): Promise<BrowserSessionId>;
+    open(label?: string): Promise<BrowserSessionId>;
     /** Open a URL in the active tab (default) or a new tab. */
     openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void>;
     /** List the session's tabs with their titles. */
@@ -142,6 +168,14 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     }, signal?: AbortSignal): Promise<void>;
     /** Execute JS in the active tab's page context. */
     execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult>;
+    /**
+     * Poll until the active tab's page is ready (and optional URL/selector
+     * match), or the budget runs out. Returns a verdict instead of throwing on
+     * timeout — the caller (model) decides what a miss means. Polling evaluates
+     * in the CURRENT document, so after a navigation the old document may
+     * briefly answer; pass the expected `url` to disambiguate.
+     */
+    waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult>;
     /** Produce an AI-friendly snapshot of the active tab. */
     snapshot(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserSnapshotResult>;
     /** Check whether a human-verification challenge is blocking the active tab. */
@@ -157,6 +191,16 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     type(session: BrowserSessionId, request: {
         readonly text: string;
     }, signal?: AbortSignal): Promise<void>;
+    /** Scroll the page: by deltas, to a selector, or to top/bottom. */
+    scroll(session: BrowserSessionId, request: BrowserScrollRequest, signal?: AbortSignal): Promise<void>;
+    /** Go back (-1) or forward (+1) in the active tab's navigation history. */
+    private historyStep;
+    /** Go back in the active tab's history. */
+    back(session: BrowserSessionId, signal?: AbortSignal): Promise<void>;
+    /** Go forward in the active tab's history. */
+    forward(session: BrowserSessionId, signal?: AbortSignal): Promise<void>;
+    /** Press one named key (Enter/Tab/arrows/…) via CDP key events. */
+    key(session: BrowserSessionId, request: BrowserKeyRequest, signal?: AbortSignal): Promise<void>;
     /**
      * Fill a form's fields in one batch. Runs one page-context script that
      * resolves each field (selector, or name/label/placeholder among visible
@@ -187,15 +231,12 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     flushAuth(session: BrowserSessionId): Promise<readonly ExportedCookie[]>;
     /** Import cookies into the session (restore login state). Self-hosted only. */
     restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number>;
-    /** Capture the current page, optionally full-page. PNG only (CDP JPEG hangs on Electron 43). */
-    screenshot(session: BrowserSessionId, request?: {
-        readonly fullPage?: boolean;
-        readonly savePath?: string;
-    }, signal?: AbortSignal): Promise<{
+    /** Capture the current page, optionally full-page, PNG or JPEG, scalable. */
+    screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<{
         readonly dataUrl: string;
         readonly path?: string;
     }>;
-    /** Build the data URL and optionally write the PNG to disk. */
+    /** Build the data URL and optionally write the image to disk. */
     private saveScreenshot;
     /** Append one operation to the session's history. */
     private record;
@@ -217,7 +258,7 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     private activeTab;
     /** Append a fresh tab and make it active. */
     private newTab;
-    /** Ask the host to show the active tab's view. */
+    /** Ask the host to show the active tab's view, carrying the session label. */
     private showActive;
     /** Read the current URL of a view through CDP. */
     private currentUrl;

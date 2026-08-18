@@ -43,7 +43,9 @@ declare module 'electron' {
   }
   export interface NativeImage {
     toPNG(): Buffer
+    toJPEG(quality: number): Buffer
     getSize(): { width: number; height: number }
+    resize(options: { width?: number; height?: number }): NativeImage
   }
   export interface WebContents {
     readonly id: number
@@ -54,6 +56,8 @@ declare module 'electron' {
     capturePage(): Promise<NativeImage>
     loadURL(url: string): Promise<void>
     setWindowOpenHandler(handler: (details: { url: string }) => { action: 'deny' }): void
+    getTitle(): string
+    getURL(): string
   }
   export interface WebContentsView {
     readonly webContents: WebContents
@@ -75,6 +79,7 @@ declare module 'electron' {
     show(): void
     restore(): void
     focus(): void
+    setTitle(title: string): void
     on(event: 'closed', listener: () => void): this
     on(event: 'resize', listener: () => void): this
     off(event: 'closed', listener: () => void): this

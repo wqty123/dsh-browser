@@ -108,7 +108,9 @@ async function ensureSession(browser: NonNullable<Context['browser']>, state: To
   if (existing !== undefined) return existing
   const pending = state.pendingOpens.get(key)
   if (pending !== undefined) return pending
-  const opening = browser.open().then(
+  // The task key rides along as the session label so the window title shows
+  // which task's page is currently visible to the human.
+  const opening = browser.open(key).then(
     session => {
       // Tie the session's lifetime to the agent's scoped context FIRST: when
       // the agent (and its DSH session) is disposed, the effect's disposer
@@ -148,11 +150,11 @@ function parseFillValue(v: string | undefined): string | number | boolean {
 function formatSnapshot(snapshot: {
   url: string
   title?: string
-  elements: readonly { ref: number; kind: string; label: string; x: number; y: number }[]
+  elements: readonly { ref: number; kind: string; label: string; x: number; y: number; frame?: boolean }[]
   truncated?: boolean
   challenge?: { blocked: boolean; kind?: string; reason?: string }
 }): string {
-  const lines = snapshot.elements.map(el => `[${el.ref}] ${el.kind}: ${el.label} (${el.x},${el.y})`)
+  const lines = snapshot.elements.map(el => `[${el.ref}] ${el.kind}: ${el.label}${el.frame === true ? ' (iframe)' : ''} (${el.x},${el.y})`)
   const header = `URL: ${snapshot.url}${snapshot.title !== undefined ? `\nTitle: ${snapshot.title}` : ''}`
   const body = lines.length > 0 ? lines.join('\n') : '(no interactive elements found)'
   const tail = snapshot.truncated === true ? '\n(snapshot truncated)' : ''
@@ -209,6 +211,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                 label: { type: 'string', required: true },
                 x: { type: 'number', required: true },
                 y: { type: 'number', required: true },
+                frame: { type: 'boolean' },
               },
             },
           },
@@ -240,7 +243,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       return {
         url: snapshot.url,
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
-        elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, x: el.x, y: el.y })),
+        elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, x: el.x, y: el.y, ...el.frame === true ? { frame: true } : {} })),
         truncated: snapshot.truncated,
         ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
       }
@@ -271,6 +274,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                 label: { type: 'string', required: true },
                 x: { type: 'number', required: true },
                 y: { type: 'number', required: true },
+                frame: { type: 'boolean' },
               },
             },
           },
@@ -297,7 +301,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       return {
         url: snapshot.url,
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
-        elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, x: el.x, y: el.y })),
+        elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, x: el.x, y: el.y, ...el.frame === true ? { frame: true } : {} })),
         truncated: snapshot.truncated,
         ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
       }
@@ -341,6 +345,40 @@ export function apply(ctx: Context, config: Config = {}): void {
           ? 'Ask the human to complete the verification in the shared browser window (the page is visible to them), then re-check with browser_snapshot.'
           : '',
       }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_wait',
+    description: 'Wait until the shared-browser page is ready: load complete, and optionally the expected URL and/or a CSS selector present (top document or same-origin iframes). Use after browser_open on slow sites instead of snapshotting a white page — wait for the URL you navigated to first. Returns ready=true/false with a short reason; a miss is not an error.',
+    parameters: {
+      timeoutMs: { type: 'number', description: 'Maximum wait in ms (default 30000).' },
+      url: { type: 'string', description: 'Expected page URL (exact or prefix), e.g. the URL you opened.' },
+      selector: { type: 'string', description: 'CSS selector that must exist.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ready: { type: 'boolean', required: true },
+          reason: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.ready ? 'Page ready.' : `Wait timed out: ${value.reason}` }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const result = await browser.waitFor(session, {
+        ...args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {},
+        ...args.url !== undefined ? { url: args.url } : {},
+        ...args.selector !== undefined ? { selector: args.selector } : {},
+      }, exec.signal)
+      return { ready: result.ready, reason: result.reason }
     },
   }))
 
@@ -465,6 +503,100 @@ export function apply(ctx: Context, config: Config = {}): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'browser_scroll',
+    description: 'Scroll the shared-browser page: by pixel deltas (deltaX/deltaY), to a CSS selector\'s element, or to the top/bottom. Use to reveal below-the-fold content before snapshotting or clicking.',
+    parameters: {
+      deltaX: { type: 'number', description: 'Horizontal scroll delta in CSS pixels.' },
+      deltaY: { type: 'number', description: 'Vertical scroll delta in CSS pixels.' },
+      selector: { type: 'string', description: 'Scroll the element matching this CSS selector into view.' },
+      toTop: { type: 'boolean', description: 'Scroll to the top of the page.' },
+      toBottom: { type: 'boolean', description: 'Scroll to the bottom of the page.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { scrolled: { type: 'boolean', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: value.scrolled ? 'Scrolled.' : 'Scroll failed.' }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false, // mutates page scroll state; exclusive within a task
+    async execute(args, exec) {
+      assertAllowed(state, 'browser_scroll')
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await browser.scroll(session, {
+        ...args.deltaX !== undefined ? { deltaX: args.deltaX } : {},
+        ...args.deltaY !== undefined ? { deltaY: args.deltaY } : {},
+        ...args.selector !== undefined ? { selector: args.selector } : {},
+        ...args.toTop === true ? { toTop: true } : {},
+        ...args.toBottom === true ? { toBottom: true } : {},
+      }, exec.signal)
+      return { scrolled: true }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_back',
+    description: 'Go back one step in the shared-browser page history. A no-op when there is no previous entry.',
+    parameters: {},
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { back: { type: 'boolean', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: value.back ? 'Went back.' : 'Failed.' }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false, // mutates page state; exclusive within a task
+    async execute(_args, exec) {
+      assertAllowed(state, 'browser_back')
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await browser.back(session, exec.signal)
+      return { back: true }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_forward',
+    description: 'Go forward one step in the shared-browser page history. A no-op when there is no next entry.',
+    parameters: {},
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { forward: { type: 'boolean', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: value.forward ? 'Went forward.' : 'Failed.' }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false, // mutates page state; exclusive within a task
+    async execute(_args, exec) {
+      assertAllowed(state, 'browser_forward')
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await browser.forward(session, exec.signal)
+      return { forward: true }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_key',
+    description: 'Press one named key in the shared-browser page (Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space). Use after focusing an input to submit a chat box (Enter), move focus (Tab), or navigate a list (arrows).',
+    parameters: {
+      key: { type: 'string', required: true, enum: ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Space'], description: 'The key to press.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { pressed: { type: 'boolean', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: value.pressed ? `Pressed ${String(_args.key)}.` : 'Key press failed.' }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false, // mutates page state; exclusive within a task
+    async execute(args, exec) {
+      assertAllowed(state, 'browser_key')
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await browser.key(session, { key: args.key }, exec.signal)
+      return { pressed: true }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'browser_fill',
     description: 'Fill a form in one batch: pass fields with a CSS selector or name/label/placeholder text and the value to set (string, number, or boolean for checkbox/radio; for selects or radio groups pass the option value or visible text). Values are applied with the native setter plus input/change events, so React/Vue controlled inputs update correctly. Optionally submit the containing form. Prefer this over hand-written browser_execute for form filling; per-field failures are reported instead of throwing.',
     parameters: {
@@ -549,10 +681,14 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_screenshot',
-    description: 'Capture the current shared-browser page as a PNG screenshot. Use for visual confirmation of layout, charts, designs, or CAPTCHAs, or to feed a vision tool (read_image) that locates elements visually. Supports optional full-page capture and optional save-to-file (the saved path can be passed to read_image for vision-based element location).',
+    description: 'Capture the current shared-browser page as a screenshot (PNG default, JPEG optional). Use for visual confirmation of layout, charts, designs, or CAPTCHAs, or to feed a vision tool (read_image) that locates elements visually. Supports full-page capture, save-to-file, JPEG encoding, and downscaling (maxWidth/maxHeight) to cut vision-tool token cost. JPEG is only available on the self-hosted native path; the desktop-shell path returns PNG.',
     parameters: {
       fullPage: { type: 'boolean', description: 'Capture the full scrollable page instead of the viewport (default false).' },
-      savePath: { type: 'string', description: 'Absolute file path to also save the PNG to (e.g. for read_image vision location).' },
+      savePath: { type: 'string', description: 'Absolute file path to also save the image to (e.g. for read_image vision location).' },
+      format: { type: 'string', enum: ['png', 'jpeg'], description: 'Image format (default png; jpeg is self-hosted native path only).' },
+      quality: { type: 'number', description: 'JPEG quality 1-100 (default 80); ignored for PNG.' },
+      maxWidth: { type: 'number', description: 'Downscale to fit within this width (aspect preserved).' },
+      maxHeight: { type: 'number', description: 'Downscale to fit within this height (aspect preserved).' },
     },
     output: {
       schema: {
@@ -574,6 +710,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       const shot = await browser.screenshot(session, {
         ...args.fullPage === true ? { fullPage: true } : {},
         ...args.savePath !== undefined ? { savePath: args.savePath } : {},
+        ...args.format !== undefined ? { format: args.format } : {},
+        ...args.quality !== undefined ? { quality: args.quality } : {},
+        ...args.maxWidth !== undefined ? { maxWidth: args.maxWidth } : {},
+        ...args.maxHeight !== undefined ? { maxHeight: args.maxHeight } : {},
       }, exec.signal)
       return {
         dataUrl: shot.dataUrl,
@@ -874,7 +1014,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_restrict',
-    description: 'Restrict which browser actions are allowed, to prevent stray clicks/navigation. Pass a list of browser tool names (e.g. ["browser_snapshot","browser_content","browser_click"]) — any other browser_* call is refused. Pass an empty list or omit to lift the restriction. Read-only tools (snapshot/content/screenshot/session) are never blocked.',
+    description: 'Restrict which browser actions are allowed, to prevent stray clicks/navigation. Pass a list of browser tool names (e.g. ["browser_snapshot","browser_content","browser_click"]) — any other browser_* call is refused. Pass an empty list or omit to lift the restriction. Read-only tools (snapshot/content/screenshot/session) are never blocked. IMPORTANT: this is a SOFT guardrail against accidental actions, NOT a security boundary — you (the model) can lift it yourself with an empty list.',
     parameters: {
       allowed: {
         type: 'array',

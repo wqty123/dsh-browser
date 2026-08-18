@@ -19,7 +19,8 @@
 import { app, BrowserWindow, WebContentsView } from 'electron'
 import { createInterface } from 'node:readline'
 import { createConnection } from 'node:net'
-import { join } from 'node:path'
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 /** The spawn token the parent passed via `--rpc-token`; must be echoed in our hello. */
 const tokenArg = process.argv.indexOf('--rpc-token')
@@ -54,6 +55,27 @@ const views = new Map<string, HostView>()
 /** The single browser window; created lazily on first createView. */
 let window: BrowserWindow | undefined
 
+/** The currently visible (topmost) view id, to skip redundant re-raising. */
+let visibleViewId: string | undefined
+
+/**
+ * Set the window title to identify the visible view's page and owner. The
+ * label (session/task id) comes from the parent; the page title/URL come from
+ * the view itself, so a human can tell which task's page is on screen.
+ */
+function updateWindowTitle(entry: HostView, label: string | undefined): void {
+  if (window === undefined) return
+  let title = 'dsh-browser'
+  if (label !== undefined && label !== '') title += ` [${label.slice(0, 48)}]`
+  try {
+    const pageTitle = entry.webContentsView.webContents.getTitle()
+    const url = entry.webContentsView.webContents.getURL()
+    if (pageTitle !== '') title += ` — ${pageTitle}`
+    if (url !== '' && url !== 'about:blank') title += ` — ${url}`
+  } catch { /* view destroyed */ }
+  window.setTitle(title)
+}
+
 /** The RPC socket to the parent; set when the connection is established. */
 let rpcSocket: import('node:net').Socket | undefined
 
@@ -67,7 +89,7 @@ function reply(id: number, payload: Record<string, unknown>): void {
 }
 
 /** Handle one command. */
-async function handle(op: string, msg: { id: number; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[] }): Promise<void> {
+async function handle(op: string, msg: { id: number; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; label?: string; format?: string; quality?: number; maxWidth?: number; maxHeight?: number }): Promise<void> {
   try {
     switch (op) {
       case 'ping':
@@ -110,8 +132,13 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         window.contentView.addChildView(view)
         const [width, height] = window.getContentSize()
         view.setBounds({ x: 0, y: 0, width: width ?? 0, height: height ?? 0 })
-        if (views.size === 0) view.setVisible(true)
+        const first = views.size === 0
+        if (first) view.setVisible(true)
         views.set(viewId, { webContentsView: view })
+        if (first) {
+          visibleViewId = viewId
+          updateWindowTitle(views.get(viewId)!, undefined)
+        }
         reply(msg.id, { ok: true })
         return
       }
@@ -120,6 +147,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         if (viewId === undefined) throw new Error('destroyView missing viewId')
         const entry = views.get(viewId)
         if (entry !== undefined) {
+          if (visibleViewId === viewId) visibleViewId = undefined
           views.delete(viewId)
           try { entry.webContentsView.webContents.debugger.detach() } catch { /* already detached */ }
           entry.webContentsView.webContents.close()
@@ -133,17 +161,26 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         if (viewId === undefined) throw new Error('showView missing viewId')
         const entry = views.get(viewId)
         if (entry !== undefined) {
-          // Hide every other view, then show and RAISE the target so the
-          // human actually sees the active tab/session (topmost child wins).
-          for (const v of views.values()) {
-            if (v === entry) continue
-            try { v.webContentsView.setVisible(false) } catch { /* destroyed */ }
+          if (visibleViewId !== viewId) {
+            // Hide every other view, then show and RAISE the target so the
+            // human actually sees the active tab/session (topmost child wins).
+            // When the target is ALREADY the visible topmost view, skip the
+            // remove/re-add dance — doing it on every operation made the
+            // window flicker as two tasks alternated.
+            for (const v of views.values()) {
+              if (v === entry) continue
+              try { v.webContentsView.setVisible(false) } catch { /* destroyed */ }
+            }
+            entry.webContentsView.setVisible(true)
+            if (window !== undefined) {
+              window.contentView.removeChildView(entry.webContentsView)
+              window.contentView.addChildView(entry.webContentsView)
+            }
+            visibleViewId = viewId
           }
-          entry.webContentsView.setVisible(true)
-          if (window !== undefined) {
-            window.contentView.removeChildView(entry.webContentsView)
-            window.contentView.addChildView(entry.webContentsView)
-          }
+          // Always refresh the title: it reflects the CURRENT page of the
+          // visible view, which changes as the agent navigates.
+          updateWindowTitle(entry, msg.label)
         }
         reply(msg.id, { ok: true })
         return
@@ -171,6 +208,13 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         //  - CDP Page.captureScreenshot: works without a display surface, but
         //    can hang when another hidden WebContentsView exists in the window.
         // Try capturePage first (show/focus/restore + one retry), then CDP.
+        // PNG/JPEG + downscale are applied on the NativeImage here, so the
+        // body never needs a second round-trip.
+        const wantFormat = msg.format === 'jpeg' ? 'jpeg' : 'png'
+        const wantQuality = typeof msg.quality === 'number' ? msg.quality : 80
+        const maxW = typeof msg.maxWidth === 'number' ? msg.maxWidth : 0
+        const maxH = typeof msg.maxHeight === 'number' ? msg.maxHeight : 0
+        let mime = 'image/png'
         if (window !== undefined) {
           try { if (!window.isVisible()) window.show() } catch { /* closing */ }
           try { window.restore() } catch { /* not minimized */ }
@@ -186,8 +230,16 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
             await new Promise(resolve => setTimeout(resolve, 400))
             image = await entry.webContentsView.webContents.capturePage()
           }
-          const png = image.toPNG()
-          if (png.length > 0) base64 = png.toString('base64')
+          // Downscale to fit the requested box, preserving aspect ratio.
+          const size = image.getSize()
+          let w = size.width ?? 0
+          let h = size.height ?? 0
+          if (maxW > 0 && w > maxW) { h = Math.round(h * maxW / w); w = maxW }
+          if (maxH > 0 && h > maxH) { w = Math.round(w * maxH / h); h = maxH }
+          if (w > 0 && h > 0 && (w !== size.width || h !== size.height)) image = image.resize({ width: w, height: h })
+          const buf = wantFormat === 'jpeg' ? image.toJPEG(wantQuality) : image.toPNG()
+          if (wantFormat === 'jpeg') mime = 'image/jpeg'
+          if (buf.length > 0) base64 = buf.toString('base64')
         } catch (error) {
           const state = window !== undefined
             ? JSON.stringify({
@@ -223,7 +275,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         if (base64 === '') {
           throw new Error('capture produced no image (view not painted)')
         }
-        reply(msg.id, { ok: true, result: { base64, width: 0, height: 0 } })
+        reply(msg.id, { ok: true, result: { base64, mime } })
         return
       }
       case 'download': {
@@ -236,9 +288,11 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         const entry = views.get(viewId)
         if (entry === undefined) throw new Error(`download: unknown view ${viewId}`)
         // Fetch the URL inside the page context (keeps cookies/login), read
-        // the body as base64, and return it; the parent writes the file. This
-        // avoids Electron's download pipeline entirely (CDP debugger attach
-        // can interfere with will-download).
+        // the body as base64, and write the file HERE — the body never
+        // crosses the RPC line protocol, so large downloads cannot balloon
+        // the parent's memory or hit the single-line cap. This also avoids
+        // Electron's download pipeline entirely (CDP debugger attach can
+        // interfere with will-download).
         const result = await entry.webContentsView.webContents.debugger.sendCommand('Runtime.evaluate', {
           // Stream the body through a reader so the size cap is enforced as
           // bytes arrive — never buffer an unbounded download into memory
@@ -286,7 +340,13 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
           const detail = (result as { exceptionDetails?: { exception?: { description?: string } } }).exceptionDetails
           throw new Error(`download failed: ${detail?.exception?.description ?? 'no data'}`)
         }
-        reply(msg.id, { ok: true, result: { base64: value, savePath } })
+        // Temp file + rename keeps the write atomic-ish: a crash mid-write
+        // leaves only a `.part` file, never a half-written final file.
+        const tmpPath = savePath + '.part'
+        mkdirSync(dirname(savePath), { recursive: true })
+        writeFileSync(tmpPath, Buffer.from(value, 'base64'))
+        renameSync(tmpPath, savePath)
+        reply(msg.id, { ok: true, result: { path: savePath } })
         return
       }
       case 'flushAuth': {
