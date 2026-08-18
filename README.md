@@ -18,7 +18,7 @@
 | --- | --- |
 | 了解插件为什么存在、与无头方案的区别 | [为什么做共享真实浏览器](docs/why-browser.md) |
 | 安装、配置与日常使用 | [用户指南](docs/user-guide.md) |
-| 全部 25 个工具的参数、输出与示例 | [工具参考](docs/tool-reference.md) |
+| 全部 33 个工具的参数、输出与示例 | [工具参考](docs/tool-reference.md) |
 | 了解 seam / provider / 工具三层与自托管实现 | [架构说明](docs/architecture.md) |
 | 查看全部文档与 README 分工 | [文档索引](docs/README.md) |
 
@@ -28,7 +28,7 @@
 
 - **真实视图,而非转播**:浏览器是原生 `WebContentsView`,用户直接看到 agent 在做什么,随时可以上手接管;
 - **装好即用**:有桌面外壳时嵌入外壳视图;纯 `dsh web` 也能**自托管**——插件自己拉起一个 Electron 窗口,不需要任何额外配置;
-- **一插件即一套工具**:安装后 agent 自动获得 25 个 `browser_*` 工具(打开、查看、等待、操作、滚动、回退、填表、按键、截图、下载、登录态管理……)。
+- **一插件即一套工具**:安装后 agent 自动获得 33 个 `browser_*` 工具(打开、查看、无障碍树、等待、语义/坐标操作、滚动、回退、批量/单控件填表、按键、结构化提取、截图、下载、登录态管理……)。
 
 一句话:**安装插件 = 获得一个与用户共享、可被 agent 驱动的真实浏览器。**
 
@@ -133,15 +133,23 @@ dsh plugin --profile web add <本仓库路径>
 | `browser_open` | 打开 URL(可选新标签),返回页面快照 | ✅ |
 | `browser_wait` | 等待页面加载完成(可选期望 URL / CSS 选择器),返回是否就绪 | – |
 | `browser_snapshot` | 交互元素(输入框/按钮/链接)带编号清单(穿透同源 iframe 与 Shadow DOM) | – |
+| `browser_a11y` | 无障碍树:每个交互节点的语义角色/名称/值/状态 + 坐标(穿透同源 iframe 与 Shadow DOM) | – |
 | `browser_execute` | 在页面执行 JS;参数以 `arguments[0..n]` 传入 | ✅ |
 | `browser_content` | 以 html / markdown / txt / json 抓取页面(selector、maxChars、timeoutMs) | – |
-| `browser_click` | 按视口坐标点击(配合截图做视觉定位) | ✅ |
-| `browser_type` | 向聚焦元素输入文本(CDP `Input.insertText`) | ✅ |
+| `browser_click` | 点击:语义目标(`target`: css/text/xpath,滚动到元素并点中心)或视口坐标(配合截图视觉定位) | ✅ |
+| `browser_type` | 输入文本(可先按 `target` 聚焦元素;CDP `Input.insertText`) | ✅ |
 | `browser_key` | 按命名按键(Enter/Tab/方向键/Home/End 等) | ✅ |
 | `browser_scroll` | 滚动页面(像素增量 / 选择器定位 / 顶部底部) | ✅ |
 | `browser_back` | 页面历史后退一步(无前项时为空操作) | ✅ |
 | `browser_forward` | 页面历史前进一步(无后项时为空操作) | ✅ |
+| `browser_refresh` | 刷新当前页(等价浏览器的刷新按钮) | ✅ |
 | `browser_fill` | 批量填充表单(选择器/名称/标签匹配,受控输入、下拉、单选/复选,可选提交) | ✅ |
+| `browser_set_value` | 单个控件设值(按 `target` 定位;原生 setter + input/change,React 受控输入可用) | ✅ |
+| `browser_check` | 勾选/取消勾选 checkbox 或 radio(按 `target` 定位) | ✅ |
+| `browser_select` | 选中 `<select>` 的某个选项(按值/文本/索引,按 `target` 定位) | ✅ |
+| `browser_clear` | 清空输入/文本域/contenteditable,或取消勾选(按 `target` 定位) | ✅ |
+| `browser_get_value` | 读取元素当前值(操作后验证用;按 `target` 定位) | – |
+| `browser_scrape` | 结构化提取:容器选择器 + 字段映射(`选择器[@属性]`),静态 CSS 查询、CSP 安全 | – |
 | `browser_screenshot` | 截图,可选 `fullPage`、`savePath`、JPEG(`format`/`quality`)与缩放(`maxWidth`/`maxHeight`) | – |
 | `browser_list_tabs` | 当前会话的标签列表 | – |
 | `browser_switch_tab` | 按 id 切换标签(自托管下同步切换可见视图) | ✅ |
@@ -161,7 +169,13 @@ dsh plugin --profile web add <本仓库路径>
 ### 等待页面就绪
 
 - **`browser_open` 之后、`browser_snapshot` 之前,慢站点请先 `browser_wait`**:传 `url`(你打开的地址)与可选的 `selector`,等它返回 `ready: true` 再拍照——否则拍到的是旧页面或白屏。
-- 页面里看不到的内容先想 iframe / Shadow DOM:快照会穿透同源 iframe 与 shadow root 并标注 `(iframe)`,坐标始终是顶层文档坐标,可直接用 `browser_click`;DOM 选择器则是 frame 作用域的,需用 `browser_execute` 经 `iframe.contentDocument` 访问。
+- 页面里看不到的内容先想 iframe / Shadow DOM:快照与无障碍树会穿透同源 iframe 与 shadow root 并标注 `(iframe)`,坐标始终是顶层文档坐标,可直接用 `browser_click`;DOM 选择器则是 frame 作用域的,需用 `browser_execute` 经 `iframe.contentDocument` 访问。
+
+### 语义定位(`target`)与无障碍树
+
+- **`browser_a11y` 是理解页面的首选**:它返回每个交互节点的语义角色(button/textbox/checkbox…)、可访问名称、当前值、状态(enabled/checked/expanded…)与坐标,比编号快照更能说明“这是什么、能做什么”;拿到坐标后可直接 `browser_click`/`browser_type`。
+- **`browser_click`/`browser_type` 支持 `target` 定位**:`{by: css|text|xpath, value, index?}`——`text` 按元素自身可见文本匹配(精确优先、退化包含、最深元素优先);点击会把元素滚动到视口中央再点;输入会先聚焦该元素。
+- **单控件操作用 `browser_set_value`/`browser_check`/`browser_select`/`browser_clear`/`browser_get_value`**,批量用 `browser_fill`,列表页结构化抓取用 `browser_scrape`。
 
 ### 操作纪律(点击/填表)
 
@@ -197,9 +211,11 @@ agent (browser_* 工具)
 
 - **seam 层**(`browser` 行)提供 `ctx.browser` 服务:provider 注册、会话生命周期、错误码,与具体实现解耦;
 - **provider 层**(`browser-electron` 行)通过 `ElectronBrowserViewHost` 接缝操作视图(创建/销毁/显示/`sendCommand`),由真实外壳用 Electron 对象实现;
-- **工具层**(`tool-browser` 行)提供模型侧的 25 个 `browser_*` 工具,按调用方任务(DSH 会话)维护独立的浏览器会话。
+- **工具层**(`tool-browser` 行)提供模型侧的 33 个 `browser_*` 工具,按调用方任务(DSH 会话)维护独立的浏览器会话。
 
-**自托管模式**:没有桌面外壳时,插件自己拉起一个 Electron 子进程(`host-main.js`),通过本机 TCP JSON-RPC 驱动(RPC 带随机 token 认证)。子进程崩溃会自动重启;截图优先走 Electron 原生 `capturePage`(CDP 截图在多视图下会挂起),并自动选择环境中**最新版本**的 Electron(33.x 有合成器缺陷,建议 ≥ 40)。窗口标题实时显示当前可见页面所属的会话标识(任务)与页面标题/URL——多个任务共享同一窗口时也能分辨;窗口缩放时视图自动跟随。
+**自托管模式**:没有桌面外壳时,插件自己拉起一个 Electron 子进程(`host-main.js`),通过本机 TCP JSON-RPC 驱动(RPC 带随机 token 认证)。子进程崩溃会自动重启;截图优先走 Electron 原生 `capturePage`(CDP 截图在多视图下会挂起),并自动选择环境中**最新版本**的 Electron(33.x 有合成器缺陷,建议 ≥ 40)。
+
+**自托管浏览器就是一台真正的浏览器**:每个任务(DSH 会话)拥有**独立的浏览器窗口**,窗口自带完整工具栏——地址栏、后退/前进/刷新按钮、标签条(新建/切换/关闭标签)。人可以直接像用 Chrome 一样使用它:在地址栏输入网址(自动补 `https://`)、点标签切换页面、开新标签;agent 与人的操作都汇入**同一个会话模型**(同一套标签、历史与导航),窗口标题实时显示当前任务标识与页面标题/URL,窗口缩放时视图自动跟随。任务结束后窗口随会话自动关闭。
 
 **Electron 定位顺序**:① `require('electron')`(peer 依赖)→ ② `ELECTRON_PATH`(显式覆盖)→ ③ DSH 安装锚点与 pnpm 虚拟仓库中**版本最新**者。找不到时工具会报清晰的错误提示。
 
@@ -246,7 +262,7 @@ agent (browser_* 工具)
 pnpm run build
 ```
 
-> 仓库当前未附带自动化测试套件(类型检查 + 构建即可验证本插件的 TypeScript 侧)。
+> 运行测试: `node --test "tests/*.test.mjs"`(假 host 测试,无需 Electron)。
 
 代码结构:
 

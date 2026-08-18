@@ -17,11 +17,11 @@
  *
  * Security: the RPC server accepts exactly ONE connection, and only after
  * that connection proves knowledge of the random per-spawn token (passed to
- * the child via `--rpc-token`, never printed). A local process that connects
- * to the loopback port without the token can neither impersonate the child
- * nor inject replies — it is disconnected immediately. Commands are only
- * written after the hello authenticates, so a spoofed socket never sees
- * traffic.
+ * the child via its stdin (first line, never in argv). A local process that
+ * connects to the loopback port without the token can neither impersonate the
+ * child nor inject replies — it is disconnected immediately. Commands are
+ * only written after the hello authenticates, so a spoofed socket never
+ * sees traffic.
  * @module dsh-browser/browser-electron/remote-host
  */
 
@@ -32,7 +32,7 @@ import { existsSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
-import type { ElectronBrowserViewHost, ElectronViewHandle, ScreenshotOptions } from './provider.js'
+import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, ScreenshotOptions } from './provider.js'
 import type { ExportedCookie } from '../browser/types.js'
 
 /** How long to wait for the child to signal readiness before failing. */
@@ -174,7 +174,7 @@ interface Pending {
  * connects back and speaks the same one-JSON-per-line protocol.
  */
 class ElectronChildClient {
-  private readonly child: ChildProcessByStdio<null, import('node:stream').Readable, import('node:stream').Readable>
+  private readonly child: import('node:child_process').ChildProcessWithoutNullStreams
   private readonly pending = new Map<number, Pending>()
   private nextId = 1
   private buffer = ''
@@ -196,6 +196,7 @@ class ElectronChildClient {
     private readonly port: number,
     private readonly token: string,
     private readonly onExit?: () => void,
+    private readonly onUserAction?: (action: BrowserUserAction) => void,
   ) {
     const electron = resolveElectronPath()
     process.stderr.write(`[dsh-browser host] spawning electron: ${electron}\n`)
@@ -205,8 +206,8 @@ class ElectronChildClient {
     const env: Record<string, string | undefined> = { ...process.env }
     delete env.ELECTRON_RUN_AS_NODE
     delete env.NODE_OPTIONS
-    this.child = spawn(electron, [hostMainPath, '--rpc-port', String(port), '--rpc-token', token], {
-      stdio: ['ignore', 'pipe', 'pipe'],
+    this.child = spawn(electron, [hostMainPath, '--rpc-port', String(port)], {
+      stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: false,
       env,
     })
@@ -215,6 +216,12 @@ class ElectronChildClient {
       // Diagnostics only; never parse stderr as protocol.
       process.stderr.write(`[dsh-browser host] ${String(chunk)}`)
     })
+    // Send the spawn token over stdin (first line). The child reads it from
+    // stdin instead of argv so the token is never visible in the process
+    // listing (WMI / Process Explorer / /proc/*). After writing, close stdin
+    // so the child knows the token has been fully delivered.
+    this.child.stdin?.write(token + '\n')
+    this.child.stdin?.end()
     // A failed spawn (bad/corrupt binary) emits 'error' — without a listener
     // that would crash the whole DSH process.
     this.child.on('error', error => {
@@ -293,11 +300,18 @@ class ElectronChildClient {
       const line = this.buffer.slice(0, nl).trim()
       this.buffer = this.buffer.slice(nl + 1)
       if (line === '') continue
-      let msg: { id?: number; op?: string; token?: string; ok?: boolean; result?: unknown; err?: string }
+      let msg: { id?: number; op?: string; token?: string; ok?: boolean; result?: unknown; err?: string; action?: unknown }
       try {
         msg = JSON.parse(line) as typeof msg
       } catch {
         // Non-protocol line; ignore.
+        continue
+      }
+      if (msg.op === 'userAction') {
+        // Fire-and-forget notification from the child's own UI (toolbar):
+        // there is no reply and no pending id — route it straight to the
+        // host's user-action handler (which the provider registered).
+        this.onUserAction?.(msg.action as BrowserUserAction)
         continue
       }
       if (this.awaitingHello) {
@@ -407,6 +421,11 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   private disposed = false
   /** Cached probe result so `available()` stays cheap after the first call. */
   private electronAvailable: boolean | undefined
+  /** Window groups (windowId per view), re-sent on every materialization so
+   *  a restarted child still places views in the right windows. */
+  private readonly groups = new Map<string, { windowId: string; label?: string }>()
+  /** The provider's user-action handler; routes toolbar actions into sessions. */
+  private userActionHandler: ((action: BrowserUserAction) => void) | undefined
 
   constructor(private readonly hostMainPath: string) {}
 
@@ -483,10 +502,16 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     const address = server.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
     this.server = server
-    // Random per-spawn token: the child must prove knowledge of it (via the
-    // --rpc-token argv) before any command is written to the socket.
+    // Random per-spawn token: the child must prove knowledge of it (via
+    // stdin hello) before any command is written to the socket.
     const token = randomBytes(24).toString('hex')
-    this.client = new ElectronChildClient(this.hostMainPath, port, token, () => this.onChildExit())
+    this.client = new ElectronChildClient(
+      this.hostMainPath,
+      port,
+      token,
+      () => this.onChildExit(),
+      action => this.userActionHandler?.(action),
+    )
     if (this.pendingSocket !== undefined) {
       this.client.attach(this.pendingSocket)
       this.pendingSocket = undefined
@@ -522,6 +547,13 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     await this.ready()
     const client = this.client
     if (client === undefined) throw new Error('browser host unavailable')
+    // Re-send the window group before creating the view: the child routes the
+    // view into its session's own window. Re-sending every materialization
+    // also covers a child restart (the new child has no assignments yet).
+    const group = this.groups.get(id)
+    if (group !== undefined) {
+      await client.call('groupView', { viewId: id, windowId: group.windowId, ...group.label !== undefined ? { label: group.label } : {} })
+    }
     await client.call('createView', { viewId: id })
     // If the view was destroyed while the createView RPC was in flight, do
     // not re-insert a stale entry that would resurrect a dead child view.
@@ -540,6 +572,28 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     // window title — a human can then tell which task's page is visible.
     void this.ready()
       .then(() => this.client?.call('showView', { viewId: handle.id, ...label !== undefined ? { label } : {} }))
+      .catch(() => { /* host unavailable */ })
+  }
+
+  /** Route a view into its session's own window (one window per session). */
+  groupView(handle: ElectronViewHandle, windowId: string, label?: string): void {
+    this.groups.set(handle.id, { windowId, ...label !== undefined ? { label } : {} })
+    // Fire-and-forget: the child may not exist yet; ensureView re-sends the
+    // group before every createView anyway.
+    void this.ready()
+      .then(() => this.client?.call('groupView', { viewId: handle.id, windowId, ...label !== undefined ? { label } : {} }))
+      .catch(() => { /* host unavailable */ })
+  }
+
+  /** Register the provider's handler for user-initiated toolbar actions. */
+  onUserAction(handler: (action: BrowserUserAction) => void): void {
+    this.userActionHandler = handler
+  }
+
+  /** Surface a failed user action to the child's toolbar (address bar etc.). */
+  notifyUserActionError(windowId: string, message: string): void {
+    void this.ready()
+      .then(() => this.client?.call('userActionError', { windowId, message }))
       .catch(() => { /* host unavailable */ })
   }
 

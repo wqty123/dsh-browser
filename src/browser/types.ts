@@ -69,6 +69,126 @@ export interface BrowserKeyRequest {
   readonly key: string
 }
 
+/**
+ * How to find one element for a targeted interaction (form controls, clicks,
+ * typing). `text` matches an element's own visible text — exact first, then
+ * contains, deepest element preferred (so a button inside a card wins over
+ * the card itself).
+ */
+export interface BrowserElementTarget {
+  /** Locator kind. */
+  readonly by: 'css' | 'text' | 'xpath'
+  /** The CSS selector / visible text / XPath expression. */
+  readonly value: string
+  /** 0-based index of the match to use. Default 0. */
+  readonly index?: number
+}
+
+/** Set the value of one input/textarea/select/contenteditable. */
+export interface BrowserSetValueRequest {
+  /** The element to set (css/text/xpath). */
+  readonly target: BrowserElementTarget
+  /** The value to set (string, number, or boolean). */
+  readonly value: string | number | boolean
+  /** Element-lookup budget in ms. Default 5000. */
+  readonly timeoutMs?: number
+}
+
+/** Result of a single setValue. */
+export interface BrowserSetValueResult {
+  /** How the value was applied: input | textarea | select | contenteditable. */
+  readonly method: string
+  /** The value as applied. */
+  readonly value: string
+}
+
+/** Check/uncheck one checkbox or radio. */
+export interface BrowserCheckRequest {
+  /** The element to toggle (css/text/xpath). */
+  readonly target: BrowserElementTarget
+  /** Desired state. Default true (check). */
+  readonly checked?: boolean
+  /** Element-lookup budget in ms. Default 5000. */
+  readonly timeoutMs?: number
+}
+
+/** Select one option of a `<select>`, by value, visible text, or index. */
+export interface BrowserSelectRequest {
+  /** The `<select>` element (css/text/xpath). */
+  readonly target: BrowserElementTarget
+  /** Match the option by its value attribute. */
+  readonly optionValue?: string
+  /** Match the option by its visible text. */
+  readonly optionText?: string
+  /** Match the option by its 0-based index. */
+  readonly optionIndex?: number
+  /** Element-lookup budget in ms. Default 5000. */
+  readonly timeoutMs?: number
+}
+
+/** Result of a single select. */
+export interface BrowserSelectResult {
+  /** The selected option's value attribute. */
+  readonly value: string
+  /** The selected option's visible text. */
+  readonly text: string
+}
+
+/** Clear one input/textarea/contenteditable (or uncheck a checkbox/radio). */
+export interface BrowserClearRequest {
+  /** The element to clear (css/text/xpath). */
+  readonly target: BrowserElementTarget
+  /** Element-lookup budget in ms. Default 5000. */
+  readonly timeoutMs?: number
+}
+
+/** Read one element's current value (for verification). */
+export interface BrowserGetValueRequest {
+  /** The element to read (css/text/xpath). */
+  readonly target: BrowserElementTarget
+  /** Element-lookup budget in ms. Default 5000. */
+  readonly timeoutMs?: number
+}
+
+/** Result of a getValue. */
+export interface BrowserGetValueResult {
+  /** The element's value; null when the element has none (e.g. a checkbox). */
+  readonly value: string | null
+  /** For checkbox/radio: the checked state. */
+  readonly checked?: boolean
+  /** For `<select>`: the selected option's visible text. */
+  readonly selectedText?: string
+}
+
+/** One field of a scrape: a name plus a selector (optionally `selector@attr`). */
+export interface BrowserScrapeField {
+  /** Output key. */
+  readonly name: string
+  /**
+   * CSS selector relative to each item; append `@attr` to take an attribute
+   * instead of text (`a@href` returns an absolute URL for links).
+   */
+  readonly selector: string
+}
+
+/** Extract structured data from repeated DOM items (static, CSP-safe). */
+export interface BrowserScrapeRequest {
+  /** Required: CSS selector of each result container (e.g. `div.card`). */
+  readonly item: string
+  /** Field map: name -> selector[@attr]. */
+  readonly fields: readonly BrowserScrapeField[]
+  /** Wait budget for the item selector to appear. Default 5000. */
+  readonly timeoutMs?: number
+}
+
+/** Structured extraction result. */
+export interface BrowserScrapeResult {
+  /** Number of items extracted. */
+  readonly count: number
+  /** One object per item; missing fields are null. */
+  readonly items: readonly Record<string, string | null>[]
+}
+
 /** One field of a batch form fill. Match by selector, or by name/label/placeholder. */
 export interface BrowserFillField {
   /** CSS selector; when present, candidates are scoped to it. */
@@ -256,6 +376,56 @@ export interface BrowserSnapshotResult {
 }
 
 /**
+ * One node of the accessibility tree, with a stable reference number the
+ * model can cite. Roles/names prefer Chrome's `computedRole`/`computedName`
+ * with tag/attribute inference as fallback; coordinates are top-document
+ * viewport-relative so the node can also be driven by click/type.
+ */
+export interface BrowserA11yNode {
+  /** 1-based reference number, stable for the lifetime of one a11y call. */
+  readonly ref: number
+  /** ARIA role: button | link | textbox | checkbox | radio | combobox | … */
+  readonly role: string
+  /** Accessible name (aria-label, label text, placeholder, own text, …). */
+  readonly name: string
+  /** Current value of input-like nodes (null when not applicable). */
+  readonly value: string | null
+  /** ARIA/DOM states: enabled/disabled/checked/unchecked/expanded/… */
+  readonly states: readonly string[]
+  /** DOM depth (within its document), for reconstructing the tree. */
+  readonly depth: number
+  /** Element tag name (lowercase). */
+  readonly tag: string
+  /** Viewport-relative center, for coordinate fallbacks. */
+  readonly x: number
+  readonly y: number
+  /** True when the node lives inside a same-origin iframe. */
+  readonly frame?: boolean
+}
+
+/** A11y tree request: what to include and how many nodes to return. */
+export interface BrowserA11yRequest {
+  /** Include hidden elements (display:none, hidden, aria-hidden). Default false. */
+  readonly includeHidden?: boolean
+  /** Maximum nodes returned. Default 500; clamped to 10-5000. */
+  readonly maxNodes?: number
+}
+
+/** The page's accessibility tree, flattened into a numbered node list. */
+export interface BrowserA11yResult {
+  /** Final page URL. */
+  readonly url: string
+  /** Page title, if any. */
+  readonly title?: string
+  /** Number of nodes returned. */
+  readonly count: number
+  /** Flattened a11y nodes (depth restores the tree). */
+  readonly nodes: readonly BrowserA11yNode[]
+  /** True when the result was truncated (maxNodes reached). */
+  readonly truncated: boolean
+}
+
+/**
  * A detected human-verification (bot-detection / CAPTCHA) challenge blocking
  * the page. Detection is best-effort and marker-based; a clean result is not a
  * guarantee that no challenge exists.
@@ -353,14 +523,36 @@ export interface BrowserProvider {
   waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult>
   /** Produce an AI-friendly snapshot of the active tab. */
   snapshot(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserSnapshotResult>
+  /** Read the active tab's accessibility tree (semantic, interactive nodes). */
+  a11y(session: BrowserSessionId, request: BrowserA11yRequest, signal?: AbortSignal): Promise<BrowserA11yResult>
+  /** Reload the active tab. Honor `signal` for cancellation. */
+  reload(session: BrowserSessionId, signal?: AbortSignal): Promise<void>
   /** Check whether a human-verification challenge is blocking the active tab. */
   detectChallenge(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserChallenge>
   /** Fetch page content in a requested format. */
   content(session: BrowserSessionId, request: BrowserContentRequest, signal?: AbortSignal): Promise<BrowserContentResult>
-  /** Click at viewport coordinates (fallback path; execute is preferred). Honor `signal` for cancellation. */
-  click(session: BrowserSessionId, request: BrowserClickRequest, signal?: AbortSignal): Promise<void>
-  /** Type into the focused element (fallback path). Honor `signal` for cancellation. */
-  type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void>
+  /**
+   * Click at viewport coordinates, or at a located element's center when the
+   * request carries a `target`. Honor `signal` for cancellation.
+   */
+  click(session: BrowserSessionId, request: BrowserClickRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void>
+  /**
+   * Type into the focused element, or focus a located element first when the
+   * request carries a `target`. Honor `signal` for cancellation.
+   */
+  type(session: BrowserSessionId, request: BrowserTypeRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void>
+  /** Set one element's value (native setter + input/change events). */
+  setValue(session: BrowserSessionId, request: BrowserSetValueRequest, signal?: AbortSignal): Promise<BrowserSetValueResult>
+  /** Check or uncheck one checkbox/radio. */
+  check(session: BrowserSessionId, request: BrowserCheckRequest, signal?: AbortSignal): Promise<{ readonly checked: boolean }>
+  /** Select one option of a `<select>`. */
+  selectOption(session: BrowserSessionId, request: BrowserSelectRequest, signal?: AbortSignal): Promise<BrowserSelectResult>
+  /** Clear one input/textarea/contenteditable (or uncheck). */
+  clearField(session: BrowserSessionId, request: BrowserClearRequest, signal?: AbortSignal): Promise<{ readonly cleared: boolean }>
+  /** Read one element's current value (for verification). */
+  getValue(session: BrowserSessionId, request: BrowserGetValueRequest, signal?: AbortSignal): Promise<BrowserGetValueResult>
+  /** Extract structured data from repeated DOM items (static CSS, CSP-safe). */
+  scrape(session: BrowserSessionId, request: BrowserScrapeRequest, signal?: AbortSignal): Promise<BrowserScrapeResult>
   /** Scroll the active tab. Honor `signal` for cancellation. */
   scroll(session: BrowserSessionId, request: BrowserScrollRequest, signal?: AbortSignal): Promise<void>
   /** Go back in the active tab's history. Honor `signal` for cancellation. */

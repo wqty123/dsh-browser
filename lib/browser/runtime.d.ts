@@ -8,9 +8,9 @@
  */
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-import type { BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserChallenge, ExportedCookie } from './types.js';
+import type { BrowserA11yRequest, BrowserA11yResult, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserElementTarget, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserChallenge, ExportedCookie } from './types.js';
 export { BrowserError, } from './types.js';
-export type { BrowserChallenge, BrowserClickRequest, BrowserContentFormat, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillField, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, ExportedCookie, } from './types.js';
+export type { BrowserA11yNode, BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentFormat, BrowserElementTarget, BrowserGetValueRequest, BrowserGetValueResult, BrowserScrapeField, BrowserScrapeRequest, BrowserScrapeResult, BrowserSelectRequest, BrowserSelectResult, BrowserSetValueRequest, BrowserSetValueResult, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillField, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, ExportedCookie, } from './types.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
         browser: BrowserRuntime;
@@ -72,12 +72,20 @@ export declare class BrowserRuntime extends Service {
     waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult>;
     /** Produce an AI-friendly snapshot of the session's page. */
     snapshot(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserSnapshotResult>;
+    /** Read the session's page accessibility tree through the selected provider. */
+    a11y(session: BrowserSessionId, request: BrowserA11yRequest, signal?: AbortSignal): Promise<BrowserA11yResult>;
+    /** Reload the session's active tab through the selected provider. */
+    reload(session: BrowserSessionId, signal?: AbortSignal): Promise<void>;
     /** Fetch page content in a requested format. */
     content(session: BrowserSessionId, request: BrowserContentRequest, signal?: AbortSignal): Promise<BrowserContentResult>;
-    /** Click at viewport coordinates through the selected provider. */
-    click(session: BrowserSessionId, request: BrowserClickRequest, signal?: AbortSignal): Promise<void>;
-    /** Type into the focused element through the selected provider. */
-    type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void>;
+    /** Click at viewport coordinates (or a located element) through the selected provider. */
+    click(session: BrowserSessionId, request: BrowserClickRequest | {
+        readonly target: BrowserElementTarget;
+    }, signal?: AbortSignal): Promise<void>;
+    /** Type into the focused element (or a located one) through the selected provider. */
+    type(session: BrowserSessionId, request: BrowserTypeRequest | {
+        readonly target: BrowserElementTarget;
+    }, signal?: AbortSignal): Promise<void>;
     /** Scroll the session's page through the selected provider. */
     scroll(session: BrowserSessionId, request: BrowserScrollRequest, signal?: AbortSignal): Promise<void>;
     /** Go back in the session's page history through the selected provider. */
@@ -88,6 +96,22 @@ export declare class BrowserRuntime extends Service {
     key(session: BrowserSessionId, request: BrowserKeyRequest, signal?: AbortSignal): Promise<void>;
     /** Fill a form's fields in one batch through the selected provider. */
     fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult>;
+    /** Set one element's value through the selected provider. */
+    setValue(session: BrowserSessionId, request: BrowserSetValueRequest, signal?: AbortSignal): Promise<BrowserSetValueResult>;
+    /** Check or uncheck one checkbox/radio through the selected provider. */
+    check(session: BrowserSessionId, request: BrowserCheckRequest, signal?: AbortSignal): Promise<{
+        readonly checked: boolean;
+    }>;
+    /** Select one option of a `<select>` through the selected provider. */
+    selectOption(session: BrowserSessionId, request: BrowserSelectRequest, signal?: AbortSignal): Promise<BrowserSelectResult>;
+    /** Clear one element through the selected provider. */
+    clearField(session: BrowserSessionId, request: BrowserClearRequest, signal?: AbortSignal): Promise<{
+        readonly cleared: boolean;
+    }>;
+    /** Read one element's value through the selected provider. */
+    getValue(session: BrowserSessionId, request: BrowserGetValueRequest, signal?: AbortSignal): Promise<BrowserGetValueResult>;
+    /** Extract structured data through the selected provider. */
+    scrape(session: BrowserSessionId, request: BrowserScrapeRequest, signal?: AbortSignal): Promise<BrowserScrapeResult>;
     /** Capture the current page through the selected provider. */
     screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult>;
     /** Check for a human-verification challenge on the active tab. */

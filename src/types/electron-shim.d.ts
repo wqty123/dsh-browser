@@ -55,9 +55,13 @@ declare module 'electron' {
     downloadURL(url: string): void
     capturePage(): Promise<NativeImage>
     loadURL(url: string): Promise<void>
-    setWindowOpenHandler(handler: (details: { url: string }) => { action: 'deny' }): void
+    loadFile(path: string): Promise<void>
+    send(channel: string, payload: unknown): void
+    setWindowOpenHandler(handler: (details: { url: string }) => { action: 'deny' } | { action: 'allow' }): void
     getTitle(): string
     getURL(): string
+    on(event: 'ipc-message', listener: (event: unknown, channel: string, ...args: unknown[]) => void): this
+    on(event: 'page-title-updated' | 'did-navigate' | 'did-navigate-in-page' | 'dom-ready', listener: (event: unknown, ...args: unknown[]) => void): this
   }
   export interface WebContentsView {
     readonly webContents: WebContents
@@ -79,6 +83,8 @@ declare module 'electron' {
     show(): void
     restore(): void
     focus(): void
+    moveTop(): void
+    close(): void
     setTitle(title: string): void
     on(event: 'closed', listener: () => void): this
     on(event: 'resize', listener: () => void): this

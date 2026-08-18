@@ -10,21 +10,34 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {
+  BrowserA11yRequest,
+  BrowserA11yResult,
+  BrowserCheckRequest,
+  BrowserClearRequest,
   BrowserClickRequest,
   BrowserContentRequest,
   BrowserContentResult,
   BrowserDownloadRequest,
+  BrowserElementTarget,
   BrowserExecuteRequest,
   BrowserExecuteResult,
   BrowserFillRequest,
   BrowserFillResult,
+  BrowserGetValueRequest,
+  BrowserGetValueResult,
   BrowserHistoryEntry,
   BrowserNavigateRequest,
   BrowserOpenRequest,
   BrowserProvider,
+  BrowserScrapeRequest,
+  BrowserScrapeResult,
   BrowserScreenshotRequest,
   BrowserScreenshotResult,
+  BrowserSelectRequest,
+  BrowserSelectResult,
   BrowserSessionId,
+  BrowserSetValueRequest,
+  BrowserSetValueResult,
   BrowserSnapshotResult,
   BrowserTab,
   BrowserTypeRequest,
@@ -41,9 +54,24 @@ export {
   BrowserError,
 } from './types.js'
 export type {
+  BrowserA11yNode,
+  BrowserA11yRequest,
+  BrowserA11yResult,
   BrowserChallenge,
+  BrowserCheckRequest,
+  BrowserClearRequest,
   BrowserClickRequest,
   BrowserContentFormat,
+  BrowserElementTarget,
+  BrowserGetValueRequest,
+  BrowserGetValueResult,
+  BrowserScrapeField,
+  BrowserScrapeRequest,
+  BrowserScrapeResult,
+  BrowserSelectRequest,
+  BrowserSelectResult,
+  BrowserSetValueRequest,
+  BrowserSetValueResult,
   BrowserWaitRequest,
   BrowserWaitResult,
   BrowserScrollRequest,
@@ -208,18 +236,28 @@ export class BrowserRuntime extends Service {
     return this.resolveProvider().snapshot(session, signal)
   }
 
+  /** Read the session's page accessibility tree through the selected provider. */
+  async a11y(session: BrowserSessionId, request: BrowserA11yRequest, signal?: AbortSignal): Promise<BrowserA11yResult> {
+    return this.resolveProvider().a11y(session, request, signal)
+  }
+
+  /** Reload the session's active tab through the selected provider. */
+  async reload(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().reload(session, signal)
+  }
+
   /** Fetch page content in a requested format. */
   async content(session: BrowserSessionId, request: BrowserContentRequest, signal?: AbortSignal): Promise<BrowserContentResult> {
     return this.resolveProvider().content(session, request, signal)
   }
 
-  /** Click at viewport coordinates through the selected provider. */
-  async click(session: BrowserSessionId, request: BrowserClickRequest, signal?: AbortSignal): Promise<void> {
+  /** Click at viewport coordinates (or a located element) through the selected provider. */
+  async click(session: BrowserSessionId, request: BrowserClickRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void> {
     return this.resolveProvider().click(session, request, signal)
   }
 
-  /** Type into the focused element through the selected provider. */
-  async type(session: BrowserSessionId, request: BrowserTypeRequest, signal?: AbortSignal): Promise<void> {
+  /** Type into the focused element (or a located one) through the selected provider. */
+  async type(session: BrowserSessionId, request: BrowserTypeRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void> {
     return this.resolveProvider().type(session, request, signal)
   }
 
@@ -246,6 +284,36 @@ export class BrowserRuntime extends Service {
   /** Fill a form's fields in one batch through the selected provider. */
   async fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult> {
     return this.resolveProvider().fillForm(session, request, signal)
+  }
+
+  /** Set one element's value through the selected provider. */
+  async setValue(session: BrowserSessionId, request: BrowserSetValueRequest, signal?: AbortSignal): Promise<BrowserSetValueResult> {
+    return this.resolveProvider().setValue(session, request, signal)
+  }
+
+  /** Check or uncheck one checkbox/radio through the selected provider. */
+  async check(session: BrowserSessionId, request: BrowserCheckRequest, signal?: AbortSignal): Promise<{ readonly checked: boolean }> {
+    return this.resolveProvider().check(session, request, signal)
+  }
+
+  /** Select one option of a `<select>` through the selected provider. */
+  async selectOption(session: BrowserSessionId, request: BrowserSelectRequest, signal?: AbortSignal): Promise<BrowserSelectResult> {
+    return this.resolveProvider().selectOption(session, request, signal)
+  }
+
+  /** Clear one element through the selected provider. */
+  async clearField(session: BrowserSessionId, request: BrowserClearRequest, signal?: AbortSignal): Promise<{ readonly cleared: boolean }> {
+    return this.resolveProvider().clearField(session, request, signal)
+  }
+
+  /** Read one element's value through the selected provider. */
+  async getValue(session: BrowserSessionId, request: BrowserGetValueRequest, signal?: AbortSignal): Promise<BrowserGetValueResult> {
+    return this.resolveProvider().getValue(session, request, signal)
+  }
+
+  /** Extract structured data through the selected provider. */
+  async scrape(session: BrowserSessionId, request: BrowserScrapeRequest, signal?: AbortSignal): Promise<BrowserScrapeResult> {
+    return this.resolveProvider().scrape(session, request, signal)
   }
 
   /** Capture the current page through the selected provider. */

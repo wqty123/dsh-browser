@@ -18,7 +18,7 @@
 | --- | --- |
 | Why a shared real browser, and how it differs from headless approaches | [Why a shared real browser](docs/why-browser.md) |
 | Installation, configuration, day-to-day use | [User guide](docs/user-guide.md) |
-| All 25 tools: parameters, output, examples | [Tool reference](docs/tool-reference.md) |
+| All 33 tools: parameters, output, examples | [Tool reference](docs/tool-reference.md) |
 | How the seam / provider / tools layers and self-hosting work | [Architecture](docs/architecture.md) |
 | Documentation index and README split | [Docs index](docs/README.md) |
 
@@ -28,7 +28,7 @@
 
 - **A real view, not a relay**: the browser is a native `WebContentsView`; the human sees every step the agent takes and can grab control at any time;
 - **Install-and-use**: with a desktop shell the shell's embedded view is used; on plain `dsh web` the plugin **self-hosts** — it spawns its own Electron window with zero extra configuration;
-- **One plugin, one toolset**: after install the agent automatically gets 25 `browser_*` tools (open, wait, inspect, interact, scroll, back/forward, fill forms, press keys, screenshot, download, auth management…).
+- **One plugin, one toolset**: after install the agent automatically gets 33 `browser_*` tools (open, a11y tree, wait, semantic/coordinate interaction, scroll, back/forward, batch and single-control form filling, keys, structured scraping, screenshot, download, auth management…).
 
 In one sentence: **installing the plugin gives you a real browser that is shared with the user and drivable by the agent.**
 
@@ -133,15 +133,23 @@ See the full list in [Tool reference](#tool-reference).
 | `browser_open` | Open a URL (optionally in a new tab); returns a page snapshot | ✅ |
 | `browser_wait` | Wait for page load (optional expected URL / CSS selector), returns readiness | – |
 | `browser_snapshot` | Numbered inventory of interactive elements (inputs/buttons/links; pierces same-origin iframes and Shadow DOM) | – |
+| `browser_a11y` | Accessibility tree: semantic role/name/value/states + coordinates per interactive node (pierces same-origin iframes and Shadow DOM) | – |
 | `browser_execute` | Run JS in the page; args arrive as `arguments[0..n]` | ✅ |
 | `browser_content` | Fetch the page as html / markdown / txt / json (selector, maxChars, timeoutMs) | – |
-| `browser_click` | Click at viewport coordinates (for vision-located targets) | ✅ |
-| `browser_type` | Type text into the focused element (CDP `Input.insertText`) | ✅ |
+| `browser_click` | Click a semantic target (`target`: css/text/xpath, scrolls into view and clicks center) or viewport coordinates (vision-located) | ✅ |
+| `browser_type` | Type text (optionally focusing a `target` element first; CDP `Input.insertText`) | ✅ |
 | `browser_key` | Press a named key (Enter/Tab/arrows/Home/End…) | ✅ |
 | `browser_scroll` | Scroll the page (pixel deltas / selector / top-bottom) | ✅ |
 | `browser_back` | One step back in page history (no-op at the start) | ✅ |
 | `browser_forward` | One step forward in page history (no-op at the end) | ✅ |
+| `browser_refresh` | Reload the current page (like a browser refresh button) | ✅ |
 | `browser_fill` | Batch form fill (selector/name/label matching, controlled inputs, selects, checkbox/radio, optional submit) | ✅ |
+| `browser_set_value` | Set one control's value (`target`-located; native setter + input/change, React-controlled friendly) | ✅ |
+| `browser_check` | Check/uncheck a checkbox or radio (`target`-located) | ✅ |
+| `browser_select` | Select an option of a `<select>` by value/text/index (`target`-located) | ✅ |
+| `browser_clear` | Clear an input/textarea/contenteditable, or uncheck (`target`-located) | ✅ |
+| `browser_get_value` | Read an element's current value for verification (`target`-located) | – |
+| `browser_scrape` | Structured extraction: container selector + field map (`selector@attr`), static CSS only, CSP-safe | – |
 | `browser_screenshot` | Capture, optional `fullPage`, `savePath`, JPEG (`format`/`quality`) and scaling (`maxWidth`/`maxHeight`) | – |
 | `browser_list_tabs` | List the session's tabs | – |
 | `browser_switch_tab` | Switch to a tab by id (also switches the visible view when self-hosted) | ✅ |
@@ -161,7 +169,13 @@ See the full list in [Tool reference](#tool-reference).
 ### Waiting for the page
 
 - **After `browser_open`, before `browser_snapshot`, call `browser_wait` on slow sites**: pass `url` (what you opened) and an optional `selector`, and wait for `ready: true` — otherwise you snapshot the old document or a white screen.
-- **Content you cannot see may live in an iframe / Shadow DOM**: snapshots pierce same-origin iframes and shadow roots and mark them `(iframe)`; coordinates are always top-document, so `browser_click` works directly. DOM selectors are frame-scoped — reach them via `iframe.contentDocument` in `browser_execute`.
+- **Content you cannot see may live in an iframe / Shadow DOM**: snapshots and the a11y tree pierce same-origin iframes and shadow roots and mark them `(iframe)`; coordinates are always top-document, so `browser_click` works directly. DOM selectors are frame-scoped — reach them via `iframe.contentDocument` in `browser_execute`.
+
+### Semantic targets and the a11y tree
+
+- **`browser_a11y` is the best way to understand a page**: every interactive node carries its semantic role (button/textbox/checkbox…), accessible name, current value, states (enabled/checked/expanded…) and coordinates — click/type them directly.
+- **`browser_click`/`browser_type` accept a `target`**: `{by: css|text|xpath, value, index?}` — `text` matches an element's own visible text (exact first, then contains, deepest preferred); clicks scroll the element to the viewport center first; typing focuses it first.
+- **Use the single-control tools for one field** (`browser_set_value`/`browser_check`/`browser_select`/`browser_clear`/`browser_get_value`), `browser_fill` for batches, and `browser_scrape` for structured list extraction.
 
 ### Operating discipline (click/fill)
 
@@ -197,9 +211,11 @@ agent (browser_* tools)
 
 - **Seam** (`browser` row): provides the `ctx.browser` service — provider registration, session lifecycle, error codes — decoupled from any implementation.
 - **Provider** (`browser-electron` row): operates views through the `ElectronBrowserViewHost` seam (create/destroy/show, `sendCommand`), implemented with real Electron objects by the shell.
-- **Tools** (`tool-browser` row): the 25 model-facing `browser_*` tools, maintaining one browser session per calling task (DSH session).
+- **Tools** (`tool-browser` row): the 33 model-facing `browser_*` tools, maintaining one browser session per calling task (DSH session).
 
-**Self-hosted mode**: without a desktop shell, the plugin spawns its own Electron child process (`host-main.js`) and drives it over loopback TCP JSON-RPC (authenticated with a per-spawn token). The child auto-restarts after a crash; screenshots prefer Electron's native `capturePage` (CDP capture can hang with multiple views in the window); the plugin automatically picks the **newest** Electron in the environment (33.x has a compositor defect; ≥ 40 recommended). The window title always shows which task's page is currently visible (session label + page title/URL), and views follow the window size on resize.
+**Self-hosted mode**: without a desktop shell, the plugin spawns its own Electron child process (`host-main.js`) and drives it over loopback TCP JSON-RPC (authenticated with a per-spawn token). The child auto-restarts after a crash; screenshots prefer Electron's native `capturePage` (CDP capture can hang with multiple views in the window); the plugin automatically picks the **newest** Electron in the environment (33.x has a compositor defect; ≥ 40 recommended).
+
+**The self-hosted browser IS a real browser**: every task (DSH session) gets its **own browser window** with a full toolbar — address bar, back/forward/reload buttons, and a tab strip (new/switch/close tabs). A human can use it exactly like Chrome: type a URL in the address bar (https:// is added automatically), click tabs, open new ones. Human and agent actions feed the **same session model** (same tabs, history, and navigation); the window title always shows the task label plus the page title/URL, and views follow the window size on resize. A window closes automatically with its session when the task ends.
 
 **Electron lookup order**: ① `require('electron')` (peer dependency) → ② `ELECTRON_PATH` (explicit override) → ③ the newest among DSH install anchors and pnpm virtual stores. A clear error tells you when none is found.
 
@@ -246,7 +262,7 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 pnpm run build
 ```
 
-> The repo does not currently ship an automated test suite (type-check + build verifies the TypeScript side).
+> Run tests: `node --test "tests/*.test.mjs"` (fake-host tests, no Electron needed).
 
 Code layout:
 
