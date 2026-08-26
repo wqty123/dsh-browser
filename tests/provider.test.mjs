@@ -111,6 +111,27 @@ test('open/list/switch/close/reset tab lifecycle', async () => {
   await assert.rejects(() => p.listTabs(sid), /not open/)
 })
 
+test('switchTab/closeTab locate a tab across sessions and reject unknown ids', async () => {
+  const host = makeHost()
+  const p = new ElectronBrowserProvider(host)
+  const sid = await p.open()
+  const tabId = (await p.listTabs(sid))[0].id
+  // A second session (simulates the tool layer resolving a different session
+  // than the one that opened the tab): tab ids are globally unique, so
+  // switching/closing by id must still find the tab.
+  const other = await p.open()
+  await p.switchTab(other, tabId)
+  assert.equal((await p.listTabs(other)).length, 1, 'switching did not disturb the other session')
+  assert.ok((await p.listTabs(sid)).some(t => t.id === tabId), 'tab still belongs to its session')
+  await p.closeTab(other, tabId)
+  assert.ok(!(await p.listTabs(sid)).some(t => t.id === tabId), 'close by id removed the tab')
+  // An id that exists nowhere must THROW (no silent fake success).
+  await assert.rejects(async () => { await p.closeTab(other, 'tab:does-not-exist') }, /not open in this session/)
+  await assert.rejects(async () => { await p.switchTab(other, 'tab:does-not-exist') }, /not open in this session/)
+  await p.close(sid)
+  await p.close(other)
+})
+
 test('open(label) surfaces the label through showView', async () => {
   const host = makeHost()
   const p = new ElectronBrowserProvider(host)

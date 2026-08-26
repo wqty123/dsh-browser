@@ -389,21 +389,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Switch to a tab by id, making its view visible. */
   switchTab(session: BrowserSessionId, tabId: string): Promise<void> {
-    const s = this.session(session)
-    const index = s.tabs.findIndex(tab => tab.id === tabId)
-    if (index < 0) {
-      throw new BrowserError(`browser: tab "${tabId}" is not open in this session`, 'BROWSER_TAB_UNKNOWN')
-    }
-    s.activeIndex = index
-    this.showActive(s)
+    const found = this.locateTab(session, tabId)
+    found.s.activeIndex = found.index
+    this.showActive(found.s)
     return Promise.resolve()
   }
 
   /** Close one tab; closing the active tab activates the next. */
   closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
-    const s = this.session(session)
-    const index = s.tabs.findIndex(tab => tab.id === tabId)
-    if (index < 0) return Promise.resolve() // idempotent
+    const found = this.locateTab(session, tabId)
+    const s = found.s
+    const index = found.index
     const removed = s.tabs[index]
     if (removed !== undefined) {
       s.tabs.splice(index, 1)
@@ -424,6 +420,30 @@ export class ElectronBrowserProvider implements BrowserProvider {
     }
     this.showActive(s)
     return Promise.resolve()
+  }
+
+  /**
+   * Find a tab by id, preferring the calling session. Tab ids are globally
+   * unique UUIDs, so when the calling session does not hold the tab (the tool
+   * layer's session resolution can drift from the session that opened it),
+   * fall back to locating it in any other session instead of failing — the
+   * caller explicitly named a tab, so acting on it is what they want. Throws
+   * BROWSER_TAB_UNKNOWN with the session's actual tabs when the id exists
+   * nowhere.
+   */
+  private locateTab(session: BrowserSessionId, tabId: string): { s: Session; index: number } {
+    const s = this.session(session)
+    const own = s.tabs.findIndex(tab => tab.id === tabId)
+    if (own >= 0) return { s, index: own }
+    for (const other of this.sessions.values()) {
+      const index = other.tabs.findIndex(tab => tab.id === tabId)
+      if (index >= 0) return { s: other, index }
+    }
+    const ownIds = s.tabs.map(t => t.id).join(', ') || '(none)'
+    throw new BrowserError(
+      `browser: tab "${tabId}" is not open in this session (session tabs: ${ownIds})`,
+      'BROWSER_TAB_UNKNOWN',
+    )
   }
 
   /** Close every tab and reset to one blank tab. */

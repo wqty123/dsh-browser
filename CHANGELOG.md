@@ -268,3 +268,30 @@
 - `RemoteElectronViewHost.available()` 实测 **6ms** 返回(纯文件系统探测,不再触发下载);electron 44 二进制下载后正常定位。
 - **真实端到端验证通过**(真机 Windows):spawn electron → stdin/env token 握手 → `navigate` → `snapshot` → `listTabs` → `close` 全链路 E2E PASS。
 - 版本号未 bump。五轮合计 5 个提交未推送。
+
+---
+
+# 第六轮:修复自托管模式下 switch_tab/close_tab 按 id 操作失败
+
+## 一、症状
+
+自托管(plain dsh web)模式下:`browser_switch_tab` 对任何 tab id 都报 `tab "<id>" is not open in this session`;`browser_close_tab` 返回 `closed: true` 但标签没关。其余工具全部正常。
+
+## 二、根因
+
+- **closeTab 静默假成功**:tab 找不到时 `index < 0` 直接 resolve(幂等设计),返回 `closed: true` 掩盖了真实错误——这就是"返回 Closed. 但没关闭"。
+- **按 id 查找被限定在"调用方 session"内**:工具层 `ensureSession` 解析出的 session 与实际持有该 tab 的 session 可能错位(宿主工具执行上下文差异),导致 findIndex 找不到。tab id 是全局唯一的 UUID,但查找范围错了。
+
+## 三、修复
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | closeTab 静默假成功 | 找不到时改为抛出 `BROWSER_TAB_UNKNOWN`(与 switchTab 一致),不再返回假成功 |
+| 2 | 按 id 查找限定调用方 session | 新增 `locateTab()`:优先调用方 session,找不到则**跨全部 session 按 id 兜底**(tab id 全局唯一,不会误命中其他任务);真的不存在才抛错 |
+| 3 | 错误无诊断信息 | `BROWSER_TAB_UNKNOWN` 信息附带调用方 session 的现有 tab id 列表,便于线上定位 |
+
+## 四、验证
+
+- `tsc --noEmit` 零错误;构建通过。
+- `node --test tests/*.test.mjs` **21 项**全部通过(新增:跨 session 切换/关闭兜底、未知 id 抛错回归测试)。
+- 版本号未 bump。六轮合计 6 个提交未推送。
