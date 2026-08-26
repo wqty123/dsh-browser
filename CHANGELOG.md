@@ -235,3 +235,29 @@
 - `tsc --noEmit` 零错误;构建通过。
 - `node --test tests/*.test.mjs` **20 项**全部通过(新增 3 项回归:type-with-target 不丢文本、Space 带 text、waitFor 同源判定)。
 - 版本号未 bump。四轮合计 4 个提交未推送。
+
+---
+
+# 第五轮:修复 electron 44 懒下载导致插件不可用 + 构建回归
+
+## 一、症状与根因
+
+- 症状:安装后用 pnpm 装依赖,插件报不可用/浏览器起不来。
+- 根因一:electron 44+ **不再有 postinstall**,改为**首次 `require('electron')` 时懒下载**二进制。pnpm 安装后 `node_modules/electron/` 里没有 `dist/` 与 `path.txt`(二进制缺失)。插件的 `available()` 探测走 `require('electron')`,会在 DSH 启动/provider 选择时**同步阻塞下载**(或离线失败),表现为插件不可用。
+- 根因二:装上 electron 44 后其自带类型把 `Cookie.domain` 标为可选,`flushAuth` 里两处裸用 `c.domain` 触发 TS18048,`tsc` 构建必挂(HIGH 3 的修复当时只覆盖了导出对象一处)。
+
+## 二、修复
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | `available()` 探测触发 electron 懒下载,阻塞/失败 | `resolveElectronPath()` 改为无副作用探测:先检查 `path.txt`/`dist` 是否已下载,已下载才 `require('electron')`;未下载走 ELECTRON_PATH/锚点/自身安装树扫描,全部缺失时抛错(不触发网络下载) |
+| 2 | 二进制缺失时错误信息没给指引 | 错误信息补充:Electron 44+ 首次使用自动下载(需网络),可先跑 `npx install-electron` 或设 `ELECTRON_PATH` |
+| 3 | `flushAuth` 的 `c.domain` 两处裸用导致构建失败 | `const domain = c.domain ?? ''`,host/hostPart/导出均基于它 |
+| 4 | 首次使用无感知 | 懒下载仍保留在真正 spawn 时触发(electron 44 官方机制);首次运行需网络 |
+
+## 三、验证
+
+- `tsc --noEmit` 零错误;构建通过。
+- `node --test tests/*.test.mjs` 20 项全部通过。
+- `RemoteElectronViewHost.available()` 实测 **6ms** 返回(纯文件系统探测,不再触发下载);electron 44 二进制下载后正常定位。
+- 版本号未 bump。五轮合计 5 个提交未推送。

@@ -53,10 +53,26 @@ const MAX_RPC_BUFFER_BYTES = 512 * 1024 * 1024
  */
 function resolveElectronPath(): string {
   const require = createRequire(import.meta.url)
-  // 1. Optional peer dependency.
+  // 1. Optional peer dependency — but ONLY when its binary is already on
+  //    disk. Electron 44+ downloads the binary lazily on the first require()
+  //    (it has no postinstall anymore), so probing here must never trigger a
+  //    synchronous network download: available() would block DSH startup for
+  //    the download (or fail outright offline), surfacing as a broken plugin.
+  //    The download still happens on the first real spawn; this guard only
+  //    keeps the probe side-effect free.
   try {
-    const resolved: unknown = require('electron')
-    if (typeof resolved === 'string' && resolved.length > 0) return resolved
+    const entry: unknown = require.resolve('electron')
+    if (typeof entry === 'string' && entry.length > 0) {
+      const pkgRoot = dirname(entry)
+      const binaryReady =
+        existsSync(join(pkgRoot, 'path.txt'))
+        || existsSync(join(pkgRoot, 'dist', 'electron.exe'))
+        || existsSync(join(pkgRoot, 'dist', 'electron'))
+      if (binaryReady) {
+        const resolved: unknown = require('electron')
+        if (typeof resolved === 'string' && resolved.length > 0) return resolved
+      }
+    }
   } catch {
     // continue probing
   }
@@ -118,7 +134,9 @@ function resolveElectronPath(): string {
   }
   throw new Error(
     'dsh-builtin-browser: cannot locate the Electron binary. Install electron in the host profile ' +
-    '(e.g. `dsh plugin --profile web add electron`) or set ELECTRON_PATH to the electron executable.',
+    '(e.g. `dsh plugin --profile web add electron`) or set ELECTRON_PATH to the electron executable. ' +
+    'Note: Electron 44+ downloads its binary on first use, so if the package is installed but the binary ' +
+    'is missing, run `npx install-electron` once (needs network) and retry.',
   )
 }
 
