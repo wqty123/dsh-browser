@@ -1990,7 +1990,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
    */
   private async handleUserAction(action: BrowserUserAction): Promise<void> {
     const s = this.sessions.get(action.windowId)
-    if (s === undefined) return // the session (and its window) is gone
+    if (s === undefined) {
+      // The window the human clicked in has no live session here (session
+      // closed, or a child restart changed identity). Never swallow the click
+      // silently — surface it so the toolbar can tell the human what happened.
+      const message = `action ${action.type} failed: no live browser session for window "${action.windowId}"`
+      process.stderr.write(`[dsh-browser] ${message}\n`)
+      this.notifyUserActionError(action, new Error('no live browser session'))
+      return
+    }
     try {
       switch (action.type) {
         case 'navigate':

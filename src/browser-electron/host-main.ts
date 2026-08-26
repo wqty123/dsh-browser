@@ -353,6 +353,8 @@ function createToolbar(win: HostWindow): WebContentsView | undefined {
     view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     view.webContents.on('ipc-message', (_event, channel, ...args) => {
       if (channel !== 'toolbar-action') return
+      // Diagnostics only; the parent never parses stderr.
+      process.stderr.write(`[dsh-browser host] toolbar action: ${String(args[0] ?? '')}\n`)
       handleToolbarAction(win, String(args[0] ?? ''), (args[1] ?? {}) as Record<string, unknown>)
     })
     // Once the toolbar page is up, push the current tab strip so it is not
