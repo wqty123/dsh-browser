@@ -410,3 +410,36 @@ bump `0.1.17 → 0.1.18`,将第九轮「electron 改为必装依赖」随版本�
 - **第九轮**:electron 从 optional peer 移入 `dependencies`,安装插件即自动带上 electron 包——纯 `dsh web` 自托管开箱可用,不再需要手动 `add electron`;DSH Desktop 依旧优先复用宿主二进制;文档、报错与 shim 注释同步。
 
 **验证**:`tsc` 构建零错误(有/无 electron 包两种环境);`node --test tests/*.test.mjs` 21 项全部通过。
+
+---
+
+# 第十轮:DSH-Store 兼容性声明(2026-08-27)
+
+## 背景
+
+DSH STORE 自动化(AI-Scarlett/DSH-Store #243)固定 Commit 检查发现:`dsh-builtin-browser` 对官方最新 3 个 DSH 版本(`0.1.0-rc.8` / `0.1.1-rc.1` / `0.1.1-rc.2`)没有任何 compatible 的 `dshReleases` 记录 → 触发 `DSH_LATEST_THREE_COMPATIBILITY_HOLD`,插件被临时下架。仅写宽泛范围不算安装证据,必须逐版本声明。
+
+## 改动
+
+`package.json` 新增 `dsh.compatibility`(参照已收录插件 `dsh-vision` 的 schema):
+
+- `dsh`: `>=0.1.1-rc.1 <0.2.0`(覆盖两条 compatible 声明);
+- `profiles`: `["web", "desktop"]`;
+- `dshReleases`:
+  - `0.1.1-rc.2`: `compatible`(peer 对齐 `^0.1.1-rc.2`、CI 全绿、真实 DSH E2E 验证);
+  - `0.1.1-rc.1`: `compatible`(真实 DSH `0.1.1-rc.1` profile-boot E2E 实测通过:open→navigate→snapshot 全链路);
+  - `0.1.0-rc.8`: `unknown`(未实测,不宣称兼容)。
+
+目的:恢复 DSH STORE 收录。推送后自动化每 8 小时复检,确定性 blocker 清除后自动更新/关闭 issue #243。
+
+## 验证
+
+- `tsc` 构建零错误;`node --test tests/*.test.mjs` 21 项全部通过。
+
+---
+
+## 0.1.19 发布(2026-08-27)
+
+bump `0.1.18 → 0.1.19`,将第十轮「DSH-Store 兼容性声明」随版本发布(tag `v0.1.19`)。
+
+**验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` 21 项全部通过。
