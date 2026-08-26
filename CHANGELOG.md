@@ -323,3 +323,19 @@
 - 真机探针(hit2/hit3):真实 OS 点击到达工具栏 view(`input-event mouseDown`)、DOM mousedown 触发;焦点路由生效(点击工具栏 → `toolbar.isFocused()=true`,点击页面 → `page.isFocused()=true`)。
 - `tsc --noEmit` 零错误;`node --test tests/*.test.mjs` **21 项**全部通过。
 - 版本号未 bump。七轮合计 7 个提交未推送。
+
+---
+
+## 0.1.16 发布(2026-08-26)
+
+bump `0.1.15 → 0.1.16`,将第一至第七轮全部修复随版本发布(本地 11 个提交,origin/master 自 `9ffe5d6` 起):
+
+- **第一轮**:安全与健壮性修复(详见上文)
+- **第二轮**:功能补全 + 测试 + CI(详见上文)
+- **第三轮**:对标 browser-bridge 的功能 + 审查修复(详见上文)
+- **第四轮**:DSH 0.1.1-rc.2 对齐 + 复查修复(详见上文)
+- **第五轮**:`available()` 无副作用探测(electron 44 懒下载)+ flushAuth 构建修复
+- **第六轮**:Windows RPC 握手 token env 兜底;switch/close_tab 跨 session 定位 + closeTab 不再假成功
+- **第七轮**:工具栏焦点路由——点击聚焦目标 view,地址栏可输入,窗口 refocus 恢复上次 view
+
+**验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` 21 项全部通过。tag `v0.1.16`。
