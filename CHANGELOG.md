@@ -373,3 +373,31 @@ bump `0.1.16 → 0.1.17`,将第八轮 DSH Desktop 宿主 Electron 复用修复�
 - **第八轮**:插件运行在 Electron 进程内直接复用宿主二进制;插件跑在宿主子 Node 进程时沿进程祖先树找到宿主 Electron 兜底(Windows 用 PowerShell CIM,仅最后手段)——DSH Desktop **零安装开箱可用**;报错按当前 profile 动态提示;补齐 electron shim(`WebContents.focus()` / `on('input-event')` / `BrowserWindow.on('focus')`)修复无 electron 包环境(CI)的类型检查;文档与 CHANGELOG 同步。
 
 **验证**:`tsc` 构建零错误(有无 electron 包两种环境);`node --test tests/*.test.mjs` 21 项全部通过。
+
+---
+
+# 第九轮:electron 改为必装依赖(2026-08-27)
+
+## 动机
+
+issue #4 报告者的核心诉求是「装完插件即可用」:此前 electron 是 optional peer,安装插件不会自动带来 electron 包,DSH Desktop 之外(纯 `dsh web` 自托管)的用户仍需手动 `add electron`。本轮按报告者建议 ① 的 A 分支,把 electron 从 optional peer 改为**真实依赖**。
+
+## 改动
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `package.json`:`electron` 从 `peerDependencies`(+ `peerDependenciesMeta.optional`)移入 `dependencies`(`>= 30.0.0`),删除 `peerDependenciesMeta` | 安装插件即自动带上 electron 包;electron 44+ 无 postinstall,二进制首次使用懒下载,安装不增重 |
+| 2 | `remote-host.ts` 注释与报错措辞同步 | 定位顺序 ③ 改为「随插件安装的 electron 包」;报错区分新旧安装(新装自带 electron,旧装仍可 `dsh plugin --profile <profile> add electron`) |
+| 3 | `electron-shim.d.ts` 注释同步 | electron 现在是运行时依赖,shim 仍保留(供独立 typecheck src/ 时自洽) |
+| 4 | 文档同步(README 中英、user-guide、architecture、CHANGELOG) | 「环境要求」改为必装依赖;定位顺序、FAQ、已知限制同步 |
+
+## 说明
+
+- **DSH Desktop 行为不变**:依旧优先复用宿主二进制(步骤 0/②),随包安装的 electron 仅作后备——安装体积变重是换取「装完即可用」的代价,符合报告者建议。
+- **CI 影响**:electron 成为 dependencies 后,CI 的 `npm install` 会装上 electron 包(44+ 无 postinstall,不下载二进制),`tsc` 将使用真实 electron 类型(shim 同步保留,双环境仍零错误)。
+
+## 验证
+
+- `tsc --noEmit` 零错误(有/无 electron 包两种环境);构建通过。
+- `node --test tests/*.test.mjs` 21 项全部通过。
+- 版本号未 bump(按仓库惯例,发布时 bump)。

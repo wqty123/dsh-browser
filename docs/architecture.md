@@ -60,7 +60,7 @@ RemoteElectronViewHost  ──TCP JSON-RPC──▶  host-main.js
 
 - **协议**:本机 loopback TCP,每行一个 JSON(`{ id, op, ... }` ↔ `{ id, ok, result|err }`);
 - **认证**:每次 spawn 生成随机 token(经 `--rpc-token` 传入),子进程首条消息必须回传该 token(`hello`);服务端只接受**一个**连接,其余连接直接断开——本机其他进程无法伪冒子进程或注入回复;
-- **Electron 定位**:① 插件运行在 Electron 进程内(DSH Desktop 主进程)时直接复用宿主二进制(`process.execPath`);② 进程祖先树中的宿主 Electron 二进制(DSH Desktop 把插件跑在子 Node 进程时的兜底,Windows 用 PowerShell CIM 查询,仅在其它路径全部落空时才执行)→ ③ peer 依赖 → ④ `ELECTRON_PATH` → ⑤ 锚点与 pnpm store 中**版本最新**者(33.x 有合成器缺陷,建议 ≥ 40);
+- **Electron 定位**:① 插件运行在 Electron 进程内(DSH Desktop 主进程)时直接复用宿主二进制(`process.execPath`);② 进程祖先树中的宿主 Electron 二进制(DSH Desktop 把插件跑在子 Node 进程时的兜底,Windows 用 PowerShell CIM 查询,仅在其它路径全部落空时才执行)→ ③ 随插件安装的 electron 包 → ④ `ELECTRON_PATH` → ⑤ 锚点与 pnpm store 中**版本最新**者(33.x 有合成器缺陷,建议 ≥ 40);
 - **稳健性**:子进程/套接字都有 `error` 监听(否则未捕获事件会炸掉整个 DSH 进程);子进程退出自动重启;物化失败可重试;下载仅限 HTTP(S)、`savePath` 必须绝对路径(默认限定 `~/Downloads`,可配置 `downloadDir` 覆盖)、流式限流 + Content-Length 提前拒绝、256MB 上限与 60s 超时,文件由**子进程直接落盘**(临时文件 + rename,不再经 RPC 传 base64);cookie 导出/恢复有 30s 超时;
 - **视图可见性**:多标签/多会话时,`showView` 隐藏其他视图并把目标视图置顶(remove+re-add),确保用户看到的是活动标签;目标是当前可见视图时**跳过** remove/re-add(否则每次操作都闪烁);窗口标题实时显示当前可见会话的任务标识 + 页面标题/URL(`showView` 携带会话 label,子进程读 `getTitle`/`getURL`);窗口 resize 时视图 bounds 自动跟随;
 - **孤儿防护**:父进程断开时子进程自动退出,不留僵尸窗口;

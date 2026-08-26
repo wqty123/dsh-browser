@@ -217,7 +217,7 @@ agent (browser_* tools)
 
 **The self-hosted browser IS a real browser**: every task (DSH session) gets its **own browser window** with a full toolbar — address bar, back/forward/reload buttons, and a tab strip (new/switch/close tabs). A human can use it exactly like Chrome: type a URL in the address bar (https:// is added automatically), click tabs, open new ones. Keyboard focus follows your clicks — **click the address bar to type, click the page to interact** (Windows focus routing; fixes the case where clicks did not move focus and the address bar could not receive typed URLs). Human and agent actions feed the **same session model** (same tabs, history, and navigation); the window title always shows the task label plus the page title/URL, and views follow the window size on resize. A window closes automatically with its session when the task ends.
 
-**Electron lookup order**: ① the current process IS Electron (DSH Desktop main process) → reuse the host binary directly; ② walk the process ancestry for the host's Electron binary (covers hosts that run the plugin in a child Node process, e.g. DSH Desktop; PowerShell CIM on Windows, last resort only); ③ `require('electron')` (peer dependency); ④ `ELECTRON_PATH` (explicit override); ⑤ the newest among DSH install anchors and pnpm virtual stores. **Zero extra install on DSH Desktop**; when nothing is found a clear error tells you what to do (including the per-profile install command).
+**Electron lookup order**: ① the current process IS Electron (DSH Desktop main process) → reuse the host binary directly; ② walk the process ancestry for the host's Electron binary (covers hosts that run the plugin in a child Node process, e.g. DSH Desktop; PowerShell CIM on Windows, last resort only); ③ `require('electron')` (the electron package bundled with the plugin); ④ `ELECTRON_PATH` (explicit override); ⑤ the newest among DSH install anchors and pnpm virtual stores. **Zero extra install on DSH Desktop**; when nothing is found a clear error tells you what to do.
 
 ## Division of labor with the desktop shell
 
@@ -226,9 +226,9 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 ## Requirements
 
 - DeepSeek Harness (dsh) with the matching profile (`web` / `desktop`, etc.)
-- **Electron runtime** (optional peer dependency):
-  - **DSH Desktop**: the host itself runs on Electron — the plugin reuses the host binary automatically, **zero extra install**;
-  - **plain `dsh web` self-hosted**: an Electron binary is required and located automatically (see above; ≥ 40 recommended; 44+ downloads its binary on first use, needs network)
+- **Electron runtime** (required dependency, installed automatically with the plugin):
+  - **DSH Desktop**: the host itself runs on Electron — the plugin reuses the host binary automatically (the bundled electron is just a fallback);
+  - **plain `dsh web` self-hosted**: uses the bundled electron package directly (≥ 40 recommended; 44+ downloads its binary on first use, needs network)
 
 ### Verified versions
 
@@ -292,6 +292,7 @@ Code layout:
 | **0.1.16** | 2026-08-26 | **Release**: all seven rounds ship as **0.1.16** (build clean, 21/21 tests pass, `v0.1.16`) |
 | 8 | 2026-08-27 | **DSH Desktop host-Electron reuse**: running inside an Electron process reuses the host binary directly; when the host runs the plugin in a child Node process, walk the process ancestry to find the host's Electron (PowerShell CIM on Windows, last resort only) — **DSH Desktop works with zero install**; error now hints per active profile; electron shim completed to fix the CI typecheck; docs updated |
 | **0.1.17** | 2026-08-27 | **Release**: round 8 ships as **0.1.17** (build clean, 21/21 tests pass) |
+| 9 | 2026-08-27 | **electron becomes a required dependency**: moved from optional peer into `dependencies`, so installing the plugin brings the electron package automatically (44+ downloads its binary lazily on first use); DSH Desktop still reuses the host binary; docs and error message updated |
 
 ## Acknowledgements
 

@@ -217,7 +217,7 @@ agent (browser_* 工具)
 
 **自托管浏览器就是一台真正的浏览器**:每个任务(DSH 会话)拥有**独立的浏览器窗口**,窗口自带完整工具栏——地址栏、后退/前进/刷新按钮、标签条(新建/切换/关闭标签)。人可以直接像用 Chrome 一样使用它:在地址栏输入网址(自动补 `https://`)、点标签切换页面、开新标签;键盘焦点跟随点击——**点地址栏即可输入、点页面即可操作**(Windows 焦点路由,修复了点击不转移焦点导致地址栏无法输入的问题)。agent 与人的操作都汇入**同一个会话模型**(同一套标签、历史与导航),窗口标题实时显示当前任务标识与页面标题/URL,窗口缩放时视图自动跟随。任务结束后窗口随会话自动关闭。
 
-**Electron 定位顺序**:① 插件运行在 Electron 进程内(DSH Desktop 主进程)时直接复用宿主二进制 → ② 进程祖先树中的宿主 Electron 二进制(DSH Desktop 把插件跑在子 Node 进程时的兜底)→ ③ `require('electron')`(peer 依赖)→ ④ `ELECTRON_PATH`(显式覆盖)→ ⑤ DSH 安装锚点与 pnpm 虚拟仓库中**版本最新**者。**DSH Desktop 上零额外安装**;找不到时工具会报清晰的错误提示(含按当前 profile 的安装命令)。
+**Electron 定位顺序**:① 插件运行在 Electron 进程内(DSH Desktop 主进程)时直接复用宿主二进制 → ② 进程祖先树中的宿主 Electron 二进制(DSH Desktop 把插件跑在子 Node 进程时的兜底)→ ③ `require('electron')`(随插件安装的 electron 包)→ ④ `ELECTRON_PATH`(显式覆盖)→ ⑤ DSH 安装锚点与 pnpm 虚拟仓库中**版本最新**者。**DSH Desktop 上零额外安装**;找不到时工具会报清晰的错误提示。
 
 ## 与桌面外壳的分工
 
@@ -226,9 +226,9 @@ agent (browser_* 工具)
 ## 环境要求
 
 - DeepSeek Harness(dsh),已安装对应 profile(`web` / `desktop` 等)
-- **Electron 运行时**(可选 peer 依赖):
-  - **DSH Desktop**:宿主本身基于 Electron,**插件自动复用宿主二进制,零额外安装**;
-  - **纯 `dsh web` 自托管**:需要 Electron 二进制,插件自动定位(见上,建议 ≥ 40;44+ 首次使用自动下载,需网络)
+- **Electron 运行时**(必装依赖,随插件自动安装):
+  - **DSH Desktop**:宿主本身基于 Electron,**插件自动复用宿主二进制**(随包安装的 electron 仅作后备);
+  - **纯 `dsh web` 自托管**:直接使用随插件安装的 electron 包(建议 ≥ 40;44+ 首次使用自动下载二进制,需网络)
 
 ### 验证过的版本
 
@@ -255,7 +255,7 @@ agent (browser_* 工具)
 - 页面弹窗(`window.open` / `target=_blank`)会被重定向到当前标签页内打开,不创建独立窗口,以免破坏标签/会话模型。
 - `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie);仅自托管浏览器可用。
 - 自托管浏览器子进程崩溃后会自动重启,但崩溃前已打开的会话视图已失效,调用 `browser_reset_session` 重建即可。
-- Electron 44+ 首次打开浏览器窗口时会自动下载二进制(约 100MB,需网络);之后不再需要。若探测时网络不可用,可预装 `ELECTRON_PATH` 指定的二进制。
+- electron 随插件安装;Electron 44+ 首次打开浏览器窗口时自动下载二进制(约 100MB,需网络),之后不再需要。若探测时网络不可用,可预装 `ELECTRON_PATH` 指定的二进制。
 - 本插件不含浏览器列 UI——那是宿主外壳的配套,别把"浏览器列"当成插件能力。
 
 ## 开发
@@ -292,6 +292,7 @@ npm run build
 | **0.1.16** | 2026-08-26 | **发布**:以上七轮全部随 **0.1.16** 发布(构建零错误、21 项测试全绿,`v0.1.16`) |
 | 第八轮 | 2026-08-27 | **DSH Desktop 宿主 Electron 复用**:插件运行在 Electron 进程内直接复用宿主二进制;插件跑在宿主子 Node 进程时沿进程祖先树找到宿主 Electron 兜底(Windows 用 PowerShell CIM,仅最后手段)——DSH Desktop **零安装开箱可用**;报错按当前 profile 动态提示;补齐 electron shim 修复 CI 类型检查;文档同步 |
 | **0.1.17** | 2026-08-27 | **发布**:第八轮修复随 **0.1.17** 发布(构建零错误、21 项测试全绿) |
+| 第九轮 | 2026-08-27 | **electron 改为必装依赖**:从 optional peer 移入 `dependencies`,安装插件即自动带上 electron 包(44+ 二进制首次使用懒下载);DSH Desktop 依旧复用宿主二进制;文档与报错同步 |
 
 ## 特别感谢
 

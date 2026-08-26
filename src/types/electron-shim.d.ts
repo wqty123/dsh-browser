@@ -1,8 +1,9 @@
 /**
  * Ambient declaration for the `electron` module used by the self-hosted
- * browser host (`host-main.ts`). The electron package is an optional peer
- * dependency (present in desktop-shell environments), so it is not in
- * devDependencies; this shim keeps typechecking self-contained.
+ * browser host (`host-main.ts`). The electron package is a bundled runtime
+ * dependency, but its type definitions can be absent when the published
+ * `src/` is typechecked standalone; this shim keeps typechecking
+ * self-contained.
  * @module dsh-browser/types/electron-shim
  */
 
