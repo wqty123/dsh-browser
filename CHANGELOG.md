@@ -361,6 +361,15 @@ bump `0.1.15 → 0.1.16`,将第一至第七轮全部修复随版本发布(本地
 
 ## 验证
 
-- `tsc --noEmit` 零错误;构建通过。
+- `tsc --noEmit` 零错误(无 electron 包环境即 CI 环境同样零错误);构建通过。
 - `node --test tests/*.test.mjs` 21 项全部通过。
-- 版本号未 bump(按仓库惯例,发布时 bump)。
+
+---
+
+## 0.1.17 发布(2026-08-27)
+
+bump `0.1.16 → 0.1.17`,将第八轮 DSH Desktop 宿主 Electron 复用修复随版本发布:
+
+- **第八轮**:插件运行在 Electron 进程内直接复用宿主二进制;插件跑在宿主子 Node 进程时沿进程祖先树找到宿主 Electron 兜底(Windows 用 PowerShell CIM,仅最后手段)——DSH Desktop **零安装开箱可用**;报错按当前 profile 动态提示;补齐 electron shim(`WebContents.focus()` / `on('input-event')` / `BrowserWindow.on('focus')`)修复无 electron 包环境(CI)的类型检查;文档与 CHANGELOG 同步。
+
+**验证**:`tsc` 构建零错误(有无 electron 包两种环境);`node --test tests/*.test.mjs` 21 项全部通过。

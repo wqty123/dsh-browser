@@ -237,7 +237,7 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 | DeepSeek Harness (dsh) | `0.1.1-rc.2` (peer range `^0.1.1-rc.2`) |
 | Electron | `44.0.0` (≥ 40 recommended; 33.x has a compositor defect) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.16` |
+| dsh-builtin-browser | `0.1.17` |
 | OS | Windows 10 (10.0.26200) |
 
 > The plugin declares `electron >= 30`; it has **only been verified on Windows** (macOS/Linux untested, not yet promised).
@@ -290,7 +290,8 @@ Code layout:
 | 6 | 2026-08 | **Windows handshake & tab lookup**: the Electron GUI process never receives piped stdin → RPC token now flows over **stdin + env var**; `browser_switch_tab`/`browser_close_tab` locate tabs across sessions (`locateTab`), `browser_close_tab` no longer fakes success, unknown ids error with the session's actual tab list |
 | 7 | 2026-08 | **Toolbar interaction (Windows focus routing)**: keyboard input only reaches the focused view and the page view grabbed it, so the address bar could not receive input → added `wireFocusRouting` (clicking a view focuses it) + window refocus restores the last-clicked view; verified with real OS input probes |
 | **0.1.16** | 2026-08-26 | **Release**: all seven rounds ship as **0.1.16** (build clean, 21/21 tests pass, `v0.1.16`) |
-| 8 | 2026-08-27 | **DSH Desktop host-Electron reuse**: running inside an Electron process reuses the host binary directly; when the host runs the plugin in a child Node process, walk the process ancestry to find the host's Electron (PowerShell CIM on Windows, last resort only) — **DSH Desktop works with zero install**; error now hints per active profile; docs updated |
+| 8 | 2026-08-27 | **DSH Desktop host-Electron reuse**: running inside an Electron process reuses the host binary directly; when the host runs the plugin in a child Node process, walk the process ancestry to find the host's Electron (PowerShell CIM on Windows, last resort only) — **DSH Desktop works with zero install**; error now hints per active profile; electron shim completed to fix the CI typecheck; docs updated |
+| **0.1.17** | 2026-08-27 | **Release**: round 8 ships as **0.1.17** (build clean, 21/21 tests pass) |
 
 ## Acknowledgements
 

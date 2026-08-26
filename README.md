@@ -237,7 +237,7 @@ agent (browser_* 工具)
 | DeepSeek Harness(dsh) | `0.1.1-rc.2`(peer 声明 `^0.1.1-rc.2`) |
 | Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.16` |
+| dsh-builtin-browser | `0.1.17` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`;**当前仅在 Windows 环境实测**(macOS/Linux 未验证,暂不承诺)。
@@ -290,7 +290,8 @@ npm run build
 | 第六轮 | 2026-08 | **Windows 握手与标签定位**:Electron GUI 进程收不到 piped stdin → RPC token 改 **stdin + 环境变量双通道**;`browser_switch_tab`/`browser_close_tab` 跨会话按 id 定位(`locateTab`),`browser_close_tab` 不再静默假成功,未知 id 报错附带现有标签列表 |
 | 第七轮 | 2026-08 | **工具栏交互(Windows 焦点路由)**:键盘输入只进有焦点的 view,页面 view 抢占焦点导致地址栏无法输入 → 新增 `wireFocusRouting`(点击即聚焦该 view)+ 窗口 refocus 恢复上次点击的 view;真机 OS 输入探针验证 |
 | **0.1.16** | 2026-08-26 | **发布**:以上七轮全部随 **0.1.16** 发布(构建零错误、21 项测试全绿,`v0.1.16`) |
-| 第八轮 | 2026-08-27 | **DSH Desktop 宿主 Electron 复用**:插件运行在 Electron 进程内直接复用宿主二进制;插件跑在宿主子 Node 进程时沿进程祖先树找到宿主 Electron 兜底(Windows 用 PowerShell CIM,仅最后手段)——DSH Desktop **零安装开箱可用**;报错按当前 profile 动态提示;文档同步 |
+| 第八轮 | 2026-08-27 | **DSH Desktop 宿主 Electron 复用**:插件运行在 Electron 进程内直接复用宿主二进制;插件跑在宿主子 Node 进程时沿进程祖先树找到宿主 Electron 兜底(Windows 用 PowerShell CIM,仅最后手段)——DSH Desktop **零安装开箱可用**;报错按当前 profile 动态提示;补齐 electron shim 修复 CI 类型检查;文档同步 |
+| **0.1.17** | 2026-08-27 | **发布**:第八轮修复随 **0.1.17** 发布(构建零错误、21 项测试全绿) |
 
 ## 特别感谢
 
