@@ -32,6 +32,10 @@ export interface Config {
      * the user's Downloads folder; override to confine downloads elsewhere.
      */
     readonly downloadDir?: string;
+    /** Maximum snapshot elements before truncation. Default 60. */
+    readonly snapshotMaxElements?: number;
+    /** Maximum content characters before truncation when no maxChars is given. Default 100_000. */
+    readonly contentMaxChars?: number;
 }
 export declare const Config: z<Config>;
 /** Register the Electron browser provider with `ctx.browser`. */

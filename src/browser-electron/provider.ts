@@ -281,7 +281,7 @@ export const CDP_PAGE_NAVIGATE = 'Page.navigate'
 const SNAPSHOT_LABEL_MAX = 120
 
 /** Named-key table for `key()`: CDP key/code names + Windows virtual key codes. */
-const KEY_SPECS: Readonly<Record<string, { readonly key: string; readonly code: string; readonly vk: number }>> = {
+const KEY_SPECS: Readonly<Record<string, { readonly key: string; readonly code: string; readonly vk: number; readonly text?: string }>> = {
   Enter: { key: 'Enter', code: 'Enter', vk: 13 },
   Tab: { key: 'Tab', code: 'Tab', vk: 9 },
   Escape: { key: 'Escape', code: 'Escape', vk: 27 },
@@ -295,7 +295,9 @@ const KEY_SPECS: Readonly<Record<string, { readonly key: string; readonly code: 
   End: { key: 'End', code: 'End', vk: 35 },
   PageUp: { key: 'PageUp', code: 'PageUp', vk: 33 },
   PageDown: { key: 'PageDown', code: 'PageDown', vk: 34 },
-  Space: { key: ' ', code: 'Space', vk: 32 },
+  // Space is the one printable key: CDP needs `text` on the keyDown for the
+  // character to land in a focused input; without it the key only scrolls.
+  Space: { key: ' ', code: 'Space', vk: 32, text: ' ' },
 }
 
 /** Supported key names, exported for the tool's enum and error messages. */
@@ -567,7 +569,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
         return false
       }
       const href = location.href
-      const urlOk = wantUrl === '' || href === wantUrl || href.startsWith(wantUrl)
+      // Exact match wins; otherwise prefix-match within the SAME origin only,
+      // so wantUrl "https://a.com" never matches a cross-origin page whose
+      // host merely starts with the same characters ("https://a.com.evil.com").
+      let urlOk = wantUrl === '' || href === wantUrl
+      if (!urlOk && wantUrl !== '') {
+        try {
+          const want = new URL(wantUrl)
+          const got = new URL(href)
+          urlOk = want.origin === got.origin && href.startsWith(wantUrl)
+        } catch { urlOk = false }
+      }
       const loadedOk = document.readyState === 'complete' || document.readyState === 'interactive'
       const foundOk = wantSelector === '' || inDoc(document, wantSelector)
       return { urlOk, loadedOk, foundOk }
@@ -1044,7 +1056,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       `)
       await this.runTargetScript(this.activeTab(s), script, locateMs, signal, 'BROWSER_TYPE_FAILED', 'browser: type')
     }
-    const text = hasTarget ? '' : request.text
+    const text = 'text' in request ? request.text : ''
     const timeoutMs = 30_000
     try {
       await withTimeout(
@@ -1165,12 +1177,23 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (spec === undefined) {
       throw new BrowserError(`browser: unsupported key "${request.key}" (supported: ${BROWSER_KEY_NAMES.join(', ')})`, 'BROWSER_KEY_UNSUPPORTED')
     }
-    const params = { key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.vk, nativeVirtualKeyCode: spec.vk }
+    const params = { key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.vk, nativeVirtualKeyCode: spec.vk, ...spec.text !== undefined ? { text: spec.text } : {} }
     const timeoutMs = 15_000
+    const release = (): Promise<Record<string, unknown>> =>
+      handle.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...params })
     try {
       await withTimeout(handle.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', ...params }), timeoutMs, signal, `browser: key press timed out after ${timeoutMs}ms`)
-      await withTimeout(handle.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...params }), timeoutMs, signal, `browser: key release timed out after ${timeoutMs}ms`)
     } catch (error) {
+      // The press may still land late; release best-effort so the key is
+      // never left in a stuck pressed state.
+      void release().catch(() => {})
+      throw new BrowserError(`browser: key "${request.key}" failed: ${String(error)}`, 'BROWSER_KEY_FAILED', { cause: error })
+    }
+    try {
+      await withTimeout(release(), timeoutMs, signal, `browser: key release timed out after ${timeoutMs}ms`)
+    } catch (error) {
+      // The press already landed; retry the release before surfacing.
+      void release().catch(() => {})
       throw new BrowserError(`browser: key "${request.key}" failed: ${String(error)}`, 'BROWSER_KEY_FAILED', { cause: error })
     }
     this.record(s, 'key', { key: request.key }, true)

@@ -42,6 +42,10 @@ export interface Config {
    * the user's Downloads folder; override to confine downloads elsewhere.
    */
   readonly downloadDir?: string
+  /** Maximum snapshot elements before truncation. Default 60. */
+  readonly snapshotMaxElements?: number
+  /** Maximum content characters before truncation when no maxChars is given. Default 100_000. */
+  readonly contentMaxChars?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -49,6 +53,8 @@ export const Config: z<Config> = z.object({
   viewHost: z.any(),
   httpOnly: z.boolean().default(true),
   downloadDir: z.string(),
+  snapshotMaxElements: z.number(),
+  contentMaxChars: z.number(),
 })
 
 /** Register the Electron browser provider with `ctx.browser`. */
@@ -60,7 +66,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // is bound to the seam's own fiber (the browser row), so a reload of this
   // row would otherwise collide with the still-registered provider
   // (BROWSER_DUPLICATE_PROVIDER) or leave a stale provider behind.
-  const unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, { httpOnly: config.httpOnly, downloadDir: config.downloadDir }))
+  const unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, {
+    httpOnly: config.httpOnly,
+    downloadDir: config.downloadDir,
+    snapshotMaxElements: config.snapshotMaxElements,
+    contentMaxChars: config.contentMaxChars,
+  }))
   ctx.effect(() => () => {
     unregister()
     if (config.viewHost === undefined && host instanceof RemoteElectronViewHost) {

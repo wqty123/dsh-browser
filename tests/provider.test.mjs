@@ -15,7 +15,7 @@ function makeHost(overrides = {}) {
   const views = new Map()
   const showCalls = []
   const groupCalls = []
-  const events = { terminate: 0, release: 0, keyDown: 0, keyUp: 0, navigateHistory: 0, reload: 0, history: { entries: [], currentIndex: -1 } }
+  const events = { terminate: 0, release: 0, keyDown: 0, keyUp: 0, navigateHistory: 0, reload: 0, history: { entries: [], currentIndex: -1 }, insertText: '', keyDownParams: null }
   const page = { url: 'about:blank', wait: { urlOk: true, loadedOk: true, foundOk: true } }
   let userActionHandler = null
   const host = {
@@ -38,9 +38,9 @@ function makeHost(overrides = {}) {
             if (events.release === 1 && overrides.failFirstRelease) throw new Error('release fails')
             return {}
           }
-          if (method === 'Input.insertText') return {}
+          if (method === 'Input.insertText') { events.insertText = params.text; return {} }
           if (method === 'Input.dispatchKeyEvent') {
-            if (params.type === 'keyDown') events.keyDown++
+            if (params.type === 'keyDown') { events.keyDown++; events.keyDownParams = params }
             if (params.type === 'keyUp') events.keyUp++
             return {}
           }
@@ -192,6 +192,35 @@ test('key presses supported keys and rejects unknown', async () => {
   assert.equal(host.events.keyDown, 1)
   assert.equal(host.events.keyUp, 1)
   await assert.rejects(p.key(sid, { key: 'F12' }), /unsupported key/)
+  await p.close(sid)
+})
+
+test('key Space carries CDP text so a focused input receives the character', async () => {
+  const host = makeHost()
+  const p = new ElectronBrowserProvider(host)
+  const sid = await p.open()
+  await p.key(sid, { key: 'Space' })
+  assert.equal(host.events.keyDown, 1)
+  assert.equal(host.events.keyUp, 1)
+  assert.equal(host.events.keyDownParams.text, ' ', 'Space keyDown must carry text for input insertion')
+  // Enter has no printable text; the keyDown must not carry a stray text.
+  await p.key(sid, { key: 'Enter' })
+  assert.equal(host.events.keyDownParams.text, undefined)
+  await p.close(sid)
+})
+
+test('waitFor URL check is same-origin, not a bare prefix', async () => {
+  const host = makeHost()
+  const p = new ElectronBrowserProvider(host)
+  const sid = await p.open()
+  let lastExpr = ''
+  host.views.values().next().value.sendCommand = async (method, params) => {
+    if (method === 'Runtime.evaluate') { lastExpr = params.expression || ''; return { result: { value: { urlOk: true, loadedOk: true, foundOk: true } } } }
+    return {}
+  }
+  await p.waitFor(sid, { url: 'https://a.example/path' })
+  assert.ok(lastExpr.includes('want.origin === got.origin'), 'URL match must be scoped to the same origin')
+  assert.ok(lastExpr.includes('href === wantUrl'), 'exact match must still be accepted')
   await p.close(sid)
 })
 
@@ -349,6 +378,10 @@ test('click/type with a target locate in-page first', async () => {
   assert.deepEqual((await p.history(sid)).at(-1).params, { target: { by: 'css', value: '#go' } })
   await p.type(sid, { text: 'hi', target: { by: 'css', value: '#in' } })
   assert.ok(focused, 'type focused the element first')
+  // Regression: typing with a target must NOT drop the text (it used to send
+  // an empty insert when a target was present).
+  assert.equal(host.events.insertText, 'hi', 'type with target still inserts the text')
+  assert.deepEqual((await p.history(sid)).at(-1).params, { text: 'hi', target: { by: 'css', value: '#in' } })
   await p.close(sid)
 })
 
