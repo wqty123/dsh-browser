@@ -210,6 +210,16 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     switchTab(session: BrowserSessionId, tabId: string): Promise<void>;
     /** Close one tab; closing the active tab activates the next. */
     closeTab(session: BrowserSessionId, tabId: string): Promise<void>;
+    /**
+     * Find a tab by id, preferring the calling session. Tab ids are globally
+     * unique UUIDs, so when the calling session does not hold the tab (the tool
+     * layer's session resolution can drift from the session that opened it),
+     * fall back to locating it in any other session instead of failing — the
+     * caller explicitly named a tab, so acting on it is what they want. Throws
+     * BROWSER_TAB_UNKNOWN with the session's actual tabs when the id exists
+     * nowhere.
+     */
+    private locateTab;
     /** Close every tab and reset to one blank tab. */
     reset(session: BrowserSessionId): Promise<void>;
     /** Navigate the active tab's view to a URL, honoring HTTP(S)-only admission. */
