@@ -213,9 +213,9 @@ agent (browser_* tools)
 - **Provider** (`browser-electron` row): operates views through the `ElectronBrowserViewHost` seam (create/destroy/show, `sendCommand`), implemented with real Electron objects by the shell.
 - **Tools** (`tool-browser` row): the 33 model-facing `browser_*` tools, maintaining one browser session per calling task (DSH session).
 
-**Self-hosted mode**: without a desktop shell, the plugin spawns its own Electron child process (`host-main.js`) and drives it over loopback TCP JSON-RPC (authenticated with a per-spawn token). The child auto-restarts after a crash; screenshots prefer Electron's native `capturePage` (CDP capture can hang with multiple views in the window); the plugin automatically picks the **newest** Electron in the environment (33.x has a compositor defect; ≥ 40 recommended).
+**Self-hosted mode**: without a desktop shell, the plugin spawns its own Electron child process (`host-main.js`) and drives it over loopback TCP JSON-RPC. The RPC is authenticated with a random per-spawn token delivered over **both stdin and an environment variable** — on Windows the Electron GUI process never receives piped stdin, so the env fallback keeps the handshake reliable. The child auto-restarts after a crash; screenshots prefer Electron's native `capturePage` (CDP capture can hang with multiple views in the window); the plugin automatically picks the **newest** Electron in the environment (33.x has a compositor defect; ≥ 40 recommended; 44+ downloads its binary on first use, needs network).
 
-**The self-hosted browser IS a real browser**: every task (DSH session) gets its **own browser window** with a full toolbar — address bar, back/forward/reload buttons, and a tab strip (new/switch/close tabs). A human can use it exactly like Chrome: type a URL in the address bar (https:// is added automatically), click tabs, open new ones. Human and agent actions feed the **same session model** (same tabs, history, and navigation); the window title always shows the task label plus the page title/URL, and views follow the window size on resize. A window closes automatically with its session when the task ends.
+**The self-hosted browser IS a real browser**: every task (DSH session) gets its **own browser window** with a full toolbar — address bar, back/forward/reload buttons, and a tab strip (new/switch/close tabs). A human can use it exactly like Chrome: type a URL in the address bar (https:// is added automatically), click tabs, open new ones. Keyboard focus follows your clicks — **click the address bar to type, click the page to interact** (Windows focus routing; fixes the case where clicks did not move focus and the address bar could not receive typed URLs). Human and agent actions feed the **same session model** (same tabs, history, and navigation); the window title always shows the task label plus the page title/URL, and views follow the window size on resize. A window closes automatically with its session when the task ends.
 
 **Electron lookup order**: ① `require('electron')` (peer dependency) → ② `ELECTRON_PATH` (explicit override) → ③ the newest among DSH install anchors and pnpm virtual stores. A clear error tells you when none is found.
 
@@ -232,10 +232,10 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 
 | Component | Version |
 | --- | --- |
-| DeepSeek Harness (dsh) | `0.1.0-rc.5` |
-| Electron | `43.4.0` (≥ 40 recommended; 33.x has a compositor defect) |
+| DeepSeek Harness (dsh) | `0.1.1-rc.2` (peer range `^0.1.1-rc.2`) |
+| Electron | `44.0.0` (≥ 40 recommended; 33.x has a compositor defect) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.15` |
+| dsh-builtin-browser | `0.1.16` |
 | OS | Windows 10 (10.0.26200) |
 
 > The plugin declares `electron >= 30`; it has **only been verified on Windows** (macOS/Linux untested, not yet promised).
@@ -253,16 +253,17 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 - Popups (`window.open` / `target=_blank`) are re-routed into the current tab instead of opening untracked native windows, so the tab/session model stays intact.
 - The `browser_auth` cookie round-trip does not preserve `hostOnly`/`sameSite` (host-only cookies come back as domain cookies); it is available on the self-hosted browser only.
 - After a self-hosted child crash the browser host restarts automatically, but sessions opened before the crash are gone — call `browser_reset_session` to rebuild.
+- Electron 44+ downloads its binary (~100 MB) on the first window open and needs network; it is never needed again afterwards. If detection runs without network, pre-install a binary and point `ELECTRON_PATH` at it.
 - This plugin contains no browser-column UI — that is host-shell territory; do not treat "browser column" as a plugin feature.
 
 ## Development
 
 ```sh
 # Type-check + build (lib/)
-pnpm run build
+npm run build
 ```
 
-> Run tests: `node --test "tests/*.test.mjs"` (fake-host tests, no Electron needed).
+> Run tests: `npm test` (= `tsc -p tsconfig.json` + `node --test "tests/*.test.mjs"`; fake-host tests, no Electron needed).
 
 Code layout:
 
@@ -272,6 +273,21 @@ Code layout:
 | `src/browser-electron/` | Electron CDP provider, self-hosted child (`host-main.ts`), RPC layer |
 | `src/tool-browser/` | Model-facing `browser_*` tools |
 | `src/types/` | Electron ambient types (shim; no hard electron type dependency) |
+
+## Update history
+
+> Round-by-round development and fixes (full detail in [CHANGELOG.md](CHANGELOG.md)). Published as of **0.1.16** (tag `v0.1.16`).
+
+| Round | Date | Content |
+| --- | --- | --- |
+| 1 | 2026-08-18 | **Security & robustness**: random-token RPC auth + single connection; download admission (HTTP(S) only, absolute path, `downloadDir`-confined) with streamed caps (Content-Length early reject, 256 MB max); CDP timeout interrupts and click/type timeout key-release recovery; per-task sessions/allow-lists with agent-lifecycle auto-close; history redaction (typed text, replay/execute args not leaked); popup re-routing into the tab |
+| 2 | 2026-08 | **Feature completion + tests + CI**: window title shows the task; flicker-free showView; snapshots/a11y pierce same-origin iframes & Shadow DOM; new `browser_wait`/`scroll`/`back`/`forward`/`key` tools; real `available()` probe; child-side downloads (temp file + atomic rename); constrained Electron lookup; JPEG/scaled screenshots; snapshot perf; test suite + CI |
+| 3 | 2026-08 | **browser-bridge parity + review fixes**: `browser_a11y` a11y tree; 6 form-control tools (`browser_set_value`/`check`/`select`/`clear`/`get_value`/`refresh`); semantic `target` (css/text/xpath); `browser_scrape` structured extraction; independent BrowserWindow + real toolbar (address bar, back/forward/reload, tab strip) routed back into the session model; tool count **20 → 33**; CI switched to npm (no lockfile → pnpm cache broken), README corrections |
+| 4 | 2026-08 | **DSH 0.1.1-rc.2 alignment + review fixes**: peer floor `^0.1.1-rc.2`; fixed `browser_type` dropping text with a target, `browser_key` Space missing CDP `text`, keyUp failure sticking a key, `browser_wait` same-origin URL mis-match, `.part` rename residue, `snapshotMaxElements`/`contentMaxChars` config wiring, missing type exports; 3 regression tests |
+| 5 | 2026-08 | **Electron 44 compatibility**: `available()` is now side-effect free (no more triggering Electron 44 lazy download); `flushAuth` cookie-domain build fix |
+| 6 | 2026-08 | **Windows handshake & tab lookup**: the Electron GUI process never receives piped stdin → RPC token now flows over **stdin + env var**; `browser_switch_tab`/`browser_close_tab` locate tabs across sessions (`locateTab`), `browser_close_tab` no longer fakes success, unknown ids error with the session's actual tab list |
+| 7 | 2026-08 | **Toolbar interaction (Windows focus routing)**: keyboard input only reaches the focused view and the page view grabbed it, so the address bar could not receive input → added `wireFocusRouting` (clicking a view focuses it) + window refocus restores the last-clicked view; verified with real OS input probes |
+| **0.1.16** | 2026-08-26 | **Release**: all seven rounds ship as **0.1.16** (build clean, 21/21 tests pass, `v0.1.16`) |
 
 ## Acknowledgements
 

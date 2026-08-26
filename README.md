@@ -213,9 +213,9 @@ agent (browser_* 工具)
 - **provider 层**(`browser-electron` 行)通过 `ElectronBrowserViewHost` 接缝操作视图(创建/销毁/显示/`sendCommand`),由真实外壳用 Electron 对象实现;
 - **工具层**(`tool-browser` 行)提供模型侧的 33 个 `browser_*` 工具,按调用方任务(DSH 会话)维护独立的浏览器会话。
 
-**自托管模式**:没有桌面外壳时,插件自己拉起一个 Electron 子进程(`host-main.js`),通过本机 TCP JSON-RPC 驱动(RPC 带随机 token 认证)。子进程崩溃会自动重启;截图优先走 Electron 原生 `capturePage`(CDP 截图在多视图下会挂起),并自动选择环境中**最新版本**的 Electron(33.x 有合成器缺陷,建议 ≥ 40)。
+**自托管模式**:没有桌面外壳时,插件自己拉起一个 Electron 子进程(`host-main.js`),通过本机 TCP JSON-RPC 驱动。RPC 带随机 token 认证,token 经 **stdin + 环境变量双通道**传递——Windows 上 Electron 是 GUI 子系统进程、收不到 piped stdin,环境变量兜底保证握手稳定。子进程崩溃会自动重启;截图优先走 Electron 原生 `capturePage`(CDP 截图在多视图下会挂起),并自动选择环境中**最新版本**的 Electron(33.x 有合成器缺陷,建议 ≥ 40;44+ 首次使用自动下载二进制,需联网)。
 
-**自托管浏览器就是一台真正的浏览器**:每个任务(DSH 会话)拥有**独立的浏览器窗口**,窗口自带完整工具栏——地址栏、后退/前进/刷新按钮、标签条(新建/切换/关闭标签)。人可以直接像用 Chrome 一样使用它:在地址栏输入网址(自动补 `https://`)、点标签切换页面、开新标签;agent 与人的操作都汇入**同一个会话模型**(同一套标签、历史与导航),窗口标题实时显示当前任务标识与页面标题/URL,窗口缩放时视图自动跟随。任务结束后窗口随会话自动关闭。
+**自托管浏览器就是一台真正的浏览器**:每个任务(DSH 会话)拥有**独立的浏览器窗口**,窗口自带完整工具栏——地址栏、后退/前进/刷新按钮、标签条(新建/切换/关闭标签)。人可以直接像用 Chrome 一样使用它:在地址栏输入网址(自动补 `https://`)、点标签切换页面、开新标签;键盘焦点跟随点击——**点地址栏即可输入、点页面即可操作**(Windows 焦点路由,修复了点击不转移焦点导致地址栏无法输入的问题)。agent 与人的操作都汇入**同一个会话模型**(同一套标签、历史与导航),窗口标题实时显示当前任务标识与页面标题/URL,窗口缩放时视图自动跟随。任务结束后窗口随会话自动关闭。
 
 **Electron 定位顺序**:① `require('electron')`(peer 依赖)→ ② `ELECTRON_PATH`(显式覆盖)→ ③ DSH 安装锚点与 pnpm 虚拟仓库中**版本最新**者。找不到时工具会报清晰的错误提示。
 
@@ -232,10 +232,10 @@ agent (browser_* 工具)
 
 | 组件 | 版本 |
 | --- | --- |
-| DeepSeek Harness(dsh) | `0.1.0-rc.5` |
-| Electron | `43.4.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
+| DeepSeek Harness(dsh) | `0.1.1-rc.2`(peer 声明 `^0.1.1-rc.2`) |
+| Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.15` |
+| dsh-builtin-browser | `0.1.16` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`;**当前仅在 Windows 环境实测**(macOS/Linux 未验证,暂不承诺)。
@@ -253,16 +253,17 @@ agent (browser_* 工具)
 - 页面弹窗(`window.open` / `target=_blank`)会被重定向到当前标签页内打开,不创建独立窗口,以免破坏标签/会话模型。
 - `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie);仅自托管浏览器可用。
 - 自托管浏览器子进程崩溃后会自动重启,但崩溃前已打开的会话视图已失效,调用 `browser_reset_session` 重建即可。
+- Electron 44+ 首次打开浏览器窗口时会自动下载二进制(约 100MB,需网络);之后不再需要。若探测时网络不可用,可预装 `ELECTRON_PATH` 指定的二进制。
 - 本插件不含浏览器列 UI——那是宿主外壳的配套,别把"浏览器列"当成插件能力。
 
 ## 开发
 
 ```sh
 # 类型检查 + 构建(lib/)
-pnpm run build
+npm run build
 ```
 
-> 运行测试: `node --test "tests/*.test.mjs"`(假 host 测试,无需 Electron)。
+> 运行测试: `npm test`(= `tsc -p tsconfig.json` + `node --test "tests/*.test.mjs"`,假 host 测试,无需 Electron)。
 
 代码结构:
 
@@ -272,6 +273,21 @@ pnpm run build
 | `src/browser-electron/` | Electron CDP provider、自托管子进程(`host-main.ts`)与 RPC 层 |
 | `src/tool-browser/` | 模型侧 `browser_*` 工具 |
 | `src/types/` | electron 环境类型(shim,避免强制依赖 electron 类型) |
+
+## 更新记录
+
+> 按轮次记录的开发与修复历程(完整明细见 [CHANGELOG.md](CHANGELOG.md))。**0.1.16** 起随版本发布(tag `v0.1.16`)。
+
+| 轮次 | 日期 | 内容 |
+| --- | --- | --- |
+| 第一轮 | 2026-08-18 | **安全与健壮性修复**:RPC 随机 token 认证 + 单连接强制;下载准入(仅 HTTP(S)、绝对路径、`downloadDir` 限定)与流式限流(Content-Length 提前拒绝,256MB 上限);CDP 超时打断与 click/type 超时松键恢复;会话/白名单改为每任务作用域并随 agent 生命周期自动关闭;操作历史脱敏(输入文本、replay/execute 参数不泄露);弹窗重定向回标签页 |
+| 第二轮 | 2026-08 | **功能补全 + 测试 + CI**:窗口标题显示任务标识、showView 无闪烁;快照/无障碍树穿透同源 iframe 与 Shadow DOM;新增 `browser_wait`/`scroll`/`back`/`forward`/`key` 工具;真实 `available()` 探测;下载改由子进程直接落盘(临时文件 + 原子改名);Electron 定位收敛;JPEG/缩放截图;快照性能优化;新增测试套件与 CI |
+| 第三轮 | 2026-08 | **对标 browser-bridge 的功能 + 审查修复**:`browser_a11y` 无障碍树;表单控件 6 件套(`browser_set_value`/`check`/`select`/`clear`/`get_value`/`refresh`);语义定位 `target`(css/text/xpath);`browser_scrape` 结构化提取;独立 BrowserWindow + 真实工具栏(地址栏/后退/前进/刷新/标签条),工具栏操作路由回会话模型;工具总数 **20 → 33**;CI 改 npm(无 lockfile 不兼容 pnpm cache)、README 修正等审查项 |
+| 第四轮 | 2026-08 | **DSH 0.1.1-rc.2 对齐 + 复查修复**:peer 下限对齐 `^0.1.1-rc.2`;修复 `browser_type` 带 target 丢文本、`browser_key` 空格缺 CDP `text`、keyUp 失败卡键、`browser_wait` URL 同源误匹配、download `.part` rename 残留、`snapshotMaxElements`/`contentMaxChars` 配置接线、导出类型补齐;新增 3 个回归测试 |
+| 第五轮 | 2026-08 | **Electron 44 兼容**:`available()` 改为无副作用探测(不再触发 Electron 44 懒下载);`flushAuth` cookie-domain 构建错误修复 |
+| 第六轮 | 2026-08 | **Windows 握手与标签定位**:Electron GUI 进程收不到 piped stdin → RPC token 改 **stdin + 环境变量双通道**;`browser_switch_tab`/`browser_close_tab` 跨会话按 id 定位(`locateTab`),`browser_close_tab` 不再静默假成功,未知 id 报错附带现有标签列表 |
+| 第七轮 | 2026-08 | **工具栏交互(Windows 焦点路由)**:键盘输入只进有焦点的 view,页面 view 抢占焦点导致地址栏无法输入 → 新增 `wireFocusRouting`(点击即聚焦该 view)+ 窗口 refocus 恢复上次点击的 view;真机 OS 输入探针验证 |
+| **0.1.16** | 2026-08-26 | **发布**:以上七轮全部随 **0.1.16** 发布(构建零错误、21 项测试全绿,`v0.1.16`) |
 
 ## 特别感谢
 
