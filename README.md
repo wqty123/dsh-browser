@@ -237,7 +237,7 @@ agent (browser_* 工具)
 | DeepSeek Harness(dsh) | `0.1.1-rc.2`(peer 声明 `^0.1.1-rc.2`) |
 | Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.17` |
+| dsh-builtin-browser | `0.1.18` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`;**当前仅在 Windows 环境实测**(macOS/Linux 未验证,暂不承诺)。
@@ -293,6 +293,7 @@ npm run build
 | 第八轮 | 2026-08-27 | **DSH Desktop 宿主 Electron 复用**:插件运行在 Electron 进程内直接复用宿主二进制;插件跑在宿主子 Node 进程时沿进程祖先树找到宿主 Electron 兜底(Windows 用 PowerShell CIM,仅最后手段)——DSH Desktop **零安装开箱可用**;报错按当前 profile 动态提示;补齐 electron shim 修复 CI 类型检查;文档同步 |
 | **0.1.17** | 2026-08-27 | **发布**:第八轮修复随 **0.1.17** 发布(构建零错误、21 项测试全绿) |
 | 第九轮 | 2026-08-27 | **electron 改为必装依赖**:从 optional peer 移入 `dependencies`,安装插件即自动带上 electron 包(44+ 二进制首次使用懒下载);DSH Desktop 依旧复用宿主二进制;文档与报错同步 |
+| **0.1.18** | 2026-08-27 | **发布**:第九轮「electron 改为必装依赖」随 **0.1.18** 发布(构建零错误、21 项测试全绿) |
 
 ## 特别感谢
 

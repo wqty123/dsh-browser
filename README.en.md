@@ -237,7 +237,7 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 | DeepSeek Harness (dsh) | `0.1.1-rc.2` (peer range `^0.1.1-rc.2`) |
 | Electron | `44.0.0` (≥ 40 recommended; 33.x has a compositor defect) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.17` |
+| dsh-builtin-browser | `0.1.18` |
 | OS | Windows 10 (10.0.26200) |
 
 > The plugin declares `electron >= 30`; it has **only been verified on Windows** (macOS/Linux untested, not yet promised).
@@ -293,6 +293,7 @@ Code layout:
 | 8 | 2026-08-27 | **DSH Desktop host-Electron reuse**: running inside an Electron process reuses the host binary directly; when the host runs the plugin in a child Node process, walk the process ancestry to find the host's Electron (PowerShell CIM on Windows, last resort only) — **DSH Desktop works with zero install**; error now hints per active profile; electron shim completed to fix the CI typecheck; docs updated |
 | **0.1.17** | 2026-08-27 | **Release**: round 8 ships as **0.1.17** (build clean, 21/21 tests pass) |
 | 9 | 2026-08-27 | **electron becomes a required dependency**: moved from optional peer into `dependencies`, so installing the plugin brings the electron package automatically (44+ downloads its binary lazily on first use); DSH Desktop still reuses the host binary; docs and error message updated |
+| **0.1.18** | 2026-08-27 | **Release**: round 9 (electron as a required dependency) ships as **0.1.18** (build clean, 21/21 tests pass) |
 
 ## Acknowledgements
 

@@ -400,4 +400,13 @@ issue #4 报告者的核心诉求是「装完插件即可用」:此前 electron 
 
 - `tsc --noEmit` 零错误(有/无 electron 包两种环境);构建通过。
 - `node --test tests/*.test.mjs` 21 项全部通过。
-- 版本号未 bump(按仓库惯例,发布时 bump)。
+
+---
+
+## 0.1.18 发布(2026-08-27)
+
+bump `0.1.17 → 0.1.18`,将第九轮「electron 改为必装依赖」随版本发布:
+
+- **第九轮**:electron 从 optional peer 移入 `dependencies`,安装插件即自动带上 electron 包——纯 `dsh web` 自托管开箱可用,不再需要手动 `add electron`;DSH Desktop 依旧优先复用宿主二进制;文档、报错与 shim 注释同步。
+
+**验证**:`tsc` 构建零错误(有/无 electron 包两种环境);`node --test tests/*.test.mjs` 21 项全部通过。
