@@ -98,12 +98,17 @@ interface HostWindow {
   readonly views: Map<string, HostView>
   /** The visible (topmost) view id within this window. */
   visibleViewId: string | undefined
+  /** The last view the human clicked (focus steering target on refocus). */
+  lastFocusedViewId: string | undefined
   /** Deferred close: the last view may be re-created immediately (closeTab keeps one blank tab). */
   closeTimer: ReturnType<typeof setTimeout> | undefined
 }
 
 /** Fallback group for views whose groupView never arrived (defensive only). */
 const SHARED_WINDOW_ID = 'shared'
+
+/** Focus key for the toolbar view (it is not in win.views). */
+const TOOLBAR_FOCUS = '\u0000toolbar'
 
 /** Windows by group key (session id). */
 const windows = new Map<string, HostWindow>()
@@ -314,10 +319,23 @@ function windowFor(windowId: string | undefined): HostWindow {
   if (existing !== undefined) return existing
   const w = new BrowserWindow({ width: 1400, height: 900, show: true, title: 'dsh-browser' })
   w.on('closed', () => { windows.delete(key) })
-  const win: HostWindow = { windowId: key, window: w, toolbarView: undefined, views: new Map(), visibleViewId: undefined, closeTimer: undefined }
+  const win: HostWindow = { windowId: key, window: w, toolbarView: undefined, views: new Map(), visibleViewId: undefined, lastFocusedViewId: undefined, closeTimer: undefined }
   // Keep every view (and the toolbar) filling the window as the human
   // resizes it; otherwise pages stay at their original size and break.
   w.on('resize', () => layoutWindow(win))
+  // Windows: keyboard input goes only to the FOCUSED webContents, and a window
+  // regaining focus (alt-tab, click) does not automatically refocus any view
+  // (electron#28163) — the last addChildView keeps the focus. Restore the view
+  // the human was last using (click steering via wireFocusRouting), falling
+  // back to the visible page view.
+  w.on('focus', () => {
+    const last = win.lastFocusedViewId
+    const wc = last === TOOLBAR_FOCUS ? win.toolbarView?.webContents
+      : last !== undefined ? win.views.get(last)?.webContentsView.webContents
+      : undefined
+    const fallback = win.visibleViewId !== undefined ? win.views.get(win.visibleViewId)?.webContentsView.webContents : undefined
+    try { (wc ?? fallback)?.focus() } catch { /* destroyed */ }
+  })
   windows.set(key, win)
   win.toolbarView = createToolbar(win)
   layoutWindow(win)
@@ -335,6 +353,21 @@ function layoutWindow(win: HostWindow): void {
       try { v.webContentsView.setBounds({ x: 0, y: TOOLBAR_HEIGHT, width, height: Math.max(0, height - TOOLBAR_HEIGHT) }) } catch { /* destroyed */ }
     }
   } catch { /* window gone */ }
+}
+
+/**
+ * Route keyboard focus on Windows. Mouse clicks reach any view regardless of
+ * focus, but keyboard events go only to the FOCUSED webContents (and a window
+ * regaining focus does not refocus any view, electron#28163). Focusing the
+ * clicked view on mousedown makes the toolbar and pages behave like a real
+ * browser: click the URL bar and type, click the page and type/scroll.
+ */
+function wireFocusRouting(win: HostWindow, view: WebContentsView, focusKey: string): void {
+  view.webContents.on('input-event', (_event, input) => {
+    if (input.type !== 'mouseDown') return
+    win.lastFocusedViewId = focusKey
+    try { view.webContents.focus() } catch { /* destroyed */ }
+  })
 }
 
 /** Create the toolbar view for a window (best-effort; never fatal). */
@@ -360,6 +393,7 @@ function createToolbar(win: HostWindow): WebContentsView | undefined {
     // Once the toolbar page is up, push the current tab strip so it is not
     // empty until the first navigation event.
     view.webContents.on('dom-ready', () => syncToolbar(win))
+    wireFocusRouting(win, view, TOOLBAR_FOCUS)
     win.window.contentView.addChildView(view)
     return view
   } catch (error) {
@@ -493,6 +527,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         view.webContents.on('page-title-updated', () => { updateWindowTitle(win, viewId, undefined); syncToolbar(win) })
         view.webContents.on('did-navigate', () => { updateWindowTitle(win, viewId, undefined); syncToolbar(win) })
         view.webContents.on('did-navigate-in-page', () => syncToolbar(win))
+        wireFocusRouting(win, view, viewId)
         const first = win.views.size === 1
         if (first) {
           view.setVisible(true)

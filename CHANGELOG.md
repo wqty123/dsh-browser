@@ -295,3 +295,31 @@
 - `tsc --noEmit` 零错误;构建通过。
 - `node --test tests/*.test.mjs` **21 项**全部通过(新增:跨 session 切换/关闭兜底、未知 id 抛错回归测试)。
 - 版本号未 bump。六轮合计 6 个提交未推送。
+
+---
+
+## 第七轮:内置浏览器工具栏交互修复(焦点路由)
+
+- **日期**:2026-08-26
+- **状态**:修复已完成并通过验证,已作为单独提交保存在本地 git,**未推送**。
+
+### 问题
+
+"让内置浏览器同时可以作为真正浏览器使用"(地址栏导航、工具栏按钮、标签条)在 Windows 上交互不可用:点击按钮无反应、地址栏无法输入。经真机探针(真实系统鼠标/键盘事件)定位:
+
+1. **`before-input-event` 只触发键盘事件**——此前用它检测鼠标点击是探针误判;修正后用 `input-event` + DOM title 变化实测:**真实鼠标点击能到达工具栏 view**,DOM 处理器与 IPC 链路本身正常。
+2. **真正的问题在键盘焦点路由**:Windows 上键盘输入只派发给**有焦点的 webContents**,而窗口重新获得焦点(alt-tab、点击)时 Electron **不会自动恢复任何 view 的焦点**(electron#28163)——最后一个 `addChildView` 的 view 抢占焦点。插件里页面 view 抢走焦点后,点击地址栏无法聚焦,键盘输入全部进页面,表现为"UI 不能正常使用"。
+
+### 修复(host-main.ts)
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | 键盘输入只进有焦点的 view,页面 view 抢占焦点 | 新增 `wireFocusRouting()`:任何 view 收到 `input-event` mouseDown 即 `webContents.focus()`——**点击地址栏 → 焦点切到工具栏 → 可输入网址;点击页面 → 焦点切回页面** |
+| 2 | 窗口重新聚焦时不恢复 view 焦点 | `win.on('focus')` 恢复**上次点击的 view**(`lastFocusedViewId`,工具栏用哨兵 key),回退到可见页面 view |
+| 3 | 工具栏 view 不在 `win.views` 里 | 定义 `TOOLBAR_FOCUS` 哨兵区分工具栏/页面焦点目标 |
+
+### 验证
+
+- 真机探针(hit2/hit3):真实 OS 点击到达工具栏 view(`input-event mouseDown`)、DOM mousedown 触发;焦点路由生效(点击工具栏 → `toolbar.isFocused()=true`,点击页面 → `page.isFocused()=true`)。
+- `tsc --noEmit` 零错误;`node --test tests/*.test.mjs` **21 项**全部通过。
+- 版本号未 bump。七轮合计 7 个提交未推送。
