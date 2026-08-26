@@ -255,9 +255,16 @@
 | 3 | `flushAuth` 的 `c.domain` 两处裸用导致构建失败 | `const domain = c.domain ?? ''`,host/hostPart/导出均基于它 |
 | 4 | 首次使用无感知 | 懒下载仍保留在真正 spawn 时触发(electron 44 官方机制);首次运行需网络 |
 
-## 三、验证
+## 三、补充修复:Windows 握手回归(RPC token 收不到)
+
+- 症状:真机端到端验证时子进程日志 `warning: no token received on stdin`,hello 带空 token,认证失败,插件完全不可用。
+- 根因:Windows 上 **Electron 是 GUI 子系统进程,收不到 piped stdin**。第一轮把 token 从 argv 改为 stdin 传递(安全修复)在 Windows 上直接断了握手——旧版(argv)能跑,新版(stdin)跑不了。
+- 修复:token 双通道传递 —— spawn 时同时写入 stdin **和** `DSH_BROWSER_RPC_TOKEN` 环境变量;子进程 **stdin 优先、env 兜底**(Windows GUI 收不到 stdin 时用 env;env 比 argv 隐蔽,默认进程列表工具不可见)。
+
+## 四、验证
 
 - `tsc --noEmit` 零错误;构建通过。
 - `node --test tests/*.test.mjs` 20 项全部通过。
 - `RemoteElectronViewHost.available()` 实测 **6ms** 返回(纯文件系统探测,不再触发下载);electron 44 二进制下载后正常定位。
+- **真实端到端验证通过**(真机 Windows):spawn electron → stdin/env token 握手 → `navigate` → `snapshot` → `listTabs` → `close` 全链路 E2E PASS。
 - 版本号未 bump。五轮合计 5 个提交未推送。

@@ -48,22 +48,30 @@ try {
 }
 
 /**
- * Read the spawn token from stdin (first line). The parent writes it and
- * closes stdin immediately; we buffer exactly one line and discard the rest.
+ * Read the spawn token. The parent sends it two ways and the child prefers
+ * the first that yields a value:
+ *   1. stdin (first line) — the secure channel on Unix/macOS;
+ *   2. DSH_BROWSER_RPC_TOKEN env — the fallback on Windows, where Electron is
+ *      a GUI-subsystem process and never receives piped stdin (the parent
+ *      sets it in the spawn env for exactly this reason).
+ * stdin wins over env so the parent's token never has to touch argv.
  */
-let RPC_TOKEN = ''
-const stdinLines = createInterface({ input: process.stdin, terminal: false })
-stdinLines.on('line', (line) => {
-  if (RPC_TOKEN === '') {
-    RPC_TOKEN = line.trim()
-    stdinLines.close()
-  }
-})
-stdinLines.on('close', () => {
-  if (RPC_TOKEN === '') {
-    process.stderr.write('[dsh-browser host] warning: no token received on stdin\n')
-  }
-})
+let RPC_TOKEN = process.env.DSH_BROWSER_RPC_TOKEN ?? ''
+const stdinDelivered = RPC_TOKEN !== ''
+if (process.stdin !== null && process.stdin.readable) {
+  const stdinLines = createInterface({ input: process.stdin, terminal: false })
+  stdinLines.on('line', (line) => {
+    if (RPC_TOKEN === '') {
+      RPC_TOKEN = line.trim()
+      stdinLines.close()
+    }
+  })
+  stdinLines.on('close', () => {
+    if (RPC_TOKEN === '' && !stdinDelivered) {
+      process.stderr.write('[dsh-browser host] warning: no token received on stdin or env\n')
+    }
+  })
+}
 
 /** CDP protocol version attached to every view's debugger. */
 const CDP_VERSION = '1.3'
@@ -810,11 +818,15 @@ void app.whenReady().then(() => {
   if (RPC_TOKEN !== '') {
     writeHello()
   } else {
-    // stdin's first line sets RPC_TOKEN (registered at module load, so it
-    // runs before this listener); wait for it, with a bounded fallback.
+    // No token yet (env absent and stdin still pending): wait for stdin's
+    // first line with a bounded fallback, then send whatever we have — an
+    // empty hello is refused by the parent, which then fails cleanly.
     const fallback = setTimeout(() => writeHello(), 2_000)
-    stdinLines.once('line', () => { clearTimeout(fallback); writeHello() })
-    stdinLines.once('close', () => { clearTimeout(fallback); writeHello() })
+    if (process.stdin !== null && process.stdin.readable) {
+      const stdinLines = createInterface({ input: process.stdin, terminal: false })
+      stdinLines.once('line', () => { clearTimeout(fallback); writeHello() })
+      stdinLines.once('close', () => { clearTimeout(fallback); writeHello() })
+    }
   }
   const rl = createInterface({ input: socket })
   rl.on('line', line => {
