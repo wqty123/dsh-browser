@@ -57,10 +57,15 @@ declare module 'electron' {
     loadURL(url: string): Promise<void>
     loadFile(path: string): Promise<void>
     send(channel: string, payload: unknown): void
+    focus(): void
     setWindowOpenHandler(handler: (details: { url: string }) => { action: 'deny' } | { action: 'allow' }): void
     getTitle(): string
     getURL(): string
     on(event: 'ipc-message', listener: (event: unknown, channel: string, ...args: unknown[]) => void): this
+    // Windows keyboard focus routing: clicks reach any view, but keyboard
+    // events go only to the focused webContents (electron#28163). `input` is
+    // the raw input event; only its `type` is consumed here.
+    on(event: 'input-event', listener: (event: unknown, input: { type: string }) => void): this
     on(event: 'page-title-updated' | 'did-navigate' | 'did-navigate-in-page' | 'dom-ready', listener: (event: unknown, ...args: unknown[]) => void): this
   }
   export interface WebContentsView {
@@ -88,8 +93,10 @@ declare module 'electron' {
     setTitle(title: string): void
     on(event: 'closed', listener: () => void): this
     on(event: 'resize', listener: () => void): this
+    on(event: 'focus', listener: () => void): this
     off(event: 'closed', listener: () => void): this
     off(event: 'resize', listener: () => void): this
+    off(event: 'focus', listener: () => void): this
   }
   export const app: {
     whenReady(): Promise<void>

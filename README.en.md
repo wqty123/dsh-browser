@@ -217,7 +217,7 @@ agent (browser_* tools)
 
 **The self-hosted browser IS a real browser**: every task (DSH session) gets its **own browser window** with a full toolbar — address bar, back/forward/reload buttons, and a tab strip (new/switch/close tabs). A human can use it exactly like Chrome: type a URL in the address bar (https:// is added automatically), click tabs, open new ones. Keyboard focus follows your clicks — **click the address bar to type, click the page to interact** (Windows focus routing; fixes the case where clicks did not move focus and the address bar could not receive typed URLs). Human and agent actions feed the **same session model** (same tabs, history, and navigation); the window title always shows the task label plus the page title/URL, and views follow the window size on resize. A window closes automatically with its session when the task ends.
 
-**Electron lookup order**: ① `require('electron')` (peer dependency) → ② `ELECTRON_PATH` (explicit override) → ③ the newest among DSH install anchors and pnpm virtual stores. A clear error tells you when none is found.
+**Electron lookup order**: ① the current process IS Electron (DSH Desktop main process) → reuse the host binary directly; ② walk the process ancestry for the host's Electron binary (covers hosts that run the plugin in a child Node process, e.g. DSH Desktop; PowerShell CIM on Windows, last resort only); ③ `require('electron')` (peer dependency); ④ `ELECTRON_PATH` (explicit override); ⑤ the newest among DSH install anchors and pnpm virtual stores. **Zero extra install on DSH Desktop**; when nothing is found a clear error tells you what to do (including the per-profile install command).
 
 ## Division of labor with the desktop shell
 
@@ -225,8 +225,10 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 
 ## Requirements
 
-- DeepSeek Harness (dsh) with the `web` profile
-- **Electron runtime** (optional peer dependency): the desktop shell carries it; on plain `dsh web` the plugin locates an Electron binary automatically (see above; ≥ 40 recommended)
+- DeepSeek Harness (dsh) with the matching profile (`web` / `desktop`, etc.)
+- **Electron runtime** (optional peer dependency):
+  - **DSH Desktop**: the host itself runs on Electron — the plugin reuses the host binary automatically, **zero extra install**;
+  - **plain `dsh web` self-hosted**: an Electron binary is required and located automatically (see above; ≥ 40 recommended; 44+ downloads its binary on first use, needs network)
 
 ### Verified versions
 
@@ -288,6 +290,7 @@ Code layout:
 | 6 | 2026-08 | **Windows handshake & tab lookup**: the Electron GUI process never receives piped stdin → RPC token now flows over **stdin + env var**; `browser_switch_tab`/`browser_close_tab` locate tabs across sessions (`locateTab`), `browser_close_tab` no longer fakes success, unknown ids error with the session's actual tab list |
 | 7 | 2026-08 | **Toolbar interaction (Windows focus routing)**: keyboard input only reaches the focused view and the page view grabbed it, so the address bar could not receive input → added `wireFocusRouting` (clicking a view focuses it) + window refocus restores the last-clicked view; verified with real OS input probes |
 | **0.1.16** | 2026-08-26 | **Release**: all seven rounds ship as **0.1.16** (build clean, 21/21 tests pass, `v0.1.16`) |
+| 8 | 2026-08-27 | **DSH Desktop host-Electron reuse**: running inside an Electron process reuses the host binary directly; when the host runs the plugin in a child Node process, walk the process ancestry to find the host's Electron (PowerShell CIM on Windows, last resort only) — **DSH Desktop works with zero install**; error now hints per active profile; docs updated |
 
 ## Acknowledgements
 

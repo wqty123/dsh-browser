@@ -25,11 +25,11 @@
  * @module dsh-browser/browser-electron/remote-host
  */
 
-import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcessByStdio } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { existsSync, readdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, ScreenshotOptions } from './provider.js'
@@ -51,7 +51,9 @@ const MAX_RPC_BUFFER_BYTES = 512 * 1024 * 1024
  *   3. every DSH install anchor + pnpm virtual store candidate, choosing the
  *      NEWEST version found. Older Electron releases (e.g. 33.x) have a
  *      compositor defect that intermittently breaks page capture, so prefer
- *      the newest binary available in the environment.
+ *      the newest binary available in the environment,
+ *   4. last resort: the process ancestry, for hosts that run this plugin in a
+ *      child Node process of their own Electron main process (DSH Desktop).
  * @returns the path to the Electron executable.
  */
 function resolveElectronPath(): string {
@@ -136,18 +138,100 @@ function resolveElectronPath(): string {
       dir = parent
     }
   }
-  if (candidates.length > 0) {
-    candidates.sort((a, b) => compareVersions(b.version, a.version))
-    const best = candidates[0]
-    if (best !== undefined) return best.path
-  }
+  // 4. Last resort for Electron hosts. DSH Desktop may run the agent runtime
+  //    (and thus this plugin) in a plain Node child of its Electron main
+  //    process — step 0 does not fire there, and there is no electron package
+  //    anywhere to find. The host's own binary IS an Electron runtime and is
+  //    guaranteed present (it is running us), so walk the process ancestry
+  //    and reuse the first Electron executable found. Zero extra install;
+  //    this is what makes the plugin work on DSH Desktop without `add
+  //    electron`, no matter how the host loads plugins.
+  const hostExe = hostElectronViaProcessTree()
+  if (hostExe !== undefined) return hostExe
   throw new Error(
     'dsh-builtin-browser: cannot locate the Electron binary. Options: (1) if you are on DSH Desktop, ' +
     'this should never appear — the plugin reuses the host Electron automatically; (2) install electron ' +
-    'into the active profile (`dsh plugin --profile <your-profile> add electron`); (3) set ELECTRON_PATH ' +
-    'to the electron executable. Note: Electron 44+ downloads its binary on first use, so if the package ' +
-    'is installed but the binary is missing, run `npx install-electron` once (needs network) and retry.',
+    'into the active profile (`dsh plugin --profile <your-profile> add electron`; on DSH Desktop the ' +
+    'profile is `desktop`); (3) set ELECTRON_PATH to the electron executable. Note: Electron 44+ downloads ' +
+    'its binary on first use, so if the package is installed but the binary is missing, run ' +
+    '`npx install-electron` once (needs network) and retry.',
   )
+}
+
+/**
+ * Last-resort Electron discovery: walk this process's ancestry looking for a
+ * parent process whose executable is itself an Electron binary. Covers hosts
+ * that run the plugin in a child Node process of their own Electron main
+ * process (e.g. DSH Desktop): the host binary is already on disk and running,
+ * so reusing it needs no extra install. Filesystem-only on POSIX (/proc); on
+ * Windows a best-effort PowerShell CIM query is used — this path only runs
+ * when every other lookup failed, so its latency never touches the happy
+ * path, and a missing/blocked powershell simply yields nothing.
+ */
+function hostElectronViaProcessTree(): string | undefined {
+  let pid: number | undefined = process.ppid
+  for (let depth = 0; depth < 6 && pid !== undefined && pid > 1; depth++) {
+    const exe = processExecutable(pid)
+    if (exe !== undefined && isElectronBinary(exe)) return exe
+    pid = processParent(pid)
+  }
+  return undefined
+}
+
+/** The executable path of a running process, or undefined when unknown. */
+function processExecutable(pid: number): string | undefined {
+  try {
+    if (process.platform === 'win32') {
+      const out = execFileSync('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ExecutablePath`,
+      ], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
+      const line = out.trim().split(/\r?\n/)[0] ?? ''
+      return line.length > 0 ? line : undefined
+    }
+    const exe = readlinkSync(`/proc/${pid}/exe`)
+    return exe.length > 0 ? exe : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The parent pid of a running process, or undefined when unknown. */
+function processParent(pid: number): number | undefined {
+  try {
+    if (process.platform === 'win32') {
+      const out = execFileSync('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ParentProcessId`,
+      ], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
+      const n = Number(out.trim().split(/\r?\n/)[0])
+      return Number.isInteger(n) && n > 1 ? n : undefined
+    }
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    // Format: pid (comm) state ppid ... — comm is parenthesized and may
+    // itself contain spaces/parens, so parse from the LAST ')'; ppid is the
+    // second field after it.
+    const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)
+    const n = Number(fields[1])
+    return Number.isInteger(n) && n > 1 ? n : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * True when the given executable is an Electron binary. The name match
+ * covers dev binaries (electron, electron.exe); the resources marker covers
+ * packaged apps whose exe carries the product name (e.g. "DSH Desktop.exe") —
+ * every Electron distribution ships `resources/electron.asar`,
+ * `resources/app.asar`, or `resources/default_app.asar` beside the binary.
+ */
+function isElectronBinary(exe: string): boolean {
+  if (basename(exe).toLowerCase().includes('electron')) return true
+  const resources = join(dirname(exe), 'resources')
+  return existsSync(join(resources, 'electron.asar'))
+    || existsSync(join(resources, 'app.asar'))
+    || existsSync(join(resources, 'default_app.asar'))
 }
 
 /** Extract an electron version like "43.4.0" from a path containing it. */

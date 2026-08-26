@@ -339,3 +339,28 @@ bump `0.1.15 → 0.1.16`,将第一至第七轮全部修复随版本发布(本地
 - **第七轮**:工具栏焦点路由——点击聚焦目标 view,地址栏可输入,窗口 refocus 恢复上次 view
 
 **验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` 21 项全部通过。tag `v0.1.16`。
+
+---
+
+# 第八轮:DSH Desktop 宿主 Electron 复用(2026-08-27)
+
+## 症状与根因
+
+- **症状**:在 DSH Desktop(基于 Electron 43 宿主,`desktop` profile)装好插件后,调用 `browser_*` 工具直接报 `cannot locate the Electron binary`。安装插件不带来 electron(optional peer,`dependencies` 为空),`ELECTRON_PATH` 未设置,desktop / web / profiles 的 `node_modules` 均无 electron 包——共享浏览器窗口永远起不来。
+- **根因**:插件自托管模式需要可启动的 Electron 二进制,而 `resolveElectronPath()` 只查 peer 依赖 / `ELECTRON_PATH` / DSH 锚点与 pnpm store。DSH Desktop 宿主本身基于 Electron 运行,宿主二进制就在本机,却从未被利用;报错示例 `--profile web` 对 DSH Desktop 用户还有误导。
+
+## 修复
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | 插件运行在 Electron 进程内(DSH Desktop 主进程)时仍去找 peer 依赖 | `resolveElectronPath()` 第一步:检测 `process.versions.electron`,是则直接复用 `process.execPath` 宿主二进制——零额外安装,且不可能缺失(我们正运行在它上面) |
+| 2 | DSH Desktop 把插件跑在 Electron 主进程的**子 Node 进程**时,第 1 步不生效,依旧找不到二进制 | 新增进程祖先树回退(最后手段):向上扫描父进程可执行文件,命中 Electron 二进制(名字含 `electron`,或旁有 `resources/electron.asar`/`app.asar`/`default_app.asar`)即复用;POSIX 走 `/proc`,Windows 走 PowerShell CIM,仅在其它路径全部落空时才执行,不影响正常路径 |
+| 3 | 报错示例 `--profile web` 对 DSH Desktop 用户有误导 | 报错改为按当前 profile 动态提示(`<your-profile>`,并注明 DSH Desktop 的 profile 是 `desktop`) |
+| 4 | 文档未说明"何时需要 electron" | 环境要求 / FAQ / 架构 / README 同步:DSH Desktop 零安装;纯 `dsh web` 自托管才需要 `dsh plugin --profile <profile> add electron` 或 `ELECTRON_PATH`(44+ 懒下载可先 `npx install-electron`) |
+| 5 | CI 类型检查失败(electron 是 optional peer,CI 无该包,走 shim 类型;第七轮焦点路由新增的 API 未入 shim) | `electron-shim.d.ts` 补齐:`WebContents.focus()`、`WebContents.on('input-event')`、`BrowserWindow.on('focus')`——无 electron 包环境 `tsc` 同样零错误 |
+
+## 验证
+
+- `tsc --noEmit` 零错误;构建通过。
+- `node --test tests/*.test.mjs` 21 项全部通过。
+- 版本号未 bump(按仓库惯例,发布时 bump)。

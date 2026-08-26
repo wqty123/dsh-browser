@@ -2,13 +2,15 @@
 
 ## 环境要求
 
-- DeepSeek Harness(dsh)且安装了 `web` profile
-- **Electron 运行时**(可选 peer 依赖):桌面外壳自带;纯 `dsh web` 下插件自动定位 Electron 二进制(建议 ≥ 40,33.x 存在截图合成器缺陷)
+- DeepSeek Harness(dsh),已安装对应 profile(`web` / `desktop` 等)
+- **Electron 运行时**(可选 peer 依赖):
+  - **DSH Desktop**:宿主本身基于 Electron,**插件自动复用宿主二进制,零额外安装**;
+  - **纯 `dsh web` 自托管**:需要 Electron 二进制,插件自动定位(建议 ≥ 40,33.x 存在截图合成器缺陷;44+ 首次使用自动下载,需网络),找不到时按下文 FAQ 安装即可。
 
 ## 安装
 
 ```sh
-# 从 npm 安装(已发布)
+# 从 npm 安装(已发布);`--profile` 换成你实际使用的 profile(DSH Desktop 为 `desktop`)
 dsh plugin --profile web add dsh-builtin-browser
 
 # 或从源码目录(独立仓库,一插件一仓库)
@@ -72,7 +74,9 @@ dsh plugin --profile web add <本仓库路径>
 能。插件自托管:自己拉起 Electron 窗口,无需桌面外壳。
 
 **Q:找不到 Electron?**
-插件按顺序自动定位:① peer 依赖 `require('electron')` → ② `ELECTRON_PATH` 环境变量 → ③ DSH 锚点与 pnpm 虚拟仓库中版本最新者。都找不到时报清晰错误,可 `dsh plugin --profile web add electron` 或设置 `ELECTRON_PATH`。
+插件按顺序自动定位:① 插件运行在 Electron 进程内(DSH Desktop 主进程)时直接复用宿主二进制 → ② 进程祖先树中的宿主 Electron 二进制(DSH Desktop 把插件跑在子 Node 进程时的兜底)→ ③ peer 依赖 `require('electron')`(仅二进制已就绪时)→ ④ `ELECTRON_PATH` 环境变量 → ⑤ DSH 锚点与 pnpm 虚拟仓库中版本最新者。
+
+DSH Desktop 上①②任一命中即开箱可用,无需任何安装。纯 `dsh web` 下全部落空时,报错会给出指引:可 `dsh plugin --profile <你的-profile> add electron`(DSH Desktop 的 profile 是 `desktop`)或设置 `ELECTRON_PATH`。
 
 **Q:截图失败或挂起?**
 确保 Electron ≥ 40(33.x 有合成器缺陷)。自托管截图优先走原生 `capturePage`,多视图/窗口未激活时自动兜底到 CDP。

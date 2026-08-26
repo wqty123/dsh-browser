@@ -217,7 +217,7 @@ agent (browser_* 工具)
 
 **自托管浏览器就是一台真正的浏览器**:每个任务(DSH 会话)拥有**独立的浏览器窗口**,窗口自带完整工具栏——地址栏、后退/前进/刷新按钮、标签条(新建/切换/关闭标签)。人可以直接像用 Chrome 一样使用它:在地址栏输入网址(自动补 `https://`)、点标签切换页面、开新标签;键盘焦点跟随点击——**点地址栏即可输入、点页面即可操作**(Windows 焦点路由,修复了点击不转移焦点导致地址栏无法输入的问题)。agent 与人的操作都汇入**同一个会话模型**(同一套标签、历史与导航),窗口标题实时显示当前任务标识与页面标题/URL,窗口缩放时视图自动跟随。任务结束后窗口随会话自动关闭。
 
-**Electron 定位顺序**:① `require('electron')`(peer 依赖)→ ② `ELECTRON_PATH`(显式覆盖)→ ③ DSH 安装锚点与 pnpm 虚拟仓库中**版本最新**者。找不到时工具会报清晰的错误提示。
+**Electron 定位顺序**:① 插件运行在 Electron 进程内(DSH Desktop 主进程)时直接复用宿主二进制 → ② 进程祖先树中的宿主 Electron 二进制(DSH Desktop 把插件跑在子 Node 进程时的兜底)→ ③ `require('electron')`(peer 依赖)→ ④ `ELECTRON_PATH`(显式覆盖)→ ⑤ DSH 安装锚点与 pnpm 虚拟仓库中**版本最新**者。**DSH Desktop 上零额外安装**;找不到时工具会报清晰的错误提示(含按当前 profile 的安装命令)。
 
 ## 与桌面外壳的分工
 
@@ -225,8 +225,10 @@ agent (browser_* 工具)
 
 ## 环境要求
 
-- DeepSeek Harness(dsh)且安装了 `web` profile
-- **Electron 运行时**(可选 peer 依赖):桌面外壳自带;纯 `dsh web` 下插件自动定位 Electron 二进制(见上,建议 ≥ 40)
+- DeepSeek Harness(dsh),已安装对应 profile(`web` / `desktop` 等)
+- **Electron 运行时**(可选 peer 依赖):
+  - **DSH Desktop**:宿主本身基于 Electron,**插件自动复用宿主二进制,零额外安装**;
+  - **纯 `dsh web` 自托管**:需要 Electron 二进制,插件自动定位(见上,建议 ≥ 40;44+ 首次使用自动下载,需网络)
 
 ### 验证过的版本
 
@@ -288,6 +290,7 @@ npm run build
 | 第六轮 | 2026-08 | **Windows 握手与标签定位**:Electron GUI 进程收不到 piped stdin → RPC token 改 **stdin + 环境变量双通道**;`browser_switch_tab`/`browser_close_tab` 跨会话按 id 定位(`locateTab`),`browser_close_tab` 不再静默假成功,未知 id 报错附带现有标签列表 |
 | 第七轮 | 2026-08 | **工具栏交互(Windows 焦点路由)**:键盘输入只进有焦点的 view,页面 view 抢占焦点导致地址栏无法输入 → 新增 `wireFocusRouting`(点击即聚焦该 view)+ 窗口 refocus 恢复上次点击的 view;真机 OS 输入探针验证 |
 | **0.1.16** | 2026-08-26 | **发布**:以上七轮全部随 **0.1.16** 发布(构建零错误、21 项测试全绿,`v0.1.16`) |
+| 第八轮 | 2026-08-27 | **DSH Desktop 宿主 Electron 复用**:插件运行在 Electron 进程内直接复用宿主二进制;插件跑在宿主子 Node 进程时沿进程祖先树找到宿主 Electron 兜底(Windows 用 PowerShell CIM,仅最后手段)——DSH Desktop **零安装开箱可用**;报错按当前 profile 动态提示;文档同步 |
 
 ## 特别感谢
 
