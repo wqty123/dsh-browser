@@ -443,3 +443,129 @@ DSH STORE 自动化(AI-Scarlett/DSH-Store #243)固定 Commit 检查发现:`dsh-b
 bump `0.1.18 → 0.1.19`,将第十轮「DSH-Store 兼容性声明」随版本发布(tag `v0.1.19`)。
 
 **验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` 21 项全部通过。
+
+---
+
+# 第十一轮:自托管浏览器宿主崩溃后的会话自愈(2026-08-27)
+
+## 背景
+
+issue #5 报告:自托管模式下 DSH 重启 / 会话 checkpoint 恢复后,`browser_*` 工具间歇性报 `dsh-builtin-browser: browser host is not running`,且恢复不自动。典型半死态:`browser_session` / `browser_list_tabs` 能返回会话与标签,但 `browser_content` 超时或 `browser_open` 直接拒绝;手动 `browser_reset_session` 或再 `browser_open` 一次才恢复。
+
+## 根因
+
+`DeferredRemoteView.materializeOnce()` 把物化后的 `RemoteView` **永久缓存**,而 `RemoteView` 硬引用创建它的 `ElectronChildClient`。浏览器子进程一死(DSH 重启 → 父进程 socket 关闭 → 子进程 `app.exit(0)`;或崩溃),`onChildExit` 虽然重置了宿主(下次可起新子进程),但**已物化的视图句柄仍指向死掉的 client** → 之后每次调用都命中 `call()` 的 `dead` 检查,永远报 "browser host is not running"。会话元数据(session id / tab)仍在 → 半死态;只有新建会话(新视图句柄)才会重新物化 → 手动 reset/open 后"恢复"。
+
+## 改动
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `remote-host.ts` 新增 `HostGoneError` 标记错误 | `fail()` 与 `call()` 的 dead 检查、`ensureView` 的 host 缺失全部标记为 host-gone,与页面级错误区分 |
+| 2 | `DeferredRemoteView` 新增 `withRecovery`:宿主已死时丢弃物化缓存 → 对新子进程重建视图 → **重试该操作恰好一次** | 存活会话在宿主死亡后的**第一次调用**即自动拉起新宿主并重试,不再永久报 "browser host is not running";页面级错误不触发重建 |
+| 3 | `ElectronChildClient` 支持注入 spawn 可执行文件(测试缝) | 默认行为不变(`resolveElectronPath()`);供无 Electron 环境的集成测试使用 |
+| 4 | 子进程意外退出时父侧输出一条日志 | 可观测性:宿主"已死 / 将重启"一目了然 |
+| 5 | 新增 `tests/remote-host-recovery.test.mjs` + `tests/fixtures/fake-host-child.mjs` | 用纯 Node 的假子进程(与 host-main.js 同协议)实测:同一视图句柄在子进程崩溃后自动重启并重试成功——旧代码下该句柄会永久失败 |
+| 6 | 文档同步(README 中英、user-guide、architecture) | 「崩溃后旧会话失效需 reset 重建」改为「崩溃后会话自动重建,仅页面状态丢失」 |
+
+## 说明
+
+- **未采用**把浏览器子进程改成 DSH 服务受管子进程(生命周期随 DSH 启停)——那是 DSH 宿主层的架构职责,不在插件能力内;插件的等价保障是:父进程断开时子进程自动退出(已有,不留孤儿),宿主死后会话在下次调用自动重建。
+- **未加心跳/看门狗**:子进程事件循环被卡死(RPC 无响应)与"进程已死"是两种情形;本次修复覆盖"进程已死"这一明确缺陷。卡死场景由 provider 的 withTimeout + terminateExecution 打断兜底。
+
+## 验证
+
+- `tsc --noEmit` 零错误(有/无 electron 包两种环境);
+- `node --test tests/*.test.mjs` **22 项全部通过**(新增 1 项回归测试);
+- 回归测试实测日志链路:`__die` → ECONNRESET → "browser host gone; will restart on next use" → 重新拉起 → 重试成功。
+
+**状态**:已提交本地,未 bump 版本、未发布(发布时 bump)。
+
+---
+
+# 第十二轮:resolveElectronPath 排除打包应用(2026-08-27)
+
+## 背景
+
+issue #6 报告:0.1.19 在 DSH Desktop(打包的 Electron 应用)上 `browser_*` 报 `browser host exited (code=0)`。`resolveElectronPath()` 能找到"某个 electron",但选中的是**打包的宿主应用 exe**——spawn 它不会按脚本参数拉起,而是启动第二个 DSH Desktop 实例 → 命中单实例锁 → 秒退 code=0,报错完全不指向根因。
+
+## 根因(三层,报告者已定位)
+
+1. **layer 0 抢跑**:插件运行在 DSH Desktop 主进程内,`process.versions.electron` 已设置 → 直接返回 `process.execPath` = 打包的 DSH Desktop.exe;
+2. **layer 1 在 Electron 主进程内失效**:`require('electron')` 解析为内置 API 模块(非 npm 包路径),bundled 探测永不命中;
+3. **layer 4 同样选错**:`isElectronBinary()` 把 `resources/app.asar` 存在即判定为 electron → 祖先树里的 DSH Desktop.exe 被当作可复用二进制。
+
+## 改动
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 新增 `isBareElectron()`:旁有 `resources/app.asar` 即**打包应用**,不可按脚本参数拉起,一律排除 | 裸 electron(dev 模式 `electron.exe`、`resources/electron.asar`/`default_app.asar` 而无 `app.asar`)才可 spawn |
+| 2 | layer 3(当前进程复用)与 layer 4(祖先树)都改为**仅裸 Electron** | DSH Desktop.exe 被正确跳过,不再秒退 |
+| 3 | layer 0 改为**bundled 纯文件系统探测**(`bundledElectronBinary()`),置于最优先 | 不依赖 `require` 语义(主进程内解析为内置模块)、不触发 electron 44+ 懒下载(probe 保持无副作用);覆盖普通 node_modules 布局 + pnpm store(`node_modules/.pnpm` 与 `.pnpm` 两种路径) |
+| 4 | 定位顺序重排:bundled → `ELECTRON_PATH` → 锚点最新者 → 当前进程裸宿主 → 祖先树裸宿主 | 打包 DSH Desktop 的正确路径是随插件安装的 electron 44 二进制;dist 缺失时给出明确报错(提示 `npx install-electron` / `ELECTRON_PATH`),不再 silent 秒退 |
+| 5 | 新增 `internals` 测试钩子(镜像 tool-browser 惯例)+ `tests/electron-resolution.test.mjs` | 打包应用(含名为 electron.exe 但带 app.asar 者)一律 false;裸 electron 为 true |
+| 6 | 文档同步(README 中英、user-guide、architecture) | 定位顺序更新 + 「打包应用不参与复用」说明 |
+
+## 说明
+
+- **DSH Desktop 行为变化**:不再复用宿主打包 exe(那是 #4 修复在打包宿主上的漏洞);0.1.18+ 插件自带 electron 包,优先用它的 dist 二进制——首次使用需触发 44+ 懒下载(`npx install-electron` 或首次 require),报错已给出指引。
+- **dev 宿主不受影响**:裸 electron 的 dev 宿主(如 `electron .` 的开发环境)仍走 layer 3/4 复用宿主二进制,零安装。
+
+## 验证
+
+- `tsc --noEmit` 零错误(有/无 electron 包两种环境);
+- `node --test tests/*.test.mjs` **23 项全部通过**(新增 1 项打包判定回归测试);
+- 本机实测:`resolveElectronPath()` 返回 `node_modules/electron/dist/electron.exe`(bundled 优先,非 `process.execPath`);`isBareElectron(node.exe)` = false。
+
+**状态**:已提交本地,未 bump 版本、未发布(发布时 bump)。
+
+---
+
+## 第二次全面复审加固(2026-08-27)
+
+对第十一、十二轮改动换角度重审(并发时序 / 跨平台 / 子进程侧),发现并修复第一轮审查漏掉的问题:
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | **并发恢复双重建竞态**:child 死时同一句柄上有两个并发 op,两个 catch 各自重建 → 对新 child 发两次 `createView(同 id)` → host-main 覆盖 map 并再挂一个 WebContentsView → 第一个视图泄漏(堆叠、不可销毁) | host-main 的 `createView` 幂等化:同 id 已存在直接回 ok,双重建收敛到同一视图 |
+| 2 | **isBareElectron 在 macOS 上失效**:resources 目录检查用 `dirname(exe)/resources`,而 macOS bundle 的资源在 `Contents/Resources` → macOS dev 宿主被误判为非裸 electron,宿主复用失效 | darwin 检查 `Contents/Resources`;打包判定扩展到解包 `app` 目录;「无 resources 目录」排除 portable(全平台一致,测试平台无关) |
+| 3 | **anchors 探测在 Electron 主进程内可返回内置名** `require.resolve('electron')` → `'electron'`(非路径),`electronExeBeside` 退化为检查 CWD 相对路径 | 加 `isAbsolute` 守卫,非绝对路径一律跳过 |
+| 4 | **dispose 期间 in-flight 重建可 spawn 僵尸 child** | `ensureView` 加 disposed 守卫,disposed 后直接抛 host-gone |
+| 5 | 新增测试:解包 `app` 目录的打包应用判定;既有打包/裸/portable 断言保持全平台一致 | |
+
+**验证**:`node --test tests/*.test.mjs` **24 项全部通过**;lib(src+host-main)重建同步;本机实测解析行为不变(bundled 优先、node.exe 非 bare)。
+
+**状态**:已提交本地,未 bump 版本、未发布(发布时 bump)。
+
+---
+
+# 项目整体交叉复审(2026-08-27)
+
+超出两份 issue 的范围,对整个项目做系统性重审:provider.ts 全部 2167 行、tool-browser 工具层(会话/白名单/参数)、browser seam(runtime.ts + types.ts)、provider↔host-main 协议逐字段比对、错误流。结论:协议两端 10 个 op 的消息形状完全匹配(含 hello 认证与 userAction 单行通知),tool 层的会话去重(pendingOpens)与 agent 绑定生命周期正确,seam 的 provider 选择语义与 close() 的容错吞没符合契约。
+
+## 发现并修复
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | **dispose() vs start() 僵尸 child 竞态**(第二次复审的 disposed 守卫只挡住了 ensureView 入口):恢复路径会在 dispose 清空状态后重新进入 `ready()` → `start()` 从 listen 挂起点恢复,新建 server 并 **spawn 出一个没人会 kill 的 electron child**(`onChildExit` 在 disposed 时提前返回,`dispose()` 又已跑完) | `ready()` 入口 disposed 快速失败;`start()` 在 spawn 完成后复检 disposed 并完整自清理(kill child + close server);`ensureView` 在 `ready()` 之后复检 disposed |
+| 2 | **pendingSocket 泄漏**:三处(onChildExit / ready 失败清理 / dispose)都只把 `pendingSocket` 置 undefined,不 destroy | 统一改为 `destroy()` 后再置空 |
+| 3 | 新增回归测试:dispose 后的宿主拒绝操作且不再 spawn(旧守卫下第一次调用会真实拉起 child 并留下僵尸窗口) | `tests/remote-host-recovery.test.mjs` 新增 dispose 快速失败用例 |
+
+## 确认无问题(交叉审查覆盖面)
+
+- **协议比对**:客户端 `command/capture/download/flushAuth/restoreAuth/userActionError/groupView/showView/destroyView/createView` 与 host-main 各 case 的字段读取逐一匹配;hello 认证前命令排队、乱序 hello 拒绝、2 秒 token 等待兜底均正确;
+- **生命周期**:`ready()` 失败自清理(promise 身份校验防误杀新启动)、`onChildExit` 保留 views map(配合 #5 自愈)、`kill()` 幂等;
+- **withRecovery 并发**:双 catch 交错最多产生两次 createView(子进程幂等收敛),重试有界;
+- **tool 层**:每 context 状态隔离、`assertAllowed` 白名单、`browser_restrict` 自身始终放行、history 脱敏;
+- **seam**:选择语义无注册顺序依赖,`close()` 对四类 provider 缺失错误吞没为 no-op。
+
+**验证**:`node --test tests/*.test.mjs` **25 项全部通过**;`tsc --noEmit` 有/无 electron 包两种环境零错误;lib 重建同步。
+
+**状态**:已提交本地,未 bump 版本、未发布(发布时 bump)。
+
+---
+
+## 0.1.20 发布(2026-08-27)
+
+bump `0.1.19 → 0.1.20`,将第十一轮(issue #5 会话自愈)、第十二轮(issue #6 打包应用排除)与三轮审查加固随版本发布(tag `v0.1.20`)。README 中英同步:更新记录新增三行、Electron 定位顺序与环境要求与修复后的代码对齐(打包宿主不复用、bundled 优先、ELECTRON_PATH 最优先)、验证版本表 bump 0.1.20。
+
+**验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` **25 项全部通过**。

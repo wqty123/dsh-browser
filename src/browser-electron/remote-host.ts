@@ -29,7 +29,7 @@ import { execFileSync, spawn, type ChildProcessByStdio } from 'node:child_proces
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, ScreenshotOptions } from './provider.js'
@@ -42,56 +42,110 @@ const READY_TIMEOUT_MS = 20_000
 const MAX_RPC_BUFFER_BYTES = 512 * 1024 * 1024
 
 /**
- * Locate the Electron binary:
- *   0. the current process IS Electron (DSH Desktop hosts load this plugin
- *      inside their own Electron main process) — reuse the host binary, so
- *      the plugin works out of the box without `add electron`;
- *   1. require('electron') from this module (bundled dependency — the
- *      electron package ships with the plugin),
- *   2. ELECTRON_PATH (explicit override),
- *   3. every DSH install anchor + pnpm virtual store candidate, choosing the
- *      NEWEST version found. Older Electron releases (e.g. 33.x) have a
- *      compositor defect that intermittently breaks page capture, so prefer
- *      the newest binary available in the environment,
+ * Locate a SPAWNABLE Electron binary — one that runs a script given as an
+ * argument, i.e. a BARE electron, never a packaged app executable:
+ *   0. ELECTRON_PATH (explicit override — user intent beats auto-discovery),
+ *   1. the plugin's own electron package (a real dependency since 0.1.18),
+ *      found by a pure filesystem walk — never require(), whose semantics
+ *      differ inside an Electron main process (there it is the built-in API
+ *      module, not the npm package) and which would trigger electron 44+'s
+ *      lazy binary download;
+ *   2. every DSH install anchor (electron installed separately, e.g.
+ *      `dsh plugin add electron` into the profile or a global prefix),
+ *      choosing the NEWEST version found. Older Electron releases (e.g.
+ *      33.x) have a compositor defect that intermittently breaks page
+ *      capture, so prefer the newest binary available in the environment,
+ *   3. the current process, when it IS a bare Electron (dev hosts, e.g.
+ *      `electron .`): reuse the host binary. Packaged app executables
+ *      (resources/app.asar beside the exe) are never reused — they ignore
+ *      the script argument and launch the app itself, typically exiting
+ *      immediately via the single-instance lock, which is exactly the
+ *      "browser host exited (code=0)" failure on DSH Desktop;
  *   4. last resort: the process ancestry, for hosts that run this plugin in a
- *      child Node process of their own Electron main process (DSH Desktop).
+ *      child Node process of their own bare-Electron main process.
  * @returns the path to the Electron executable.
  */
+/** The discovery inputs {@link resolveElectronPathImpl} selects over, injectable for tests. */
+interface ElectronPathInputs {
+  /** ELECTRON_PATH (may be unset, empty, or pointing at a missing file). */
+  readonly override: string | undefined
+  /** True when running inside an Electron main process. */
+  readonly inElectron: boolean
+  /** process.execPath (candidate for in-process host reuse). */
+  readonly execPath: string
+  /** The plugin's own electron package probe (bundled). */
+  readonly bundled: () => string | undefined
+  /** The DSH install-anchor probe. */
+  readonly anchored: () => string | undefined
+  /** The process-ancestry probe (last resort). */
+  readonly ancestry: () => string | undefined
+}
+
 function resolveElectronPath(): string {
-  const require = createRequire(import.meta.url)
-  // 0. The current process IS Electron: reuse the host binary. It cannot be
-  //    missing because we are running on it.
-  if (typeof process.versions.electron === 'string') {
-    const exe = process.execPath
-    if (typeof exe === 'string' && exe.length > 0 && existsSync(exe)) return exe
-  }
-  // 1. Bundled dependency — but ONLY when its binary is already on disk.
-  //    Electron 44+ downloads the binary lazily on the first require()
-  //    (it has no postinstall anymore), so probing here must never trigger a
-  //    synchronous network download: available() would block DSH startup for
-  //    the download (or fail outright offline), surfacing as a broken plugin.
-  //    The download still happens on the first real spawn; this guard only
-  //    keeps the probe side-effect free.
-  try {
-    const entry: unknown = require.resolve('electron')
-    if (typeof entry === 'string' && entry.length > 0) {
-      const pkgRoot = dirname(entry)
-      const binaryReady =
-        existsSync(join(pkgRoot, 'path.txt'))
-        || existsSync(join(pkgRoot, 'dist', 'electron.exe'))
-        || existsSync(join(pkgRoot, 'dist', 'electron'))
-      if (binaryReady) {
-        const resolved: unknown = require('electron')
-        if (typeof resolved === 'string' && resolved.length > 0) return resolved
-      }
-    }
-  } catch {
-    // continue probing
-  }
-  // 2. Explicit override (user intent wins).
-  const override = process.env.ELECTRON_PATH
+  return resolveElectronPathImpl({
+    override: process.env.ELECTRON_PATH,
+    inElectron: typeof process.versions.electron === 'string',
+    execPath: process.execPath,
+    bundled: bundledElectronBinary,
+    anchored: anchoredElectronBinary,
+    ancestry: hostElectronViaProcessTree,
+  })
+}
+
+/**
+ * Pure selection over the discovery probes, in order:
+ *   0. override (user intent) → 1. bundled package → 2. anchors (newest) →
+ *   3. in-process BARE host → 4. process ancestry → throw.
+ * Packaged app executables are never reused (steps 3/4 skip them).
+ */
+function resolveElectronPathImpl(inputs: ElectronPathInputs): string {
+  // 0. Explicit override first: a user-set ELECTRON_PATH is a deliberate
+  //    choice and must beat every auto-discovery (including the bundled
+  //    package) — auto-discovery is a fallback, not an override.
+  const override = inputs.override
   if (typeof override === 'string' && override.length > 0 && existsSync(override)) return override
-  // 3. Collect every candidate (anchors + pnpm stores), then pick the newest.
+  // 1. The plugin's own electron package (filesystem probe). Never require():
+  //    inside an Electron main process require('electron') is the built-in
+  //    API module, not the npm package, and electron 44+ downloads its binary
+  //    on first require — probing must stay side-effect free (available()
+  //    would otherwise block DSH startup on the download).
+  const bundled = inputs.bundled()
+  if (bundled !== undefined) return bundled
+  // 2. DSH install anchors, newest wins. (The plugin's own tree — plain and
+  //    pnpm store layouts — was already scanned in step 1; the anchors cover
+  //    electron installed separately, e.g. `dsh plugin add electron` into the
+  //    profile or a global prefix.)
+  const anchored = inputs.anchored()
+  if (anchored !== undefined) return anchored
+  // 3. The current process IS a bare Electron (dev hosts, e.g. `electron .`):
+  //    reuse the host binary — it cannot be missing because we are running on
+  //    it. A PACKAGED app executable (resources/app.asar beside it, e.g. DSH
+  //    Desktop.exe) is NOT spawnable as bare electron: it ignores the script
+  //    argument, launches the app itself, and typically exits immediately
+  //    (single-instance lock) — so it is never reused.
+  if (inputs.inElectron) {
+    const exe = inputs.execPath
+    if (typeof exe === 'string' && exe.length > 0 && existsSync(exe) && isBareElectron(exe)) return exe
+  }
+  // 4. Last resort for bare-Electron hosts: walk the process ancestry (the
+  //    plugin may run in a child Node process of an Electron main process).
+  const hostExe = inputs.ancestry()
+  if (hostExe !== undefined) return hostExe
+  throw new Error(
+    'dsh-builtin-browser: cannot locate a spawnable Electron binary. ' +
+    'The electron package ships with the plugin (0.1.18+); Electron 44+ downloads its binary on first use, ' +
+    'so if the package is installed but the binary is missing, run `npx install-electron` once (needs network) ' +
+    'in the profile that installed the plugin, then retry. Alternatively set ELECTRON_PATH to an electron ' +
+    'executable. On installs from before electron became a dependency, add it to the active profile ' +
+    '(`dsh plugin --profile <your-profile> add electron`; on DSH Desktop the profile is `desktop`). ' +
+    'Note: the host\'s own executable cannot be reused when it is a packaged Electron app (e.g. DSH Desktop.exe) ' +
+    '— only a real electron binary can be spawned.',
+  )
+}
+
+/** DSH install anchors: electron installed separately (profile / global prefix), newest wins. */
+function anchoredElectronBinary(): string | undefined {
+  const require = createRequire(import.meta.url)
   const candidates: Array<{ version: string; path: string }> = []
   const add = (version: string, path: string | undefined): void => {
     if (path !== undefined) candidates.push({ version, path })
@@ -108,73 +162,95 @@ function resolveElectronPath(): string {
   for (const anchor of anchors) {
     try {
       const resolved: unknown = require.resolve('electron', { paths: [anchor] })
-      if (typeof resolved === 'string' && resolved.length > 0) {
+      // Inside an Electron main process resolve('electron') yields the
+      // built-in module NAME (not a path) — requiring an absolute path keeps
+      // electronExeBeside from probing cwd-relative garbage like ./dist/.
+      if (typeof resolved === 'string' && resolved.length > 0 && isAbsolute(resolved)) {
         add(versionOf(resolved), electronExeBeside(resolved))
       }
     } catch {
       // continue probing
     }
   }
-  // Scan ONLY the plugin's own install tree (plus the explicit DSH anchors
-  // above). Never cwd or the executable's directory: those can sit inside an
-  // unrelated project whose node_modules may hold a different electron, and
-  // executing the newest random binary in the filesystem is a supply-chain
-  // hazard with no benefit.
-  const roots = new Set<string>([
-    fileURLToPath(new URL('.', import.meta.url)),
-  ])
-  for (const root of roots) {
-    let dir = root
-    for (let depth = 0; depth < 8; depth++) {
-      const store = join(dir, 'node_modules', '.pnpm')
-      if (existsSync(store)) {
-        for (const entry of readdirSync(store)) {
-          if (!entry.startsWith('electron@')) continue
-          const exe = electronDistExe(join(store, entry, 'node_modules', 'electron'))
-          add(entry.slice('electron@'.length), exe)
-        }
-      }
-      const parent = join(dir, '..')
-      if (parent === dir) break
-      dir = parent
-    }
+  return pickNewest(candidates)
+}
+
+/**
+ * The plugin's own electron package binary, found by a pure filesystem walk
+ * (never require(), whose semantics differ inside an Electron main process —
+ * there `require('electron')` is the built-in API module, not the npm package
+ * — and which would trigger electron 44+'s lazy binary download when the dist
+ * is missing). Checks every `node_modules/electron` above this module,
+ * including pnpm virtual-store layouts, and returns the NEWEST ready binary.
+ * Scan ONLY the plugin's own install tree: never cwd or the executable's
+ * directory, which can sit inside an unrelated project whose node_modules may
+ * hold a different electron (executing the newest random binary in the
+ * filesystem is a supply-chain hazard with no benefit).
+ */
+function bundledElectronBinary(): string | undefined {
+  const candidates: Array<{ version: string; path: string }> = []
+  const consider = (pkgRoot: string, versionHint: string): void => {
+    const exe = electronDistExe(pkgRoot)
+    if (exe !== undefined) candidates.push({ version: versionHint || pkgVersion(pkgRoot), path: exe })
   }
-  // 4. Last resort for Electron hosts. DSH Desktop may run the agent runtime
-  //    (and thus this plugin) in a plain Node child of its Electron main
-  //    process — step 0 does not fire there, and there is no electron package
-  //    anywhere to find. The host's own binary IS an Electron runtime and is
-  //    guaranteed present (it is running us), so walk the process ancestry
-  //    and reuse the first Electron executable found. Zero extra install;
-  //    this is what makes the plugin work on DSH Desktop without `add
-  //    electron`, no matter how the host loads plugins.
-  const hostExe = hostElectronViaProcessTree()
-  if (hostExe !== undefined) return hostExe
-  throw new Error(
-    'dsh-builtin-browser: cannot locate the Electron binary. Options: (1) if you are on DSH Desktop, ' +
-    'this should never appear — the plugin reuses the host Electron automatically; (2) the electron ' +
-    'package ships with the plugin, so on newer installs nothing is needed here — on installs from ' +
-    'before that change, add it to the active profile (`dsh plugin --profile <your-profile> add electron`; ' +
-    'on DSH Desktop the profile is `desktop`); (3) set ELECTRON_PATH to the electron executable. Note: ' +
-    'Electron 44+ downloads its binary on first use, so if the package is installed but the binary is ' +
-    'missing, run `npx install-electron` once (needs network) and retry.',
-  )
+  let dir = fileURLToPath(new URL('.', import.meta.url))
+  for (let depth = 0; depth < 8; depth++) {
+    // Plain (npm/yarn, hoisted) layout: <ancestor>/node_modules/electron.
+    const plain = join(dir, 'node_modules', 'electron')
+    if (existsSync(join(plain, 'package.json'))) consider(plain, '')
+    // pnpm layout: <ancestor>/node_modules/.pnpm or <ancestor>/.pnpm, with
+    // electron@<version>/node_modules/electron entries.
+    for (const storeRoot of [join(dir, 'node_modules', '.pnpm'), join(dir, '.pnpm')]) {
+      if (!existsSync(storeRoot)) continue
+      for (const entry of readdirSync(storeRoot)) {
+        if (!entry.startsWith('electron@')) continue
+        const pkg = join(storeRoot, entry, 'node_modules', 'electron')
+        // Strip pnpm's peer-dependency suffix (electron@44.0.0_@types+node@22).
+        if (existsSync(join(pkg, 'package.json'))) consider(pkg, entry.slice('electron@'.length).split('_')[0])
+      }
+    }
+    const parent = join(dir, '..')
+    if (parent === dir) break
+    dir = parent
+  }
+  return pickNewest(candidates)
+}
+
+/** The electron version from a package root's package.json, or '0.0.0'. */
+function pkgVersion(pkgRoot: string): string {
+  try {
+    const pkg = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8')) as { version?: unknown }
+    return typeof pkg.version === 'string' && pkg.version.length > 0 ? pkg.version : '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+}
+
+/** The highest-versioned candidate's path, or undefined when none. */
+function pickNewest(candidates: Array<{ version: string; path: string }>): string | undefined {
+  let best: { version: string; path: string } | undefined
+  for (const c of candidates) {
+    if (best === undefined || compareVersions(c.version, best.version) > 0) best = c
+  }
+  return best?.path
 }
 
 /**
  * Last-resort Electron discovery: walk this process's ancestry looking for a
- * parent process whose executable is itself an Electron binary. Covers hosts
- * that run the plugin in a child Node process of their own Electron main
- * process (e.g. DSH Desktop): the host binary is already on disk and running,
- * so reusing it needs no extra install. Filesystem-only on POSIX (/proc); on
- * Windows a best-effort PowerShell CIM query is used — this path only runs
- * when every other lookup failed, so its latency never touches the happy
- * path, and a missing/blocked powershell simply yields nothing.
+ * parent process whose executable is a BARE Electron binary (only bare
+ * electron can be spawned with a script argument). Covers hosts that run the
+ * plugin in a child Node process of their own Electron main process: the host
+ * binary is already on disk and running, so reusing it needs no extra
+ * install. Filesystem-only on POSIX (/proc); on Windows a best-effort
+ * PowerShell CIM query is used — this path only runs when every other lookup
+ * failed, so its latency never touches the happy path, and a
+ * missing/blocked powershell simply yields nothing.
  */
 function hostElectronViaProcessTree(): string | undefined {
   let pid: number | undefined = process.ppid
   for (let depth = 0; depth < 6 && pid !== undefined && pid > 1; depth++) {
     const exe = processExecutable(pid)
-    if (exe !== undefined && isElectronBinary(exe)) return exe
+    if (exe !== undefined && isBareElectron(exe)) return exe
     pid = processParent(pid)
   }
   return undefined
@@ -236,6 +312,32 @@ function isElectronBinary(exe: string): boolean {
     || existsSync(join(resources, 'default_app.asar'))
 }
 
+/**
+ * True when the executable is a BARE (unpackaged) Electron that can be
+ * spawned with a script argument (`exe script.js --rpc-port N`). Packaged
+ * apps carry their code inside a resources dir (`app.asar`, or an unpacked
+ * `app` dir) and are NOT spawnable as bare electron: they ignore the script
+ * argument and launch the app itself, typically exiting immediately via the
+ * single-instance lock — spawning e.g. DSH Desktop.exe is exactly the
+ * "browser host exited (code=0)" failure. A portable single-file build (no
+ * resources dir at all) likewise cannot run a script argument.
+ */
+function isBareElectron(exe: string): boolean {
+  const dir = dirname(exe)
+  // Windows/Linux keep resources beside the binary; macOS app bundles keep
+  // them in Contents/Resources, one level above the binary's MacOS dir.
+  const resourcesList = process.platform === 'darwin'
+    ? [join(dir, '..', 'Resources'), join(dir, 'resources')]
+    : [join(dir, 'resources')]
+  for (const resources of resourcesList) {
+    if (existsSync(join(resources, 'app.asar')) || existsSync(join(resources, 'app'))) return false
+  }
+  // A real electron always ships a resources dir somewhere; requiring one
+  // keeps every not-actually-spawnable layout out.
+  if (!resourcesList.some(p => existsSync(p))) return false
+  return isElectronBinary(exe)
+}
+
 /** Extract an electron version like "43.4.0" from a path containing it. */
 function versionOf(path: string): string {
   const match = /electron@(\d+\.\d+\.\d+)/.exec(path)
@@ -282,6 +384,20 @@ interface Pending {
 }
 
 /**
+ * Thrown whenever the browser host (the Electron child) is gone — it exited,
+ * failed to start, or its RPC connection dropped. Operations against a dead
+ * host can never succeed, so the view layer treats this as "rebuild against a
+ * fresh host" instead of a page-level error. Kept module-private: callers
+ * observe the behavior (auto-restart), not the class.
+ */
+class HostGoneError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'HostGoneError'
+  }
+}
+
+/**
  * Line-delimited JSON-RPC client over a local TCP socket. Electron's main
  * process on Windows does not receive piped stdin, so the parent listens on a
  * loopback port and passes it to the child via `--rpc-port`; the child
@@ -311,8 +427,11 @@ class ElectronChildClient {
     private readonly token: string,
     private readonly onExit?: () => void,
     private readonly onUserAction?: (action: BrowserUserAction) => void,
+    /** Test seam: the executable to spawn instead of the resolved Electron
+     *  binary. Absent -> resolveElectronPath() (production behavior). */
+    private readonly executable?: string,
   ) {
-    const electron = resolveElectronPath()
+    const electron = this.executable ?? resolveElectronPath()
     process.stderr.write(`[dsh-browser host] spawning electron: ${electron}\n`)
     // ELECTRON_RUN_AS_NODE (even an empty string) makes Electron run as plain
     // Node, breaking require('electron'); NODE_OPTIONS can inject flags that
@@ -358,7 +477,10 @@ class ElectronChildClient {
     if (this.dead) return
     this.dead = true
     this.connected = false
-    for (const pending of this.pending.values()) pending.reject(err)
+    // Tag every failure as "host gone" so the view layer can tell a dead host
+    // apart from a page-level error and rebuild against a fresh child.
+    const wrapped = err instanceof HostGoneError ? err : new HostGoneError(err.message)
+    for (const pending of this.pending.values()) pending.reject(wrapped)
     this.pending.clear()
     this.outbox = []
     this.onExit?.()
@@ -469,14 +591,22 @@ class ElectronChildClient {
   /** Send one command and await the reply. */
   call<T = unknown>(op: string, payload: Record<string, unknown> = {}): Promise<T> {
     if (this.dead) {
-      return Promise.reject(new Error('dsh-builtin-browser: browser host is not running'))
+      return Promise.reject(new HostGoneError('dsh-builtin-browser: browser host is not running'))
     }
     const id = this.nextId++
     const line = JSON.stringify({ id, op, ...payload })
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
       if (this.connected && this.socket !== undefined) {
-        this.socket.write(line + '\n')
+        try {
+          this.socket.write(line + '\n')
+        } catch {
+          // The socket died between the dead check and the write; the 'close'
+          // handler fails the rest. Reject THIS call as host-gone so the
+          // caller can recover immediately instead of hanging.
+          this.pending.delete(id)
+          reject(new HostGoneError('dsh-builtin-browser: browser host connection closed'))
+        }
       } else {
         // Not connected yet: queue; attach() flushes on the child's arrival.
         this.outbox.push(line)
@@ -547,7 +677,12 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   /** The provider's user-action handler; routes toolbar actions into sessions. */
   private userActionHandler: ((action: BrowserUserAction) => void) | undefined
 
-  constructor(private readonly hostMainPath: string) {}
+  constructor(
+    private readonly hostMainPath: string,
+    /** Test seam: the executable to spawn instead of the resolved Electron
+     *  binary. Absent -> resolveElectronPath() (production behavior). */
+    private readonly spawnExecutable?: string,
+  ) {}
 
   /**
    * Cheap usability probe: can we find an Electron binary to spawn? The scan
@@ -561,8 +696,12 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
       try {
         resolveElectronPath()
         this.electronAvailable = true
-      } catch {
+      } catch (error) {
         this.electronAvailable = false
+        // The provider will be reported unavailable, so the detailed
+        // resolution error (install-electron / ELECTRON_PATH guidance) would
+        // otherwise never reach the user — surface it on stderr.
+        process.stderr.write(`[dsh-browser host] electron unavailable: ${error instanceof Error ? error.message : String(error)}\n`)
       }
     }
     return this.electronAvailable
@@ -570,6 +709,10 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
 
   /** Ensure the child is up and ready (lazy on first use; restarts after a crash). */
   private ready(): Promise<void> {
+    // Fail fast on a disposed host: a recovery path can re-enter ready() after
+    // dispose() cleared its state, and starting fresh here would spawn a child
+    // nobody will ever kill.
+    if (this.disposed) throw new HostGoneError('browser host disposed')
     if (this.readyPromise !== undefined) return this.readyPromise
     const started = this.start()
     const wrapped = started.catch(error => {
@@ -581,6 +724,7 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
         this.client = undefined
         this.server?.close()
         this.server = undefined
+        this.pendingSocket?.destroy()
         this.pendingSocket = undefined
       }
       throw error
@@ -631,10 +775,21 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
       token,
       () => this.onChildExit(),
       action => this.userActionHandler?.(action),
+      this.spawnExecutable,
     )
     if (this.pendingSocket !== undefined) {
       this.client.attach(this.pendingSocket)
       this.pendingSocket = undefined
+    }
+    // dispose() can race this spawn (it may run while start() is suspended
+    // between the listen and the client creation): re-check here so a host
+    // that was torn down mid-start does not leak a child nobody will kill.
+    if (this.disposed) {
+      this.client.kill()
+      this.client = undefined
+      try { server.close() } catch { /* already closed */ }
+      if (this.server === server) this.server = undefined
+      throw new HostGoneError('browser host disposed')
     }
     // Wait for the child's connection + authentication + readiness ping. The
     // ping is queued until the hello authenticates, so a spoofed socket
@@ -645,13 +800,17 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   /** The child died: tear down so the next use starts a fresh child. */
   private onChildExit(): void {
     if (this.disposed) return
+    process.stderr.write('[dsh-browser host] browser host gone; will restart on next use\n')
     this.client = undefined
     this.server?.close()
     this.server = undefined
+    this.pendingSocket?.destroy()
     this.pendingSocket = undefined
     this.readyPromise = undefined
-    // Keep the views map: handles still resolve to ids; a fresh child simply
-    // has no such views yet, and reset_session reopens clean sessions.
+    // Keep the views map: handles still resolve to ids, and
+    // DeferredRemoteView re-materializes them against the fresh child on
+    // their next use — sessions opened before the crash stay usable instead
+    // of going stale (only the page state is lost).
   }
 
   createView(): ElectronViewHandle {
@@ -664,9 +823,15 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   }
 
   private async ensureView(id: string): Promise<RemoteView> {
+    // A rebuild in flight during dispose() must not spawn a fresh child that
+    // would then outlive the host (a zombie window nobody disposes).
+    if (this.disposed) throw new HostGoneError('browser host disposed')
     await this.ready()
+    // dispose() may have landed while the host was starting (ready() resolved
+    // after dispose cleared its state): never materialize into a dead host.
+    if (this.disposed) throw new HostGoneError('browser host disposed')
     const client = this.client
-    if (client === undefined) throw new Error('browser host unavailable')
+    if (client === undefined) throw new HostGoneError('browser host unavailable')
     // Re-send the window group before creating the view: the child routes the
     // view into its session's own window. Re-sending every materialization
     // also covers a child restart (the new child has no assignments yet).
@@ -733,6 +898,8 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     this.client = undefined
     this.server?.close()
     this.server = undefined
+    this.pendingSocket?.destroy()
+    this.pendingSocket = undefined
     this.readyPromise = undefined
     this.views.clear()
   }
@@ -748,7 +915,7 @@ class DeferredRemoteView implements ElectronViewHandle {
   ) {}
 
   /**
-   * Materialize once and cache: every sendCommand on the same handle must
+   * Materialize once and cache: every operation on the same handle must
    * target the SAME child view (re-materializing would re-run createView and
    * duplicate the window). A FAILED materialization is reset so a later call
    * (e.g. after the host restarted) can retry instead of being poisoned.
@@ -764,29 +931,51 @@ class DeferredRemoteView implements ElectronViewHandle {
     return this.materialized
   }
 
+  /**
+   * Run one operation against this view's backing child, automatically
+   * recovering from a dead host. The cached materialization is bound to the
+   * child it was created on; once that child is gone (exited, crashed, or its
+   * connection dropped — e.g. the DSH process that spawned it was restarted),
+   * any further operation on the same handle would otherwise fail forever
+   * with "browser host is not running". Instead: drop the cache, rebuild the
+   * view against a freshly spawned child, and retry the operation exactly
+   * once — so sessions that survive a host death self-heal on their FIRST
+   * call after it, without a manual browser_reset_session. Page-level errors
+   * are never retried (the view itself is fine).
+   */
+  private async withRecovery<T>(op: (view: RemoteView) => Promise<T>): Promise<T> {
+    try {
+      const view = await this.materializeOnce()
+      return await op(view)
+    } catch (error) {
+      if (!(error instanceof HostGoneError)) throw error
+      // The backing child is gone: a retry on the same materialization can
+      // never succeed. Rebuild against a fresh child and retry once; a second
+      // failure (fresh host also failing to start) surfaces to the caller.
+      this.materialized = undefined
+      const fresh = await this.materializeOnce()
+      return op(fresh)
+    }
+  }
+
   async sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const view = await this.materializeOnce()
-    return view.sendCommand(method, params)
+    return this.withRecovery(view => view.sendCommand(method, params))
   }
 
   async download(url: string, savePath: string): Promise<void> {
-    const view = await this.materializeOnce()
-    return view.download(url, savePath)
+    return this.withRecovery(view => view.download(url, savePath))
   }
 
   async capture(opts?: ScreenshotOptions): Promise<{ base64: string; mime: string }> {
-    const view = await this.materializeOnce()
-    return view.capture(opts)
+    return this.withRecovery(view => view.capture(opts))
   }
 
   async flushAuth(): Promise<ExportedCookie[]> {
-    const view = await this.materializeOnce()
-    return view.flushAuth()
+    return this.withRecovery(view => view.flushAuth())
   }
 
   async restoreAuth(cookies: ExportedCookie[]): Promise<number> {
-    const view = await this.materializeOnce()
-    return view.restoreAuth(cookies)
+    return this.withRecovery(view => view.restoreAuth(cookies))
   }
 }
 
@@ -804,4 +993,15 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 /** Default host-main path relative to this module's build output. */
 export function defaultHostMainPath(): string {
   return fileURLToPath(new URL('./host-main.js', import.meta.url))
+}
+
+/**
+ * Test/diagnostic hooks (mirrors tool-browser's `internals` convention).
+ * `isBareElectron` is the packaged-app discriminator behind the host-reuse
+ * steps; `resolveElectronPath` is the full resolution order.
+ */
+export const internals = {
+  isBareElectron,
+  resolveElectronPath,
+  resolveElectronPathImpl,
 }

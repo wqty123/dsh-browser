@@ -74,15 +74,15 @@ dsh plugin --profile web add <本仓库路径>
 能。插件自托管:自己拉起 Electron 窗口,无需桌面外壳。
 
 **Q:找不到 Electron?**
-插件按顺序自动定位:① 插件运行在 Electron 进程内(DSH Desktop 主进程)时直接复用宿主二进制 → ② 进程祖先树中的宿主 Electron 二进制(DSH Desktop 把插件跑在子 Node 进程时的兜底)→ ③ 随插件安装的 electron 包 `require('electron')`(仅二进制已就绪时)→ ④ `ELECTRON_PATH` 环境变量 → ⑤ DSH 锚点与 pnpm 虚拟仓库中版本最新者。
+插件按顺序自动定位:① `ELECTRON_PATH` 环境变量(显式覆盖,优先于一切自动发现)→ ② 随插件安装的 electron 包(纯文件系统探测,不触发 44+ 懒下载)→ ③ DSH 锚点(profile / 全局 prefix 中单独安装的 electron)中版本最新者 → ④ 当前进程就是**裸** Electron(dev 模式)时复用宿主二进制 → ⑤ 进程祖先树中的裸 Electron 二进制。**打包应用不参与复用**:旁有 `resources/app.asar` 的可执行文件(如 DSH Desktop.exe)无法按脚本参数拉起,spawn 会启动应用本体并秒退(单实例锁)——一律跳过。
 
-DSH Desktop 上①②任一命中即开箱可用,无需任何安装。纯 `dsh web` 下全部落空时,报错会给出指引:electron 已随插件安装,44+ 二进制首次使用自动下载(需网络);必要时可 `npx install-electron` 或设置 `ELECTRON_PATH`。
+DSH Desktop 上①命中即可用(0.1.18+ 插件自带 electron 包,44+ 二进制首次使用自动下载);dev 模式宿主走④复用,亦零安装。全部落空时,报错会给出指引:electron 已随插件安装,44+ 二进制缺失时先 `npx install-electron`(需网络);必要时可设置 `ELECTRON_PATH`。
 
 **Q:截图失败或挂起?**
 确保 Electron ≥ 40(33.x 有合成器缺陷)。自托管截图优先走原生 `capturePage`,多视图/窗口未激活时自动兜底到 CDP。
 
 **Q:浏览器窗口不见了?**
-窗口标题为 `dsh-browser`(自托管)。若子进程崩溃会自动重启;重启后旧会话失效,调用 `browser_reset_session` 重建。
+窗口标题为 `dsh-browser`(自托管)。若子进程崩溃(或宿主 DSH 重启)会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。
 
 **Q:下载报 CORS 错误?**
 `browser_download` 在页面上下文内 `fetch`,受同源/CORS 约束;跨域文件请先在同源页面内操作,或直接请求用户提供。仅支持 HTTP(S) URL;`savePath` 必须为绝对路径(配置 `downloadDir` 后限定在该目录内)。

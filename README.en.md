@@ -213,11 +213,11 @@ agent (browser_* tools)
 - **Provider** (`browser-electron` row): operates views through the `ElectronBrowserViewHost` seam (create/destroy/show, `sendCommand`), implemented with real Electron objects by the shell.
 - **Tools** (`tool-browser` row): the 33 model-facing `browser_*` tools, maintaining one browser session per calling task (DSH session).
 
-**Self-hosted mode**: without a desktop shell, the plugin spawns its own Electron child process (`host-main.js`) and drives it over loopback TCP JSON-RPC. The RPC is authenticated with a random per-spawn token delivered over **both stdin and an environment variable** — on Windows the Electron GUI process never receives piped stdin, so the env fallback keeps the handshake reliable. The child auto-restarts after a crash; screenshots prefer Electron's native `capturePage` (CDP capture can hang with multiple views in the window); the plugin automatically picks the **newest** Electron in the environment (33.x has a compositor defect; ≥ 40 recommended; 44+ downloads its binary on first use, needs network).
+**Self-hosted mode**: without a desktop shell, the plugin spawns its own Electron child process (`host-main.js`) and drives it over loopback TCP JSON-RPC. The RPC is authenticated with a random per-spawn token delivered over **both stdin and an environment variable** — on Windows the Electron GUI process never receives piped stdin, so the env fallback keeps the handshake reliable. The child auto-restarts after a crash; the plugin prefers its own bundled electron package — packaged app executables (e.g. DSH Desktop.exe) are never reused as the spawnable binary, which would launch the app itself and exit immediately; screenshots prefer Electron's native `capturePage` (CDP capture can hang with multiple views in the window); the plugin automatically picks the **newest** Electron in the environment (33.x has a compositor defect; ≥ 40 recommended; 44+ downloads its binary on first use, needs network).
 
 **The self-hosted browser IS a real browser**: every task (DSH session) gets its **own browser window** with a full toolbar — address bar, back/forward/reload buttons, and a tab strip (new/switch/close tabs). A human can use it exactly like Chrome: type a URL in the address bar (https:// is added automatically), click tabs, open new ones. Keyboard focus follows your clicks — **click the address bar to type, click the page to interact** (Windows focus routing; fixes the case where clicks did not move focus and the address bar could not receive typed URLs). Human and agent actions feed the **same session model** (same tabs, history, and navigation); the window title always shows the task label plus the page title/URL, and views follow the window size on resize. A window closes automatically with its session when the task ends.
 
-**Electron lookup order**: ① the current process IS Electron (DSH Desktop main process) → reuse the host binary directly; ② walk the process ancestry for the host's Electron binary (covers hosts that run the plugin in a child Node process, e.g. DSH Desktop; PowerShell CIM on Windows, last resort only); ③ `require('electron')` (the electron package bundled with the plugin); ④ `ELECTRON_PATH` (explicit override); ⑤ the newest among DSH install anchors and pnpm virtual stores. **Zero extra install on DSH Desktop**; when nothing is found a clear error tells you what to do.
+**Electron lookup order**: ① `ELECTRON_PATH` (explicit override, wins first) → ② the electron package bundled with the plugin (filesystem-only probe, never triggers the 44+ lazy download; covers both node_modules and pnpm-store layouts) → ③ the newest among DSH install anchors and pnpm virtual stores → ④ reuse the host binary when the current process is a **bare** Electron (dev mode) → ⑤ walk the process ancestry for a **bare** Electron host (PowerShell CIM on Windows, last resort only). **Packaged apps (e.g. `DSH Desktop.exe`) are never reused** — they cannot be spawned with a script argument, and misusing them exits instantly (issue #6); when nothing is found a clear error tells you what to do (including the `npx install-electron` hint).
 
 ## Division of labor with the desktop shell
 
@@ -226,9 +226,10 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 ## Requirements
 
 - DeepSeek Harness (dsh) with the matching profile (`web` / `desktop`, etc.)
-- **Electron runtime** (required dependency, installed automatically with the plugin):
-  - **DSH Desktop**: the host itself runs on Electron — the plugin reuses the host binary automatically (the bundled electron is just a fallback);
-  - **plain `dsh web` self-hosted**: uses the bundled electron package directly (≥ 40 recommended; 44+ downloads its binary on first use, needs network)
+- **Electron runtime** (required dependency, installed automatically with the plugin, ≥ 40 recommended; 44+ downloads its binary on first use, needs network):
+  - `ELECTRON_PATH` can point at another binary explicitly (highest priority);
+  - **DSH Desktop**: the packaged host exe (`DSH Desktop.exe`) is **never reused** — packaged apps cannot be spawned with a script argument and misuse exits instantly (issue #6); the bundled electron is used directly, and dev-mode **bare** Electron hosts are still reusable;
+  - **plain `dsh web` self-hosted**: uses the bundled electron package directly
 
 ### Verified versions
 
@@ -237,7 +238,7 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 | DeepSeek Harness (dsh) | `0.1.1-rc.2` (peer range `^0.1.1-rc.2`) |
 | Electron | `44.0.0` (≥ 40 recommended; 33.x has a compositor defect) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.19` |
+| dsh-builtin-browser | `0.1.20` |
 | OS | Windows 10 (10.0.26200) |
 
 > The plugin declares `electron >= 30`; it has **only been verified on Windows** (macOS/Linux untested, not yet promised).
@@ -254,7 +255,7 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 - `browser_restrict` is a **soft guardrail** against accidental actions, not a security boundary: the model can lift it itself.
 - Popups (`window.open` / `target=_blank`) are re-routed into the current tab instead of opening untracked native windows, so the tab/session model stays intact.
 - The `browser_auth` cookie round-trip does not preserve `hostOnly`/`sameSite` (host-only cookies come back as domain cookies); it is available on the self-hosted browser only.
-- After a self-hosted child crash the browser host restarts automatically, but sessions opened before the crash are gone — call `browser_reset_session` to rebuild.
+- After a self-hosted child crash (or a DSH restart that kills it) the browser host restarts automatically, and sessions opened before the crash **rebuild on their next use** — only page state is lost, no manual `browser_reset_session` needed (it still works for an explicit reset).
 - Electron 44+ downloads its binary (~100 MB) on the first window open and needs network; it is never needed again afterwards. If detection runs without network, pre-install a binary and point `ELECTRON_PATH` at it.
 - This plugin contains no browser-column UI — that is host-shell territory; do not treat "browser column" as a plugin feature.
 
@@ -296,12 +297,22 @@ Code layout:
 | **0.1.18** | 2026-08-27 | **Release**: round 9 (electron as a required dependency) ships as **0.1.18** (build clean, 21/21 tests pass) |
 | 10 | 2026-08-27 | **DSH-Store compatibility declaration**: added `dsh.compatibility.dshReleases` (rc.2/rc.1=compatible, rc.8=unknown) plus profiles/dsh range, clearing the store's auto-unlisting (HOLD) |
 | **0.1.19** | 2026-08-27 | **Release**: round 10 (DSH-Store compatibility declaration) ships as **0.1.19** (build clean, 21/21 tests pass) |
+| 11 | 2026-08-27 | **Self-hosted session self-healing after host death** (issue #5): after the host dies (DSH restart / checkpoint restore / crash), already-open sessions rebuild the host and retry on their **next call** — no more "browser host is not running", no more half-dead state; host-gone logging + a fake-child regression test added |
+| 12 | 2026-08-27 | **resolveElectronPath excludes packaged apps** (issue #6): added `isBareElectron` (a sibling `app.asar` means packaged — never reused, all platforms incl. macOS bundle layout); bundled-electron filesystem probe goes first; `ELECTRON_PATH` override wins first; missing dist errors clearly (`npx install-electron` hint) |
+| Hardening | 2026-08-27 | **Three review passes hardened**: concurrent-recovery double-rebuild race (child `createView` made idempotent), macOS bundle-path detection, `dispose()` vs `start()` zombie-child race triple-guard, pendingSocket leak, fully unit-tested lookup order (24→25 tests) |
+| **0.1.20** | 2026-08-27 | **Release**: rounds 11/12 + hardening ship as **0.1.20** (build clean, 25/25 tests pass) |
 
 ## Acknowledgements
 
 Special thanks to the [DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) and the DeepSeek AI team: the seam, the tool runtime, and the plugin system this plugin builds on all come from that project.
 
 Thanks as well to [Cordis](https://github.com/cordiverse/cordis) for the plugin foundation, and to everyone in the community who discussed, tested, gave feedback, and built plugins.
+
+## A Note from the Author
+
+Have feedback about this plugin, or an idea for another plugin you'd like built? Feel free to reach out on WeChat:
+
+**wx: `hui13866591135`** (please mention this project when sending the friend request)
 
 ## License
 

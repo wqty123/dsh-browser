@@ -213,11 +213,11 @@ agent (browser_* 工具)
 - **provider 层**(`browser-electron` 行)通过 `ElectronBrowserViewHost` 接缝操作视图(创建/销毁/显示/`sendCommand`),由真实外壳用 Electron 对象实现;
 - **工具层**(`tool-browser` 行)提供模型侧的 33 个 `browser_*` 工具,按调用方任务(DSH 会话)维护独立的浏览器会话。
 
-**自托管模式**:没有桌面外壳时,插件自己拉起一个 Electron 子进程(`host-main.js`),通过本机 TCP JSON-RPC 驱动。RPC 带随机 token 认证,token 经 **stdin + 环境变量双通道**传递——Windows 上 Electron 是 GUI 子系统进程、收不到 piped stdin,环境变量兜底保证握手稳定。子进程崩溃会自动重启;截图优先走 Electron 原生 `capturePage`(CDP 截图在多视图下会挂起),并自动选择环境中**最新版本**的 Electron(33.x 有合成器缺陷,建议 ≥ 40;44+ 首次使用自动下载二进制,需联网)。
+**自托管模式**:没有桌面外壳时,插件自己拉起一个 Electron 子进程(`host-main.js`),通过本机 TCP JSON-RPC 驱动。RPC 带随机 token 认证,token 经 **stdin + 环境变量双通道**传递——Windows 上 Electron 是 GUI 子系统进程、收不到 piped stdin,环境变量兜底保证握手稳定。子进程崩溃会自动重启;优先使用随插件安装的 electron 包(**打包应用如 DSH Desktop.exe 不会被误当作可复用二进制**,避免 spawn 秒退);截图优先走 Electron 原生 `capturePage`(CDP 截图在多视图下会挂起),并自动选择环境中**最新版本**的 Electron(33.x 有合成器缺陷,建议 ≥ 40;44+ 首次使用自动下载二进制,需联网)。
 
 **自托管浏览器就是一台真正的浏览器**:每个任务(DSH 会话)拥有**独立的浏览器窗口**,窗口自带完整工具栏——地址栏、后退/前进/刷新按钮、标签条(新建/切换/关闭标签)。人可以直接像用 Chrome 一样使用它:在地址栏输入网址(自动补 `https://`)、点标签切换页面、开新标签;键盘焦点跟随点击——**点地址栏即可输入、点页面即可操作**(Windows 焦点路由,修复了点击不转移焦点导致地址栏无法输入的问题)。agent 与人的操作都汇入**同一个会话模型**(同一套标签、历史与导航),窗口标题实时显示当前任务标识与页面标题/URL,窗口缩放时视图自动跟随。任务结束后窗口随会话自动关闭。
 
-**Electron 定位顺序**:① 插件运行在 Electron 进程内(DSH Desktop 主进程)时直接复用宿主二进制 → ② 进程祖先树中的宿主 Electron 二进制(DSH Desktop 把插件跑在子 Node 进程时的兜底)→ ③ `require('electron')`(随插件安装的 electron 包)→ ④ `ELECTRON_PATH`(显式覆盖)→ ⑤ DSH 安装锚点与 pnpm 虚拟仓库中**版本最新**者。**DSH Desktop 上零额外安装**;找不到时工具会报清晰的错误提示。
+**Electron 定位顺序**:① `ELECTRON_PATH`(显式覆盖,用户显式意图最优先)→ ② 随插件安装的 electron 包(纯文件系统探测,不触发 44+ 懒下载;覆盖 node_modules 与 pnpm store 两种布局)→ ③ DSH 安装锚点与 pnpm 虚拟仓库中**版本最新**者 → ④ 当前进程为**裸** Electron 时复用宿主二进制(开发模式)→ ⑤ 进程祖先树中的**裸** Electron 宿主(Windows 走 PowerShell CIM,仅最后手段)。**打包应用(如 `DSH Desktop.exe`)一律不复用**——它们不能按脚本参数拉起,误用会导致 spawn 秒退(issue #6);找不到时工具会报清晰的错误提示(含 `npx install-electron` 指引)。
 
 ## 与桌面外壳的分工
 
@@ -226,9 +226,10 @@ agent (browser_* 工具)
 ## 环境要求
 
 - DeepSeek Harness(dsh),已安装对应 profile(`web` / `desktop` 等)
-- **Electron 运行时**(必装依赖,随插件自动安装):
-  - **DSH Desktop**:宿主本身基于 Electron,**插件自动复用宿主二进制**(随包安装的 electron 仅作后备);
-  - **纯 `dsh web` 自托管**:直接使用随插件安装的 electron 包(建议 ≥ 40;44+ 首次使用自动下载二进制,需网络)
+- **Electron 运行时**(必装依赖,随插件自动安装,建议 ≥ 40;44+ 首次使用自动下载二进制,需网络):
+  - `ELECTRON_PATH` 可显式指定其他二进制(最优先);
+  - **DSH Desktop**:打包宿主 exe(`DSH Desktop.exe`)**不复用**——打包应用无法按脚本参数拉起,误用会秒退(issue #6);直接使用随包 electron,开发模式的**裸** Electron 宿主仍可复用;
+  - **纯 `dsh web` 自托管**:直接使用随插件安装的 electron 包
 
 ### 验证过的版本
 
@@ -237,7 +238,7 @@ agent (browser_* 工具)
 | DeepSeek Harness(dsh) | `0.1.1-rc.2`(peer 声明 `^0.1.1-rc.2`) |
 | Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.19` |
+| dsh-builtin-browser | `0.1.20` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`;**当前仅在 Windows 环境实测**(macOS/Linux 未验证,暂不承诺)。
@@ -254,7 +255,7 @@ agent (browser_* 工具)
 - `browser_restrict` 是防误操作的**软护栏**,不是安全边界:模型可以自行解除白名单。
 - 页面弹窗(`window.open` / `target=_blank`)会被重定向到当前标签页内打开,不创建独立窗口,以免破坏标签/会话模型。
 - `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie);仅自托管浏览器可用。
-- 自托管浏览器子进程崩溃后会自动重启,但崩溃前已打开的会话视图已失效,调用 `browser_reset_session` 重建即可。
+- 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。
 - electron 随插件安装;Electron 44+ 首次打开浏览器窗口时自动下载二进制(约 100MB,需网络),之后不再需要。若探测时网络不可用,可预装 `ELECTRON_PATH` 指定的二进制。
 - 本插件不含浏览器列 UI——那是宿主外壳的配套,别把"浏览器列"当成插件能力。
 
@@ -296,12 +297,22 @@ npm run build
 | **0.1.18** | 2026-08-27 | **发布**:第九轮「electron 改为必装依赖」随 **0.1.18** 发布(构建零错误、21 项测试全绿) |
 | 第十轮 | 2026-08-27 | **DSH-Store 兼容性声明**:新增 `dsh.compatibility.dshReleases`(rc.2/rc.1=compatible、rc.8=unknown)与 profiles/dsh 范围,解除商店自动下架(HOLD) |
 | **0.1.19** | 2026-08-27 | **发布**:第十轮「DSH-Store 兼容性声明」随 **0.1.19** 发布(构建零错误、21 项测试全绿) |
+| 第十一轮 | 2026-08-27 | **自托管宿主崩溃后的会话自愈**(issue #5):宿主死亡(DSH 重启 / checkpoint 恢复 / 崩溃)后,已打开的会话在**下一次调用时自动重建宿主并重试**——不再报 "browser host is not running",半死态消除;新增 host-gone 日志与假子进程回归测试 |
+| 第十二轮 | 2026-08-27 | **resolveElectronPath 排除打包应用**(issue #6):新增 `isBareElectron`(旁有 `app.asar` 即打包应用,一律不复用,全平台含 macOS bundle 布局);bundled electron 纯文件系统探测置最优先;`ELECTRON_PATH` 显式覆盖最优先;dist 缺失时明确报错(`npx install-electron` 指引) |
+| 全面复审加固 | 2026-08-27 | **三轮审查加固**:并发恢复双重建竞态(child `createView` 幂等化)、macOS bundle 路径判定、`dispose()` vs `start()` 僵尸 child 竞态三道闸、pendingSocket 泄漏、选路顺序全量单测(24→25 项测试) |
+| **0.1.20** | 2026-08-27 | **发布**:第十一/十二轮 + 全面复审加固随 **0.1.20** 发布(构建零错误、25 项测试全绿) |
 
 ## 特别感谢
 
 特别感谢 [DeepSeek Harness 原始仓库](https://github.com/deepseek-ai/deepseek-harness) 与 DeepSeek AI 团队:本插件的 seam、工具运行时与插件体系都构建在这个项目之上。
 
 同时感谢 [Cordis](https://github.com/cordiverse/cordis) 提供的插件化基础,以及所有参与讨论、测试、反馈和插件开发的社区成员。
+
+## 作者的话
+
+对插件本身有意见或者有想要制作的其他插件,欢迎加我微信来讨论:
+
+**wx:`hui13866591135`**(请在申请好友时注明)
 
 ## License
 
