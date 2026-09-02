@@ -238,7 +238,7 @@ agent (browser_* 工具)
 | DeepSeek Harness(dsh) | `0.1.1-rc.2`(peer 声明 `^0.1.1-rc.2`) |
 | Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.20` |
+| dsh-builtin-browser | `0.1.21` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`;**当前仅在 Windows 环境实测**(macOS/Linux 未验证,暂不承诺)。
@@ -253,7 +253,7 @@ agent (browser_* 工具)
 - `browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;仅允许 HTTP(S) 目标;`savePath` 必须为绝对路径(默认限定在 `~/Downloads`,可用 `downloadDir` 覆盖);单文件上限 256MB(流式限流,按 Content-Length 提前拒绝),文件由浏览器子进程直接落盘(临时文件 + 原子改名)。
 - 自托管浏览器的 cookie 在磁盘上以明文存储(Electron 默认行为);需要加密落盘的部署应在宿主层接入系统钥匙串 / DPAPI。
 - `browser_restrict` 是防误操作的**软护栏**,不是安全边界:模型可以自行解除白名单。
-- 页面弹窗(`window.open` / `target=_blank`)会被重定向到当前标签页内打开,不创建独立窗口,以免破坏标签/会话模型。
+- 页面弹窗(`window.open` / `target=_blank`)会在同一会话窗口中**新开一个标签页**打开,保留原页面与 opener 上下文,跳转也计入会话历史;非 HTTP(S) 弹窗(OAuth 承接页、`mailto:`、自定义协议)仍交给系统处理,不创建未跟踪的独立窗口。
 - `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie);仅自托管浏览器可用。
 - 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。
 - electron 随插件安装;Electron 44+ 首次打开浏览器窗口时自动下载二进制(约 100MB,需网络),之后不再需要。若探测时网络不可用,可预装 `ELECTRON_PATH` 指定的二进制。
@@ -301,6 +301,9 @@ npm run build
 | 第十二轮 | 2026-08-27 | **resolveElectronPath 排除打包应用**(issue #6):新增 `isBareElectron`(旁有 `app.asar` 即打包应用,一律不复用,全平台含 macOS bundle 布局);bundled electron 纯文件系统探测置最优先;`ELECTRON_PATH` 显式覆盖最优先;dist 缺失时明确报错(`npx install-electron` 指引) |
 | 全面复审加固 | 2026-08-27 | **三轮审查加固**:并发恢复双重建竞态(child `createView` 幂等化)、macOS bundle 路径判定、`dispose()` vs `start()` 僵尸 child 竞态三道闸、pendingSocket 泄漏、选路顺序全量单测(24→25 项测试) |
 | **0.1.20** | 2026-08-27 | **发布**:第十一/十二轮 + 全面复审加固随 **0.1.20** 发布(构建零错误、25 项测试全绿) |
+| 第十三轮 | 2026-08-28 | **macOS/Linux 输入框无法键入修复**(issue #7):0.1.16 引入的 Windows 焦点路由(mousedown 强制 focus + 窗口 refocus 恢复)未做平台判断,与 macOS 原生 click-to-focus 冲突导致登录框收不到键入 → 两处焦点逻辑加 `win32` 平台门,非 Windows 恢复原生行为 |
+| 第十四轮 | 2026-08-28 | **window.open/target=_blank 新开标签**(issue #8):HTTP(S) 弹窗不再 loadURL 覆盖当前视图,转交父进程在**同一会话窗口新开标签**——原页面与 opener 上下文保留(门户「工作台」类跳转不再 403),跳转计入会话历史;未分组视图保留回退;非 HTTP 弹窗仍放行系统 |
+| **0.1.21** | 2026-08-28 | **发布**:第十三/十四轮随 **0.1.21** 发布(构建零错误、25 项测试全绿) |
 
 ## 特别感谢
 

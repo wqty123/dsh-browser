@@ -238,7 +238,7 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 | DeepSeek Harness (dsh) | `0.1.1-rc.2` (peer range `^0.1.1-rc.2`) |
 | Electron | `44.0.0` (≥ 40 recommended; 33.x has a compositor defect) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.20` |
+| dsh-builtin-browser | `0.1.21` |
 | OS | Windows 10 (10.0.26200) |
 
 > The plugin declares `electron >= 30`; it has **only been verified on Windows** (macOS/Linux untested, not yet promised).
@@ -253,7 +253,7 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 - `browser_download` fetches in the page context (keeps logins) and is subject to same-origin/CORS constraints; HTTP(S) targets only; `savePath` must be absolute (default confined to `~/Downloads`, override with `downloadDir`); single files are capped at 256 MB (streamed with a Content-Length early reject) and are written by the browser child itself (temp file + atomic rename).
 - The self-hosted browser's cookies are stored in plaintext on disk (Electron default); deployments that need encrypted-at-rest should integrate a system keychain / DPAPI at the host layer.
 - `browser_restrict` is a **soft guardrail** against accidental actions, not a security boundary: the model can lift it itself.
-- Popups (`window.open` / `target=_blank`) are re-routed into the current tab instead of opening untracked native windows, so the tab/session model stays intact.
+- Popups (`window.open` / `target=_blank`) open as a **new tab** in the same session window: the original page and its opener context survive and the jump is recorded in the session history. Non-HTTP(S) popups (OAuth handoff pages, `mailto:`, custom schemes) are still handed to the system, and untracked native windows are never created.
 - The `browser_auth` cookie round-trip does not preserve `hostOnly`/`sameSite` (host-only cookies come back as domain cookies); it is available on the self-hosted browser only.
 - After a self-hosted child crash (or a DSH restart that kills it) the browser host restarts automatically, and sessions opened before the crash **rebuild on their next use** — only page state is lost, no manual `browser_reset_session` needed (it still works for an explicit reset).
 - Electron 44+ downloads its binary (~100 MB) on the first window open and needs network; it is never needed again afterwards. If detection runs without network, pre-install a binary and point `ELECTRON_PATH` at it.
@@ -301,6 +301,9 @@ Code layout:
 | 12 | 2026-08-27 | **resolveElectronPath excludes packaged apps** (issue #6): added `isBareElectron` (a sibling `app.asar` means packaged — never reused, all platforms incl. macOS bundle layout); bundled-electron filesystem probe goes first; `ELECTRON_PATH` override wins first; missing dist errors clearly (`npx install-electron` hint) |
 | Hardening | 2026-08-27 | **Three review passes hardened**: concurrent-recovery double-rebuild race (child `createView` made idempotent), macOS bundle-path detection, `dispose()` vs `start()` zombie-child race triple-guard, pendingSocket leak, fully unit-tested lookup order (24→25 tests) |
 | **0.1.20** | 2026-08-27 | **Release**: rounds 11/12 + hardening ship as **0.1.20** (build clean, 25/25 tests pass) |
+| 13 | 2026-08-28 | **macOS/Linux untypeable inputs fix** (issue #7): the Windows focus routing from 0.1.16 (mousedown force-focus + window-refocus restore) shipped without a platform guard and fought macOS native click-to-focus, leaving login inputs untypeable → both handlers are now gated to `win32`; non-Windows restores native behavior |
+| 14 | 2026-08-28 | **window.open/target=_blank opens a new tab** (issue #8): HTTP(S) popups no longer loadURL over the current view; they are handed to the parent and open as a **new tab in the same session window** — the opener page and its context survive (portal "workspace" jumps no longer 403) and the jump lands in session history; ungrouped views keep the fallback; non-HTTP popups still go to the system |
+| **0.1.21** | 2026-08-28 | **Release**: rounds 13/14 ship as **0.1.21** (build clean, 25/25 tests pass) |
 
 ## Acknowledgements
 

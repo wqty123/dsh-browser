@@ -569,3 +569,35 @@ issue #6 报告:0.1.19 在 DSH Desktop(打包的 Electron 应用)上 `browser_*`
 bump `0.1.19 → 0.1.20`,将第十一轮(issue #5 会话自愈)、第十二轮(issue #6 打包应用排除)与三轮审查加固随版本发布(tag `v0.1.20`)。README 中英同步:更新记录新增三行、Electron 定位顺序与环境要求与修复后的代码对齐(打包宿主不复用、bundled 优先、ELECTRON_PATH 最优先)、验证版本表 bump 0.1.20。
 
 **验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` **25 项全部通过**。
+
+---
+
+## 第十三轮(2026-08-28,issue #7 macOS 输入框无法键入)
+
+**根因**:0.1.16 引入的 `4a13e20 fix(host): route keyboard focus to the clicked view on Windows` 把 Windows 专属 workaround(`wireFocusRouting` mousedown 焦点引导 + 窗口 `focus` 时恢复上次视图焦点,针对 electron#28163)无平台判断地应用到所有平台。macOS/Linux 原生会把键盘输入路由到被点击的视图,在 mousedown 的 `input-event` 里强制 `webContents.focus()` 反而与原生 click-to-focus 打架,页面输入框收不到键入字符。0.1.15(无此代码)正常、0.1.16+ 异常,与报告者降级 0.1.15 即恢复完全吻合。
+
+**修复**:两处 Windows 专属焦点逻辑加 `process.platform === 'win32'` 门——非 Windows 平台恢复 0.1.15 的原生行为,Windows 保留 workaround(修复 #6 期间引入的工具栏/页面点击聚焦行为不变)。
+
+**验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` **25 项全部通过**;lib 重建同步。
+
+**状态**:已改未提交,未 bump 版本、未发布(发布时 bump)。
+
+---
+
+## 第十四轮(2026-08-28,issue #8 window.open/target=_blank 覆盖当前视图致 403)
+
+**根因**:`setWindowOpenHandler` 把所有 HTTP(S) 弹窗直接 `loadURL` 到当前视图并 deny——原页面被覆盖、opener 上下文丢失,依赖新窗口携带 token/referer 的页面(门户「工作台」类跳转)被后端判无权限返回 403。报告者定位准确。
+
+**修复**(采纳报告者方案 + 一个防御分支):HTTP(S) 弹窗改为 `sendUserAction({ type: 'newTab', windowId, url })`——父进程 provider 的 newTab 动作在同一会话窗口建新标签、导航并计入会话历史,原页面与 opener 上下文保留;新标签成为活动标签,agent 的 snapshot 自然跟随。未分组的共享窗口视图(无会话归属,防御路径)保留旧的 loadURL 行为避免退化。非 HTTP(S) 弹窗(OAuth/mailto/自定义协议)仍放行系统处理。附带修正:旧 loadURL 路径绕过父进程历史记录,新路径走 `openUrl` 正常记账。
+
+**验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` **25 项全部通过**(父侧 newTab user-action 已有回归覆盖);lib 重建同步;README 中英弹窗行为描述同步。
+
+**状态**:已改未提交(#7 + #8 两轮),未 bump 版本、未发布(发布时 bump)。
+
+---
+
+## 0.1.21 发布(2026-08-28)
+
+bump `0.1.20 → 0.1.21`,将第十三轮(issue #7 macOS/Linux 输入框无法键入)与第十四轮(issue #8 window.open/target=_blank 覆盖当前视图)随版本发布(tag `v0.1.21`)。README 中英同步:更新记录新增三行、验证版本表 bump 0.1.21、弹窗行为描述与修复后的代码对齐。
+
+**验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` **25 项全部通过**。
