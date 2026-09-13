@@ -176,7 +176,13 @@ button.tool:hover { background: rgba(255,255,255,.12); }
   <div class="strip" id="strip"></div>
   <div id="err"></div>
 <script>
-const bridge = window.bridge
+// NOTE: do NOT name this binding 'bridge'. contextBridge exposes the preload
+// API as a non-configurable global property, and a global-scope const/let with
+// the same name is an early SyntaxError (HasRestrictedGlobalProperty) that
+// discards the ENTIRE script at parse time -- every handler below would
+// silently never be wired up (dead address bar, dead back/forward/reload/
+// new-tab, permanently empty tab strip).
+const tb = window.bridge
 const addr = document.getElementById('addr')
 const strip = document.getElementById('strip')
 const errBox = document.getElementById('err')
@@ -187,7 +193,7 @@ function showErr(text) {
   clearTimeout(showErrT)
   showErrT = setTimeout(() => errBox.classList.remove('show'), 5000)
 }
-function post(action, payload) { bridge.post(action, payload || {}) }
+function post(action, payload) { tb.post(action, payload || {}) }
 document.getElementById('back').onclick = () => post('back')
 document.getElementById('fwd').onclick = () => post('forward')
 document.getElementById('reload').onclick = () => post('reload')
@@ -202,7 +208,7 @@ addr.addEventListener('keydown', e => {
     if (v !== '') { post('navigate', { url: v }); addr.blur() }
   }
 })
-bridge.onTabs(payload => {
+tb.onTabs(payload => {
   const tabs = (payload && payload.tabs) || []
   strip.textContent = ''
   for (const t of tabs) {
@@ -224,7 +230,7 @@ bridge.onTabs(payload => {
   const act = tabs.find(t => t.active)
   if (act && document.activeElement !== addr) addr.value = act.url || ''
 })
-bridge.onError(text => showErr(text))
+tb.onError(text => showErr(text))
 </script>
 </body>
 </html>
