@@ -331,7 +331,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 | Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
 | 本机 Chrome / Edge(可选载体) | `154.0.8037.58` / `154.0.4258.37` |
-| dsh-builtin-browser | `0.3.1` |
+| dsh-builtin-browser | `0.4.0` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`。**核心链路在 Windows 上完整实测**;系统浏览器的查找已适配 Linux 与 macOS(先查 `PATH`,再查各平台的惯例安装位置,均可用 `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH` 覆盖),但这两个平台上的**端到端链路尚未实测**,暂不承诺。
@@ -450,7 +450,7 @@ npm run build
 | 第二十八轮 | 2026-10-01 | **两条"限制"其实是实现限制**:审查文档时被指出,查证后确认它们与载体无关 —— ①`browser_auth` 原本直接调用只有自托管才实现的原生方法,没有就报 `BROWSER_AUTH_UNSUPPORTED`;但 **cookie 本来就在 CDP 里**(`Storage.getCookies` / `Storage.setCookies`),而**三种载体全都走 CDP** → 改为有原生方法时优先用它、否则走 CDP,**三种载体全部可用**,并处理 domain+path 与 URL 的差异、前导点、秒与毫秒,丢弃无法构成有效 URL 的 cookie。②JPEG 被对所有 CDP 路径禁用,理由是"CDP JPEG 在 Electron 上挂起" —— **对 Electron 成立,对本机 Chrome/Edge 无关**(那是真浏览器)→ 新增 `supportsCdpJpeg` 能力声明,只有本机浏览器声明,provider 据此透传 `format`/`quality`;侧栏保持 PNG。③顺带发现**降采样在工具描述里承诺了却只在原生路径实现** → CDP 路径改用 `clip.scale`(先读 `Page.getLayoutMetrics` 取文档尺寸,读不到就**不缩放地照常截图**),三种载体都能缩放。④文档补齐两条从未写过的载体差异:**侧栏不上报用户操作事件**(那个页面属于外壳)、**本机浏览器使用插件自己的 profile**(个人登录态不继承)。新增 11 条纯函数测试,**124/124** |
 | 第二十九轮 | 2026-10-01 | **独立代码审查**:另派一个审查者通读全树并**亲手复现**了发现。① **`spawn` 没有 `error` 监听** —— 启动失败(ENOENT、无执行权限、二进制损坏)是**异步事件**,无监听时 Node 会**把整个 DSH 宿主进程带走**;现在改为让该次命令失败。② **`dispose()` 落在 `start()` 的 250ms 轮询期间**时,已拉起的浏览器无人可杀而永久存活;轮询现在会在退出前 kill 它。③ 三种不同失败(子进程退出 / 被释放 / 真超时)共用"30 秒内没暴露 CDP",而且**半秒就报出来**;现在各自说明真实原因。④ **明确选择 `chrome`/`edge` 时仍被桌面侧栏顶掉**(发现流程从不检查 channel)—— 这也让"你选的浏览器没装"那条说明永远无法出现,等于抵消了上一轮的修复;现在明确选择会跳过侧栏发现。⑤ `CdpClient.whenReady()` 等待的 promise 无界,连接被丢弃时工具调用**永不返回**;已加界。⑥ `focus()` 用 `kill('SIGCONT')`,在 Windows 上是空操作,而注释承诺"把窗口前置";注释已改为实情。⑦ 删除不可达的 `brave` 分支。**125/125** |
 
-> registry 上的最新版本以顶部 npm 徽章为准(当前 `0.3.1`)。桌面端升级后需重跑一次 `node desktop-bridge/install.mjs`;Web 端无此步骤 —— 详见[更新方式](#更新方式两端不同)。
+> registry 上的最新版本以顶部 npm 徽章为准(当前 `0.4.0`)。桌面端升级后需重跑一次 `node desktop-bridge/install.mjs`;Web 端无此步骤 —— 详见[更新方式](#更新方式两端不同)。
 
 ## 特别感谢
 
