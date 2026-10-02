@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
  * The probe window is read at module load, hence the env assignment above the
  * dynamic import. The third constructor argument is the probe seam.
  */
-process.env.DSH_BROWSER_PROBE_RETRY_MS = '30'
+process.env.DSH_BROWSER_PROBE_RETRY_MS = '20'
 // Isolate the host log: this file constructs real hosts, which write a spawn line
 // (and an exit line) to `$DSH_HOME/logs/dsh-builtin-browser-host.log` — the log an
 // operator reads to diagnose a crash loop. Writing synthetic entries there would
@@ -41,12 +41,12 @@ test('a failed Electron probe expires instead of poisoning the process', async (
   // Once the window passes, the search runs again: a late-installed Electron
   // heals the provider on its own.
   binaryOnDisk = true
-  await settle(40)
+  await settle(150)
   assert.equal(host.available(), true)
   assert.equal(scans, 2)
 
   // A success is kept, so the hot path never scans again.
-  await settle(40)
+  await settle(150)
   assert.equal(host.available(), true)
   assert.equal(scans, 2)
 })
