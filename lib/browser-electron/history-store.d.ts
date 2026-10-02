@@ -34,6 +34,22 @@ export declare function visitedHistoryPath(): string;
  */
 export declare class HistoryStore {
     private readonly file;
+    /**
+     * File size at which the next rewrite happens.
+     *
+     * Advanced after each rewrite so the cost is paid once per PRUNE_SLACK appends
+     * rather than on every append: asking "is it over the cap?" was true from the first
+     * over-cap write onwards, which is what made every later navigation rewrite the file.
+     */
+    private pruneThreshold;
+    /**
+     * Appends since the last rewrite.
+     *
+     * prune() runs after every navigation, and the answer is almost always "nothing to
+     * do" — but working that out from the file costs a full parse. Counting instead makes
+     * the common case a comparison.
+     */
+    private appendedSincePrune;
     private readonly maxEntries;
     private readonly maxAgeMs;
     /**
@@ -69,6 +85,15 @@ export declare class HistoryStore {
      * the count cap. Cheap no-op until the file grows past the cap, so callers can
      * run it after every append.
      */
+    /**
+     * How far past the cap the file may grow before it is rewritten.
+     *
+     * Scaled to the cap rather than fixed: a fixed 500 was meaningless when the cap is
+     * small (a caller asking for three entries would never reach 503), and the slack is
+     * there to batch rewrites, not to overrule the caller's bound.
+     * @returns the number of extra entries tolerated before a rewrite.
+     */
+    private slack;
     prune(): void;
     /** Parse the whole file, skipping blank and damaged lines. */
     private readAll;
