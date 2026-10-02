@@ -62,7 +62,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "browser.edge": "本机 Edge",
     "browser.auto": "自动(优先 Chrome,其次 Edge)",
     "browser.hint": "选本机浏览器时会以**独立 profile** 启动它:不会打开、占用或修改你日常的窗口、书签与登录状态,关闭也不会关掉你自己的浏览器;代价是它看不到你日常浏览器里已登录的站点,需要时请在那个窗口里登录一次(登录态会留在插件自己的 profile 里)。桌面端默认由官方侧栏承载页面,此选项优先于侧栏。",
-    "credentials.hint": "关闭后 browser_auth 会被拒绝。桌面端请注意:Agent 驱动的是侧栏里那一个页面(人机同页),因此它与该页面共用同一个 partition —— 这也正是它能读到登录态的原因,属于有意接受的沙箱边界变化;关闭本项即拒绝读取。",
+    "credentials.hint": "关闭后 browser_auth 的导出与恢复都会被拒绝(BROWSER_AUTH_DISABLED)—— 不只是导出:恢复走的是同一个开关。桌面端请注意:Agent 驱动的是侧栏里那一个页面(人机同页),因此它与该页面共用同一个 partition —— 这也正是它能读到登录态的原因,属于有意接受的沙箱边界变化;关闭本项即拒绝读取。",
   }
 
   const en = {
@@ -101,8 +101,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "browser.edge": "Installed Edge",
     "browser.auto": "Automatic (Chrome first, then Edge)",
     "browser.hint": "Choosing an installed browser launches it with a **separate profile**: your everyday windows, bookmarks and logins are never opened, locked or modified, and closing the plugin never closes your browser. The trade-off is that it does not see sites you are already signed into there — sign in once in that window and the session stays in the plugin's own profile. On the desktop the shell's sidebar normally carries the page; this setting outranks it.",
-    "credentials.allowRead": "Allow the agent to read cookies / export login state",
-    "credentials.hint": "Off makes browser_auth refuse. On the desktop, note that the agent drives the sidebar's own page (one page for both parties), so it shares that page's partition — which is exactly why it can reach the login state. That is a deliberate sandbox-boundary change; this switch is how you refuse it.",
+    "credentials.hint": "Off makes browser_auth refuse both export and restore (BROWSER_AUTH_DISABLED) — not just export: restore goes through the same switch. On the desktop, note that the agent drives the sidebar's own page (one page for both parties), so it shares that page's partition — which is exactly why it can reach the login state. That is a deliberate sandbox-boundary change; this switch is how you refuse it.",
   }
 
   /** Read or patch the host-owned settings document. */

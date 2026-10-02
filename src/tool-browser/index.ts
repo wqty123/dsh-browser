@@ -1662,7 +1662,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_auth',
-    description: 'Export or restore the browser session\'s cookies (login state). Use "flush" to get a JSON cookie list (save it to a private file to persist logins), or "restore" with that list to put logins back (e.g. after the browser host restarted). Available on the self-hosted browser. Exported cookies are LIVE CREDENTIALS: treat them as secrets — do not echo them into the conversation, keep them out of logs, and store the list in a private file.',
+    description: 'Export or restore the browser session\'s cookies (login state). Use "flush" to get a JSON cookie list (save it to a private file to persist logins), or "restore" with that list to put logins back (e.g. after the browser host restarted). Available on all three carriers: the self-hosted browser reads its own session, while the desktop sidebar and an installed Chrome/Edge go through CDP. Refused entirely when the credential switch is off. Exported cookies are LIVE CREDENTIALS: treat them as secrets — do not echo them into the conversation, keep them out of logs, and store the list in a private file.',
     parameters: {
       action: { type: 'string', required: true, enum: ['flush', 'restore'], description: 'flush = export cookies; restore = import cookies.' },
       cookies: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Cookie list to restore (required when action=restore).' },

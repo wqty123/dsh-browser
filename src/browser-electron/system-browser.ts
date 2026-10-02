@@ -227,6 +227,19 @@ class CdpClient {
    * own deadline is only checked between polls and this await happens inside one of them.
    * @returns when the handshake completed.
    */
+  /**
+   * Whether the socket is still usable.
+   *
+   * A dropped connection is not reported to the caller of send(); the pending command
+   * would simply never complete. Asking the socket directly is what lets a cached client
+   * be discarded instead of reused, which is the difference between a restart and a 30s
+   * hang on every subsequent call.
+   * @returns true while the socket is open.
+   */
+  isAlive(): boolean {
+    return this.socket.readyState === WebSocket.OPEN
+  }
+
   async whenReady(): Promise<void> {
     const timeoutMs = 30_000
     let timer: NodeJS.Timeout | undefined
@@ -253,6 +266,11 @@ class CdpClient {
    * @returns the CDP result.
    */
   async send(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown> {
+    // Fail fast and say why. Waiting out the timeout on a closed socket produced
+    // only "timed out", which reads as a slow page and hides the real cause.
+    if (!this.isAlive()) {
+      throw new Error('dsh-builtin-browser: the browser connection is closed (the browser window was probably closed); the next command will start it again')
+    }
     await this.ready
     const id = this.nextId++
     const message = { id, method, ...params !== undefined ? { params } : {}, ...sessionId !== undefined ? { sessionId } : {} }
@@ -338,7 +356,14 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // A disposed host must never start a browser: doing so would spawn a process
     // nobody owns and nobody will kill.
     if (this.disposed) throw new Error('dsh-builtin-browser: this browser host was released')
-    if (this.client !== undefined) return this.client
+    // The exit listener clears this, but a socket can also die without the process doing so
+    // (the browser closing its debugging endpoint, a dropped connection). Checking the
+    // socket's own state costs nothing and turns a 30s hang into a restart.
+    if (this.client !== undefined) {
+      if (this.client.isAlive()) return this.client
+      this.client.close()
+      this.client = undefined
+    }
     // Concurrent first calls share one startup rather than racing two browsers.
     this.starting ??= this.start().finally(() => { this.starting = undefined })
     return await this.starting
@@ -376,6 +401,16 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
      */
     let launchError: Error | undefined
     child.on('error', error => { launchError = error })
+    // A browser that exits later is as unusable as one that never started, and the failure
+    // has to reach the NEXT call rather than being swallowed: clearing the client here is
+    // what makes ensureClient() start a fresh browser instead of returning a socket to a
+    // dead process and letting every command time out.
+    child.on('exit', () => {
+      if (this.child !== child) return
+      this.client?.close()
+      this.client = undefined
+      this.child = undefined
+    })
     const portFile = join(this.profileDir, 'DevToolsActivePort')
     const deadline = Date.now() + 30_000
     /**
@@ -450,10 +485,20 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // provider may pass format and quality through instead of falling back to PNG.
       supportsCdpJpeg: true,
       sendCommand: async (method: string, params?: Record<string, unknown>) => {
+      // A command that never answered is the only signal that a client has wedged — the
+      // socket can stay OPEN while nothing comes back, which is the form the reporter saw with
+      // a live, healthy-looking Edge. Dropping the client here means the next call starts a new
+      // browser rather than hanging again, and the error names the cause instead of a timeout.
+      try {
         const client = await this.ensureClient()
         const session = this.views.get(viewId) ?? await this.ensureSession(viewId)
         const result = await client.send(method, params, session)
         return (result ?? {}) as Record<string, unknown>
+      } catch (error) {
+        this.client?.close()
+        this.client = undefined
+        throw error
+      }
       },
     }
   }

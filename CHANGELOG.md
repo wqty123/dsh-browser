@@ -371,7 +371,7 @@
 | # | 问题 | 修复 |
 |---|---|---|
 | 1 | closeTab 静默假成功 | 找不到时改为抛出 `BROWSER_TAB_UNKNOWN`(与 switchTab 一致),不再返回假成功 |
-| 2 | 按 id 查找限定调用方 session | 新增 `locateTab()`:优先调用方 session,找不到则**跨全部 session 按 id 兜底**(tab id 全局唯一,不会误命中其他任务);真的不存在才抛错 |
+| 2 | 按 id 查找限定调用方 session | 新增 `locateTab()`:优先调用方 session,找不到则**跨全部 session 按 id 兜底**(tab id 全局唯一,不会误命中其他任务);真的不存在才抛错。**该兜底后来被移除**:跨会话命中意味着陈旧 id 能关掉别的任务(或人)的标签页还报成功,与工具承诺的隔离矛盾 —— 现在只查调用方会话,仅保留"裸 uuid 与 `tab:<uuid>` 两种写法都接受" |
 | 3 | 错误无诊断信息 | `BROWSER_TAB_UNKNOWN` 信息附带调用方 session 的现有 tab id 列表,便于线上定位 |
 
 ## 四、验证
@@ -419,7 +419,7 @@ bump `0.1.15 → 0.1.16`,将第一至第七轮全部修复随版本发布(本地
 - **第三轮**:对标 browser-bridge 的功能 + 审查修复(详见上文)
 - **第四轮**:DSH 0.1.1-rc.2 对齐 + 复查修复(详见上文)
 - **第五轮**:`available()` 无副作用探测(electron 44 懒下载)+ flushAuth 构建修复
-- **第六轮**:Windows RPC 握手 token env 兜底;switch/close_tab 跨 session 定位 + closeTab 不再假成功
+- **第六轮**:Windows RPC 握手 token env 兜底;switch/close_tab 定位(当时的跨 session 兜底后续已收紧为只查本会话)+ closeTab 不再假成功
 - **第七轮**:工具栏焦点路由——点击聚焦目标 view,地址栏可输入,窗口 refocus 恢复上次 view
 
 **验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` 21 项全部通过。tag `v0.1.16`。
@@ -1014,6 +1014,6 @@ bump `0.1.23 → 0.2.0`,发布**第二十轮**(浏览历史持久化 / 设置页
 
 **登录态**:`cookies.persist` **开**(默认)→ 固定 profile 保留,重启 DSH 仍是登录状态,`browser_auth` 照常可导出/恢复;`persist` **关** → 临时 profile,释放时整个目录删除。
 
-**优先级与回退**:显式选择的本机浏览器 > 桌面端侧栏 > 自托管;选定的浏览器没装或起不来时**记警告并继续用内置**,不静默替换。
+**优先级与回退**:显式选择的本机浏览器 > 桌面端侧栏 > 自托管。载体缺失分两种:`自动` 找不到 Chrome/Edge 时**记警告并继续用内置**;**明确选了某个浏览器**而它没装时不再只写日志 —— 改挂 `MissingSystemBrowserHost`,**每次命令都向调用方报出找不到的浏览器、查过哪些名字与位置,以及三条出路**(装上它 / 用 `DSH_BROWSER_CHROME_PATH`、`DSH_BROWSER_EDGE_PATH` 指定路径 / 把载体改回内置或自动),不静默替换。
 
 **结构**:bridge 纳入插件仓库(`desktop-bridge/`,`install.mjs` 幂等 + `--revert`),并写进 npm 打包清单 —— 此前它只存在于 DSH 仓库,用户装了插件也拿不到。

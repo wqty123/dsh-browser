@@ -1,6 +1,6 @@
 # 工具参考
 
-全部 34 个 `browser_*` 工具。守卫列:✅ 表示该动作受 `browser_restrict` 白名单约束;只读工具永不拦截。
+全部 34 个 `browser_*` 工具。守卫列:✅ 表示该动作受 `browser_restrict` 白名单约束;**「– 豁免」表示无论白名单怎么写都不拦截**(豁免集合为 `READ_ONLY_TOOLS`,`src/tool-browser/index.ts` 导出:**只观察的工具** —— `snapshot`/`a11y`/`content`/`scrape`/`screenshot`/`get_value`/`wait`/`challenge`/`list_tabs`/`session`/`history`/`visited`/`auth` —— 加上 **解除限制 / 从坏状态恢复的工具** `restrict`/`reset_session`/`reset`;`restrict` 在其中,否则限制到空的任务再也解不开);**「–」表示该工具只观察、不做动作**,故没有可拦的东西。两者之外的工具都受白名单约束 —— 例如 `browser_close_tab` 不属于豁免集合。
 
 ## 页面与导航
 
@@ -30,16 +30,16 @@
 | `browser_check` | `target`(必填), `checked?` | `{ checked }` | ✅ | 勾选/取消勾选 checkbox 或 radio(按 target 定位) |
 | `browser_select` | `target`(必填), `optionValue?`/`optionText?`/`optionIndex?`(三选一) | `{ value, text }` | ✅ | 选中 `<select>` 的某个选项(按 target 定位) |
 | `browser_clear` | `target`(必填) | `{ cleared }` | ✅ | 清空输入/文本域/contenteditable,或取消勾选 checkbox/radio |
-| `browser_get_value` | `target`(必填) | `{ value?, checked?, selectedText? }` | – | 读取元素当前值,用于操作后验证 |
-| `browser_scrape` | `item`(必填), `fields`(必填,映射), `timeoutMs?` | `{ count, items[] }` | – | 结构化提取:容器选择器 + 字段映射(如 `{"title": "h3", "url": "a@href"}`);静态 CSS 查询、不执行任意代码、CSP 安全;等待 item 出现(默认 5s) |
+| `browser_get_value` | `target`(必填) | `{ value?, checked?, selectedText? }` | – 豁免 | 读取元素当前值,用于操作后验证 |
+| `browser_scrape` | `item`(必填), `fields`(必填,映射), `timeoutMs?` | `{ count, items[] }` | – 豁免 | 结构化提取:容器选择器 + 字段映射(如 `{"title": "h3", "url": "a@href"}`);静态 CSS 查询、不执行任意代码、CSP 安全;等待 item 出现(默认 5s) |
 
 ## 标签与会话
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_list_tabs` | – | `{ session, tabs[] }` | – | 当前会话的标签列表 |
+| `browser_list_tabs` | – | `{ tabs: [{ id, url, active }] }` | – | 当前会话的标签列表(输出 schema 只有 `tabs`,**没有 `session` 字段**;会话标识请用 `browser_session`) |
 | `browser_switch_tab` | `tabId`(必填) | `{ switched }` | ✅ | 按 id 切换标签;自托管下同步切换可见视图 |
-| `browser_close_tab` | `tabId`(必填) | `{ closed }` | – | 关闭标签;关闭活动标签后激活下一个 |
+| `browser_close_tab` | `tabId`(必填) | `{ closed }` | ✅ | 关闭标签;关闭活动标签后激活下一个。**不属于只读豁免集合,受白名单约束**;`tabId` 只在本会话内查找(接受 `tab:<uuid>` 或裸 uuid),陈旧 id 不会关掉别的任务的标签页 |
 | `browser_reset` | – | `{ reset }` | ✅ | 关闭本任务所有标签,回到一个空白标签 |
 | `browser_session` | – | `{ session, tabs[] }` | – | 查看本任务的浏览器会话与标签 |
 | `browser_reset_session` | – | `{ reset }` | ✅ | 关闭并重建本任务的浏览器会话(崩溃/卡死后恢复) |
@@ -57,14 +57,14 @@
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出/恢复 cookie(自托管可用);flush 返回 cookie 列表,restore 带列表写回 |
-| `browser_restrict` | `allowed?` | `{ restrictedTo[] }` | – | 设置动作白名单;空列表解除;未知工具名报错。**软护栏**——模型可自行解除,非安全边界 |
+| `browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出/恢复 cookie —— **三种载体都可用**:自托管走原生会话,桌面侧栏与本机 Chrome/Edge 走 CDP 的 `Storage.getCookies` / `Storage.setCookies`;flush 返回 cookie 列表,restore 带列表写回。设置里「允许读取 cookies / 导出登录状态」关闭时,flush 与 restore **都**抛 `BROWSER_AUTH_DISABLED` |
+| `browser_restrict` | `allowed?` | `{ restrictedTo[] }` | – | 设置动作白名单;空列表解除;**只校验名字是否以 `browser_` 开头**(写错的前缀会报错,`browser_typo` 这种拼错但前缀合法的名字会被接受、等同于拦掉该名字,不额外报错);守卫按名字匹配,因此白名单里列什么名字就只放行什么名字。**软护栏**——模型可自行解除,非安全边界 |
 
 ## 截图
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_screenshot` | `fullPage?`, `savePath?`, `format?`(png/jpeg), `quality?`, `maxWidth?`, `maxHeight?` | `{ dataUrl, path? }` | – | 截图;PNG 默认,JPEG 仅自托管原生路径;`maxWidth`/`maxHeight` 等比缩放降低视觉模型开销;`savePath` 落盘供视觉模型读取(与 `browser_download` 同一准入门:必须位于 `downloadDir` 内且不覆盖已有文件) |
+| `browser_screenshot` | `fullPage?`, `savePath?`, `format?`(png/jpeg), `quality?`, `maxWidth?`, `maxHeight?` | `{ dataUrl, path? }` | – | 截图;PNG 默认,**JPEG 在自托管与本机 Chrome/Edge 上都可用**(自托管在原生 `capturePage` 路径编码,本机浏览器经 CDP 声明 `supportsCdpJpeg`;**桌面侧栏**的 Electron CDP JPEG 编码器会挂起,该载体下 JPEG 请求返回 PNG);`maxWidth`/`maxHeight` 等比缩放**三种载体都支持**;`fullPage` 会跳过原生 `capturePage`、三种载体统一走 CDP `captureBeyondViewport`;`savePath` 落盘供视觉模型读取(与 `browser_download` 同一准入门:必须位于 `downloadDir` 内且不覆盖已有文件) |
 
 ## 常用组合
 

@@ -133,7 +133,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
   <tr>
     <td width="50%" valign="top">
       <h3>安全限制</h3>
-      <p><code>browser_restrict</code> 限制允许的浏览器动作(白名单),防止 agent 误点、误导航;只读工具(snapshot/content/screenshot)不受限。</p>
+      <p><code>browser_restrict</code> 限制允许的浏览器动作(白名单),防止 agent 误点、误导航;只读工具(snapshot / a11y / content / scrape / screenshot / get_value / challenge / list_tabs / session / history / visited / auth)加上「解除限制 / 复位会话」几个永远豁免,不受白名单影响。</p>
     </td>
     <td width="50%" valign="top">
       <h3>截图即存即读</h3>
@@ -153,7 +153,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
   <tr>
     <td width="50%" valign="top">
       <h3>设置页里的「浏览器」栏</h3>
-      <p><b>用哪个浏览器</b>(内置 Electron / 本机 Chrome / 本机 Edge / 自动)、历史与 cookie 是否保留、侧栏是否自动展开、会话结束时是否关闭浏览器、是否显示光标、视觉策略、是否允许读取凭据 —— 开关<b>即时生效</b>,无需重启。</p>
+      <p><b>用哪个浏览器</b>(内置 Electron / 本机 Chrome / 本机 Edge / 自动)、历史是否保留、侧栏是否自动展开、会话结束时是否关闭浏览器、是否显示光标、视觉策略、是否允许读取凭据 —— 这些开关都是<b>每次使用时现读</b>,改完即时生效,无需重启。<b>只有两个例外</b>:<code>browser.channel</code>(用哪个浏览器)与 <code>cookies.persist</code>(是否保留 cookies)在插件挂载时读取一次,改完需要<b>重新加载插件</b>(重启 dsh / 刷新页面)才生效。</p>
     </td>
     <td width="50%" valign="top">
       <h3>收尾明确</h3>
@@ -192,12 +192,12 @@ node <本仓库路径>/desktop-bridge/install.mjs
 | `browser_check` | 勾选/取消勾选 checkbox 或 radio(按 `target` 定位) | ✅ |
 | `browser_select` | 选中 `<select>` 的某个选项(按值/文本/索引,按 `target` 定位) | ✅ |
 | `browser_clear` | 清空输入/文本域/contenteditable,或取消勾选(按 `target` 定位) | ✅ |
-| `browser_get_value` | 读取元素当前值(操作后验证用;按 `target` 定位) | – |
-| `browser_scrape` | 结构化提取:容器选择器 + 字段映射(`选择器[@属性]`),静态 CSS 查询、CSP 安全 | – |
+| `browser_get_value` | 读取元素当前值(操作后验证用;按 `target` 定位) | – 豁免 |
+| `browser_scrape` | 结构化提取:容器选择器 + 字段映射(`选择器[@属性]`),静态 CSS 查询、CSP 安全 | – 豁免 |
 | `browser_screenshot` | 截图,可选 `fullPage`、`savePath`、JPEG(`format`/`quality`)与缩放(`maxWidth`/`maxHeight`);`savePath` 与下载同一准入门(限定在 `downloadDir` 内、不覆盖已有文件) | – |
 | `browser_list_tabs` | 当前会话的标签列表 | – |
 | `browser_switch_tab` | 按 id 切换标签(自托管下同步切换可见视图) | ✅ |
-| `browser_close_tab` | 按 id 关闭标签;关闭活动标签后激活下一个 | – |
+| `browser_close_tab` | 按 id 关闭标签;关闭活动标签后激活下一个 | ✅ |
 | `browser_reset` | 关闭本任务所有标签,回到一个空白标签 | ✅ |
 | `browser_session` | 查看本任务的浏览器会话与标签 | – |
 | `browser_reset_session` | 关闭并重建本任务的浏览器会话 | ✅ |
@@ -208,7 +208,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
 | `browser_challenge` | 检测人机验证(CAPTCHA / Cloudflare / reCAPTCHA / hCaptcha / Turnstile) | – |
 | `browser_restrict` | 限制允许的浏览器动作(白名单;空列表解除)。**软护栏**,模型可自行解除,非安全边界 | – |
 
-> 「守卫」列:打 ✅ 的动作受 `browser_restrict` 白名单约束;只读工具(snapshot/content/screenshot/list_tabs/session/challenge/history)永不拦截。
+> 「守卫」列:打 ✅ 的动作受 `browser_restrict` 白名单约束;**「– 豁免」的工具无论白名单怎么写都不拦截**;**「–」表示只观察、本来就不做动作,因此没有可拦的东西**。豁免集合来自 `READ_ONLY_TOOLS`(`src/tool-browser/index.ts`):`snapshot` / `a11y` / `content` / `scrape` / `screenshot` / `get_value` / `wait` / `challenge` / `list_tabs` / `session` / `history` / `visited` / `auth`,外加 `restrict`(白名单本身必须能解除,否则一旦限制到空就再也出不来)、`reset_session`、`reset`(从崩死状态恢复)。`browser_close_tab` **不在**豁免集合里,与 `open`/`click`/`switch_tab` 一样可被限制。
 
 ### 等待页面就绪
 
@@ -292,7 +292,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 > - Agent 能读到该 partition 中的 **Cookie / 登录态**,`browser_auth` 可将其导出(由设置项控制);
 > - 反过来,你在侧栏里的操作与 Agent 的操作**作用于同一个页面**,可能互相影响(Agent 不会主动覆盖你的输入,但导航会改变双方看到的内容)。
 >
-> 这是"人机同页"的必然代价。我们认为值得(它把"Agent 在一个你看不见的窗口里操作"变成"你能看着它操作并随时接手"),但你有权知道它存在 —— 因此也提供了开关:**「凭据访问」关闭后 Agent 不再读取 Cookie/登录态**;**「视觉策略」设为纯非视觉后,任何依赖截图定位的坐标点击都会被拒绝**。不想接受这个边界变化时,把 desktop profile 里的插件移除即可回到"独立窗口"的旧形态。
+> 这是"人机同页"的必然代价。我们认为值得(它把"Agent 在一个你看不见的窗口里操作"变成"你能看着它操作并随时接手"),但你有权知道它存在 —— 因此也提供了开关:**「凭据访问」关闭后 <code>browser_auth</code> 的导出与恢复都会被拒绝(<code>BROWSER_AUTH_DISABLED</code>)—— 不只是"不再读取":恢复走的是同一个开关**;**「视觉策略」设为纯非视觉后,任何依赖截图定位的坐标点击都会被拒绝**。不想接受这个边界变化时,把 desktop profile 里的插件移除即可回到"独立窗口"的旧形态。
 
 **② 用你自己的浏览器(Chrome / Edge)**
 
@@ -312,7 +312,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 
 > 可见视图与列布局始终属于宿主外壳;插件只负责 seam、provider 与工具。各形态下**工具集、浏览历史、设置栏、可视化鼠标、收尾语义完全一致**,差别只在页面由谁承载。
 >
-> **优先级**:设置里显式选择的本机浏览器 > 桌面端侧栏 > 自托管。选定的浏览器**没装或起不来**时会记一条警告并继续用内置浏览器 —— **不会静默换成别的**。
+> **优先级**:设置里显式选择的本机浏览器 > 桌面端侧栏 > 自托管。载体缺失时分两种处理:`自动` 的语义就是"哪个都行",找不到 Chrome/Edge 时**记一条警告并继续用内置**;**明确选了某个浏览器**而它没装时不再只写日志 —— 插件改挂一个只会解释原因的载体,**每次命令都向调用方报出找不到的是哪个浏览器、查过哪些名字与位置,以及三条出路**,不会让你对着一条关于 Electron 的错误去猜真正的原因。
 
 ## 环境要求
 
@@ -366,7 +366,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 
 - JPEG 截图在**自托管**与**本机 Chrome / Edge** 上可用;**桌面端侧栏**走外壳的 `webContents.debugger`,其 Electron 的 CDP JPEG 编码会挂起,因此该载体下请求 JPEG 会返回 PNG。降采样(`maxWidth`/`maxHeight`)**三种载体都支持**(经 CDP `clip.scale`,或用自托管的原生 `capturePage`)。
 - 自托管截图优先走 Electron 原生 `capturePage`(CDP `captureScreenshot` 在多视图下会挂起);截图前自动把目标标签置顶。
-- `fullPage` 截图在部分主机的**软件合成**下不稳定 —— 这只影响**自托管**载体(它走 `capturePage`);侧栏与本机浏览器走 CDP 的 `captureBeyondViewport`,不受此影响。
+- `fullPage` 截图在部分主机的**软件合成**下不稳定 —— 请求 `fullPage` 时**原生 `capturePage` 路径被整体跳过**(`capturePage` 没有捕获滚动区以外内容的能力),因此**三种载体都走 CDP 的 `captureBeyondViewport`**,`fullPage` 的不稳定性与载体无关,任何载体都可能碰到;只有视口截图才优先走原生的 `capturePage`。
 - 人机验证(CAPTCHA)无法自动解决:快照会标注检测到的挑战,此时应请用户在共享窗口中人工完成,而不是反复重试。
 - 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于宿主层,本插件不承诺。
 - `browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;仅允许 HTTP(S) 目标;`savePath` 必须为绝对路径且位于 `downloadDir` 内(默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`,可用 `downloadDir` 覆盖),不覆盖已存在文件;`browser_screenshot` 的 `savePath` 走同一准入门;单文件上限 256MB(流式限流,按 Content-Length 提前拒绝),文件由浏览器子进程直接落盘(临时文件 + 原子改名)。
@@ -374,7 +374,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 - `browser_restrict` 是防误操作的**软护栏**,不是安全边界:模型可以自行解除白名单。
 - 页面弹窗(`window.open` / `target=_blank`)不再覆盖当前视图:HTTP(S) 弹窗会在同一会话窗口**新开一个标签页**并计入历史,原页面与 opener 上下文保留;非 HTTP(S) 弹窗(空 URL 弹窗承接、`mailto:`、自定义协议)仍**放行原生窗口**,交给系统处理——这类弹窗不纳入会话模型。
 - `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie)。**三种载体都可用**:自托管走原生会话,侧栏与本机浏览器走 CDP 的 `Storage.getCookies` / `Storage.setCookies`。
-- 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。新视图创建前会先有界加载 `about:blank`(保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时;子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`,超过 2 MiB 时**轮转并保留一行时间戳标记**(不再整体清空 —— 那样会把几周的历史一起抹掉),纯 `dsh web` 自托管可据此自助排查崩溃循环。
+- 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。新视图创建前会先有界加载 `about:blank`(保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时;子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`,写之前若该文件已超过 2 MiB,则**丢弃旧内容、只写入一行带时间戳的轮转记录**(形如 `<ISO 时间戳> log rotated: previous content exceeded 2097152 bytes and was discarded`)—— 旧内容就此消失,不留副本,但那一行证明"曾发生过轮转",纯 `dsh web` 自托管可据此自助排查崩溃循环。
 - electron 随插件安装;但 Electron 44+ 不再随安装下载二进制(约 100MB,需网络)——插件探测是纯文件系统、不触发其懒下载,二进制缺失时首次使用会报错并提示先 `npx install-electron`;也可预装 `ELECTRON_PATH` 指定的二进制。
 - 本插件不提供任何**浏览器界面**(地址栏、标签条、侧栏面板都不是插件画的):桌面端的浏览器界面是**外壳自带的官方侧栏**,我们只是借它的页面来驱动;自托管载体下画窗口的是插件拉起的那个 Electron 子进程,那是载体本身而非插件 UI。别把"侧栏"或"浏览器列"当成插件能力。
 - **侧栏载体不上报"用户操作"事件**:人在那个页面里点击是外壳自己的事件,而 bridge 没有用于回报它的操作。因此依赖该事件的功能(如自定义的接管提示)在桌面端侧栏下不会触发;换到自托管载体则可以。
@@ -411,7 +411,7 @@ npm run build
 | 第三轮 | 2026-08 | **对标 browser-bridge 的功能 + 审查修复**:`browser_a11y` 无障碍树;表单控件 6 件套(`browser_set_value`/`check`/`select`/`clear`/`get_value`/`refresh`);语义定位 `target`(css/text/xpath);`browser_scrape` 结构化提取;独立 BrowserWindow + 真实工具栏(地址栏/后退/前进/刷新/标签条),工具栏操作路由回会话模型;工具总数 **20 → 33**;CI 改 npm(无 lockfile 不兼容 pnpm cache)、README 修正等审查项 |
 | 第四轮 | 2026-08 | **DSH 0.1.1-rc.2 对齐 + 复查修复**:peer 下限对齐 `^0.1.1-rc.2`;修复 `browser_type` 带 target 丢文本、`browser_key` 空格缺 CDP `text`、keyUp 失败卡键、`browser_wait` URL 同源误匹配、download `.part` rename 残留、`snapshotMaxElements`/`contentMaxChars` 配置接线、导出类型补齐;新增 3 个回归测试 |
 | 第五轮 | 2026-08 | **Electron 44 兼容**:`available()` 改为无副作用探测(不再触发 Electron 44 懒下载);`flushAuth` cookie-domain 构建错误修复 |
-| 第六轮 | 2026-08 | **Windows 握手与标签定位**:Electron GUI 进程收不到 piped stdin → RPC token 改 **stdin + 环境变量双通道**;`browser_switch_tab`/`browser_close_tab` 跨会话按 id 定位(`locateTab`),`browser_close_tab` 不再静默假成功,未知 id 报错附带现有标签列表 |
+| 第六轮 | 2026-08 | **Windows 握手与标签定位**:Electron GUI 进程收不到 piped stdin → RPC token 改 **stdin + 环境变量双通道**;`browser_switch_tab`/`browser_close_tab` 定位标签(`locateTab`),`browser_close_tab` 不再静默假成功,未知 id 报错附带现有标签列表。本轮当时的实现会**跨会话**兜底查找,后续已收紧:**查找范围只限调用方会话**(陈旧 id 不得关掉别的任务或人的标签页),仅保留"接受裸 uuid 与 `tab:<uuid>` 两种写法"这一便利 |
 | 第七轮 | 2026-08 | **工具栏交互(Windows 焦点路由)**:键盘输入只进有焦点的 view,页面 view 抢占焦点导致地址栏无法输入 → 新增 `wireFocusRouting`(点击即聚焦该 view)+ 窗口 refocus 恢复上次点击的 view;真机 OS 输入探针验证 |
 | **0.1.16** | 2026-08-26 | **发布**:以上七轮全部随 **0.1.16** 发布(构建零错误、21 项测试全绿,`v0.1.16`) |
 | 第八轮 | 2026-08-27 | **DSH Desktop 宿主 Electron 复用**:插件运行在 Electron 进程内直接复用宿主二进制;插件跑在宿主子 Node 进程时沿进程祖先树找到宿主 Electron 兜底(Windows 用 PowerShell CIM,仅最后手段)——DSH Desktop **零安装开箱可用**;报错按当前 profile 动态提示;补齐 electron shim 修复 CI 类型检查;文档同步 |

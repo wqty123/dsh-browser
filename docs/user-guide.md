@@ -17,9 +17,11 @@ dsh plugin --profile web add dsh-builtin-browser
 dsh plugin --profile web add <本仓库路径>
 ```
 
-安装会链接插件、把 `dsh-builtin-browser` 加入 profile 的 bundle 层,并挂载三行:
+安装会链接插件、把 `dsh-builtin-browser` 加入 profile 的 bundle 层,并挂载四行(一个惰性的根行 + 三个功能行):
 
 | 行 | 子路径 | 角色 |
+| --- | --- | --- |
+| `dsh-builtin-browser` | 包名本身 | **惰性根行**:不注册任何东西(空 `apply()`),只用来声明包名 —— 宿主的客户端插件扫描靠精确包名读到 `dsh.client`,少了这行设置栏不会出现 |
 | --- | --- | --- |
 | `browser` | `dsh-builtin-browser/browser` | `ctx.browser` 能力 seam(始终挂载) |
 | `browser-electron` | `dsh-builtin-browser/browser-electron` | Electron CDP provider |
@@ -31,7 +33,7 @@ dsh plugin --profile web add <本仓库路径>
 
 | 行 | 配置项 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser-electron` | `viewHost` | 对象 | 必填 | 宿主提供的 `ElectronBrowserViewHost`(通常 `!!js ctx.get('electronViewHost')`) |
+| `browser-electron` | `viewHost` | 对象 | 可选 | 宿主提供的 `ElectronBrowserViewHost`(通常 `!!js ctx.get('electronViewHost')`)。**不传时插件自己选载体**:桌面端驱动官方侧栏、否则自托管;设置里显式选择的 Chrome/Edge 优先于两者 |
 | `browser-electron` | `httpOnly` | 布尔 | `true` | 仅允许 HTTP(S) 导航;`file:`/`data:` 等拒绝 |
 | `browser-electron` | `snapshotMaxElements` | 数字 | `60` | 快照最多收录的交互元素数 |
 | `browser-electron` | `contentMaxChars` | 数字 | `100000` | 内容抓取默认字符上限 |

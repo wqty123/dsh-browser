@@ -133,7 +133,7 @@ See the full list in [Tool reference](#tool-reference).
   <tr>
     <td width="50%" valign="top">
       <h3>Safety restriction</h3>
-      <p><code>browser_restrict</code> limits which browser actions are allowed (allow-list) to prevent stray clicks/navigation; read-only tools (snapshot/content/screenshot) are never blocked.</p>
+      <p><code>browser_restrict</code> limits which browser actions are allowed (allow-list) to prevent stray clicks/navigation; read-only tools (snapshot / a11y / content / scrape / screenshot / get_value / challenge / list_tabs / session / history / visited / auth) plus the "lift the restriction / reset the session" tools are always exempt.</p>
     </td>
     <td width="50%" valign="top">
       <h3>Screenshot, save and read</h3>
@@ -153,7 +153,7 @@ See the full list in [Tool reference](#tool-reference).
   <tr>
     <td width="50%" valign="top">
       <h3>A "Browser" section in Settings</h3>
-      <p><b>Which browser</b> (bundled Electron / installed Chrome / installed Edge / automatic), keep history / keep cookies / auto-expand the side panel / close the browser when a session ends / show the cursor / vision strategy / allow credential reads — switches take effect <b>immediately</b>, no restart.</p>
+      <p><b>Which browser</b> (bundled Electron / installed Chrome / installed Edge / automatic), keep history, auto-expand the side panel, close the browser when a session ends, show the cursor, vision strategy, allow credential reads — every one of these is <b>read fresh on each use</b>, so a change takes effect immediately with no restart. <b>Two exceptions</b>: <code>browser.channel</code> (which browser) and <code>cookies.persist</code> (keep cookies) are read once when the plugin is applied, so changing either needs a <b>plugin reload</b> (restart dsh / refresh the page).</p>
     </td>
     <td width="50%" valign="top">
       <h3>Unambiguous teardown</h3>
@@ -192,12 +192,12 @@ See the full list in [Tool reference](#tool-reference).
 | `browser_check` | Check/uncheck a checkbox or radio (`target`-located) | ✅ |
 | `browser_select` | Select an option of a `<select>` by value/text/index (`target`-located) | ✅ |
 | `browser_clear` | Clear an input/textarea/contenteditable, or uncheck (`target`-located) | ✅ |
-| `browser_get_value` | Read an element's current value for verification (`target`-located) | – |
-| `browser_scrape` | Structured extraction: container selector + field map (`selector@attr`), static CSS only, CSP-safe | – |
+| `browser_get_value` | Read an element's current value for verification (`target`-located) | – exempt |
+| `browser_scrape` | Structured extraction: container selector + field map (`selector@attr`), static CSS only, CSP-safe | – exempt |
 | `browser_screenshot` | Capture, optional `fullPage`, `savePath`, JPEG (`format`/`quality`) and scaling (`maxWidth`/`maxHeight`); `savePath` shares the download gate (confined to `downloadDir`, never overwrites) | – |
 | `browser_list_tabs` | List the session's tabs | – |
 | `browser_switch_tab` | Switch to a tab by id (also switches the visible view when self-hosted) | ✅ |
-| `browser_close_tab` | Close a tab by id; closing the active tab activates the next | – |
+| `browser_close_tab` | Close a tab by id; closing the active tab activates the next | ✅ |
 | `browser_reset` | Close all tabs of this task, back to one blank tab | ✅ |
 | `browser_session` | Show this task's browser session and tabs | – |
 | `browser_reset_session` | Close and rebuild this task's browser session | ✅ |
@@ -208,7 +208,7 @@ See the full list in [Tool reference](#tool-reference).
 | `browser_challenge` | Detect a human-verification challenge (CAPTCHA / Cloudflare / reCAPTCHA / hCaptcha / Turnstile) | – |
 | `browser_restrict` | Restrict allowed browser actions (allow-list; empty list lifts it). **Soft guardrail** — the model can lift it itself; not a security boundary | – |
 
-> "Guard" column: ✅ actions are governed by the `browser_restrict` allow-list; read-only tools (snapshot/content/screenshot/list_tabs/session/challenge/history) are never blocked.
+> "Guard" column: ✅ actions are governed by the `browser_restrict` allow-list; **rows marked "– exempt" are never blocked, whatever the allow-list says**, and **a plain "–" means the tool only observes — it performs no action, so there is nothing to restrict**. The exempt set is `READ_ONLY_TOOLS` (`src/tool-browser/index.ts`): `snapshot` / `a11y` / `content` / `scrape` / `screenshot` / `get_value` / `wait` / `challenge` / `list_tabs` / `session` / `history` / `visited` / `auth`, plus `restrict` (the restriction itself must stay liftable, or a task that restricted everything could never get out), `reset_session` and `reset`. `browser_close_tab` is **not** exempt: like `open`/`click`/`switch_tab` it can be restricted.
 
 ### Waiting for the page
 
@@ -292,7 +292,7 @@ node desktop-bridge/install.mjs --revert   # roll back
 > - the agent can read the **cookies and login state** in that partition, and `browser_auth` can export them (controlled by a setting);
 > - your actions in the sidebar and the agent's actions act on **the same page** and can affect each other (the agent will not overwrite what you are typing, but navigation changes what you both see).
 >
-> That is the inherent cost of one shared page. We think it is worth it — it turns "the agent is doing something in a window you cannot see" into "you can watch it work and take over" — but you are entitled to know it exists, so there are switches: with **credential access** off the agent stops reading cookies and login state, and with the **vision strategy** set to non-visual any coordinate click that depends on a screenshot is refused. If you would rather not accept the boundary change at all, removing the plugin from the desktop profile returns you to the old separate-window shape.
+> That is the inherent cost of one shared page. We think it is worth it — it turns "the agent is doing something in a window you cannot see" into "you can watch it work and take over" — but you are entitled to know it exists, so there are switches: with **credential access** off, `browser_auth` **refuses both export and restore** (`BROWSER_AUTH_DISABLED`) — not merely "stops reading", since restore needs the same switch; and with the **vision strategy** set to non-visual any coordinate click that depends on a screenshot is refused. If you would rather not accept the boundary change at all, removing the plugin from the desktop profile returns you to the old separate-window shape.
 
 **② Use the browser you already have (Chrome / Edge)**
 
@@ -312,7 +312,7 @@ The settings panel can point the plugin at an **installed Chrome or Edge** (`bro
 
 > The visible view and column layout always belong to the host shell; the plugin owns the seam, the provider and the tools. Across all carriers the **toolset, browsing history, settings panel, synthetic cursor and teardown rules are identical** — only the carrier of the page differs.
 >
-> **Precedence**: an explicitly chosen installed browser > the desktop sidebar > self-hosting. If the chosen browser is **missing or fails to start**, a warning is logged and the bundled browser is kept — it is **never silently swapped** for something else.
+> **Precedence**: an explicitly chosen installed browser > the desktop sidebar > self-hosting. A missing carrier is handled two different ways: `automatic` means "any browser will do", so it **logs a warning and keeps the bundled one**; but when you **named a browser explicitly** and it is absent, the plugin no longer settles for a log line — it adopts a carrier whose only job is to explain, so **every command reports to the caller which browser was missing, the names and locations that were searched, and three ways out**. You are not left staring at an Electron error wondering what actually went wrong.
 
 ## Requirements
 
@@ -366,7 +366,7 @@ The plugin has one installation per host, and the two are updated separately —
 
 - JPEG screenshots work on the **self-hosted** carrier and with an **installed Chrome / Edge**. The **desktop sidebar** goes through the shell's `webContents.debugger`, whose Electron CDP JPEG encoder hangs, so a JPEG request on that carrier returns PNG. Downscaling (`maxWidth`/`maxHeight`) **works on all three** — through a CDP `clip.scale`, or the native `capturePage` when self-hosted.
 - Self-hosted captures prefer Electron's native `capturePage` (CDP `captureScreenshot` can hang with multiple views in the window); the target tab is raised before capturing.
-- `fullPage` capture is flaky under software compositing on some hosts — that affects the **self-hosted** carrier only (it captures through `capturePage`); the sidebar and an installed Chrome/Edge use CDP `captureBeyondViewport` and are unaffected.
+- `fullPage` capture is flaky under software compositing on some hosts — with `fullPage` the native `capturePage` path is **skipped entirely** (`capturePage` cannot reach content beyond the viewport), so **all three carriers go through CDP `captureBeyondViewport`** and the flakiness is not carrier-specific: any carrier can hit it. Only viewport captures prefer the native `capturePage`.
 - CAPTCHA cannot be solved automatically: snapshots flag detected challenges; ask the human to complete it in the shared window instead of retrying.
 - Private mode (`privateMode`) is not implemented: it needs Electron session partitioning, which is host-layer territory; this plugin does not promise it.
 - `browser_download` fetches in the page context (keeps logins) and is subject to same-origin/CORS constraints; HTTP(S) targets only; `savePath` must be absolute and inside `downloadDir` (default: the system Downloads folder, auto-detecting `Downloads`/`下载`/`下載` and `XDG_DOWNLOAD_DIR`; override with `downloadDir`) and never replaces an existing file; `browser_screenshot`'s `savePath` goes through the same gate; single files are capped at 256 MB (streamed with a Content-Length early reject) and are written by the browser child itself (temp file + atomic rename).
@@ -374,7 +374,7 @@ The plugin has one installation per host, and the two are updated separately —
 - `browser_restrict` is a **soft guardrail** against accidental actions, not a security boundary: the model can lift it itself.
 - Popups (`window.open` / `target=_blank`) no longer overwrite the current view: HTTP(S) popups open as a **new tab** in the same session window, recorded in the session history, keeping the original page and its opener context alive. Non-HTTP(S) popups (empty-URL popup handoffs, `mailto:`, custom schemes) are still **allowed as native windows** and handed to the system — such windows are simply not part of the session model.
 - The `browser_auth` cookie round-trip does not preserve `hostOnly`/`sameSite` (host-only cookies come back as domain cookies). It **works on all three carriers**: self-hosted reads its own session, while the sidebar and an installed Chrome/Edge go through CDP's `Storage.getCookies` / `Storage.setCookies`.
-- After a self-hosted child crash (or a DSH restart that kills it) the browser host restarts automatically, and sessions opened before the crash **rebuild on their next use** — only page state is lost, no manual `browser_reset_session` needed (it still works for an explicit reset). A new view preloads `about:blank` (bounded 3 s) before creation so it always has a live renderer, host-side commands are bounded at 20 s, and the child's stderr plus exit code/signal are written to `$DSH_HOME/logs/dsh-builtin-browser-host.log` (2 MB self-truncating) so a plain `dsh web` self-hosted setup can diagnose a crash loop itself.
+- After a self-hosted child crash (or a DSH restart that kills it) the browser host restarts automatically, and sessions opened before the crash **rebuild on their next use** — only page state is lost, no manual `browser_reset_session` needed (it still works for an explicit reset). A new view preloads `about:blank` (bounded 3 s) before creation so it always has a live renderer, and host-side commands are bounded at 20 s. The child's stderr plus exit code/signal go to `$DSH_HOME/logs/dsh-builtin-browser-host.log`; before appending, a file already over 2 MiB is **truncated: the old contents are discarded and replaced by a single timestamped rotation line** (`<ISO timestamp> log rotated: previous content exceeded 2097152 bytes and was discarded`). Nothing is kept from before the rotation — but that line records that it happened, so a plain `dsh web` self-hosted setup can still diagnose a crash loop itself.
 - The electron package ships with the plugin, but Electron 44+ no longer downloads its binary at install time (~100 MB, needs network) — the probe is filesystem-only and never triggers its lazy download, so a missing binary surfaces as a clear error on first use telling you to run `npx install-electron` first; alternatively pre-install a binary and point `ELECTRON_PATH` at it.
 - This plugin draws **no browser interface of its own** (no address bar, no tab strip, no side panel): on the desktop that interface is the **shell's own official sidebar**, and the plugin merely drives the page inside it. On the self-hosted carrier the window is drawn by the Electron child the plugin spawns — that is the carrier, not plugin UI. Do not treat "the sidebar" or "browser column" as a plugin feature.
 - **The sidebar carrier does not report user-action events**: a human clicking in that page is the shell's own event, and the bridge has no operation that reports it. Features relying on that event therefore do not fire on the desktop sidebar; they do on the self-hosted carrier.
@@ -409,7 +409,7 @@ Code layout:
 | 3 | 2026-08 | **browser-bridge parity + review fixes**: `browser_a11y` a11y tree; 6 form-control tools (`browser_set_value`/`check`/`select`/`clear`/`get_value`/`refresh`); semantic `target` (css/text/xpath); `browser_scrape` structured extraction; independent BrowserWindow + real toolbar (address bar, back/forward/reload, tab strip) routed back into the session model; tool count **20 → 33**; CI switched to npm (no lockfile → pnpm cache broken), README corrections |
 | 4 | 2026-08 | **DSH 0.1.1-rc.2 alignment + review fixes**: peer floor `^0.1.1-rc.2`; fixed `browser_type` dropping text with a target, `browser_key` Space missing CDP `text`, keyUp failure sticking a key, `browser_wait` same-origin URL mis-match, `.part` rename residue, `snapshotMaxElements`/`contentMaxChars` config wiring, missing type exports; 3 regression tests |
 | 5 | 2026-08 | **Electron 44 compatibility**: `available()` is now side-effect free (no more triggering Electron 44 lazy download); `flushAuth` cookie-domain build fix |
-| 6 | 2026-08 | **Windows handshake & tab lookup**: the Electron GUI process never receives piped stdin → RPC token now flows over **stdin + env var**; `browser_switch_tab`/`browser_close_tab` locate tabs across sessions (`locateTab`), `browser_close_tab` no longer fakes success, unknown ids error with the session's actual tab list |
+| 6 | 2026-08 | **Windows handshake & tab lookup**: the Electron GUI process never receives piped stdin → RPC token now flows over **stdin + env var**; `browser_switch_tab`/`browser_close_tab` locate tabs (`locateTab`), `browser_close_tab` no longer fakes success, unknown ids error with the session's actual tab list. That round fell back to searching **every** session; it was tightened later — lookup is now **confined to the calling session** (a stale id must not close or switch another task's tab, or the human's), keeping only the convenience of accepting a bare uuid as well as `tab:<uuid>` |
 | 7 | 2026-08 | **Toolbar interaction (Windows focus routing)**: keyboard input only reaches the focused view and the page view grabbed it, so the address bar could not receive input → added `wireFocusRouting` (clicking a view focuses it) + window refocus restores the last-clicked view; verified with real OS input probes |
 | **0.1.16** | 2026-08-26 | **Release**: all seven rounds ship as **0.1.16** (build clean, 21/21 tests pass, `v0.1.16`) |
 | 8 | 2026-08-27 | **DSH Desktop host-Electron reuse**: running inside an Electron process reuses the host binary directly; when the host runs the plugin in a child Node process, walk the process ancestry to find the host's Electron (PowerShell CIM on Windows, last resort only) — **DSH Desktop works with zero install**; error now hints per active profile; electron shim completed to fix the CI typecheck; docs updated |
