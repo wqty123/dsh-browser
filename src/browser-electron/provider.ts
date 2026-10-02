@@ -1772,7 +1772,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
           continue
         }
         if (els.length === 0) { out.push({ ok: false, error: 'field not found', target: describe(spec) }); continue }
-        const el = els[0]
+        let el = els[0]
         // The caller may name a kind. Honor it: the branches below read the element's own
         // tag/type, so without this a selector matching two different controls acted on
         // whichever came first — usually right, which is what hid the mistake.
@@ -1792,6 +1792,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
           }
           els.length = 0
           els.push(wanted)
+          // el was bound before the filter narrowed els, so the branches below would still
+          // read the first match — the very silent wrong-element behaviour this filter exists
+          // to remove.
+          el = els[0]
         }
         const tag = el.tagName
         const type = (el.type || '').toLowerCase()
@@ -2208,7 +2212,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     })()`
     const result = await withTimeout(
       handleSendEvaluate(tab.handle, script),
-      timeoutMs,
+      timeoutMs + TARGET_SCRIPT_GRACE_MS,
       signal,
       `browser: scrape timed out after ${timeoutMs}ms`,
       () => terminatePage(tab.handle),

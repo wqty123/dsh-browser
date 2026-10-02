@@ -209,8 +209,11 @@ export class SettingsStore {
       throw new Error(`dsh-builtin-browser: settings could not be saved: ${error instanceof Error ? error.message : String(error)}`)
 
     }
-    this.cached = merged
-    this.cachedMtimeMs = Date.now()
+    // Deliberately NOT published: the value is not on disk, so caching it would hand
+    // the next reader a document that does not exist — and the mtime stamp would make
+    // that look fresh. Clearing the cache makes the next read take the file again.
+    this.cached = undefined
+    this.cachedMtimeMs = -1
     return merged
   }
 }

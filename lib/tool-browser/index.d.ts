@@ -28,6 +28,20 @@ export interface Config {
     /** Optional initial allow-list of browser tool names; other tools are refused. */
     readonly allowedActions?: readonly string[];
 }
+/**
+ * Guard one browser tool call against the active restriction. Refuses calls
+ * not on the allow-list when a restriction is in effect.
+ * @param state - the calling context's tool state.
+ * @param toolName - the browser tool about to run.
+ */
+/**
+ * Tools that only observe, plus the ones that undo a restriction.
+ *
+ * Never subject to an allow-list: restricting what the agent may *do* must not also
+ * blind it or trap it, and the tool descriptions promise as much. browser_restrict
+ * is in here so a task that restricted everything can still lift it.
+ */
+export declare const READ_ONLY_TOOLS: ReadonlySet<string>;
 /** Register all browser tools with `ctx.tools`. */
 export declare function apply(ctx: Context, config?: Config): void;
 /** Test hook: inspect and reset session mappings across every live plugin apply. */
