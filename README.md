@@ -364,19 +364,21 @@ node desktop-bridge/install.mjs --revert   # 回滚
 
 ## 已知限制
 
-- JPEG 截图仅自托管原生路径可用(`capturePage` 的 `toJPEG`);桌面壳的 CDP 回退路径仍为 PNG(CDP JPEG 在 Electron 43 上挂起)。
+- JPEG 截图在**自托管**与**本机 Chrome / Edge** 上可用;**桌面端侧栏**走外壳的 `webContents.debugger`,其 Electron 的 CDP JPEG 编码会挂起,因此该载体下请求 JPEG 会返回 PNG。降采样(`maxWidth`/`maxHeight`)**三种载体都支持**(经 CDP `clip.scale`,或用自托管的原生 `capturePage`)。
 - 自托管截图优先走 Electron 原生 `capturePage`(CDP `captureScreenshot` 在多视图下会挂起);截图前自动把目标标签置顶。
-- 部分主机在软件合成下 `fullPage` 截图不稳定。
+- `fullPage` 截图在部分主机的**软件合成**下不稳定 —— 这只影响**自托管**载体(它走 `capturePage`);侧栏与本机浏览器走 CDP 的 `captureBeyondViewport`,不受此影响。
 - 人机验证(CAPTCHA)无法自动解决:快照会标注检测到的挑战,此时应请用户在共享窗口中人工完成,而不是反复重试。
 - 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于宿主层,本插件不承诺。
 - `browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;仅允许 HTTP(S) 目标;`savePath` 必须为绝对路径且位于 `downloadDir` 内(默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`,可用 `downloadDir` 覆盖),不覆盖已存在文件;`browser_screenshot` 的 `savePath` 走同一准入门;单文件上限 256MB(流式限流,按 Content-Length 提前拒绝),文件由浏览器子进程直接落盘(临时文件 + 原子改名)。
 - 自托管浏览器的 cookie 在磁盘上以明文存储(Electron 默认行为);需要加密落盘的部署应在宿主层接入系统钥匙串 / DPAPI。
 - `browser_restrict` 是防误操作的**软护栏**,不是安全边界:模型可以自行解除白名单。
 - 页面弹窗(`window.open` / `target=_blank`)不再覆盖当前视图:HTTP(S) 弹窗会在同一会话窗口**新开一个标签页**并计入历史,原页面与 opener 上下文保留;非 HTTP(S) 弹窗(空 URL 弹窗承接、`mailto:`、自定义协议)仍**放行原生窗口**,交给系统处理——这类弹窗不纳入会话模型。
-- `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie);**依赖自托管载体** —— 桌面端走侧栏、或改用本机 Chrome/Edge 时该工具会报 `BROWSER_AUTH_UNSUPPORTED`(这两条路径的 Cookie 由浏览器自身管理,不经过插件)。
+- `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie)。**三种载体都可用**:自托管走原生会话,侧栏与本机浏览器走 CDP 的 `Storage.getCookies` / `Storage.setCookies`。
 - 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。新视图创建前会先有界加载 `about:blank`(保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时;子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`,超过 2 MiB 时**轮转并保留一行时间戳标记**(不再整体清空 —— 那样会把几周的历史一起抹掉),纯 `dsh web` 自托管可据此自助排查崩溃循环。
 - electron 随插件安装;但 Electron 44+ 不再随安装下载二进制(约 100MB,需网络)——插件探测是纯文件系统、不触发其懒下载,二进制缺失时首次使用会报错并提示先 `npx install-electron`;也可预装 `ELECTRON_PATH` 指定的二进制。
-- 本插件不含浏览器列 UI——那是宿主外壳的配套,别把"浏览器列"当成插件能力。
+- 本插件不提供任何**浏览器界面**(地址栏、标签条、侧栏面板都不是插件画的):桌面端的浏览器界面是**外壳自带的官方侧栏**,我们只是借它的页面来驱动;自托管载体下画窗口的是插件拉起的那个 Electron 子进程,那是载体本身而非插件 UI。别把"侧栏"或"浏览器列"当成插件能力。
+- **侧栏载体不上报"用户操作"事件**:人在那个页面里点击是外壳自己的事件,而 bridge 没有用于回报它的操作。因此依赖该事件的功能(如自定义的接管提示)在桌面端侧栏下不会触发;换到自托管载体则可以。
+- **本机 Chrome / Edge 载体使用插件自己的 profile**:插件用它自己的用户数据目录启动浏览器(`$DSH_HOME/dsh-builtin-browser-host/<chrome|edge>-profile`),所以你日常浏览器里的书签、扩展与登录态**不会自动继承** —— 这是刻意的,避免插件操作与你的个人会话混在一起;登录态是否跨重启保留由 `cookies.persist` 决定。
 
 ## 开发
 

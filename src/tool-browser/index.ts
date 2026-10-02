@@ -1116,11 +1116,11 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_screenshot',
-    description: 'Capture the current shared-browser page as a screenshot (PNG default, JPEG optional). This is for models that can read images: layout checks, charts, designs, CAPTCHAs, or locating an element by eye before clicking its coordinates. A model without image input gains nothing from it — browser_snapshot, browser_a11y and browser_content carry the same page as text, and browser_scrape extracts structured data. Supports full-page capture, save-to-file, JPEG encoding, and downscaling (maxWidth/maxHeight) to cut vision-tool token cost. JPEG is only available on the self-hosted native path; the desktop-shell path returns PNG.',
+    description: 'Capture the current shared-browser page as a screenshot (PNG default, JPEG optional). This is for models that can read images: layout checks, charts, designs, CAPTCHAs, or locating an element by eye before clicking its coordinates. A model without image input gains nothing from it — browser_snapshot, browser_a11y and browser_content carry the same page as text, and browser_scrape extracts structured data. Supports full-page capture, save-to-file, JPEG encoding, and downscaling (maxWidth/maxHeight) to cut vision-tool token cost. JPEG needs a browser whose CDP encoder works — the self-hosted browser and an installed Chrome/Edge; the desktop sidebar falls back to PNG because the Electron CDP JPEG encoder hangs. Downscaling works on every carrier.',
     parameters: {
       fullPage: { type: 'boolean', description: 'Capture the full scrollable page instead of the viewport (default false).' },
       savePath: { type: 'string', description: 'Absolute file path to also save the image to (e.g. for read_image vision location). Must resolve inside the configured downloadDir (default: the system Downloads folder, localized names such as ~/下载 included); an existing file is never overwritten.' },
-      format: { type: 'string', enum: ['png', 'jpeg'], description: 'Image format (default png; jpeg is self-hosted native path only).' },
+      format: { type: 'string', enum: ['png', 'jpeg'], description: 'Image format (default png; jpeg needs the self-hosted browser or an installed Chrome/Edge; the desktop sidebar returns PNG because the Electron CDP JPEG encoder hangs).' },
       quality: { type: 'number', description: 'JPEG quality 1-100 (default 80); ignored for PNG.' },
       maxWidth: { type: 'number', description: 'Downscale to fit within this width (aspect preserved).' },
       maxHeight: { type: 'number', description: 'Downscale to fit within this height (aspect preserved).' },

@@ -161,6 +161,15 @@ export interface ElectronViewHandle {
      */
     sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
     /**
+     * Whether this view's CDP can encode JPEG and honour a quality setting.
+     *
+     * Electron 43's CDP hangs on `Page.captureScreenshot` with `format: 'jpeg'`, so a view
+     * backed by Electron must leave this unset and the provider keeps to PNG. A view backed
+     * by an installed Chrome or Edge is the real browser, where JPEG works, and sets it so
+     * the requested format is not silently downgraded.
+     */
+    readonly supportsCdpJpeg?: boolean;
+    /**
      * Give the backing view web focus so keyboard input reaches its page.
      * Optional: an adapter that cannot focus a view omits it, and the provider
      * then behaves exactly as before.
@@ -236,6 +245,40 @@ export interface CdpEvaluateParams {
 }
 /** CDP method for a full-page screenshot capture. */
 export declare const CDP_PAGE_CAPTURE_SCREENSHOT = "Page.captureScreenshot";
+/**
+ * The document size out of a `Page.getLayoutMetrics` response.
+ *
+ * CDP returns `cssContentSize` (the whole document) and `cssLayoutViewport` (what is
+ * visible); the newer spellings `contentSize` / `layoutViewport` appear on some
+ * versions, so both are accepted. Returns undefined when neither is usable, leaving the
+ * caller to capture unscaled rather than guess.
+ * @param metrics - the raw CDP response.
+ * @returns the document and viewport size in CSS pixels.
+ */
+export declare function layoutSize(metrics: Record<string, unknown>): {
+    width: number;
+    height: number;
+    viewportHeight: number;
+} | undefined;
+/**
+ * Map CDP cookies onto the shape `browser_auth` exports.
+ *
+ * CDP reports a cookie as domain + path rather than a URL, and in seconds rather than
+ * milliseconds, so both are converted. Entries missing a name, value or domain are
+ * dropped rather than exported as broken cookies the caller cannot restore.
+ * @param raw - the `cookies` array from a CDP response, of unknown shape.
+ * @returns the mappable cookies.
+ */
+export declare function toExportedCookies(raw: unknown): ExportedCookie[];
+/**
+ * Map an exported cookie onto the fields `Storage.setCookies` expects.
+ *
+ * An exported cookie may carry only a URL, so the domain and path are recovered from it
+ * when they are absent; without either, CDP cannot place the cookie and it is skipped.
+ * @param cookie - the cookie to convert.
+ * @returns the CDP cookie, or undefined when it lacks a usable domain.
+ */
+export declare function toCdpCookie(cookie: ExportedCookie): Record<string, unknown> | undefined;
 /** Native capture options the self-hosted view handle understands. */
 export interface ScreenshotOptions {
     readonly format?: 'png' | 'jpeg';

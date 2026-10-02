@@ -394,6 +394,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     const viewId = randomUUID()
     return {
       id: viewId,
+      // This is the real browser, not Electron: CDP's JPEG encoder works here, so the
+      // provider may pass format and quality through instead of falling back to PNG.
+      supportsCdpJpeg: true,
       sendCommand: async (method: string, params?: Record<string, unknown>) => {
         const client = await this.ensureClient()
         const session = this.views.get(viewId) ?? await this.ensureSession(viewId)
