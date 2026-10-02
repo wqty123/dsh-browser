@@ -35,7 +35,6 @@ export declare function bridgeEndpointPath(): string;
  * point is a single page both parties can see.
  */
 export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
-    private readonly endpoint;
     private readonly connection;
     private readonly views;
     /**
@@ -47,6 +46,16 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * session gets its own page).
      */
     private readonly orphaned;
+    /**
+     * Registered by the provider, and deliberately never invoked on this carrier.
+     *
+     * The sidebar is the shell's own interface: a human clicking inside that page is an
+     * event the shell owns, and the bridge exposes no operation that reports it. The
+     * handler is stored anyway so the interface contract holds (a caller may register
+     * one and must not be surprised) and so a future bridge operation can deliver it
+     * without changing the provider. Consequently no user-action event is emitted while
+     * the desktop sidebar is the carrier — by design, not by omission.
+     */
     private userActionHandler;
     /**
      * @param endpoint - the shell's published bridge endpoint.

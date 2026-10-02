@@ -1564,7 +1564,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
     timeoutMs,
     isConcurrencySafe: () => false,
-    async execute(args, exec) {
+    async execute(args, _exec) {
       // Always allowed so the guard can be lifted.
       const allowed = args.allowed ?? []
       const unknown = allowed.filter((t: string) => !t.startsWith('browser_'))

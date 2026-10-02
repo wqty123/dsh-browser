@@ -25,7 +25,7 @@
  * @module dsh-browser/browser-electron/remote-host
  */
 
-import { execFileSync, spawn, type ChildProcessByStdio } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'

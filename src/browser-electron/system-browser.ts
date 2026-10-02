@@ -204,7 +204,7 @@ class CdpClient {
   /**
    * @param url - the browser's `webSocketDebuggerUrl`.
    */
-  constructor(private readonly url: string) {
+  constructor(url: string) {
     // Node 22 provides WebSocket globally; no dependency is added for this.
     const socket = new WebSocket(url)
     this.socket = socket

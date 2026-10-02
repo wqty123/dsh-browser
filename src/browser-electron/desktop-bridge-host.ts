@@ -25,7 +25,6 @@
 
 import { BridgeConnection, type BridgeEndpoint } from './bridge-connection.js'
 import { readFileSync } from 'node:fs'
-import { connect, type Socket } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -69,12 +68,22 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    * session gets its own page).
    */
   private readonly orphaned = new Set<number>()
+  /**
+   * Registered by the provider, and deliberately never invoked on this carrier.
+   *
+   * The sidebar is the shell's own interface: a human clicking inside that page is an
+   * event the shell owns, and the bridge exposes no operation that reports it. The
+   * handler is stored anyway so the interface contract holds (a caller may register
+   * one and must not be surprised) and so a future bridge operation can deliver it
+   * without changing the provider. Consequently no user-action event is emitted while
+   * the desktop sidebar is the carrier — by design, not by omission.
+   */
   private userActionHandler: ((action: BrowserUserAction) => void) | undefined
 
   /**
    * @param endpoint - the shell's published bridge endpoint.
    */
-  private constructor(private readonly endpoint: BridgeEndpoint) {
+  private constructor(endpoint: BridgeEndpoint) {
     this.connection = new BridgeConnection(endpoint)
   }
 
