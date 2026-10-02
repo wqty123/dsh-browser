@@ -21,7 +21,12 @@
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
 import type { BrowserChannel } from './system-browser.js'
 
-/** How each product is named in the message, and what to install. */
+/**
+ * How each product is named in the message, and what to install.
+ *
+ * Only chrome and edge can appear: the constructor's type excludes `bundled` and `auto`,
+ * and `BrowserChannel` has no `brave`. A brave entry here would be unreachable code.
+ */
 const PRODUCT: Record<string, { label: string; install: string; variable: string }> = {
   chrome: {
     label: 'Google Chrome',
@@ -33,18 +38,12 @@ const PRODUCT: Record<string, { label: string; install: string; variable: string
     install: 'install Microsoft Edge',
     variable: 'DSH_BROWSER_EDGE_PATH',
   },
-  brave: {
-    label: 'Brave',
-    install: 'install Brave',
-    variable: 'DSH_BROWSER_BRAVE_PATH',
-  },
 }
 
 /** How the setting is named to the user. */
 const SETTING_LABEL: Record<string, string> = {
   chrome: '本机 Chrome / installed Chrome',
   edge: '本机 Edge / installed Edge',
-  brave: '本机 Brave / installed Brave',
   auto: '自动 / automatic',
   bundled: '内置 / bundled',
 }

@@ -204,7 +204,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
 | `browser_history` | 操作日志(最新在后),含成功/失败与结果摘要 | – |
 | `browser_replay` | 按序号回放某一步(navigate/execute/click/type) | ✅ |
 | `browser_download` | 带会话 cookie 下载 HTTP(S) URL 到本地文件(`savePath` 必须绝对路径且位于 `downloadDir` 内,不覆盖已有文件,上限 256MB) | ✅ |
-| `browser_auth` | 导出/恢复 cookie(登录态持久化,自托管可用) | ✅ |
+| `browser_auth` | 导出/恢复 cookie(登录态持久化;**三种载体都可用** —— 自托管走原生会话,侧栏与本机浏览器走 CDP) | ✅ |
 | `browser_challenge` | 检测人机验证(CAPTCHA / Cloudflare / reCAPTCHA / hCaptcha / Turnstile) | – |
 | `browser_restrict` | 限制允许的浏览器动作(白名单;空列表解除)。**软护栏**,模型可自行解除,非安全边界 | – |
 
@@ -447,6 +447,8 @@ npm run build
 | **0.3.0** | 2026-10-01 | **发布**:第二十一~二十六轮合并发布(桌面端侧栏载体、可选本机浏览器、需求表 v2 全部落地)。**99/99 测试全绿**,tag `v0.3.0` |
 | 第二十七轮 | 2026-10-01 | **系统浏览器只在需要时启动**(上报的 bug)+ 收尾加固:此前 entry 在注册时就 `await launch()`,于是**一装好插件就弹出浏览器**,连"启动 DSH"都会拉起它 → 改为**构造惰性、首次需要页面才启动**(并合并并发启动);自查又补两处边界:释放后的宿主**拒绝启动**(否则会拉起没人管的进程)、启动过程中被释放则**停止轮询并拒绝发布客户端**(否则留下悬空连接)。另新增 `tools/install-web-plugin.mjs` 把"改 pin → install → **立即修复 profile** → 复验"固化为一条命令,并移除 CHANGELOG 里机器用户名 |
 | **0.3.1** | 2026-10-01 | **发布**:第二十七轮(惰性启动 + 释放后拒绝启动)随 **0.3.1** 发布。**100/100 测试全绿**,tag `v0.3.1` |
+| 第二十八轮 | 2026-10-01 | **两条"限制"其实是实现限制**:审查文档时被指出,查证后确认它们与载体无关 —— ①`browser_auth` 原本直接调用只有自托管才实现的原生方法,没有就报 `BROWSER_AUTH_UNSUPPORTED`;但 **cookie 本来就在 CDP 里**(`Storage.getCookies` / `Storage.setCookies`),而**三种载体全都走 CDP** → 改为有原生方法时优先用它、否则走 CDP,**三种载体全部可用**,并处理 domain+path 与 URL 的差异、前导点、秒与毫秒,丢弃无法构成有效 URL 的 cookie。②JPEG 被对所有 CDP 路径禁用,理由是"CDP JPEG 在 Electron 上挂起" —— **对 Electron 成立,对本机 Chrome/Edge 无关**(那是真浏览器)→ 新增 `supportsCdpJpeg` 能力声明,只有本机浏览器声明,provider 据此透传 `format`/`quality`;侧栏保持 PNG。③顺带发现**降采样在工具描述里承诺了却只在原生路径实现** → CDP 路径改用 `clip.scale`(先读 `Page.getLayoutMetrics` 取文档尺寸,读不到就**不缩放地照常截图**),三种载体都能缩放。④文档补齐两条从未写过的载体差异:**侧栏不上报用户操作事件**(那个页面属于外壳)、**本机浏览器使用插件自己的 profile**(个人登录态不继承)。新增 11 条纯函数测试,**124/124** |
+| 第二十九轮 | 2026-10-01 | **独立代码审查**:另派一个审查者通读全树并**亲手复现**了发现。① **`spawn` 没有 `error` 监听** —— 启动失败(ENOENT、无执行权限、二进制损坏)是**异步事件**,无监听时 Node 会**把整个 DSH 宿主进程带走**;现在改为让该次命令失败。② **`dispose()` 落在 `start()` 的 250ms 轮询期间**时,已拉起的浏览器无人可杀而永久存活;轮询现在会在退出前 kill 它。③ 三种不同失败(子进程退出 / 被释放 / 真超时)共用"30 秒内没暴露 CDP",而且**半秒就报出来**;现在各自说明真实原因。④ **明确选择 `chrome`/`edge` 时仍被桌面侧栏顶掉**(发现流程从不检查 channel)—— 这也让"你选的浏览器没装"那条说明永远无法出现,等于抵消了上一轮的修复;现在明确选择会跳过侧栏发现。⑤ `CdpClient.whenReady()` 等待的 promise 无界,连接被丢弃时工具调用**永不返回**;已加界。⑥ `focus()` 用 `kill('SIGCONT')`,在 Windows 上是空操作,而注释承诺"把窗口前置";注释已改为实情。⑦ 删除不可达的 `brave` 分支。**125/125** |
 
 > registry 上的最新版本以顶部 npm 徽章为准(当前 `0.3.1`)。桌面端升级后需重跑一次 `node desktop-bridge/install.mjs`;Web 端无此步骤 —— 详见[更新方式](#更新方式两端不同)。
 

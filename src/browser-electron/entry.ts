@@ -132,6 +132,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // spawns a browser window. (An earlier version launched it here, which meant a
   // browser appeared the moment the plugin loaded — reported and fixed.)
   const channel = settings.get().browser.channel
+  // Naming a browser is a decision about which one to use, so it also decides whether the
+  // desktop sidebar may take over. Skipping discovery for an explicit choice is what makes
+  // that choice real — otherwise a user who picked Chrome would silently get the sidebar,
+  // and a user who picked a browser that is not installed would never see the explanation
+  // written for exactly that case, because the sidebar would quietly replace it.
+  const explicitChoice = channel !== 'bundled' && channel !== 'auto'
   if (channel !== 'bundled') {
     const detected = detectBrowser(channel)
     if (detected === undefined) {
@@ -159,6 +165,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
   }
+
+  // An explicit choice was already adopted above; discovering the sidebar here would
+  // replace it, which is exactly what this guard prevents.
+  if (explicitChoice) return
 
   void DesktopBridgeViewHost.discover().then(sidebar => {
     // No bridge (plain `dsh web`, an older desktop build, or a shell that already

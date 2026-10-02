@@ -93,6 +93,31 @@ test('an unused host never spawns anything', () => {
 // A released host must stay released: using it afterwards would spawn a browser
 // nobody owns and nobody will kill. (`available()` correctly reports false here,
 // which is also what stops the plugin from routing work to a dead carrier.)
+test('a browser that cannot be launched fails the command instead of killing the host', async () => {
+  // The bug: spawn reports ENOENT (and every other launch failure) through an
+  // ASYNCHRONOUS 'error' event, not a throw and not exitCode. With no listener, Node
+  // treats it as unhandled and takes the whole process down — one bad browser path
+  // would kill DSH itself, not just the tool call.
+  //
+  // This test only passes if that event is handled: if it is not, the runner dies
+  // instead of reporting a failure.
+  const host = new SystemBrowserViewHost(
+    { kind: 'chrome', path: join(tmpdir(), 'dsh-no-such-browser', 'chrome.exe') },
+    mkdtempSync(join(tmpdir(), 'dsh-browser-profile-')),
+  )
+  const view = host.createView()
+  await assert.rejects(
+    () => view.sendCommand('Runtime.evaluate', { expression: '1' }),
+    error => {
+      // The message must name the real cause, not a CDP timeout.
+      assert.match(error.message, /could not launch|exited immediately/, `unexpected message: ${error.message}`)
+      assert.doesNotMatch(error.message, /did not expose CDP/, 'a launch failure is not a CDP timeout')
+      return true
+    },
+  )
+  host.dispose()
+})
+
 test('a released host refuses to start a browser', async () => {
   const host = new SystemBrowserViewHost(
     { kind: 'chrome', path: join(tmpdir(), 'never-a-browser.exe') },

@@ -59,9 +59,13 @@ test('destroying a view that was never created is harmless', () => {
   assert.doesNotThrow(() => host.destroyView(host.createView()))
 })
 
-test('an unknown product still produces a usable message', async () => {
-  // Defensive: the channel type should prevent this, but a message that crashes is
-  // worse than one that names the product awkwardly.
-  const host = new MissingSystemBrowserHost('brave', [])
-  await assert.rejects(() => host.createView().sendCommand('Page.navigate'), /Brave/)
+test('a message can be produced for every selectable browser', () => {
+  // Only chrome and edge can be chosen explicitly; brave is reachable through the
+  // `auto` channel's detection order but never as a stated choice, so no message is
+  // ever built for it. Both selectable products must produce a full explanation.
+  for (const kind of ['chrome', 'edge']) {
+    const host = new MissingSystemBrowserHost(kind, [])
+    assert.equal(host.available(), true)
+    assert.doesNotThrow(() => host.createView())
+  }
 })

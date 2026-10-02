@@ -122,11 +122,16 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     /** The browser owns window grouping. */
     groupView(): void;
     /**
-     * Bring the browser's window forward.
+     * Best effort at bringing the browser's window forward.
      *
-     * The browser is a separate application, so there is no view to raise; focusing
-     * the process is the closest honest equivalent, and failing to do so (a minimized
-     * window, a locked session) is never worth an error.
+     * The browser is a separate application, so there is no view to raise. What this can
+     * actually do is ask its process to continue from a stopped state — which is a no-op on
+     * Windows, where `SIGCONT` is not a supported signal and the call throws. It is kept
+     * because it costs nothing and does help on POSIX (a process stopped with SIGSTOP
+     * resumes), but it must not be read as a promise that the window comes to the front;
+     * importantly, it does NOT raise a window that is merely behind another. Raising the
+     * page properly would need `Page.bringToFront` on a specific target session, which is a
+     * view-level concern and not available to the host.
      */
     focus(): Promise<void>;
     /** The browser reports its own window lifecycle. */
