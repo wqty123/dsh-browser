@@ -121,23 +121,31 @@ test('open/list/switch/close/reset tab lifecycle', async () => {
   await assert.rejects(() => p.listTabs(sid), /not open/)
 })
 
-test('switchTab/closeTab locate a tab across sessions and reject unknown ids', async () => {
+test('switchTab/closeTab stay inside their own session and reject unknown ids', async () => {
   const host = makeHost()
   const p = new ElectronBrowserProvider(host)
   const sid = await p.open()
   const tabId = (await p.listTabs(sid))[0].id
-  // A second session (simulates the tool layer resolving a different session
-  // than the one that opened the tab): tab ids are globally unique, so
-  // switching/closing by id must still find the tab.
+
+  // A second session. Tab ids are globally unique, so a bare uuid is accepted for
+  // convenience — but looking it up in the OTHER session is not: that would let a stale
+  // id close or switch a tab belonging to another task (or to the human) and still report
+  // success, which is the opposite of the isolation these tools promise.
   const other = await p.open()
-  await p.switchTab(other, tabId)
-  assert.equal((await p.listTabs(other)).length, 1, 'switching did not disturb the other session')
-  assert.ok((await p.listTabs(sid)).some(t => t.id === tabId), 'tab still belongs to its session')
-  await p.closeTab(other, tabId)
-  assert.ok(!(await p.listTabs(sid)).some(t => t.id === tabId), 'close by id removed the tab')
+  await assert.rejects(async () => { await p.switchTab(other, tabId) }, /not open in this session/)
+  await assert.rejects(async () => { await p.closeTab(other, tabId) }, /not open in this session/)
+
+  // The tab is untouched by either refusal, and still reachable from its own session.
+  assert.ok((await p.listTabs(sid)).some(t => t.id === tabId), 'the other session could not disturb it')
+  assert.equal((await p.listTabs(other)).length, 1, 'nor did it gain anything')
+  await p.switchTab(sid, tabId)
+
+  // The bare uuid form still works inside the owning session.
+  await p.switchTab(sid, tabId.replace('tab:', ''))
+
   // An id that exists nowhere must THROW (no silent fake success).
-  await assert.rejects(async () => { await p.closeTab(other, 'tab:does-not-exist') }, /not open in this session/)
-  await assert.rejects(async () => { await p.switchTab(other, 'tab:does-not-exist') }, /not open in this session/)
+  await assert.rejects(async () => { await p.closeTab(sid, 'tab:does-not-exist') }, /not open in this session/)
+  await assert.rejects(async () => { await p.switchTab(sid, 'tab:does-not-exist') }, /not open in this session/)
   await p.close(sid)
   await p.close(other)
 })

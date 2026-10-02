@@ -907,8 +907,11 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
 
   /** The child died: tear down so the next use starts a fresh child. */
   private onChildExit(): void {
-    if (this.disposed) return
-    process.stderr.write('[dsh-browser host] browser host gone; will restart on next use\n')
+    // A disposed host still has to drop these: returning here left a child that had
+    // already been replaced during a dispose race in no map at all, so nothing would
+    // ever kill it. Only the restart is suppressed, not the cleanup.
+    const wasDisposed = this.disposed
+    if (!wasDisposed) process.stderr.write('[dsh-browser host] browser host gone; will restart on next use\n')
     this.client = undefined
     this.server?.close()
     this.server = undefined

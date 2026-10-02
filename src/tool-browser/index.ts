@@ -19,6 +19,27 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { BrowserSessionId } from '../browser/types.js'
 
+/**
+ * Register a cleanup that runs once when the process exits.
+ *
+ * A single hook per process, holding a list of callbacks, rather than one listener per
+ * session: sessions come and go, listeners do not, and Node warns when a listener count
+ * passes ten.
+ */
+const exitCleanups = new Set<() => void>()
+let exitHookInstalled = false
+function registerExitCleanup(cleanup: () => void): void {
+  exitCleanups.add(cleanup)
+  if (exitHookInstalled) return
+  exitHookInstalled = true
+  process.on('exit', () => {
+    for (const run of exitCleanups) {
+      try { run() } catch { /* exiting; nothing useful to do */ }
+    }
+  })
+}
+
+
 /** Plugin name used by loader diagnostics. */
 export const name = 'tool-browser'
 /** The tool registry, browser seam, and system-prompt registry this tool layer consumes. */
@@ -145,9 +166,10 @@ async function ensureSession(browser: NonNullable<Context['browser']>, state: To
         } else if (key === 'default') {
           // Agentless / CLI probe: close the session on process exit so the
           // window is not orphaned.
-          process.on('exit', () => {
-            void browser.close(session).catch(() => {})
-          })
+          // One hook for the whole process, not one listener per session: a default session can
+          // be created repeatedly (a CLI probe does), and each registration lived for the life of
+          // the process — so the listener list grew without bound and Node warned at eleven.
+          registerExitCleanup(() => browser.close(session).catch(() => {}))
         }
       } catch (error) {
         // effect() failed — undo the registration so future calls retry.
@@ -265,7 +287,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // browser_open is an overview of what just loaded, not a locator: it has no
       // `coords` parameter, so coordinates stay off here (browser_snapshot owns
       // that switch for callers that actually target pixels).
-      render: (args, value) => [{ type: 'text', text: formatSnapshot(value, { coords: (args as { coords?: boolean }).coords === true }) }],
+      render: (args, value) => [{ type: 'text', text: formatSnapshot(value, {}) }],
     },
     timeoutMs,
     isConcurrencySafe: () => false, // opens tabs / navigates; exclusive within a task
@@ -665,6 +687,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const target = args.target as { by?: string; value?: string; index?: number } | undefined
+      // A target whose value is empty is a caller mistake, not a request to fall back.
+      // Degrading silently sent typed text to whatever held focus — possibly a password
+      // field — or dropped the semantic target in favour of coordinates.
+      if (target !== undefined && typeof target.value === 'string' && target.value === '') {
+        throw new Error('target.value is empty; pass a css selector, visible text or XPath, or omit target entirely to use x/y')
+      }
       if (target !== undefined && typeof target.value === 'string' && target.value !== '') {
         await browser.click(session, {
           target: {
@@ -711,6 +739,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const target = args.target as { by?: string; value?: string; index?: number } | undefined
+      // A target whose value is empty is a caller mistake, not a request to fall back.
+      // Degrading silently sent typed text to whatever held focus — possibly a password
+      // field — or dropped the semantic target in favour of coordinates.
+      if (target !== undefined && typeof target.value === 'string' && target.value === '') {
+        throw new Error('target.value is empty; pass a css selector, visible text or XPath, or omit target entirely to use x/y')
+      }
       if (target !== undefined && typeof target.value === 'string' && target.value !== '') {
         await browser.type(session, {
           text: args.text,
@@ -1346,9 +1380,6 @@ export function apply(ctx: Context, config: Config = {}): void {
         // Replay of type/setValue carries the same sensitive fields.
         if (e.action === 'replay' && params.of === 'type' && typeof params.text === 'string') {
           params.text = '*'.repeat(Math.min(params.text.length, 64)) + ` (${params.text.length} chars)`
-        }
-        if (e.action === 'replay' && params.of === 'setValue' && typeof params.value === 'string') {
-          params.value = '*'.repeat(Math.min(params.value.length, 64)) + ` (${params.value.length} chars)`
         }
         // Execute scripts may embed form tokens / credentials; mask script,
         // args, and result for both direct execute and replay-of-execute.
