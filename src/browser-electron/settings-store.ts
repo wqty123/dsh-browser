@@ -206,14 +206,14 @@ export class SettingsStore {
       // Do NOT publish the new value as cached, and do not pretend the file changed: a
       // reader compares the file's mtime against this stamp, so stamping "now" on a failed
       // write made the next get() re-read the file and silently revert the user's change.
+      // Clear the cache before failing: the value on disk is still the old one, so leaving
+      // the merged document cached would hand the next reader something that does not exist —
+      // and the stamp would make it look fresh until the mtime comparison rolled it back.
+      this.cached = undefined
+      this.cachedMtimeMs = -1
       throw new Error(`dsh-builtin-browser: settings could not be saved: ${error instanceof Error ? error.message : String(error)}`)
 
     }
-    // Deliberately NOT published: the value is not on disk, so caching it would hand
-    // the next reader a document that does not exist — and the mtime stamp would make
-    // that look fresh. Clearing the cache makes the next read take the file again.
-    this.cached = undefined
-    this.cachedMtimeMs = -1
     return merged
   }
 }
