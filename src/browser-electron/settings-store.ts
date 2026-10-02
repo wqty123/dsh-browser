@@ -163,18 +163,27 @@ export class SettingsStore {
    */
   get(): BrowserSettings {
     let mtimeMs = -1
-    let text: string | undefined
     try {
-      if (existsSync(this.file)) {
-        mtimeMs = statSync(this.file).mtimeMs
-        text = readFileSync(this.file, 'utf8')
-      }
+      if (existsSync(this.file)) mtimeMs = statSync(this.file).mtimeMs
     } catch {
       // Unreadable file: fall through to defaults below.
       mtimeMs = -1
-      text = undefined
     }
+    // Return the cache BEFORE reading. The read used to happen first "just in case", which
+    // made the cache pointless: every call paid for a synchronous read of the whole file and
+    // then discarded it. This is on the path of every tool call that consults a setting, so
+    // it was a stat plus a read per call where a single stat will do.
     if (this.cached !== undefined && mtimeMs === this.cachedMtimeMs) return this.cached
+
+    let text: string | undefined
+    if (mtimeMs !== -1) {
+      try {
+        text = readFileSync(this.file, 'utf8')
+      } catch {
+        text = undefined
+        mtimeMs = -1
+      }
+    }
     try {
       // A leading BOM is what ordinary Windows editors (Notepad, PowerShell's
       // `Set-Content -Encoding utf8`) leave behind, and `JSON.parse` rejects it.
