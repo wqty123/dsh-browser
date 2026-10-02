@@ -38,12 +38,17 @@ export interface DetectedBrowser {
  * Find an installed Chromium browser.
  *
  * `auto` prefers Chrome, then Edge, then Brave — the order reflects how likely each
- * is to be the browser a user actually chose rather than one Windows shipped.
+ * is to be the browser a user actually chose rather than one the system shipped.
+ * Each candidate is looked up in three places, most specific first: an explicit
+ * environment override, then PATH, then the platform's conventional install
+ * locations. PATH comes before the fixed paths because it is what actually reflects
+ * how the browser was installed.
  * @param channel - the configured choice; `bundled` never resolves to a system browser.
  * @param env - environment lookup, injected so tests need no real machine.
+ * @param platform - the platform to use conventions for; injected for the same reason.
  * @returns the detected browser, or undefined when the choice is unavailable.
  */
-export declare function detectBrowser(channel: BrowserChannel, env?: NodeJS.ProcessEnv): DetectedBrowser | undefined;
+export declare function detectBrowser(channel: BrowserChannel, env?: NodeJS.ProcessEnv, platform?: NodeJS.Platform): DetectedBrowser | undefined;
 /** A system browser driven over CDP, presented as a browser view host. */
 export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private readonly browser;

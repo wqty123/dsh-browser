@@ -5,7 +5,7 @@
 // browser, and an unavailable choice must be reported rather than guessed at.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,6 +15,18 @@ import { detectBrowser, SystemBrowserViewHost } from '../lib/browser-electron/sy
 const everything = {
   DSH_BROWSER_CHROME_PATH: process.execPath,
   DSH_BROWSER_EDGE_PATH: process.execPath,
+}
+
+/**
+ * A directory holding empty files with the given names, usable as a fake PATH entry.
+ *
+ * Detection only asks whether a path exists, so the contents do not matter — this
+ * makes the platform-specific lookup testable without those browsers being installed.
+ */
+function fakeBin(names) {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-fake-bin-'))
+  for (const name of names) writeFileSync(join(dir, name), '')
+  return dir
 }
 
 test('the bundled choice never resolves to a system browser', () => {
@@ -95,4 +107,51 @@ test('a released host refuses to start a browser', async () => {
     'the command fails instead of launching anything',
   )
   assert.equal(host.started, false, 'and no process was spawned')
+})
+
+// Issue #19: on Linux the browser is normally a launcher on PATH, packaged under a
+// versioned name — microsoft-edge-stable, google-chrome-stable — and the Windows
+// Application layout this file originally assumed does not exist there at all.
+//
+// A caveat about these tests: a Linux PATH cannot be simulated faithfully on Windows,
+// because every absolute Windows path already contains a colon (C:\...) that a
+// colon-separated split would tear apart. So what is asserted here is what this
+// platform can actually verify — the Windows separator, the lookup order, the
+// per-platform isolation — plus the Linux table's contents, read from the source.
+test('the Linux launcher names are the packaged ones', () => {
+  const source = readFileSync(new URL('../src/browser-electron/system-browser.ts', import.meta.url), 'utf8')
+  assert.match(source, /linux: \['microsoft-edge-stable'/, 'the versioned Edge launcher is listed')
+  assert.match(source, /linux: \['google-chrome-stable'/, 'the versioned Chrome launcher is listed')
+  assert.match(source, /'\/usr\/bin\/microsoft-edge-stable'/, 'and a fixed Linux location too')
+  assert.match(source, /darwin: \[/, 'as are macOS bundle paths')
+})
+
+test('a Windows PATH is split on the Windows separator', () => {
+  const empty = fakeBin([])
+  const bin = fakeBin(['chrome.exe'])
+  // The browser is only in the second directory, so splitting on the wrong separator
+  // would mangle the whole string into one path and miss it.
+  assert.equal(detectBrowser('chrome', { PATH: empty + ';' + bin }, 'win32')?.path, join(bin, 'chrome.exe'))
+})
+
+test('a single PATH directory is searched as-is', () => {
+  const bin = fakeBin(['msedge.exe'])
+  assert.equal(detectBrowser('edge', { PATH: bin }, 'win32')?.path, join(bin, 'msedge.exe'))
+})
+
+test('the Windows lookup also accepts the Path spelling', () => {
+  // Windows spells it both ways depending on who set it.
+  const bin = fakeBin(['chrome.exe'])
+  assert.equal(detectBrowser('chrome', { Path: bin }, 'win32')?.path, join(bin, 'chrome.exe'))
+})
+
+test('a directory without a matching launcher is not a hit', () => {
+  const bin = fakeBin(['something-else.exe'])
+  assert.notEqual(detectBrowser('brave', { PATH: bin }, 'win32')?.path, join(bin, 'something-else.exe'))
+})
+
+test('an explicit override still outranks PATH', () => {
+  const bin = fakeBin(['chrome.exe'])
+  const found = detectBrowser('chrome', { PATH: bin, DSH_BROWSER_CHROME_PATH: process.execPath }, 'win32')
+  assert.equal(found?.path, process.execPath)
 })

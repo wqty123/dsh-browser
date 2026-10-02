@@ -334,7 +334,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 | dsh-builtin-browser | `0.3.1` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
-> 插件声明 `electron >= 30`;**当前仅在 Windows 环境实测**(macOS/Linux 未验证,暂不承诺)。
+> 插件声明 `electron >= 30`。**核心链路在 Windows 上完整实测**;系统浏览器的查找已适配 Linux 与 macOS(先查 `PATH`,再查各平台的惯例安装位置,均可用 `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH` 覆盖),但这两个平台上的**端到端链路尚未实测**,暂不承诺。
 
 ## 更新方式(两端不同)
 

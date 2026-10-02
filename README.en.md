@@ -333,7 +333,7 @@ The settings panel can point the plugin at an **installed Chrome or Edge** (`bro
 | dsh-builtin-browser | `0.3.0` |
 | OS | Windows 10 (10.0.26200) |
 
-> The plugin declares `electron >= 30`; it has **only been verified on Windows** (macOS/Linux untested, not yet promised).
+> The plugin declares `electron >= 30`. The **core path is fully verified on Windows**; system-browser detection is now adapted for Linux and macOS (PATH first, then each platform's conventional install locations, all overridable with `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH`), but the end-to-end path on those platforms has not been measured, so no promise is made yet.
 
 ## Updating (the two hosts differ)
 
