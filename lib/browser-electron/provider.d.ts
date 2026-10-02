@@ -638,7 +638,17 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
      *    diagnostics: it can never be allowed to become the failure.
      */
     private notifyUserActionError;
-    /** Ask the host to show the active tab's view, carrying the session label. */
+    /**
+     * Ask the host to show the active tab's view, carrying the session label.
+     *
+     * The two halves are sequential, not alternatives. `showView` makes the view the
+     * visible one — which is what keeps what the human sees in step with what the agent
+     * drives, and what lets `capturePage` return an image at all (a hidden view captures
+     * empty) — while `collapse` folds the carrier's own chrome away when the user asked
+     * for no auto-expand. Making them exclusive meant that with auto-expand off this
+     * method did nothing at all on carriers without `collapse` (the self-hosted one),
+     * silently desynchronising the two and failing every screenshot.
+     */
     private showActive;
     /** Read the current URL of a view through CDP. */
     private currentUrl;
