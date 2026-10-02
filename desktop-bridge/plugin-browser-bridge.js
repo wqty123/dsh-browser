@@ -24,12 +24,24 @@
 import { createServer } from 'node:net'
 import { randomBytes } from 'node:crypto'
 import { writeFileSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { app, webContents } from 'electron'
 
-/** Absolute path of the endpoint file the plugin reads. */
+/**
+ * Absolute path of the endpoint file the plugin reads.
+ *
+ * The fallback has to match the plugin's own (`process.env.DSH_HOME ??
+ * homedir()/.dsh`, see src/browser-electron/desktop-bridge-host.ts). With a
+ * bare `?? ''` an unset DSH_HOME resolves to the process CWD, so the endpoint
+ * landed beside the app — while the plugin looked in ~/.dsh and never found it.
+ * The failure is silent in both directions: discovery returns undefined and the
+ * plugin quietly falls back to a self-hosted window, with no error anywhere.
+ * Measured on DSH Desktop 0.2.0-rc.2, launched from a shortcut (no DSH_HOME in
+ * its environment).
+ */
 function endpointFile() {
-  const home = process.env.DSH_HOME ?? ''
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   return join(home, 'dsh-builtin-browser-bridge.json')
 }
 
@@ -128,10 +140,21 @@ async function handle(request) {
     //    b. otherwise type into the address field and submit with REAL key input
     //       (synthetic events do not move React's controlled input, and the field
     //       also loses focus to re-renders, so both halves are needed).
+    let submitVerdict = 'n/a'
     const restored = await sendCdp(shell.id, 'Runtime.evaluate', {
+      // Only real controls count, and only their OWN text does. Matching any
+      // node's `textContent` made a container that merely mentioned restoring a
+      // page report RESTORED — which skipped the address route below entirely
+      // and left the guest unmaterialized (measured on DSH 0.2.0-rc.2, where the
+      // sidebar shows no restore control at all).
       expression: `(() => {
         const nodes = Array.from(document.querySelectorAll('button,a,[role=button],div[role=link]'));
-        const hit = nodes.find(n => /恢复页面|恢复上次|上次打开/.test((n.textContent || '').trim()));
+        const hit = nodes.find(n => {
+          const own = (n.textContent || '').trim();
+          if (own.length > 24) return false;
+          return /^(恢复页面|恢复上次|恢复上次页面|上次打开)$/.test(own)
+            || /恢复|restore/i.test(n.getAttribute('aria-label') || n.getAttribute('title') || '');
+        });
         if (hit === undefined) return 'NO_RESTORE';
         hit.click();
         return 'RESTORED';
@@ -140,8 +163,15 @@ async function handle(request) {
     })
     if (restored?.result?.value !== 'RESTORED') {
       if (url !== '') {
-        // Set the value the way React accepts it, then submit with real input.
-        await sendCdp(shell.id, 'Runtime.evaluate', {
+        // Set the value the way React accepts it, then SUBMIT THE FORM.
+        //
+        // A dispatched Enter is not enough: the sidebar browser's toolbar is a
+        // `<form>` whose submission is wired to an explicit control (aria-label
+        // "前往" / "Go"), and implicit submission does not fire there — measured
+        // on DSH 0.2.0-rc.2, where Enter left the field filled and the guest
+        // uncreated. `requestSubmit()` goes through the same path the button
+        // does, so it works with React's onSubmit and needs no localized label.
+        const typed = await sendCdp(shell.id, 'Runtime.evaluate', {
           expression: `(() => {
             const inputs = Array.from(document.querySelectorAll('input')).filter(i => /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || '')));
             if (inputs.length === 0) return 'NO_ADDRESS_BAR';
@@ -150,18 +180,28 @@ async function handle(request) {
             setter.call(input, ${JSON.stringify(String(request.url ?? ''))});
             input.dispatchEvent(new Event('input', { bubbles: true }));
             input.focus();
-            return 'TYPED';
+            const form = input.form ?? input.closest('form');
+            if (form) { form.requestSubmit(); return 'SUBMITTED_FORM'; }
+            const button = input.parentElement
+              ? input.parentElement.querySelector('button[type=submit],button')
+              : null;
+            if (button) { button.click(); return 'CLICKED_SUBMIT'; }
+            return 'TYPED_ONLY';
           })()`,
           returnByValue: true,
         })
-        for (const type of ['keyDown', 'keyUp']) {
-          await sendCdp(shell.id, 'Input.dispatchKeyEvent', {
-            type,
-            key: 'Enter',
-            code: 'Enter',
-            windowsVirtualKeyCode: 13,
-            nativeVirtualKeyCode: 13,
-          })
+        submitVerdict = String(typed?.result?.value ?? 'n/a')
+        // Enter stays as the last resort for sidebars without a form.
+        if (submitVerdict === 'TYPED_ONLY') {
+          for (const type of ['keyDown', 'keyUp']) {
+            await sendCdp(shell.id, 'Input.dispatchKeyEvent', {
+              type,
+              key: 'Enter',
+              code: 'Enter',
+              windowsVirtualKeyCode: 13,
+              nativeVirtualKeyCode: 13,
+            })
+          }
         }
       }
     }
@@ -177,7 +217,7 @@ async function handle(request) {
         return { ok: true, created: true, id: created[0].id, via: restored?.result?.value === 'RESTORED' ? 'restore' : 'address' }
       }
     }
-    throw new Error(`the sidebar did not create a browser guest (prepare=${String(verdict)}, restore=${String(restored?.result?.value)})`)
+    throw new Error(`the sidebar did not create a browser guest (prepare=${String(verdict)}, restore=${String(restored?.result?.value)}, submit=${submitVerdict})`)
   }
   if (op === 'ensureTabs') {
     // Grow the sidebar's browser tab strip to `count` tabs and report every guest.
