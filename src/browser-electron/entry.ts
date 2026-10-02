@@ -21,7 +21,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.js'
 import { DesktopBridgeViewHost } from './desktop-bridge-host.js'
-import { detectBrowser, SystemBrowserViewHost } from './system-browser.js'
+import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.js'
+import { MissingSystemBrowserHost } from './missing-system-browser.js'
 import { SettingsStore } from './settings-store.js'
 
 export {
@@ -134,7 +135,16 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   if (channel !== 'bundled') {
     const detected = detectBrowser(channel)
     if (detected === undefined) {
-      ctx.logger?.warn?.(`dsh-builtin-browser: ${channel} was requested but no installation was found; using the bundled browser`)
+      // `auto` promises to take whatever is available, so falling back is what it
+      // asked for. Naming a browser is a specific request, and quietly satisfying it
+      // with a different one turns the real problem ("no Chrome here") into a
+      // confusing error about Electron later on. Report it instead.
+      if (channel === 'auto') {
+        ctx.logger?.warn?.('dsh-builtin-browser: no installed browser was found; using the bundled browser')
+      } else {
+        adopt(new MissingSystemBrowserHost(channel, searchSummary(channel)),
+          `the selected ${channel} is not installed — commands will explain how to fix it`)
+      }
     } else {
       const home = process.env.DSH_HOME ?? homedir()
       // Login state lives in the browser profile, so the cookies setting decides where

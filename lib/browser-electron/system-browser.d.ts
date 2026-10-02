@@ -49,6 +49,17 @@ export interface DetectedBrowser {
  * @returns the detected browser, or undefined when the choice is unavailable.
  */
 export declare function detectBrowser(channel: BrowserChannel, env?: NodeJS.ProcessEnv, platform?: NodeJS.Platform): DetectedBrowser | undefined;
+/**
+ * Everything that was checked for one product, for reporting a miss.
+ *
+ * Detection returns undefined with no explanation, which left the caller able to say
+ * only "not found". This gives the user the actual list so they can see whether the
+ * plugin looked somewhere their browser is not.
+ * @param kind - the product to describe.
+ * @param platform - the platform whose names and locations apply.
+ * @returns the launcher names (as PATH lookups) and the fixed locations checked.
+ */
+export declare function searchSummary(kind: DetectedBrowser['kind'], platform?: NodeJS.Platform): string[];
 /** A system browser driven over CDP, presented as a browser view host. */
 export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private readonly browser;

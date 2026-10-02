@@ -349,6 +349,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
   ```
   bridge 不在时插件自动退回自托管(多出一个独立窗口),功能不中断。
 - 浏览器内核默认由桌面端自带的 Electron 提供,插件不会再下载一份 Electron;也可以在设置里改用它自己装的 Chrome / Edge。
+- **选了某个浏览器但它没装时会怎样**:`内置` 用自己的 Electron;`自动` 挑一个已装的、**都没有就安静地退回内置**;**明确选了 Chrome / Edge** 而它不在时则**直接报错说明找不到它**(报错里写明查了哪些名字与位置,并给出三条出路:装上它 / 用 `DSH_BROWSER_CHROME_PATH`、`DSH_BROWSER_EDGE_PATH` 指定路径 / 把载体改回 `内置` 或 `自动`)—— 不会让你对着一条关于 Electron 的错误去猜真正的原因。
 
 **Web 端(`dsh web`)**
 - 插件是 web profile 里的依赖(`$DSH_HOME/profiles/web`),更新后**重启 `dsh web`** 生效。
@@ -440,7 +441,7 @@ npm run build
 | 第二十三轮 | 2026-10-01 | **CVE-2026-84961(undici)**:CVE 真实,但收到的自动修复**在本仓库失效** —— `pnpm.overrides` 写在 `package.json` 里,pnpm 10 起已不再读取该字段(实测打印警告并忽略,lock 仍是 7.29.0)。改在 **`pnpm-workspace.yaml`**(新位置)锁 `undici: 7.29.1`,同大版本不做无收益跳跃。影响面已澄清:插件不 import undici,发布物也不含 `node_modules` |
 | 第二十四轮 | 2026-10-01 | **需求表 v2 逐条落地**:①**视觉策略真正接线** —— `nonVisual` 下坐标点击被**明确拒绝并给出可执行替代**、工具描述改为语义优先(此前该设置项存了却无人读取);②**非视觉输出增强** —— 快照按 `depth` 缩进、坐标改按需(`coords: true`)、去空 states,`content(txt)` 改用浏览器渲染文本;③**沙箱边界变化明示**(两份 README + 设置面板);④`closeWithSession` / `autoExpandOnce` 真正生效(bridge 新增 `closeSidebarBrowser`、`collapseSidebar`);⑤**每会话独占一个侧栏标签**,释放只关自己的;⑥历史新增**关键词与来源会话**过滤;⑦光标新增**操作气泡**。顺带修掉 6 个实测 bug(逐字动画文本被拆成一列字母、重启后首次调用必失败、三个设置项是死的、释放会关掉别人的标签、设置文件带 BOM 时全部设置被静默丢弃) |
 | 第二十五轮 | 2026-10-01 | **速度优化 + 结构拆分**:真机量化出每条命令 **49.1ms** 的结构性开销(新建 TCP 连接含 token 往返 24.8ms + 每条命令前的存活检查 24ms),复用连接只需 **0.2ms** → 改为**长连接 + 请求串行**,并把存活判定改为"命令失败才重建"。传输层拆成独立模块 `bridge-connection.ts`(`desktop-bridge-host.ts` 426 → 306 行)。光标：位置未变时不再重绘、缓动改 190ms、新增 `forgetCursor`(文档替换后必须清缓存,否则导航后指针再也不出现) |
-| 第二十六轮 | 2026-10-01 | **可选用本机 Chrome / Edge**:设置里可选 `bundled` / `auto` / `chrome` / `edge`,做法与 Codex Browser Use 一致 —— `--remote-debugging-port=0` 启动、读浏览器自己写下的 `DevToolsActivePort` 取端口、全程走 CDP(用 Node 22 内置 `WebSocket`,**零新增依赖**)。**用户日常数据不被触碰**(独立 profile);登录态按 `cookies.persist` 决定保留或丢弃。优先级:显式选择 > 桌面侧栏 > 自托管;缺失时记警告并继续用内置,**不静默替换** |
+| 第二十六轮 | 2026-10-01 | **可选用本机 Chrome / Edge**:设置里可选 `bundled` / `auto` / `chrome` / `edge`,做法与 Codex Browser Use 一致 —— `--remote-debugging-port=0` 启动、读浏览器自己写下的 `DevToolsActivePort` 取端口、全程走 CDP(用 Node 22 内置 `WebSocket`,**零新增依赖**)。**用户日常数据不被触碰**(独立 profile);登录态按 `cookies.persist` 决定保留或丢弃。优先级:显式选择 > 桌面侧栏 > 自托管;缺失时记录警告并继续用内置(后续细化:`自动` 仍会回退,但**明确选择**时改为**报出找不到的那个浏览器**,不再悄悄换一个) |
 | **0.3.0** | 2026-10-01 | **发布**:第二十一~二十六轮合并发布(桌面端侧栏载体、可选本机浏览器、需求表 v2 全部落地)。**99/99 测试全绿**,tag `v0.3.0` |
 | 第二十七轮 | 2026-10-01 | **系统浏览器只在需要时启动**(上报的 bug)+ 收尾加固:此前 entry 在注册时就 `await launch()`,于是**一装好插件就弹出浏览器**,连"启动 DSH"都会拉起它 → 改为**构造惰性、首次需要页面才启动**(并合并并发启动);自查又补两处边界:释放后的宿主**拒绝启动**(否则会拉起没人管的进程)、启动过程中被释放则**停止轮询并拒绝发布客户端**(否则留下悬空连接)。另新增 `tools/install-web-plugin.mjs` 把"改 pin → install → **立即修复 profile** → 复验"固化为一条命令,并移除 CHANGELOG 里机器用户名 |
 | **0.3.1** | 2026-10-01 | **发布**:第二十七轮(惰性启动 + 释放后拒绝启动)随 **0.3.1** 发布。**100/100 测试全绿**,tag `v0.3.1` |
