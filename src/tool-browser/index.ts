@@ -1631,7 +1631,13 @@ export function apply(ctx: Context, config: Config = {}): void {
         const cookies = await browser.flushAuth(session)
         return { cookies: cookies.map(c => ({ ...c })) as never }
       }
-      const list = (args.cookies ?? []) as unknown[]
+      // The description says cookies are required for restore; without this check an
+      // empty call returned {restored: 0} and rendered 'Restored 0 cookies.', which
+      // reads as success and would leave the caller believing the login was restored.
+      if (!Array.isArray(args.cookies) || args.cookies.length === 0) {
+        throw new Error('browser_auth: action "restore" needs a non-empty "cookies" array (get one from action "export" on the same profile)')
+      }
+      const list = args.cookies as unknown[]
       const restored = await browser.restoreAuth(session, list as never)
       return { restored }
     },
