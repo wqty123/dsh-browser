@@ -22,6 +22,7 @@ import { join } from 'node:path'
 import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.js'
 import { DesktopBridgeViewHost } from './desktop-bridge-host.js'
 import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.js'
+import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralProfiles } from './ephemeral-profile.js'
 import { MissingSystemBrowserHost } from './missing-system-browser.js'
 import { SettingsStore } from './settings-store.js'
 
@@ -164,9 +165,17 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // (the point of using their own browser), while turning persistence off gets a
       // throwaway directory that is removed when the browser is released.
       const persist = settings.get().cookies.persist
+      const profileRoot = join(home, BROWSER_PROFILE_DIR)
       const profileDir = persist
-        ? join(home, BROWSER_PROFILE_DIR, `${detected.kind}-profile`)
-        : join(home, BROWSER_PROFILE_DIR, `${detected.kind}-profile-ephemeral-${randomUUID()}`)
+        ? join(profileRoot, `${detected.kind}-profile`)
+        : join(profileRoot, ephemeralProfileName(detected.kind, randomUUID()))
+      if (!persist) {
+        // A process killed outright never runs its own cleanup (see ephemeral-profile.ts),
+        // so the sweep happens HERE — at the only moment that can still act on a profile
+        // whose owner is gone — and before this run claims a directory of its own.
+        sweepAbandonedEphemeralProfiles(profileRoot, detected.kind)
+        claimEphemeralProfile(profileDir)
+      }
       adopt(new SystemBrowserViewHost(detected, profileDir, [], persist ? undefined : profileDir),
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
