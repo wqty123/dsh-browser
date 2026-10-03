@@ -321,6 +321,15 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * spawned when a view is actually needed.
    */
   private client: CdpClient | undefined
+  /**
+   * Set when a command went unanswered rather than being refused.
+   *
+   * A timeout says nothing about the connection: the page may simply be slow. It marks the
+   * client for a cheap check before the next command trusts it, which keeps a slow page
+   * from being mistaken for a dead browser while still catching one that has truly stopped
+   * answering.
+   */
+  private clientSuspect = false
   private child: ChildProcess | undefined
   private starting: Promise<CdpClient> | undefined
 
@@ -352,6 +361,29 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * The CDP client, starting the browser on first use.
    * @returns the connected client.
    */
+  /**
+   * Whether a client that reports itself open is actually answering.
+   *
+   * An open socket proves nothing: a browser can hold the connection and never reply, and
+   * that state must not be cached, or every later command waits out its own timeout. Asking
+   * the browser something cheap is a fact; reading the failure text is a guess, and the
+   * guess was wrong in both directions (it killed healthy browsers on a slow page, and it
+   * mistook the browser's own free text for a verdict).
+   *
+   * This is only reached when the socket is open, so the common path costs nothing.
+   * @param client - the client to question.
+   * @returns true when it answered.
+   */
+  private async probeClient(client: CdpClient): Promise<boolean> {
+    try {
+      await client.send('Browser.getVersion', {})
+      return true
+    } catch {
+      // No answer within the budget, or the socket failed while asking: unusable either way.
+      return false
+    }
+  }
+
   private async ensureClient(): Promise<CdpClient> {
     // A disposed host must never start a browser: doing so would spawn a process
     // nobody owns and nobody will kill.
@@ -360,9 +392,19 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // (the browser closing its debugging endpoint, a dropped connection). Checking the
     // socket's own state costs nothing and turns a 30s hang into a restart.
     if (this.client !== undefined) {
-      if (this.client.isAlive()) return this.client
-      this.client.close()
+      // A closed socket means the browser is gone; an OPEN socket proves nothing, because
+      // a browser can hold the connection and never answer. Only probe when the socket is
+      // closed or a previous command went unanswered without being refused — probing every
+      // call would add a round trip to the common path for nothing.
+      const current = this.client
+      if (current.isAlive() && !this.clientSuspect) return current
+      if (current.isAlive() && await this.probeClient(current)) {
+        this.clientSuspect = false
+        return current
+      }
+      current.close()
       this.client = undefined
+      this.clientSuspect = false
     }
     // Concurrent first calls share one startup rather than racing two browsers.
     this.starting ??= this.start().finally(() => { this.starting = undefined })
@@ -523,20 +565,26 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       try {
         const result = await client.send(method, params, session)
         return (result ?? {}) as Record<string, unknown>
-      } catch (error) {
-        // Only a BROKEN CONNECTION justifies discarding the client. A CDP protocol error is an
-        // ordinary failure of one command, and tearing down the browser for it turned a single
-        // bad call into every later call reconnecting to a browser it then abandoned.
-          const answered = !(error instanceof Error) || !/timed out|did not complete|connection is closed/.test(error.message)
-          // Drop the client when the browser did not answer at all. A protocol error means it
-          // DID answer and merely refused this command, so the connection is still good; a
-          // timeout or a dead socket means otherwise, and keeping that client means every
-          // later call reuses a connection that will never reply.
-          if (!client.isAlive() || !answered) {
-          this.client?.close()
-          this.client = undefined
+        } catch (error) {
+          // A CDP protocol error means the browser ANSWERED and refused this one command, so the
+          // connection is healthy and must be kept. Deciding by the error TEXT misfires both
+          // ways: the inner timeout rejects with "… timed out", so a slow but healthy page read
+          // as a dead browser, the client was dropped, and the next call's start() killed the
+          // running child — the human's tabs and half-filled forms gone, which is worse than the
+          // bug that change was fixing. The browser's own free text is interpolated into
+          // protocol errors too, so any message containing those words misfired the same way.
+          // Unanswered versus refused. 'timed out' is the inner client's own budget expiring,
+          // which says the page was slow, not that the browser died — so it only marks the client
+          // for a probe. Being wrong here costs a two-second check; being wrong about the
+          // browser being dead cost the user their open tabs.
+          if (error instanceof Error && /timed out/.test(error.message)) this.clientSuspect = true
+          if (!client.isAlive()) {
+            // Only THIS call's client. Under concurrency the field may already hold a
+            // connection another call just published, and closing that would kill a healthy one.
+            if (this.client === client) this.client = undefined
+            client.close()
           }
-        throw error
+          throw error
       }
       },
     }
