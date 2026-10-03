@@ -115,18 +115,19 @@ export class BridgeConnection {
       })
       this.queue.push(id)
       const timer = setTimeout(() => {
-        // Only the entry that actually timed out is forgotten. This used to search with
-        // `entry.resolve === resolve`, comparing a wrapper against the original promise
-        // resolver — always -1, so the splice never removed anything and the entry stayed
-        // queued to be handed some LATER request's answer.
-        this.forget(id)
         const error = new Error(`dsh-builtin-browser: bridge timed out after ${timeoutMs}ms`)
-        // An unanswered request desynchronises the stream for an id-less bridge, and leaves
-        // one outstanding for one that echoes ids — either way the next call starts on a
-        // fresh socket. Skipped when the socket has already been replaced: tearing down the
-        // REPLACEMENT because an abandoned request timed out would break the call that is
-        // using it. pending.get(id) still finds this entry: reset() only clears the map.
-        if (this.pending.has(id) && this.socket === socket) this.reset(error)
+        // An unanswered request desynchronises the stream for an id-less bridge, and leaves one
+        // outstanding for one that echoes ids — either way the next call should start on a
+        // fresh socket. Only when THIS request's socket is still the live one: tearing down the
+        // REPLACEMENT because an abandoned request timed out would break whatever is using it.
+        //
+        // This test used to read `this.pending.has(id) && this.socket === socket`, with
+        // `forget(id)` on the line above it — and forget() is what removes the entry that `has`
+        // was looking for, so the condition was false every single time and the rebuild never
+        // ran. A timed-out call therefore left the desynchronised socket in place, and every
+        // later call inherited exactly the ambiguity this reset exists to clear. Deciding
+        // before forgetting is the whole fix; the `else` still drops the stale entry.
+        if (this.socket === socket) this.reset(error)
         else this.forget(id)
         // reset() already rejected this entry through its wrapper when it ran, so this is
         // either the only rejection or a no-op that guarantees the caller settles.

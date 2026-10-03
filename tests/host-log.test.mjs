@@ -41,6 +41,11 @@ test('a silent spawn failure is logged with a timestamp, both paths and entry pr
   assert.match(log, /browser host exited \(code=1 signal=null\)/, 'the exit is recorded')
   assert.match(log, /pid=\d+/, 'the exit line identifies the dying child')
   assert.match(log, /entryExists=true/, 'entry presence is rechecked at exit for comparison with the spawn line')
+  // The line the failure path exists to write. It was unreachable for a while: the dedupe ran
+  // twice and the second run compared against a field the first had just written, so its window
+  // was 0-1ms wide and the test was always true — a child that exits instantly with empty stderr
+  // left nothing in the log at all, which is the one signature this line is meant to expose.
+  assert.match(log, /browser host start failed \(attempt \d+\)/, 'the start failure itself is recorded')
 })
 
 test('every host-log line is dated', async () => {
