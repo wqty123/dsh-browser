@@ -97,6 +97,8 @@ DSH Desktop 上②命中即可用(0.1.18+ 插件自带 electron 包;44+ 二进�
 **Q:如何禁止 agent 乱点?**
 `browser_restrict` 设置白名单(如只允许 `browser_snapshot`/`browser_content`);传空列表解除。注意它是防误操作的**软护栏**,模型可自行解除,不是安全边界。
 
+要一个**模型自己解不掉**的限制,用设置页「Agent 能做什么」的三个开关(执行页面脚本 / 下载文件到磁盘 / 写入登录状态):它们写在设置文档里,而没有任何工具能写那个文档,所以模型只能被拒 —— 这与 `browser_restrict` 的区别不是"谁更强",而是"谁能改"。部署级(对所有人生效)还可以用 `tool-browser` 的 `allowedActions` 配置,见 `cordis.patch.yml` 的注释。
+
 ## 故障排查
 
 | 现象 | 可能原因 | 处理 |

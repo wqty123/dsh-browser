@@ -17,7 +17,7 @@
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_execute` | `script`(必填), `args?` | `{ ok, value? / exception? }` | ✅ | 在页面执行 JS;脚本以 `return` 开头或作为表达式;`args` 以 `arguments[0..n]` 传入。**返回值上限 50 000 字符**,超出时结果里写明"截断于 50 000 / 实际 N 字符"(要完整内容请让表达式返回更小的值) |
+| `browser_execute` | `script`(必填), `args?` | `{ ok, value? / exception? }` | ✅ | 在页面执行 JS;脚本以 `return` 开头或作为表达式;`args` 以 `arguments[0..n]` 传入。**返回值上限 50 000 字符**,超出时结果里写明"截断于 50 000 / 实际 N 字符"(要完整内容请让表达式返回更小的值)。受设置「Agent 能做什么 → 允许在页面里执行脚本」门控,关闭后一律被拒(`BROWSER_EXECUTE_DISABLED`),且没有任何工具能把它打开 |
 | `browser_click` | `target?`(css/text/xpath), `x?`, `y?`(target 与坐标二选一) | `{ clicked }` | ✅ | 语义目标点击:按 `target` 定位、滚动到视口中央再点中心;或视口坐标点击(配合截图做视觉定位) |
 | `browser_type` | `text`(必填), `target?` | `{ typed }` | ✅ | 输入文本;传 `target` 先聚焦该元素(CDP `Input.insertText`) |
 | `browser_key` | `key`(必填,枚举) | `{ pressed }` | ✅ | 按命名按键:Enter/Tab/Escape/Backspace/Delete/方向键/Home/End/PageUp/PageDown/Space |
@@ -51,13 +51,13 @@
 | `browser_history` | `verbose?` | `{ entries[] }` | – | 操作日志(最新在后),含 seq/action/ok/params/result/error。**默认只渲染最近 20 条,且不显示每条的参数**(参数就是你刚发出去的),首行先给总条数,免得把尾部当成全部;要看参数时传 `verbose: true`。返回的完整 `entries[]` 不受条数限制 |
 | `browser_visited` | `limit`(默认 30,上限 200), `domain`(主机名包含匹配), `query`(URL 或标题包含匹配), `session`(按来源会话标签过滤) | `{ count, entries[] }` | – | **持久化浏览历史**(访问过的页面,最新在前):与 cookie 同址落盘(`$DSH_HOME/dsh-builtin-browser-host/history.jsonl`),关闭浏览器与重启 DSH 后仍在;上限 5000 条或 90 天。重开某条用 `browser_open`;与 `browser_history`(会话内操作日志,随会话消失)是两件事;可在设置里关闭记录。渲染时**时间戳精确到分钟**,会话标记**只在切换时打印一次并取 8 位前缀** |
 | `browser_replay` | `seq`(必填) | `{ replayed }` | ✅ | 按序号回放某一步(navigate/execute/click/type/scroll/key) |
-| `browser_download` | `url`(必填), `savePath`(必填) | `{ path }` | ✅ | 带会话 cookie 下载到本地(仅 http(s);`savePath` 必须为绝对路径且位于 `downloadDir` 内——默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`;不覆盖已有文件;上限 256MB,受 CORS 约束;由子进程直接落盘) |
+| `browser_download` | `url`(必填), `savePath`(必填) | `{ path }` | ✅ | 带会话 cookie 下载到本地(仅 http(s);`savePath` 必须为绝对路径且位于 `downloadDir` 内——默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`;不覆盖已有文件;上限 256MB,受 CORS 约束;由子进程直接落盘)。受设置「允许下载文件到磁盘」门控(`BROWSER_DOWNLOAD_DISABLED`) |
 
 ## 登录态与安全
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出/恢复 cookie —— **三种载体都可用**:自托管走原生会话,桌面侧栏与本机 Chrome/Edge 走 CDP 的 `Network.getCookies` / `Storage.setCookies`;flush 返回 cookie 列表,restore 带列表写回。**flush 只导出当前页所属站点的 cookie**(不是整台机器的共享 cookie 罐),范围按本会话所在页面的 URL 收敛;**范围未知时直接拒绝而不是放宽**(自托管侧栏载体报"cookie 范围未知",CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`)。`restored` 反映真的提交了多少(无法构成有效 URL 的 cookie 会被丢弃并报出条数)。**受白名单约束**:`restore` 会向任意域写 cookie,是动作而非观察,因此该工具**不在只读豁免集合**里。设置里「允许读取 cookies / 导出登录状态」关闭时,flush 与 restore **都**抛 `BROWSER_AUTH_DISABLED` |
+| `browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出/恢复 cookie —— **三种载体都可用**:自托管走原生会话,桌面侧栏与本机 Chrome/Edge 走 CDP 的 `Network.getCookies` / `Storage.setCookies`;flush 返回 cookie 列表,restore 带列表写回。**flush 只导出当前页所属站点的 cookie**(不是整台机器的共享 cookie 罐),范围按本会话所在页面的 URL 收敛;**范围未知时直接拒绝而不是放宽**(自托管侧栏载体报"cookie 范围未知",CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`)。`restored` 反映真的提交了多少(无法构成有效 URL 的 cookie 会被丢弃并报出条数)。**受白名单约束**:`restore` 会向任意域写 cookie,是动作而非观察,因此该工具**不在只读豁免集合**里。设置里「允许读取 cookies / 导出登录状态」关闭时,flush 与 restore **都**抛 `BROWSER_AUTH_DISABLED`。导出受设置「凭据」门控(`BROWSER_AUTH_DISABLED`),写入受「允许写入登录状态」门控(`BROWSER_AUTH_WRITE_DISABLED`)—— 两者独立 |
 | `browser_restrict` | `allowed?` | `{ restrictedTo[] }` | – | 设置动作白名单;空列表解除;**只校验名字是否以 `browser_` 开头**(写错的前缀会报错,`browser_typo` 这种拼错但前缀合法的名字会被接受、等同于拦掉该名字,不额外报错);守卫按名字匹配,因此白名单里列什么名字就只放行什么名字。**软护栏**——模型可自行解除,非安全边界 |
 
 ## 截图

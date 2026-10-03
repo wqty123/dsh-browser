@@ -55,4 +55,9 @@
       # To restrict a deployment, replace this with, for example:
       #   config:
       #     allowedActions: [browser_snapshot, browser_a11y, browser_content, browser_click]
+      #
+      # The settings panel's "What the agent may do" switches are a SEPARATE layer with the
+      # same property — the model cannot lift them either — and they need no patch file at
+      # all. The list above restricts every task in a deployment; those three switches
+      # restrict what any task may do on this installation, and need no YAML.
       config: {}

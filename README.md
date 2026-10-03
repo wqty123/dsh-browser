@@ -153,7 +153,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
   <tr>
     <td width="50%" valign="top">
       <h3>设置页里的「浏览器」栏</h3>
-      <p><b>用哪个浏览器</b>(内置 Electron / 本机 Chrome / 本机 Edge / 自动)、历史是否保留、侧栏是否自动展开、会话结束时是否关闭浏览器、是否显示光标、视觉策略、是否允许读取凭据 —— 这些开关都是<b>每次使用时现读</b>,改完即时生效,无需重启。<b>只有两个例外</b>:<code>browser.channel</code>(用哪个浏览器)与 <code>cookies.persist</code>(是否保留 cookies)在插件挂载时读取一次,改完需要<b>重新加载插件</b>(重启 dsh / 刷新页面)才生效。</p>
+      <p><b>用哪个浏览器</b>(内置 Electron / 本机 Chrome / 本机 Edge / 自动)、历史是否保留、侧栏是否自动展开、会话结束时是否关闭浏览器、是否显示光标、视觉策略、是否允许读取凭据 —— 这些开关都是<b>每次使用时现读</b>,改完即时生效,无需重启。<b>只有两个例外</b>:<code>browser.channel</code>(用哪个浏览器)与 <code>cookies.persist</code>(是否保留 cookies)在插件挂载时读取一次,改完需要<b>重新加载插件</b>(重启 dsh / 刷新页面)才生效。栏里另有一组「Agent 能做什么」的动作开关 —— <b>执行页面脚本</b>、<b>下载文件到磁盘</b>、<b>写入登录状态</b> —— 它们与 <code>browser_restrict</code> 不是一回事:后者是模型自己的软护栏,模型随时可以解除;这三项写在设置文档里,<b>没有任何工具能改它</b>,模型只能被拒。</p>
     </td>
     <td width="50%" valign="top">
       <h3>收尾明确</h3>
@@ -177,7 +177,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
 | `browser_wait` | 等待页面加载完成(可选期望 URL / CSS 选择器),返回是否就绪 | – |
 | `browser_snapshot` | 交互元素(输入框/按钮/链接)带编号清单,元素可引用时附 `{#id}` / `{[name=x]}` 定位选择器(穿透同源 iframe 与 Shadow DOM) | – |
 | `browser_a11y` | 无障碍树:每个交互节点的语义角色/名称/值/状态,可引用时附 `{#id}` / `{[name=x]}`;坐标按需(`coords: true`,默认不含;穿透同源 iframe 与 Shadow DOM) | – |
-| `browser_execute` | 在页面执行 JS;参数以 `arguments[0..n]` 传入 | ✅ |
+| `browser_execute` | 在页面执行 JS;参数以 `arguments[0..n]` 传入。受设置「允许在页面里执行脚本」门控,关闭后一律被拒(`BROWSER_EXECUTE_DISABLED`) | ✅ |
 | `browser_visited` | 读取持久化浏览历史(访问过的页面,可按域名过滤/限量);重开用 `browser_open` | – |
 | `browser_content` | 以 html / markdown / txt / json 抓取页面(selector、maxChars、timeoutMs) | – |
 | `browser_click` | 点击:语义目标(`target`: css/text/xpath,滚动到元素并点中心)或视口坐标(配合截图视觉定位) | ✅ |
@@ -203,8 +203,8 @@ node <本仓库路径>/desktop-bridge/install.mjs
 | `browser_reset_session` | 关闭并重建本任务的浏览器会话 | – 豁免 |
 | `browser_history` | 操作日志(最新在后),含成功/失败与结果摘要 | – |
 | `browser_replay` | 按序号回放某一步(navigate/execute/click/type) | ✅ |
-| `browser_download` | 带会话 cookie 下载 HTTP(S) URL 到本地文件(`savePath` 必须绝对路径且位于 `downloadDir` 内,不覆盖已有文件,上限 256MB) | ✅ |
-| `browser_auth` | 导出/恢复 cookie(登录态持久化;**三种载体都可用** —— 自托管走原生会话,侧栏与本机浏览器走 CDP) | ✅ |
+| `browser_download` | 带会话 cookie 下载 HTTP(S) URL 到本地文件(`savePath` 必须绝对路径且位于 `downloadDir` 内,不覆盖已有文件,上限 256MB)。受设置「允许下载文件到磁盘」门控(`BROWSER_DOWNLOAD_DISABLED`) | ✅ |
+| `browser_auth` | 导出/恢复 cookie(登录态持久化;**三种载体都可用** —— 自托管走原生会话,侧栏与本机浏览器走 CDP)。导出受设置「凭据」门控(`BROWSER_AUTH_DISABLED`),写入受「允许写入登录状态」门控(`BROWSER_AUTH_WRITE_DISABLED`);两者独立 | ✅ |
 | `browser_challenge` | 检测人机验证(CAPTCHA / Cloudflare / reCAPTCHA / hCaptcha / Turnstile) | – |
 | `browser_restrict` | 限制允许的浏览器动作(白名单;空列表解除)。**软护栏**,模型可自行解除,非安全边界 | – |
 
@@ -385,7 +385,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 - 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于宿主层,本插件不承诺。
 - `browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;仅允许 HTTP(S) 目标;`savePath` 必须为绝对路径且位于 `downloadDir` 内(默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`,可用 `downloadDir` 覆盖),不覆盖已存在文件;`browser_screenshot` 的 `savePath` 走同一准入门;单文件上限 256MB(流式限流,按 Content-Length 提前拒绝),文件由浏览器子进程直接落盘(临时文件 + 原子改名)。
 - 自托管浏览器的 cookie 在磁盘上以明文存储(Electron 默认行为);需要加密落盘的部署应在宿主层接入系统钥匙串 / DPAPI。
-- `browser_restrict` 是防误操作的**软护栏**,不是安全边界:模型可以自行解除白名单。
+- `browser_restrict` 是防误操作的**软护栏**,不是安全边界:模型可以自行解除白名单。要一个**模型解不掉**的限制,用设置页「Agent 能做什么」的三个动作开关(它们写在设置文档里,没有任何工具能写),或部署级的 `tool-browser` 配置 `allowedActions`(见 `cordis.patch.yml` 的注释)。
 - 页面弹窗(`window.open` / `target=_blank`)不再覆盖当前视图:HTTP(S) 弹窗会在同一会话窗口**新开一个标签页**并计入历史,原页面与 opener 上下文保留;非 HTTP(S) 弹窗(空 URL 弹窗承接、`mailto:`、自定义协议)仍**放行原生窗口**,交给系统处理——这类弹窗不纳入会话模型。
 - `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie)。**三种载体都可用**:自托管走原生会话,侧栏与本机浏览器走 CDP 的 `Network.getCookies` / `Storage.setCookies`。**`flush` 只导出当前页所属站点的 cookie**,不是整台机器的共享 cookie 罐 —— 导出范围按本会话所在页面的 URL 收敛;页面上没有可用的 URL(未知范围)时**直接拒绝**,而不是扩大范围去读全部域(自托管侧栏载体报"无法确定 cookie 范围",CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`);`browser_restrict` 的白名单**也管着 `browser_auth`**,因为 `restore` 是向任意域写 cookie 的动作。
 - 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。新视图创建前会先有界加载 `about:blank`(保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时;子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`,写之前若该文件已超过 2 MiB,则**丢弃旧内容、只写入一行带时间戳的轮转记录**(形如 `<ISO 时间戳> log rotated: previous content exceeded 2097152 bytes and was discarded`)—— 旧内容就此消失,不留副本,但那一行证明"曾发生过轮转",纯 `dsh web` 自托管可据此自助排查崩溃循环。
@@ -469,6 +469,7 @@ npm run build
 | **0.4.1** | 2026-10-02 | **发布**:issue #21 —— **系统浏览器载体(chrome/edge)进程死亡后不重连、不重启**,每条 `browser_*` 挂起 30 秒、只能重启 DSH。启动阶段失败上一轮已处理,但**启动成功之后**的死亡完全没被观察:没有 `exit` 监听,`this.client` 赋值后从不清空,`ensureClient()` 永远返回那条已断开的连接。按两种失败形态分别修:进程死亡 → 全程观察子进程,退出即清缓存、下次调用重新拉起;socket 死亡而进程存活 → 用缓存前先查存活;进程与 socket 都在但命令不再回答 → **命令失败即丢弃客户端**。另外在已关闭的 socket 上发命令改为**立刻失败并说明原因**,而不是等满预算再报一条指向不到真正原因的"超时"。**132/132**,tag `v0.4.1` |
 | 第三十二轮 | 2026-10-03 | **输出成本审计 + 独立验证**(未发布):① **`browser_a11y`**:默认节点数 **500 → 150**、缩进两空格 → 一空格、`states=[…]` 只列非默认项(**没有 `states=` 就是 enabled**)、结尾提示缩短;② **快照与无障碍树给出可引用选择器**:`{#id}` / `{[name=x]}`(此前页面脚本算出来了却被工具层丢掉,而定位工具只接受 css/text/xpath,模型只能猜文本或退回截图),并在输出 schema 里声明该字段(否则 `additionalProperties: false` 会让整个结果被拒 —— 这正是它第一次真实调用时暴露的方式);③ **`browser_content` 上限改为按格式**(html/json 50 000,其余 20 000,`maxChars` 可覆盖),**`json` 不再返回 `{}`**(DOM 节点序列化不出东西)而返回 `{"html":…,"tag":…}`,截断提示说明如何收窄;④ `browser_scrape` 结果改紧凑 JSON;⑤ `browser_execute` 返回值上限 50 000 字符并写明截断;⑥ `browser_history` 默认只展示最近 20 条、不回显参数、首行给总数,`verbose: true` 才带参数(该参数此前声明了没人读);⑦ `browser_visited` 时间戳精确到分钟、会话标记只在变化时打印一次并取 8 位前缀;⑧ **`browser_auth` 的 `flush` 只导出当前页所属站点的 cookie**(此前是整台机器共享的 cookie 罐),**范围未知时拒绝而不是放宽**;`restore` 的条数反映真的提交了多少(`Storage.setCookies` 没有返回值,此前恒为 0,读起来像失败);**`browser_auth` 移出只读集合**——它的 `restore` 向任意域写 cookie,是动作不是观察;⑨ **设置写入原子化**、设置缓存先返回再读文件、浏览历史不再每次导航重写整个文件(到上限后每条导航重写 648 KB,实测 17.5~20.6ms 一次)、`browser_content` 页内脚本的语法错误(四种格式全坏)、`browser_visited` 输出空行、`bridge-connection` 按请求 id 关联应答、`tools/install-web-plugin.mjs` 先确认能修再动 profile。另有**两条无上限的页内等待**(历史:自托管截图/下载,以及 cookie 导出与恢复)补齐超时。**132 → 134** |
 | 第三十三轮 | 2026-10-03 | **系统浏览器载体:崩溃之后真的能用**(未发布):① **一个命令失败不再拆掉整条连接** —— CDP 协议错误意味着浏览器答了并拒绝这一条,连接是健康的;② **重启后清掉的是会话映射**(不只是缓存里的连接与子进程),否则新浏览器收到的每条命令都带着上个进程发放的 session id —— 这就是"重启之后每条调用都失败、永不恢复"的成因;③ **慢页面不是死浏览器**:以错误文本判死活会把 5s/15s 的外层超时当成浏览器死亡,进而杀掉你正在用的窗口(标签与填到一半的表单一起丢),现在状态分三态 —— socket 已关闭 → 丢弃、有应答但拒绝 → 保留、**没有应答 → 标记存疑**,下次调用先用 `Browser.getVersion` 探一次;④ **kill 之后最多等 3 秒它真的退出**(Windows 上 `kill` 是异步的,不等就会把新进程交给旧实例,还把由此产生的秒退误报成"路径不是可运行的浏览器");⑤ **只认本次启动写的 `DevToolsActivePort`**(被杀掉的浏览器没机会清理它,旧文件会让宿主连到别的 Chromium 或 `node --inspect` 上);⑥ **端口发现的回归测试换成真能说 CDP 的夹具**(旧的 `.cmd` 桩在 Windows 上被 Node 拒绝 spawn,三个断言恰好都被一次同步失败满足,CI 一直是绿的而退出处理一次都没跑)。**134/134** |
+| 第三十四轮 | 2026-10-03 | **操作者级动作开关(真正的入口)**:设置页新增「Agent 能做什么」—— **执行页面脚本** / **下载文件到磁盘** / **写入登录状态** 三个开关,关闭即拒绝对应能力(`BROWSER_EXECUTE_DISABLED` / `BROWSER_DOWNLOAD_DISABLED` / `BROWSER_AUTH_WRITE_DISABLED`)。与 `browser_restrict` 的区别是**谁能改**:后者由模型设定、也由模型解除;这三项写在设置文档里,没有任何工具能写它。顺带修正一处读/写混淆:恢复登录态(`browser_auth` restore)原先受**读**开关管、报错还说 "reading cookies is switched off" —— 允许读取的操作者因此无法拒绝写入;现在它归写入开关,读与写可以分别设置。**148 → 157** |
 
 > registry 上的最新版本以顶部 npm 徽章为准(当前 `0.4.1`)。桌面端升级后需重跑一次 `node desktop-bridge/install.mjs`;Web 端无此步骤 —— 详见[更新方式](#更新方式两端不同)。
 
