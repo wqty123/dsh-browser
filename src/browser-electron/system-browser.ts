@@ -592,7 +592,17 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     if (ephemeral !== undefined && this.child !== undefined) {
       // The browser flushes its profile while shutting down, so deleting later avoids
       // racing it. Leftovers are only a stray temp directory, never a live credential.
-      setTimeout(() => { try { rmSync(ephemeral, { recursive: true, force: true }) } catch { /* best effort */ } }, 3_000).unref?.()
+      //
+      // The timer is unref'd, so it never holds the process open — which also means that a
+      // process which exits inside this 3s window (a CLI probe, a DSH restart) leaves the
+      // directory behind for good, silently contradicting the user's "keep no profile"
+      // choice. The exit hook below is the same delete, run synchronously as a last resort;
+      // the callback is idempotent, so whichever runs first wins and the other is a no-op.
+      const removeEphemeral = (): void => {
+        try { rmSync(ephemeral, { recursive: true, force: true }) } catch { /* best effort */ }
+      }
+      setTimeout(removeEphemeral, 3_000).unref?.()
+      process.once('exit', removeEphemeral)
     } else if (ephemeral !== undefined) {
       // Never started, so nothing can be holding it open.
       try { rmSync(ephemeral, { recursive: true, force: true }) } catch { /* best effort */ }

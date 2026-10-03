@@ -9,7 +9,7 @@
  * @module dsh-browser/browser-electron/settings-store
  */
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { BrowserChannel } from './system-browser.js'
@@ -212,7 +212,7 @@ export class SettingsStore {
     const merged = resolveSettings(deepMerge(current as unknown as Record<string, unknown>, patch))
     try {
       mkdirSync(dirname(this.file), { recursive: true })
-      writeFileSync(this.file, `${JSON.stringify(merged, null, 2)}\n`)
+      writeFileAtomic(this.file, `${JSON.stringify(merged, null, 2)}\n`)
     } catch (error) {
       // Do NOT publish the new value as cached, and do not pretend the file changed: a
       // reader compares the file's mtime against this stamp, so stamping "now" on a failed
@@ -226,6 +226,40 @@ export class SettingsStore {
 
     }
     return merged
+  }
+}
+
+/**
+ * Replace a file's contents atomically: write a sibling temporary file, then rename it over
+ * the target.
+ *
+ * `writeFileSync(target, …)` truncates and rewrites in place, so a crash, a full disk or an
+ * antivirus lock in the middle leaves HALF a JSON document. The reader treats an unparseable
+ * file as "all defaults" (by design, so a hand-edit cannot break startup), which silently
+ * flips `credentials.allowRead`, `cookies.persist` and `browser.channel` back to their
+ * defaults — and the next successful update writes those defaults to disk for good.
+ *
+ * The rename is the commit point: a reader sees either the old document or the new one,
+ * never a partial one. It stays in the same directory so the rename is atomic on Windows
+ * as well as POSIX (`renameSync` maps to MoveFileEx there: same-volume replaces are
+ * atomic, cross-volume ones are not supported at all).
+ *
+ * The temporary is written with a unique suffix rather than a fixed `.tmp`, so two writers
+ * (the settings panel and a second DSH process) cannot rename each other's half-written
+ * file into place.
+ * @param file - the target path.
+ * @param contents - the complete new document.
+ */
+function writeFileAtomic(file: string, contents: string): void {
+  const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
+  try {
+    writeFileSync(temporary, contents)
+    renameSync(temporary, file)
+  } catch (error) {
+    // The rename is the commit point, so a failure before it leaves the target untouched —
+    // only the temporary has to go, and it must not be left behind as garbage.
+    try { rmSync(temporary, { force: true }) } catch { /* the temp is already the least of it */ }
+    throw error
   }
 }
 

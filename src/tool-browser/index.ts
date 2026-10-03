@@ -141,6 +141,26 @@ function agentOf(exec: unknown): ExecAgent | undefined {
 }
 
 /**
+ * Read a target's `index`, refusing the values that cannot mean anything.
+ *
+ * The index is looked up in the page (`els[index] ?? null`), so a negative one — `-1`, the
+ * common "give me the last one" shorthand — matches nothing. The page script then treated
+ * that as "not on the page yet" and polled for its whole 10s budget before reporting
+ * "element not found", which reads like a slow page rather than a bad argument. Refusing it
+ * here names the real problem immediately.
+ * @param target - the caller's target, or undefined when there is none.
+ * @returns the index, or undefined to let the page default to 0.
+ */
+function targetIndex(target: { readonly index?: unknown } | undefined): number | undefined {
+  const index = target?.index
+  if (index === undefined) return undefined
+  if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0) {
+    throw new Error(`target.index must be a non-negative integer (got ${JSON.stringify(index)}); it is a 0-based position among the matches, and negative values such as -1 match nothing — pass the position you want, or narrow the selector`)
+  }
+  return index
+}
+
+/**
  * The task key for a tool call: the calling DSH session id, or the shared
  * default key when the call carries no agent context (CLI probes, tests).
  * @param exec - the tool-execution context; only its optional agent id is read.
@@ -255,6 +275,25 @@ function formatSnapshot(snapshot: {
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
   const timeoutMs = config.timeoutMs ?? 60_000
+  /**
+   * Longest wait `browser_wait` may poll for, leaving room for the tool call itself to
+   * finish and report.
+   *
+   * `browser_wait` promises a VERDICT — `{ready:false, reason}` — and the enclosing tool
+   * call aborts at `timeoutMs`. A caller-supplied budget longer than that aborted the call
+   * instead, so the documented verdict never arrived. Clamping to just inside the budget is
+   * what keeps the promise: the polling stops, the reason is returned.
+   */
+  const maxWaitMs = Math.max(250, timeoutMs - 5_000)
+  /**
+   * Most fields `browser_fill` accepts in one batch.
+   *
+   * The batch runs as ONE page evaluation, so hundreds of fields do not produce hundreds of
+   * per-field verdicts — they produce a single evaluate that exceeds the tool budget and
+   * throws, which is the opposite of the documented "per-field failures are reported instead
+   * of throwing". Real forms are far smaller than this; anything larger should be split.
+   */
+  const maxFillFields = 200
   // Per-context state: sessions, in-flight opens, and the restriction are
   // scoped to THIS plugin apply, so parallel contexts never share sessions
   // or leak restrictions into each other.
@@ -557,7 +596,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const result = await browser.waitFor(session, {
-        ...args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {},
+        // Capped so an over-budget argument returns the documented verdict (see maxWaitMs)
+        // rather than aborting the whole tool call.
+        ...args.timeoutMs !== undefined ? { timeoutMs: Math.min(args.timeoutMs, maxWaitMs) } : {},
         ...args.url !== undefined ? { url: args.url } : {},
         ...args.selector !== undefined ? { selector: args.selector } : {},
       }, exec.signal)
@@ -723,12 +764,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (target !== undefined && typeof target.value === 'string' && target.value === '') {
         throw new Error('target.value is empty; pass a css selector, visible text or XPath, or omit target entirely to use x/y')
       }
+      const index = targetIndex(target)
       if (target !== undefined && typeof target.value === 'string' && target.value !== '') {
         await browser.click(session, {
           target: {
             by: (target.by === 'text' || target.by === 'xpath' ? target.by : 'css') as 'css' | 'text' | 'xpath',
             value: target.value,
-            ...target.index !== undefined ? { index: target.index } : {},
+            ...index !== undefined ? { index } : {},
           },
         }, exec.signal)
       } else {
@@ -775,13 +817,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (target !== undefined && typeof target.value === 'string' && target.value === '') {
         throw new Error('target.value is empty; pass a css selector, visible text or XPath, or omit target entirely to use x/y')
       }
+      const index = targetIndex(target)
       if (target !== undefined && typeof target.value === 'string' && target.value !== '') {
         await browser.type(session, {
           text: args.text,
           target: {
             by: (target.by === 'text' || target.by === 'xpath' ? target.by : 'css') as 'css' | 'text' | 'xpath',
             value: target.value,
-            ...target.index !== undefined ? { index: target.index } : {},
+            ...index !== undefined ? { index } : {},
           },
         }, exec.signal)
       } else {
@@ -969,7 +1012,11 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
-      const fields = (args.fields ?? []).map((f: { selector?: string; name?: string; label?: string; placeholder?: string; kind?: string; value?: string }) => {
+      const requested = args.fields ?? []
+      if (requested.length > maxFillFields) {
+        throw new Error(`browser_fill: ${requested.length} fields in one call exceeds the ${maxFillFields}-field limit; split it into several calls so each one can report per-field results instead of timing out as a batch`)
+      }
+      const fields = requested.map((f: { selector?: string; name?: string; label?: string; placeholder?: string; kind?: string; value?: string }) => {
         // A missing value is a caller mistake, not a request to clear the field. Turning
         // it into '' silently unchecks a checkbox or empties a text input while the tool
         // still reports success, so it fails loudly. The schema marks value required, but
@@ -1696,7 +1743,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // empty call returned {restored: 0} and rendered 'Restored 0 cookies.', which
       // reads as success and would leave the caller believing the login was restored.
       if (!Array.isArray(args.cookies) || args.cookies.length === 0) {
-        throw new Error('browser_auth: action "restore" needs a non-empty "cookies" array (get one from action "export" on the same profile)')
+        throw new Error('browser_auth: action "restore" needs a non-empty "cookies" array (get one from action "flush" on the same profile)')
       }
       const list = args.cookies as unknown[]
       const restored = await browser.restoreAuth(session, list as never)

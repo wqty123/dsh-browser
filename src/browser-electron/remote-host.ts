@@ -19,9 +19,11 @@
  * that connection proves knowledge of the random per-spawn token (passed to
  * the child via its stdin (first line, never in argv). A local process that
  * connects to the loopback port without the token can neither impersonate the
- * child nor inject replies — it is disconnected immediately. Commands are
- * only written after the hello authenticates, so a spoofed socket never
- * sees traffic.
+ * child nor inject replies — it is disconnected as soon as its first line
+ * arrives. Commands are only written after the hello authenticates, and every
+ * other inbound op (including the fire-and-forget `userAction` / `viewClosed`
+ * notifications) is dispatched only once that check has passed, so an
+ * unauthenticated peer can neither read traffic nor drive a session.
  * @module dsh-browser/browser-electron/remote-host
  */
 
@@ -523,11 +525,23 @@ class ElectronChildClient {
     })
   }
 
+  /** Drop the "did not authenticate" deadline once it can no longer be meaningful. */
+  private clearHelloTimer(): void {
+    if (this.helloTimer === undefined) return
+    clearTimeout(this.helloTimer)
+    this.helloTimer = undefined
+  }
+
   /** Reject everything in flight, mark the client dead, and notify the host. */
   private fail(err: Error): void {
     if (this.dead) return
     this.dead = true
     this.connected = false
+    // The authentication deadline outlives the socket it was armed for otherwise: it is
+    // keyed on `awaitingHello` alone, so a client that already failed on some other path
+    // kept a live timer until it fired (harmless, but it is a dangling timer in a process
+    // that may be shutting down).
+    this.clearHelloTimer()
     // Tag every failure as "host gone" so the view layer can tell a dead host
     // apart from a page-level error and rebuild against a fresh child.
     const wrapped = err instanceof HostGoneError ? err : new HostGoneError(err.message)
@@ -600,19 +614,34 @@ class ElectronChildClient {
         // Non-protocol line; ignore.
         continue
       }
-      if (msg.op === 'userAction') {
-        // Fire-and-forget notification from the child's own UI (toolbar):
-        // there is no reply and no pending id — route it straight to the
-        // host's user-action handler (which the provider registered).
-        this.onUserAction?.(msg.action as BrowserUserAction)
-        continue
-      }
-      if (msg.op === 'viewClosed') {
-        // Fire-and-forget notification from the child's own UI: the human closed
-        // the window, so the interface that session showed is gone. The provider
-        // decides what that ends — browsing history and login state survive on
-        // disk, only the session itself does not.
-        this.onViewClosed?.(typeof msg.windowId === 'string' ? msg.windowId : '')
+      if (msg.op === 'userAction' || msg.op === 'viewClosed') {
+        // A fire-and-forget notification from the child's own UI (toolbar). These carry no
+        // reply and no pending id, and they hand the provider a session-level verb — so they
+        // are dispatched ONLY once the peer has proved it knows the spawn token.
+        //
+        // They used to be handled before the hello check, while the module comment claimed an
+        // unauthenticated peer "is disconnected immediately … a spoofed socket never sees
+        // traffic". Both were wrong: any loopback process that won the race for the single
+        // accepted socket could inject `viewClosed` and end the human's browser session
+        // before the token check rejected it. Only the loopback interface can connect, so
+        // this is a same-machine race rather than a remote attack — which is exactly the
+        // kind of thing the token exists to close.
+        if (this.awaitingHello) {
+          this.awaitingHello = false
+          this.clearHelloTimer()
+          this.socket?.destroy()
+          this.fail(new Error('dsh-builtin-browser: browser host sent a notification before authenticating'))
+          return
+        }
+        if (msg.op === 'userAction') {
+          // Route it straight to the host's user-action handler (which the provider registered).
+          this.onUserAction?.(msg.action as BrowserUserAction)
+        } else {
+          // The human closed the window, so the interface that session showed is gone. The
+          // provider decides what that ends — browsing history and login state survive on
+          // disk, only the session itself does not.
+          this.onViewClosed?.(typeof msg.windowId === 'string' ? msg.windowId : '')
+        }
         continue
       }
       if (this.awaitingHello) {
@@ -620,10 +649,7 @@ class ElectronChildClient {
         // Anything else (or a wrong token) means a spoofed connection: drop
         // it and fail every pending call rather than trust the line.
         this.awaitingHello = false
-        if (this.helloTimer !== undefined) {
-          clearTimeout(this.helloTimer)
-          this.helloTimer = undefined
-        }
+        this.clearHelloTimer()
         if (msg.op !== 'hello' || msg.token !== this.token) {
           this.socket?.destroy()
           this.fail(new Error('dsh-builtin-browser: browser host authentication failed'))
@@ -675,8 +701,14 @@ class ElectronChildClient {
 
   /** Terminate the child. */
   kill(): void {
+    this.clearHelloTimer()
+    // Kill the child FIRST, then drop the socket. The child's own exit path runs
+    // `app.exit(0)`, which closes its window and flushes the profile; destroying the socket
+    // first makes the terminate race that graceful path, and on Windows the terminate almost
+    // always wins — leaving the profile unflushed on every dispose. The socket is torn down
+    // immediately after either way, so nothing is left to reconnect.
+    try { this.child.kill() } catch { /* already gone */ }
     try { this.socket?.destroy() } catch { /* already closed */ }
-    this.child.kill()
   }
 }
 
@@ -731,6 +763,30 @@ const PROBE_RETRY_MS = (() => {
 })()
 
 /**
+ * Retry schedule for a browser host that will not stay up, in milliseconds, indexed by the
+ * number of consecutive failed starts (see {@link RemoteElectronViewHost.noteStartFailure}).
+ *
+ * The first entry is 0 on purpose: an ordinary one-off death must still heal on the very
+ * next call, which is the behaviour remote-host-recovery.test.mjs pins. From the second
+ * failure on, each attempt is spaced. `available()` can only answer "is there a binary",
+ * so a binary that exists and crashes on every launch (`code=1` with empty stderr) would
+ * otherwise produce an endless crash loop, one window per tool call, with nothing to make
+ * it stop.
+ */
+const START_RETRY_SCHEDULE_MS: readonly number[] = [0, 500, 2_000, 8_000, 30_000]
+
+/** Attempts after which the host stops retrying immediately and keeps the longest delay. */
+const START_FAILURES_MAX = START_RETRY_SCHEDULE_MS.length
+
+/** Two reports within this window describe the same dying child, not two attempts. */
+const START_FAILURE_DEDUPE_MS = 1_000
+
+/** Render a delay for a human-readable log line. */
+function formatDelay(ms: number): string {
+  return ms >= 1_000 ? `${(ms / 1_000).toFixed(1)}s` : `${String(ms)}ms`
+}
+
+/**
  * Self-hosted view host: spawns the plugin's Electron child on first use and
  * keeps it alive until dispose(). Fallback when no desktop shell provides
  * ctx.electronViewHost.
@@ -747,6 +803,12 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   private electronAvailable: boolean | undefined
   /** Earliest time the next probe may run after a negative one. */
   private nextProbeAt = 0
+  /** Consecutive child starts that did not survive; drives {@link startRetryAt}. */
+  private startFailures = 0
+  /** Earliest time `ready()` may spawn another child after a failed start. */
+  private startRetryAt: number | undefined
+  /** When the last start failure was recorded, used to count one death once. */
+  private lastStartFailureAt = 0
   /** Window groups (windowId per view), re-sent on every materialization so
    *  a restarted child still places views in the right windows. */
   private readonly groups = new Map<string, { windowId: string; label?: string }>()
@@ -821,23 +883,88 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
       return gone
     }
     if (this.readyPromise !== undefined) return this.readyPromise
+    // Backoff gate for a host that keeps failing to START (see START_RETRY_SCHEDULE_MS).
+    // The client is undefined exactly when the previous child is gone — a start failure, or
+    // a child that died after it came up — so this only delays restarts, never first use.
+    const retryAt = this.startRetryAt
+    if (retryAt !== undefined && Date.now() < retryAt && this.client === undefined) {
+      const waitMs = retryAt - Date.now()
+      const waiting = Promise.reject(new HostGoneError(
+        `browser host did not start; retrying in ${formatDelay(waitMs)} `
+        + `(attempt ${String(this.startFailures)}${this.startFailures >= START_FAILURES_MAX ? ', start attempts are now spaced out rather than immediate' : ''})`,
+      ))
+      // Keep the rejection observable to callers while marking it handled here: the
+      // fire-and-forget callers that drive this path attach their own handler, but one that
+      // forgets must not turn the recovery gate into an unhandled rejection.
+      waiting.catch(() => undefined)
+      return waiting
+    }
     const started = this.start()
-    const wrapped = started.catch(error => {
-      // A failed startup must not poison the host forever: tear down whatever
-      // was half-created and let the next call retry from scratch.
-      if (this.readyPromise === wrapped) {
-        this.readyPromise = undefined
-        this.client?.kill()
-        this.client = undefined
-        this.server?.close()
-        this.server = undefined
-        this.pendingSocket?.destroy()
-        this.pendingSocket = undefined
-      }
-      throw error
-    })
+    const wrapped = started.then(
+      () => {
+        // A child that came up clears the record: the next death is a new failure, not
+        // another entry in this run of them.
+        this.startFailures = 0
+        this.startRetryAt = undefined
+      },
+      error => {
+        // A failed startup must not poison the host forever: tear down whatever
+        // was half-created and let the next call retry from scratch.
+        if (this.readyPromise === wrapped) {
+          this.readyPromise = undefined
+          this.client?.kill()
+          this.client = undefined
+          this.server?.close()
+          this.server = undefined
+          this.pendingSocket?.destroy()
+          this.pendingSocket = undefined
+        }
+        this.noteStartFailure(error)
+        throw error
+      },
+    )
     this.readyPromise = wrapped
     return wrapped
+  }
+
+  /**
+   * Record one child that did not survive, and set the earliest retry time.
+   *
+   * `available()` answers "is there a binary to spawn" from the FILESYSTEM, and a success
+   * there is cached for the host's lifetime (correctly — rescanning on every tool call was
+   * the bug). That probe therefore cannot see the failure mode where the binary exists and
+   * crashes on every launch: the signature `code=1` with empty stderr that host-log.test.mjs
+   * asserts. Each browser call then spawned a child that died within milliseconds, with no
+   * backoff and nothing that ever gives up — an endless crash loop, each iteration a window
+   * flashing on screen.
+   *
+   * The first retry is immediate, so the ordinary transient death (the DSH restart in
+   * remote-host-recovery.test.mjs) still heals on the very next call. After that the delay
+   * grows: once {@link START_FAILURES_MAX} attempts have failed, every later attempt is
+   * spaced by the table's last entry — the host keeps trying, but a permanently broken
+   * install now costs one spawn per 30s instead of one per tool call. Nothing is marked
+   * dead for good: a repaired installation heals on the next attempt, and `dispose()`
+   * still stops everything immediately.
+   * @param error - what the failed attempt reported.
+   */
+  private noteStartFailure(error: unknown): void {
+    // Count each dying child ONCE. A failing start usually arrives twice — the client's
+    // 'exit' listener (onChildExit) and the rejected readiness call (here) observe the same
+    // death — and counting both would exhaust the schedule in half the failures while the
+    // log showed two attempts. One child cannot die twice within this window, so the second
+    // report for the same death only re-schedules the same retry.
+    const now = Date.now()
+    const repeat = now - this.lastStartFailureAt < START_FAILURE_DEDUPE_MS
+    this.lastStartFailureAt = now
+    if (!repeat) this.startFailures += 1
+    const index = Math.min(this.startFailures, START_RETRY_SCHEDULE_MS.length) - 1
+    const delayMs = START_RETRY_SCHEDULE_MS[index] ?? 0
+    this.startRetryAt = delayMs > 0 ? now + delayMs : undefined
+    const line = `${hostStamp()} browser host start failed (attempt ${String(this.startFailures)}`
+      + `${this.startFailures >= START_FAILURES_MAX ? ', giving up on immediate retries' : ''}): ${String(error)}`
+      + `${delayMs > 0 ? ` — next attempt in ${formatDelay(delayMs)}` : ''}`
+    process.stderr.write(`[dsh-browser host] ${line}\n`)
+    appendHostLog(`${line}\n`)
   }
 
   private async start(): Promise<void> {
@@ -912,6 +1039,10 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     // ever kill it. Only the restart is suppressed, not the cleanup.
     const wasDisposed = this.disposed
     if (!wasDisposed) process.stderr.write('[dsh-browser host] browser host gone; will restart on next use\n')
+    // A child that started and then died is also a failed start, and it is the shape a crash
+    // loop takes (the child comes up far enough to be pending on `ping`, then exits): count
+    // it so the restart is spaced instead of attempted on every single tool call.
+    if (!wasDisposed) this.noteStartFailure('the browser host process exited')
     this.client = undefined
     this.server?.close()
     this.server = undefined

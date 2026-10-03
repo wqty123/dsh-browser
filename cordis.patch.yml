@@ -40,3 +40,21 @@
 
     - id: tool-browser
       name: dsh-builtin-browser/tool-browser
+      # The tool layer's own switches. `config` is what makes them reachable at all: without
+      # it every factory deployment ran on the defaults while the comments below pointed
+      # operators at a plugin-level allow-list that no row could set.
+      #
+      #   allowedActions: an operator-level allow-list of browser tool names, applied to
+      #     every task in the deployment (a task can still restrict itself further with
+      #     browser_restrict). Omit it, or leave it out of this block, to leave the tools
+      #     unrestricted — READ_ONLY_TOOLS plus browser_restrict stay usable either way.
+      #   timeoutMs: the cooperative per-call budget in ms (default 60000).
+      #   tabTools: whether the tab-management tools are registered (default true).
+      #
+      # Example (uncomment to restrict this deployment):
+      # config:
+      #   tabTools: true
+      #   timeoutMs: 60000
+      #   allowedActions: [browser_snapshot, browser_a11y, browser_content, browser_click, browser_type]
+      config:
+        tabTools: true

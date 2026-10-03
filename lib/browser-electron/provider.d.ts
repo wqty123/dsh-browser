@@ -390,8 +390,26 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
      * Chromium drops `Input.*` events for a view with no display surface, so this
      * runs before click/type/key and fails loudly (BROWSER_VIEW_NOT_PRESENTED)
      * rather than reporting a success the page never saw.
+     * @param s - the session whose active view must be presented.
+     * @param signal - optional cancellation.
+     * @returns the view the session's active tab has AFTER the presentation barrier.
      */
     private present;
+    /**
+     * Refuse to send synthesized input to a view that is no longer the one it was located
+     * against.
+     *
+     * `locateHandle` was captured before a page-side locate that can consume its whole
+     * 10s budget; the session's active tab is re-read afterwards. If they differ, the human
+     * switched tabs mid-flight (the product's whole point is that they can take over), and
+     * the coordinates belong to one page while the dispatch would go to another. Comparing
+     * the handles turns that into a loud, retryable error instead of input the caller
+     * believes landed.
+     * @param session - the session id, for the message.
+     * @param locateHandle - the view the locate ran in.
+     * @param liveHandle - the view that is active now.
+     */
+    private assertSameView;
     /**
      * Give the view web focus before synthesizing keyboard input.
      *

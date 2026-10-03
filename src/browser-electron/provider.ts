@@ -850,13 +850,16 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * Chromium drops `Input.*` events for a view with no display surface, so this
    * runs before click/type/key and fails loudly (BROWSER_VIEW_NOT_PRESENTED)
    * rather than reporting a success the page never saw.
+   * @param s - the session whose active view must be presented.
+   * @param signal - optional cancellation.
+   * @returns the view the session's active tab has AFTER the presentation barrier.
    */
-  private async present(s: Session, signal?: AbortSignal): Promise<void> {
+  private async present(s: Session, signal?: AbortSignal): Promise<ElectronViewHandle> {
     const { handle } = this.activeTab(s)
     const present = this.host.presentView?.bind(this.host)
     if (present === undefined) {
       this.showActive(s)
-      return
+      return this.activeTab(s).handle
     }
     signal?.throwIfAborted()
     const timeoutMs = 10_000
@@ -875,6 +878,34 @@ export class ElectronBrowserProvider implements BrowserProvider {
         { cause: error },
       )
     }
+    // Read the active tab AGAIN. `present` is a round-trip that can take up to the budget
+    // above, and the human is invited to drive the same window (a toolbar tab switch, a
+    // closed window) while the agent waits. Chromium answers `Input.*` with success even
+    // for a view that has no display surface, so dispatching to a handle that is no longer
+    // the visible one does not fail — it silently lands nowhere, or on the wrong page.
+    return this.activeTab(s).handle
+  }
+
+  /**
+   * Refuse to send synthesized input to a view that is no longer the one it was located
+   * against.
+   *
+   * `locateHandle` was captured before a page-side locate that can consume its whole
+   * 10s budget; the session's active tab is re-read afterwards. If they differ, the human
+   * switched tabs mid-flight (the product's whole point is that they can take over), and
+   * the coordinates belong to one page while the dispatch would go to another. Comparing
+   * the handles turns that into a loud, retryable error instead of input the caller
+   * believes landed.
+   * @param session - the session id, for the message.
+   * @param locateHandle - the view the locate ran in.
+   * @param liveHandle - the view that is active now.
+   */
+  private assertSameView(session: BrowserSessionId, locateHandle: ElectronViewHandle, liveHandle: ElectronViewHandle): void {
+    if (locateHandle === liveHandle) return
+    throw new BrowserError(
+      `browser: the session's active view changed while the element was being located (session ${session}); the operation was not dispatched — retry it`,
+      'BROWSER_VIEW_CHANGED',
+    )
   }
 
   /**
@@ -1381,7 +1412,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // the page, it is an empty object the caller will read as "no data here" and then
       // retry with other selectors. Serialise the markup instead, which is what a caller
       // asking for JSON of an element can actually use.
-      content = JSON.stringify({ html: root.outerHTML, tag: root.tagName.toLowerCase() })
+      else if (fmt === 'json') content = JSON.stringify({ html: root.outerHTML, tag: root.tagName.toLowerCase() })
       else {
         // markdown: headings, paragraphs, links, lists (best-effort)
         const parts = []
@@ -1436,7 +1467,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
     signal?: AbortSignal,
   ): Promise<void> {
     const s = this.session(session)
-    const { handle } = this.activeTab(s)
+    // The view the locate runs against. It can stop being the session's active view while
+    // the locate waits (see prepareTarget), so every dispatch below re-reads the live one.
+    const locateHandle = this.activeTab(s).handle
     signal?.throwIfAborted()
     let x = 0
     let y = 0
@@ -1470,8 +1503,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
       y = request.y
     }
     // Input.* is only delivered to a view with a current display surface; the
-    // barrier also re-presents after a navigation replaced the renderer.
-    await this.present(s, signal)
+    // barrier also re-presents after a navigation replaced the renderer. It returns the
+    // handle that may still be receiving input when it settles.
+    const handle = await this.present(s, signal)
+    // The locate (up to 10s) and the present barrier both ran against the view captured
+    // earlier; if the human switched tabs meanwhile, these coordinates belong to one page
+    // and the dispatch would go to another — and Chromium answers success either way.
+    if ('target' in request) this.assertSameView(session, locateHandle, handle)
     const timeoutMs = 30_000
     const send = (params: Record<string, unknown>, label: string): Promise<unknown> =>
       withTimeout(
@@ -1498,6 +1536,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // tab" signal, so the bubble is what lets a human follow along without the log.
     this.showCursor(handle, x, y, 'click', 'click', true)
     const release = (): void => {
+      // Back to the handle the PRESS may have landed on, deliberately not to the currently
+      // active tab: this only runs after a failed press/release, and re-targeting a
+      // compensating half of a click to a view the human just switched to would press a
+      // button there. Best-effort either way.
       void handle
         .sendCommand('Input.dispatchMouseEvent', {
           type: 'mouseReleased',
@@ -1537,7 +1579,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
     signal?: AbortSignal,
   ): Promise<void> {
     const s = this.session(session)
-    const { handle } = this.activeTab(s)
+    // The view the locate runs against. It can stop being the session's active view while
+    // the locate waits (the human is invited to drive the same window), so the input below
+    // goes to the handle `present` reports instead of this one.
+    const locateHandle = this.activeTab(s).handle
     signal?.throwIfAborted()
     const hasTarget = 'target' in request
     if (hasTarget) {
@@ -1554,8 +1599,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const text = 'text' in request ? request.text : ''
     const timeoutMs = 30_000
     // Input.insertText goes through the Input domain: same display-surface
-    // requirement as click/key.
-    await this.present(s, signal)
+    // requirement as click/key. It also reports which view is active once the barrier has
+    // settled, which is what makes the tab-switch check below meaningful.
+    const handle = await this.present(s, signal)
+    // Focusing one page and inserting into another is exactly the silent mis-target this
+    // refuses: the element was focused in the located view, and the text would have gone to
+    // whichever page is now visible — possibly a password field there.
+    if (hasTarget) this.assertSameView(session, locateHandle, handle)
     try {
       await withTimeout(
         handle.sendCommand('Input.insertText', { text } satisfies CdpInsertTextParams),
@@ -1679,7 +1729,6 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Press one named key (Enter/Tab/arrows/…) via CDP key events. */
   async key(session: BrowserSessionId, request: BrowserKeyRequest, signal?: AbortSignal): Promise<void> {
     const s = this.session(session)
-    const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
     const spec = KEY_SPECS[request.key]
     if (spec === undefined) {
@@ -1687,8 +1736,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
     }
     const params = { key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.vk, nativeVirtualKeyCode: spec.vk, ...spec.text !== undefined ? { text: spec.text } : {} }
     const timeoutMs = 15_000
-    // Input.dispatchKeyEvent is subject to the same display-surface rule.
-    await this.present(s, signal)
+    // Input.dispatchKeyEvent is subject to the same display-surface rule. The handle comes
+    // back from the presentation barrier rather than from a capture taken before it: this
+    // session is shared with the human, who may switch tabs while the barrier round-trips,
+    // and a key sent to the view they left is silently dropped (or lands on the new page).
+    const handle = await this.present(s, signal)
+    // Focus the SAME view the key is dispatched to; focusing the pre-switch handle would
+    // grant web focus to a page that then receives nothing.
     await this.focusView(handle)
     const release = (): Promise<Record<string, unknown>> =>
       handle.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...params })
@@ -1726,7 +1780,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
       name: f.name ?? null,
       label: f.label ?? null,
       placeholder: f.placeholder ?? null,
-      kind: f.kind ?? 'text',
+      // A field with NO kind is a field with no kind FILTER: absent, not 'text'. Defaulting
+      // it to 'text' here made `if (spec.kind)` above always true, so every unspecified
+      // field was narrowed to an <input> — browser_fill on a <textarea> reported
+      // `no "text" control matched`, and a contenteditable could not match any kind at all.
+      // The value stays a string or null (never undefined): the in-page check tests truthiness,
+      // and JSON drops an undefined member entirely, which is the same thing here.
+      kind: f.kind ?? null,
       value: f.value,
     })))
     const submitFlag = request.submit === true
@@ -1780,7 +1840,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
         let el = els[0]
         // The caller may name a kind. Honor it: the branches below read the element's own
         // tag/type, so without this a selector matching two different controls acted on
-        // whichever came first — usually right, which is what hid the mistake.
+        // whichever came first — usually right, which is what hid the mistake. A field that
+        // names NO kind gets no filter at all: the element's own tag then decides the
+        // branch, which is what "kind defaults to text" was always trying to say.
         if (spec.kind) {
           const matchesKind = (node) => {
             const nodeTag = node.tagName
@@ -1788,6 +1850,12 @@ export class ElectronBrowserProvider implements BrowserProvider {
             if (spec.kind === 'select') return nodeTag === 'SELECT'
             if (spec.kind === 'textarea') return nodeTag === 'TEXTAREA'
             if (spec.kind === 'checkbox' || spec.kind === 'radio') return nodeType === spec.kind
+            // 'text': the plain-value branch covers <input> AND <textarea>, and the batch
+            // already collects [contenteditable="true"] as a settable control — so all three
+            // must match. Requiring nodeTag === 'INPUT' here reported "no text control
+            // matched" for a textarea and left the contenteditable branch below unreachable.
+            if (nodeTag === 'TEXTAREA') return true
+            if (node.isContentEditable === true) return true
             return nodeTag === 'INPUT' && nodeType !== 'checkbox' && nodeType !== 'radio' && nodeType !== 'file'
           }
           const wanted = els.find(matchesKind)
@@ -1910,6 +1978,14 @@ export class ElectronBrowserProvider implements BrowserProvider {
         const by = typeof spec.by === 'string' ? spec.by : 'css'
         const value = String(spec.value ?? '')
         const index = typeof spec.index === 'number' ? spec.index : 0
+        // An index outside the list can never match on a later poll, exactly like a selector
+        // that fails to parse — so it must not look like a miss either. `-1`, the common
+        // "last one" shorthand, otherwise burned the caller's whole locate budget (10s) and
+        // then reported "element not found", which reads like a slow page rather than a bad
+        // argument.
+        if (!Number.isInteger(index) || index < 0) {
+          throw new Error('target.index must be a non-negative integer, got ' + JSON.stringify(spec.index))
+        }
         let els = []
         if (by === 'css') {
           // A selector that does not PARSE can never match on a later poll, so
@@ -2250,12 +2326,21 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const file = resolve(savePath)
     if (this.downloadDir !== undefined) {
       const dir = resolve(this.downloadDir)
-      // Case-insensitive comparison: Windows paths are case-insensitive, and
-      // resolve() does not normalize case. Without this, C:\Users\X\Downloads
-      // and c:\users\x\downloads would be treated as different roots.
-      const dirLower = dir.toLowerCase()
-      const fileLower = file.toLowerCase()
-      if (fileLower !== dirLower && !fileLower.startsWith(dirLower + sep.toLowerCase())) {
+      // Windows paths are case-insensitive and resolve() does not normalize case, so there
+      // the containment check folds case — otherwise C:\Users\X\Downloads and
+      // c:\users\x\downloads would read as different roots. Everywhere else the fold is
+      // REMOVED: a case-sensitive filesystem (Linux) treats /home/u/DOWNLOADS and
+      // /home/u/Downloads as different directories, so folding case there let a savePath
+      // that merely differed in case pass admission — a directory-confinement escape, and
+      // one that mkdirSync below would then happily create.
+      const fold = process.platform === 'win32' ? (value: string): string => value.toLowerCase() : (value: string): string => value
+      const dirKey = fold(dir)
+      const fileKey = fold(file)
+      // The directory ITSELF is refused, not accepted: a save path that IS downloadDir names
+      // a directory, so there is no file to write — and mkdirSync would have created the
+      // directory when it did not exist. Two paths are "inside" only when the file path is
+      // strictly below the directory, which the separator check below already expresses.
+      if (!fileKey.startsWith(dirKey + fold(sep))) {
         throw new BrowserError(`browser: ${kind} savePath must be inside downloadDir "${dir}"`, code)
       }
     }
@@ -2376,14 +2461,25 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // CDP again, for the same reason as the export: any carrier that drives a real
     // browser can set cookies on it. Storage.setCookies needs the cookie fields spelled
     // the CDP way, including the sameSite spelling and seconds rather than milliseconds.
+    //
+    // toCdpCookie returns undefined for a cookie it cannot place (no usable domain), and
+    // `cookies.map(...)` passed that undefined straight through: the array then held a
+    // JSON `null`, CDP rejected the WHOLE call, and every valid cookie failed with an error
+    // naming none of them. Filter the unusable ones out and say how many went.
+    const mapped = cookies.map(toCdpCookie)
+    const convertible = mapped.filter((cookie): cookie is Record<string, unknown> => cookie !== undefined)
+    const dropped = mapped.length - convertible.length
+    if (dropped > 0) {
+      process.stderr.write(`[dsh-browser] restoreAuth: dropped ${dropped} of ${mapped.length} cookie(s) with no usable domain; the rest were still restored\n`)
+    }
     const result = await withTimeout(
-      handle.sendCommand('Storage.setCookies', { cookies: cookies.map(toCdpCookie) }),
+      handle.sendCommand('Storage.setCookies', { cookies: convertible }),
       timeoutMs,
       undefined,
       `browser: auth restore timed out after ${timeoutMs}ms`,
     )
     const restored = toExportedCookies(result.cookies).length
-    this.record(s, 'restoreAuth', { count: cookies.length }, true, { result: `${restored} cookies (CDP)` })
+    this.record(s, 'restoreAuth', { count: cookies.length, dropped }, true, { result: `${restored} cookies (CDP)${dropped > 0 ? `; ${dropped} dropped` : ''}` })
     return restored
   }
 
@@ -2477,7 +2573,12 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (typeof data !== 'string') {
       throw new BrowserError('browser: screenshot returned no image data', 'BROWSER_SCREENSHOT_FAILED')
     }
-    return this.saveScreenshot(data, request?.savePath, 'image/png')
+    // The mime must name the format that was ACTUALLY requested (params.format), not PNG
+    // unconditionally: a carrier that sets supportsCdpJpeg asks for `format: 'jpeg'`, so
+    // hardcoding the PNG mime announced a JPEG body as a PNG — the data URL then carried a
+    // mislabelled image, and a caller that decodes by mime wrote the wrong file.
+    const mime = params.format === 'jpeg' ? 'image/jpeg' : 'image/png'
+    return this.saveScreenshot(data, request?.savePath, mime)
   }
 
   /**

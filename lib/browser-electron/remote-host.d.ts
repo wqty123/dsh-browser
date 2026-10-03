@@ -19,9 +19,11 @@
  * that connection proves knowledge of the random per-spawn token (passed to
  * the child via its stdin (first line, never in argv). A local process that
  * connects to the loopback port without the token can neither impersonate the
- * child nor inject replies — it is disconnected immediately. Commands are
- * only written after the hello authenticates, so a spoofed socket never
- * sees traffic.
+ * child nor inject replies — it is disconnected as soon as its first line
+ * arrives. Commands are only written after the hello authenticates, and every
+ * other inbound op (including the fire-and-forget `userAction` / `viewClosed`
+ * notifications) is dispatched only once that check has passed, so an
+ * unauthenticated peer can neither read traffic nor drive a session.
  * @module dsh-browser/browser-electron/remote-host
  */
 import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle } from './provider.js';
@@ -113,6 +115,12 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
     private electronAvailable;
     /** Earliest time the next probe may run after a negative one. */
     private nextProbeAt;
+    /** Consecutive child starts that did not survive; drives {@link startRetryAt}. */
+    private startFailures;
+    /** Earliest time `ready()` may spawn another child after a failed start. */
+    private startRetryAt;
+    /** When the last start failure was recorded, used to count one death once. */
+    private lastStartFailureAt;
     /** Window groups (windowId per view), re-sent on every materialization so
      *  a restarted child still places views in the right windows. */
     private readonly groups;
@@ -155,6 +163,27 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
      * instead, which those callers already handle.
      */
     private ready;
+    /**
+     * Record one child that did not survive, and set the earliest retry time.
+     *
+     * `available()` answers "is there a binary to spawn" from the FILESYSTEM, and a success
+     * there is cached for the host's lifetime (correctly — rescanning on every tool call was
+     * the bug). That probe therefore cannot see the failure mode where the binary exists and
+     * crashes on every launch: the signature `code=1` with empty stderr that host-log.test.mjs
+     * asserts. Each browser call then spawned a child that died within milliseconds, with no
+     * backoff and nothing that ever gives up — an endless crash loop, each iteration a window
+     * flashing on screen.
+     *
+     * The first retry is immediate, so the ordinary transient death (the DSH restart in
+     * remote-host-recovery.test.mjs) still heals on the very next call. After that the delay
+     * grows: once {@link START_FAILURES_MAX} attempts have failed, every later attempt is
+     * spaced by the table's last entry — the host keeps trying, but a permanently broken
+     * install now costs one spawn per 30s instead of one per tool call. Nothing is marked
+     * dead for good: a repaired installation heals on the next attempt, and `dispose()`
+     * still stops everything immediately.
+     * @param error - what the failed attempt reported.
+     */
+    private noteStartFailure;
     private start;
     /** The child died: tear down so the next use starts a fresh child. */
     private onChildExit;

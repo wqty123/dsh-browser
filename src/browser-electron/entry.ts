@@ -152,15 +152,21 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           `the selected ${channel} is not installed — commands will explain how to fix it`)
       }
     } else {
-      const home = process.env.DSH_HOME ?? homedir()
+      // Same profile root as settings-store, history-store and desktop-bridge-host: the
+      // `?.dsh` component used to be missing HERE only, so a desktop launched from a
+      // shortcut (no DSH_HOME in the environment) put its browser profile in
+      // `C:\Users\<user>\dsh-builtin-browser-host\` while its settings and history lived in
+      // `~/.dsh/dsh-builtin-browser-host/` — two half-profiles that never met, and a
+      // settings panel whose switches appeared not to apply.
+      const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
       // Login state lives in the browser profile, so the cookies setting decides where
       // that profile goes: a stable directory keeps the user signed in across restarts
       // (the point of using their own browser), while turning persistence off gets a
       // throwaway directory that is removed when the browser is released.
       const persist = settings.get().cookies.persist
       const profileDir = persist
-        ? join(home, 'dsh-builtin-browser-host', `${detected.kind}-profile`)
-        : join(home, 'dsh-builtin-browser-host', `${detected.kind}-profile-ephemeral-${randomUUID()}`)
+        ? join(home, BROWSER_PROFILE_DIR, `${detected.kind}-profile`)
+        : join(home, BROWSER_PROFILE_DIR, `${detected.kind}-profile-ephemeral-${randomUUID()}`)
       adopt(new SystemBrowserViewHost(detected, profileDir, [], persist ? undefined : profileDir),
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
@@ -180,6 +186,15 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
 
 /** Route the settings panel reads and writes. */
 const SETTINGS_ROUTE = '/dsh-builtin-browser/settings'
+
+/**
+ * The directory under the DSH home that holds this plugin's browser profile.
+ *
+ * Named once, because every consumer of it must agree: `settingsPath()` and the history
+ * store resolve their own copy from `$DSH_HOME`, and a profile written under a different
+ * root than the settings document is a pair that silently never meets.
+ */
+const BROWSER_PROFILE_DIR = 'dsh-builtin-browser-host'
 
 /** The host web-server surface this plugin uses, described structurally. */
 interface WebServerHost {
