@@ -503,6 +503,9 @@ class ElectronChildClient {
       const line = `${hostStamp()} spawn error: ${String(error)} electron=${electron} hostMain=${this.hostMainPath}`
       process.stderr.write(`[dsh-browser host] ${line}\n`)
       appendHostLog(`${line}\n`)
+      // The cached availability answer is retired by `onExit` below, which this reaches
+      // through fail(): the decision needs the host's view of what is on disk, not the
+      // client's.
       this.fail(new Error(`dsh-builtin-browser: browser host failed to start: ${String(error)}`))
     })
     this.child.on('exit', (code, signal) => {
@@ -862,6 +865,38 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   }
 
   /**
+   * Retire the cached "an Electron binary is here" answer.
+   *
+   * A success is cached for the host's lifetime because rescanning on every tool call was
+   * the original bug — but the probe reads the FILESYSTEM, so it cannot see a binary that
+   * stops being usable afterwards. Only a real spawn attempt can observe that, which is why
+   * the two failure paths in {@link RemoteElectronViewHost.start} call this: the next
+   * `available()` rescans and reports what is actually on disk, instead of advertising a
+   * provider that cannot start.
+   */
+  private forgetBinary(): void {
+    this.electronAvailable = undefined
+    this.nextProbeAt = 0
+  }
+
+  /**
+   * Whether the binary the host would spawn — or the entry it needs — is no longer there.
+   *
+   * Only asked after a launch actually failed, so a healthy path never pays for it. The
+   * entry script counts because Electron exits 1 with empty stderr when it cannot load it,
+   * and resolution itself throws exactly when it can find nothing, which is the same answer.
+   * @returns true when the next `available()` must rescan instead of reusing its cache.
+   */
+  private binaryIsGone(): boolean {
+    if (!existsSync(this.hostMainPath)) return true
+    try {
+      return !existsSync(this.spawnExecutable ?? resolveElectronPath())
+    } catch {
+      return true
+    }
+  }
+
+  /**
    * Ensure the child is up and ready (lazy on first use; restarts after a crash).
    *
    * Never throws synchronously. Callers are fire-and-forget
@@ -1057,6 +1092,14 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     // loop takes (the child comes up far enough to be pending on `ping`, then exits): count
     // it so the restart is spaced instead of attempted on every single tool call.
     if (!wasDisposed) this.noteStartFailure('the browser host process exited')
+    // The cached `available()` answer came from the FILESYSTEM, so only a real attempt can
+    // contradict it. A binary that stops being usable after the probe said yes — an
+    // interrupted reinstall, a removed mount, a wiped cache — kept the provider advertised
+    // as available for the rest of the process's life, because provider selection reads
+    // that same cached yes; every later call then paid a doomed spawn. Both failure routes
+    // (a spawn error, and a child that exits) arrive here, so this is the one place that
+    // observes the loss, and it costs two stats on a path that is already failing.
+    if (this.binaryIsGone()) this.forgetBinary()
     this.client = undefined
     this.server?.close()
     this.server = undefined

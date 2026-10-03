@@ -154,6 +154,26 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
      */
     available(): boolean;
     /**
+     * Retire the cached "an Electron binary is here" answer.
+     *
+     * A success is cached for the host's lifetime because rescanning on every tool call was
+     * the original bug — but the probe reads the FILESYSTEM, so it cannot see a binary that
+     * stops being usable afterwards. Only a real spawn attempt can observe that, which is why
+     * the two failure paths in {@link RemoteElectronViewHost.start} call this: the next
+     * `available()` rescans and reports what is actually on disk, instead of advertising a
+     * provider that cannot start.
+     */
+    private forgetBinary;
+    /**
+     * Whether the binary the host would spawn — or the entry it needs — is no longer there.
+     *
+     * Only asked after a launch actually failed, so a healthy path never pays for it. The
+     * entry script counts because Electron exits 1 with empty stderr when it cannot load it,
+     * and resolution itself throws exactly when it can find nothing, which is the same answer.
+     * @returns true when the next `available()` must rescan instead of reusing its cache.
+     */
+    private binaryIsGone;
+    /**
      * Ensure the child is up and ready (lazy on first use; restarts after a crash).
      *
      * Never throws synchronously. Callers are fire-and-forget
