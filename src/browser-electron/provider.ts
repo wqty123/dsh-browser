@@ -2492,7 +2492,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
       undefined,
       `browser: auth restore timed out after ${timeoutMs}ms`,
     )
-    const restored = toExportedCookies(result.cookies).length
+    // Storage.setCookies returns nothing, so the count comes from what was actually
+    // sent. Reading result.cookies here was always undefined, which rendered as
+    // "Restored 0 cookies." while the write had succeeded.
+    const restored = convertible.length
     this.record(s, 'restoreAuth', { count: cookies.length, dropped }, true, { result: `${restored} cookies (CDP)${dropped > 0 ? `; ${dropped} dropped` : ''}` })
     return restored
   }

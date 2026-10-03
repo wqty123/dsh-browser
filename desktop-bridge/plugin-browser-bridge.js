@@ -101,7 +101,7 @@ async function handle(request) {
     const id = Number(request.id)
     if (!Number.isFinite(id)) throw new Error('cdp requires a numeric id')
     const result = await sendCdp(id, String(request.method ?? ''), request.params)
-    return { ok: true, result }
+    return { ok: true, result, bridgeRequestId: request.bridgeRequestId }
   }
   if (op === 'ensureSidebar') {
     const url = request.url === undefined ? '' : String(request.url)
@@ -313,7 +313,7 @@ async function handle(request) {
       })()`,
       returnByValue: true,
     })
-    return { ok: true, result: folded?.result?.value }
+    return { ok: true, result: folded?.result?.value, bridgeRequestId: request.bridgeRequestId }
   }
   throw new Error(`unknown op ${JSON.stringify(op)}`)
 }
