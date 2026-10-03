@@ -549,6 +549,11 @@ export function apply(ctx: Context, config: Config = {}): void {
           states: [...n.states],
           depth: n.depth,
           tag: n.tag,
+          // The provider computes this and the renderer prints it, but this mapping is an
+          // explicit allow-list rather than a pass-through — so leaving it out here silently
+          // dropped the field between the two, and the tool promised a reference it never
+          // sent. The snapshot mapping lists its selector; this one did not.
+          selector: n.selector,
           x: n.x,
           y: n.y,
           ...n.frame === true ? { frame: true } : {},
