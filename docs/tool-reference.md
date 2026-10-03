@@ -9,7 +9,7 @@
 | `browser_open` | `url`(必填), `newTab?` | 快照(url/title/elements/truncated/challenge) | ✅ | 打开 URL,返回带编号元素的快照;`newTab: true` 在新标签打开 |
 | `browser_wait` | `timeoutMs?`, `url?`, `selector?` | `{ ready, reason }` | – | 等待页面加载完成(可选期望 URL / CSS 选择器);未就绪不抛错,返回原因 |
 | `browser_snapshot` | – | 快照 | – | 交互元素(输入框/按钮/链接)编号清单,供定位与点击;穿透同源 iframe 与 Shadow DOM,iframe 内元素标注 `frame` |
-| `browser_a11y` | `includeHidden?`, `maxNodes?`(10-5000,默认 500) | `{ url, title?, count, nodes[], truncated }` | – | 无障碍树:每个交互节点的 `role`/`name`/`value`/`states`/`depth`/`tag`/坐标;优先 Chrome `computedRole`/`computedName`,穿透同源 iframe 与 Shadow DOM;坐标可直接喂 `browser_click`/`browser_type` |
+| `browser_a11y` | `includeHidden?`, `maxNodes?`(10-5000,默认 150) | `{ url, title?, count, nodes[], truncated }` | – | 无障碍树:每个交互节点的 `role`/`name`/`value`/`states`/`depth`/`tag`/坐标;优先 Chrome `computedRole`/`computedName`,穿透同源 iframe 与 Shadow DOM;坐标可直接喂 `browser_click`/`browser_type` |
 | `browser_content` | `format`(html/markdown/txt/json,必填), `selector?`, `maxChars?`, `timeoutMs?` | `{ content, truncated }` | – | 抓取页面内容;`selector` 限定区域 |
 | `browser_challenge` | – | `{ blocked, kind?, reason?, hint? }` | – | 检测人机验证(CAPTCHA/Cloudflare/reCAPTCHA/hCaptcha/Turnstile);阻塞时请用户处理 |
 

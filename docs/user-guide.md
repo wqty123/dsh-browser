@@ -36,7 +36,7 @@ dsh plugin --profile web add <本仓库路径>
 | `browser-electron` | `viewHost` | 对象 | 可选 | 宿主提供的 `ElectronBrowserViewHost`(通常 `!!js ctx.get('electronViewHost')`)。**不传时插件自己选载体**:桌面端驱动官方侧栏、否则自托管;设置里显式选择的 Chrome/Edge 优先于两者 |
 | `browser-electron` | `httpOnly` | 布尔 | `true` | 仅允许 HTTP(S) 导航;`file:`/`data:` 等拒绝 |
 | `browser-electron` | `snapshotMaxElements` | 数字 | `60` | 快照最多收录的交互元素数 |
-| `browser-electron` | `contentMaxChars` | 数字 | `100000` | 内容抓取默认字符上限 |
+| `browser-electron` | `contentMaxChars` | 数字 | (已废弃) | **不再被读取** —— 上限改为按格式:html 50 000,其余 20 000;单次调用可用 `maxChars` 覆盖 |
 | `browser-electron` | `downloadDir` | 字符串 | 系统下载目录(自动识别 `Downloads`/`下载`/`下載`,或 `XDG_DOWNLOAD_DIR`) | 限定 `browser_download` 与 `browser_screenshot` 保存路径必须位于该目录内且不覆盖已有文件;默认收敛到系统下载目录,可改沙箱目录 |
 | `tool-browser` | `timeoutMs` | 数字 | `60000` | 工具协作超时(ms) |
 | `tool-browser` | `tabTools` | 布尔 | `true` | 是否注册标签管理工具 |
