@@ -895,7 +895,12 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         // the parent's memory or hit the single-line cap. This also avoids
         // Electron's download pipeline entirely (CDP debugger attach can
         // interfere with will-download).
-        const result = await entry.webContentsView.webContents.debugger.sendCommand('Runtime.evaluate', {
+        // Bounded like every other op. The evaluate awaits a page-side fetch, so a slow or
+        // unresponsive server held the serial queue open forever: handle() never settled,
+        // every later op queued behind it, and the parent's plain timeout does not restart
+        // the host.
+        const result = await withTimeout(
+          entry.webContentsView.webContents.debugger.sendCommand('Runtime.evaluate', {
           // Stream the body through a reader so the size cap is enforced as
           // bytes arrive — never buffer an unbounded download into memory
           // before checking the limit (a huge URL would otherwise OOM the
@@ -936,7 +941,10 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
           })()`,
           awaitPromise: true,
           returnByValue: true,
-        })
+          }) as Promise<{ result?: { value?: unknown }; exceptionDetails?: { exception?: { description?: string } } }>,
+          COMMAND_TIMEOUT_MS,
+          'download evaluate',
+        )
         const value = (result as { result?: { value?: unknown } }).result?.value
         if (typeof value !== 'string') {
           const detail = (result as { exceptionDetails?: { exception?: { description?: string } } }).exceptionDetails
@@ -965,7 +973,13 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         if (win === undefined || entry === undefined) throw new Error(`flushAuth: unknown view ${viewId}`)
         // Export the session's cookies so login state can be saved/restored
         // across browser hosts (or shared with another machine).
-        const cookies = await entry.webContentsView.webContents.session.cookies.get({})
+        // Bounded like every other op: a renderer that stops answering here would hold the
+        // serial queue forever, and the parent's plain timeout does not restart the host.
+        const cookies = await withTimeout(
+          entry.webContentsView.webContents.session.cookies.get({}),
+          COMMAND_TIMEOUT_MS,
+          'cookies.get',
+        )
         const exported = cookies.map(c => {
           // Electron types the cookie domain as optional; a missing domain
           // cannot be exported meaningfully, so default to '' (matches the
@@ -999,16 +1013,22 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         let restored = 0
         for (const c of cookies as Array<{ url?: string; name?: string; value?: string; domain?: string; path?: string; secure?: boolean; httpOnly?: boolean; expirationDate?: number }>) {
           if (typeof c.url !== 'string' || typeof c.name !== 'string' || typeof c.value !== 'string') continue
-          await entry.webContentsView.webContents.session.cookies.set({
-            url: c.url,
-            name: c.name,
-            value: c.value,
-            ...typeof c.domain === 'string' ? { domain: c.domain } : {},
-            ...typeof c.path === 'string' ? { path: c.path } : {},
-            ...typeof c.secure === 'boolean' ? { secure: c.secure } : {},
-            ...typeof c.httpOnly === 'boolean' ? { httpOnly: c.httpOnly } : {},
-            ...typeof c.expirationDate === 'number' ? { expirationDate: c.expirationDate } : {},
-          })
+          // Bounded per cookie: this runs once for every cookie, so a single hang held the
+          // serial queue open forever with no path to recovery.
+          await withTimeout(
+            entry.webContentsView.webContents.session.cookies.set({
+              url: c.url,
+              name: c.name,
+              value: c.value,
+              ...typeof c.domain === 'string' ? { domain: c.domain } : {},
+              ...typeof c.path === 'string' ? { path: c.path } : {},
+              ...typeof c.secure === 'boolean' ? { secure: c.secure } : {},
+              ...typeof c.httpOnly === 'boolean' ? { httpOnly: c.httpOnly } : {},
+              ...typeof c.expirationDate === 'number' ? { expirationDate: c.expirationDate } : {},
+            }),
+            COMMAND_TIMEOUT_MS,
+            'cookies.set',
+          )
           restored++
         }
         reply(msg.id, { ok: true, result: { restored } })
