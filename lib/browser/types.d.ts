@@ -468,7 +468,15 @@ export interface BrowserProvider {
     /**
      * Open a new session. The provider mints the session id and prepares its
      * backing surface (a view, a headless page, and so on). Sessions are isolated from
-     * each other; a session must not be visible to any other session's caller.
+     * each other in what they OWN — tabs, the active tab, history, the view — so one
+     * session must not be visible to any other session's caller.
+     *
+     * That isolation stops at the browser's own state, and is not meant to go further:
+     * cookies, logins and site storage are deliberately shared by every session, because
+     * every session drives the same browser and "sign in once, use it everywhere" is the
+     * point of using a real one. Reads that hand that state to a caller (see
+     * `flushAuth`) are scoped to the page in question, which is least exposure rather
+     * than a claim that the jar is per-session.
      * @param label - optional human-readable label (e.g. the calling DSH task
      * id) the provider may surface on the visible surface (window title) so a
      * human can tell which task's page is currently shown.

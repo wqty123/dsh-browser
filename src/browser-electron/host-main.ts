@@ -974,11 +974,12 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         // Export the session's cookies so login state can be saved/restored
         // across browser hosts (or shared with another machine).
         //
-        // Scoped to this view's own page. An unfiltered read returns the WHOLE shared jar —
-        // every domain every task has visited, plus whatever the human is signed into — while
-        // the seam promises sessions are isolated from each other. Views here are built without
-        // a partition, so this filter is what keeps one session's export from being another's
-        // login state. An unknown page refuses rather than widening.
+        // Scoped to this view's own page. The jar is SHARED on purpose: views here are built
+        // without a partition and every window drives the same browser, so signing in once
+        // works everywhere. What must not be shared is the HANDING OVER — an unfiltered read
+        // would put every domain every task has visited, plus whatever the human is signed
+        // into, in front of one task's caller. Least exposure, not isolation. An unknown page
+        // refuses rather than widening.
         //
         // Bounded like every other op: a renderer that stops answering here would hold the
         // serial queue forever, and the parent's plain timeout does not restart the host.
