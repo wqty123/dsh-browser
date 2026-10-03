@@ -339,6 +339,12 @@ export function apply(ctx: Context, config: Config = {}): void {
                 x: { type: 'number', required: true },
                 y: { type: 'number', required: true },
                 frame: { type: 'boolean' },
+                // The page-side script computes this for every element and the tool layer
+                // passes it through. Without it in the schema, a declared
+                // additionalProperties: false rejects the whole result at run time — which is
+                // how this was found, on the very first real call, after a static review had
+                // called the change verified.
+                selector: { type: 'string' },
               },
             },
           },
@@ -407,6 +413,12 @@ export function apply(ctx: Context, config: Config = {}): void {
                 x: { type: 'number', required: true },
                 y: { type: 'number', required: true },
                 frame: { type: 'boolean' },
+                // The page-side script computes this for every element and the tool layer
+                // passes it through. Without it in the schema, a declared
+                // additionalProperties: false rejects the whole result at run time — which is
+                // how this was found, on the very first real call, after a static review had
+                // called the change verified.
+                selector: { type: 'string' },
               },
             },
           },
@@ -474,6 +486,12 @@ export function apply(ctx: Context, config: Config = {}): void {
                 x: { type: 'number', required: true },
                 y: { type: 'number', required: true },
                 frame: { type: 'boolean' },
+                // The page-side script computes this for every element and the tool layer
+                // passes it through. Without it in the schema, a declared
+                // additionalProperties: false rejects the whole result at run time — which is
+                // how this was found, on the very first real call, after a static review had
+                // called the change verified.
+                selector: { type: 'string' },
               },
             },
           },
