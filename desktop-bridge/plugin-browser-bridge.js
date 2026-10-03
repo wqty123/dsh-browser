@@ -394,8 +394,16 @@ export function start() {
           if (typeof request.op !== 'string' || request.op === '') continue
         }
         void handle(request)
-          .then(answer => socket.write(JSON.stringify(answer) + '\n'))
-          .catch(error => socket.write(JSON.stringify({ ok: false, error: String(error?.message ?? error) }) + '\n'))
+          // The request id is stamped HERE, at the single point where every answer is written,
+          // rather than on the handful of returns that happened to remember it.
+          //
+          // The parent matches replies to requests by this id; when it is missing the parent
+          // marks the whole connection id-less and serialisable, which drops every reply back
+          // to arrival order and makes it reject in-flight requests when a second call
+          // arrives. Only two of this bridge's nine reply paths carried the field, so most
+          // operations permanently degraded the connection they used.
+          .then(answer => socket.write(JSON.stringify({ ...answer, bridgeRequestId: request.bridgeRequestId }) + '\n'))
+          .catch(error => socket.write(JSON.stringify({ ok: false, error: String(error?.message ?? error), bridgeRequestId: request.bridgeRequestId }) + '\n'))
       }
     })
     socket.on('error', () => { /* client went away */ })
