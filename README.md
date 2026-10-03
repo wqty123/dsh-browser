@@ -341,7 +341,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 
 | 组件 | 版本 |
 | --- | --- |
-| DeepSeek Harness(dsh) | `0.2.0-rc.2`(peer 声明 `>=0.1.1-rc.2 <0.3.0`) |
+| DeepSeek Harness(dsh) | `0.2.1-alpha.1`(peer 声明 `>=0.1.1-rc.2 <0.3.0`;更早的 `0.2.0-rc.2`、`0.1.x` 亦有实测记录) |
 | Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
 | 本机 Chrome / Edge(可选载体) | `154.0.8037.58` / `154.0.4258.37` |
@@ -349,6 +349,17 @@ node desktop-bridge/install.mjs --revert   # 回滚
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`。**核心链路在 Windows 上完整实测**;系统浏览器的查找已适配 Linux 与 macOS(先查 `PATH`,再查各平台的惯例安装位置,均可用 `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH` 覆盖),但这两个平台上的**端到端链路尚未实测**,暂不承诺。
+
+> **宿主兼容性可以随时复验**:`node scripts/verify-host-compat.mjs` 会用某个 profile 里**真实安装**的
+> `@deepseek-ai/*` 包组装一个宿主,加载本插件的编译产物、经宿主自己的 `defineTool` 注册工具、再用一个
+> 假 provider 真调两个工具(`browser_session` / `browser_a11y`)。它回答的是"DSH 升级有没有把我们弄坏",
+> 不需要启动浏览器。默认读 `$DSH_HOME/profiles` 下的 profile,可用 `DSH_PROFILE` / `DSH_HOME` 指定。
+>
+> **关于预发布版本的 semver 语义**:范围 `>=0.1.1-rc.2 <0.3.0` 在 **semver 默认语义**下不匹配任何带
+> 预发布标签的版本(如 `0.2.1-alpha.1`)—— 这是规范行为,预发布只被"同一 major.minor.patch 元组"的
+> 比较器允许。DSH 判定插件兼容性时用的是 `includePrerelease: true`
+> (`packages/boot/app-boot/src/plugin-compatibility.ts`),因此这些预发布宿主**实际都在范围内**;
+> 若某个外部工具用默认语义得出"不兼容",那是它的语义与 DSH 不同,不是这里的声明写错了。
 
 ## 更新方式(两端不同)
 
@@ -470,6 +481,7 @@ npm run build
 | 第三十二轮 | 2026-10-03 | **输出成本审计 + 独立验证**(未发布):① **`browser_a11y`**:默认节点数 **500 → 150**、缩进两空格 → 一空格、`states=[…]` 只列非默认项(**没有 `states=` 就是 enabled**)、结尾提示缩短;② **快照与无障碍树给出可引用选择器**:`{#id}` / `{[name=x]}`(此前页面脚本算出来了却被工具层丢掉,而定位工具只接受 css/text/xpath,模型只能猜文本或退回截图),并在输出 schema 里声明该字段(否则 `additionalProperties: false` 会让整个结果被拒 —— 这正是它第一次真实调用时暴露的方式);③ **`browser_content` 上限改为按格式**(html/json 50 000,其余 20 000,`maxChars` 可覆盖),**`json` 不再返回 `{}`**(DOM 节点序列化不出东西)而返回 `{"html":…,"tag":…}`,截断提示说明如何收窄;④ `browser_scrape` 结果改紧凑 JSON;⑤ `browser_execute` 返回值上限 50 000 字符并写明截断;⑥ `browser_history` 默认只展示最近 20 条、不回显参数、首行给总数,`verbose: true` 才带参数(该参数此前声明了没人读);⑦ `browser_visited` 时间戳精确到分钟、会话标记只在变化时打印一次并取 8 位前缀;⑧ **`browser_auth` 的 `flush` 只导出当前页所属站点的 cookie**(此前是整台机器共享的 cookie 罐),**范围未知时拒绝而不是放宽**;`restore` 的条数反映真的提交了多少(`Storage.setCookies` 没有返回值,此前恒为 0,读起来像失败);**`browser_auth` 移出只读集合**——它的 `restore` 向任意域写 cookie,是动作不是观察;⑨ **设置写入原子化**、设置缓存先返回再读文件、浏览历史不再每次导航重写整个文件(到上限后每条导航重写 648 KB,实测 17.5~20.6ms 一次)、`browser_content` 页内脚本的语法错误(四种格式全坏)、`browser_visited` 输出空行、`bridge-connection` 按请求 id 关联应答、`tools/install-web-plugin.mjs` 先确认能修再动 profile。另有**两条无上限的页内等待**(历史:自托管截图/下载,以及 cookie 导出与恢复)补齐超时。**132 → 134** |
 | 第三十三轮 | 2026-10-03 | **系统浏览器载体:崩溃之后真的能用**(未发布):① **一个命令失败不再拆掉整条连接** —— CDP 协议错误意味着浏览器答了并拒绝这一条,连接是健康的;② **重启后清掉的是会话映射**(不只是缓存里的连接与子进程),否则新浏览器收到的每条命令都带着上个进程发放的 session id —— 这就是"重启之后每条调用都失败、永不恢复"的成因;③ **慢页面不是死浏览器**:以错误文本判死活会把 5s/15s 的外层超时当成浏览器死亡,进而杀掉你正在用的窗口(标签与填到一半的表单一起丢),现在状态分三态 —— socket 已关闭 → 丢弃、有应答但拒绝 → 保留、**没有应答 → 标记存疑**,下次调用先用 `Browser.getVersion` 探一次;④ **kill 之后最多等 3 秒它真的退出**(Windows 上 `kill` 是异步的,不等就会把新进程交给旧实例,还把由此产生的秒退误报成"路径不是可运行的浏览器");⑤ **只认本次启动写的 `DevToolsActivePort`**(被杀掉的浏览器没机会清理它,旧文件会让宿主连到别的 Chromium 或 `node --inspect` 上);⑥ **端口发现的回归测试换成真能说 CDP 的夹具**(旧的 `.cmd` 桩在 Windows 上被 Node 拒绝 spawn,三个断言恰好都被一次同步失败满足,CI 一直是绿的而退出处理一次都没跑)。**134/134** |
 | 第三十四轮 | 2026-10-03 | **操作者级动作开关(真正的入口)**:设置页新增「Agent 能做什么」—— **执行页面脚本** / **下载文件到磁盘** / **写入登录状态** 三个开关,关闭即拒绝对应能力(`BROWSER_EXECUTE_DISABLED` / `BROWSER_DOWNLOAD_DISABLED` / `BROWSER_AUTH_WRITE_DISABLED`)。与 `browser_restrict` 的区别是**谁能改**:后者由模型设定、也由模型解除;这三项写在设置文档里,没有任何工具能写它。顺带修正一处读/写混淆:恢复登录态(`browser_auth` restore)原先受**读**开关管、报错还说 "reading cookies is switched off" —— 允许读取的操作者因此无法拒绝写入;现在它归写入开关,读与写可以分别设置。**148 → 157** |
+| 第三十五轮 | 2026-10-03 | **DSH 0.2.1 适配(未发布)**:宿主升到 `0.2.1-alpha.1`(相对 rc.2 有 266 个提交),逐项核对插件的宿主依赖面 —— `cordis` 的 `Context`/`Service`(vendor 4.0.5-alpha.1)、`dsh-tools` 的 `defineTool` 与 `DefineToolOptions` 全部字段、`dsh-system-prompt` 的 `section()`、`dsh-llm` 的 `HarnessError`、`schemastery` 的默认导出,以及客户端的 `slots.inject('settings.section')` 与 `locale.register/bind` —— **形状全部未变**(客户端侧与 DSH 官方插件的用法逐字对照)。新增 `scripts/verify-host-compat.mjs`:用 profile 里**真实安装**的 `@deepseek-ai/*` 组装宿主、加载插件编译产物、经宿主的 `defineTool` 注册 34 个工具、再以假 provider 真调 `browser_session` 与 `browser_a11y`,实测**全绿**;`dsh.compatibility.dshReleases` 记入 `0.2.1-alpha.1 = compatible`。另记一处语义坑:该范围在 **semver 默认语义**下不匹配任何预发布版本,而 DSH 用 `includePrerelease: true` 判定,故这些宿主实际都在范围内 |
 
 > registry 上的最新版本以顶部 npm 徽章为准(当前 `0.4.1`)。桌面端升级后需重跑一次 `node desktop-bridge/install.mjs`;Web 端无此步骤 —— 详见[更新方式](#更新方式两端不同)。
 

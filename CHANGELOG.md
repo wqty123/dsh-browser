@@ -4,6 +4,57 @@
 
 ---
 
+# 第三十五轮(2026-10-03,DSH 0.2.1 适配)
+
+**仍未 bump 版本**(与上一条同:随下一次发布生效)。宿主升到 **0.2.1-alpha.1**(相对 `0.2.0-rc.2`
+有 **266 个提交**),所以把插件依赖的宿主 API 面逐项重核了一遍 —— 版本范围写在 `package.json` 里
+只是**声明**,不是证据。
+
+> 第三十三轮(系统浏览器载体的崩溃恢复)与第三十四轮(操作者级动作开关)的明细目前**只在 README 的
+> 更新记录表**里,本文件尚未回填。如实记下这个缺口,不假装这份明细是完整的。
+
+### 一、核对结果:形状全部未变
+
+- **`cordis`**(vendor 4.0.5-alpha.1):`Context` 与 `Service` 都在;插件用的 `ctx.effect`(含 generator
+  形式)、`ctx.get(name)`、`ctx.on` 语义未变。
+- **`@deepseek-ai/dsh-tools`**:`defineTool` 仍在,`DefineToolOptions` 的字段逐个比对 —— `name` /
+  `description` / `parameters` / `output.schema` / `output.render` / `timeoutMs` /
+  `isConcurrencySafe` / `execute` 与插件传入的写法**完全一致**;**参数规格的语义也没变**
+  ("per-property parameter schema compiled to an implicit open object root")。
+- **`@deepseek-ai/dsh-system-prompt`**:`ctx.systemPrompt.section(spec)` 签名未变。
+- **`@deepseek-ai/dsh-llm`**:`HarnessError` 仍是可继承的错误类。
+- **`@deepseek-ai/schemastery`**(vendor 3.18.5-alpha.1):默认导出仍是 schema 构造器。
+- **客户端侧**:`ctx.slots.inject('settings.section', …)` 与 `ctx.slots.register({ name, id, order, label,
+  locale, inject }, Component)` 的形状,与 DSH 0.2.1 自带的客户端插件(`ui-agent-preset`、
+  `ui-settings-account`)**逐字一致**;`ctx.locale.register(NS, { zh, en })` 与 `ctx.locale.bind(NS)` 同理。
+- `ctx.browser` **是插件自己提供的服务**(`dsh-builtin-browser/browser` 那一行),不依赖宿主 —— 这一点
+  值得写下来,因为 DSH 0.2.1 新增了自己的 `ctx.browserUse` 具名槽,两者并存、互不干扰。
+
+### 二、真机验证:新增 `scripts/verify-host-compat.mjs`
+
+把这次的一次性核对沉淀成可复跑的探针:它用某个 profile 里**真实安装**的 `@deepseek-ai/*` 包组装一个
+宿主(profile 的 `package.json` 作为解析根,因此 link 依赖与运行时一致),加载插件的**编译产物**,
+经宿主自己的 `defineTool` 注册工具,再用一个假 provider 真调 `browser_session` 与 `browser_a11y`。
+
+在 `0.2.1-alpha.1` 上实测:**全部通过** —— 34 个工具注册成功、每个工具定义都带合法的 JSON Schema 与
+输出契约、`browser_session` 返回会话、`browser_a11y` 渲染出 `{#id}` 引用选择器。它不覆盖浏览器真正
+启动(这里没有 Electron),也不覆盖面板在真实会话里渲染。
+
+无法解析到 profile 时,探针明确报告"跑不了"并**以 0 退出**:探不到的宿主不等于"不兼容",为此让 CI
+变红是在报告错误的东西。
+
+### 三、两处声明层面的处理
+
+- `dsh.compatibility.dshReleases` 记入 **`0.2.1-alpha.1` = compatible**(这是实测记录,精确版本白名单)。
+- **没有**给 `peerDependencies` / `compatibility.dsh` 的范围打补丁。原因值得记下:范围
+  `>=0.1.1-rc.2 <0.3.0` 在 **semver 默认语义**下**不匹配任何**带预发布标签的版本 —— 规范如此,
+  预发布只被"同一 major.minor.patch 元组"的比较器允许,因此 `0.2.1-alpha.1` 需要一条
+  `>=0.2.1-alpha.1` 这样的分支才认。而 DSH 自己判定插件兼容性用的是 `includePrerelease: true`
+  (`packages/boot/app-boot/src/plugin-compatibility.ts:77`),在这些宿主上**本来就通过**。加那种分支是
+  "按元组打补丁":DSH 每出一条新的预发布线就要再加一段,还会让人以为范围已经覆盖所有预发布。
+  实测确认 `0.2.1-alpha.1` 能在这个宿主上加载运行,所以声明保持原样,把语义写进 README 说明。
+
+---
 # 第三十二轮(2026-10-03,输出成本审计与一次独立验证)
 
 **仍未 bump 版本**(同上一节:随下一次发布生效)。前一半来自一轮"每次调用都在付的输出成本"审计
