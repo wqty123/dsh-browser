@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -43,6 +43,7 @@ test("a replaced browser is usable and does not carry the dead one's session", a
   // reviewer found this by tracing every frame between the host and the fake browser; the
   // "exit listener masks the start() path" explanation I had recorded was only part of it.
   let current = createFakeBrowser()
+  const browsers = [current]
   let port = await current.listen()
   const launches = []
   const children = []
@@ -57,69 +58,151 @@ test("a replaced browser is usable and does not carry the dead one's session", a
   const host = new SystemBrowserViewHost({ kind: 'chrome', path: 'fake-browser' }, profileDir, [], undefined, launcher)
   const view = host.createView()
 
-  // Establish a session FIRST. Without this the views map is empty when the browser dies, so
-  // there is no stale session id for the fix to clear — which is why the old test could not
-  // distinguish a working fix from a broken one.
-  await view.sendCommand('Runtime.evaluate', { expression: '1' })
-  const deadSession = current.sessionId
-  assert.match(deadSession, /^session-/, 'the fake issued a session id')
+  try {
+    // Establish a session FIRST. Without this the views map is empty when the browser dies, so
+    // there is no stale session id for the fix to clear — which is why the old test could not
+    // distinguish a working fix from a broken one.
+    await view.sendCommand('Runtime.evaluate', { expression: '1' })
+    const deadSession = current.sessionId
+    assert.match(deadSession, /^session-/, 'the fake issued a session id')
 
-  // The browser dies the way a closed window ends it, and a replacement appears on a NEW port
-  // with a NEW session id — which is what makes a reused id detectable rather than invisible.
-  await current.kill()
-  current = createFakeBrowser()
-  port = await current.listen()
-  children[0].exitCode = 0
-  children[0].emit('exit', 0, null)
+    // The browser dies the way a closed window ends it, and a replacement appears on a NEW port
+    // with a NEW session id — which is what makes a reused id detectable rather than invisible.
+    await current.kill()
+    current = createFakeBrowser()
+    browsers.push(current)
+    port = await current.listen()
+    children[0].exitCode = 0
+    children[0].emit('exit', 0, null)
 
-  const after = await view.sendCommand('Runtime.evaluate', { expression: '2' }).then(
-    () => undefined,
-    error => String(error.message),
-  )
+    const after = await view.sendCommand('Runtime.evaluate', { expression: '2' }).then(
+      () => undefined,
+      error => String(error.message),
+    )
 
-  assert.doesNotMatch(
-    String(after ?? ''),
-    /Session with given id not found/,
-    `the replacement was sent a session id issued by the dead browser: ${after}`,
-  )
-  assert.notEqual(current.sessionId, deadSession, 'the replacement issued a different session id')
-  assert.ok(launches.length >= 2, `the host launched a replacement (${launches.length} launches)`)
-
-  host.dispose()
-  await current.kill()
-  rmSync(profileDir, { recursive: true, force: true })
+    assert.doesNotMatch(
+      String(after ?? ''),
+      /Session with given id not found/,
+      `the replacement was sent a session id issued by the dead browser: ${after}`,
+    )
+    assert.notEqual(current.sessionId, deadSession, 'the replacement issued a different session id')
+    assert.ok(launches.length >= 2, `the host launched a replacement (${launches.length} launches)`)
+  } finally {
+    // A failing assertion must not leave listening servers behind: the test process would
+    // then never exit, which reads as a hang rather than the failure it actually is.
+    // (Killing an already-closed fake resolves anyway, so this is safe on every path.)
+    host.dispose()
+    for (const browser of browsers) await browser.kill()
+    rmSync(profileDir, { recursive: true, force: true })
+  }
 })
 
-test('the stale port file is not adopted by the next launch', async () => {
+test('a browser that drops its connection without dying does not carry its sessions over', async () => {
+  // The ONE route into a restart that reaches start()'s own cleanup. Every other route clears
+  // the maps somewhere else first: the process exiting is handled by the exit listener, and
+  // dispose() clears them itself — which is why deleting start()'s clearing left this file
+  // green. Here the process stays up and only its debugging connection goes away, so nothing
+  // has cleaned up by the time start() runs.
+  const profileDir = mkdtempSync(join(tmpdir(), 'dsh-dropsocket-'))
+  const { SystemBrowserViewHost } = await import('../lib/browser-electron/system-browser.js')
+
+  const browser = createFakeBrowser()
+  const browserPort = await browser.listen()
+  const launcher = () => {
+    // A replacement process: the port file is written by THIS launch, the way a real browser
+    // writes its own, so the host reconnects to the browser it just started.
+    writeFileSync(join(profileDir, 'DevToolsActivePort'), `${browserPort}\n`)
+    return fakeChild()
+  }
+
+  const host = new SystemBrowserViewHost({ kind: 'chrome', path: 'fake-browser' }, profileDir, [], undefined, launcher)
+  const view = host.createView()
+  try {
+    await view.sendCommand('Runtime.evaluate', { expression: '1' })
+    const droppedSession = browser.sessionId
+    assert.match(droppedSession, /^session-/, 'the fake issued a session id')
+
+    // The connection dies; the process does not.
+    browser.dropConnections()
+
+    // The first call is the one that discovers the connection is dead, so it is allowed to
+    // fail — that is how this carrier decides to rebuild. What matters is what the NEXT call
+    // sends, because that is where a session id from the dropped connection would be replayed.
+    const discovered = await view.sendCommand('Runtime.evaluate', { expression: '2' }).then(() => 'ok', error => String(error.message))
+    const after = await view.sendCommand('Runtime.evaluate', { expression: '3' }).then(() => 'ok', error => String(error.message))
+
+    assert.doesNotMatch(
+      after,
+      /Session with given id not found/,
+      `the reconnected browser was sent a session id issued before the drop (first call: ${discovered})`,
+    )
+    // And it really did recover onto the browser it started: without this half, a host that
+    // never reconnected at all would satisfy the assertion above.
+    assert.equal(after, 'ok', `the host did not recover after the drop: ${after}`)
+    assert.equal(browser.connections, 2, 'the host reconnected exactly once, to the browser it started')
+  } finally {
+    host.dispose()
+    await browser.kill()
+    rmSync(profileDir, { recursive: true, force: true })
+  }
+})
+
+test('the next launch uses the port its own browser wrote, not the stale file', async () => {
   // A killed browser never removes DevToolsActivePort, so after the first restart the file
   // always describes the previous browser. Reading it means connecting to whatever holds that
   // port now — a client this host did not start and cannot kill.
+  //
+  // This case previously asserted only that the stale browser was NOT contacted, which a
+  // discovery loop that never worked at all also satisfies. The positive half — the host
+  // connects to the browser THIS launch produced — is what makes the negative half mean
+  // something, and the launcher below is the only place that can observe the removal itself
+  // rather than its consequences.
   const profileDir = mkdtempSync(join(tmpdir(), 'dsh-staleport-'))
   const { SystemBrowserViewHost } = await import('../lib/browser-electron/system-browser.js')
 
+  const portFile = join(profileDir, 'DevToolsActivePort')
   const first = createFakeBrowser()
   const firstPort = await first.listen()
-  writeFileSync(join(profileDir, 'DevToolsActivePort'), `${firstPort}\n`)
+  writeFileSync(portFile, `${firstPort}\n`)
 
   const second = createFakeBrowser()
   const secondPort = await second.listen()
   const child = fakeChild()
+  /** Whether the previous browser's file was still on disk AT SPAWN TIME. */
+  let staleAtSpawn
   const host = new SystemBrowserViewHost({ kind: 'chrome', path: 'fake-browser' }, profileDir, [], undefined, () => {
-    // Deliberately do NOT write a port file: the only one on disk is the previous browser's.
+    // The fix removes the stale file BEFORE spawning, so it must already be gone here.
+    // Only the freshness check would survive without this observation, which is why
+    // deleting the removal left every assertion green before.
+    staleAtSpawn = existsSync(portFile)
+    // This launch's browser writes ITS OWN port when it comes up, exactly as a real one
+    // does — so both halves of the behaviour are decidable: the stale file is refused, and
+    // the port this process wrote is the one adopted.
+    writeFileSync(portFile, `${secondPort}\n`)
     return child
   })
   const view = host.createView()
-  const outcome = await view.sendCommand('Runtime.evaluate', { expression: '1' }).then(() => 'ok', error => String(error.message))
+  try {
+    const outcome = await view.sendCommand('Runtime.evaluate', { expression: '1' }).then(() => 'ok', error => String(error.message))
 
-  // It must not have connected to the stale port. Either it failed, or it is talking to
-  // something it launched — never to the browser the file names.
-  assert.notEqual(first.sessionId, undefined, 'the first fake is real')
-  const adoptedStale = second.sessionId !== undefined && outcome === 'ok' && firstPort !== secondPort
-  assert.ok(!adoptedStale, `the host used the stale port file to connect (outcome: ${outcome})`)
+    // POSITIVE: the host reached the browser this launch produced.
+    assert.notEqual(secondPort, firstPort, 'the two fakes listen on different ports')
+    assert.equal(outcome, 'ok', `the host must connect to the browser it started (outcome: ${outcome})`)
+    assert.match(String(second.sessionId), /^session-/, 'the browser this launch started is the one that answered')
 
-  host.dispose()
-  child.exitCode = 0
-  await first.kill()
-  await second.kill()
-  rmSync(profileDir, { recursive: true, force: true })
+    // NEGATIVE: the browser the stale file names was never contacted.
+    assert.notEqual(first.sessionId, undefined, 'the first fake is real')
+    assert.equal(first.sessionId, '', 'the host never spoke to the browser named by the stale port file')
+
+    // And the stale file was actually removed, not merely judged stale.
+    assert.equal(staleAtSpawn, false, 'the stale port file was still on disk when the browser was spawned')
+  } finally {
+    // A failing assertion must not leave two listening servers behind: the test process
+    // would then never exit, and a mutation run would hang instead of reporting red.
+    host.dispose()
+    child.exitCode = 0
+    await first.kill()
+    await second.kill()
+    rmSync(profileDir, { recursive: true, force: true })
+  }
 })

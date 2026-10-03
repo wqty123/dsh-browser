@@ -6,15 +6,20 @@
 // is a minimal CDP server: it speaks enough of the protocol to hand out a target and a
 // session, it can be killed, and it can come back on a new port, which is what the carrier
 // has to cope with.
+//
+// Sessions belong to the CONNECTION that created them, as they do in CDP: a page attached
+// over one WebSocket is not addressable from another. Modelling that is what makes a stale
+// session id detectable after a dropped connection instead of accidentally still valid.
 import { randomUUID } from 'node:crypto'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 
 /** The subset of CDP this plugin needs: create a target, attach to it. */
 function createFakeBrowser() {
-  /** One page, with an id and a session id that change with every launch. */
-  let targetId = ''
-  let sessionId = ''
+  /** The last session id handed out, for a test to observe. */
+  let lastSessionId = ''
+  /** Debugging connections accepted so far: a drop plus a reconnect is two. */
+  let connections = 0
 
   const server = createServer((request, response) => {
     if (request.url === '/json/version') {
@@ -34,6 +39,10 @@ function createFakeBrowser() {
     socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' + `Sec-WebSocket-Accept: ${accept}\r\n\r\n`)
     sockets.add(socket)
     socket.on('close', () => sockets.delete(socket))
+    // This connection's own CDP state: a page attached here is addressable here and nowhere
+    // else, so an id issued before a drop is rejected afterwards rather than quietly reused.
+    connections += 1
+    const state = { targetId: '', sessionId: '' }
     // Frames can be split across chunks, so accumulate until a whole one is present:
     // decoding chunk by chunk truncated the JSON and looked like a protocol failure.
     let buffered = Buffer.alloc(0)
@@ -48,26 +57,27 @@ function createFakeBrowser() {
         } catch {
           continue
         }
-        const reply = handleCommand(message)
+        const reply = handleCommand(message, state)
         if (reply !== undefined) socket.write(encodeFrame(JSON.stringify(reply)))
       }
     })
   })
 
   /** Answer the two commands the carrier sends, on the live target. */
-  function handleCommand(message) {
+  function handleCommand(message, state) {
     if (message.id === undefined) return undefined
     if (message.method === 'Target.createTarget') {
-      targetId = `target-${randomUUID()}`
-      return { id: message.id, result: { targetId } }
+      state.targetId = `target-${randomUUID()}`
+      return { id: message.id, result: { targetId: state.targetId } }
     }
     if (message.method === 'Target.attachToTarget') {
-      sessionId = `session-${randomUUID()}`
-      return { id: message.id, result: { sessionId } }
+      state.sessionId = `session-${randomUUID()}`
+      lastSessionId = state.sessionId
+      return { id: message.id, result: { sessionId: state.sessionId } }
     }
     // Every page command goes to the current session; a stale one is a protocol error,
     // which is exactly the failure H3 produced.
-    if (message.sessionId !== undefined && message.sessionId !== sessionId) {
+    if (message.sessionId !== undefined && message.sessionId !== state.sessionId) {
       return { id: message.id, sessionId: message.sessionId, error: { message: 'Session with given id not found.' } }
     }
     return { id: message.id, sessionId: message.sessionId, result: {} }
@@ -75,11 +85,22 @@ function createFakeBrowser() {
 
   return {
     get port() { return server.address().port },
-    get targetId() { return targetId },
-    get sessionId() { return sessionId },
+    get sessionId() { return lastSessionId },
+    get connections() { return connections },
     async listen() {
       await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
       return server.address().port
+    },
+    /**
+     * Drop every live debugging connection while the process stays up.
+     *
+     * This is the failure the exit listener cannot see, and therefore the one that reaches
+     * `start()`'s own cleanup: a browser that closed its debugging endpoint, or a socket the
+     * OS tore down. Nothing has cleared the view and session maps by the time it happens.
+     */
+    dropConnections() {
+      for (const socket of sockets) socket.destroy()
+      sockets.clear()
     },
     /** Kill it the way a closed window ends: sockets drop, the port stops answering. */
     async kill() {
