@@ -3,7 +3,7 @@
 // file — and the default download directory must honor localized names.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -133,4 +133,63 @@ test('a localized (Chinese) download directory works, explicitly and via XDG_DOW
     if (previous === undefined) delete process.env.XDG_DOWNLOAD_DIR
     else process.env.XDG_DOWNLOAD_DIR = previous
   }
+})
+
+// The containment check was TEXTUAL, and a symlink is exactly what a textual check
+// cannot see: `resolve()` normalizes `..` but never follows a link, so a link inside
+// the directory that pointed outside it passed every test the gate had and the write
+// landed outside. (M5's residue — the download sandbox resolved no real paths.)
+test('a link inside downloadDir cannot be used to write outside it', async t => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-link-'))
+  const dir = join(base, 'dl')
+  const outside = join(base, 'outside')
+  mkdirSync(dir)
+  mkdirSync(outside)
+  const link = join(dir, 'out')
+  try {
+    // A junction on Windows needs no privilege (a file symlink does, and requiring one
+    // would make this skip on every default install); POSIX ignores the type argument.
+    symlinkSync(outside, link, 'junction')
+  } catch (error) {
+    // Saying "skipped" is honest. Passing as though the case ran is not.
+    t.skip(`this environment cannot create a link: ${error.message}`)
+    return
+  }
+
+  const p = new ElectronBrowserProvider(makeHost(), { downloadDir: dir })
+  const sid = await p.open()
+  await assert.rejects(
+    () => p.screenshot(sid, { savePath: join(link, 'escaped.png') }),
+    /resolves outside downloadDir/,
+  )
+  assert.equal(existsSync(join(outside, 'escaped.png')), false, 'nothing was written through the link')
+  await p.close(sid)
+})
+
+// `existsSync` follows links, so a DANGLING one read as "this name is free" — and the
+// write then created the link's target, outside the admitted directory whenever the
+// link pointed out of it. The directory entry is what has to be free, not its target.
+test('a dangling link is refused rather than followed out of the directory', async t => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-dangling-'))
+  const dir = join(base, 'dl')
+  mkdirSync(dir)
+  const target = join(base, 'never-written.png')
+  const link = join(dir, 'shot.png')
+  try {
+    symlinkSync(target, link, 'file')
+  } catch (error) {
+    // Needs SeCreateSymbolicLinkPrivilege on Windows (developer mode or an elevated
+    // shell); Linux and macOS allow it for any user.
+    t.skip(`this environment cannot create a file symlink: ${error.message}`)
+    return
+  }
+
+  const p = new ElectronBrowserProvider(makeHost(), { downloadDir: dir })
+  const sid = await p.open()
+  await assert.rejects(
+    () => p.screenshot(sid, { savePath: link }),
+    /refusing to overwrite existing file/,
+  )
+  assert.equal(existsSync(target), false, 'the link target was not created')
+  await p.close(sid)
 })

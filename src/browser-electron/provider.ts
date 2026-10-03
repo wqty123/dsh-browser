@@ -8,7 +8,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { HistoryStore, type VisitedPage } from './history-store.js'
@@ -522,6 +522,57 @@ function defaultDownloadDir(): string {
     if (existsSync(candidate)) return candidate
   }
   return join(homedir(), DOWNLOAD_DIR_NAMES[0] ?? 'Downloads')
+}
+
+/**
+ * Whether a directory entry exists at `path`, judging the ENTRY rather than what it
+ * points at.
+ *
+ * `existsSync` follows links, so a DANGLING symlink — a link whose target does not
+ * exist — reads as "nothing here", and a write to that path creates the target
+ * instead: outside `downloadDir` whenever the link points out of it. `lstatSync`
+ * sees the link itself, which is the only correct answer to "is this name free".
+ * @param path - the path to judge.
+ * @returns true when any entry (file, directory, link) occupies the name.
+ */
+function entryExists(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The real path of the deepest existing ancestor of `path` — `path` itself when it
+ * exists, otherwise the nearest directory above it that does.
+ *
+ * `resolve()` normalizes `..` but never follows a link, so nothing textual can tell
+ * that `<downloadDir>/link/x.png` leaves the directory through `link`. The first
+ * ancestor that exists (judged by lstat, so a dangling link counts — the write would
+ * go through it) is the last component whose real location still determines where
+ * the bytes land, so that is the one to resolve and check.
+ * @param path - an absolute path that may not exist yet.
+ * @returns the resolved real path of its deepest existing ancestor.
+ */
+function realAncestorOf(path: string): string {
+  let current = path
+  for (let depth = 0; depth < 64; depth += 1) {
+    if (entryExists(current)) {
+      try {
+        return realpathSync(current)
+      } catch {
+        // The entry vanished between the two calls, or cannot be resolved: the
+        // textual path is the best available answer, and the write reports the rest.
+        return current
+      }
+    }
+    const parent = dirname(current)
+    if (parent === current) return current
+    current = parent
+  }
+  return current
 }
 
 /**
@@ -2371,11 +2422,38 @@ export class ElectronBrowserProvider implements BrowserProvider {
       if (!fileKey.startsWith(dirKey + fold(sep))) {
         throw new BrowserError(`browser: ${kind} savePath must be inside downloadDir "${dir}"`, code)
       }
+      // The check above is textual, and a symlink defeats it: resolve() normalizes `..`
+      // but never follows a link, so `<downloadDir>/out/x.png` passed every test above
+      // while `out` pointed at a directory outside the gate — and the write then landed
+      // there. Resolve the REAL location of the deepest existing ancestor (which is what
+      // decides where the bytes go) and require it to be inside the real directory too.
+      // A legitimate path is unaffected: its ancestor resolves to the directory itself.
+      //
+      // The directory is created first so that it can be resolved at all — mkdirSync is a
+      // no-op for one that already exists — and a directory that cannot be created or
+      // resolved falls back to its textual form, leaving the real filesystem error to the
+      // write instead of inventing one here.
+      let realDir: string
+      try {
+        mkdirSync(dir, { recursive: true })
+        realDir = fold(realpathSync(dir))
+      } catch {
+        realDir = fold(dir)
+      }
+      const realAncestor = fold(realAncestorOf(file))
+      if (realAncestor !== realDir && !realAncestor.startsWith(realDir + fold(sep))) {
+        throw new BrowserError(`browser: ${kind} savePath resolves outside downloadDir "${dir}" (a symlink leaves it)`, code)
+      }
     }
     // Never replace an existing file: its previous content is unrecoverable,
     // and the admitted directory may hold files the human put there. A new
     // name is one tool call away.
-    if (existsSync(file)) {
+    //
+    // Judged with lstat (see {@link entryExists}), not existsSync: existsSync FOLLOWS
+    // links, so a DANGLING symlink read as "nothing here" and the write below created
+    // its target — outside the directory whenever the link pointed out of it. It is the
+    // directory entry that has to be free, whatever that entry points at.
+    if (entryExists(file)) {
       throw new BrowserError(`browser: refusing to overwrite existing file "${file}" — use another name`, code)
     }
     return file
