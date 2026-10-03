@@ -25,9 +25,19 @@
  * @module dsh-browser/browser-electron/system-browser
  */
 
-import { readFileSync, rmSync } from 'node:fs'
+import { readFileSync, rmSync, statSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+
+/**
+ * How long a killed browser is given to actually exit before the launch proceeds.
+ *
+ * `kill()` only sends the signal — on Windows it is TerminateProcess, which is asynchronous —
+ * and the browser may hold this profile's singleton lock for a while afterwards. Spawning
+ * immediately meant the replacement saw a live instance, handed its command line over and
+ * exited, and that exit was reported as a bad browser path.
+ */
+const EXIT_GRACE_MS = 3_000
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
@@ -437,7 +447,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // --user-data-dir. On Windows the new one would merely hand off to it and exit, and that
     // exit would then be treated as the launch failing.
     if (this.child !== undefined) {
-      try { this.child.kill() } catch { /* already gone */ }
+      const dying = this.child
+      try { dying.kill() } catch { /* already gone */ }
       this.child = undefined
 
       // Whatever the old browser issued is worthless now, and its exit listener cannot clean
@@ -448,7 +459,27 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       this.client = undefined
       this.views.clear()
       this.sessions.clear()
+
+      // Wait for it to actually die. kill() only sends the signal: on Windows it is
+      // TerminateProcess, which is asynchronous, and the browser may still hold this profile's
+      // singleton lock for a while. Spawning immediately meant the replacement saw an existing
+      // instance, handed its command line over and exited — and that exit was then reported as
+      // "check that the path is a runnable browser", blaming the user's install for a race this
+      // code created. Bounded, because a process that refuses to die must not hang the call.
+      await new Promise<void>(resolve => {
+        if (dying.exitCode !== null || dying.signalCode !== null) { resolve(); return }
+        const done = (): void => { clearTimeout(timer); resolve() }
+        const timer = setTimeout(done, EXIT_GRACE_MS)
+        dying.once('exit', done)
+      })
     }
+    // The port file belongs to the browser that just died, and it is NOT removed when the
+    // process is killed: nothing gives a terminated browser a chance to clean up. The launch
+    // loop below reads it to learn the port, so a stale file means connecting to whatever else
+    // holds that port — or to the previous instance — and publishing a client this host does
+    // not own and dispose() can never kill.
+    try { rmSync(join(this.profileDir, 'DevToolsActivePort'), { force: true }) } catch { /* nothing to remove */ }
+    const spawnedAt = Date.now()
     let child: ReturnType<typeof spawn>
     try {
       child = spawn(this.browser.path, args, { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false })
@@ -483,6 +514,24 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       this.sessions.clear()
     })
     const portFile = join(this.profileDir, 'DevToolsActivePort')
+    /**
+     * The port this launch wrote, or undefined while it has not written one yet.
+     *
+     * A file left by the PREVIOUS browser is not evidence about this one. Its contents
+     * name a port that may now belong to something else entirely — another Chromium, a
+     * node --inspect — and connecting there publishes a client this host does not own and
+     * dispose() can never kill. Only a file written after the spawn counts.
+     */
+    const freshPort = (): number | undefined => {
+      try {
+        if (!existsSync(portFile)) return undefined
+        if (statSync(portFile).mtimeMs < spawnedAt) return undefined
+        const value = Number(readFileSync(portFile, 'utf8').split('\n')[0]?.trim() ?? '')
+        return Number.isInteger(value) && value > 0 ? value : undefined
+      } catch {
+        return undefined
+      }
+    }
     const deadline = Date.now() + 30_000
     /**
      * Why the loop stopped, so the failure can say what actually happened. Reporting
@@ -500,10 +549,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       if (launchError !== undefined) { if (this.child === child) this.child = undefined; stopped = 'launch-failed'; break }
       if (Date.now() > deadline) { child.kill(); if (this.child === child) this.child = undefined; stopped = 'timeout'; break }
       if (child.exitCode !== null) { if (this.child === child) this.child = undefined; stopped = 'exited'; break }
-      if (existsSync(portFile)) {
+      // Only a port THIS launch wrote: reading whatever file happened to be there is how a
+          // restart could adopt the previous browser, or any process now holding that port.
+          const port = freshPort()
+          if (port !== undefined) {
         try {
-          const port = readFileSync(portFile, 'utf8').split('\n')[0]?.trim() ?? ''
-          if (port !== '') {
             const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json() as { webSocketDebuggerUrl?: string }
             if (typeof version.webSocketDebuggerUrl === 'string') {
               const client = new CdpClient(version.webSocketDebuggerUrl)
@@ -514,7 +564,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
               this.client = client
               return client
             }
-          }
         } catch {
           // The file can exist a moment before the port answers; poll again.
         }
