@@ -119,7 +119,7 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
     private startFailures;
     /** Earliest time `ready()` may spawn another child after a failed start. */
     private startRetryAt;
-    /** When the last start failure was recorded, used to count one death once. */
+    /** When the last start failure was reported, used to keep one death to one log line. */
     private lastStartFailureAt;
     /** Window groups (windowId per view), re-sent on every materialization so
      *  a restarted child still places views in the right windows. */

@@ -133,7 +133,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
   <tr>
     <td width="50%" valign="top">
       <h3>安全限制</h3>
-      <p><code>browser_restrict</code> 限制允许的浏览器动作(白名单),防止 agent 误点、误导航;只读工具(snapshot / a11y / content / scrape / screenshot / get_value / challenge / list_tabs / session / history / visited / auth)加上「解除限制 / 复位会话」几个永远豁免,不受白名单影响。</p>
+      <p><code>browser_restrict</code> 限制允许的浏览器动作(白名单),防止 agent 误点、误导航;只读工具(snapshot / a11y / content / scrape / screenshot / get_value / wait / challenge / list_tabs / session / history / visited)加上「解除限制 / 复位会话」几个永远豁免,不受白名单影响。</p>
     </td>
     <td width="50%" valign="top">
       <h3>截图即存即读</h3>
@@ -198,9 +198,9 @@ node <本仓库路径>/desktop-bridge/install.mjs
 | `browser_list_tabs` | 当前会话的标签列表 | – |
 | `browser_switch_tab` | 按 id 切换标签(自托管下同步切换可见视图) | ✅ |
 | `browser_close_tab` | 按 id 关闭标签;关闭活动标签后激活下一个 | ✅ |
-| `browser_reset` | 关闭本任务所有标签,回到一个空白标签 | ✅ |
+| `browser_reset` | 关闭本任务所有标签,回到一个空白标签 | – 豁免 |
 | `browser_session` | 查看本任务的浏览器会话与标签 | – |
-| `browser_reset_session` | 关闭并重建本任务的浏览器会话 | ✅ |
+| `browser_reset_session` | 关闭并重建本任务的浏览器会话 | – 豁免 |
 | `browser_history` | 操作日志(最新在后),含成功/失败与结果摘要 | – |
 | `browser_replay` | 按序号回放某一步(navigate/execute/click/type) | ✅ |
 | `browser_download` | 带会话 cookie 下载 HTTP(S) URL 到本地文件(`savePath` 必须绝对路径且位于 `downloadDir` 内,不覆盖已有文件,上限 256MB) | ✅ |
@@ -208,7 +208,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
 | `browser_challenge` | 检测人机验证(CAPTCHA / Cloudflare / reCAPTCHA / hCaptcha / Turnstile) | – |
 | `browser_restrict` | 限制允许的浏览器动作(白名单;空列表解除)。**软护栏**,模型可自行解除,非安全边界 | – |
 
-> 「守卫」列:打 ✅ 的动作受 `browser_restrict` 白名单约束;**「– 豁免」的工具无论白名单怎么写都不拦截**;**「–」表示只观察、本来就不做动作,因此没有可拦的东西**。豁免集合来自 `READ_ONLY_TOOLS`(`src/tool-browser/index.ts`):`snapshot` / `a11y` / `content` / `scrape` / `screenshot` / `get_value` / `wait` / `challenge` / `list_tabs` / `session` / `history` / `visited` / `auth`,外加 `restrict`(白名单本身必须能解除,否则一旦限制到空就再也出不来)、`reset_session`、`reset`(从崩死状态恢复)。`browser_close_tab` **不在**豁免集合里,与 `open`/`click`/`switch_tab` 一样可被限制。
+> 「守卫」列:打 ✅ 的动作受 `browser_restrict` 白名单约束;**「– 豁免」的工具无论白名单怎么写都不拦截**;**「–」表示只观察、本来就不做动作,因此没有可拦的东西**。豁免集合来自 `READ_ONLY_TOOLS`(`src/tool-browser/index.ts`):`snapshot` / `a11y` / `content` / `scrape` / `screenshot` / `get_value` / `wait` / `challenge` / `list_tabs` / `session` / `history` / `visited`,外加 `restrict`(白名单本身必须能解除,否则一旦限制到空就再也出不来)、`reset_session`、`reset`(从崩死状态恢复)。`browser_close_tab` **不在**豁免集合里,与 `open`/`click`/`switch_tab` 一样可被限制;`browser_auth` 同样不在(它的 `restore` 会向任意域写 cookie,是动作而非观察)。
 
 ### 等待页面就绪
 

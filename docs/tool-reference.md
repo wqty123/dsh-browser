@@ -1,6 +1,6 @@
 # 工具参考
 
-全部 34 个 `browser_*` 工具。守卫列:✅ 表示该动作受 `browser_restrict` 白名单约束;**「– 豁免」表示无论白名单怎么写都不拦截**(豁免集合为 `READ_ONLY_TOOLS`,`src/tool-browser/index.ts` 导出:**只观察的工具** —— `snapshot`/`a11y`/`content`/`scrape`/`screenshot`/`get_value`/`wait`/`challenge`/`list_tabs`/`session`/`history`/`visited`/`auth` —— 加上 **解除限制 / 从坏状态恢复的工具** `restrict`/`reset_session`/`reset`;`restrict` 在其中,否则限制到空的任务再也解不开);**「–」表示该工具只观察、不做动作**,故没有可拦的东西。两者之外的工具都受白名单约束 —— 例如 `browser_close_tab` 不属于豁免集合。
+全部 34 个 `browser_*` 工具。守卫列:✅ 表示该动作受 `browser_restrict` 白名单约束;**「– 豁免」表示无论白名单怎么写都不拦截**(豁免集合为 `READ_ONLY_TOOLS`,`src/tool-browser/index.ts` 导出:**只观察的工具** —— `snapshot`/`a11y`/`content`/`scrape`/`screenshot`/`get_value`/`wait`/`challenge`/`list_tabs`/`session`/`history`/`visited` —— 加上 **解除限制 / 从坏状态恢复的工具** `restrict`/`reset_session`/`reset`;`restrict` 在其中,否则限制到空的任务再也解不开);**「–」表示该工具只观察、不做动作**,故没有可拦的东西。两者之外的工具都受白名单约束 —— 例如 `browser_close_tab`、`browser_auth` 都不属于豁免集合(`browser_auth` 的 `restore` 会向任意域写 cookie,是动作,不是观察)。
 
 ## 页面与导航
 
@@ -40,9 +40,9 @@
 | `browser_list_tabs` | – | `{ tabs: [{ id, url, active }] }` | – | 当前会话的标签列表(输出 schema 只有 `tabs`,**没有 `session` 字段**;会话标识请用 `browser_session`) |
 | `browser_switch_tab` | `tabId`(必填) | `{ switched }` | ✅ | 按 id 切换标签;自托管下同步切换可见视图 |
 | `browser_close_tab` | `tabId`(必填) | `{ closed }` | ✅ | 关闭标签;关闭活动标签后激活下一个。**不属于只读豁免集合,受白名单约束**;`tabId` 只在本会话内查找(接受 `tab:<uuid>` 或裸 uuid),陈旧 id 不会关掉别的任务的标签页 |
-| `browser_reset` | – | `{ reset }` | ✅ | 关闭本任务所有标签,回到一个空白标签 |
+| `browser_reset` | – | `{ reset }` | – 豁免 | 关闭本任务所有标签,回到一个空白标签(列入 `READ_ONLY_TOOLS`:限制到空的任务也必须能复位,否则白名单成了陷阱) |
 | `browser_session` | – | `{ session, tabs[] }` | – | 查看本任务的浏览器会话与标签 |
-| `browser_reset_session` | – | `{ reset }` | ✅ | 关闭并重建本任务的浏览器会话(崩溃/卡死后恢复) |
+| `browser_reset_session` | – | `{ reset }` | – 豁免 | 关闭并重建本任务的浏览器会话(崩溃/卡死后恢复;同上,永远可用) |
 
 ## 历史与下载
 

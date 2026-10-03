@@ -1977,13 +1977,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
       const match = () => {
         const by = typeof spec.by === 'string' ? spec.by : 'css'
         const value = String(spec.value ?? '')
-        const index = typeof spec.index === 'number' ? spec.index : 0
-        // An index outside the list can never match on a later poll, exactly like a selector
-        // that fails to parse — so it must not look like a miss either. `-1`, the common
-        // "last one" shorthand, otherwise burned the caller's whole locate budget (10s) and
-        // then reported "element not found", which reads like a slow page rather than a bad
-        // argument.
-        if (!Number.isInteger(index) || index < 0) {
+        // Named matchIndex rather than index: this whole function is one host-side template
+        // literal, so a bare name declared here can silently shadow a host binding of the
+        // same name and turn an inner reference into a type error.
+        const matchIndex = typeof spec.index === 'number' ? spec.index : 0
+        // An index that cannot address an element can never match on a later poll, exactly
+        // like a selector that fails to parse — so it must not look like a miss either. A
+        // negative index, the common "last one" shorthand, otherwise burned the caller's
+        // whole locate budget (10s) and then reported "element not found", which reads like a
+        // slow page rather than a bad argument.
+        // (No backticks in this comment: it lives inside a template literal.)
+        if (!Number.isInteger(matchIndex) || matchIndex < 0) {
           throw new Error('target.index must be a non-negative integer, got ' + JSON.stringify(spec.index))
         }
         let els = []
@@ -2011,7 +2015,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
           const pool = exact.length > 0 ? exact : all.filter(el => isVisible(el) && ownText(el).includes(value))
           els = pool.sort((a, b) => depth(b) - depth(a))
         }
-        return els[index] ?? null
+        return els[matchIndex] ?? null
       }
       const deadline = Date.now() + timeoutMs
       let el = null

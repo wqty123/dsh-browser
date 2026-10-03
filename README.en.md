@@ -133,7 +133,7 @@ See the full list in [Tool reference](#tool-reference).
   <tr>
     <td width="50%" valign="top">
       <h3>Safety restriction</h3>
-      <p><code>browser_restrict</code> limits which browser actions are allowed (allow-list) to prevent stray clicks/navigation; read-only tools (snapshot / a11y / content / scrape / screenshot / get_value / challenge / list_tabs / session / history / visited / auth) plus the "lift the restriction / reset the session" tools are always exempt.</p>
+      <p><code>browser_restrict</code> limits which browser actions are allowed (allow-list) to prevent stray clicks/navigation; read-only tools (snapshot / a11y / content / scrape / screenshot / get_value / wait / challenge / list_tabs / session / history / visited) plus the "lift the restriction / reset the session" tools are always exempt.</p>
     </td>
     <td width="50%" valign="top">
       <h3>Screenshot, save and read</h3>
@@ -198,9 +198,9 @@ See the full list in [Tool reference](#tool-reference).
 | `browser_list_tabs` | List the session's tabs | – |
 | `browser_switch_tab` | Switch to a tab by id (also switches the visible view when self-hosted) | ✅ |
 | `browser_close_tab` | Close a tab by id; closing the active tab activates the next | ✅ |
-| `browser_reset` | Close all tabs of this task, back to one blank tab | ✅ |
+| `browser_reset` | Close all tabs of this task, back to one blank tab | – exempt |
 | `browser_session` | Show this task's browser session and tabs | – |
-| `browser_reset_session` | Close and rebuild this task's browser session | ✅ |
+| `browser_reset_session` | Close and rebuild this task's browser session | – exempt |
 | `browser_history` | Operation log (newest last), with per-step success/error and result summary | – |
 | `browser_replay` | Replay one step by sequence number (navigate/execute/click/type) | ✅ |
 | `browser_download` | Download an HTTP(S) URL with session cookies to a local file (absolute `savePath` inside `downloadDir`, never overwrites, 256 MB cap) | ✅ |
@@ -208,7 +208,7 @@ See the full list in [Tool reference](#tool-reference).
 | `browser_challenge` | Detect a human-verification challenge (CAPTCHA / Cloudflare / reCAPTCHA / hCaptcha / Turnstile) | – |
 | `browser_restrict` | Restrict allowed browser actions (allow-list; empty list lifts it). **Soft guardrail** — the model can lift it itself; not a security boundary | – |
 
-> "Guard" column: ✅ actions are governed by the `browser_restrict` allow-list; **rows marked "– exempt" are never blocked, whatever the allow-list says**, and **a plain "–" means the tool only observes — it performs no action, so there is nothing to restrict**. The exempt set is `READ_ONLY_TOOLS` (`src/tool-browser/index.ts`): `snapshot` / `a11y` / `content` / `scrape` / `screenshot` / `get_value` / `wait` / `challenge` / `list_tabs` / `session` / `history` / `visited` / `auth`, plus `restrict` (the restriction itself must stay liftable, or a task that restricted everything could never get out), `reset_session` and `reset`. `browser_close_tab` is **not** exempt: like `open`/`click`/`switch_tab` it can be restricted.
+> "Guard" column: ✅ actions are governed by the `browser_restrict` allow-list; **rows marked "– exempt" are never blocked, whatever the allow-list says**, and **a plain "–" means the tool only observes — it performs no action, so there is nothing to restrict**. The exempt set is `READ_ONLY_TOOLS` (`src/tool-browser/index.ts`): `snapshot` / `a11y` / `content` / `scrape` / `screenshot` / `get_value` / `wait` / `challenge` / `list_tabs` / `session` / `history` / `visited`, plus `restrict` (the restriction itself must stay liftable, or a task that restricted everything could never get out), `reset_session` and `reset`. `browser_close_tab` is **not** exempt: like `open`/`click`/`switch_tab` it can be restricted; neither is `browser_auth`, whose `restore` writes cookies to arbitrary domains — an action, not an observation.
 
 ### Waiting for the page
 

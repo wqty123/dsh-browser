@@ -28,13 +28,13 @@ export interface BridgeEndpoint {
  * A reusable connection to the bridge.
  *
  * Requests may be in flight CONCURRENTLY, so answers are correlated by id rather than by
- * position: `call()` stamps a unique {@link REQUEST_ID_FIELD} on the request and
- * `onData()` resolves the entry that carries the echoed id. A bridge that does not echo it
- * is still supported — the answer is then handed to the oldest outstanding request, which
- * is the arrival-order rule the protocol states — but a missing id is recorded, and once
- * that happens a later unmatched answer resets the socket rather than being handed to
- * whichever request happens to be first (which is how two concurrent calls could each
- * receive the other's answer).
+ * position: `call()` stamps a unique {@link REQUEST_ID_FIELD} on the request and `onData()`
+ * resolves the entry that carries the echoed id. A bridge that does not echo it is still
+ * supported — its answer is handed to the oldest outstanding request, which is the
+ * arrival-order rule the protocol states. Once such an answer has been seen, the connection
+ * stops keeping two requests in flight (a second one re-dials), so position can never be the
+ * only thing distinguishing two callers' answers. An answer that matches nothing is never
+ * handed to whichever request happens to be first: the socket is dropped instead.
  *
  * A broken socket is discarded so the next call dials again — a dead connection must never
  * become a dead plugin.
@@ -73,6 +73,8 @@ export declare class BridgeConnection {
     close(): void;
     /** The live socket, connecting and authenticating it on first use. */
     private ensureSocket;
+    /** Tear the connection down for an event raised by `source`, unless it is already gone. */
+    private socketFailed;
     /** Resolve queued requests by id, or in order when the bridge does not echo one. */
     private onData;
     /** Forget one request (its answer can no longer be matched). */
