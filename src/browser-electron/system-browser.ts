@@ -359,6 +359,15 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private starting: Promise<CdpClient> | undefined
 
   /**
+   * Browsers that ignored a kill.
+   *
+   * They are no longer this host's child — a replacement has taken that slot — but they
+   * are still running, still holding the profile, and still something release must try to
+   * stop. Forgetting them is what allowed a launch this host could not undo.
+   */
+  private readonly stubborn: { kill: () => void; exitCode: number | null; signalCode: NodeJS.Signals | null }[] = []
+
+  /**
    * @param browser - the detected installation to launch on first use.
    * @param profileDir - a plugin-owned directory; the user's own profile is never touched.
    * @param extraArgs - additional Chromium switches.
@@ -494,6 +503,15 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         const done = (): void => { clearTimeout(timer); resolve() }
         const timer = setTimeout(done, EXIT_GRACE_MS)
         dying.once('exit', done)
+        // It did not exit in time. Dropping the reference here was how this host could
+        // launch a browser it could never kill again: dispose() only knows about this.child,
+        // and this process still holds the profile's singleton lock. Remember it so release
+        // still reaches it.
+        if (dying.exitCode === null && dying.signalCode === null) this.stubborn.push(dying)
+        dying.once('exit', () => {
+          const at2 = this.stubborn.indexOf(dying)
+          if (at2 !== -1) this.stubborn.splice(at2, 1)
+        })
       })
     }
     // The port file belongs to the browser that just died, and it is NOT removed when the
@@ -722,6 +740,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     this.sessions.clear()
     this.client?.close()
     try { this.child?.kill() } catch { /* already gone */ }
+    // And anything that ignored an earlier kill. They hold this profile, so leaving them
+    // running means the next launch contends with a browser nobody owns.
+    for (const leftover of this.stubborn.splice(0)) {
+      try { leftover.kill() } catch { /* already gone */ }
+    }
     const ephemeral = this.ephemeralDir
     if (ephemeral !== undefined && this.child !== undefined) {
       // The browser flushes its profile while shutting down, so deleting later avoids

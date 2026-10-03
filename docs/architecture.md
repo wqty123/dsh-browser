@@ -43,7 +43,7 @@ agent (browser_* 工具)
 - `browser_reset_session` 关闭本任务会话并遗忘映射(即使 close 抛错也清除,下次调用重建);
 - 会话生命周期绑定 agent 作用域 ctx:agent(DSH 会话)销毁时自动关闭对应浏览器会话,任务结束后不再泄漏窗口/视图;
 - 会话/开启动态/白名单都是**每插件实例(每 context)作用域**的,多 context 互不共享、互不污染;
-- `browser_restrict` 维护本实例白名单,守卫所有非只读工具;
+- `browser_restrict` 维护本任务白名单,守卫所有非只读工具;
 - 输出 schema 与返回值严格一致(DSH 运行时会校验,`additionalProperties: false` 下多一个字段都会报错)。
 
 ### 输出尺寸(工具层)

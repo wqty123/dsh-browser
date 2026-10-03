@@ -306,7 +306,7 @@ export interface ElectronBrowserProviderConfig {
   readonly settings?: () => BrowserSettings
   /** Maximum snapshot elements before truncation. Default 60. */
   readonly snapshotMaxElements?: number
-  /** Maximum content characters before truncation when no maxChars is given. Default 100_000. */
+  /** Maximum content characters before truncation when no maxChars is given. No longer read: the cap is per format (html and json 50 000, otherwise 20 000). */
   readonly contentMaxChars?: number
   /**
    * Directory `browser_download` save paths must resolve inside (prevents a
