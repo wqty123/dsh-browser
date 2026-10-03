@@ -101,6 +101,14 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private child;
     private starting;
     /**
+     * Browsers that ignored a kill.
+     *
+     * They are no longer this host's child — a replacement has taken that slot — but they
+     * are still running, still holding the profile, and still something release must try to
+     * stop. Forgetting them is what allowed a launch this host could not undo.
+     */
+    private readonly stubborn;
+    /**
      * @param browser - the detected installation to launch on first use.
      * @param profileDir - a plugin-owned directory; the user's own profile is never touched.
      * @param extraArgs - additional Chromium switches.
