@@ -38,6 +38,21 @@ import { join } from 'node:path'
  * exited, and that exit was reported as a bad browser path.
  */
 const EXIT_GRACE_MS = 3_000
+
+/**
+ * Starts a browser process and returns a handle to it.
+ *
+ * Injectable so tests can supply something that speaks CDP — the seam a recovery test needs
+ * and could not have while the launch was hardcoded to a stub that rejects Chromium's args.
+ * @param path - the executable to run.
+ * @param args - its arguments.
+ * @returns the child process.
+ */
+export type BrowserLauncher = (path: string, args: readonly string[]) => ReturnType<typeof spawn>
+
+/** The real launcher: spawn a detached-free child with pipes closed. */
+const defaultLauncher: BrowserLauncher = (path, args) =>
+  spawn(path, [...args], { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false })
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
@@ -349,12 +364,20 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * @param extraArgs - additional Chromium switches.
    * @param ephemeralDir - a directory to delete on release, when the user has turned
    *   persistence off so no login state outlives the session.
+   * @param launcher - how to start the browser, for tests.
+   *
+   *   Recovery after the browser dies was untestable without this: the suite spawns a stub
+   *   with Chromium's arguments, and a stub that is not a browser rejects them and exits, so
+   *   no CDP endpoint ever appears and no session is ever created. Verified by mutation —
+   *   removing every sessions.clear() left the recovery tests green. A launcher lets a test
+   *   provide something that actually speaks CDP, so the state those tests describe exists.
    */
   constructor(
     private readonly browser: DetectedBrowser,
     private readonly profileDir: string,
     private readonly extraArgs: readonly string[] = [],
     private readonly ephemeralDir?: string,
+    private readonly launcher: BrowserLauncher = defaultLauncher,
   ) {}
 
   /** Which product this host would drive (for diagnostics). */
@@ -482,7 +505,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     const spawnedAt = Date.now()
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn(this.browser.path, args, { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false })
+      child = this.launcher(this.browser.path, args)
     } catch (error) {
       // spawn throws synchronously for some targets (a .cmd on Windows, a path that cannot
       // be executed). Without this the exception escaped start() and skipped every

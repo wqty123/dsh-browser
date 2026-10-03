@@ -6,6 +6,7 @@
 // is a minimal CDP server: it speaks enough of the protocol to hand out a target and a
 // session, it can be killed, and it can come back on a new port, which is what the carrier
 // has to cope with.
+import { randomUUID } from 'node:crypto'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 

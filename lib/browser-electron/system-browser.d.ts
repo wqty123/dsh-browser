@@ -24,6 +24,17 @@
  * only the carrier differs.
  * @module dsh-browser/browser-electron/system-browser
  */
+/**
+ * Starts a browser process and returns a handle to it.
+ *
+ * Injectable so tests can supply something that speaks CDP — the seam a recovery test needs
+ * and could not have while the launch was hardcoded to a stub that rejects Chromium's args.
+ * @param path - the executable to run.
+ * @param args - its arguments.
+ * @returns the child process.
+ */
+export type BrowserLauncher = (path: string, args: readonly string[]) => ReturnType<typeof spawn>;
+import { spawn } from 'node:child_process';
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js';
 /** Which browser the user asked for. */
 export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'auto';
@@ -66,6 +77,7 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private readonly profileDir;
     private readonly extraArgs;
     private readonly ephemeralDir?;
+    private readonly launcher;
     private readonly views;
     private disposed;
     /**
@@ -94,8 +106,15 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * @param extraArgs - additional Chromium switches.
      * @param ephemeralDir - a directory to delete on release, when the user has turned
      *   persistence off so no login state outlives the session.
+     * @param launcher - how to start the browser, for tests.
+     *
+     *   Recovery after the browser dies was untestable without this: the suite spawns a stub
+     *   with Chromium's arguments, and a stub that is not a browser rejects them and exits, so
+     *   no CDP endpoint ever appears and no session is ever created. Verified by mutation —
+     *   removing every sessions.clear() left the recovery tests green. A launcher lets a test
+     *   provide something that actually speaks CDP, so the state those tests describe exists.
      */
-    constructor(browser: DetectedBrowser, profileDir: string, extraArgs?: readonly string[], ephemeralDir?: string | undefined);
+    constructor(browser: DetectedBrowser, profileDir: string, extraArgs?: readonly string[], ephemeralDir?: string | undefined, launcher?: BrowserLauncher);
     /** Which product this host would drive (for diagnostics). */
     get kind(): DetectedBrowser['kind'];
     /** Whether the browser has actually been started yet (diagnostics and tests). */
