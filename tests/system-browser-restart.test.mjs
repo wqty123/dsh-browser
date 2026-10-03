@@ -35,13 +35,22 @@ test("a replaced browser is usable and does not carry the dead one's session", a
 
   // The launcher hands out a fake process and writes the port file the host reads, so the
   // host's own discovery path runs rather than being bypassed.
+  //
+  // A NEW child per launch, which is what a real spawn does. Returning the same object was
+  // why this test could not fail: the first child is marked exited before the second launch,
+  // so start()'s loop immediately concluded `stopped = 'exited'` and never reconnected — the
+  // stale session id was never sent, and deleting the clearing code changed nothing. The
+  // reviewer found this by tracing every frame between the host and the fake browser; the
+  // "exit listener masks the start() path" explanation I had recorded was only part of it.
   let current = createFakeBrowser()
   let port = await current.listen()
-  const child = fakeChild()
   const launches = []
+  const children = []
   const launcher = () => {
     writeFileSync(join(profileDir, 'DevToolsActivePort'), `${port}\n`)
     launches.push(port)
+    const child = fakeChild()
+    children.push(child)
     return child
   }
 
@@ -60,8 +69,8 @@ test("a replaced browser is usable and does not carry the dead one's session", a
   await current.kill()
   current = createFakeBrowser()
   port = await current.listen()
-  child.exitCode = 0
-  child.emit('exit', 0, null)
+  children[0].exitCode = 0
+  children[0].emit('exit', 0, null)
 
   const after = await view.sendCommand('Runtime.evaluate', { expression: '2' }).then(
     () => undefined,
