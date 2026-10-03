@@ -238,7 +238,6 @@ node <本仓库路径>/desktop-bridge/install.mjs
 | `browser-electron` | `viewHost` | 对象 | 可选 | 宿主提供的 `ElectronBrowserViewHost` 实例(如 `!!js ctx.get('electronViewHost')`)。**不传时插件自己选载体** —— 桌面端驱动官方侧栏、否则自托管;若在设置里指定了本机 Chrome / Edge,该选择优先于两者 |
 | `browser-electron` | `httpOnly` | 布尔 | `true` | 仅允许 HTTP(S) 导航;其余协议(如 `file:`/`data:`)拒绝(`BROWSER_NAVIGATION_BLOCKED`) |
 | `browser-electron` | `snapshotMaxElements` | 数字 | `60` | 快照最多收录的交互元素数,超出截断 |
-| `browser-electron` | `contentMaxChars` | 数字 | (已废弃) | **不再被读取** —— 上限改为按格式:html 50 000,其余 20 000;单次调用可用 `maxChars` 覆盖 |
 | `browser-electron` | `downloadDir` | 字符串 | 系统下载目录(自动识别 `Downloads`/`下载`/`下載`,或 `XDG_DOWNLOAD_DIR`) | 限定 `browser_download` 与 `browser_screenshot` 的保存路径必须位于该目录内,且不覆盖已有文件(防 agent 写任意路径或替换现有文件);默认收敛到系统下载目录,可改为沙箱目录 |
 | `tool-browser` | `timeoutMs` | 数字 | `60000` | 工具协作超时(ms) |
 | `tool-browser` | `tabTools` | 布尔 | `true` | 是否注册标签管理工具(`browser_list_tabs` 等) |
@@ -409,7 +408,6 @@ npm run build
 | 第一轮 | 2026-08-18 | **安全与健壮性修复**:RPC 随机 token 认证 + 单连接强制;下载准入(仅 HTTP(S)、绝对路径、`downloadDir` 限定)与流式限流(Content-Length 提前拒绝,256MB 上限);CDP 超时打断与 click/type 超时松键恢复;会话/白名单改为每任务作用域并随 agent 生命周期自动关闭;操作历史脱敏(输入文本、replay/execute 参数不泄露);弹窗重定向回标签页 |
 | 第二轮 | 2026-08 | **功能补全 + 测试 + CI**:窗口标题显示任务标识、showView 无闪烁;快照/无障碍树穿透同源 iframe 与 Shadow DOM;新增 `browser_wait`/`scroll`/`back`/`forward`/`key` 工具;真实 `available()` 探测;下载改由子进程直接落盘(临时文件 + 原子改名);Electron 定位收敛;JPEG/缩放截图;快照性能优化;新增测试套件与 CI |
 | 第三轮 | 2026-08 | **对标 browser-bridge 的功能 + 审查修复**:`browser_a11y` 无障碍树;表单控件 6 件套(`browser_set_value`/`check`/`select`/`clear`/`get_value`/`refresh`);语义定位 `target`(css/text/xpath);`browser_scrape` 结构化提取;独立 BrowserWindow + 真实工具栏(地址栏/后退/前进/刷新/标签条),工具栏操作路由回会话模型;工具总数 **20 → 33**;CI 改 npm(无 lockfile 不兼容 pnpm cache)、README 修正等审查项 |
-| `browser-electron` | `contentMaxChars` | 数字 | (已废弃) | **不再被读取** —— 上限改为按格式:html 50 000,其余 20 000;单次调用可用 `maxChars` 覆盖 |
 | 第五轮 | 2026-08 | **Electron 44 兼容**:`available()` 改为无副作用探测(不再触发 Electron 44 懒下载);`flushAuth` cookie-domain 构建错误修复 |
 | 第六轮 | 2026-08 | **Windows 握手与标签定位**:Electron GUI 进程收不到 piped stdin → RPC token 改 **stdin + 环境变量双通道**;`browser_switch_tab`/`browser_close_tab` 定位标签(`locateTab`),`browser_close_tab` 不再静默假成功,未知 id 报错附带现有标签列表。本轮当时的实现会**跨会话**兜底查找,后续已收紧:**查找范围只限调用方会话**(陈旧 id 不得关掉别的任务或人的标签页),仅保留"接受裸 uuid 与 `tab:<uuid>` 两种写法"这一便利 |
 | 第七轮 | 2026-08 | **工具栏交互(Windows 焦点路由)**:键盘输入只进有焦点的 view,页面 view 抢占焦点导致地址栏无法输入 → 新增 `wireFocusRouting`(点击即聚焦该 view)+ 窗口 refocus 恢复上次点击的 view;真机 OS 输入探针验证 |
