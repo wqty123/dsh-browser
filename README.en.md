@@ -304,7 +304,7 @@ node desktop-bridge/install.mjs --revert   # roll back
 > - the agent can read the **cookies and login state** in that partition, and `browser_auth` can export them (controlled by a setting);
 > - your actions in the sidebar and the agent's actions act on **the same page** and can affect each other (the agent will not overwrite what you are typing, but navigation changes what you both see).
 >
-> That is the inherent cost of one shared page. We think it is worth it — it turns "the agent is doing something in a window you cannot see" into "you can watch it work and take over" — but you are entitled to know it exists, so there are switches: with **credential access** off, `browser_auth` **refuses both export and restore** (`BROWSER_AUTH_DISABLED`) — not merely "stops reading", since restore needs the same switch; and with the **vision strategy** set to non-visual any coordinate click that depends on a screenshot is refused. If you would rather not accept the boundary change at all, removing the plugin from the desktop profile returns you to the old separate-window shape.
+> That is the inherent cost of one shared page. We think it is worth it — it turns "the agent is doing something in a window you cannot see" into "you can watch it work and take over" — but you are entitled to know it exists, so there are switches: with **credential access** off, `browser_auth` **refuses the export** (`BROWSER_AUTH_DISABLED`) — it governs reading only, while writing login state (restore) answers to its own switch and reports `BROWSER_AUTH_WRITE_DISABLED`; and with the **vision strategy** set to non-visual any coordinate click that depends on a screenshot is refused. If you would rather not accept the boundary change at all, removing the plugin from the desktop profile returns you to the old separate-window shape.
 
 **② Use the browser you already have (Chrome / Edge)**
 
@@ -317,7 +317,7 @@ The settings panel can point the plugin at an **installed Chrome or Edge** (`bro
 **What happens to login state**:
 
 - `cookies.persist` **on** (default) → that fixed profile is kept, so **you stay signed in across DSH restarts**, and `browser_auth` can still export/restore its cookies.
-- `cookies.persist` **off** → a **throwaway profile** each time, deleted when the browser is released; no login trace is left behind.
+- `cookies.persist` **off** → a **throwaway profile** each time, deleted when the browser is released; no login trace is left behind. A process killed outright never reaches that release path, so the next start **sweeps** the throwaway profiles an earlier run left behind — only those whose owner is gone AND which have not been written to for an hour, so the profile an orphaned browser is still working in is left alone.
 - The trade-off, stated plainly: a separate profile **does not see** the sites you are signed into in your everyday browser. Sign in once in the window the plugin opens and the session stays in its own profile.
 
 **③ A shell that provides `electronViewHost`** (older desktop shells): that view is used directly.
@@ -344,7 +344,7 @@ The settings panel can point the plugin at an **installed Chrome or Edge** (`bro
 | Electron | `44.0.0` (≥ 40 recommended; 33.x has a compositor defect) |
 | Node.js | `22.20.0` |
 | Installed Chrome / Edge (optional carriers) | `154.0.8037.58` / `154.0.4258.37` |
-| dsh-builtin-browser | `0.4.0` |
+| dsh-builtin-browser | `0.4.1` (the development branch is past that release) |
 | OS | Windows 10 (10.0.26200) |
 
 > The plugin declares `electron >= 30`. The **core path is fully verified on Windows**; system-browser detection is now adapted for Linux and macOS (PATH first, then each platform's conventional install locations, all overridable with `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH`), but the end-to-end path on those platforms has not been measured, so no promise is made yet.
@@ -397,7 +397,7 @@ The plugin has one installation per host, and the two are updated separately —
 - `fullPage` capture is flaky under software compositing on some hosts — with `fullPage` the native `capturePage` path is **skipped entirely** (`capturePage` cannot reach content beyond the viewport), so **all three carriers go through CDP `captureBeyondViewport`** and the flakiness is not carrier-specific: any carrier can hit it. Only viewport captures prefer the native `capturePage`.
 - CAPTCHA cannot be solved automatically: snapshots flag detected challenges; ask the human to complete it in the shared window instead of retrying.
 - Private mode (`privateMode`) is not implemented: it needs Electron session partitioning, which is host-layer territory; this plugin does not promise it.
-- `browser_download` fetches in the page context (keeps logins) and is subject to same-origin/CORS constraints; HTTP(S) targets only; `savePath` must be absolute and inside `downloadDir` (default: the system Downloads folder, auto-detecting `Downloads`/`下载`/`下載` and `XDG_DOWNLOAD_DIR`; override with `downloadDir`) and never replaces an existing file; `browser_screenshot`'s `savePath` goes through the same gate; single files are capped at 256 MB (streamed with a Content-Length early reject) and are written by the browser child itself (temp file + atomic rename).
+- `browser_download` fetches in the page context (keeps logins) and is subject to same-origin/CORS constraints; HTTP(S) targets only; `savePath` must be absolute and inside `downloadDir` (default: the system Downloads folder, auto-detecting `Downloads`/`下载`/`下載` and `XDG_DOWNLOAD_DIR`; override with `downloadDir`) and never replaces an existing file; `browser_screenshot`'s `savePath` goes through the same gate; single files are capped at 256 MB (streamed with a Content-Length early reject) and are written by the browser child itself (temp file + atomic rename). Admission also resolves where a path really lands: a symlink inside `downloadDir` cannot carry the write out of it, and a dangling link is refused too (it reads as a name already taken, not as a free path).
 - The self-hosted browser's cookies are stored in plaintext on disk (Electron default); deployments that need encrypted-at-rest should integrate a system keychain / DPAPI at the host layer.
 - `browser_restrict` is a **soft guardrail** against accidental actions, not a security boundary: the model can lift it itself. For a limit the model **cannot** lift, use the three action switches in Settings ("What the agent may do") — they live in the settings document, which no tool can write — or the deployment-level `tool-browser` config `allowedActions` (see the comments in `cordis.patch.yml`).
 - Popups (`window.open` / `target=_blank`) no longer overwrite the current view: HTTP(S) popups open as a **new tab** in the same session window, recorded in the session history, keeping the original page and its opener context alive. Non-HTTP(S) popups (empty-URL popup handoffs, `mailto:`, custom schemes) are still **allowed as native windows** and handed to the system — such windows are simply not part of the session model.

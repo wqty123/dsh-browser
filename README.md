@@ -304,7 +304,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 > - Agent 能读到该 partition 中的 **Cookie / 登录态**,`browser_auth` 可将其导出(由设置项控制);
 > - 反过来,你在侧栏里的操作与 Agent 的操作**作用于同一个页面**,可能互相影响(Agent 不会主动覆盖你的输入,但导航会改变双方看到的内容)。
 >
-> 这是"人机同页"的必然代价。我们认为值得(它把"Agent 在一个你看不见的窗口里操作"变成"你能看着它操作并随时接手"),但你有权知道它存在 —— 因此也提供了开关:**「凭据访问」关闭后 <code>browser_auth</code> 的导出与恢复都会被拒绝(<code>BROWSER_AUTH_DISABLED</code>)—— 不只是"不再读取":恢复走的是同一个开关**;**「视觉策略」设为纯非视觉后,任何依赖截图定位的坐标点击都会被拒绝**。不想接受这个边界变化时,把 desktop profile 里的插件移除即可回到"独立窗口"的旧形态。
+> 这是"人机同页"的必然代价。我们认为值得(它把"Agent 在一个你看不见的窗口里操作"变成"你能看着它操作并随时接手"),但你有权知道它存在 —— 因此也提供了开关:**「凭据访问」关闭后 <code>browser_auth</code> 的导出会被拒绝(<code>BROWSER_AUTH_DISABLED</code>)—— 它只管读;写入登录态(<code>restore</code>)另有「允许写入登录状态」开关,报 <code>BROWSER_AUTH_WRITE_DISABLED</code>,两者独立**;**「视觉策略」设为纯非视觉后,任何依赖截图定位的坐标点击都会被拒绝**。不想接受这个边界变化时,把 desktop profile 里的插件移除即可回到"独立窗口"的旧形态。
 
 **② 用你自己的浏览器(Chrome / Edge)**
 
@@ -317,7 +317,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 **登录态怎么办**:
 
 - `cookies.persist` **开**(默认)→ 上面那个固定 profile 会保留,**重启 DSH 后仍是登录状态**;`browser_auth` 也照常可导出/恢复该 profile 的 Cookie。
-- `cookies.persist` **关** → 每次用**临时 profile**,释放浏览器时整个目录被删除,不留登录痕迹。
+- `cookies.persist` **关** → 每次用**临时 profile**,释放浏览器时整个目录被删除,不留登录痕迹。**进程被强杀时释放路径跑不到**,所以下一次启动会**先清扫**上一轮残留的临时 profile —— 只清"属主进程已不在 **且** 一小时没有写入"的那些,免得删掉仍在运行的孤儿浏览器正在用的目录。
 - 代价要说清:独立 profile **看不到**你日常浏览器里已登录的站点 —— 在插件打开的窗口里登录一次即可,之后登录态就存在它自己的 profile 里。
 
 **③ 有 `electronViewHost` 的宿主(旧版桌面外壳)**:直接使用外壳提供的视图。
@@ -345,7 +345,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 | Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
 | 本机 Chrome / Edge(可选载体) | `154.0.8037.58` / `154.0.4258.37` |
-| dsh-builtin-browser | `0.4.0` |
+| dsh-builtin-browser | `0.4.1`(开发分支已超出该发布版本) |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`。**核心链路在 Windows 上完整实测**;系统浏览器的查找已适配 Linux 与 macOS(先查 `PATH`,再查各平台的惯例安装位置,均可用 `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH` 覆盖),但这两个平台上的**端到端链路尚未实测**,暂不承诺。
@@ -394,7 +394,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 - `fullPage` 截图在部分主机的**软件合成**下不稳定 —— 请求 `fullPage` 时**原生 `capturePage` 路径被整体跳过**(`capturePage` 没有捕获滚动区以外内容的能力),因此**三种载体都走 CDP 的 `captureBeyondViewport`**,`fullPage` 的不稳定性与载体无关,任何载体都可能碰到;只有视口截图才优先走原生的 `capturePage`。
 - 人机验证(CAPTCHA)无法自动解决:快照会标注检测到的挑战,此时应请用户在共享窗口中人工完成,而不是反复重试。
 - 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于宿主层,本插件不承诺。
-- `browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;仅允许 HTTP(S) 目标;`savePath` 必须为绝对路径且位于 `downloadDir` 内(默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`,可用 `downloadDir` 覆盖),不覆盖已存在文件;`browser_screenshot` 的 `savePath` 走同一准入门;单文件上限 256MB(流式限流,按 Content-Length 提前拒绝),文件由浏览器子进程直接落盘(临时文件 + 原子改名)。
+- `browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;仅允许 HTTP(S) 目标;`savePath` 必须为绝对路径且位于 `downloadDir` 内(默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`,可用 `downloadDir` 覆盖),不覆盖已存在文件;`browser_screenshot` 的 `savePath` 走同一准入门;单文件上限 256MB(流式限流,按 Content-Length 提前拒绝),文件由浏览器子进程直接落盘(临时文件 + 原子改名)。准入还会解析路径的**真实归属**:`downloadDir` 里的符号链接无法把写入带出目录,悬空链接同样被拒(它读作"名字已被占用",而不是"路径空闲")。
 - 自托管浏览器的 cookie 在磁盘上以明文存储(Electron 默认行为);需要加密落盘的部署应在宿主层接入系统钥匙串 / DPAPI。
 - `browser_restrict` 是防误操作的**软护栏**,不是安全边界:模型可以自行解除白名单。要一个**模型解不掉**的限制,用设置页「Agent 能做什么」的三个动作开关(它们写在设置文档里,没有任何工具能写),或部署级的 `tool-browser` 配置 `allowedActions`(见 `cordis.patch.yml` 的注释)。
 - 页面弹窗(`window.open` / `target=_blank`)不再覆盖当前视图:HTTP(S) 弹窗会在同一会话窗口**新开一个标签页**并计入历史,原页面与 opener 上下文保留;非 HTTP(S) 弹窗(空 URL 弹窗承接、`mailto:`、自定义协议)仍**放行原生窗口**,交给系统处理——这类弹窗不纳入会话模型。
