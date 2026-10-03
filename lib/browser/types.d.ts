@@ -366,6 +366,14 @@ export interface BrowserA11yNode {
     readonly depth: number;
     /** Element tag name (lowercase). */
     readonly tag: string;
+    /**
+     * A CSS selector for this node, when one can be derived from its id or name.
+     *
+     * Empty for the many elements that have neither. Present because a role and a name are not
+     * always enough to target a node: `{by: 'text'}` matches an accessible name only loosely,
+     * and this is what lets a caller point at the exact element it was shown.
+     */
+    readonly selector: string;
     /** Viewport-relative center, for coordinate fallbacks. */
     readonly x: number;
     readonly y: number;
