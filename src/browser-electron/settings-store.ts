@@ -50,6 +50,22 @@ export interface BrowserSettings {
   readonly credentials: {
     readonly allowRead: boolean
   }
+  /**
+   * What the agent is allowed to DO, as opposed to what it may look at.
+   *
+   * These are OPERATOR switches: the settings panel is not reachable from the model, so a
+   * value here refuses whatever the model asks for, and no tool can lift it. That is what
+   * separates them from `browser_restrict`, which is the model's own soft guardrail. All
+   * three default to on, which is the documented out-of-the-box behaviour.
+   */
+  readonly actions: {
+    /** Run arbitrary page scripts in the active tab (`browser_execute`). */
+    readonly allowExecute: boolean
+    /** Download a URL to disk (`browser_download`). */
+    readonly allowDownload: boolean
+    /** Write cookies — importing login state (`browser_auth` restore). */
+    readonly allowCredentialWrite: boolean
+  }
 }
 
 /** Defaults for every switch: the documented out-of-the-box behaviour. */
@@ -63,6 +79,7 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   // it starts a real Chrome/Edge with its own profile.
   browser: { channel: 'bundled' },
   credentials: { allowRead: true },
+  actions: { allowExecute: true, allowDownload: true, allowCredentialWrite: true },
 }
 
 /**
@@ -118,6 +135,7 @@ export function resolveSettings(raw: unknown): BrowserSettings {
   const vision = section(source, 'vision')
   const credentials = section(source, 'credentials')
   const browser = section(source, 'browser')
+  const actions = section(source, 'actions')
   return {
     history: {
       enabled: bool(history.enabled, DEFAULT_SETTINGS.history.enabled),
@@ -133,6 +151,11 @@ export function resolveSettings(raw: unknown): BrowserSettings {
     vision: { strategy: vision.strategy === 'nonVisual' ? 'nonVisual' : DEFAULT_SETTINGS.vision.strategy },
     browser: { channel: resolveChannel(browser.channel) },
     credentials: { allowRead: bool(credentials.allowRead, DEFAULT_SETTINGS.credentials.allowRead) },
+    actions: {
+      allowExecute: bool(actions.allowExecute, DEFAULT_SETTINGS.actions.allowExecute),
+      allowDownload: bool(actions.allowDownload, DEFAULT_SETTINGS.actions.allowDownload),
+      allowCredentialWrite: bool(actions.allowCredentialWrite, DEFAULT_SETTINGS.actions.allowCredentialWrite),
+    },
   }
 }
 

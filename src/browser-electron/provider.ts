@@ -999,6 +999,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Execute JS in the active tab's page context. */
   async execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
+    this.assertActionAllowed('execute')
     const s = this.session(session)
     const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
@@ -2386,6 +2387,35 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /**
+   * Refuse an action the settings have switched off.
+   *
+   * These switches belong to the OPERATOR. The settings document is written through the
+   * plugin's own panel and no tool can reach it, so — unlike `browser_restrict`, which the
+   * model owns and can lift at will — a refusal here stands for as long as the setting does.
+   * That is the point of them: a deployment can take page-script execution, downloads, or
+   * login-state writes off the table without relying on the model's cooperation.
+   *
+   * Read through `settingsSource` on every call rather than captured at construction, so
+   * flipping a switch applies to the next command instead of the next restart — the same
+   * rule the credentials gate follows.
+   * @param action - which switch to consult.
+   * @throws BrowserError when that switch is off.
+   */
+  private assertActionAllowed(action: 'execute' | 'download' | 'credentialWrite'): void {
+    const settings = this.settingsSource?.()
+    if (settings === undefined) return
+    if (action === 'execute' && !settings.actions.allowExecute) {
+      throw new BrowserError('browser: running page scripts is switched off in settings (Browser → actions)', 'BROWSER_EXECUTE_DISABLED')
+    }
+    if (action === 'download' && !settings.actions.allowDownload) {
+      throw new BrowserError('browser: downloads are switched off in settings (Browser → actions)', 'BROWSER_DOWNLOAD_DISABLED')
+    }
+    if (action === 'credentialWrite' && !settings.actions.allowCredentialWrite) {
+      throw new BrowserError('browser: writing cookies is switched off in settings (Browser → actions)', 'BROWSER_AUTH_WRITE_DISABLED')
+    }
+  }
+
+  /**
    * Admit a caller-supplied save path for a file the browser writes to disk.
    * ONE gate for both `browser_download` and `browser_screenshot`: the path
    * must be absolute, must resolve inside `downloadDir`, and must not already
@@ -2472,6 +2502,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * @returns the path the file was written to.
    */
   async download(session: BrowserSessionId, request: { readonly url: string; readonly savePath: string }, signal?: AbortSignal): Promise<{ readonly path: string }> {
+    // Before admission, and before the session is even resolved: a switched-off action is
+    // not a path problem, and the caller should hear the real reason.
+    this.assertActionAllowed('download')
     const s = this.session(session)
     const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
@@ -2570,12 +2603,12 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Import cookies into the session (restore login state). Self-hosted only. */
   async restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number> {
-    // The settings panel offers "allow the agent to read cookies / export login state".
-    // Until now nothing read that switch, so turning it off changed nothing at all —
-    // the tool exported every cookie regardless.
-    if (this.settingsSource?.().credentials.allowRead === false) {
-      throw new BrowserError('browser: reading cookies is switched off in settings (Browser → credentials)', 'BROWSER_AUTH_DISABLED')
-    }
+    // Restore WRITES cookies, so it answers to the write switch — not to
+    // `credentials.allowRead`. It used to consult the read switch and report "reading
+    // cookies is switched off", which is both the wrong gate and the wrong sentence: an
+    // operator who allowed reading but wanted logins left alone had no switch at all,
+    // and one who turned reading off lost the restore path for the wrong reason.
+    this.assertActionAllowed('credentialWrite')
     const s = this.session(session)
     const { handle } = this.activeTab(s)
     const timeoutMs = 30_000

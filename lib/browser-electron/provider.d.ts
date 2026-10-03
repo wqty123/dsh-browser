@@ -517,6 +517,22 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
      */
     scrape(session: BrowserSessionId, request: BrowserScrapeRequest, signal?: AbortSignal): Promise<BrowserScrapeResult>;
     /**
+     * Refuse an action the settings have switched off.
+     *
+     * These switches belong to the OPERATOR. The settings document is written through the
+     * plugin's own panel and no tool can reach it, so — unlike `browser_restrict`, which the
+     * model owns and can lift at will — a refusal here stands for as long as the setting does.
+     * That is the point of them: a deployment can take page-script execution, downloads, or
+     * login-state writes off the table without relying on the model's cooperation.
+     *
+     * Read through `settingsSource` on every call rather than captured at construction, so
+     * flipping a switch applies to the next command instead of the next restart — the same
+     * rule the credentials gate follows.
+     * @param action - which switch to consult.
+     * @throws BrowserError when that switch is off.
+     */
+    private assertActionAllowed;
+    /**
      * Admit a caller-supplied save path for a file the browser writes to disk.
      * ONE gate for both `browser_download` and `browser_screenshot`: the path
      * must be absolute, must resolve inside `downloadDir`, and must not already

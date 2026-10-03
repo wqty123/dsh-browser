@@ -44,6 +44,22 @@ export interface BrowserSettings {
     readonly credentials: {
         readonly allowRead: boolean;
     };
+    /**
+     * What the agent is allowed to DO, as opposed to what it may look at.
+     *
+     * These are OPERATOR switches: the settings panel is not reachable from the model, so a
+     * value here refuses whatever the model asks for, and no tool can lift it. That is what
+     * separates them from `browser_restrict`, which is the model's own soft guardrail. All
+     * three default to on, which is the documented out-of-the-box behaviour.
+     */
+    readonly actions: {
+        /** Run arbitrary page scripts in the active tab (`browser_execute`). */
+        readonly allowExecute: boolean;
+        /** Download a URL to disk (`browser_download`). */
+        readonly allowDownload: boolean;
+        /** Write cookies — importing login state (`browser_auth` restore). */
+        readonly allowCredentialWrite: boolean;
+    };
 }
 /** Defaults for every switch: the documented out-of-the-box behaviour. */
 export declare const DEFAULT_SETTINGS: BrowserSettings;
