@@ -442,7 +442,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_a11y',
-    description: 'Read the page\'s accessibility tree: every interactive node with its semantic role (button/link/textbox/checkbox/…), accessible name, current value, and states (enabled/disabled/checked/expanded/…), plus coordinates. Prefer this over browser_snapshot to understand a page\'s structure and find the right element: roles and names tell you WHAT each node is, and the coordinates let you drive it with browser_click/browser_type. Penetrates same-origin iframes and shadow roots.',
+    description: 'Read the page\'s accessibility tree: every interactive node with its semantic role (button/link/textbox/checkbox/…), accessible name, current value, and states (enabled/disabled/checked/expanded/…), (coordinates only when coords: true). Prefer this over browser_snapshot to understand a page\'s structure and find the right element: roles and names tell you WHAT each node is, and the roles and names are what browser_click/browser_type accept as a semantic target. Penetrates same-origin iframes and shadow roots.',
     parameters: {
       includeHidden: { type: 'boolean', description: 'Include hidden elements (default false).' },
       maxNodes: { type: 'number', description: 'Maximum nodes (default 500, range 10-5000).' },
@@ -495,7 +495,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           return `${indent}[${n.ref}] ${n.role} "${n.name}"${valuePart}${coordsPart}${statePart}${n.frame === true ? ' (iframe)' : ''}`
         })
         const header = `URL: ${value.url}${value.title !== undefined ? `\nTitle: ${value.title}` : ''}`
-        const hint = showCoords ? '' : '\n(coordinates omitted — pass coords: true to include them, or click by semantic target)'
+        const hint = showCoords ? '' : '\n(no coords; pass coords: true)'
         return [{ type: 'text', text: `${header}\n\n${lines.length > 0 ? lines.join('\n') : '(no accessible interactive nodes)'}${value.truncated === true ? '\n(truncated)' : ''}${hint}` }]
       },
     },
@@ -1261,7 +1261,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_screenshot',
-    description: 'Capture the current shared-browser page as a screenshot (PNG default, JPEG optional). This is for models that can read images: layout checks, charts, designs, CAPTCHAs, or locating an element by eye before clicking its coordinates. A model without image input gains nothing from it — browser_snapshot, browser_a11y and browser_content carry the same page as text, and browser_scrape extracts structured data. Supports full-page capture, save-to-file, JPEG encoding, and downscaling (maxWidth/maxHeight) to cut vision-tool token cost. JPEG needs a browser whose CDP encoder works — the self-hosted browser and an installed Chrome/Edge; the desktop sidebar falls back to PNG because the Electron CDP JPEG encoder hangs. Downscaling works on every carrier.',
+    description: 'Capture the current shared-browser page as a screenshot (PNG default, JPEG optional). This is for models that can read images: layout checks, charts, designs, CAPTCHAs, or locating an element by eye before clicking its coordinates. A model without image input gains nothing from it — browser_snapshot, browser_a11y and browser_content carry the same page as text, and browser_scrape extracts structured data. Supports full-page capture, save-to-file, JPEG encoding, and downscaling (maxWidth/maxHeight) to cut vision-tool token cost. JPEG needs a browser whose CDP encoder works — the self-hosted browser and an installed Chrome/Edge; some carriers (the desktop sidebar) return PNG instead. Downscaling works on every carrier.',
     parameters: {
       fullPage: { type: 'boolean', description: 'Capture the full scrollable page instead of the viewport (default false).' },
       savePath: { type: 'string', description: 'Absolute file path to also save the image to (e.g. for read_image vision location). Must resolve inside the configured downloadDir (default: the system Downloads folder, localized names such as ~/下载 included); an existing file is never overwritten.' },
@@ -1539,15 +1539,19 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
       render: (_args, value) => {
         const entries = value.entries as Array<{ at: number; url: string; title?: string; session?: string }>
+        let lastSession: string | undefined
         if (entries.length === 0) {
           return [{ type: 'text', text: '(no recorded visits — nothing has been browsed yet, or history recording is turned off in settings)' }]
         }
         return [{
           type: 'text',
           text: entries.map(entry => {
-            const when = new Date(entry.at).toISOString().replace('T', ' ').slice(0, 19)
+            const when = new Date(entry.at).toISOString().replace('T', ' ').slice(0, 16)
             const title = entry.title !== undefined ? `${entry.title} — ` : ''
-            return `${when}  ${title}${entry.url}${entry.session !== undefined ? `  [${entry.session}]` : ''}`
+            const tag = entry.session !== undefined && entry.session !== lastSession
+              ? `  [session ${entry.session.slice(0, 8)}]`
+              : ''
+            lastSession = entry.session
           }).join('\n'),
         }]
       },

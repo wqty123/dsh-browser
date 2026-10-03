@@ -2439,8 +2439,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // Every other carrier drives a real browser over CDP, and cookies are part of CDP —
     // the sidebar goes through the shell's webContents.debugger, an installed Chrome or
     // Edge is the browser itself. So this works everywhere rather than only self-hosted.
+    // Scoped to the page this session is on. Storage.getCookies without a filter returns the
+    // whole default-context jar — every domain every task has visited, plus whatever the human
+    // is signed into — which contradicts the per-session isolation the seam promises. A cookie
+    // for somewhere this session never went is not this session's to export.
+    const cookiesUrl = await this.currentUrl(handle).catch(() => '')
     const result = await withTimeout(
-      handle.sendCommand('Storage.getCookies', {}),
+      handle.sendCommand('Storage.getCookies', cookiesUrl === '' ? {} : { urls: [cookiesUrl] }),
       timeoutMs,
       undefined,
       `browser: auth export timed out after ${timeoutMs}ms`,
