@@ -1552,6 +1552,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               ? `  [session ${entry.session.slice(0, 8)}]`
               : ''
             lastSession = entry.session
+            return `${when}  ${title}${entry.url}${tag}`
           }).join('\n'),
         }]
       },
