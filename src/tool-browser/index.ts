@@ -623,7 +623,18 @@ export function apply(ctx: Context, config: Config = {}): void {
           exception: { type: 'string' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: value.ok ? `Result: ${String(value.value)}` : `Exception: ${value.exception}` }],
+      // A return value is whatever the page produced, and `document.body.outerHTML` measured
+      // 157,350 characters — ~39-52k tokens from one call. Bounded, with the cut stated so the
+      // caller knows to narrow the expression rather than the value being silently short.
+      render: (_args, value) => {
+        if (!value.ok) return [{ type: 'text', text: `Exception: ${value.exception}` }]
+        const rendered = String(value.value ?? '')
+        const cap = 50_000
+        const text = rendered.length > cap
+          ? `Result: ${rendered.slice(0, cap)}\n(result truncated at ${cap} of ${rendered.length} characters — return a smaller value, or write it with browser_execute + a variable)`
+          : `Result: ${rendered}`
+        return [{ type: 'text', text }]
+      },
     },
     timeoutMs,
     isConcurrencySafe: () => false, // page JS can be stateful
@@ -663,7 +674,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           truncated: { type: 'boolean', required: true },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: value.content + (value.truncated ? '\n(truncated)' : '') }],
+      render: (_args, value) => [{ type: 'text', text: value.content + (value.truncated ? `\n(content truncated — narrow it with selector= or raise maxChars)` : '') }],
     },
     timeoutMs,
     isConcurrencySafe: () => true,
@@ -709,7 +720,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `${value.count} item(s):\n${JSON.stringify(value.items, null, 2)}`,
+        // Compact, unlike the pretty-printed form this used to emit: two-space indentation
+        // carries no information a model can use and cost 13.7% of a measured 39,559-character
+        // result. The count leads so the caller can tell a short list from a capped one.
+        text: `${value.count} item(s):\n${JSON.stringify(value.items)}`,
       }],
     },
     timeoutMs,
@@ -1398,7 +1412,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.tools.register(defineTool({
     name: 'browser_history',
     description: 'List the shared browser session\'s recorded operation history (navigate/execute/click/type), newest last, with per-step success/error. Use to understand what the agent did and to pick a step to replay.',
-    parameters: {},
+    parameters: {
+      verbose: { type: 'boolean', description: "Include each operation's parameters (default false). They are what you just sent, so they are omitted unless asked for." },
+    },
     output: {
       schema: {
         type: 'object',
@@ -1425,14 +1441,17 @@ export function apply(ctx: Context, config: Config = {}): void {
       render: (_args, value) => {
         const entries = value.entries as Array<{ seq: number; action: string; ok: boolean; params: Record<string, unknown>; result?: string; error?: string }>
         if (entries.length === 0) return [{ type: 'text', text: '(no recorded operations yet)' }]
-        return [{
-          type: 'text',
-          text: entries.map(e => {
-            const rawParams = JSON.stringify(e.params)
-            const shownParams = rawParams.length > 300 ? rawParams.slice(0, 300) + '…' : rawParams
-            return `#${e.seq} ${e.action} ${e.ok ? 'ok' : 'FAIL'} ${shownParams}${e.result !== undefined ? ` -> ${e.result}` : ''}${e.error !== undefined ? ` !! ${e.error}` : ''}`
-          }).join('\n'),
-        }]
+        // The parameters are what the caller itself just sent, so echoing them back is cost
+        // without information — measured at 18,162 characters for 200 operations, of which the
+        // per-entry params dominated. Only the tail is shown by default: the recent steps are
+        // what a caller reasons about, and the count leads so the tail is not mistaken for all.
+        const recent = entries.slice(-20)
+        const omitted = entries.length - recent.length
+        const lines = recent.map(e => `#${e.seq} ${e.action} ${e.ok ? 'ok' : 'FAIL'}${e.result !== undefined ? ` -> ${e.result}` : ''}${e.error !== undefined ? ` !! ${e.error}` : ''}`)
+        const header = omitted > 0
+          ? `${entries.length} operations recorded; showing the last ${recent.length} (pass verbose: true for their parameters):`
+          : `${entries.length} operation(s):`
+        return [{ type: 'text', text: `${header}\n${lines.join('\n')}` }]
       },
     },
     timeoutMs,

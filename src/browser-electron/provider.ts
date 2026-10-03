@@ -1171,7 +1171,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
     const includeHidden = request.includeHidden === true
-    const maxNodes = Math.max(10, Math.min(5000, Math.floor(request.maxNodes ?? 500)))
+    // 150 rather than 500. The cap fills on any real page, and 500 nodes measured 38,953
+      // characters — 10k-13k tokens for a single call. A caller that needs more asks for it.
+      const maxNodes = Math.max(10, Math.min(5000, Math.floor(request.maxNodes ?? 150)))
     const script = `(() => {
       const includeHidden = ${String(includeHidden)}
       const maxNodes = ${String(maxNodes)}
@@ -1361,9 +1363,12 @@ export class ElectronBrowserProvider implements BrowserProvider {
   async content(session: BrowserSessionId, request: BrowserContentRequest, signal?: AbortSignal): Promise<BrowserContentResult> {
     const tab = this.activeTab(this.session(session))
     signal?.throwIfAborted()
-    const maxChars = request.maxChars ?? this.contentMaxChars
     const selector = request.selector ?? ''
     const format = request.format
+    // Per-format caps. A full HTML document is enormous, but the same limit applied to
+    // plain text is no limit at all (a whole page of text measured 25,882 characters).
+    // This bounds the common case instead of letting one call spend 25k-33k tokens.
+    const maxChars = request.maxChars ?? (format === 'html' ? 50_000 : 20_000)
     const script = `(() => {
       const root = ${selector === '' ? 'document.body' : `document.querySelector(${JSON.stringify(selector)})`}
       if (!root) return { ok: false, reason: 'selector not found' }
