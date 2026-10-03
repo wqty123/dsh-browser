@@ -31,13 +31,17 @@ test('the read-only set contains only tools that exist', () => {
   }
 })
 
+// browser_auth is deliberately absent: it is a two-action tool whose "restore" WRITES
+// cookies to arbitrary domains, so exempting it would let a task that restricted its own
+// actions still rewrite the shared browser state. "flush" alone would qualify, but a tool
+// is exempt or not — the action is what the allow-list governs.
 test('every observing tool is exempt from an allow-list', () => {
   // Restricting what the agent may DO must not blind it: the tools that only look must
   // survive any allow-list.
   const observing = [
     'browser_snapshot', 'browser_a11y', 'browser_content', 'browser_scrape', 'browser_screenshot',
     'browser_get_value', 'browser_wait', 'browser_challenge', 'browser_list_tabs',
-    'browser_session', 'browser_history', 'browser_visited', 'browser_auth',
+    'browser_session', 'browser_history', 'browser_visited',
   ]
   for (const name of observing) {
     assert.ok(READ_ONLY_TOOLS.has(name), `${name} observes, so it must never be blocked`)

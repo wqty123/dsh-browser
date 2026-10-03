@@ -102,7 +102,10 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'browser_list_tabs', 'browser_session', 'browser_history', 'browser_visited',
   // browser_auth reads cookies out of the browser: an observation, and one the
   // credentials switch gates on its own (see credentials.allowRead in the settings).
-  'browser_auth',
+  // browser_auth is deliberately NOT here. It reads cookies on "flush" but WRITES them on
+  // "restore", to arbitrary domains, which is an action like any other — exempting the tool
+  // would let a task that restricted its own actions rewrite the shared browser's logins.
+  //
   // Getting out of a bad state, or lifting the restriction itself. Without these a task
   // that restricted everything could neither recover nor be released.
   'browser_restrict', 'browser_reset_session', 'browser_reset',
@@ -234,12 +237,12 @@ function parseFillValue(v: string | undefined): string | number | boolean {
 function formatSnapshot(snapshot: {
   url: string
   title?: string
-  elements: readonly { ref: number; kind: string; label: string; x: number; y: number; frame?: boolean }[]
+  elements: readonly { ref: number; kind: string; label: string; x: number; y: number; frame?: boolean; selector?: string }[]
   truncated?: boolean
   challenge?: { blocked: boolean; kind?: string; reason?: string }
 }, options: { coords?: boolean } = {}): string {
   const showCoords = options.coords === true
-  const lines = snapshot.elements.map(el => `[${el.ref}] ${el.kind}: ${el.label}${el.frame === true ? ' (iframe)' : ''}${showCoords ? ` (${el.x},${el.y})` : ''}`)
+  const lines = snapshot.elements.map(el => `[${el.ref}] ${el.kind}: ${el.label}${el.selector !== undefined && el.selector !== '' ? ` {${el.selector}}` : ''}${el.frame === true ? ' (iframe)' : ''}${showCoords ? ` (${el.x},${el.y})` : ''}`)
   const header = `URL: ${snapshot.url}${snapshot.title !== undefined ? `\nTitle: ${snapshot.title}` : ''}`
   const body = lines.length > 0 ? lines.join('\n') : '(no interactive elements found)'
   const tail = snapshot.truncated === true ? '\n(snapshot truncated)' : ''
@@ -331,7 +334,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       return {
         url: snapshot.url,
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
-        elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, x: el.x, y: el.y, ...el.frame === true ? { frame: true } : {} })),
+        elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, selector: el.selector, x: el.x, y: el.y, ...el.frame === true ? { frame: true } : {} })),
         truncated: snapshot.truncated,
         ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
       }
@@ -391,7 +394,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       return {
         url: snapshot.url,
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
-        elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, x: el.x, y: el.y, ...el.frame === true ? { frame: true } : {} })),
+        elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, selector: el.selector, x: el.x, y: el.y, ...el.frame === true ? { frame: true } : {} })),
         truncated: snapshot.truncated,
         ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
       }

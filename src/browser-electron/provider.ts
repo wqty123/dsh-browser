@@ -1376,7 +1376,12 @@ export class ElectronBrowserProvider implements BrowserProvider {
         }
       }
       else if (fmt === 'html') content = root.outerHTML || ''
-      else if (fmt === 'json') content = JSON.stringify(root)
+      // A DOM element has no own enumerable properties — everything lives on the prototype
+      // chain — so JSON.stringify(root) is always "{}". That is not a structured view of
+      // the page, it is an empty object the caller will read as "no data here" and then
+      // retry with other selectors. Serialise the markup instead, which is what a caller
+      // asking for JSON of an element can actually use.
+      content = JSON.stringify({ html: root.outerHTML, tag: root.tagName.toLowerCase() })
       else {
         // markdown: headings, paragraphs, links, lists (best-effort)
         const parts = []
