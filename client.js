@@ -1,7 +1,8 @@
 /**
  * Browser settings panel (client half): the switches that decide how the shared
  * browser behaves — history retention, login-state persistence, presentation,
- * vision strategy and credential access.
+ * vision strategy, credential access, and which ACTIONS the agent may take —
+ * the one group of switches written where no tool can reach them.
  *
  * The host half owns the document and serves it at `/dsh-builtin-browser/settings`;
  * this panel only renders it and sends patches, so the same file stays the single
@@ -62,7 +63,15 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "browser.edge": "本机 Edge",
     "browser.auto": "自动(优先 Chrome,其次 Edge)",
     "browser.hint": "选本机浏览器时会以**独立 profile** 启动它:不会打开、占用或修改你日常的窗口、书签与登录状态,关闭也不会关掉你自己的浏览器;代价是它看不到你日常浏览器里已登录的站点,需要时请在那个窗口里登录一次(登录态会留在插件自己的 profile 里)。桌面端默认由官方侧栏承载页面,此选项优先于侧栏。",
-    "credentials.hint": "关闭后 browser_auth 的导出与恢复都会被拒绝(BROWSER_AUTH_DISABLED)—— 不只是导出:恢复走的是同一个开关。桌面端请注意:Agent 驱动的是侧栏里那一个页面(人机同页),因此它与该页面共用同一个 partition —— 这也正是它能读到登录态的原因,属于有意接受的沙箱边界变化;关闭本项即拒绝读取。",
+    "credentials.hint": "关闭后 browser_auth 的导出会被拒绝,报 BROWSER_AUTH_DISABLED —— 导出读的是整台机器共享的 cookie 罐(按当前页所属站点收敛)。它只管**读**:写入登录状态(restore)归下面「Agent 能做什么」里的写入开关。桌面端请注意:Agent 驱动的是侧栏里那一个页面(人机同页),因此它与该页面共用同一个 partition —— 这也正是它能读到登录态的原因,属于有意接受的沙箱边界变化;关闭本项即拒绝读取。",
+    "actions.title": "Agent 能做什么",
+    "actions.lead": "与 browser_restrict 不同:那一层是模型自己设的软护栏,它随时可以解除;这里的三项由你在设置里决定,模型无法覆盖。",
+    "actions.allowExecute": "允许在页面里执行脚本",
+    "actions.allowExecute.hint": "browser_execute 能在当前页面里运行任意 JavaScript —— 它的能力上限就是这个页面能做的事。关闭后该工具一律被拒(BROWSER_EXECUTE_DISABLED),模型没有任何工具能把它打开。",
+    "actions.allowDownload": "允许下载文件到磁盘",
+    "actions.allowDownload.hint": "browser_download 会把 URL 下载到 downloadDir 内(带登录态;仍需通过目录准入,不覆盖已有文件)。关闭后一律被拒(BROWSER_DOWNLOAD_DISABLED)。截图另存走的是同一套目录准入,不受此项影响。",
+    "actions.allowCredentialWrite": "允许写入登录状态",
+    "actions.allowCredentialWrite.hint": "browser_auth 的 restore 会向任意域写入 cookie。关闭后只能导出、不能导入(BROWSER_AUTH_WRITE_DISABLED);读取仍由上面「凭据」那一项控制。",
   }
 
   const en = {
@@ -101,7 +110,15 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "browser.edge": "Installed Edge",
     "browser.auto": "Automatic (Chrome first, then Edge)",
     "browser.hint": "Choosing an installed browser launches it with a **separate profile**: your everyday windows, bookmarks and logins are never opened, locked or modified, and closing the plugin never closes your browser. The trade-off is that it does not see sites you are already signed into there — sign in once in that window and the session stays in the plugin's own profile. On the desktop the shell's sidebar normally carries the page; this setting outranks it.",
-    "credentials.hint": "Off makes browser_auth refuse both export and restore (BROWSER_AUTH_DISABLED) — not just export: restore goes through the same switch. On the desktop, note that the agent drives the sidebar's own page (one page for both parties), so it shares that page's partition — which is exactly why it can reach the login state. That is a deliberate sandbox-boundary change; this switch is how you refuse it.",
+    "credentials.hint": "Off makes browser_auth refuse the export, reporting BROWSER_AUTH_DISABLED — an export reads the machine-wide shared cookie jar (narrowed to the current page's site). It governs READING only: writing login state (restore) answers to the write switch under \"What the agent may do\" below. On the desktop, note that the agent drives the sidebar's own page (one page for both parties), so it shares that page's partition — which is exactly why it can reach the login state. That is a deliberate sandbox-boundary change; this switch is how you refuse it.",
+    "actions.title": "What the agent may do",
+    "actions.lead": "Unlike browser_restrict, which is the model's own soft guardrail and can be lifted by the model at any time, these three are yours: set here, they override anything the model asks for.",
+    "actions.allowExecute": "Run scripts in the page",
+    "actions.allowExecute.hint": "browser_execute runs arbitrary JavaScript in the active tab — its reach is everything that page can do. Off refuses the tool outright (BROWSER_EXECUTE_DISABLED) and no tool the model holds can turn it back on.",
+    "actions.allowDownload": "Download files to disk",
+    "actions.allowDownload.hint": "browser_download fetches a URL into downloadDir (with login state; still subject to the directory admission gate, never overwriting an existing file). Off refuses it outright (BROWSER_DOWNLOAD_DISABLED). Saving a screenshot goes through the same directory gate and is not covered by this switch.",
+    "actions.allowCredentialWrite": "Write login state",
+    "actions.allowCredentialWrite.hint": "browser_auth's restore writes cookies to arbitrary domains. Off allows export but not import (BROWSER_AUTH_WRITE_DISABLED); reading stays under the Credentials switch above.",
   }
 
   /** Read or patch the host-owned settings document. */
@@ -287,6 +304,34 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
             h("span", { key: "h", style: styles.hint }, t("browser.hint")),
           ]),
         ]),
+      ]),
+
+      section("actions.title", [
+        h("p", { key: "lead", style: styles.hint }, t("actions.lead")),
+        h(Toggle, {
+          key: "allowExecute",
+          labelKey: "actions.allowExecute",
+          hintKey: "actions.allowExecute.hint",
+          checked: settings.actions.allowExecute,
+          busy,
+          onChange: value => patch({ actions: { allowExecute: value } }),
+        }),
+        h(Toggle, {
+          key: "allowDownload",
+          labelKey: "actions.allowDownload",
+          hintKey: "actions.allowDownload.hint",
+          checked: settings.actions.allowDownload,
+          busy,
+          onChange: value => patch({ actions: { allowDownload: value } }),
+        }),
+        h(Toggle, {
+          key: "allowCredentialWrite",
+          labelKey: "actions.allowCredentialWrite",
+          hintKey: "actions.allowCredentialWrite.hint",
+          checked: settings.actions.allowCredentialWrite,
+          busy,
+          onChange: value => patch({ actions: { allowCredentialWrite: value } }),
+        }),
       ]),
 
       section("credentials.title", [
