@@ -77,6 +77,15 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * spawned when a view is actually needed.
      */
     private client;
+    /**
+     * Set when a command went unanswered rather than being refused.
+     *
+     * A timeout says nothing about the connection: the page may simply be slow. It marks the
+     * client for a cheap check before the next command trusts it, which keeps a slow page
+     * from being mistaken for a dead browser while still catching one that has truly stopped
+     * answering.
+     */
+    private clientSuspect;
     private child;
     private starting;
     /**
@@ -95,6 +104,20 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * The CDP client, starting the browser on first use.
      * @returns the connected client.
      */
+    /**
+     * Whether a client that reports itself open is actually answering.
+     *
+     * An open socket proves nothing: a browser can hold the connection and never reply, and
+     * that state must not be cached, or every later command waits out its own timeout. Asking
+     * the browser something cheap is a fact; reading the failure text is a guess, and the
+     * guess was wrong in both directions (it killed healthy browsers on a slow page, and it
+     * mistook the browser's own free text for a verdict).
+     *
+     * This is only reached when the socket is open, so the common path costs nothing.
+     * @param client - the client to question.
+     * @returns true when it answered.
+     */
+    private probeClient;
     private ensureClient;
     /**
      * Launch the browser with a private profile and connect over CDP.
