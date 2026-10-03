@@ -1465,7 +1465,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         },
       },
-      render: (_args, value) => {
+      render: (args, value) => {
         const entries = value.entries as Array<{ seq: number; action: string; ok: boolean; params: Record<string, unknown>; result?: string; error?: string }>
         if (entries.length === 0) return [{ type: 'text', text: '(no recorded operations yet)' }]
         // The parameters are what the caller itself just sent, so echoing them back is cost
@@ -1474,9 +1474,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         // what a caller reasons about, and the count leads so the tail is not mistaken for all.
         const recent = entries.slice(-20)
         const omitted = entries.length - recent.length
-        const lines = recent.map(e => `#${e.seq} ${e.action} ${e.ok ? 'ok' : 'FAIL'}${e.result !== undefined ? ` -> ${e.result}` : ''}${e.error !== undefined ? ` !! ${e.error}` : ''}`)
+        const lines = recent.map(e => `#${e.seq} ${e.action} ${e.ok ? 'ok' : 'FAIL'}${e.result !== undefined ? ` -> ${e.result}` : ''}${e.error !== undefined ? ` !! ${e.error}` : ''}${args.verbose === true ? ` ${JSON.stringify(e.params)}` : ''}`)
         const header = omitted > 0
-          ? `${entries.length} operations recorded; showing the last ${recent.length} (pass verbose: true for their parameters):`
+          ? `${entries.length} operations recorded; showing the last ${recent.length} (${args.verbose === true ? '' : ' (pass verbose: true for parameters)'}):`
           : `${entries.length} operation(s):`
         return [{ type: 'text', text: `${header}\n${lines.join('\n')}` }]
       },
