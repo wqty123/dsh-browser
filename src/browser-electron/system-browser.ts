@@ -391,7 +391,22 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       ...this.extraArgs,
       'about:blank',
     ]
-    const child = spawn(this.browser.path, args, { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false })
+    // A browser from a previous attempt may still be running with this same
+    // --user-data-dir. On Windows the new one would merely hand off to it and exit, and that
+    // exit would then be treated as the launch failing.
+    if (this.child !== undefined) {
+      try { this.child.kill() } catch { /* already gone */ }
+      this.child = undefined
+    }
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(this.browser.path, args, { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false })
+    } catch (error) {
+      // spawn throws synchronously for some targets (a .cmd on Windows, a path that cannot
+      // be executed). Without this the exception escaped start() and skipped every
+      // diagnostic below it.
+      throw new Error(`dsh-builtin-browser: could not launch ${this.browser.path}: ${error instanceof Error ? error.message : String(error)}`)
+    }
     this.child = child
     /**
      * A launch that fails (ENOENT, no permission, a broken binary) is reported by an
@@ -410,6 +425,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       this.client?.close()
       this.client = undefined
       this.child = undefined
+      // The pages this client opened belong to the process that just died; keeping their
+      // session ids means every later command is sent to a browser that never issued them.
+      // Clearing these is what makes the restart usable rather than merely alive.
+      this.views.clear()
+      this.sessions.clear()
     })
     const portFile = join(this.profileDir, 'DevToolsActivePort')
     const deadline = Date.now() + 30_000
@@ -489,14 +509,19 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // socket can stay OPEN while nothing comes back, which is the form the reporter saw with
       // a live, healthy-looking Edge. Dropping the client here means the next call starts a new
       // browser rather than hanging again, and the error names the cause instead of a timeout.
+      const client = await this.ensureClient()
+      const session = this.views.get(viewId) ?? await this.ensureSession(viewId)
       try {
-        const client = await this.ensureClient()
-        const session = this.views.get(viewId) ?? await this.ensureSession(viewId)
         const result = await client.send(method, params, session)
         return (result ?? {}) as Record<string, unknown>
       } catch (error) {
-        this.client?.close()
-        this.client = undefined
+        // Only a BROKEN CONNECTION justifies discarding the client. A CDP protocol error is an
+        // ordinary failure of one command, and tearing down the browser for it turned a single
+        // bad call into every later call reconnecting to a browser it then abandoned.
+        if (!client.isAlive()) {
+          this.client?.close()
+          this.client = undefined
+        }
         throw error
       }
       },

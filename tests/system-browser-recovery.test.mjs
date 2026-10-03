@@ -16,17 +16,18 @@ import { join } from 'node:path'
 import { SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
 
 /** A directory holding a stub "browser" that exits immediately. */
+/**
+ * A path that behaves like a browser that dies at once.
+ *
+ * A .cmd stub cannot be used: Node refuses to spawn one without a shell (EINVAL, since the
+ * CVE-2024-27980 fix) and throws synchronously, so the test would pass without ever reaching
+ * the exit handling it is meant to exercise. The Node binary itself is a real executable on
+ * every platform, and it exits immediately when handed a browser's arguments — which is what
+ * "the browser died" looks like from the host's point of view.
+ * @returns an absolute path to an executable that exits without exposing CDP.
+ */
 function stubBrowser() {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-stub-browser-'))
-  const path = join(dir, process.platform === 'win32' ? 'stub-browser.cmd' : 'stub-browser')
-  if (process.platform === 'win32') {
-    // A .cmd that returns straight away: spawn succeeds, the process is gone immediately.
-    writeFileSync(path, '@echo off\r\nexit /b 0\r\n')
-  } else {
-    writeFileSync(path, '#!/bin/sh\nexit 0\n')
-    chmodSync(path, 0o755)
-  }
-  return path
+  return process.execPath
 }
 
 test('a browser that exits is not reported as a usable connection', async () => {
