@@ -797,11 +797,19 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         try {
           let image
           try {
-            image = await entry.webContentsView.webContents.capturePage()
+            image = await withTimeout(
+              entry.webContentsView.webContents.capturePage(),
+              COMMAND_TIMEOUT_MS,
+              'capturePage',
+            )
           } catch (error) {
             process.stderr.write(`[dsh-browser host] capturePage failed: ${String(error)}\n`)
             await new Promise(resolve => setTimeout(resolve, 400))
-            image = await entry.webContentsView.webContents.capturePage()
+            image = await withTimeout(
+              entry.webContentsView.webContents.capturePage(),
+              COMMAND_TIMEOUT_MS,
+              'capturePage',
+            )
           }
           // Downscale to fit the requested box, preserving aspect ratio.
           const size = image.getSize()
@@ -831,7 +839,11 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
             try { win.window.contentView.removeChildView(toolbar) } catch { /* already gone */ }
           }
           try {
-            const shot = await entry.webContentsView.webContents.debugger.sendCommand('Page.captureScreenshot', {})
+            const shot = await withTimeout(
+              entry.webContentsView.webContents.debugger.sendCommand('Page.captureScreenshot', {}),
+              COMMAND_TIMEOUT_MS,
+              'Page.captureScreenshot',
+            )
             const data = (shot as { data?: unknown }).data
             if (typeof data === 'string' && data.length > 0) base64 = data
           } finally {
