@@ -883,7 +883,21 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // closed window) while the agent waits. Chromium answers `Input.*` with success even
     // for a view that has no display surface, so dispatching to a handle that is no longer
     // the visible one does not fail — it silently lands nowhere, or on the wrong page.
-    return this.activeTab(s).handle
+    //
+    // Returning the re-read handle was wrong, though: `handle` above is the one that was
+    // actually presented, and if the active tab changed during the round trip then the
+    // re-read one was never presented at all. Handing it back meant the caller dispatched
+    // to a view with no display surface — the exact failure this method exists to prevent,
+    // arrived at from the other side. Either the presented view is still the active one, or
+    // the caller must be told rather than given something else to aim at.
+    const live = this.activeTab(s).handle
+    if (live !== handle) {
+      throw new BrowserError(
+        'browser: the active tab changed while the page view was being presented, so synthesized input would go to an unshown view — retry, and the new page will be presented instead',
+        'BROWSER_VIEW_CHANGED',
+      )
+    }
+    return handle
   }
 
   /**
