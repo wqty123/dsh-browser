@@ -207,6 +207,28 @@ test('a switch that is off renders as off — the panel shows what the file says
   assert.equal(toggles.get('actions.allowExecute').checked, false)
 })
 
+test('a document from an older host, with no action section, still renders', async () => {
+  // The failure this guards, reproduced exactly: after an update without a restart the client
+  // bundle is new while the host is old, so the document it serves has no `actions`. Reading
+  // `settings.actions.allowExecute` off that threw, and the throw took the whole panel with it —
+  // the section did not show stale values, it refused to open.
+  const legacy = { ...DEFAULT_SETTINGS }
+  delete legacy.actions
+  const { tree } = await mount({ settings: legacy })
+
+  const toggles = new Map(
+    elements(tree)
+      .filter(element => element.props.labelKey !== undefined)
+      .map(element => [element.props.labelKey, element.props]),
+  )
+  for (const labelKey of ['actions.allowExecute', 'actions.allowDownload', 'actions.allowCredentialWrite']) {
+    assert.ok(toggles.has(labelKey), `the panel still renders "${labelKey}"`)
+    assert.equal(toggles.get(labelKey).checked, true, `"${labelKey}" falls back to the host's behaviour: on`)
+  }
+  // And the sections that were always there are unharmed.
+  assert.ok(toggles.has('history.enabled'), 'the rest of the panel renders too')
+})
+
 test('flipping a switch sends exactly that patch', async () => {
   const { tree, host } = await mount()
   // Element props, not the element: `h(Toggle, {…})` keeps everything on `props`.

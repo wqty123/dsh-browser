@@ -175,7 +175,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   /** The settings page section. */
   function SettingsRoot() {
     const t = translate
-    const [settings, setSettings] = useState(null)
+    const [rawSettings, setSettings] = useState(null)
     const [meta, setMeta] = useState({ path: "" })
     const [error, setError] = useState("")
     const [busy, setBusy] = useState(false)
@@ -202,12 +202,22 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         .then(() => setBusy(false))
     }, [])
 
-    if (settings === null) {
+    if (rawSettings === null) {
       return h("div", { style: styles.wrap }, [
         h("p", { key: "l", style: styles.lead }, t("loading")),
         error !== "" ? h("p", { key: "e", style: styles.error }, `${t("failed")} ${error}`) : null,
       ])
     }
+
+    // A document served by an OLDER host has no `actions` section — which is exactly the state
+    // an update leaves behind when the host has not been restarted yet (the client bundle is
+    // read at request time, the host's code at startup). Rendering `settings.actions.allowExecute`
+    // off that threw, and the throw took the whole panel with it: the section did not merely show
+    // stale values, it refused to open. Fill the gap with the defaults an older host behaves by,
+    // which is also the honest reading — it has no such switch, so "on" is what it does.
+    const settings = rawSettings.actions === undefined
+      ? { ...rawSettings, actions: { allowExecute: true, allowDownload: true, allowCredentialWrite: true } }
+      : rawSettings
 
     const section = (titleKey, children) => h("div", { key: titleKey, style: styles.group }, [
       h("p", { key: "t", style: styles.groupTitle }, t(titleKey)),
