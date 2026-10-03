@@ -22,7 +22,6 @@ dsh plugin --profile web add <本仓库路径>
 | 行 | 子路径 | 角色 |
 | --- | --- | --- |
 | `dsh-builtin-browser` | 包名本身 | **惰性根行**:不注册任何东西(空 `apply()`),只用来声明包名 —— 宿主的客户端插件扫描靠精确包名读到 `dsh.client`,少了这行设置栏不会出现 |
-| --- | --- | --- |
 | `browser` | `dsh-builtin-browser/browser` | `ctx.browser` 能力 seam(始终挂载) |
 | `browser-electron` | `dsh-builtin-browser/browser-electron` | Electron CDP provider |
 | `tool-browser` | `dsh-builtin-browser/tool-browser` | `browser_*` 模型侧工具 |
@@ -36,7 +35,7 @@ dsh plugin --profile web add <本仓库路径>
 | `browser-electron` | `viewHost` | 对象 | 可选 | 宿主提供的 `ElectronBrowserViewHost`(通常 `!!js ctx.get('electronViewHost')`)。**不传时插件自己选载体**:桌面端驱动官方侧栏、否则自托管;设置里显式选择的 Chrome/Edge 优先于两者 |
 | `browser-electron` | `httpOnly` | 布尔 | `true` | 仅允许 HTTP(S) 导航;`file:`/`data:` 等拒绝 |
 | `browser-electron` | `snapshotMaxElements` | 数字 | `60` | 快照最多收录的交互元素数 |
-| `browser-electron` | `contentMaxChars` | 数字 | (已废弃) | **不再被读取** —— 上限改为按格式:html 50 000,其余 20 000;单次调用可用 `maxChars` 覆盖 |
+| `browser-electron` | `contentMaxChars` | 数字 | **不再被读取(已废弃)** | 曾经的"内容抓取默认字符上限"。**现在没有任何代码读它,改它不改变任何行为** —— 上限按格式固定:html 50 000、json 50 000、txt 20 000、markdown 20 000,单次调用用 `maxChars` 覆盖。保留该键只为不让既有配置因未知键而报错 |
 | `browser-electron` | `downloadDir` | 字符串 | 系统下载目录(自动识别 `Downloads`/`下载`/`下載`,或 `XDG_DOWNLOAD_DIR`) | 限定 `browser_download` 与 `browser_screenshot` 保存路径必须位于该目录内且不覆盖已有文件;默认收敛到系统下载目录,可改沙箱目录 |
 | `tool-browser` | `timeoutMs` | 数字 | `60000` | 工具协作超时(ms) |
 | `tool-browser` | `tabTools` | 布尔 | `true` | 是否注册标签管理工具 |
@@ -68,7 +67,7 @@ dsh plugin --profile web add <本仓库路径>
 - `browser_session` 查看本任务的会话与标签;
 - `browser_reset_session` 关闭并重建本任务的会话(崩溃或卡死后用它恢复)。
 
-登录态(cookie)为所有任务共享;可用 `browser_auth` 导出/恢复,重启后不丢。
+登录态(cookie)为所有任务共享;可用 `browser_auth` 导出/恢复,重启后不丢。注意 **`flush` 只导出当前页所属站点的 cookie**(按本会话所在页面的 URL 收敛),页面 URL 未知时**直接拒绝**而不是扩大范围去读整台机器的 cookie 罐;`restore` 会向任意域写 cookie,所以 `browser_auth` **同样受 `browser_restrict` 白名单约束**,不属于只读豁免。
 
 ## FAQ
 
@@ -85,6 +84,12 @@ DSH Desktop 上②命中即可用(0.1.18+ 插件自带 electron 包;44+ 二进�
 
 **Q:浏览器窗口不见了?**
 窗口标题为 `dsh-browser`(自托管)。若子进程崩溃(或宿主 DSH 重启)会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。
+
+**Q:设置里的 `contentMaxChars` 改了没反应?**
+因为它**已经没有任何代码在读** —— 那是内容上限改为按格式固定之后的遗留键(html/json 50 000,txt/markdown 20 000)。上限请用单次调用的 `maxChars` 覆盖。
+
+**Q:本机 Chrome / Edge 被关掉之后还能继续用吗?**
+能。该载体观察进程退出并清掉**已失效的会话映射**,下一次调用会**重新拉起**浏览器并继续工作;重新拉起前会先 kill 旧进程并**最多等 3 秒**它真正退出,且**只认本次启动写下的 `DevToolsActivePort`**(被杀掉的浏览器没机会清理那个文件,照读会连到别的 Chromium 或 `node --inspect` 上)。反过来,页面只是**慢**不会让插件杀掉你的窗口:命令超时只把连接标记为存疑,下一次调用先用 `Browser.getVersion` 探一次再决定是否丢弃,只有 socket 已关闭才重启。
 
 **Q:下载报 CORS 错误?**
 `browser_download` 在页面上下文内 `fetch`,受同源/CORS 约束;跨域文件请先在同源页面内操作,或直接请求用户提供。仅支持 HTTP(S) URL;`savePath` 必须为绝对路径且位于 `downloadDir` 内(默认系统下载目录,自动识别 `Downloads`/`下载`/`下載`),不覆盖已有文件;`browser_screenshot` 的 `savePath` 受同一套限制。

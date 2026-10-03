@@ -8,16 +8,16 @@
 | --- | --- | --- | --- | --- |
 | `browser_open` | `url`(必填), `newTab?` | 快照(url/title/elements/truncated/challenge) | ✅ | 打开 URL,返回带编号元素的快照;`newTab: true` 在新标签打开 |
 | `browser_wait` | `timeoutMs?`, `url?`, `selector?` | `{ ready, reason }` | – | 等待页面加载完成(可选期望 URL / CSS 选择器);未就绪不抛错,返回原因 |
-| `browser_snapshot` | – | 快照 | – | 交互元素(输入框/按钮/链接)编号清单,供定位与点击;穿透同源 iframe 与 Shadow DOM,iframe 内元素标注 `frame` |
-| `browser_a11y` | `includeHidden?`, `maxNodes?`(10-5000,默认 150) | `{ url, title?, count, nodes[], truncated }` | – | 无障碍树:每个交互节点的 `role`/`name`/`value`/`states`/`depth`/`tag`/坐标;优先 Chrome `computedRole`/`computedName`,穿透同源 iframe 与 Shadow DOM;坐标可直接喂 `browser_click`/`browser_type` |
-| `browser_content` | `format`(html/markdown/txt/json,必填), `selector?`, `maxChars?`, `timeoutMs?` | `{ content, truncated }` | – | 抓取页面内容;`selector` 限定区域 |
+| `browser_snapshot` | – | 快照 | – | 交互元素(输入框/按钮/链接)编号清单,供定位与点击;穿透同源 iframe 与 Shadow DOM,iframe 内元素标注 `frame`。元素有 `id` 或 `name` 时,每行末尾附**可直接引用**的 `{#id}` / `{[name=x]}`(推导不出来时该段不出现),可原样作为 `browser_click`/`browser_type` 的 `target {by:"css", value:"…"}` |
+| `browser_a11y` | `includeHidden?`, `maxNodes?`(10-5000,**默认 150**), `coords?` | `{ url, title?, count, nodes[], truncated }` | – | 无障碍树:每个交互节点的 `role`/`name`/`value`/`states`/`depth`/`tag`/`selector`,优先 Chrome `computedRole`/`computedName`,穿透同源 iframe 与 Shadow DOM。**默认不返回坐标**(需要像素落点时传 `coords: true`;要按文本驱动目标,用节点的 `name` 配 `browser_click` 的 `target {by:"text"}`)。`states` **只列非默认状态** —— 没有 `states=` 就是 enabled;缩进为一层一个空格 |
+| `browser_content` | `format`(html/markdown/txt/json,必填), `selector?`, `maxChars?`, `timeoutMs?` | `{ content, truncated }` | – | 抓取页面内容;`selector` 限定区域。**字符上限按格式**(默认):`html`/`json` **50 000**,`txt`/`markdown` **20 000**,单次调用用 `maxChars` 覆盖;被截断时结果末尾提示如何收窄。`json` 返回 `{"html": "<元素 outerHTML>", "tag": "<标签名>"}` —— 不是空对象(DOM 节点自身没有可枚举属性,`JSON.stringify` 一个元素只会得到 `{}`) |
 | `browser_challenge` | – | `{ blocked, kind?, reason?, hint? }` | – | 检测人机验证(CAPTCHA/Cloudflare/reCAPTCHA/hCaptcha/Turnstile);阻塞时请用户处理 |
 
 ## 页面操作
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_execute` | `script`(必填), `args?` | `{ ok, value? / exception? }` | ✅ | 在页面执行 JS;脚本以 `return` 开头或作为表达式;`args` 以 `arguments[0..n]` 传入 |
+| `browser_execute` | `script`(必填), `args?` | `{ ok, value? / exception? }` | ✅ | 在页面执行 JS;脚本以 `return` 开头或作为表达式;`args` 以 `arguments[0..n]` 传入。**返回值上限 50 000 字符**,超出时结果里写明"截断于 50 000 / 实际 N 字符"(要完整内容请让表达式返回更小的值) |
 | `browser_click` | `target?`(css/text/xpath), `x?`, `y?`(target 与坐标二选一) | `{ clicked }` | ✅ | 语义目标点击:按 `target` 定位、滚动到视口中央再点中心;或视口坐标点击(配合截图做视觉定位) |
 | `browser_type` | `text`(必填), `target?` | `{ typed }` | ✅ | 输入文本;传 `target` 先聚焦该元素(CDP `Input.insertText`) |
 | `browser_key` | `key`(必填,枚举) | `{ pressed }` | ✅ | 按命名按键:Enter/Tab/Escape/Backspace/Delete/方向键/Home/End/PageUp/PageDown/Space |
@@ -31,7 +31,7 @@
 | `browser_select` | `target`(必填), `optionValue?`/`optionText?`/`optionIndex?`(三选一) | `{ value, text }` | ✅ | 选中 `<select>` 的某个选项(按 target 定位) |
 | `browser_clear` | `target`(必填) | `{ cleared }` | ✅ | 清空输入/文本域/contenteditable,或取消勾选 checkbox/radio |
 | `browser_get_value` | `target`(必填) | `{ value?, checked?, selectedText? }` | – 豁免 | 读取元素当前值,用于操作后验证 |
-| `browser_scrape` | `item`(必填), `fields`(必填,映射), `timeoutMs?` | `{ count, items[] }` | – 豁免 | 结构化提取:容器选择器 + 字段映射(如 `{"title": "h3", "url": "a@href"}`);静态 CSS 查询、不执行任意代码、CSP 安全;等待 item 出现(默认 5s) |
+| `browser_scrape` | `item`(必填), `fields`(必填,映射), `timeoutMs?` | `{ count, items[] }` | – 豁免 | 结构化提取:容器选择器 + 字段映射(如 `{"title": "h3", "url": "a@href"}`);静态 CSS 查询、不执行任意代码、CSP 安全;等待 item 出现(默认 5s)。**结果是最紧凑的 JSON**(不缩进),条目数在最前面 |
 
 ## 标签与会话
 
@@ -48,8 +48,8 @@
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_history` | – | `{ entries[] }` | – | 操作日志(最新在后),含 seq/action/ok/params/result/error |
-| `browser_visited` | `limit`(默认 30,上限 200), `domain`(主机名包含匹配) | `{ count, entries[] }` | – | **持久化浏览历史**(访问过的页面,最新在前):与 cookie 同址落盘(`$DSH_HOME/dsh-builtin-browser-host/history.jsonl`),关闭浏览器与重启 DSH 后仍在;上限 5000 条或 90 天。重开某条用 `browser_open`;与 `browser_history`(会话内操作日志,随会话消失)是两件事;可在设置里关闭记录 |
+| `browser_history` | `verbose?` | `{ entries[] }` | – | 操作日志(最新在后),含 seq/action/ok/params/result/error。**默认只渲染最近 20 条,且不显示每条的参数**(参数就是你刚发出去的),首行先给总条数,免得把尾部当成全部;要看参数时传 `verbose: true`。返回的完整 `entries[]` 不受条数限制 |
+| `browser_visited` | `limit`(默认 30,上限 200), `domain`(主机名包含匹配), `query`(URL 或标题包含匹配), `session`(按来源会话标签过滤) | `{ count, entries[] }` | – | **持久化浏览历史**(访问过的页面,最新在前):与 cookie 同址落盘(`$DSH_HOME/dsh-builtin-browser-host/history.jsonl`),关闭浏览器与重启 DSH 后仍在;上限 5000 条或 90 天。重开某条用 `browser_open`;与 `browser_history`(会话内操作日志,随会话消失)是两件事;可在设置里关闭记录。渲染时**时间戳精确到分钟**,会话标记**只在切换时打印一次并取 8 位前缀** |
 | `browser_replay` | `seq`(必填) | `{ replayed }` | ✅ | 按序号回放某一步(navigate/execute/click/type/scroll/key) |
 | `browser_download` | `url`(必填), `savePath`(必填) | `{ path }` | ✅ | 带会话 cookie 下载到本地(仅 http(s);`savePath` 必须为绝对路径且位于 `downloadDir` 内——默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`;不覆盖已有文件;上限 256MB,受 CORS 约束;由子进程直接落盘) |
 
@@ -57,7 +57,7 @@
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出/恢复 cookie —— **三种载体都可用**:自托管走原生会话,桌面侧栏与本机 Chrome/Edge 走 CDP 的 `Storage.getCookies` / `Storage.setCookies`;flush 返回 cookie 列表,restore 带列表写回。设置里「允许读取 cookies / 导出登录状态」关闭时,flush 与 restore **都**抛 `BROWSER_AUTH_DISABLED` |
+| `browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出/恢复 cookie —— **三种载体都可用**:自托管走原生会话,桌面侧栏与本机 Chrome/Edge 走 CDP 的 `Network.getCookies` / `Storage.setCookies`;flush 返回 cookie 列表,restore 带列表写回。**flush 只导出当前页所属站点的 cookie**(不是整台机器的共享 cookie 罐),范围按本会话所在页面的 URL 收敛;**范围未知时直接拒绝而不是放宽**(自托管侧栏载体报"cookie 范围未知",CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`)。`restored` 反映真的提交了多少(无法构成有效 URL 的 cookie 会被丢弃并报出条数)。**受白名单约束**:`restore` 会向任意域写 cookie,是动作而非观察,因此该工具**不在只读豁免集合**里。设置里「允许读取 cookies / 导出登录状态」关闭时,flush 与 restore **都**抛 `BROWSER_AUTH_DISABLED` |
 | `browser_restrict` | `allowed?` | `{ restrictedTo[] }` | – | 设置动作白名单;空列表解除;**只校验名字是否以 `browser_` 开头**(写错的前缀会报错,`browser_typo` 这种拼错但前缀合法的名字会被接受、等同于拦掉该名字,不额外报错);守卫按名字匹配,因此白名单里列什么名字就只放行什么名字。**软护栏**——模型可自行解除,非安全边界 |
 
 ## 截图
