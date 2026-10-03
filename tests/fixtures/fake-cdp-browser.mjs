@@ -57,11 +57,11 @@ function createFakeBrowser() {
   function handleCommand(message) {
     if (message.id === undefined) return undefined
     if (message.method === 'Target.createTarget') {
-      targetId = 'target-1'
+      targetId = `target-${randomUUID()}`
       return { id: message.id, result: { targetId } }
     }
     if (message.method === 'Target.attachToTarget') {
-      sessionId = 'session-1'
+      sessionId = `session-${randomUUID()}`
       return { id: message.id, result: { sessionId } }
     }
     // Every page command goes to the current session; a stale one is a protocol error,

@@ -39,6 +39,14 @@ test('a replaced browser does not leave the old session ids in place', async () 
   )
   const view = host.createView()
 
+  // Establish a session FIRST. Without this the views map is empty when the browser dies, so
+  // there is no stale session id for the fix to have to clear — the state this test is named
+  // after never existed, which is why reverting the fix left it green.
+  const before = await view.sendCommand('Runtime.evaluate', { expression: '1' }).then(
+    () => undefined,
+    error => String(error.message),
+  )
+
   // The browser dies the way a closed window ends it.
   await first.kill()
   assert.ok(firstPort > 0, 'the first browser was listening')
@@ -51,11 +59,15 @@ test('a replaced browser does not leave the old session ids in place', async () 
   // The second command must reach a WORKING browser. Before H1-H3 this either reused the
   // dead session id (protocol error, forever) or killed the fresh client with the hand-off
   // process's exit.
-  try {
-    await view.sendCommand('Runtime.evaluate', { expression: '1' })
-  } catch (error) {
-    // Failing is acceptable only if it is the launch that failed, not a stale session.
-    assert.doesNotMatch(String(error.message), /Session with given id not found/, `stale session reused: ${error.message}`)
+  const after = await view.sendCommand('Runtime.evaluate', { expression: '2' }).then(
+    () => undefined,
+    error => String(error.message),
+  )
+  // Positive: a stale session is the one failure that must never appear, and it is the one the
+  // old assertions could not distinguish from success.
+  assert.doesNotMatch(String(after ?? ''), /Session with given id not found/, `the replacement browser was sent a session id from the dead one: ${after}`)
+  if (before !== undefined) {
+    assert.doesNotMatch(String(after ?? ''), /Session with given id not found/, 'diagnostic: the first command also failed')
   }
 
   host.dispose()
