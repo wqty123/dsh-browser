@@ -498,7 +498,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         },
       },
       render: (args, value) => {
-        const nodes = value.nodes as Array<{ ref: number; role: string; name: string; value?: string | null; states: string[]; depth: number; tag: string; x: number; y: number; frame?: boolean }>
+        const nodes = value.nodes as Array<{ ref: number; role: string; name: string; value?: string | null; states: string[]; depth: number; tag: string; x: number; y: number; frame?: boolean; selector?: string }>
         // Built for reading, not for imaging: containment is shown as indentation
         // (the depth was already collected and simply thrown away), an empty state
         // list adds nothing, and coordinates appear only when asked for — a model
@@ -516,7 +516,10 @@ export function apply(ctx: Context, config: Config = {}): void {
           // now means "enabled", which the description states.
           const notableStates = Array.isArray(n.states) ? n.states.filter((state: string) => state !== 'enabled') : []
           const statePart = notableStates.length > 0 ? ` states=[${notableStates.join(',')}]` : ''
-          return `${indent}[${n.ref}] ${n.role} "${n.name}"${valuePart}${coordsPart}${statePart}${n.frame === true ? ' (iframe)' : ''}`
+          // The provider computes this for a node with an id or a name; printing it is what
+          // makes the node something the caller can point at instead of guessing at its text.
+          const selectorPart = typeof n.selector === 'string' && n.selector !== '' ? ` {${n.selector}}` : ''
+          return `${indent}[${n.ref}] ${n.role} "${n.name}"${valuePart}${coordsPart}${statePart}${selectorPart}${n.frame === true ? ' (iframe)' : ''}`
         })
         const header = `URL: ${value.url}${value.title !== undefined ? `\nTitle: ${value.title}` : ''}`
         const hint = showCoords ? '' : '\n(no coords; pass coords: true)'
