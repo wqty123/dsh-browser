@@ -15,7 +15,13 @@ import { join } from 'node:path'
  * The probe window is read at module load, hence the env assignment above the
  * dynamic import. The third constructor argument is the probe seam.
  */
-process.env.DSH_BROWSER_PROBE_RETRY_MS = '20'
+// A WIDE window, on purpose. The case below asserts that a cached answer is REUSED, and with a
+// tight window that assertion silently measures how busy the machine is: at 20ms, two calls a
+// few microseconds apart were observed straddling the window during a full-suite run, so the
+// second one rescanned and `scans` came back 2 instead of 1 — a failure with nothing to do with
+// the code. The value only has to exceed the gap between two consecutive statements (it does,
+// by orders of magnitude) and stay under the settle() that follows (it does).
+process.env.DSH_BROWSER_PROBE_RETRY_MS = '1000'
 // Isolate the host log: this file constructs real hosts, which write a spawn line
 // (and an exit line) to `$DSH_HOME/logs/dsh-builtin-browser-host.log` — the log an
 // operator reads to diagnose a crash loop. Writing synthetic entries there would
@@ -44,12 +50,12 @@ test('a failed Electron probe expires instead of poisoning the process', async (
   // Once the window passes, the search runs again: a late-installed Electron
   // heals the provider on its own.
   binaryOnDisk = true
-  await settle(150)
+  await settle(1250)
   assert.equal(host.available(), true)
   assert.equal(scans, 2)
 
   // A success is kept, so the hot path never scans again.
-  await settle(150)
+  await settle(1250)
   assert.equal(host.available(), true)
   assert.equal(scans, 2)
 })
