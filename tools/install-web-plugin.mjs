@@ -145,16 +145,23 @@ if (version !== undefined) {
 }
 
 // ---- 2. install -------------------------------------------------------------
+  // Resolve the repair tool BEFORE installing. Step 2 is the step that breaks the
+  // profile, and this script depends on a repair tool that ships outside this package —
+  // so checking afterwards meant the default outcome was to damage the profile and then
+  // report that it could not be fixed.
+  const repair = findRepairTool()
+  if (repair === undefined) {
+    console.error('  no repair tool found — refusing to run the install that would break the profile.')
+    console.error('  Set DSH_REPAIR_TOOL to repair-web-profile.mjs (it is not part of this package: the')
+    console.error('  profile layout it repairs is specific to the machine DSH is installed on).')
+    process.exit(1)
+  }
+
 console.log('step 2: pnpm install (this is the step that causes the damage)')
 run('pnpm', ['install', '--ignore-scripts'], PROFILE)
 
 // ---- 3. repair, immediately -------------------------------------------------
 console.log('step 3: repair the profile (never skip this)')
-const repair = findRepairTool()
-if (repair === undefined) {
-  console.error('  repair tool not found — set DSH_REPAIR_TOOL to its path; the profile is likely damaged now')
-  process.exit(1)
-}
 run(process.execPath, [repair, '--apply'], import.meta.dirname)
 
 // ---- 4. verify --------------------------------------------------------------
