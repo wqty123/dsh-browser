@@ -25,6 +25,7 @@ import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-br
 import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralProfiles } from './ephemeral-profile.js'
 import { MissingSystemBrowserHost } from './missing-system-browser.js'
 import { SettingsStore } from './settings-store.js'
+import { sameOrigin } from './settings-route.js'
 
 export {
   ELECTRON_BROWSER_PROVIDER_ID,
@@ -247,27 +248,8 @@ function installSettingsRoute(ctx: Context, settings: SettingsStore): void {
 }
 
 /**
- * Same-origin guard. Settings are machine-local configuration, so a page loaded
- * elsewhere must not be able to read or rewrite them.
- * @param request - the incoming request.
- * @returns whether the request may touch the settings document.
- */
-function sameOrigin(request: IncomingMessage): boolean {
-  const site = String(request.headers['sec-fetch-site'] ?? '').toLowerCase()
-  if (site === 'cross-site') return false
-  const origin = String(request.headers.origin ?? '').trim()
-  if (origin === 'null') return false
-  if (origin === '') return true
-  try {
-    return new URL(origin).host.toLowerCase() === String(request.headers.host ?? '').trim().toLowerCase()
-  } catch {
-    return false
-  }
-}
-
-/**
  * One settings round-trip: `GET` reads the document, `PUT`/`POST` merges a
- * partial patch into it.
+ * partial patch into it. Admission lives in `settings-route.ts` so it can be tested.
  * @param request - the incoming request.
  * @param response - the response to write.
  * @param settings - the settings document.
@@ -284,11 +266,11 @@ async function handleSettingsRequest(
     })
     response.end(JSON.stringify(body))
   }
-  if (!sameOrigin(request)) {
+  const method = request.method ?? 'GET'
+  if (!sameOrigin(request, method !== 'GET')) {
     json(403, { ok: false, error: 'cross-origin request refused' })
     return
   }
-  const method = request.method ?? 'GET'
   if (method === 'GET') {
     json(200, { ok: true, settings: settings.get(), path: settings.path() })
     return
