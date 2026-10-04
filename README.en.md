@@ -221,13 +221,33 @@ See the full list in [Tool reference](#tool-reference).
 - **`browser_click`/`browser_type` accept a `target`**: `{by: css|text|xpath, value, index?}` — `text` matches an element's own visible text (exact first, then contains, deepest preferred); clicks scroll the element to the viewport center first; typing focuses it first.
 - **Use the single-control tools for one field** (`browser_set_value`/`browser_check`/`browser_select`/`browser_clear`/`browser_get_value`), `browser_fill` for batches, and `browser_scrape` for structured list extraction.
 
-### Operating discipline (click/fill)
+### Operating discipline (locating/clicking/filling)
 
+- **Semantics first, coordinates last**: `browser_a11y` gives roles and accessible names, `browser_snapshot` gives refs and coordinates, and **both carry a selector** (see the next section) — **use it when it exists**, because scrolling and layout changes do not invalidate it.
+- **`browser_click`'s `target` (css/text) IS semantic location**; use it instead of computing coordinates yourself. Scrolling into view, clicking the centre, iframe offsets and device pixel ratio are all handled for you.
 - **Prefer DOM semantics over coordinates**: submit forms with `form.requestSubmit()`; click with `element.click()`; coordinate clicks are the last resort.
 - **Target the right element**: pages often have hidden duplicates (e.g. mobile buttons); filter visible elements with `browser_execute` (`getBoundingClientRect()` w/h > 0, `getComputedStyle` not `display:none`), then take coordinates.
 - **Click right after taking coordinates**: do not insert other operations in between (filling/scrolling moves elements and invalidates old coordinates).
 - **Verify before clicking**: use `document.elementFromPoint(x, y)` to confirm the coordinate hits the intended element (button/link), then perform the real click.
 - **DPR awareness**: CDP input uses CSS pixels; on high-DPI screens calibrate with `elementFromPoint` instead of guessing coordinates.
+- **Two failures of the same action means change the approach**: a different selector, a semantic target, or a fresh snapshot — not the same coordinate a third time.
+
+### When NOT to take a screenshot
+
+Tool output is spent out of the caller's context, and **a screenshot is the most expensive kind**:
+
+- **If text will do, use text.** `browser_snapshot` / `browser_a11y` / `browser_content` carry the same page as text; **a model without image input gains nothing from a screenshot** and only pays for it. Keep screenshots for what genuinely needs pixels: layout, charts, design checks.
+- **A downscaled capture returns `width`/`height`** (the real pixel size). When you use `maxWidth`/`maxHeight` to control cost, read those to confirm it took effect rather than decoding the data URL yourself.
+
+### The operator's three switches, which no tool can change
+
+**Running page scripts**, **downloading to disk** and **writing login state** are controlled by the operator in the settings page, and **no `browser_*` tool can change them**. When one is off the error code is unambiguous — **do not retry and do not route around it**; say that the human needs to enable it:
+
+`BROWSER_EXECUTE_DISABLED` (scripts), `BROWSER_DOWNLOAD_DISABLED` (downloads), `BROWSER_AUTH_WRITE_DISABLED` (writing login state), `BROWSER_AUTH_DISABLED` (reading cookies).
+
+Do not confuse those with `BROWSER_DOWNLOAD_BLOCKED` / `BROWSER_SCREENSHOT_BLOCKED`, which mean **the save path was refused by the sandbox** (change the path, not a setting), or `BROWSER_DOWNLOAD_UNSUPPORTED`, which means **this carrier has no such capability**.
+
+**`browser_restrict` is different** — it is a temporary allow-list the model sets and lifts itself, and **it is not a way around the three switches above**.
 
 ### Output size and truncation
 

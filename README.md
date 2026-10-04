@@ -221,13 +221,33 @@ node <本仓库路径>/desktop-bridge/install.mjs
 - **`browser_click`/`browser_type` 支持 `target` 定位**:`{by: css|text|xpath, value, index?}`——`text` 按元素自身可见文本匹配(精确优先、退化包含、最深元素优先);点击会把元素滚动到视口中央再点;输入会先聚焦该元素。
 - **单控件操作用 `browser_set_value`/`browser_check`/`browser_select`/`browser_clear`/`browser_get_value`**,批量用 `browser_fill`,列表页结构化抓取用 `browser_scrape`。
 
-### 操作纪律(点击/填表)
+### 操作纪律(定位/点击/填表)
 
+- **先语义、后坐标**:`browser_a11y` 给角色与可访问名称,`browser_snapshot` 给引用与坐标;**两者都带选择器**(见下一节),**有选择器就优先用它** —— 它不会被滚动和布局变化作废。
+- **`browser_click` 的 `target`(css/text)本身就是语义定位**,能用就别自己算坐标:滚进视野、中心点击、iframe 偏移、像素比都由它处理。
 - **优先用 DOM 语义而非坐标**:表单提交优先 `form.requestSubmit()`;点击优先 `element.click()`;坐标点击是最后手段。
 - **选中正确的元素**:页面常有隐藏副本(如移动端按钮),用 `browser_execute` 过滤可见元素(`getBoundingClientRect()` 宽高 > 0、`getComputedStyle` 非 `display:none`),再取坐标。
 - **取坐标后立即点击**:中间不要插入其他操作(填表、滚动会移动元素,旧坐标立即失效)。
 - **点击前验证命中**:`document.elementFromPoint(x, y)` 确认该坐标确实是目标元素(按钮/链接),再执行真实点击。
 - **DPR 注意**:CDP 输入使用 CSS 像素;高 DPI 屏上若点击落空,用 `elementFromPoint` 校准,不要盲试坐标。
+- **同一动作连败两次就换策略**:换选择器、换语义定位、或重新快照 —— 不要第三次用同样的坐标。
+
+### 什么时候不该用截图
+
+工具输出占用的是调用方的上下文,**而截图是最贵的一种**:
+
+- **能用文本就用文本。** `browser_snapshot` / `browser_a11y` / `browser_content` 给出同一页面的文本表示;**没有图像输入能力的模型看截图什么也得不到**,只是白花。截图留给布局、图表、设计核对这类**必须看像素**的事。
+- **降采样后结果里会返回 `width`/`height`**(实际像素尺寸)。用 `maxWidth`/`maxHeight` 控制成本时,靠这两个数字确认它生效了,而不是自己解码 data URL。
+
+### 人的三个开关,模型绕不过
+
+设置页里的**执行页面脚本**、**下载到磁盘**、**写入登录态**由操作者控制,**任何 `browser_*` 工具都改不了**。关掉时报的错误码是明确的,看到它**不要重试、不要绕路** —— 那是人的决定,直接说明"需要他在设置里打开":
+
+`BROWSER_EXECUTE_DISABLED`(执行脚本)、`BROWSER_DOWNLOAD_DISABLED`(下载)、`BROWSER_AUTH_WRITE_DISABLED`(写入登录态)、`BROWSER_AUTH_DISABLED`(读 cookie)。
+
+别和这两种混淆:`BROWSER_DOWNLOAD_BLOCKED` / `BROWSER_SCREENSHOT_BLOCKED` 是**保存路径被沙箱拒绝**(换路径,不是找开关);`BROWSER_DOWNLOAD_UNSUPPORTED` 是**该载体没这个能力**。
+
+**`browser_restrict` 不同** —— 那是模型自己设的临时白名单,可设可解除,但**不该用来绕过上面三个门**。
 
 ### 输出尺寸与截断
 

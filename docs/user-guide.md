@@ -55,11 +55,51 @@ dsh plugin --profile web add <本仓库路径>
 
 ## 操作纪律
 
+**定位:先用语义,再考虑坐标**
+
+- **`browser_a11y` 是理解页面的首选**,它给出每个交互节点的**角色**(button/textbox/…)与**可访问名称**,比读 DOM 更接近"这页面上有什么";`browser_snapshot` 给出可点击元素的**引用与坐标**。
+- **两者都带 `selector`**:无 id 且无 name 时是空串。**有 `selector` 就优先用它**,它比坐标稳定 —— 页面滚动、布局变化都不会让它失效,而坐标会。
 - **优先用 DOM 语义而非坐标**:表单提交优先 `form.requestSubmit()`;点击优先 `element.click()`;坐标点击是最后手段。
+- **`browser_click` 的 `target`(css/text)本质上就是语义定位**,能用它就别自己算坐标 —— 它会把元素滚进视野并在中心点击,坐标抖动、像素比、iframe 偏移都由它处理。
 - **选中正确的元素**:页面常有隐藏副本(如移动端按钮),用 `browser_execute` 过滤可见元素(`getBoundingClientRect()` 宽高 > 0、`getComputedStyle` 非 `display:none`),再取坐标。
 - **取坐标后立即点击**:中间不要插入其他操作(填表、滚动会移动元素,旧坐标立即失效)。
 - **点击前验证命中**:`document.elementFromPoint(x, y)` 确认该坐标确实是目标元素,再执行真实点击。
 - **DPR 注意**:CDP 输入使用 CSS 像素;高 DPI 屏上若点击落空,用 `elementFromPoint` 校准,不要盲试坐标。
+
+**截图与内容:先问"我要的是判断还是像素"**
+
+- **能用文本就用文本。** `browser_snapshot` / `browser_a11y` / `browser_content` 给出同一页面的文本表示;**没有图像输入能力的模型看截图什么也得不到**,只会花钱。
+- **`browser_screenshot` 带 `maxWidth`/`maxHeight` 时,结果里会返回 `width`/`height`**(实际像素尺寸)。需要控制成本时用它确认降采样生效了,而不是自己解码 data URL。
+- **`browser_content` 的 `maxChars` 是按格式分档的**(html/json 默认 5 万,其余 2 万),单次传 `maxChars` 优先于设置里的 `contentMaxChars`。
+
+**动作开关:三个门是操作者(人)的,不是你的**
+
+设置页里的**执行页面脚本**、**下载文件到磁盘**、**写入登录态** 由人控制,**任何 `browser_*` 工具都改不了它们**。关掉时对应调用会明确报错,一眼能认出:
+
+| 谁被关 | 报的错误码 | 哪些工具会遇到 |
+| --- | --- | --- |
+| 执行页面脚本 | `BROWSER_EXECUTE_DISABLED` | `browser_execute`、以及需要页内脚本的工具 |
+| 下载文件到磁盘 | `BROWSER_DOWNLOAD_DISABLED` | `browser_download` |
+| 写入登录态 | `BROWSER_AUTH_WRITE_DISABLED` | `browser_auth` 的 `restore` |
+| 读取 cookie | `BROWSER_AUTH_DISABLED` | `browser_auth` 的 `flush` |
+
+**看到这些码不要重试、不要绕路** —— **它是人的决定,不是可以克服的故障**,直接告诉人"需要他在设置里打开"。
+
+另外几个容易认错来源的码:`BROWSER_DOWNLOAD_BLOCKED` / `BROWSER_SCREENSHOT_BLOCKED` 是**保存路径被沙箱拒绝**(不是开关问题,换路径而不是找开关);`BROWSER_DOWNLOAD_UNSUPPORTED` 是**该载体没有这个能力**(比如非自托管浏览器)。
+
+`browser_restrict` **不一样** —— 那是**你自己**设的临时白名单,你有权设也有权解除;它不该被用来绕过上面三个门。
+
+**失败怎么读**
+
+- **`CDP error: ...` 是浏览器答了但拒绝**(比如元素已经不在)—— 多半是页面变了,重新快照再试,不要盲目重复同一动作。
+- **超时 / 连接类错误**才是浏览器可能有问题;这类错误会触发一次自动探测,通常下一条命令就能恢复。
+- **`BROWSER_SESSION_UNKNOWN`** 说明会话没了(浏览器被替换过);`browser_reset_session` 重建本任务的会话。
+- **同一个动作连续失败两次就换策略**:换 `selector`、换语义定位、或者用 `browser_snapshot` 重新看页面 —— **不要第三次用同样的坐标**。
+
+**`browser_history` 与动作集**
+
+- `browser_history` **默认只给 20 条**,要更多自己传 `limit`。
+- **可重放的动作有六种**:`navigate` / `click` / `type` / `scroll` / `key` / `execute`。不是每种历史记录都能 `browser_replay`,遇到不可重放的会明确报错。
 
 ## 多任务并行
 
