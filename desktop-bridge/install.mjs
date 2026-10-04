@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Install the plugin browser bridge into an installed DSH Desktop.
  *
  * WHY A SCRIPT
@@ -273,9 +273,36 @@ if (revert) {
     reverted = true
   }
   if (existsSync(backupPath)) {
-    copyFileSync(backupPath, mainPath)
-    console.log(`restored ${mainPath} from ${backupPath}`)
-    reverted = true
+    // Refuse when the backup no longer matches the tree it would overwrite.
+    //
+    // The backup is taken once and then kept, so after a desktop upgrade it holds the PREVIOUS
+    // build's main.js. Restoring it would silently roll the app back to that build's code — and
+    // it would also discard any patch another tool applied in the meantime, which is not a
+    // hypothetical here: `dsh-purge` patches this same file, so a blind revert erases its work
+    // while reporting success. A matching current file is the only case where the restore is
+    // unambiguously right; anything else needs a human to decide.
+    let backedUp
+    let current
+    try {
+      backedUp = readFileSync(backupPath)
+      current = readFileSync(mainPath)
+    } catch {
+      backedUp = undefined
+      current = undefined
+    }
+    const identical = backedUp !== undefined && current !== undefined && backedUp.equals(current)
+    const stillHasOurMarker = current !== undefined && current.includes(MARKER)
+    if (!identical && !stillHasOurMarker) {
+      console.error(`WARNING: ${mainPath} has changed since the backup was taken, and it does`)
+      console.error('  not contain the bridge import either — something else has edited it')
+      console.error('  (a desktop upgrade, or another patch tool). Restoring the backup would')
+      console.error(`  discard that. The backup is at ${backupPath}; restore it by hand if that`)
+      console.error('  is what you want. Skipping this file.')
+    } else {
+      copyFileSync(backupPath, mainPath)
+      console.log(`restored ${mainPath} from ${backupPath}`)
+      reverted = true
+    }
   }
   if (existsSync(cliShimBackup)) {
     copyFileSync(cliShimBackup, cliShimPath)

@@ -30,7 +30,8 @@
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { extname, join } from 'node:path'
+import path from 'node:path'
 
 /**
  * Where the DSH home is.
@@ -93,9 +94,38 @@ const verifyOnly = args.includes('--verify')
 const version = args.find(arg => !arg.startsWith('--'))
 
 /** Run a command, streaming nothing but failing loudly. */
+/**
+ * Resolve a command the way a shell would.
+ *
+ * `execFileSync('pnpm', …)` fails with ENOENT on Windows whenever pnpm is a `.cmd` shim or an
+ * extensionless sh script — Node's execFile does no PATHEXT resolution and no shim reading, so
+ * the step that this whole script exists to perform could not run on the machine it was
+ * written for. Probing for a runnable spelling first is what makes it portable; passing
+ * `shell: true` unconditionally would also work but would hand every argument to cmd.exe.
+ * @param command - the bare command name.
+ * @returns the name to actually execute.
+ */
+function resolveCommand(command) {
+  if (process.platform !== 'win32') return command
+  const exts = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)
+  // A bare name that already carries an extension is left alone.
+  if (extname(command) !== '') return command
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, command + ext)
+      if (existsSync(candidate)) return candidate
+    }
+  }
+  return command
+}
+
 function run(command, commandArgs, cwd) {
+  const resolved = resolveCommand(command)
   console.log(`  $ ${command} ${commandArgs.join(' ')}`)
-  execFileSync(command, commandArgs, { cwd, stdio: ['ignore', 'inherit', 'inherit'] })
+  // `.cmd`/`.bat` are not executables; they are read by cmd.exe, so they need a shell.
+  const needsShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(resolved)
+  execFileSync(resolved, commandArgs, { cwd, stdio: ['ignore', 'inherit', 'inherit'], shell: needsShell })
 }
 
 /** Read the profile's pin for this plugin. */
@@ -114,6 +144,16 @@ function junctionReport() {
 }
 
 console.log(`web-profile plugin install  (profile: ${PROFILE})`)
+
+// Before anything reads the profile. `currentPin()` reads the profile's package.json, so
+// running this against a profile that does not exist — a typo, or `--profile desktop` — used
+// to fail with a raw ENOENT stack from JSON.parse, and the friendly "not a dsh web profile"
+// message below was unreachable because the throw happened first.
+if (!existsSync(join(PROFILE, 'package.json'))) {
+  console.error(`  ${PROFILE} is not a dsh web profile (no package.json there).`)
+  console.error('  Pass --profile <name>, or install the plugin manually.')
+  process.exit(2)
+}
 console.log(`pin now: ${currentPin()}`)
 
 if (verifyOnly) {
