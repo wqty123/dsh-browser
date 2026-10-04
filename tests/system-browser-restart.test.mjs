@@ -1,4 +1,4 @@
-// Issue #21, done for real this time.
+﻿// Issue #21, done for real this time.
 //
 // The previous version could not fail. Its stub was Node, spawned with Chromium's arguments,
 // which Node rejects — so no CDP endpoint ever appeared, no session was ever created, and the
@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -42,13 +42,24 @@ test("a replaced browser is usable and does not carry the dead one's session", a
   // stale session id was never sent, and deleting the clearing code changed nothing. The
   // reviewer found this by tracing every frame between the host and the fake browser; the
   // "exit listener masks the start() path" explanation I had recorded was only part of it.
+  //
+  // The mtime is set FORWARD rather than left to the clock. `freshPort()` refuses a
+  // DevToolsActivePort older than this launch, which is right — it is what stops a restart
+  // from adopting the previous browser's port — but CI's filesystem timestamps have
+  // one-second resolution, so a file written in the same second as the spawn could compare
+  // as "older" and be rejected for the whole 30 s budget. That is why this was green here
+  // and red there: NTFS is finer-grained than the runner's filesystem. Stamping the file
+  // explicitly makes the intent true by construction instead of by timing luck.
   let current = createFakeBrowser()
   const browsers = [current]
   let port = await current.listen()
   const launches = []
   const children = []
   const launcher = () => {
-    writeFileSync(join(profileDir, 'DevToolsActivePort'), `${port}\n`)
+    const portFile = join(profileDir, 'DevToolsActivePort')
+    writeFileSync(portFile, `${port}\n`)
+    const ahead = new Date(Date.now() + 1000)
+    utimesSync(portFile, ahead, ahead)
     launches.push(port)
     const child = fakeChild()
     children.push(child)
@@ -111,7 +122,13 @@ test('a browser that drops its connection without dying does not carry its sessi
   const launcher = () => {
     // A replacement process: the port file is written by THIS launch, the way a real browser
     // writes its own, so the host reconnects to the browser it just started.
-    writeFileSync(join(profileDir, 'DevToolsActivePort'), `${browserPort}\n`)
+    const portFile = join(profileDir, 'DevToolsActivePort')
+    writeFileSync(portFile, `${browserPort}\n`)
+    // Stamped forward for the same reason as the first launcher: CI's timestamp
+    // resolution can make a file written in this same second compare as older than the
+    // spawn, and freshPort() would then refuse it for the whole budget.
+    const ahead = new Date(Date.now() + 1000)
+    utimesSync(portFile, ahead, ahead)
     return fakeChild()
   }
 
