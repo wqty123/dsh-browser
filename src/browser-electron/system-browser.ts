@@ -40,22 +40,6 @@ import { join } from 'node:path'
 const EXIT_GRACE_MS = 3_000
 
 /**
- * Budget for asking a discovered CDP port who it is.
- *
- * Bounded so a loopback request that never answers cannot hold the launch past its deadline —
- * the launch loop only re-checks the deadline between iterations, so an unbounded fetch sat
- * inside one iteration indefinitely.
- *
- * It must stay well under the 250 ms between iterations, because the usual case is not a slow
- * answer but NO answer: a browser that has written `DevToolsActivePort` but is not listening
- * yet refuses the connection immediately, and that is what lets the loop spin. Setting this to
- * two seconds made each iteration cost two seconds instead, so a 30 s budget bought fifteen
- * attempts instead of a hundred and twenty — the launch then timed out on a machine that was
- * merely slower, which is exactly what CI reported.
- */
-const PORT_PROBE_MS = 200
-
-/**
  * Starts a browser process and returns a handle to it.
  *
  * Injectable so tests can supply something that speaks CDP — the seam a recovery test needs
@@ -681,12 +665,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
           const port = freshPort()
           if (port !== undefined) {
         try {
-            const version = await (await fetch(`http://127.0.0.1:${port}/json/version`, {
-          // Bounded, so a loopback request that never answers cannot hold the launch past the
-          // deadline above: the loop re-checks the deadline between iterations, and without
-          // this one hung fetch was able to sit inside an iteration indefinitely.
-          signal: AbortSignal.timeout(PORT_PROBE_MS),
-        })).json() as { webSocketDebuggerUrl?: string }
+            const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json() as { webSocketDebuggerUrl?: string }
             if (typeof version.webSocketDebuggerUrl === 'string') {
               const client = new CdpClient(version.webSocketDebuggerUrl)
               await client.whenReady()
