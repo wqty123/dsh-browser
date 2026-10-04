@@ -40,6 +40,23 @@ import { join } from 'node:path'
 const EXIT_GRACE_MS = 3_000
 
 /**
+ * Ceiling on one attempt to ask a discovered CDP port who it is.
+ *
+ * The launch loop below polls: it reads `DevToolsActivePort`, tries `/json/version` on the port
+ * inside it, and waits 250 ms between attempts under a 30 s deadline. An unbounded fetch can
+ * park inside one iteration for the whole budget, so a bound is needed — but it has to be
+ * small enough that the loop still behaves like a loop.
+ *
+ * The usual case is NOT a slow answer, it is NO answer: a browser that has written the file but
+ * is not listening yet refuses the connection instantly, and that immediacy is what lets the
+ * loop spin. Any timeout added here is paid on every iteration in which the port is not ready,
+ * so an earlier attempt at this used 2000 ms — eight times the poll interval — and cut the
+ * attempts available in the budget from roughly 120 to 15. This value is the same size as the
+ * interval, so a worst-case iteration costs 500 ms and the budget still affords ~60 attempts.
+ */
+const PORT_PROBE_MS = 250
+
+/**
  * Starts a browser process and returns a handle to it.
  *
  * Injectable so tests can supply something that speaks CDP — the seam a recovery test needs
@@ -665,9 +682,19 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
           const port = freshPort()
           if (port !== undefined) {
         try {
-            const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json() as { webSocketDebuggerUrl?: string }
+            const version = await (await fetch(`http://127.0.0.1:${port}/json/version`, {
+              // Bounded: an unanswered loopback request would otherwise park inside this
+              // iteration for the rest of the budget, and the deadline above is only re-checked
+              // between iterations. Deliberately no larger than the 250 ms sleep — see
+              // PORT_PROBE_MS.
+              signal: AbortSignal.timeout(PORT_PROBE_MS),
+            })).json() as { webSocketDebuggerUrl?: string }
             if (typeof version.webSocketDebuggerUrl === 'string') {
               const client = new CdpClient(version.webSocketDebuggerUrl)
+              // `whenReady` has its own 30 s ceiling, and it is reached only after the port
+              // answered above — so the browser is listening and this is a handshake, not a
+              // discovery. A handshake that outlives the launch is reported as the timeout it
+              // is, by the same deadline that governs everything else here.
               await client.whenReady()
               // Still wanted? A dispose() during the handshake has already killed the
               // process, so publishing the client would leave a dangling connection.
