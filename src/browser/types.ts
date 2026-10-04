@@ -266,6 +266,14 @@ export interface BrowserWaitResult {
 export interface BrowserScreenshotResult {
   /** Base64 data URL of the capture (PNG or JPEG per the request). */
   readonly dataUrl: string
+  /** Pixel size of the image in `dataUrl`, when the capture was measured and scaled.
+   *
+   * Present when the request carried `maxWidth`/`maxHeight` and the layout metrics were
+   * readable: the scaling happens inside CDP through a clip, and without this the only way to
+   * learn what came back was to decode the data URL. Undefined means "not measured", which is
+   * also what an unscaled capture reports. */
+  readonly width?: number
+  readonly height?: number
   /** File path the capture was also saved to, when the request asked for it. */
   readonly path?: string
 }

@@ -2778,6 +2778,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // to the region it names, so it has to cover the whole document. The page's own size
     // is read first; when that is unavailable the capture proceeds unscaled rather than
     // failing — an image the caller can shrink itself beats no image at all.
+    let rendered: { width: number; height: number } | undefined
     if (request?.maxWidth !== undefined || request?.maxHeight !== undefined) {
       const metrics = await withTimeout(
         handle.sendCommand('Page.getLayoutMetrics', {}),
@@ -2791,6 +2792,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
         const byWidth = request.maxWidth !== undefined && size.width > 0 ? request.maxWidth / size.width : 1
         const byHeight = request.maxHeight !== undefined && height > 0 ? request.maxHeight / height : 1
         const scale = Math.min(1, byWidth, byHeight)
+        // What the caller will actually receive. Recorded before the branch below, because the
+        // size is worth reporting even when no scaling happened (scale 1).
+        rendered = { width: Math.round(size.width * scale), height: Math.round(height * scale) }
         if (scale < 1) {
           params.clip = { x: 0, y: 0, width: size.width, height, scale }
           // The clip defines the captured area; captureBeyondViewport must not also apply.
@@ -2813,7 +2817,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // hardcoding the PNG mime announced a JPEG body as a PNG — the data URL then carried a
     // mislabelled image, and a caller that decodes by mime wrote the wrong file.
     const mime = params.format === 'jpeg' ? 'image/jpeg' : 'image/png'
-    return this.saveScreenshot(data, request?.savePath, mime)
+    return this.saveScreenshot(data, request?.savePath, mime, rendered)
   }
 
   /**
@@ -2823,7 +2827,12 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * file — so a screenshot cannot be used to write to, or silently replace,
    * files anywhere the DSH process happens to have permission (issue #13).
    */
-  private saveScreenshot(base64: string, savePath: string | undefined, mime: string): { dataUrl: string; path?: string } {
+  private saveScreenshot(
+    base64: string,
+    savePath: string | undefined,
+    mime: string,
+    rendered?: { width: number; height: number },
+  ): { dataUrl: string; path?: string; width?: number; height?: number } {
     if (savePath !== undefined) {
       // Admission failures propagate unchanged: they describe the caller's
       // path, not a disk problem.
@@ -2831,13 +2840,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
       try {
         mkdirSync(dirname(target), { recursive: true })
         writeFileSync(target, Buffer.from(base64, 'base64'))
-        return { dataUrl: `data:${mime};base64,${base64}`, path: target }
+        return { dataUrl: `data:${mime};base64,${base64}`, path: target, ...rendered }
       } catch (error) {
         // Report the write problem but keep the capture usable.
         throw new BrowserError(`browser: screenshot save to "${target}" failed: ${String(error)}`, 'BROWSER_SCREENSHOT_SAVE_FAILED', { cause: error })
       }
     }
-    return { dataUrl: `data:${mime};base64,${base64}` }
+    return { dataUrl: `data:${mime};base64,${base64}`, ...rendered }
   }
 
   /** Append one operation to the session's history. */

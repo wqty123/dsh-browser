@@ -131,8 +131,21 @@ if (!existsSync(PACKAGE)) {
 
 // ---- 1. pin the version -----------------------------------------------------
 if (version !== undefined) {
-  if (currentPin() === version) {
+  const pinned = currentPin()
+  if (pinned === version) {
     console.log(`step 1: already pinned at ${version}`)
+  } else if (typeof pinned === 'string' && pinned.startsWith('link:')) {
+    // A `link:` pin is a deliberate source checkout — someone pointed the profile at a working
+    // tree on purpose, usually to develop against it. This script installs a PUBLISHED version,
+    // and overwriting the link with a plain version number would silently swap that working tree
+    // for whatever the registry serves: the one outcome nobody asking for a release expects when
+    // their profile is aimed at source. Refusing is the only safe default, and editing
+    // package.json by hand is the escape hatch for the cases where the swap IS meant.
+    console.error(`refusing to overwrite a link: pin with ${version}`)
+    console.error(`  ${PLUGIN} is currently: ${pinned}`)
+    console.error('  That is a deliberate checkout of a local working tree. To install the published')
+    console.error(`  version instead, edit ${PACKAGE} yourself and remove the link first.`)
+    process.exit(1)
   } else {
     copyFileSync(PACKAGE, `${PACKAGE}.bak-before-${version}`)
     const document = JSON.parse(readFileSync(PACKAGE, 'utf8'))

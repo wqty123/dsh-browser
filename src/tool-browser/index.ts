@@ -1307,7 +1307,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         type: 'object',
         additionalProperties: false,
         properties: {
-          dataUrl: { type: 'string', required: true, description: 'Base64 PNG data URL of the screenshot.' },
+          dataUrl: { type: 'string', required: true, description: 'Base64 data URL of the screenshot (PNG, or JPEG when the carrier uses CDP JPEG).' },
+          width: { type: 'number', description: 'Pixel width of the returned image, when the capture was measured (present with maxWidth/maxHeight).' },
+          height: { type: 'number', description: 'Pixel height of the returned image, when the capture was measured.' },
           path: { type: 'string', description: 'The file path the screenshot was saved to, when savePath was given.' },
         },
       },
