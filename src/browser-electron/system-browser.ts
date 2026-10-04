@@ -108,6 +108,11 @@ const INSTALL_LOCATIONS: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.P
     win32: [
       String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`,
       String.raw`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+      // Where a per-user install lands, which is what Chrome's own installer chooses when it
+      // cannot (or should not) write to Program Files. Missing this meant the plugin reported
+      // "no browser found" on machines that plainly had one.
+      String.raw`%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`,
+      String.raw`%LOCALAPPDATA%\Chromium\Application\chrome.exe`,
     ],
     darwin: [
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -125,6 +130,7 @@ const INSTALL_LOCATIONS: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.P
     win32: [
       String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
       String.raw`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+      String.raw`%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe`,
     ],
     darwin: ['/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'],
     linux: [
@@ -137,10 +143,27 @@ const INSTALL_LOCATIONS: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.P
     win32: [
       String.raw`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
       String.raw`C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe`,
+      String.raw`%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe`,
     ],
     darwin: ['/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'],
     linux: ['/usr/bin/brave-browser', '/usr/bin/brave', '/snap/bin/brave'],
   },
+}
+
+/**
+ * Resolve the environment references in one install location.
+ *
+ * The list is static strings, but a per-user install lands under %LOCALAPPDATA%, so the entry
+ * has to be resolved against the environment detection was HANDED rather than process.env — a
+ * caller that supplies a platform and an environment (which is what makes detection testable)
+ * must not end up reading the developer's real machine.
+ * @param location - one entry from the install-location table.
+ * @param env - the environment to resolve against.
+ * @returns the path with %NAME% references replaced, or the entry unchanged when unknown.
+ */
+function expandLocation(location: string, env: NodeJS.ProcessEnv): string {
+  return location.replace(/%([^%]+)%/g, (whole, name: string) =>
+    env[name] ?? env[name.toUpperCase()] ?? env[name.toLowerCase()] ?? whole)
 }
 
 /**
@@ -197,7 +220,8 @@ export function detectBrowser(
     if (fromEnv !== undefined && fromEnv !== '' && existsSync(fromEnv)) return { kind, path: fromEnv }
     const onPath = findOnPath(PATH_NAMES[kind]?.[platform] ?? [], env, platform)
     if (onPath !== undefined) return { kind, path: onPath }
-    for (const candidate of INSTALL_LOCATIONS[kind]?.[platform] ?? []) {
+    for (const raw of INSTALL_LOCATIONS[kind]?.[platform] ?? []) {
+      const candidate = expandLocation(raw, env)
       if (existsSync(candidate)) return { kind, path: candidate }
     }
   }
@@ -214,9 +238,15 @@ export function detectBrowser(
  * @param platform - the platform whose names and locations apply.
  * @returns the launcher names (as PATH lookups) and the fixed locations checked.
  */
-export function searchSummary(kind: DetectedBrowser['kind'], platform: NodeJS.Platform = process.platform): string[] {
+export function searchSummary(
+  kind: DetectedBrowser['kind'],
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
   const onPath = (PATH_NAMES[kind]?.[platform] ?? []).map(name => `${name} (on PATH)`)
-  const located = INSTALL_LOCATIONS[kind]?.[platform] ?? []
+  // Expanded, so the report names the location that was actually tested rather than a template
+  // the user cannot paste into a file manager.
+  const located = (INSTALL_LOCATIONS[kind]?.[platform] ?? []).map(entry => expandLocation(entry, env))
   return [...onPath, ...located]
 }
 
@@ -626,7 +656,16 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       throw new Error(`dsh-builtin-browser: could not launch ${target}: ${launchError?.message ?? 'unknown error'}`)
     }
     if (stopped === 'exited') {
-      throw new Error(`dsh-builtin-browser: ${target} exited immediately after launch (exit code ${child.exitCode}); check that the path is a runnable browser`)
+      // Exit code 0 is the whole story here: the browser decided to hand the request to an
+      // instance that already owns this profile directory and quit, rather than failing. That is
+      // what a leftover browser from a previous run (or a second DSH on the same profile) looks
+      // like. "Check that the path is a runnable browser" pointed at the one cause that is almost
+      // never it, and sent people looking for a broken install that was not there.
+      throw new Error(
+        `dsh-builtin-browser: ${target} exited immediately after launch (exit code ${child.exitCode}). `
+        + 'That exit code means it handed the request to an instance already using this profile '
+        + 'directory and quit — look for a leftover browser process from an earlier run, then retry.',
+      )
     }
     if (stopped === 'released') {
       throw new Error(`dsh-builtin-browser: ${target} was released while it was starting`)

@@ -70,7 +70,7 @@ export declare function detectBrowser(channel: BrowserChannel, env?: NodeJS.Proc
  * @param platform - the platform whose names and locations apply.
  * @returns the launcher names (as PATH lookups) and the fixed locations checked.
  */
-export declare function searchSummary(kind: DetectedBrowser['kind'], platform?: NodeJS.Platform): string[];
+export declare function searchSummary(kind: DetectedBrowser['kind'], platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv): string[];
 /** A system browser driven over CDP, presented as a browser view host. */
 export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private readonly browser;
