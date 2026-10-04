@@ -4,6 +4,66 @@
 
 ---
 
+# 第三十七轮(2026-10-04,架构重构 + 一份外部审查的落实)
+
+**未 bump 版本** —— 这些改动随下一次发布生效。
+
+一份独立审查外加一次架构评审,共同得出一个结论:**这个仓库最需要改的不是"大",是同一份事实在四处手抄**。两个已发布的 bug 都出自这个机制 —— `browser_a11y` 的 `selector` 与 `browser_screenshot` 的 `width`/`height`,都是 provider 算了、schema 声明了、而工具层的**手写白名单**把它丢了。两次全套测试都是绿的,因为**没有一个测试真的跑过一个工具**。
+
+## 一、字段集:一处声明,两端同源
+
+- 新增 `src/tool-browser/element-fields.ts`:元素与节点的字段表、由它导出的 item schema、以及 `projectElement`/`projectNode` 投影。schema 与投影从此同源,"漏一个静默丢数据、多一个整包被拒"在结构上不再可能。
+- 类型上踩过一个坑并如实记下:`defineTool` 校验的是自己的 `ValueSchemaSpec`,`Record<string, unknown>` 太宽、`as const` 也救不了索引签名。最终**字面量承担类型、测试守护一致性**。
+- `browser_snapshot` 的 schema 也切过来了 —— 之前的重构只做了 `browser_open` 那一半。
+- `BrowserA11yNode.value` 的契约由 `string | null` 改为 `string?`:provider 产出 `null` 表示"不适用",而投影会丢掉它,两者说的是同一件事。
+- 新增 `tests/element-fields.test.mjs`(7 条):schema ⟷ 表**双向相等**、投影携带全部声明字段、投影**丢弃未声明字段**、required 一致,以及**遍历全部 34 个注册工具**断言"schema 要求的字段工具确实产出"。
+
+## 二、页面脚本:安全网从 4/16 变成全覆盖
+
+- 原 `script-syntax.test.mjs` 靠"驱动某个行为"来捕获脚本,**最多覆盖 16 段里的 4 段** —— 虚拟光标、下载、bridge 的脚本从未被解析过。
+- 新增 `tests/page-scripts-parse.test.mjs`:直接扫描源码,覆盖 provider、`host-main` 的工具栏与下载、`virtual-cursor`、以及 sidebar bridge 的脚本。
+- 写它时一度以为发现了语法错误,实际是**抽取器**没做模板转义解码:源码里 `/recaptcha\\/api|.../i` 的 `\\/` 在模板求值时变成 `\/`,保留双反斜杠会让正则提前结束、把后面的内容读成 flags。这条教训写进了测试注释。
+
+## 三、自托管载体的两个真 bug
+
+- **`materializeOnce` 的"失败即重置"是死代码**:存进去的是**派生 promise**,而 catch 里比较的是**原始 promise**,永远为假。于是子进程活着但不应答这类失败(不是 `HostGoneError`,`withRecovery` 不兜)会**永久毒死该句柄**,注释承诺的"重试"不可达。
+- **`fail()` 误清 `kill()` 的 500ms 兜底刀**:socket 死 ≠ 子进程死,而刀存在的唯一理由正是子进程不理会 socket 关闭。清掉它意味着 dispose 后进程/窗口泄漏、继续占着 profile。现在只在观察到的退出与释放路径上清。
+
+## 四、seam 不再说谎
+
+- 四个能力从**结构性强转**提升为接口声明:handle 的 `download`/`flushAuth`/`restoreAuth`/`capture`,以及宿主的 `notifyUserActionError`。强转对编译器什么都不说,照着接口实现的新宿主会得到静默 no-op。
+- 顺带把 issue #16 的现场收进契约:那次未绑定调用让 `this` 为 undefined,宿主第一条语句抛错、异常逃出 async catch 变成 unhandled rejection,**整个 DSH 进程退出**。
+- `capture` 的契约里补上尺寸 —— 那是 `browser_screenshot` 的 schema 声明过的,而 seam 从来只有 `{base64, mime}`。
+- 删掉 8 个只为满足接口而存在的空方法,以及 2 个全仓无调用点的宿主级 `focus()`。接口成员全是 `?` 可选,provider 全部 `?.()` 调用,这是纯减法。
+
+## 五、截图尺寸:native 路径终于也有
+
+审查指出 `2a8e52e`("a scaled screenshot reports its size")**只修了 CDP 载体那一半**:schema 与 execute 都做了,但**原生 `capturePage` 路径没把尺寸传回**,而 `RemoteView.capture` 的契约只有 `{base64, mime}` —— 于是**默认的自托管载体上 `width`/`height` 永远缺席**。现在 child 侧在下采样之后记录尺寸并回报,provider 的 `capture()` 类型、`screenshot()` 返回类型与 native 分支全部接通。
+
+## 六、设置与存储
+
+- **`section()` 不再对"整节手误"fail-open**:`"actions": false`、`null`、一个字符串都会被当成"缺席",于是每个 gate 取**放行的默认值** —— 与它自己"不可读的开关必须解析为 OFF"的教义相反。现在区分"缺席"(取默认)与"存在但非对象"(拒绝)。
+- **`history.maxEntries`/`maxAgeDays` 不再是死旋钮**:它们被解析、被持久化,却从不传给 `HistoryStore`,`entry.ts` 也不传。改开关有效、改数字无效。现在读取器把当前值传给 `updateLimits()`。
+
+## 七、系统浏览器载体
+
+- **`'exited'` 的报错不再把任意退出码都解释成"移交给了占着 profile 的实例"** —— 那句解释只对 code 0 成立,而对崩溃码它会把人引向一个不存在的残留进程。
+- **轮询同时看 `signalCode`**:被信号杀死的浏览器从不设置 `exitCode`,只查它是让一次秒死拖满 30 秒、最后报成"did not expose CDP"。
+- **端口探活的 `fetch` 加上 `AbortSignal`**:环回请求挂住会越过启动 deadline,因为循环只在迭代之间复查。
+
+## 八、RPC 词汇表
+
+- 新增 `src/browser-electron/rpc-ops.ts`:子端 switch 与父端发送的 op 名从此有了一份清单,并有测试**读两侧源码**断言一致。这类"改一处要记得改另一处"的缺口已经咬过一次 —— `noteStartFailure` 里那个恒为真的去重比较,让一个专门让静默失败可见的日志行**从未写过**。
+- 该测试当场抓到清单里两个我凭印象写下的 op(`release`/`collapse`)子端并不处理。
+
+## 九、这一轮自己犯的错(如实记下)
+
+- 用脚本把 4 处"成对清空"替换成 `forgetBrowserState()` 时,**把方法自己体内的两行也替换了**,于是它调用自己 → 无限递归 → 两个测试挂起。编译器看不见(递归是合法的),是测试跑不动才暴露的。
+- CHANGELOG 的插入脚本把内容放在模板字符串里,而内容含有反引号(`\`browser_a11y\``),导致脚本自身语法错误。
+- 这两条都属于同一个模式:**大段自动替换时要确认替换范围,写完立刻跑一遍**。
+
+---
+
 # 第三十六轮(2026-10-04,一轮外部审计的落实)
 
 **随 0.4.2 发布**(第三十二~三十六轮合并)。一份外部审计给了 8 条带行号与证据链的指控,逐条用代码核实

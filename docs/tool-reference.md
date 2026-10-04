@@ -49,7 +49,7 @@
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
 | `browser_history` | `verbose?` | `{ entries[] }` | – | 操作日志(最新在后),含 seq/action/ok/params/result/error。**默认只渲染最近 20 条,且不显示每条的参数**(参数就是你刚发出去的),首行先给总条数,免得把尾部当成全部;要看参数时传 `verbose: true`。返回的完整 `entries[]` 不受条数限制 |
-| `browser_visited` | `limit`(默认 30,上限 200), `domain`(主机名包含匹配), `query`(URL 或标题包含匹配), `session`(按来源会话标签过滤) | `{ count, entries[] }` | – | **持久化浏览历史**(访问过的页面,最新在前):与 cookie 同址落盘(`$DSH_HOME/dsh-builtin-browser-host/history.jsonl`),关闭浏览器与重启 DSH 后仍在;上限 5000 条或 90 天。重开某条用 `browser_open`;与 `browser_history`(会话内操作日志,随会话消失)是两件事;可在设置里关闭记录。渲染时**时间戳精确到分钟**,会话标记**只在切换时打印一次并取 8 位前缀** |
+| `browser_visited` | `limit`(默认 30,上限 200), `domain`(主机名包含匹配), `query`(URL 或标题包含匹配), `session`(按来源会话标签过滤) | `{ count, entries[] }` | – | **持久化浏览历史**(访问过的页面,最新在前):与 cookie 同址落盘(`$DSH_HOME/dsh-builtin-browser-host/history.jsonl`),关闭浏览器与重启 DSH 后仍在;上限默认 5000 条或 90 天(设置文档里的 `history.maxEntries` / `history.maxAgeDays` 可改)。重开某条用 `browser_open`;与 `browser_history`(会话内操作日志,随会话消失)是两件事;可在设置里关闭记录。渲染时**时间戳精确到分钟**,会话标记**只在切换时打印一次并取 8 位前缀** |
 | `browser_replay` | `seq`(必填) | `{ replayed }` | ✅ | 按序号回放某一步(navigate/execute/click/type/scroll/key) |
 | `browser_download` | `url`(必填), `savePath`(必填) | `{ path }` | ✅ | 带会话 cookie 下载到本地(仅 http(s);`savePath` 必须为绝对路径且位于 `downloadDir` 内——默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`;不覆盖已有文件;上限 256MB,受 CORS 约束;由子进程直接落盘)。受设置「允许下载文件到磁盘」门控(`BROWSER_DOWNLOAD_DISABLED`) |
 
@@ -64,7 +64,7 @@
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_screenshot` | `fullPage?`, `savePath?`, `format?`(png/jpeg), `quality?`, `maxWidth?`, `maxHeight?` | `{ dataUrl, path? }` | – | 截图;PNG 默认,**JPEG 在自托管与本机 Chrome/Edge 上都可用**(自托管在原生 `capturePage` 路径编码,本机浏览器经 CDP 声明 `supportsCdpJpeg`;**桌面侧栏**的 Electron CDP JPEG 编码器会挂起,该载体下 JPEG 请求返回 PNG);`maxWidth`/`maxHeight` 等比缩放**三种载体都支持**;`fullPage` 会跳过原生 `capturePage`、三种载体统一走 CDP `captureBeyondViewport`;`savePath` 落盘供视觉模型读取(与 `browser_download` 同一准入门:必须位于 `downloadDir` 内且不覆盖已有文件) |
+| `browser_screenshot` | `fullPage?`, `savePath?`, `format?`(png/jpeg), `quality?`, `maxWidth?`, `maxHeight?` | `{ dataUrl, path?, width?, height? }` | – | 截图;PNG 默认,**JPEG 在自托管与本机 Chrome/Edge 上都可用**(自托管在原生 `capturePage` 路径编码,本机浏览器经 CDP 声明 `supportsCdpJpeg`;**桌面侧栏**的 Electron CDP JPEG 编码器会挂起,该载体下 JPEG 请求返回 PNG);`maxWidth`/`maxHeight` 等比缩放**三种载体都支持**;`fullPage` 会跳过原生 `capturePage`、三种载体统一走 CDP `captureBeyondViewport`;`savePath` 落盘供视觉模型读取(与 `browser_download` 同一准入门:必须位于 `downloadDir` 内且不覆盖已有文件) |
 
 ## 常用组合
 

@@ -243,7 +243,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
 
 ## 配置
 
-插件通过 `cordis.patch.yml` 挂载**四行**:一个**惰性的根行**(只用来声明包名,宿主的客户端插件扫描靠它读到 `dsh.client`,否则设置栏不会出现)+ 三个功能行(`browser` / `browser-electron` / `tool-browser`)。各行配置:
+插件通过 `cordis.patch.yml` 挂载**四行**:一个**惰性的根行**(只用来声明包名:宿主的客户端插件扫描按**精确包名**读该行的 `dsh.client`,以子路径命名的行会被整行跳过,少了这行设置栏不会出现)+ 三个功能行(`browser` / `browser-electron` / `tool-browser`)。各行配置:
 
 | 行 | 配置项 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -346,7 +346,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 | Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
 | 本机 Chrome / Edge(可选载体) | `154.0.8037.58` / `154.0.4258.37` |
-| dsh-builtin-browser | `0.4.2`(即当前发布版本) |
+| dsh-builtin-browser | `0.4.3`(未发布,开发分支) |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`。**核心链路在 Windows 上完整实测**;系统浏览器的查找已适配 Linux 与 macOS(先查 `PATH`,再查各平台的惯例安装位置,均可用 `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH` 覆盖),但这两个平台上的**端到端链路尚未实测**,暂不承诺。
@@ -396,13 +396,13 @@ node desktop-bridge/install.mjs --revert   # 回滚
 - `fullPage` 截图在部分主机的**软件合成**下不稳定 —— 请求 `fullPage` 时**原生 `capturePage` 路径被整体跳过**(`capturePage` 没有捕获滚动区以外内容的能力),因此**三种载体都走 CDP 的 `captureBeyondViewport`**,`fullPage` 的不稳定性与载体无关,任何载体都可能碰到;只有视口截图才优先走原生的 `capturePage`。
 - 人机验证(CAPTCHA)无法自动解决:快照会标注检测到的挑战,此时应请用户在共享窗口中人工完成,而不是反复重试。
 - 无痕模式(`privateMode`)未实现:它需要 Electron 的 session 分区能力,属于宿主层,本插件不承诺。
-- 设置文档**存在但读不懂**(JSON 损坏、写到一半、权限读不到)时,四个**门控**开关(`credentials.allowRead` 与三个动作开关)一律按**关**处理,其余设置取默认值 —— "读不透操作者的意图"不等于"操作者什么都允许"。文件**不存在**(首次运行)仍按默认值。单个门控字段类型不对(`"false"` 字符串、`null`、数字)同样按**关**。
+- 设置文档**存在但读不懂**(JSON 损坏、写到一半、权限读不到)时,四个**门控**开关(`credentials.allowRead` 与三个动作开关)一律按**关**处理,其余设置取默认值 —— "读不透操作者的意图"不等于"操作者什么都允许"。文件**不存在**(首次运行)仍按默认值。单个门控字段类型不对(`"false"` 字符串、`null`、数字)同样按**关**;门控所在的**小节**整个写成非对象(如 `actions: false`、`null`、一个字符串)也按**关** —— 而不是把里面的每个开关当成"缺席"、各取放行的默认值。
 - `browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;仅允许 HTTP(S) 目标;`savePath` 必须为绝对路径且位于 `downloadDir` 内(默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`,可用 `downloadDir` 覆盖),不覆盖已存在文件;`browser_screenshot` 的 `savePath` 走同一准入门;单文件上限 256MB(流式限流,按 Content-Length 提前拒绝),文件由浏览器子进程直接落盘(临时文件 + 原子改名)。准入还会解析路径的**真实归属**:`downloadDir` 里的符号链接无法把写入带出目录,悬空链接同样被拒(它读作"名字已被占用",而不是"路径空闲")。
 - 自托管浏览器的 cookie 在磁盘上以明文存储(Electron 默认行为);需要加密落盘的部署应在宿主层接入系统钥匙串 / DPAPI。
 - `browser_restrict` 是防误操作的**软护栏**,不是安全边界:模型可以自行解除白名单。要一个**模型拿工具改不掉**的限制,用设置页「Agent 能做什么」的三个动作开关(它们写在设置文档里,`browser_*` 工具没有一个会写它),或部署级的 `tool-browser` 配置 `allowedActions`(见 `cordis.patch.yml` 的注释)。**这条边界要说准**:设置走的是本机 HTTP 端点,写入要求带同源 `Origin`(裸 HTTP 客户端因此写不进去),但**同源页面仍然可以写** —— 这是"插件暴露了一个 HTTP 端点"的固有代价,它**不是凭据系统**,面板上的说明也是这么写的。
 - 页面弹窗(`window.open` / `target=_blank`)不再覆盖当前视图:HTTP(S) 弹窗会在同一会话窗口**新开一个标签页**并计入历史,原页面与 opener 上下文保留;非 HTTP(S) 弹窗(空 URL 弹窗承接、`mailto:`、自定义协议)仍**放行原生窗口**,交给系统处理——这类弹窗不纳入会话模型。
 - `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie)。**三种载体都可用**:自托管走原生会话,侧栏与本机浏览器走 CDP 的 `Network.getCookies` / `Storage.setCookies`。**`flush` 只导出当前页所属站点的 cookie**,不是整台机器的共享 cookie 罐 —— 导出范围按本会话所在页面的 URL 收敛;页面上没有可用的 URL(未知范围)时**直接拒绝**,而不是扩大范围去读全部域(自托管侧栏载体报"无法确定 cookie 范围",CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`);`browser_restrict` 的白名单**也管着 `browser_auth`**,因为 `restore` 是向任意域写 cookie 的动作。
-- 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。新视图创建前会先有界加载 `about:blank`(保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时;子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`,写之前若该文件已超过 2 MiB,则**丢弃旧内容、只写入一行带时间戳的轮转记录**(形如 `<ISO 时间戳> log rotated: previous content exceeded 2097152 bytes and was discarded`)—— 旧内容就此消失,不留副本,但那一行证明"曾发生过轮转",纯 `dsh web` 自托管可据此自助排查崩溃循环。
+- 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。新视图创建前会先有界加载 `about:blank`(3 秒上限,保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时;子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`,写之前若该文件已超过 2 MiB,则**丢弃旧内容、只写入一行带时间戳的轮转记录**(形如 `<ISO 时间戳> log rotated: previous content exceeded 2097152 bytes and was discarded`)—— 旧内容就此消失,不留副本,但那一行证明"曾发生过轮转",纯 `dsh web` 自托管可据此自助排查崩溃循环。
 - electron 随插件安装;但 Electron 44+ 不再随安装下载二进制(约 100MB,需网络)——插件探测是纯文件系统、不触发其懒下载,二进制缺失时首次使用会报错并提示先 `npx install-electron`;也可预装 `ELECTRON_PATH` 指定的二进制。
 - 本插件不提供任何**浏览器界面**(地址栏、标签条、侧栏面板都不是插件画的):桌面端的浏览器界面是**外壳自带的官方侧栏**,我们只是借它的页面来驱动;自托管载体下画窗口的是插件拉起的那个 Electron 子进程,那是载体本身而非插件 UI。别把"侧栏"或"浏览器列"当成插件能力。
 - **侧栏载体不上报"用户操作"事件**:人在那个页面里点击是外壳自己的事件,而 bridge 没有用于回报它的操作。因此依赖该事件的功能(如自定义的接管提示)在桌面端侧栏下不会触发;换到自托管载体则可以。
@@ -422,8 +422,8 @@ npm run build
 | 目录 | 职责 |
 | --- | --- |
 | `src/browser/` | `ctx.browser` seam 与全部请求/结果类型 |
-| `src/browser-electron/` | provider 与三种载体实现 —— 桌面侧栏桥(`desktop-bridge-host.ts`)、本机浏览器(`system-browser.ts`)、自托管子进程(`host-main.ts`);传输层 `bridge-connection.ts`;以及设置、历史、虚拟光标 |
-| `src/tool-browser/` | 模型侧 `browser_*` 工具 |
+| `src/browser-electron/` | provider 与三种载体实现 —— 桌面侧栏桥(`desktop-bridge-host.ts`)、本机浏览器(`system-browser.ts`)、自托管子进程(`host-main.ts`);传输层 `bridge-connection.ts` 与 RPC 操作词汇表 `rpc-ops.ts`;以及设置、历史、虚拟光标 |
+| `src/tool-browser/` | 模型侧 `browser_*` 工具;元素/节点字段集 `element-fields.ts`(item schema 与投影同源,一处声明) |
 | `src/types/` | electron 环境类型(shim,避免强制依赖 electron 类型) |
 | `desktop-bridge/` | 装进桌面端的那条 bridge 与幂等安装脚本(`install.mjs`) |
 | `tools/` | 运维脚本(如 `install-web-plugin.mjs`:钉版本 → 安装 → 修复 profile → 复验) |
@@ -487,6 +487,7 @@ npm run build
 | 第三十五轮 | 2026-10-03 | **DSH 0.2.1 适配(随 **0.4.2** 发布)**:宿主升到 `0.2.1-alpha.1`(相对 rc.2 有 266 个提交),逐项核对插件的宿主依赖面 —— `cordis` 的 `Context`/`Service`(vendor 4.0.5-alpha.1)、`dsh-tools` 的 `defineTool` 与 `DefineToolOptions` 全部字段、`dsh-system-prompt` 的 `section()`、`dsh-llm` 的 `HarnessError`、`schemastery` 的默认导出,以及客户端的 `slots.inject('settings.section')` 与 `locale.register/bind` —— **形状全部未变**(客户端侧与 DSH 官方插件的用法逐字对照)。新增 `scripts/verify-host-compat.mjs`:用 profile 里**真实安装**的 `@deepseek-ai/*` 组装宿主、加载插件编译产物、经宿主的 `defineTool` 注册 34 个工具、再以假 provider 真调 `browser_session` 与 `browser_a11y`,实测**全绿**;`dsh.compatibility.dshReleases` 记入 `0.2.1-alpha.1 = compatible`。另记一处语义坑:该范围在 **semver 默认语义**下不匹配任何预发布版本,而 DSH 用 `includePrerelease: true` 判定,故这些宿主实际都在范围内 |
 | 第三十六轮 | 2026-10-04 | **一轮外部审计的落实(随 **0.4.2** 发布)**:审计给了 8 条带行号与证据链的指控,逐条用代码核实后分三批修完 —— ①**存储与设置**:设置文件**存在但读不懂**时不再回落"全开"(那让一次撕裂写入重新打开操作者关掉的全部能力),门控字段类型不对也按 OFF 处理,`history.jsonl` 的整文件重写改用设置那套原子写,`contentMaxChars` 这个被"按格式分档"取代后**赋值却无人读取**的配置重新生效;②**生命周期**:浏览器子进程先收 socket 关闭、给足时间自己 `app.quit()` 落盘 profile,之后才强杀(旧注释声称的"`app.exit(0)` 会 flush profile"是假的,而 Windows 上 `kill()` 是 TerminateProcess,子进程根本来不及跑 handler),子进程侧也不再 `app.exit(0)`;③**可用性**:click/type/fill 的目标解析此前只匹配顶层 `document`,而快照与 `waitFor` 走 shadow root 与 iframe —— **看得见、等得到、却点不到**,现在解析脚本也收集全部根;Windows 上补上 `%LOCALAPPDATA%` 的用户级安装路径,并把 "exited immediately (exit code 0)" 的文案从"路径不是可运行浏览器"改成它真正的含义(把请求交给已占用该 profile 的实例后退出)。另修两处会静默破坏他人工作的地方:`install-web-plugin.mjs` 不再把 registry 版本号写进 profile 覆盖 `link:` 钉版,失败的 adopt 会先 dispose 那个半成品 host。**审计里两条我不同意**:`window-all-closed`/`before-quit` 的 grep 为 0 并不说明问题(Electron 默认行为已正确),而 `requestSingleInstanceLock` 会破坏正常重启而非修好孤儿。 |
 | **0.4.2** | 2026-10-04 | **发布**:第三十二~三十六轮合并发布 —— 主题是**把看不见的错变成看得见的**。① **输出成本**:每次调用的 token 降到原来的零头(a11y 默认 **500 → 150** 节点、缩进与 `states` 只留信息量、`content` 按格式分档、`history` 默认 20 条)。② **动作开关**:三个由**操作者**持有、`browser_*` 工具一个都改不掉的权限闸(执行页面脚本 / 下载到磁盘 / 写入登录状态),与模型自设自解的 `browser_restrict` 明确分开。③ **恢复语义补完**:系统浏览器载体进程死亡后**连会话一起重建**(此前浏览器能重启,视图却还拿着死浏览器的 session id,于是"快速失败、持续失败")、慢页面不再被误判成死浏览器、`kill` 之后先等它真的退出。④ **一轮外部审计的落实**:设置文件**存在但读不懂**时改为 fail-closed(此前一次撕裂写入会重新打开操作者关掉的**全部**能力,且下一次保存把默认值写回磁盘)、`history.jsonl` 原子写、**请求时读取**的客户端面板不再因宿主缺字段而整体打不开、click/type/fill 现在能点到快照里看得见的 shadow DOM 与 iframe 元素、Windows 补上 `%LOCALAPPDATA%` 用户级安装路径。**171/171 通过**(共 172 项,1 项因平台跳过),tag `v0.4.2` |
+| 第三十七轮 | 2026-10-04 | **架构重构 + 一份外部审查的落实**(未 bump 版本,随下一次发布生效):主题是**同一份事实不再四处手抄** —— 两个已发布的 bug(`browser_a11y` 的 `selector`、`browser_screenshot` 的 `width`/`height`)都出自同一个机制"provider 算了、schema 声明了、而工具层的手写白名单把它丢了",两次全套测试都是绿的,因为**没有一个测试真的跑过一个工具**。① **字段集一处声明、两端同源**:新增 `src/tool-browser/element-fields.ts`(元素/节点字段表,以及由它导出的 item schema 与投影),`browser_snapshot` 的 schema 也切过来了(此前只做了 `browser_open` 那一半);新增 `tests/element-fields.test.mjs`(7 条:schema ⟷ 表**双向相等**、投影携带全部声明字段、投影丢弃未声明字段,并遍历全部 34 个注册工具断言"schema 要求的字段工具确实产出");② **页面脚本解析从 4/16 变成全覆盖**:新增 `tests/page-scripts-parse.test.mjs` 直接扫描源码(provider、`host-main` 的工具栏与下载、虚拟光标、侧栏 bridge),不再依赖"驱动某个行为"才能捕获脚本 —— 虚拟光标、下载与 bridge 的脚本此前从未被解析过;③ **自托管两个真 bug**:`materializeOnce` 的"失败即重置"是死代码(存进去的是派生 promise,比较的是原始 promise,判定永假),于是"子进程活着但不应答"这类失败会**永久毒死该句柄**、注释承诺的重试不可达;`fail()` 误清 `kill()` 的 500ms 兜底刀 —— socket 死 ≠ 子进程死,现在只在观察到的退出与释放路径上清;④ **seam 不再说谎**:handle 的 `download`/`flushAuth`/`restoreAuth`/`capture` 与宿主的 `notifyUserActionError` 从**结构性强转**提升为接口声明(照着接口实现的新宿主不再得到静默 no-op),`capture` 的契约补上尺寸,并删掉 8 个只为满足接口而存在的空方法与 2 个全仓无调用点的宿主级 `focus()`;⑤ **截图尺寸不再只有 CDP 载体报**:更早那次修复只做了 CDP 载体那一半,**原生 `capturePage` 路径没把尺寸传回**,于是**默认的自托管载体上 `width`/`height` 永远缺席** —— 现在 child 在下采样之后记录尺寸并回报,`capture()` 的类型、`screenshot()` 的返回类型与 native 分支全部接通(测量到尺寸时才回报,`width?`/`height?` 本就是可选的);⑥ **设置与存储**:门控所在的**小节整个存在但不是对象**(`actions: false`、`null`、一个字符串)不再被当成"缺席"(那会让里面每个门控各取放行的默认值),现在其中每个门控都按**关**;`history.maxEntries`/`maxAgeDays` 不再是死旋钮(被解析、被持久化,却从不交给 `HistoryStore`),现在读取器把当前值传给 `updateLimits()`;⑦ **系统浏览器载体**:`'exited'` 的报错不再把任意退出码都解释成"移交给了占着 profile 的实例"—— 那句只对 code 0 成立,崩溃码会把人引向一个并不存在的残留进程;启动轮询**同时看 `signalCode`**(被信号杀死的浏览器从不设置 `exitCode`,只查它会让一次秒死拖满 30 秒、最后报成"did not expose CDP");端口探活的 `fetch` 加上 `AbortSignal`;⑧ **RPC 词汇表**:新增 `src/browser-electron/rpc-ops.ts`,子端 switch 与父端发送的 op 名从此有清单,并由 `tests/rpc-ops.test.mjs` 读两侧源码断言一致(当场抓到两个凭印象写下的 op 子端并不处理)。**183/183 通过**(共 **184** 项,1 项跳过:Windows 上创建文件符号链接需要提权) |
 
 > registry 上的最新版本以顶部 npm 徽章为准(当前 `0.4.2`)。桌面端升级后需重跑一次 `node desktop-bridge/install.mjs`;Web 端无此步骤 —— 详见[更新方式](#更新方式两端不同)。
 

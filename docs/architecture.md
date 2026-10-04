@@ -44,7 +44,7 @@ agent (browser_* 工具)
 - 会话生命周期绑定 agent 作用域 ctx:agent(DSH 会话)销毁时自动关闭对应浏览器会话,任务结束后不再泄漏窗口/视图;
 - 会话/开启动态/白名单都是**每插件实例(每 context)作用域**的,多 context 互不共享、互不污染;
 - `browser_restrict` 维护本任务白名单,守卫所有非只读工具;
-- 输出 schema 与返回值严格一致(DSH 运行时会校验,`additionalProperties: false` 下多一个字段都会报错)。
+- 输出 schema 与返回值严格一致(DSH 运行时会校验,`additionalProperties: false` 下多一个字段都会报错):元素与节点的字段集在 `element-fields.ts` 里**只声明一次**,item schema 与投影都由它导出 —— 手写白名单漏一个字段会**静默丢数据**、多一个会让**整个结果被拒**,同源之后这两个方向都不可能单独出错(`browser_a11y` 的 `selector` 与 `browser_screenshot` 的 `width`/`height` 都是这么丢的)。
 
 ### 输出尺寸(工具层)
 
@@ -68,7 +68,7 @@ RemoteElectronViewHost  ──TCP JSON-RPC──▶  host-main.js
   DeferredRemoteView(物化缓存)              webContents.debugger(CDP)
 ```
 
-- **协议**:本机 loopback TCP,每行一个 JSON(`{ id, op, ... }` ↔ `{ id, ok, result|err }`);
+- **协议**:本机 loopback TCP,每行一个 JSON(`{ id, op, ... }` ↔ `{ id, ok, result|err }`);op 名清单只写在 `rpc-ops.ts` 一处,并由一个读**子端 switch 与父端调用两侧源码**的测试断言一致 —— 单侧改名因此会当场失败,而不是编译通过、运行时报 "unknown op";
 - **认证**:每次 spawn 生成随机 token,经 **stdin 首行 + `DSH_BROWSER_RPC_TOKEN` 环境变量双通道**传给子进程(绝不进 argv,避免进程列表泄露;Windows GUI 进程收不到 piped stdin,环境变量兜底),子进程首条消息必须回传该 token(`hello`);服务端只接受**一个**连接,其余连接直接断开——本机其他进程无法伪冒子进程或注入回复;
 - **Electron 定位**:① `ELECTRON_PATH`(显式覆盖,优先于一切自动发现)→ ② 随插件安装的 electron 包(纯文件系统探测,含 pnpm store 布局,不触发 44+ 懒下载)→ ③ 锚点与 pnpm store 中**版本最新**者(33.x 有合成器缺陷,建议 ≥ 40)→ ④ 当前进程是**裸** Electron(dev 模式)时复用宿主二进制(`process.execPath`)→ ⑤ 进程祖先树中的裸 Electron 二进制(Windows 用 PowerShell CIM 查询,仅在其它路径全部落空时才执行)。**打包应用不参与复用**:旁有 `resources/app.asar` 的可执行文件(如 DSH Desktop.exe)不能按脚本参数拉起——spawn 会启动应用本体并秒退(单实例锁,即 "browser host exited (code=0)"),一律跳过;
 - **稳健性**:子进程/套接字都有 `error` 监听(否则未捕获事件会炸掉整个 DSH 进程);子进程退出自动重启,已物化的视图句柄在下次调用时**自动重建并重试一次**(会话跨崩溃存活,仅页面状态丢失,不再出现 "browser host is not running" 僵尸态);物化失败可重试;下载仅限 HTTP(S)、`savePath` 必须绝对路径(`downloadDir` 已配置时用它;未配置时按序探测 —— 存在的 `XDG_DOWNLOAD_DIR` → home 下第一个存在的 `Downloads`/`下载`/`下載` → 回退 `~/Downloads`,首次使用时创建)、流式限流 + Content-Length 提前拒绝、256MB 上限与 60s 超时,文件由**子进程直接落盘**(临时文件 + rename,不再经 RPC 传 base64);cookie 导出/恢复有 30s 超时,两者受**不同**的门控:导出是**读**动作,读 `credentials.allowRead`,关闭时抛 `BROWSER_AUTH_DISABLED`;恢复是**写**动作,读 `actions.allowCredentialWrite`,关闭时抛 `BROWSER_AUTH_WRITE_DISABLED`(允许读取的操作者因此仍能拒绝写入)。有原生方法时优先用它,否则走 CDP 的 `Network.getCookies` / `Storage.setCookies`(三种载体都可用);**导出的范围收敛到本会话当前所在页面的 URL**,页面 URL 取不到时**拒绝而不是放宽**(CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`,自托管侧栏按 view 自己的 URL 过滤);`cookies.get`/`cookies.set`(后者每条 cookie 一次)与下载的 `Runtime.evaluate` 都套同一套 `COMMAND_TIMEOUT_MS` —— 这三条曾经是无上限的 await,会让串行操作队列永久停在那一条上;
