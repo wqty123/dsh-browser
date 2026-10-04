@@ -567,7 +567,11 @@ function makeLocateContext(counts) {
   return vm.createContext({
     document: {
       querySelectorAll(sel) {
-        counts.css++
+        // Only the caller's selector counts. The resolve script also walks each root with '*' to
+        // find shadow hosts and iframes, and that walk is not a retry — counting it turned these
+        // assertions into a measurement of the collector rather than of the polling behaviour
+        // they are about.
+        if (String(sel) !== '*') counts.css++
         if (unparsable(sel)) throw new SyntaxError(`Failed to execute 'querySelectorAll' on 'Document': '${sel}' is not a valid selector.`)
         return []
       },
