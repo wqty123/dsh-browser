@@ -204,7 +204,16 @@ export interface ElectronBrowserProviderConfig {
     readonly settings?: () => BrowserSettings;
     /** Maximum snapshot elements before truncation. Default 60. */
     readonly snapshotMaxElements?: number;
-    /** Maximum content characters before truncation when no maxChars is given. No longer read: the cap is per format (html and json 50 000, otherwise 20 000). */
+    /**
+     * Explicit content cap, overriding the per-format default when set.
+     *
+     * Honoured again, and it is worth saying why that is a fix rather than a feature: this was
+     * `config.contentMaxChars ?? 100_000`, one number for every format, and when the caps became
+     * per-format (html and json 50 000, otherwise 20 000) the field was left assigned and never
+     * read. A configuration knob that silently does nothing is worse than no knob — it is an
+     * operator's decision that quietly went nowhere. Leaving it unset means the per-format
+     * default; setting it means the operator meant it.
+     */
     readonly contentMaxChars?: number;
     /**
      * Directory `browser_download` save paths must resolve inside (prevents a

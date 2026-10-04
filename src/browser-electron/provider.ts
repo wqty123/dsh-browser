@@ -1910,10 +1910,34 @@ export class ElectronBrowserProvider implements BrowserProvider {
         }
         return false
       }
+      // Every root this page exposes: the top document plus its shadow trees (recursively)
+      // and same-origin iframes. The snapshot and waitFor already walk all of them, so an
+      // element inside one is shown to the model and can be waited for — resolving a click or
+      // a fill used to look at the top document alone and answer "not found" for something
+      // the model had just been handed a reference to. The two must agree about what exists.
+      // (Kept in step with the collector in the snapshot script above.)
+      const allRoots = () => {
+        const roots = []
+        const seen = new Set()
+        const visit = doc => {
+          if (seen.has(doc)) return
+          seen.add(doc)
+          roots.push(doc)
+          for (const el of doc.querySelectorAll('*')) {
+            if (el.shadowRoot) visit(el.shadowRoot)
+            if (el.tagName === 'IFRAME') {
+              try { const d = el.contentDocument; if (d) visit(d) } catch { /* cross-origin */ }
+            }
+          }
+        }
+        visit(document)
+        return roots
+      }
+      const roots = allRoots()
       const candidates = (spec) => {
         const all = spec.selector
-          ? [...document.querySelectorAll(spec.selector)]
-          : [...document.querySelectorAll('input, textarea, select, [contenteditable="true"]')].filter(el => matches(el, spec))
+          ? roots.flatMap(root => [...root.querySelectorAll(spec.selector)])
+          : roots.flatMap(root => [...root.querySelectorAll('input, textarea, select, [contenteditable="true"]')]).filter(el => matches(el, spec))
         const vis = all.filter(visible)
         return vis.length > 0 ? vis : all
       }
@@ -2082,24 +2106,57 @@ export class ElectronBrowserProvider implements BrowserProvider {
           throw new Error('target.index must be a non-negative integer, got ' + JSON.stringify(spec.index))
         }
         let els = []
+        // Every root this page exposes: the top document plus its shadow trees (recursively)
+        // and same-origin iframes. The snapshot and waitFor already walk all of them, so an
+        // element inside one is shown to the model and can be waited for — resolving a click or
+        // a fill used to look at the top document alone and answer "not found" for something
+        // the model had just been handed a reference to. The two must agree about what exists.
+        // (Kept in step with the collector in the snapshot script above.)
+        const allRoots = () => {
+          const roots = []
+          const seen = new Set()
+          const visit = doc => {
+            if (seen.has(doc)) return
+            seen.add(doc)
+            roots.push(doc)
+            for (const el of doc.querySelectorAll('*')) {
+              if (el.shadowRoot) visit(el.shadowRoot)
+              if (el.tagName === 'IFRAME') {
+                try { const d = el.contentDocument; if (d) visit(d) } catch { /* cross-origin */ }
+              }
+            }
+          }
+          visit(document)
+          return roots
+        }
+        const roots = allRoots()
         if (by === 'css') {
           // A selector that does not PARSE can never match on a later poll, so
           // it must not look like a miss: the old "return null" kept the caller
           // polling until the whole budget was gone, and "element not found
           // after 10s" reads like a slow page while the real cause is a
           // malformed selector (a label or plain text passed where one belongs).
-          try { els = Array.from(document.querySelectorAll(value)) }
+          // Parse on the top document first: a selector that does not PARSE must still be
+          // reported as a bad argument rather than as a miss, and that check is about syntax,
+          // not about which root holds the element.
+          try { document.querySelectorAll(value) }
           catch (error) { throw new Error('invalid CSS selector ' + JSON.stringify(value) + ' (' + String((error && error.message) || error) + ')') }
+          for (const root of roots) els.push(...root.querySelectorAll(value))
         } else if (by === 'xpath') {
           try {
-            const snap = document.evaluate(value, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null)
-            for (let i = 0; i < snap.snapshotLength; i++) {
-              const n = snap.snapshotItem(i)
-              if (n instanceof Element) els.push(n)
+            for (const root of roots) {
+              const snap = document.evaluate(value, root, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null)
+              for (let i = 0; i < snap.snapshotLength; i++) {
+                const n = snap.snapshotItem(i)
+                if (n instanceof Element) els.push(n)
+              }
             }
           } catch (error) { throw new Error('invalid XPath ' + JSON.stringify(value) + ' (' + String((error && error.message) || error) + ')') }
         } else {
-          const all = Array.from(document.querySelectorAll('body *'))
+          // '*' rather than 'body *': a shadow root and an iframe document have no body of
+          // their own to anchor to, and the visibility and own-text predicates below are what
+          // actually decide whether an element counts.
+          const all = roots.flatMap(root => [...root.querySelectorAll('*')])
           const exact = all.filter(el => isVisible(el) && ownText(el) === value)
           // Exact first, then contains; deepest element preferred (so a
           // button inside a card wins over the card itself).

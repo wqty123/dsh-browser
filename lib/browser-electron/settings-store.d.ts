@@ -106,3 +106,27 @@ export declare class SettingsStore {
      */
     update(patch: unknown): BrowserSettings;
 }
+/**
+ * Replace a file's contents atomically: write a sibling temporary file, then rename it over
+ * the target.
+ *
+ * `writeFileSync(target, …)` truncates and rewrites in place, so a crash, a full disk or an
+ * antivirus lock in the middle leaves HALF a JSON document. That used to be silent: the reader
+ * resolved an unparseable file to the defaults, so a torn write flipped `credentials.allowRead`
+ * and the action switches back ON, and the next successful update wrote those defaults to disk
+ * for good. The read side no longer does that (see {@link SETTINGS_WHEN_UNREADABLE}) — but the
+ * write side still has to stop producing torn files at all, because half a document is not
+ * something this plugin should ever leave behind.
+ *
+ * The rename is the commit point: a reader sees either the old document or the new one,
+ * never a partial one. It stays in the same directory so the rename is atomic on Windows
+ * as well as POSIX (`renameSync` maps to MoveFileEx there: same-volume replaces are
+ * atomic, cross-volume ones are not supported at all).
+ *
+ * The temporary is written with a unique suffix rather than a fixed `.tmp`, so two writers
+ * (the settings panel and a second DSH process) cannot rename each other's half-written
+ * file into place. Shared with the history store, which had the same hole.
+ * @param file - the target path.
+ * @param contents - the complete new document.
+ */
+export declare function writeFileAtomic(file: string, contents: string): void;
