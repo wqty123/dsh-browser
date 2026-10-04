@@ -19,9 +19,13 @@ jobs:
       - run: npm -v
       # `--ignore-scripts` skips electron's postinstall, which downloads ~100MB from GitHub
       # releases for a package these tests never launch — every test drives a fixture child
-      # script in place of the real host. That download is the ONLY step in this job whose
-      # outcome depends on something other than the npm registry, and its cost varies by an
-      # order of magnitude between runs. Users still get the binary; this changes what CI pays.
+      # script in place of the real host. That download is the only step in this job whose
+      # outcome depends on something other than the npm registry, and it costs minutes on a
+      # runner. Users still get the binary; this changes what CI pays, not what ships.
+      #
+      # It is NOT a fix for run #51. That run's steps show install and tsc BOTH succeeding, with
+      # the test step failing — a flaky case, fixed in the test file itself. This line is here
+      # because the download is dead weight, not because it was ever a suspect.
       - run: npm install --no-save --ignore-scripts
       - run: npx tsc -p tsconfig.json
       - run: node --test "tests/*.test.mjs"
