@@ -19,7 +19,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 
   const react = require("react")
   const h = react.createElement
-  const { useCallback, useEffect, useState } = react
+  const { useCallback, useEffect, useRef, useState } = react
 
   const name = "dsh-builtin-browser"
   const inject = ["slots", "locale"]
@@ -150,23 +150,82 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 .dsh-bb-row {
   border-radius: 8px;
   padding: 7px 9px;
-  background: var(--dsw-alias-bg-layer-1, rgba(128,128,128,.10));
   color: var(--dsw-alias-label-primary, inherit);
   transition: background-color .12s ease;
 }
+/* No resting background: a permanent grey block behind every row reads as a set of buttons
+   rather than a list of settings. The highlight belongs to the pointer, not to the row. */
 .dsh-bb-row:hover {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.20));
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.15));
 }
 .dsh-bb-row:active {
-  background: var(--dsw-alias-interactive-bg-active, rgba(128,128,128,.26));
+  background: var(--dsw-alias-interactive-bg-active, rgba(128,128,128,.22));
 }
 .dsh-bb-row:focus-within {
   border-color: var(--dsw-alias-border-l2, rgba(128,128,128,.4));
 }
-.dsh-bb-select {
+/* The dropdown is drawn here rather than by the OS.
+   A native <select> paints its popup with system colours on Windows: the highlight overrides
+   whatever the option sets (white text on a white bar), and the list carries a border no CSS
+   can remove. Only the collapsed control is styleable, so a panel that matches its theme
+   everywhere else ends up with one control that does not. Everything below is ours: the
+   surface, the highlight, and the absence of that line. */
+.dsh-bb-dd {
+  position: relative;
+  display: inline-block;
+  margin-top: 4px;
+}
+.dsh-bb-dd-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 8px 4px 9px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4));
+  border-radius: 6px;
   background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,.12));
   color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+.dsh-bb-dd-btn:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.18));
+}
+.dsh-bb-dd-btn:disabled { opacity: .55; cursor: default; }
+.dsh-bb-dd-caret { opacity: .6; font-size: 10px; line-height: 1; }
+.dsh-bb-dd-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  max-width: 340px;
+  padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4));
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, #2f2f2f);
+  box-shadow: 0 6px 20px rgba(0,0,0,.28);
+}
+.dsh-bb-dd-opt {
+  display: block;
+  width: 100%;
+  padding: 6px 9px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* The same ellipse the rows use, so the panel reads as one surface — and it is ours to draw,
+   which is the whole reason this control exists. */
+.dsh-bb-dd-opt:hover,
+.dsh-bb-dd-opt[data-active="true"] {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.18));
+}
+.dsh-bb-dd-opt[aria-selected="true"] { font-weight: 600; }
 `
 
   /** Install the stylesheet once, however many times the panel is mounted. */
@@ -188,11 +247,103 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     box: { marginTop: "2px" },
     label: { display: "flex", flexDirection: "column", gap: "2px", cursor: "pointer" },
     hint: { opacity: 0.68, lineHeight: 1.5 },
-    select: { marginTop: "4px", padding: "4px 6px", borderRadius: "6px", background: "transparent", color: "inherit", border: "1px solid rgba(128,128,128,.4)" },
     status: { opacity: 0.7, minHeight: "18px" },
     error: { color: "#e5534b" },
     pathLine: { opacity: 0.6, wordBreak: "break-all", lineHeight: 1.5 },
     button: { padding: "3px 10px", borderRadius: "6px", border: "1px solid rgba(128,128,128,.4)", background: "transparent", color: "inherit", cursor: "pointer" },
+  }
+
+  /**
+   * A dropdown drawn by this panel rather than by the operating system.
+   *
+   * Replaces a native `<select>`, whose popup Windows paints with system colours: the hover
+   * highlight overrode the option's background (white text on a white bar) and the list carried
+   * a border no CSS could remove. Both are unfixable from outside the control, and this panel's
+   * two dropdowns were the only places it did not match its own theme.
+   *
+   * Keyboard and assistive-technology behaviour is reimplemented rather than inherited, which is
+   * the cost of owning the rendering: Up/Down move, Enter/Space commit, Escape closes and
+   * returns focus, Home/End jump, clicking outside closes.
+   */
+  function Dropdown(props) {
+    const [open, setOpen] = useState(false)
+    // Index the keyboard has moved to; -1 means "the selected value, unless the user moved".
+    const [active, setActive] = useState(-1)
+    const rootRef = useRef(null)
+    const buttonRef = useRef(null)
+
+    const selected = props.options.findIndex(option => option.value === props.value)
+    const current = props.options[selected] ?? props.options[0]
+
+    useEffect(() => {
+      if (!open) return undefined
+      const away = event => {
+        if (rootRef.current !== null && !rootRef.current.contains(event.target)) setOpen(false)
+      }
+      document.addEventListener("mousedown", away)
+      return () => document.removeEventListener("mousedown", away)
+    }, [open])
+
+    const commit = index => {
+      const option = props.options[index]
+      if (option === undefined) return
+      setOpen(false)
+      setActive(-1)
+      buttonRef.current?.focus()
+      if (option.value !== props.value) props.onChange(option.value)
+    }
+
+    const onKeyDown = event => {
+      if (event.key === "Escape") {
+        if (open) { event.preventDefault(); setOpen(false); buttonRef.current?.focus() }
+        return
+      }
+      if (!open && (event.key === "Enter" || event.key === " " || event.key === "ArrowDown")) {
+        event.preventDefault()
+        setOpen(true)
+        setActive(selected >= 0 ? selected : 0)
+        return
+      }
+      if (!open) return
+      const last = props.options.length - 1
+      if (event.key === "ArrowDown") { event.preventDefault(); setActive(a => Math.min(last, (a < 0 ? selected : a) + 1)) }
+      else if (event.key === "ArrowUp") { event.preventDefault(); setActive(a => Math.max(0, (a < 0 ? selected : a) - 1)) }
+      else if (event.key === "Home") { event.preventDefault(); setActive(0) }
+      else if (event.key === "End") { event.preventDefault(); setActive(last) }
+      else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); commit(active < 0 ? selected : active) }
+    }
+
+    return h("div", { key: "s", className: "dsh-bb-dd", ref: rootRef }, [
+      h("button", {
+        key: "b",
+        type: "button",
+        ref: buttonRef,
+        className: "dsh-bb-dd-btn",
+        disabled: props.disabled,
+        "aria-haspopup": "listbox",
+        "aria-expanded": open ? "true" : "false",
+        onClick: () => { setOpen(o => !o); setActive(-1) },
+        onKeyDown,
+      }, [
+        h("span", { key: "v" }, current === undefined ? "" : current.label),
+        h("span", { key: "c", className: "dsh-bb-dd-caret", "aria-hidden": "true" }, "\\u25be"),
+      ]),
+      open ? h("div", {
+        key: "l",
+        className: "dsh-bb-dd-list",
+        role: "listbox",
+        "aria-label": props.label,
+      }, props.options.map((option, index) => h("button", {
+        key: option.value,
+        type: "button",
+        className: "dsh-bb-dd-opt",
+        role: "option",
+        "aria-selected": option.value === props.value ? "true" : "false",
+        "data-active": index === active ? "true" : "false",
+        onMouseEnter: () => setActive(index),
+        onClick: () => commit(index),
+      }, option.label))) : null,
+    ])
   }
 
   /** One boolean switch bound to a settings path. */
@@ -322,16 +473,17 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         h("div", { key: "row", style: styles.row, className: "dsh-bb-row" }, [
           h("label", { key: "l", style: styles.label }, [
             h("span", { key: "t" }, t("vision.strategy")),
-            h("select", {
+            h(Dropdown, {
               key: "s",
-              style: styles.select, className: "dsh-bb-select",
+              label: t("vision.strategy"),
               value: settings.vision.strategy,
               disabled: busy,
-              onChange: event => patch({ vision: { strategy: event.target.value } }),
-            }, [
-              h("option", { key: "auto", value: "auto" }, t("vision.auto")),
-              h("option", { key: "nonVisual", value: "nonVisual" }, t("vision.nonVisual")),
-            ]),
+              onChange: value => patch({ vision: { strategy: value } }),
+              options: [
+                { value: "auto", label: t("vision.auto") },
+                { value: "nonVisual", label: t("vision.nonVisual") },
+              ],
+            }),
             h("span", { key: "h", style: styles.hint }, t("vision.hint")),
           ]),
         ]),
@@ -341,18 +493,19 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         h("div", { key: "row", style: styles.row, className: "dsh-bb-row" }, [
           h("label", { key: "l", style: styles.label }, [
             h("span", { key: "t" }, t("browser.channel")),
-            h("select", {
+            h(Dropdown, {
               key: "s",
-              style: styles.select, className: "dsh-bb-select",
+              label: t("browser.channel"),
               value: settings.browser.channel,
               disabled: busy,
-              onChange: event => patch({ browser: { channel: event.target.value } }),
-            }, [
-              h("option", { key: "bundled", value: "bundled" }, t("browser.bundled")),
-              h("option", { key: "auto", value: "auto" }, t("browser.auto")),
-              h("option", { key: "chrome", value: "chrome" }, t("browser.chrome")),
-              h("option", { key: "edge", value: "edge" }, t("browser.edge")),
-            ]),
+              onChange: value => patch({ browser: { channel: value } }),
+              options: [
+                { value: "bundled", label: t("browser.bundled") },
+                { value: "auto", label: t("browser.auto") },
+                { value: "chrome", label: t("browser.chrome") },
+                { value: "edge", label: t("browser.edge") },
+              ],
+            }),
             h("span", { key: "h", style: styles.hint }, t("browser.hint")),
           ]),
         ]),
