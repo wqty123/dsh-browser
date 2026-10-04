@@ -808,6 +808,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         try { win.window.restore() } catch { /* not minimized */ }
         win.window.focus()
         let base64 = ''
+        let renderedSize: { width: number; height: number } | undefined
         try {
           let image
           try {
@@ -832,6 +833,9 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
           if (maxW > 0 && w > maxW) { h = Math.round(h * maxW / w); w = maxW }
           if (maxH > 0 && h > maxH) { w = Math.round(w * maxH / h); h = maxH }
           if (w > 0 && h > 0 && (w !== size.width || h !== size.height)) image = image.resize({ width: w, height: h })
+          // What the caller actually receives: after the downscale, not the captured size.
+          // Recorded here because this is the last point that knows both.
+          if (w > 0 && h > 0) renderedSize = { width: w, height: h }
           const buf = wantFormat === 'jpeg' ? image.toJPEG(wantQuality) : image.toPNG()
           if (wantFormat === 'jpeg') mime = 'image/jpeg'
           if (buf.length > 0) base64 = buf.toString('base64')
@@ -876,7 +880,12 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         if (base64 === '') {
           throw new Error('capture produced no image (view not painted)')
         }
-        reply(msg.id, { ok: true, result: { base64, mime } })
+        // The measured size travels with the image. Without it the native path — which is the
+        // default self-hosted one — could never answer `browser_screenshot`'s width/height,
+        // because the seam's only channel was {base64, mime} and the provider had nothing to
+        // forward. The caller's `maxWidth`/`maxHeight` are applied here, so this is the only
+        // place that knows what came back.
+        reply(msg.id, { ok: true, result: { base64, mime, width: renderedSize?.width, height: renderedSize?.height } })
         return
       }
       case 'download': {

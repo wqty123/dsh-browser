@@ -18,6 +18,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { BrowserSessionId } from '../browser/types.js'
+import {
+  ELEMENT_ITEM_SCHEMA,
+  NODE_ITEM_SCHEMA,
+  projectElement,
+  projectNode,
+} from './element-fields.js'
 
 /**
  * Register a cleanup that runs once when the process exits.
@@ -329,24 +335,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           elements: {
             type: 'array',
             required: true,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                ref: { type: 'number', required: true },
-                kind: { type: 'string', required: true },
-                label: { type: 'string', required: true },
-                x: { type: 'number', required: true },
-                y: { type: 'number', required: true },
-                frame: { type: 'boolean' },
-                // The page-side script computes this for every element and the tool layer
-                // passes it through. Without it in the schema, a declared
-                // additionalProperties: false rejects the whole result at run time — which is
-                // how this was found, on the very first real call, after a static review had
-                // called the change verified.
-                selector: { type: 'string' },
-              },
-            },
+            // Same shared item schema as browser_open's, so the two cannot drift apart.
+            items: ELEMENT_ITEM_SCHEMA,
           },
           challenge: {
             type: 'object',
@@ -379,7 +369,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       return {
         url: snapshot.url,
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
-        elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, selector: el.selector, x: el.x, y: el.y, ...el.frame === true ? { frame: true } : {} })),
+        elements: snapshot.elements.map(el => projectElement(el)),
         truncated: snapshot.truncated,
         ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
       }
@@ -445,7 +435,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       return {
         url: snapshot.url,
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
-        elements: snapshot.elements.map(el => ({ ref: el.ref, kind: el.kind, label: el.label, selector: el.selector, x: el.x, y: el.y, ...el.frame === true ? { frame: true } : {} })),
+        elements: snapshot.elements.map(el => projectElement(el)),
         truncated: snapshot.truncated,
         ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
       }
@@ -472,28 +462,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           nodes: {
             type: 'array',
             required: true,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                ref: { type: 'number', required: true },
-                role: { type: 'string', required: true },
-                name: { type: 'string', required: true },
-                value: { type: 'string' },
-                states: { type: 'array', required: true, items: { type: 'string' } },
-                depth: { type: 'number', required: true },
-                tag: { type: 'string', required: true },
-                x: { type: 'number', required: true },
-                y: { type: 'number', required: true },
-                frame: { type: 'boolean' },
-                // The page-side script computes this for every element and the tool layer
-                // passes it through. Without it in the schema, a declared
-                // additionalProperties: false rejects the whole result at run time — which is
-                // how this was found, on the very first real call, after a static review had
-                // called the change verified.
-                selector: { type: 'string' },
-              },
-            },
+            // Same shared table as the node projection.
+            items: NODE_ITEM_SCHEMA,
           },
         },
       },
@@ -541,23 +511,18 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...result.title !== undefined ? { title: result.title } : {},
         count: result.count,
         truncated: result.truncated,
-        nodes: result.nodes.map(n => ({
-          ref: n.ref,
-          role: n.role,
-          name: n.name,
-          ...n.value !== null ? { value: n.value } : {},
-          states: [...n.states],
-          depth: n.depth,
-          tag: n.tag,
-          // The provider computes this and the renderer prints it, but this mapping is an
-          // explicit allow-list rather than a pass-through — so leaving it out here silently
-          // dropped the field between the two, and the tool promised a reference it never
-          // sent. The snapshot mapping lists its selector; this one did not.
-          selector: n.selector,
-          x: n.x,
-          y: n.y,
-          ...n.frame === true ? { frame: true } : {},
-        })),
+        // The projection drops `value: null` (the schema declares a string, and the contract is
+        // that an absent value means "not applicable"), so the run-time shape and the inferred
+        // type differ by exactly that. The field table is what keeps the schema and the
+        // projection in agreement; this assertion is the type-level echo of that.
+        // The projection and the schema are now generated from one field table, so the shape
+        // they agree on is guaranteed at run time. TypeScript cannot see that agreement — it
+        // infers the output type from the schema object and compares it against the provider's
+        // interface, which describes the provider's internal shape rather than the contract
+        // (`value` nullable internally, absent on the wire; `selector` required by the
+        // interface, optional in the inferred schema). The assertion bridges that last gap; the
+        // test that walks every registered tool is what checks the agreement for real.
+        nodes: result.nodes.map(n => projectNode(n)) as never,
       }
     },
   }))

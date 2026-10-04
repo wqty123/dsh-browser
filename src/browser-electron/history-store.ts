@@ -68,8 +68,8 @@ export class HistoryStore {
    * the common case a comparison.
    */
   private appendedSincePrune = 0
-  private readonly maxEntries: number
-  private readonly maxAgeMs: number
+  private maxEntries: number
+  private maxAgeMs: number
 
   /**
    * @param file - absolute path of the JSONL history file.
@@ -80,9 +80,24 @@ export class HistoryStore {
     limits: HistoryLimits = {},
   ) {
     this.maxEntries = limits.maxEntries ?? DEFAULT_MAX_ENTRIES
-    // The first rewrite is due once the file has grown PRUNE_SLACK past the cap.
-    this.pruneThreshold = this.maxEntries + this.slack()
     this.maxAgeMs = (limits.maxAgeDays ?? DEFAULT_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000
+    // The first rewrite is due once the file has grown the slack past the cap.
+    this.pruneThreshold = this.maxEntries + this.slack()
+  }
+
+  /**
+   * Re-read the retention limits.
+   *
+   * They are settings, and settings change while the plugin runs — a panel that let the
+   * operator edit them while nothing read the new values made the control a lie. Entry count
+   * and age are the pair the interface presents, so they are updated together.
+   * @param limits - the current retention overrides.
+   */
+  updateLimits(limits: HistoryLimits): void {
+    this.maxEntries = limits.maxEntries ?? DEFAULT_MAX_ENTRIES
+    this.maxAgeMs = (limits.maxAgeDays ?? DEFAULT_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000
+    // Recomputed rather than left alone: a smaller cap means the next rewrite is sooner.
+    this.pruneThreshold = Math.max(this.pruneThreshold, this.maxEntries + this.slack())
   }
 
   /** Whether the history file exists yet (diagnostics and tests). */
@@ -163,13 +178,23 @@ export class HistoryStore {
     const cutoff = Date.now() - this.maxAgeMs
     const fresh = all.filter(page => page.at >= cutoff)
     const kept = fresh.length > this.maxEntries ? fresh.slice(fresh.length - this.maxEntries) : fresh
-    // Only rewrite when something actually fell off, and only once the excess
-    // is worth a full rewrite.
-    if (kept.length === all.length) return
+    // Every early exit has to retire the count it just spent, or the gate above stops gating.
+    // It counted appends so that the common "nothing to do" case is a comparison; leaving the
+    // counter set on the two paths that DO read the file meant it was never zero again, so
+    // every navigation paid the full parse this was written to avoid.
+    if (kept.length === all.length) {
+      this.appendedSincePrune = 0
+      return
+    }
     // Only rewrite once the file has grown PRUNE_SLACK past what we last wrote. Asking
     // "is the file over the cap?" instead was true from the first over-cap append
     // onwards, so every single navigation after that rewrote the whole file.
-    if (all.length < this.pruneThreshold) return
+    if (all.length < this.pruneThreshold) {
+      // Deliberately NOT reset here: the count is what tracks progress toward the threshold,
+      // so clearing it would postpone the rewrite indefinitely. The read is the price of
+      // staying under the threshold, and the threshold is what bounds how often that happens.
+      return
+    }
     try {
       const body = kept.map(page => `${JSON.stringify(page)}\n`).join('')
       // Atomic, like the settings document. A plain writeFileSync truncates first, and this is

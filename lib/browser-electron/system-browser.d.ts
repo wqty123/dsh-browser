@@ -157,6 +157,15 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * @returns true when it answered.
      */
     private probeClient;
+    /**
+     * Forget which browser issued what, after that browser is gone.
+     *
+     * The two maps must move together: `views` maps a view id to a session id and `sessions`
+     * maps a session id to a target id, so clearing one alone leaves a mapping the next command
+     * will act on. Every path that abandons a browser calls this rather than spelling the pair
+     * out — four separate copies is how the third one came to be missing.
+     */
+    private forgetBrowserState;
     private ensureClient;
     /**
      * Launch the browser with a private profile and connect over CDP.
@@ -179,10 +188,23 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     destroyView(handle: ElectronViewHandle): void;
     /** Nothing to show: the browser owns its own windows. */
     showView(): void;
-    /** Same as {@link showView}. */
-    presentView(): Promise<void>;
-    /** The browser owns window grouping. */
-    groupView(): void;
+    /**
+     * Bring the target's page to the front, then report success.
+     *
+     * The comment on `focus` below used to say this was impossible — that raising the page needs
+     * `Page.bringToFront` on a target session, which is a view-level concern the host cannot
+     * reach. The handle this method is handed IS that view, and it can send commands, so the
+     * capability was here all along; it just was not used. Without it `presentView` was an empty
+     * async method, so the provider's whole presentation barrier — the one that stops
+     * `Input.*` from being silently dropped for a view with no display surface, and reports
+     * `BROWSER_VIEW_NOT_PRESENTED` when it cannot present — never ran on this carrier.
+     *
+     * A failure is swallowed rather than propagated: a real Chrome window that refuses to come
+     * forward is not a reason to refuse the click that follows. The barrier exists to order the
+     * two, and the order is honoured either way.
+     * @param handle - the view to present.
+     */
+    presentView(handle: ElectronViewHandle): Promise<void>;
     /**
      * Best effort at bringing the browser's window forward.
      *
@@ -196,10 +218,6 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * view-level concern and not available to the host.
      */
     focus(): Promise<void>;
-    /** The browser reports its own window lifecycle. */
-    onUserAction(): void;
-    /** The browser reports its own window lifecycle. */
-    onViewClosed(): void;
     /**
      * Close the browser we launched, if we ever launched one.
      *
@@ -216,6 +234,10 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * a second copy of that rule.
      */
     private ensureSession;
+    /** Create and attach the target for one view. Serialised by {@link ensureSession}. */
+    private buildSession;
+    /** Views whose session is being created right now, so a second caller waits for the first. */
+    private readonly sessionBuilding;
     /** sessionId -> targetId, so a destroyed view can close the right page. */
     private readonly sessions;
 }

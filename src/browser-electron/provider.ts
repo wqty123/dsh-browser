@@ -160,6 +160,18 @@ export interface ElectronBrowserViewHost {
    */
   available?(): boolean
   /**
+   * Tell the human that a toolbar action the agent could not complete has failed.
+   *
+   * Optional. Declared rather than reached through a cast because this is what issue #16 was:
+   * the call used to be unbound, so `this` inside the host's implementation was undefined and
+   * its first statement threw — inside an async catch, which turned it into an unhandled
+   * rejection that took the whole DSH process down. A declared member is checkable; a cast is
+   * not.
+   * @param windowId - the window the action came from.
+   * @param message - what to show the human.
+   */
+  notifyUserActionError?(windowId: string, message: string): void
+  /**
    * Optional: associate a view with a window group. Views grouped under the
    * same `windowId` share one window (one window per browser session); a host
    * without this keeps a single shared window. Called right after
@@ -257,6 +269,37 @@ export interface ElectronViewHandle {
    * then behaves exactly as before.
    */
   focus?(): Promise<void>
+  /**
+   * Save a URL straight to disk, when the backing view can do that itself.
+   *
+   * Optional. Declared here rather than reached through a structural cast at the call site:
+   * a cast tells the compiler nothing, so a host that implements the interface without this
+   * method compiles and then silently does nothing.
+   * @param url - the URL to fetch.
+   * @param savePath - where to write it.
+   */
+  download?(url: string, savePath: string): Promise<void>
+  /**
+   * Export this view's cookies. Optional; see {@link download} for why it is declared.
+   * @returns the cookies, scoped to the view's own page.
+   */
+  flushAuth?(): Promise<readonly ExportedCookie[]>
+  /**
+   * Import cookies into this view. Optional.
+   * @param cookies - the cookies to write.
+   * @returns how many were accepted.
+   */
+  restoreAuth?(cookies: readonly ExportedCookie[]): Promise<number>
+  /**
+   * Capture this view natively, returning the image and its measured size.
+   *
+   * Optional. The size is part of the contract because the caller's own tool schema declares
+   * `width`/`height`; a host that can measure the image should say so here rather than leaving
+   * the provider to guess.
+   * @param opts - format, quality and downscale bounds.
+   * @returns the encoded image and the pixel size the caller will receive.
+   */
+  capture?(opts?: ScreenshotOptions): Promise<{ base64: string; mime: string; width?: number; height?: number }>
 }
 
 /** One tab inside a session: its view plus a stable id. */
@@ -2595,7 +2638,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // savePath admission: the shared gate — absolute, inside `downloadDir`,
     // and never an existing file. Screenshots use the very same one.
     const savePath = this.admitSavePath(request.savePath, 'download')
-    const downloadable = handle as { download?(url: string, savePath: string): Promise<void> }
+    const downloadable = handle
     if (typeof downloadable.download !== 'function') {
       throw new BrowserError('browser: download is only available on the self-hosted browser', 'BROWSER_DOWNLOAD_UNSUPPORTED')
     }
@@ -2632,7 +2675,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const timeoutMs = 30_000
     // The self-hosted carrier has a native path (the child reads its own session), which
     // is worth preferring: it reports exactly what the browser persisted.
-    const native = handle as { flushAuth?(): Promise<readonly ExportedCookie[]> }
+    const native = handle
     if (typeof native.flushAuth === 'function') {
       const cookies = await withTimeout(native.flushAuth(), timeoutMs, undefined, `browser: auth export timed out after ${timeoutMs}ms`)
       this.record(s, 'flushAuth', {}, true, { result: `${cookies.length} cookies` })
@@ -2684,7 +2727,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const { handle } = this.activeTab(s)
     const timeoutMs = 30_000
-    const native = handle as { restoreAuth?(cookies: readonly ExportedCookie[]): Promise<number> }
+    const native = handle
     if (typeof native.restoreAuth === 'function') {
       const restored = await withTimeout(native.restoreAuth(cookies), timeoutMs, undefined, `browser: auth restore timed out after ${timeoutMs}ms`)
       this.record(s, 'restoreAuth', { count: cookies.length }, true, { result: `${restored} cookies` })
@@ -2723,7 +2766,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     session: BrowserSessionId,
     request?: BrowserScreenshotRequest,
     signal?: AbortSignal,
-  ): Promise<{ readonly dataUrl: string; readonly path?: string }> {
+  ): Promise<{ readonly dataUrl: string; readonly path?: string; readonly width?: number; readonly height?: number }> {
     const s = this.session(session)
     const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
@@ -2734,7 +2777,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // immediately (empty) for hidden ones. JPEG and downscaling are encoded
     // in the child from the NativeImage, so this path is the only one that
     // can produce JPEG (CDP JPEG hangs on Electron 43).
-    const capturable = handle as { capture?(opts?: ScreenshotOptions): Promise<{ base64: string; mime: string }> }
+    const capturable = handle
     if (request?.fullPage !== true && typeof capturable.capture === 'function') {
       // Ensure the target view is the visible one before capturing.
       this.showActive(s)
@@ -2752,7 +2795,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
       if (shot.base64 === '') {
         throw new BrowserError('browser: capture returned an empty image (view not painted); retry shortly', 'BROWSER_SCREENSHOT_FAILED')
       }
-      return this.saveScreenshot(shot.base64, request?.savePath, shot.mime ?? 'image/png')
+      return this.saveScreenshot(
+        shot.base64,
+        request?.savePath,
+        shot.mime ?? 'image/png',
+        // The child measured these after applying any downscale, and they describe the image
+        // the caller receives. Without them this path — the default self-hosted one — could
+        // never answer the width/height its own tool schema declares.
+        shot.width !== undefined && shot.height !== undefined
+          ? { width: shot.width, height: shot.height }
+          : undefined,
+      )
     }
     // Fallback: a handle without a native capture() (the sidebar, or an installed Chrome
     // or Edge) uses CDP; full-page needs `captureBeyondViewport`, which capturePage lacks.
@@ -2887,8 +2940,14 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const store = this.historyStore
     if (store === undefined) return
     // The settings panel can switch recording off at runtime; the static config
-    // only supplies the startup default.
-    if (this.settingsSource !== undefined && !this.settingsSource().history.enabled) return
+    // only supplies the startup default. The RETENTION limits are read here too: they were
+    // parsed and stored but never handed to the store, so editing maxEntries or maxAgeDays in
+    // the file changed nothing — the switch worked and the numbers beside it did not.
+    if (this.settingsSource !== undefined) {
+      const live = this.settingsSource().history
+      if (!live.enabled) return
+      store.updateLimits({ maxEntries: live.maxEntries, maxAgeDays: live.maxAgeDays })
+    }
     void handleSendEvaluate(handle, 'location.href + "\\u0000" + (document.title || "")')
       .then(result => {
         if (!result.ok || typeof result.value !== 'string') return
@@ -3144,11 +3203,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const message = `action ${action.type} failed: ${String(error)}`
     let reported = false
     try {
-      const host = this.host as { notifyUserActionError?(windowId: string, message: string): void }
-      const notify = host.notifyUserActionError
-      if (typeof notify === 'function') {
-        // Called on its owner: an unbound call here kills the host process.
-        notify.call(host, action.windowId, message)
+      const notify = this.host.notifyUserActionError?.bind(this.host)
+      if (notify !== undefined) {
+        // Bound at the call: an unbound call here kills the host process (issue #16).
+        notify(action.windowId, message)
         reported = true
       }
     } catch (notifyError) {

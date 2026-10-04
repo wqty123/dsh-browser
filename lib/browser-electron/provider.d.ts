@@ -62,6 +62,18 @@ export interface ElectronBrowserViewHost {
      */
     available?(): boolean;
     /**
+     * Tell the human that a toolbar action the agent could not complete has failed.
+     *
+     * Optional. Declared rather than reached through a cast because this is what issue #16 was:
+     * the call used to be unbound, so `this` inside the host's implementation was undefined and
+     * its first statement threw — inside an async catch, which turned it into an unhandled
+     * rejection that took the whole DSH process down. A declared member is checkable; a cast is
+     * not.
+     * @param windowId - the window the action came from.
+     * @param message - what to show the human.
+     */
+    notifyUserActionError?(windowId: string, message: string): void;
+    /**
      * Optional: associate a view with a window group. Views grouped under the
      * same `windowId` share one window (one window per browser session); a host
      * without this keeps a single shared window. Called right after
@@ -175,6 +187,42 @@ export interface ElectronViewHandle {
      * then behaves exactly as before.
      */
     focus?(): Promise<void>;
+    /**
+     * Save a URL straight to disk, when the backing view can do that itself.
+     *
+     * Optional. Declared here rather than reached through a structural cast at the call site:
+     * a cast tells the compiler nothing, so a host that implements the interface without this
+     * method compiles and then silently does nothing.
+     * @param url - the URL to fetch.
+     * @param savePath - where to write it.
+     */
+    download?(url: string, savePath: string): Promise<void>;
+    /**
+     * Export this view's cookies. Optional; see {@link download} for why it is declared.
+     * @returns the cookies, scoped to the view's own page.
+     */
+    flushAuth?(): Promise<readonly ExportedCookie[]>;
+    /**
+     * Import cookies into this view. Optional.
+     * @param cookies - the cookies to write.
+     * @returns how many were accepted.
+     */
+    restoreAuth?(cookies: readonly ExportedCookie[]): Promise<number>;
+    /**
+     * Capture this view natively, returning the image and its measured size.
+     *
+     * Optional. The size is part of the contract because the caller's own tool schema declares
+     * `width`/`height`; a host that can measure the image should say so here rather than leaving
+     * the provider to guess.
+     * @param opts - format, quality and downscale bounds.
+     * @returns the encoded image and the pixel size the caller will receive.
+     */
+    capture?(opts?: ScreenshotOptions): Promise<{
+        base64: string;
+        mime: string;
+        width?: number;
+        height?: number;
+    }>;
 }
 /** Provider config: navigation admission defaults and snapshot caps. */
 export interface ElectronBrowserProviderConfig {
@@ -583,6 +631,8 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<{
         readonly dataUrl: string;
         readonly path?: string;
+        readonly width?: number;
+        readonly height?: number;
     }>;
     /**
      * Build the data URL and optionally write the image to disk. The caller's

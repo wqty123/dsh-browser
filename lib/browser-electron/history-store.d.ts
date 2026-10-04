@@ -50,13 +50,22 @@ export declare class HistoryStore {
      * the common case a comparison.
      */
     private appendedSincePrune;
-    private readonly maxEntries;
-    private readonly maxAgeMs;
+    private maxEntries;
+    private maxAgeMs;
     /**
      * @param file - absolute path of the JSONL history file.
      * @param limits - retention overrides (entry count and age).
      */
     constructor(file?: string, limits?: HistoryLimits);
+    /**
+     * Re-read the retention limits.
+     *
+     * They are settings, and settings change while the plugin runs — a panel that let the
+     * operator edit them while nothing read the new values made the control a lie. Entry count
+     * and age are the pair the interface presents, so they are updated together.
+     * @param limits - the current retention overrides.
+     */
+    updateLimits(limits: HistoryLimits): void;
     /** Whether the history file exists yet (diagnostics and tests). */
     exists(): boolean;
     /**

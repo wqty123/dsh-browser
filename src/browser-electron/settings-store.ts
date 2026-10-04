@@ -143,13 +143,35 @@ function resolveChannel(value: unknown): BrowserChannel {
 
 /** Coerce one positive-integer field, keeping the default when invalid. */
 function count(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  const floored = Math.floor(value)
+  // A fractional value below 1 floors to 0, and 0 is not "very few" in either place these are
+  // used: as a history entry cap it means `slice(len - 0)`, i.e. keep nothing, so a hand-typed
+  // `0.5` silently wiped the history file on the next rewrite. Anything that survives the
+  // floor has to still be a usable limit.
+  return floored > 0 ? floored : fallback
 }
 
 /** Read one nested section of an unknown document, or an empty object. */
-function section(source: Record<string, unknown>, key: string): Record<string, unknown> {
+/**
+ * Read one section of the document, distinguishing ABSENT from UNREADABLE.
+ *
+ * Absent (the key is not there at all) is a document written before the section existed, and
+ * the defaults apply — that is the documented behaviour. Present-but-not-an-object
+ * (`"actions": false`, `null` from a truncated write, a stray string) is a document this code
+ * cannot read, and returning `{}` for it made every gate inside look absent, so each one took
+ * its permissive default. A whole section mistyped is exactly the shape a careless hand edit
+ * produces, and it opened every capability the section was there to bound.
+ * @param source - the parsed document.
+ * @param key - the section name.
+ * @returns the section, or undefined when it is present but not an object.
+ */
+function section(source: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
   const value = source[key]
-  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+  if (value === undefined) return {}
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
 }
 
 /**
@@ -168,25 +190,42 @@ export function resolveSettings(raw: unknown): BrowserSettings {
   const credentials = section(source, 'credentials')
   const browser = section(source, 'browser')
   const actions = section(source, 'actions')
+  // A section that is present but unreadable refuses its gates rather than defaulting them
+  // open. The rest of a broken section keeps its defaults: refusing history or presentation
+  // would punish the user for a bad file without protecting anything.
+  const credentialsUsable = credentials ?? {}
+  const actionsUsable = actions ?? {}
   return {
     history: {
-      enabled: bool(history.enabled, DEFAULT_SETTINGS.history.enabled),
-      maxEntries: count(history.maxEntries, DEFAULT_SETTINGS.history.maxEntries),
-      maxAgeDays: count(history.maxAgeDays, DEFAULT_SETTINGS.history.maxAgeDays),
+      enabled: bool(history?.enabled, DEFAULT_SETTINGS.history.enabled),
+      maxEntries: count(history?.maxEntries, DEFAULT_SETTINGS.history.maxEntries),
+      maxAgeDays: count(history?.maxAgeDays, DEFAULT_SETTINGS.history.maxAgeDays),
     },
-    cookies: { persist: bool(cookies.persist, DEFAULT_SETTINGS.cookies.persist) },
+    cookies: { persist: bool(cookies?.persist, DEFAULT_SETTINGS.cookies.persist) },
     ui: {
-      autoExpandOnce: bool(ui.autoExpandOnce, DEFAULT_SETTINGS.ui.autoExpandOnce),
-      closeWithSession: bool(ui.closeWithSession, DEFAULT_SETTINGS.ui.closeWithSession),
-      virtualCursor: bool(ui.virtualCursor, DEFAULT_SETTINGS.ui.virtualCursor),
+      autoExpandOnce: bool(ui?.autoExpandOnce, DEFAULT_SETTINGS.ui.autoExpandOnce),
+      closeWithSession: bool(ui?.closeWithSession, DEFAULT_SETTINGS.ui.closeWithSession),
+      virtualCursor: bool(ui?.virtualCursor, DEFAULT_SETTINGS.ui.virtualCursor),
     },
-    vision: { strategy: vision.strategy === 'nonVisual' ? 'nonVisual' : DEFAULT_SETTINGS.vision.strategy },
-    browser: { channel: resolveChannel(browser.channel) },
-    credentials: { allowRead: gate(credentials.allowRead, DEFAULT_SETTINGS.credentials.allowRead) },
+    vision: { strategy: vision?.strategy === 'nonVisual' ? 'nonVisual' : DEFAULT_SETTINGS.vision.strategy },
+    browser: { channel: resolveChannel(browser?.channel) },
+    credentials: {
+      // `gate` returns false for anything present-and-not-a-boolean, so an unreadable section
+      // is refused here for free: the section itself is the "present but wrong" value.
+      allowRead: credentials === undefined
+        ? false
+        : gate(credentialsUsable.allowRead, DEFAULT_SETTINGS.credentials.allowRead),
+    },
     actions: {
-      allowExecute: gate(actions.allowExecute, DEFAULT_SETTINGS.actions.allowExecute),
-      allowDownload: gate(actions.allowDownload, DEFAULT_SETTINGS.actions.allowDownload),
-      allowCredentialWrite: gate(actions.allowCredentialWrite, DEFAULT_SETTINGS.actions.allowCredentialWrite),
+      allowExecute: actions === undefined
+        ? false
+        : gate(actionsUsable.allowExecute, DEFAULT_SETTINGS.actions.allowExecute),
+      allowDownload: actions === undefined
+        ? false
+        : gate(actionsUsable.allowDownload, DEFAULT_SETTINGS.actions.allowDownload),
+      allowCredentialWrite: actions === undefined
+        ? false
+        : gate(actionsUsable.allowCredentialWrite, DEFAULT_SETTINGS.actions.allowCredentialWrite),
     },
   }
 }

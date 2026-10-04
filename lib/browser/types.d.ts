@@ -366,8 +366,15 @@ export interface BrowserA11yNode {
     readonly role: string;
     /** Accessible name (aria-label, label text, placeholder, own text, …). */
     readonly name: string;
-    /** Current value of input-like nodes (null when not applicable). */
-    readonly value: string | null;
+    /**
+     * Current value of input-like nodes; absent when the node has none.
+     *
+     * The provider produces `null` for "not applicable" and the tool layer drops it, so absence
+     * and null mean the same thing here — which is what the output schema declares (`string`,
+     * not nullable). Saying `string | null` described the provider's internal shape rather than
+     * the contract, and the two disagreed at every call.
+     */
+    readonly value?: string;
     /** ARIA/DOM states: enabled/disabled/checked/unchecked/expanded/… */
     readonly states: readonly string[];
     /** DOM depth (within its document), for reconstructing the tree. */

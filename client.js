@@ -137,12 +137,54 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     return data
   }
 
+  /**
+   * The panel's own stylesheet.
+   *
+   * Inline styles cannot express `:hover`, and the rows need one — an interactive row with no
+   * feedback reads as decoration. The colours come from DSH's own design tokens
+   * (`--dsw-alias-*`, the same ones the host's settings rows use) so this follows the active
+   * theme instead of guessing at it; each has a literal fallback because a token may be absent
+   * under a third-party theme, and an unstyled row is worse than a slightly-off one.
+   */
+  const CSS = `
+.dsh-bb-row {
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: var(--dsw-alias-bg-layer-1, rgba(128,128,128,.10));
+  color: var(--dsw-alias-label-primary, inherit);
+  transition: background-color .12s ease;
+}
+.dsh-bb-row:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.20));
+}
+.dsh-bb-row:active {
+  background: var(--dsw-alias-interactive-bg-active, rgba(128,128,128,.26));
+}
+.dsh-bb-row:focus-within {
+  border-color: var(--dsw-alias-border-l2, rgba(128,128,128,.4));
+}
+.dsh-bb-select {
+  background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,.12));
+  color: var(--dsw-alias-label-primary, inherit);
+}
+`
+
+  /** Install the stylesheet once, however many times the panel is mounted. */
+  function installStyles() {
+    if (typeof document === "undefined") return
+    if (document.getElementById("dsh-builtin-browser-styles") !== null) return
+    const tag = document.createElement("style")
+    tag.id = "dsh-builtin-browser-styles"
+    tag.textContent = CSS
+    document.head.appendChild(tag)
+  }
+
   const styles = {
     wrap: { display: "flex", flexDirection: "column", gap: "14px", padding: "4px 2px", fontSize: "13px" },
     lead: { opacity: 0.75, lineHeight: 1.6, margin: 0 },
     group: { border: "1px solid rgba(128,128,128,.28)", borderRadius: "8px", padding: "10px 12px" },
     groupTitle: { margin: "0 0 8px", fontSize: "13px", fontWeight: 600 },
-    row: { display: "flex", gap: "10px", alignItems: "flex-start", padding: "5px 0" },
+    row: { display: "flex", gap: "10px", alignItems: "flex-start" },
     box: { marginTop: "2px" },
     label: { display: "flex", flexDirection: "column", gap: "2px", cursor: "pointer" },
     hint: { opacity: 0.68, lineHeight: 1.5 },
@@ -156,7 +198,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   /** One boolean switch bound to a settings path. */
   function Toggle(props) {
     const t = translate
-    return h("div", { style: styles.row }, [
+    return h("div", { style: styles.row, className: "dsh-bb-row" }, [
       h("input", {
         key: "i",
         type: "checkbox",
@@ -277,12 +319,12 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       ]),
 
       section("vision.title", [
-        h("div", { key: "row", style: styles.row }, [
+        h("div", { key: "row", style: styles.row, className: "dsh-bb-row" }, [
           h("label", { key: "l", style: styles.label }, [
             h("span", { key: "t" }, t("vision.strategy")),
             h("select", {
               key: "s",
-              style: styles.select,
+              style: styles.select, className: "dsh-bb-select",
               value: settings.vision.strategy,
               disabled: busy,
               onChange: event => patch({ vision: { strategy: event.target.value } }),
@@ -296,12 +338,12 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       ]),
 
       section("browser.title", [
-        h("div", { key: "row", style: styles.row }, [
+        h("div", { key: "row", style: styles.row, className: "dsh-bb-row" }, [
           h("label", { key: "l", style: styles.label }, [
             h("span", { key: "t" }, t("browser.channel")),
             h("select", {
               key: "s",
-              style: styles.select,
+              style: styles.select, className: "dsh-bb-select",
               value: settings.browser.channel,
               disabled: busy,
               onChange: event => patch({ browser: { channel: event.target.value } }),
@@ -366,6 +408,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   }
 
   function apply(ctx) {
+    // Before anything renders: the rows need a hover state, and inline styles cannot express
+    // one. Idempotent, so a re-apply does not stack copies.
+    installStyles()
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-builtin-browser: dictionaries")
     const t = ctx.locale.bind(NS)
     translate = t

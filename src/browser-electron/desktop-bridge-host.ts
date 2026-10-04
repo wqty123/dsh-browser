@@ -229,26 +229,13 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    */
   showView(): void {}
 
-  /** Same as {@link showView}: the page is already presented by the shell. */
-  async presentView(): Promise<void> {}
 
-  /**
-   * The shell owns window grouping, and one sidebar serves every view, so there
-   * is nothing to record here. (It must not write a placeholder guest id either:
-   * a view whose guest is not yet materialized has to stay absent from the map,
-   * or the first real command would be sent to the placeholder.)
-   */
-  groupView(): void {}
 
-  /** Focus is the shell's to manage, and there is no separate window to raise. */
-  async focus(): Promise<void> {}
 
   onUserAction(handler: (action: BrowserUserAction) => void): void {
     this.userActionHandler = handler
   }
 
-  /** The shell reports its own window lifecycle; nothing to subscribe to here. */
-  onViewClosed(): void {}
 
   /**
    * Release the sidebar's browser pages (requirements §3, `ui.closeWithSession`).
