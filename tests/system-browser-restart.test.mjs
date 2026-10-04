@@ -1,4 +1,4 @@
-﻿// Issue #21, done for real this time.
+// Issue #21, done for real this time.
 //
 // The previous version could not fail. Its stub was Node, spawned with Chromium's arguments,
 // which Node rejects — so no CDP endpoint ever appeared, no session was ever created, and the
@@ -196,6 +196,12 @@ test('the next launch uses the port its own browser wrote, not the stale file', 
     // does — so both halves of the behaviour are decidable: the stale file is refused, and
     // the port this process wrote is the one adopted.
     writeFileSync(portFile, `${secondPort}\n`)
+    // Stamped forward, like the other two launchers: `freshPort()` refuses a file older than
+    // the spawn, and CI's one-second timestamp resolution can make a file written in this same
+    // second compare as older — which is exactly what this test exists to distinguish, so it
+    // must not also be able to fail for a reason that has nothing to do with the behaviour.
+    const ahead = new Date(Date.now() + 1000)
+    utimesSync(portFile, ahead, ahead)
     return child
   })
   const view = host.createView()
