@@ -78,6 +78,18 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private readonly extraArgs;
     private readonly ephemeralDir?;
     private readonly launcher;
+    /**
+     * viewId -> the session that view rides, and the client that issued it.
+     *
+     * The client is part of the value on purpose. A session id means nothing to a browser other
+     * than the one that handed it out, and this host replaces browsers routinely: the process
+     * dies, or its debugging socket closes while the process lives on. Keeping only the id meant
+     * the host could start a NEW browser successfully and then send every command to it carrying
+     * a session the old one had issued — `Session with given id not found`, on every call, with a
+     * browser that answers /json/version perfectly well and nothing the user can do short of
+     * restarting DSH. Comparing identity catches it with no round trip; validating each cached
+     * session against the browser would put one on every page command.
+     */
     private readonly views;
     private disposed;
     /**
@@ -196,7 +208,13 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * browser) simply tears down its bookkeeping.
      */
     dispose(): void;
-    /** The flattened session for a view, creating its page on first use. */
+    /**
+     * The flattened session for a view, creating its page on first use.
+     *
+     * No cache check here: the only caller has already established that the cached session does
+     * not belong to the client it is about to use. Re-checking would mean either a round trip or
+     * a second copy of that rule.
+     */
     private ensureSession;
     /** sessionId -> targetId, so a destroyed view can close the right page. */
     private readonly sessions;
