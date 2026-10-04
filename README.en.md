@@ -232,6 +232,19 @@ See the full list in [Tool reference](#tool-reference).
 - **DPR awareness**: CDP input uses CSS pixels; on high-DPI screens calibrate with `elementFromPoint` instead of guessing coordinates.
 - **Two failures of the same action means change the approach**: a different selector, a semantic target, or a fresh snapshot — not the same coordinate a third time.
 
+### Vision strategy: know which one you are in first
+
+The **`vision.strategy`** setting decides whether coordinate clicks are usable, and **that is the only thing it affects**:
+
+| Strategy | Coordinate clicks | Suited to |
+| --- | --- | --- |
+| `auto` (default) | allowed | **A model that can read images** — screenshots are a valid way to check layout |
+| `nonVisual` | **refused** | **A model with no image input** |
+
+**Under `nonVisual` a coordinate click is refused outright**, reported as `BROWSER_NON_VISUAL_COORDINATES`, and the error names the fix: pass a semantic target, e.g. `target { by: "text", value: "Sign in" }`, which locates the element from the DOM and clicks its centre. **That is a configuration, not a failure — do not retry the same coordinate.**
+
+**DOM queries, the accessibility tree, text extraction and structured scraping are identical under both strategies** — that is, **the page can be operated completely without image input**. So the "when not to screenshot" advice below is the default for **every** model, not a concession to the ones that cannot see.
+
 ### When NOT to take a screenshot
 
 Tool output is spent out of the caller's context, and **a screenshot is the most expensive kind**:

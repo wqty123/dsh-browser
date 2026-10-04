@@ -55,6 +55,13 @@ dsh plugin --profile web add <本仓库路径>
 
 ## 操作纪律
 
+**先确认视觉策略。** 设置里的 `vision.strategy` 决定坐标点击能不能用,**而且只决定这一件事**:
+
+- **`auto`(默认)**:坐标与语义都允许,适合能读图的模型。
+- **`nonVisual`**:**坐标点击被明确拒绝**,报 `BROWSER_NON_VISUAL_COORDINATES`,错误信息直接给出改法 —— 传语义 target,如 `target { by: "text", value: "Sign in" }`。**这是配置,不是故障,不要重试同一次坐标点击。**
+
+**两种策略下 DOM 查询、无障碍树、文本提取与结构化抓取完全一致** —— 所以下面这些纪律对**所有模型**都成立,不是因为谁看不了图。
+
 **定位:先用语义,再考虑坐标**
 
 - **`browser_a11y` 是理解页面的首选**,它给出每个交互节点的**角色**(button/textbox/…)与**可访问名称**,比读 DOM 更接近"这页面上有什么";`browser_snapshot` 给出可点击元素的**引用与坐标**。
@@ -68,7 +75,7 @@ dsh plugin --profile web add <本仓库路径>
 
 **截图与内容:先问"我要的是判断还是像素"**
 
-- **能用文本就用文本。** `browser_snapshot` / `browser_a11y` / `browser_content` 给出同一页面的文本表示;**没有图像输入能力的模型看截图什么也得不到**,只会花钱。
+- **能用文本就用文本。** `browser_snapshot` / `browser_a11y` / `browser_content` 给出同一页面的文本表示;**没有图像输入能力的模型看截图什么也得不到**,只会花钱。截图留给布局、图表、设计核对这类**必须看像素**的事。
 - **`browser_screenshot` 带 `maxWidth`/`maxHeight` 时,结果里会返回 `width`/`height`**(实际像素尺寸)。需要控制成本时用它确认降采样生效了,而不是自己解码 data URL。
 - **`browser_content` 的 `maxChars` 是按格式分档的**(html/json 默认 5 万,其余 2 万),单次传 `maxChars` 优先于设置里的 `contentMaxChars`。
 
