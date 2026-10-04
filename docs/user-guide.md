@@ -35,10 +35,11 @@ dsh plugin --profile web add <本仓库路径>
 | `browser-electron` | `viewHost` | 对象 | 可选 | 宿主提供的 `ElectronBrowserViewHost`(通常 `!!js ctx.get('electronViewHost')`)。**不传时插件自己选载体**:桌面端驱动官方侧栏、否则自托管;设置里显式选择的 Chrome/Edge 优先于两者 |
 | `browser-electron` | `httpOnly` | 布尔 | `true` | 仅允许 HTTP(S) 导航;`file:`/`data:` 等拒绝 |
 | `browser-electron` | `snapshotMaxElements` | 数字 | `60` | 快照最多收录的交互元素数 |
-| `browser-electron` | `contentMaxChars` | 数字 | **不再被读取(已废弃)** | 曾经的"内容抓取默认字符上限"。**现在没有任何代码读它,改它不改变任何行为** —— 上限按格式固定:html 50 000、json 50 000、txt 20 000、markdown 20 000,单次调用用 `maxChars` 覆盖。保留该键只为不让既有配置因未知键而报错 |
+| `browser-electron` | `contentMaxChars` | 数字 | 未设置(按格式分档) | 内容抓取的字符上限。**不设**时按格式取分档默认(html 50 000、json 50 000、txt 20 000、markdown 20 000);**设了**就是操作者的值,覆盖分档默认。单次调用的 `maxChars` 优先级最高 |
 | `browser-electron` | `downloadDir` | 字符串 | 系统下载目录(自动识别 `Downloads`/`下载`/`下載`,或 `XDG_DOWNLOAD_DIR`) | 限定 `browser_download` 与 `browser_screenshot` 保存路径必须位于该目录内且不覆盖已有文件;默认收敛到系统下载目录,可改沙箱目录 |
 | `tool-browser` | `timeoutMs` | 数字 | `60000` | 工具协作超时(ms) |
 | `tool-browser` | `tabTools` | 布尔 | `true` | 是否注册标签管理工具 |
+| `tool-browser` | `allowedActions` | 字符串数组 | 不限制 | **部署级**动作白名单,对该部署里的每个任务生效(单个任务仍可用 `browser_restrict` 再收窄);`READ_ONLY_TOOLS` 与 `browser_restrict` 无论列表怎么写都不拦。`cordis.patch.yml` 默认给的是空 `config: {}`(等于不限制) |
 
 ## 快速上手(给 agent 的提示词示例)
 
@@ -86,7 +87,7 @@ DSH Desktop 上②命中即可用(0.1.18+ 插件自带 electron 包;44+ 二进�
 窗口标题为 `dsh-browser`(自托管)。若子进程崩溃(或宿主 DSH 重启)会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。
 
 **Q:设置里的 `contentMaxChars` 改了没反应?**
-因为它**已经没有任何代码在读** —— 那是内容上限改为按格式固定之后的遗留键(html/json 50 000,txt/markdown 20 000)。上限请用单次调用的 `maxChars` 覆盖。
+先确认改的是哪一层。优先级从高到低是:**单次调用的 `maxChars`** > **配置里的 `contentMaxChars`** > **按格式的分档默认**(html/json 50 000,txt/markdown 20 000)。`contentMaxChars` 的作用就是给这个部署换一个默认值:不设时才用分档,设了就盖过分档。若改了没反应,通常是那一次调用自己传了 `maxChars`。
 
 **Q:本机 Chrome / Edge 被关掉之后还能继续用吗?**
 能。该载体观察进程退出并清掉**已失效的会话映射**,下一次调用会**重新拉起**浏览器并继续工作;重新拉起前会先 kill 旧进程并**最多等 3 秒**它真正退出,且**只认本次启动写下的 `DevToolsActivePort`**(被杀掉的浏览器没机会清理那个文件,照读会连到别的 Chromium 或 `node --inspect` 上)。反过来,页面只是**慢**不会让插件杀掉你的窗口:命令超时只把连接标记为存疑,下一次调用先用 `Browser.getVersion` 探一次再决定是否丢弃,只有 socket 已关闭才重启。

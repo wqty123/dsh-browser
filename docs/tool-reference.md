@@ -57,7 +57,7 @@
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出/恢复 cookie —— **三种载体都可用**:自托管走原生会话,桌面侧栏与本机 Chrome/Edge 走 CDP 的 `Network.getCookies` / `Storage.setCookies`;flush 返回 cookie 列表,restore 带列表写回。**flush 只导出当前页所属站点的 cookie**(不是整台机器的共享 cookie 罐),范围按本会话所在页面的 URL 收敛;**范围未知时直接拒绝而不是放宽**(自托管侧栏载体报"cookie 范围未知",CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`)。`restored` 反映真的提交了多少(无法构成有效 URL 的 cookie 会被丢弃并报出条数)。**受白名单约束**:`restore` 会向任意域写 cookie,是动作而非观察,因此该工具**不在只读豁免集合**里。设置里「允许读取 cookies / 导出登录状态」关闭时,flush 与 restore **都**抛 `BROWSER_AUTH_DISABLED`。导出受设置「凭据」门控(`BROWSER_AUTH_DISABLED`),写入受「允许写入登录状态」门控(`BROWSER_AUTH_WRITE_DISABLED`)—— 两者独立 |
+| `browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出/恢复 cookie —— **三种载体都可用**:自托管走原生会话,桌面侧栏与本机 Chrome/Edge 走 CDP 的 `Network.getCookies` / `Storage.setCookies`;flush 返回 cookie 列表,restore 带列表写回。**flush 只导出当前页所属站点的 cookie**(不是整台机器的共享 cookie 罐),范围按本会话所在页面的 URL 收敛;**范围未知时直接拒绝而不是放宽**(自托管侧栏载体报"cookie 范围未知",CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`)。`restored` 反映真的提交了多少(无法构成有效 URL 的 cookie 会被丢弃并报出条数)。**受白名单约束**:`restore` 会向任意域写 cookie,是动作而非观察,因此该工具**不在只读豁免集合**里。**两个门控是分开的**:`flush`(读)受设置「凭据 / 允许读取 cookies」管,关闭时抛 `BROWSER_AUTH_DISABLED`;`restore`(写)受「允许写入登录状态」管,关闭时抛 `BROWSER_AUTH_WRITE_DISABLED` —— 关掉读不会连带拒绝写,反之亦然 |
 | `browser_restrict` | `allowed?` | `{ restrictedTo[] }` | – | 设置动作白名单;空列表解除;**只校验名字是否以 `browser_` 开头**(写错的前缀会报错,`browser_typo` 这种拼错但前缀合法的名字会被接受、等同于拦掉该名字,不额外报错);守卫按名字匹配,因此白名单里列什么名字就只放行什么名字。**软护栏**——模型可自行解除,非安全边界 |
 
 ## 截图
