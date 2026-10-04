@@ -12,6 +12,16 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - run: npm install --no-save
+      # Which node and npm actually ran. A job that passes locally and fails here is
+      # unactionable without them: `node-version: 22` resolves to whatever 22.x the runner
+      # currently carries, and the install below behaves differently across npm majors.
+      - run: node -v
+      - run: npm -v
+      # `--ignore-scripts` skips electron's postinstall, which downloads ~100MB from GitHub
+      # releases for a package these tests never launch — every test drives a fixture child
+      # script in place of the real host. That download is the ONLY step in this job whose
+      # outcome depends on something other than the npm registry, and its cost varies by an
+      # order of magnitude between runs. Users still get the binary; this changes what CI pays.
+      - run: npm install --no-save --ignore-scripts
       - run: npx tsc -p tsconfig.json
       - run: node --test "tests/*.test.mjs"
