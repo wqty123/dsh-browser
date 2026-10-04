@@ -13,10 +13,11 @@
  * @module dsh-browser/browser-electron/history-store
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { VisitedPage } from '../browser/types.js'
+import { writeFileAtomic } from './settings-store.js'
 
 export type { VisitedPage }
 
@@ -171,13 +172,18 @@ export class HistoryStore {
     if (all.length < this.pruneThreshold) return
     try {
       const body = kept.map(page => `${JSON.stringify(page)}\n`).join('')
-      writeFileSync(this.file, body)
+      // Atomic, like the settings document. A plain writeFileSync truncates first, and this is
+      // the whole history in one call: a TerminateProcess mid-write — the browser host is
+      // killed exactly that way on Windows — left a partial file, and the reader drops a
+      // half-written TAIL rather than the middle, so everything after the tear was lost.
+      writeFileAtomic(this.file, body)
       // The file now holds only what was kept, so the next rewrite is due once
       // PRUNE_SLACK more entries have been appended.
       this.pruneThreshold = kept.length + this.slack()
       this.appendedSincePrune = 0
     } catch {
-      // Best-effort: an unpruned file still reads correctly.
+      // Best-effort: an unpruned file still reads correctly, and the atomic write leaves the
+      // previous one in place when it fails.
     }
   }
 

@@ -46,12 +46,24 @@ function makeHost() {
 /** A settings document with the action switches overridden; everything else stays default. */
 const settingsWith = (actions) => resolveSettings({ actions })
 
-test('the action switches default to on, and a hand-edited file cannot loosen them wrongly', () => {
+test('the action switches default to on, and a mistyped gate is refused rather than defaulted', () => {
   assert.deepEqual(DEFAULT_SETTINGS.actions, { allowExecute: true, allowDownload: true, allowCredentialWrite: true })
-  const resolved = resolveSettings({ actions: { allowExecute: 'yes', allowDownload: false, somethingElse: 1 } })
-  assert.equal(resolved.actions.allowExecute, true, 'a mistyped value falls back to the default')
+
+  // Absent means "written before the switch existed" and takes the documented default.
+  assert.equal(resolveSettings({}).actions.allowExecute, true, 'an absent field takes its default')
+
+  // Present but not a boolean does NOT. These four gate capabilities, and "the document means
+  // something this code cannot read" must not resolve to "everything is permitted": that used to
+  // be the behaviour, so `"false"`, `null` and `1` all read as ON and one dropped byte reopened
+  // whatever had been switched off.
+  const resolved = resolveSettings({
+    actions: { allowExecute: 'yes', allowDownload: false, allowCredentialWrite: 1, somethingElse: 1 },
+    credentials: { allowRead: 'true' },
+  })
+  assert.equal(resolved.actions.allowExecute, false, 'a mistyped gate is refused, not defaulted')
   assert.equal(resolved.actions.allowDownload, false, 'a real boolean is honoured')
-  assert.equal(resolved.actions.allowCredentialWrite, true, 'an absent field takes its default')
+  assert.equal(resolved.actions.allowCredentialWrite, false, 'a number is not a boolean')
+  assert.equal(resolved.credentials.allowRead, false, 'the credentials gate is refused the same way')
   assert.equal('somethingElse' in resolved.actions, false, 'unknown keys are dropped')
 })
 

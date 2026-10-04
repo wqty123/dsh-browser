@@ -96,10 +96,28 @@ test('update merges, persists, and reads back', () => {
   assert.equal(onDisk.history.enabled, false)
 })
 
-test('a malformed file behaves as defaults instead of failing', () => {
+test('a malformed file refuses the capability gates instead of failing or defaulting', () => {
+  // The behaviour changed on purpose. A file that exists and cannot be parsed used to resolve to
+  // DEFAULT_SETTINGS, which meant a torn write (a TerminateProcess during the save) or one stray
+  // character silently reopened every switch the operator had turned off — and the next save
+  // wrote those defaults to disk for good. "No file" is still a first run and still takes the
+  // defaults; "a file I cannot read" is not the same statement.
   const file = settingsFile()
   writeFileSync(file, '{ this is not json')
-  assert.deepEqual(new SettingsStore(file).get(), DEFAULT_SETTINGS)
+  const resolved = new SettingsStore(file).get()
+
+  assert.equal(resolved.credentials.allowRead, false, 'cookie reading is not granted by a corrupt file')
+  assert.deepEqual(resolved.actions, { allowExecute: false, allowDownload: false, allowCredentialWrite: false })
+
+  // Everything that is merely convenient keeps its default: refusing history or the browser
+  // choice would punish the user for a corrupt file without protecting anything.
+  assert.deepEqual(resolved.history, DEFAULT_SETTINGS.history)
+  assert.deepEqual(resolved.ui, DEFAULT_SETTINGS.ui)
+  assert.deepEqual(resolved.browser, DEFAULT_SETTINGS.browser)
+
+  // And a file that is simply ABSENT — a first run — still gets the documented defaults.
+  const fresh = new SettingsStore(join(mkdtempSync(join(tmpdir(), 'dsh-settings-new-')), 'settings.json')).get()
+  assert.deepEqual(fresh, DEFAULT_SETTINGS)
 })
 
 test('the provider honours a settings switch flipped at runtime', async () => {

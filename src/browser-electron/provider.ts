@@ -306,7 +306,16 @@ export interface ElectronBrowserProviderConfig {
   readonly settings?: () => BrowserSettings
   /** Maximum snapshot elements before truncation. Default 60. */
   readonly snapshotMaxElements?: number
-  /** Maximum content characters before truncation when no maxChars is given. No longer read: the cap is per format (html and json 50 000, otherwise 20 000). */
+  /**
+   * Explicit content cap, overriding the per-format default when set.
+   *
+   * Honoured again, and it is worth saying why that is a fix rather than a feature: this was
+   * `config.contentMaxChars ?? 100_000`, one number for every format, and when the caps became
+   * per-format (html and json 50 000, otherwise 20 000) the field was left assigned and never
+   * read. A configuration knob that silently does nothing is worse than no knob — it is an
+   * operator's decision that quietly went nowhere. Leaving it unset means the per-format
+   * default; setting it means the operator meant it.
+   */
   readonly contentMaxChars?: number
   /**
    * Directory `browser_download` save paths must resolve inside (prevents a
@@ -588,7 +597,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   private readonly sessions = new Map<BrowserSessionId, Session>()
   private readonly httpOnly: boolean
   private readonly snapshotMaxElements: number
-  private readonly contentMaxChars: number
+  private readonly contentMaxChars: number | undefined
   private readonly downloadDir: string | undefined
   /**
    * Persistent browsing history, or `undefined` when the user turned it off.
@@ -604,7 +613,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   ) {
     this.httpOnly = config.httpOnly ?? true
     this.snapshotMaxElements = config.snapshotMaxElements ?? 60
-    this.contentMaxChars = config.contentMaxChars ?? 100_000
+    this.contentMaxChars = config.contentMaxChars
     // Confine downloads AND screenshot saves to a dedicated directory by
     // default: the OS Downloads folder is the human-visible, browser-natural
     // place for written files, and it is the one directory the DSH file
@@ -1439,7 +1448,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // Per-format caps. A full HTML document is enormous, but the same limit applied to
     // plain text is no limit at all (a whole page of text measured 25,882 characters).
     // This bounds the common case instead of letting one call spend 25k-33k tokens.
-    const maxChars = request.maxChars ?? (format === 'html' || format === 'json' ? 50_000 : 20_000)
+    //
+    // The plugin config overrides the lot when it is set — see `contentMaxChars`. The caller's
+    // own `maxChars` still outranks both: an explicit per-call bound is the most specific
+    // statement of intent there is.
+    const maxChars = request.maxChars
+      ?? this.contentMaxChars
+      ?? (format === 'html' || format === 'json' ? 50_000 : 20_000)
     const script = `(() => {
       const root = ${selector === '' ? 'document.body' : `document.querySelector(${JSON.stringify(selector)})`}
       if (!root) return { ok: false, reason: 'selector not found' }

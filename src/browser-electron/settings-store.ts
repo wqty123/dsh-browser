@@ -98,6 +98,38 @@ function bool(value: unknown, fallback: boolean): boolean {
 }
 
 /**
+ * Coerce one boolean field that GATES A CAPABILITY.
+ *
+ * The difference from {@link bool} is what a mistyped value means. Absent still takes the
+ * default — a document written before the switch existed is the documented behaviour. But
+ * present-and-not-a-boolean is a document this code cannot read, and for a switch that gates
+ * something the operator chose to limit, unreadable resolves to OFF. `bool`'s fallback made
+ * `"false"` (a string), `null` (a truncated write) and `1` all mean the same as `true`, so a
+ * single dropped byte reopened every capability that had been turned off.
+ * @param value - the raw value from the settings document.
+ * @param fallback - the default, used only when the field is absent.
+ * @returns the value when it is a boolean, `false` when it is anything else.
+ */
+function gate(value: unknown, fallback: boolean): boolean {
+  if (value === undefined) return fallback
+  return value === true
+}
+
+/**
+ * What an unreadable document resolves to.
+ *
+ * Only the capability gates are refused; everything else keeps its default. The distinction is
+ * deliberate: refusing history, presentation or browser choice would punish the user for a
+ * corrupt file without protecting anything, while refusing the gates is the whole point —
+ * "the operator's intent cannot be read" must not resolve to "the operator permits".
+ */
+const SETTINGS_WHEN_UNREADABLE: BrowserSettings = {
+  ...DEFAULT_SETTINGS,
+  credentials: { allowRead: false },
+  actions: { allowExecute: false, allowDownload: false, allowCredentialWrite: false },
+}
+
+/**
  * Coerce the browser channel, keeping the default when it is not one of the
  * known choices. A hand-edited typo must not silently select a different browser.
  * @param value - the raw value from the settings document.
@@ -150,11 +182,11 @@ export function resolveSettings(raw: unknown): BrowserSettings {
     },
     vision: { strategy: vision.strategy === 'nonVisual' ? 'nonVisual' : DEFAULT_SETTINGS.vision.strategy },
     browser: { channel: resolveChannel(browser.channel) },
-    credentials: { allowRead: bool(credentials.allowRead, DEFAULT_SETTINGS.credentials.allowRead) },
+    credentials: { allowRead: gate(credentials.allowRead, DEFAULT_SETTINGS.credentials.allowRead) },
     actions: {
-      allowExecute: bool(actions.allowExecute, DEFAULT_SETTINGS.actions.allowExecute),
-      allowDownload: bool(actions.allowDownload, DEFAULT_SETTINGS.actions.allowDownload),
-      allowCredentialWrite: bool(actions.allowCredentialWrite, DEFAULT_SETTINGS.actions.allowCredentialWrite),
+      allowExecute: gate(actions.allowExecute, DEFAULT_SETTINGS.actions.allowExecute),
+      allowDownload: gate(actions.allowDownload, DEFAULT_SETTINGS.actions.allowDownload),
+      allowCredentialWrite: gate(actions.allowCredentialWrite, DEFAULT_SETTINGS.actions.allowCredentialWrite),
     },
   }
 }
@@ -205,8 +237,12 @@ export class SettingsStore {
       try {
         text = readFileSync(this.file, 'utf8')
       } catch {
-        text = undefined
-        mtimeMs = -1
+        // It was there a moment ago (the stat above) and cannot be read now: permissions, a
+        // lock, a directory in the way. That is not "no document" — the file is not absent, so
+        // what it said is unknown, and unknown resolves to the refusing document.
+        this.cached = SETTINGS_WHEN_UNREADABLE
+        this.cachedMtimeMs = mtimeMs
+        return this.cached
       }
     }
     try {
@@ -218,8 +254,12 @@ export class SettingsStore {
       const body = text?.replace(/^\uFEFF/, '')
       this.cached = body === undefined ? DEFAULT_SETTINGS : resolveSettings(JSON.parse(body))
     } catch {
-      // Malformed JSON: behave as defaults rather than fail startup.
-      this.cached = DEFAULT_SETTINGS
+      // A document that EXISTS but cannot be parsed is not the same as no document at all: the
+      // first is a corrupted or half-written file whose contents were the operator's decisions,
+      // the second is a first run. Resolving both to the defaults meant a kill during the write,
+      // or one stray character, silently reopened the capabilities that had been switched off —
+      // so this side refuses them instead (see SETTINGS_WHEN_UNREADABLE).
+      this.cached = SETTINGS_WHEN_UNREADABLE
     }
     this.cachedMtimeMs = mtimeMs
     return this.cached
@@ -257,10 +297,12 @@ export class SettingsStore {
  * the target.
  *
  * `writeFileSync(target, …)` truncates and rewrites in place, so a crash, a full disk or an
- * antivirus lock in the middle leaves HALF a JSON document. The reader treats an unparseable
- * file as "all defaults" (by design, so a hand-edit cannot break startup), which silently
- * flips `credentials.allowRead`, `cookies.persist` and `browser.channel` back to their
- * defaults — and the next successful update writes those defaults to disk for good.
+ * antivirus lock in the middle leaves HALF a JSON document. That used to be silent: the reader
+ * resolved an unparseable file to the defaults, so a torn write flipped `credentials.allowRead`
+ * and the action switches back ON, and the next successful update wrote those defaults to disk
+ * for good. The read side no longer does that (see {@link SETTINGS_WHEN_UNREADABLE}) — but the
+ * write side still has to stop producing torn files at all, because half a document is not
+ * something this plugin should ever leave behind.
  *
  * The rename is the commit point: a reader sees either the old document or the new one,
  * never a partial one. It stays in the same directory so the rename is atomic on Windows
@@ -269,11 +311,11 @@ export class SettingsStore {
  *
  * The temporary is written with a unique suffix rather than a fixed `.tmp`, so two writers
  * (the settings panel and a second DSH process) cannot rename each other's half-written
- * file into place.
+ * file into place. Shared with the history store, which had the same hole.
  * @param file - the target path.
  * @param contents - the complete new document.
  */
-function writeFileAtomic(file: string, contents: string): void {
+export function writeFileAtomic(file: string, contents: string): void {
   const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
   try {
     writeFileSync(temporary, contents)
