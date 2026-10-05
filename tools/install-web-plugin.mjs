@@ -53,9 +53,63 @@ if (HARNESS === undefined || HARNESS === '') {
   console.error('set DSH_HARNESS to your deepseek-harness checkout (this script needs the repo\'s node_modules layout)')
   process.exit(1)
 }
-const PROFILE = join(HOME, 'profiles', 'web')
+/**
+ * Which profile to install into.
+ *
+ * This used to be the literal `profiles/web`, so the desktop profile was not merely
+ * unsupported — it was invisible, and installing there produced a plugin that could not
+ * load. The failure is silent and misdiagnoses easily: the package is linked and listed in
+ * `dsh.profile.bundles`, so everything LOOKS installed, but its five peerDependencies are
+ * absent from a profile that lives outside the desktop install's resolution chain. Node
+ * cannot find them, the loader's import fails, the entry ends up with no fiber, and the
+ * client-module scan skips it — taking the tools AND the settings panel with it (see
+ * `dsh-client-modules/lib/index.js`, the `entry.fiber === void 0` check).
+ * @returns the profile name, from `--profile` or `DSH_PROFILE`, defaulting to `web`.
+ */
+const PROFILE_NAME = (() => {
+  const flag = process.argv.indexOf('--profile')
+  if (flag !== -1 && process.argv[flag + 1] !== undefined) return process.argv[flag + 1]
+  return process.env.DSH_PROFILE ?? 'web'
+})()
+const PROFILE = join(HOME, 'profiles', PROFILE_NAME)
 const PACKAGE = join(PROFILE, 'package.json')
 const PLUGIN = 'dsh-builtin-browser'
+/**
+ * The five packages the plugin declares as peerDependencies.
+ *
+ * A peer is the host's to provide, and `dsh web` provides them because its profile links the
+ * harness checkout. The desktop ships its own copies inside `resources/app/dsh/node_modules`
+ * instead, and a profile at `$DSH_HOME/profiles/desktop` sits OUTSIDE that tree — so the
+ * lookup never reaches them. Linking the shipped copies is what the web profile does in
+ * effect, and it is what makes the desktop profile resolvable.
+ */
+const PEERS = [
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-system-prompt',
+  '@deepseek-ai/dsh-tools',
+  '@deepseek-ai/schemastery',
+]
+/**
+ * Where the desktop keeps the copies of those peers, when it is the selected profile.
+ * Discovered rather than assumed: the install can live under LOCALAPPDATA or be given
+ * outright, and a wrong guess here is worse than none.
+ * @returns the `node_modules` directory holding the peers, or undefined.
+ */
+function desktopPeerRoot() {
+  const candidates = []
+  if (process.env.DSH_DESKTOP_APP !== undefined && process.env.DSH_DESKTOP_APP !== '') {
+    candidates.push(join(process.env.DSH_DESKTOP_APP, 'node_modules'))
+  }
+  const local = process.env.LOCALAPPDATA
+  if (local !== undefined && local !== '') {
+    candidates.push(join(local, 'Programs', 'DeepSeek Harness', 'resources', 'app', 'dsh', 'node_modules'))
+  }
+  for (const candidate of candidates) {
+    if (PEERS.every(peer => existsSync(join(candidate, peer)))) return candidate
+  }
+  return undefined
+}
 const HERE = import.meta.dirname
 /**
  * Where the repair tool lives.
@@ -195,6 +249,46 @@ if (version !== undefined) {
   }
 } else {
   console.log('step 1: no version given, keeping the current pin')
+}
+
+// ---- 1b. peer dependencies, on a profile that cannot reach them ---------------
+//
+// The plugin declares five peers, which the HOST provides. `dsh web` provides them by
+// linking the harness checkout into its profile, so nothing was ever needed here. The
+// desktop ships its own copies inside `resources/app/dsh/node_modules` and its profile lives
+// outside that tree, so the lookup cannot reach them — and the plugin then fails to load in a
+// way that looks like success: it is linked, it is in `dsh.profile.bundles`, and its tools
+// and settings panel are simply absent. Linking the shipped copies is what closes it.
+if (PROFILE_NAME === 'desktop' && !verifyOnly) {
+  const peerRoot = desktopPeerRoot()
+  if (peerRoot === undefined) {
+    console.error('step 1b: could not find the desktop\'s own copies of the plugin\'s peers.')
+    console.error('  Set DSH_DESKTOP_APP to the `dsh` directory inside the desktop install')
+    console.error('  (the one containing node_modules), then re-run. Without them the plugin')
+    console.error('  will be linked but will not load, and its settings panel will be missing.')
+    process.exit(1)
+  }
+  const document = JSON.parse(readFileSync(PACKAGE, 'utf8'))
+  document.dependencies ??= {}
+  const linked = []
+  for (const peer of PEERS) {
+    const spec = `link:${join(peerRoot, peer).replace(/\\/g, '/')}`
+    if (document.dependencies[peer] !== spec) {
+      document.dependencies[peer] = spec
+      linked.push(peer)
+    }
+  }
+  if (linked.length === 0) {
+    console.log('step 1b: peer links already in place')
+  } else {
+    writeFileSync(PACKAGE, `${JSON.stringify(document, null, 2)}\n`)
+    console.log(`step 1b: linked ${linked.length} peer(s) from the desktop install`)
+    for (const peer of linked) console.log(`  ${peer}`)
+  }
+} else if (PROFILE_NAME === 'desktop') {
+  console.log('step 1b: verify-only, not touching the peer links')
+} else {
+  console.log(`step 1b: not needed for the ${PROFILE_NAME} profile`)
 }
 
 // ---- 2. install -------------------------------------------------------------
