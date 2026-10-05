@@ -91,7 +91,7 @@ async function runAgainst (broken) {
   const endpoint = join(dir, 'endpoint.json')
   writeFileSync(endpoint, JSON.stringify({ pid: process.pid, port, token: 'fake-token' }))
   const child = spawn(process.execPath, ['tools/accept-desktop.mjs'], {
-    env: { ...process.env, DSH_BRIDGE_ENDPOINT: endpoint },
+    env: { ...process.env, DSH_BRIDGE_ENDPOINT: endpoint, NODE_TEST_CONTEXT: undefined },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let out = ''

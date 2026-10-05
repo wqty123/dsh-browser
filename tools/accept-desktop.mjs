@@ -10,6 +10,15 @@
 import { readFileSync } from 'node:fs'
 import { connect } from 'node:net'
 
+
+// A tool, not a test. `node --test` executes every file it is given, and this one runs on
+// purpose — it talks to the live bridge, or edits the source. Node's test runner sets
+// NODE_TEST_CONTEXT for the child it spawns for each file, so that is the signal. A test that
+// needs to run this tool for real spawns it with the variable cleared.
+if (process.env.NODE_TEST_CONTEXT !== undefined) {
+  process.exit(0)
+}
+
 const ENDPOINT = process.env.DSH_BRIDGE_ENDPOINT ?? 'D:/dsh-home/dsh-builtin-browser-bridge.json'
 const ep = JSON.parse(readFileSync(ENDPOINT, 'utf8'))
 
