@@ -75,7 +75,7 @@ import { randomUUID } from 'node:crypto'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
 
 /** Which browser the user asked for. */
-export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'auto'
+export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'auto' | 'sidebar'
 
 /** A resolved browser installation. */
 export interface DetectedBrowser {

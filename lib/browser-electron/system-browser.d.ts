@@ -37,7 +37,7 @@ export type BrowserLauncher = (path: string, args: readonly string[]) => ReturnT
 import { spawn } from 'node:child_process';
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js';
 /** Which browser the user asked for. */
-export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'auto';
+export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'auto' | 'sidebar';
 /** A resolved browser installation. */
 export interface DetectedBrowser {
     /** Which product this is. */
