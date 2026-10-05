@@ -82,3 +82,20 @@ test('every gated op is called with an owner from the host', () => {
   })
   assert.deepEqual(missing, [], 'these are called without an owner and fail silently: ' + missing.join(', '))
 })
+
+test('ensureTabs counts, and does not create tabs', () => {
+  // It used to click the strip's "+" and then the guide card, in a loop of thirty. That could
+  // never work: a guest appears only once a page NAVIGATES, and this op never navigates — so the
+  // tab it made stayed a guide page, the count it waited for never arrived, and it spent eighteen
+  // seconds failing while leaving the empty guide tab behind. Those leftovers are what the user
+  // saw as "it keeps creating new browser entries".
+  //
+  // Tab creation belongs to ensureSidebar, which carries a url. This op only reports.
+  const lines = bridge.split('\n')
+  const start = lines.findIndex(l => /if \(op === 'ensureTabs'\)/.test(l))
+  assert.ok(start >= 0, 'ensureTabs exists')
+  const end = lines.findIndex((l, i) => i > start && /if \(op === 'showTab'\)/.test(l))
+  const body = lines.slice(start, end > 0 ? end : start + 200).join('\n')
+  assert.ok(!/\.click\(\)/.test(body), 'ensureTabs must not click anything')
+  assert.ok(!/clickedPlus|clickedGuide/.test(body), 'nor keep round-scoped click flags')
+})

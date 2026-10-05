@@ -593,15 +593,21 @@ async function handle(request) {
     // never returned, which is the whole point — one session no longer drives another's page.
     const unclaimed = (ids) => ids.filter(id => !claims.has(id) || claims.get(id) === owner)
 
-    const rounds = 30
-    let lastVerdict = ''
-    let sawControl = false
-    // Each control is clicked AT MOST ONCE. Clicking is what creates a tab, so a click inside
-    // the retry loop spawns one tab per round — the previous version clicked the guide card up
-    // to 30 times and opened a dozen browsers. Retrying means waiting and re-reading the DOM,
-    // never re-clicking: the strip is the human's surface, and a loop must not spray into it.
-    let clickedPlus = false
-    let clickedGuide = false
+    // This op COUNTS. It does not create tabs.
+    //
+    // Creating one used to look right and is not: a guest appears only once something NAVIGATES,
+    // and nothing here navigates — so every tab this op made stayed a guide page. It could never
+    // satisfy the count it was waiting for, so it spent eighteen seconds (30 x 600ms) and then
+    // failed, AND it left the guide tab behind in the strip. That second effect is what the user
+    // saw as "it keeps creating new browser entries": entries with no page in them.
+    //
+    // Tab creation belongs to `ensureSidebar`, which carries a url and therefore navigates the
+    // page it makes. The host asks for a new tab there (see guestFor), so this path is only a
+    // fallback: it re-counts for a moment in case something else is materialising a guest, then
+    // reports what it actually has.
+    const rounds = 6
+    let lastVerdict = 'NO_CONTROL'
+    const sawControl = false
     for (let attempt = 0; attempt < rounds; attempt++) {
       const guests = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
       // Hand back ONLY this owner's tabs plus tabs nobody has claimed, and claim what we hand
@@ -609,95 +615,30 @@ async function handle(request) {
       // driving another session's page: the ids were real, but the callers were not their owners.
       const available = unclaimed(guests.map(contents => contents.id))
       // Reclaim ours first so repeated calls from the same session are stable, then fill the
-      // remainder from unclaimed tabs, then — only if still short — grow the strip.
+      // remainder from unclaimed tabs.
       const ordered = [...mine, ...available.filter(id => !mine.has(id))]
       if (ordered.length >= want) {
         const chosen = ordered.slice(0, want)
         for (const id of chosen) claims.set(id, owner)
         return { ok: true, ids: chosen, verdict: lastVerdict, owner, claimed: chosen }
       }
-      // Two steps, because one is not a tab. Measured on this shell: the strip's "+" control
-      // (`aria-label 新标签页`) adds a START PAGE tab — a guide page listing the page types —
-      // and produces no webview at all. The guest only comes from the guide entry on that new
-      // tab, whose title is 浏览器 and whose command is browser.new. The loop previously did the
-      // first step and then waited for a guest that could never appear, reporting "the control
-      // was found and clicked, but no new guest appeared" — accurate, and pointing at the wrong
-      // thing.
-      if (!clickedPlus || !clickedGuide) {
-        const acted = await sendCdp(shell.id, 'Runtime.evaluate', {
-          expression: `(() => {
-            const labelOf = (node) => ((node.getAttribute('aria-label') || '') + ' ' + (node.textContent || '') + ' ' + (node.getAttribute('title') || '')).trim();
-            const clickables = (root, out = []) => {
-              for (const node of root.querySelectorAll('button,[role=button]')) {
-                out.push(node);
-                if (node.shadowRoot) clickables(node.shadowRoot, out);
-              }
-              return out;
-            };
-            const all = clickables(document);
-            const state = { plus: ${clickedPlus ? 'false' : 'true'}, guide: ${clickedGuide ? 'false' : 'true'} };
-            // A tab that is still a guide page: give it its browser page. This is the step that
-            // turns a start-page tab into a real webview.
-            //
-            // Identified by BOTH halves of the card, not by a prefix. The card carries the title
-            // 浏览器 and the description 浏览网页, while a tab in the strip carries only the
-            // title — so a prefix test would match the strip's own tab and merely switch to it,
-            // which looks like "clicked and nothing happened" and would burn a round per visit.
-            // The length bound keeps a container that happens to mention both out of it.
-            if (state.guide) {
-              const isCard = (n) => {
-                const own = (n.textContent || '').trim();
-                if (own.length > 24) return false;
-                return /浏览器/.test(own) && /浏览网页/.test(own);
-              };
-              const guide = all.find(isCard);
-              if (guide !== undefined) { guide.click(); return 'CLICKED_GUIDE' }
-            }
-            // Otherwise the strip needs another tab first; the guide appears on it, and the next
-            // round takes the step above.
-            // The strip's "+" control. Measured on this shell: the page carries TWO of them, one
-            // visible and one not — the same shape as the hidden address input in issue #25, and
-            // find() takes whichever comes first in the DOM. Clicking the hidden one does
-            // nothing, which reads as "the click had no effect" rather than as a missing control.
-            if (state.plus) {
-              const visible = (el) => {
-                const r = el.getBoundingClientRect();
-                if (r.width <= 0 || r.height <= 0) return false;
-                const s = getComputedStyle(el);
-                return s.display !== 'none' && s.visibility !== 'hidden';
-              };
-              const plus = all.filter(visible).find(n => /新标签页|新建标签|new tab/i.test(labelOf(n)));
-              if (plus !== undefined) { plus.click(); return 'CLICKED_PLUS' }
-            }
-            return 'WAITING';
-          })()`,
-          returnByValue: true,
-        })
-        lastVerdict = String(acted?.result?.value ?? '')
-        if (lastVerdict === 'CLICKED_GUIDE') clickedGuide = true
-        if (lastVerdict === 'CLICKED_PLUS') clickedPlus = true
-        if (lastVerdict !== 'WAITING') sawControl = true
-      }
       await new Promise(resolve => setTimeout(resolve, 600))
     }
-    if (!sawControl) {
-      // The strip may genuinely have the tabs this owner needs while the "new tab" control is
-      // unreachable — a clickable strip without a plus button. Report what we can serve before
-      // declaring failure, so a session that already owns a tab is not told it has none.
-      const guests = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
-      const available = unclaimed(guests.map(contents => contents.id))
-      const ordered = [...mine, ...available.filter(id => !mine.has(id))]
-      if (ordered.length > 0) {
-        for (const id of ordered) claims.set(id, owner)
-        return { ok: true, ids: ordered, verdict: 'NO_CONTROL_BUT_REUSED', owner, claimed: ordered }
-      }
-      throw new Error(
-        'the sidebar exposes no new-tab control after ' + String(rounds) + ' attempts '
-        + `(last verdict: ${lastVerdict || 'none'}) — the browser tab may not be open, or the `
-        + 'control is somewhere this cannot reach',
-      )
+    // Nothing here creates tabs — see the note above. If the caller wants more than this
+    // session holds, say so plainly instead of leaving guide tabs behind: the fix is `newTab`
+    // on ensureSidebar, which carries a url and therefore navigates the page it makes.
+    const remaining = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
+    const stillFree = unclaimed(remaining.map(contents => contents.id))
+    const serveable = [...mine, ...stillFree.filter(id => !mine.has(id))]
+    if (serveable.length > 0) {
+      for (const id of serveable) claims.set(id, owner)
+      return { ok: true, ids: serveable, verdict: 'REUSED', owner, claimed: serveable }
     }
-    throw new Error(`the sidebar stopped at fewer than ${want} tabs (the control was found and clicked, but no new guest appeared)`)
+    throw new Error(
+      'this session holds no sidebar browser page after ' + String(rounds) + ' checks — '
+      + 'open one with ensureSidebar (newTab for a second). ensureTabs does not create tabs: '
+      + 'a guest appears only once a page navigates, and this op never navigates.',
+    )
   }
   if (op === 'showTab') {
     // Bring one browser guest to the front — the "switch to this tab" half of opening a page.
