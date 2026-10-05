@@ -533,7 +533,13 @@ async function handle(request) {
     // halves of the reported symptom — "it says it failed" and "the page turned up in another
     // session's tab" — from one line. The set difference is the guest this call made.
     const before = new Set(webContents.getAllWebContents().filter(c => c.getType() === 'webview').map(c => c.id))
-    for (let attempt = 0; attempt < 24; attempt++) {
+    // A guest appears only once something NAVIGATES. Without a url this call navigates nothing, so
+    // waiting the full twelve seconds is pure loss — and this is the host's FIRST call of every
+    // session (`documentStamp` runs before `Page.navigate`), which means the first browser_open of
+    // a session spends twelve seconds failing at something it was never able to do, before the
+    // navigation call succeeds a moment later. Four rounds still covers a page that is mid-load.
+    const rounds = haveUrl ? 24 : 4
+    for (let attempt = 0; attempt < rounds; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 500))
       const fresh = webContents.getAllWebContents()
         .filter(contents => contents.getType() === 'webview')

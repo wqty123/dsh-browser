@@ -127,6 +127,26 @@ test('newTab with no url clicks the card exactly once, not twice', async () => {
   assert.equal(clicks, 1)
 })
 
+test('with no url the wait is short — a guest can only appear after navigating', async () => {
+  // The host's FIRST call of every session carries no url (`documentStamp` runs before
+  // `Page.navigate`), and that call fails by design: the guest it waits for appears only once
+  // something navigates, and it navigates nothing. Waiting the full twelve seconds there meant
+  // every session's first browser_open sat idle for twelve seconds, then the real navigation
+  // succeeded — which the user experiences as "I clicked and nothing happened for a while".
+  //
+  // Timed rather than string-matched: the property is about how long the caller waits.
+  claims.clear()
+  page.clicks = 0
+  page.addressBar = false
+  const started = Date.now()
+  try {
+    await handle({ op: 'ensureSidebar', owner: 's1' })
+  } catch { /* expected: no guest can appear without a navigation */ }
+  const elapsed = Date.now() - started
+  assert.ok(elapsed < 6_000,
+    'a no-url failure must not wait the full twelve seconds; it took ' + String(elapsed) + 'ms')
+})
+
 test('newTab activates the tab it just created, not one called 浏览器', () => {
   // Measured on this shell, the strip reads:
   //
