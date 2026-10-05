@@ -560,8 +560,18 @@ async function handle(request) {
             }
             // Otherwise the strip needs another tab first; the guide appears on it, and the next
             // round takes the step above.
+            // The strip's "+" control. Measured on this shell: the page carries TWO of them, one
+            // visible and one not — the same shape as the hidden address input in issue #25, and
+            // find() takes whichever comes first in the DOM. Clicking the hidden one does
+            // nothing, which reads as "the click had no effect" rather than as a missing control.
             if (state.plus) {
-              const plus = all.find(n => /新标签页|新建标签|new tab/i.test(labelOf(n)));
+              const visible = (el) => {
+                const r = el.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) return false;
+                const s = getComputedStyle(el);
+                return s.display !== 'none' && s.visibility !== 'hidden';
+              };
+              const plus = all.filter(visible).find(n => /新标签页|新建标签|new tab/i.test(labelOf(n)));
               if (plus !== undefined) { plus.click(); return 'CLICKED_PLUS' }
             }
             return 'WAITING';
