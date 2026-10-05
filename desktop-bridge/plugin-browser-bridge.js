@@ -476,10 +476,20 @@ function shellPrepareSidebar() {
       afterOpen[afterOpen.length - 1].focus();
       return opened ? 'OPENED_AND_FOCUSED' : 'FOCUSED';
     }
-    const CARD = /^(浏览器|浏览网页|Browser)$/;
+    // The launcher card's textContent is the WHOLE card, not its title: measured on this
+    // desktop it reads "浏览器浏览网页Ctrl+T" (title + subtitle + shortcut). Matching the
+    // text against /^(浏览器)$/ therefore matched nothing and the panel was never asked to
+    // open — the click silently did nothing and the caller then failed after its poll.
+    //
+    // Anchor at the START instead: the card begins with 浏览器, while the neighbouring
+    // workspace-files card reads "工作区文件浏览会话工作区的文件Ctrl+P" and merely CONTAINS
+    // 浏览 — an unanchored /浏览/ would click the wrong card. The aria-label branch is kept
+    // for shells that label the control explicitly.
+    const CARD = /^(浏览器|浏览网页|Browser)/;
     for (const node of clickables()) {
       const label = labelOf(node);
-      if (CARD.test(label) || /浏览网页|open browser|new browser tab/i.test(node.getAttribute('aria-label') || '')) {
+      const aria = node.getAttribute('aria-label') || '';
+      if (CARD.test(label) || /open browser|new browser tab|浏览网页/i.test(aria)) {
         node.click();
         return 'CLICKED_LAUNCHER';
       }
