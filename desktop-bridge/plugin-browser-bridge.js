@@ -165,10 +165,28 @@ async function handle(request) {
         await new Promise(resolve => setTimeout(resolve, 250))
         const probe = await sendCdp(shell.id, 'Runtime.evaluate', {
           expression: `(() => {
-            const inputs = Array.from(document.querySelectorAll('input'))
-              .filter(i => /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || '')));
-            if (inputs.length === 0) return 'NO_ADDRESS_BAR';
-            inputs[inputs.length - 1].focus();
+            const pickAddressInput = () => {
+              const visible = (el) => {
+                const r = el.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) return false;
+                const s = getComputedStyle(el);
+                return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+              };
+              const labelOf = (i) => (i.placeholder || '') + ' ' + (i.getAttribute('aria-label') || '');
+              const all = Array.from(document.querySelectorAll('input')).filter(visible);
+              // The shell's own address bar first, by its exact placeholder, so a page that
+              // merely mentions a URL cannot win. Both spellings of the parenthesis are listed
+              // because the placeholder is localized.
+              const exact = all.filter(i => /^\s*输入\s*HTTP\(S\)\s*地址\s*$/.test(i.placeholder || '')
+                || /^(Enter|Type)\s+(an\s+)?HTTP\(S\)\s+address/i.test(i.placeholder || ''));
+              if (exact.length > 0) return exact[0];
+              // Otherwise any VISIBLE field that looks like an address bar.
+              const loose = all.filter(i => /HTTP|地址|url/i.test(labelOf(i)));
+              return loose.length > 0 ? loose[0] : undefined;
+            };
+            const input = pickAddressInput();
+            if (input === undefined) return 'NO_ADDRESS_BAR';
+            input.focus();
             return 'FOCUSED';
           })()`,
           returnByValue: true,
@@ -224,9 +242,27 @@ async function handle(request) {
         // does, so it works with React's onSubmit and needs no localized label.
         const typed = await sendCdp(shell.id, 'Runtime.evaluate', {
           expression: `(() => {
-            const inputs = Array.from(document.querySelectorAll('input')).filter(i => /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || '')));
-            if (inputs.length === 0) return 'NO_ADDRESS_BAR';
-            const input = inputs[inputs.length - 1];
+            const pickAddressInput = () => {
+              const visible = (el) => {
+                const r = el.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) return false;
+                const s = getComputedStyle(el);
+                return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+              };
+              const labelOf = (i) => (i.placeholder || '') + ' ' + (i.getAttribute('aria-label') || '');
+              const all = Array.from(document.querySelectorAll('input')).filter(visible);
+              // The shell's own address bar first, by its exact placeholder, so a page that
+              // merely mentions a URL cannot win. Both spellings of the parenthesis are listed
+              // because the placeholder is localized.
+              const exact = all.filter(i => /^\s*输入\s*HTTP\(S\)\s*地址\s*$/.test(i.placeholder || '')
+                || /^(Enter|Type)\s+(an\s+)?HTTP\(S\)\s+address/i.test(i.placeholder || ''));
+              if (exact.length > 0) return exact[0];
+              // Otherwise any VISIBLE field that looks like an address bar.
+              const loose = all.filter(i => /HTTP|地址|url/i.test(labelOf(i)));
+              return loose.length > 0 ? loose[0] : undefined;
+            };
+            const input = pickAddressInput();
+            if (input === undefined) return 'NO_ADDRESS_BAR';
             const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
             setter.call(input, ${JSON.stringify(String(request.url ?? ''))});
             input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -327,12 +363,23 @@ async function handle(request) {
       }
       const clicked = await sendCdp(shell.id, 'Runtime.evaluate', {
         expression: `(() => {
-          const seen = [];
           const scan = (root) => {
             for (const node of root.querySelectorAll('button,[role=button]')) {
-              seen.push(node);
-              const label = (node.getAttribute('aria-label') || '') + (node.textContent || '') + (node.getAttribute('title') || '');
-              if (/新标签页|新建标签|new tab/i.test(label)) { node.click(); return true }
+              const label = ((node.getAttribute('aria-label') || '') + ' ' + (node.textContent || '') + ' ' + (node.getAttribute('title') || '')).trim();
+              // The launcher card IS the new-tab control. The host registers the browser page
+              // type with a guide entry whose title is 浏览器 and whose description is 浏览网页,
+              // carrying the command browser.new — clicking that card is exactly how a second
+              // browser tab is created. Matching only /新标签页|新建标签|new tab/ therefore found
+              // nothing on this shell, and every request for a second tab failed as if the tab
+              // strip had no control at all.
+              //
+              // Anchored so it cannot fire on a neighbour: the workspace-files card reads
+              // 工作区文件浏览会话… and merely CONTAINS 浏览.
+              if (/^浏览器/.test(label) || /^(浏览网页)/.test(label)
+                || /新标签页|新建标签|new tab/i.test(label)) {
+                node.click();
+                return true;
+              }
               // A control inside a shadow root or a frame is invisible to a flat query, which
               // is one of the ways this used to report "no control" for a strip that had one.
               if (node.shadowRoot) { if (scan(node.shadowRoot)) return true }
@@ -518,8 +565,21 @@ function shellPrepareSidebar() {
       return scan(document);
     };
 
-    const addressInput = () => Array.from(document.querySelectorAll('input'))
-      .filter(i => /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || '')));
+    // Visibility-aware and exact-first: the page holds hidden URL inputs too, and picking
+    // one of those is issue #25 — the submit lands nowhere and the guest is never created.
+    const addressInput = () => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        const s = getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const all = Array.from(document.querySelectorAll('input')).filter(visible);
+      const exact = all.filter(i => /^\s*输入\s*HTTP\(S\)\s*地址\s*$/.test(i.placeholder || '')
+        || /^(Enter|Type)\s+(an\s+)?HTTP\(S\)\s+address/i.test(i.placeholder || ''));
+      const pool = exact.length > 0 ? exact : all.filter(i => /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || '')));
+      return pool.length > 0 ? [pool[0]] : [];
+    };
 
     // 1. Is there already an address bar? Then the sidebar is up; just focus it.
     const existing = addressInput();
