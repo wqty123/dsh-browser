@@ -31,6 +31,12 @@ function makeBridge (broken = '') {
         const reply = (body) => socket.write(JSON.stringify({ ...body, bridgeRequestId: request.bridgeRequestId }) + '\n')
         const owner = request.owner ?? 'anonymous'
 
+        if (request.op === 'version') {
+          // A loadedAt in the future is always newer than the file on disk, which is what the
+          // acceptance script's first check compares against.
+          reply({ ok: true, loadedAt: new Date(Date.now() + 60_000).toISOString(), protocol: 2 })
+          continue
+        }
         if (request.op === 'list') {
           const mine = guests.filter(g => g.owner === owner)
           // The shell window travels with every list answer, which is what lets a FAILING run read
@@ -105,7 +111,7 @@ async function runAgainst (broken) {
 test('the acceptance script passes against a correct bridge', async () => {
   const { code, out } = await runAgainst('')
   assert.equal(code, 0, 'it should pass:\n' + out)
-  assert.match(out, /ALL 10 CHECKS PASS/)
+  assert.match(out, /ALL 11 CHECKS PASS/)
 })
 
 test('the acceptance script FAILS when newTab reuses an existing page', async () => {

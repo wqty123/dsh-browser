@@ -63,6 +63,17 @@ const queues = new Map()
  */
 const claims = new Map()
 
+/**
+ * When this module was loaded, and the protocol generation it speaks.
+ *
+ * The bridge is imported once by `main.js` at boot, so editing the file changes nothing until the
+ * host process restarts. That makes "did my restart actually load the new bridge?" a real question
+ * — and a run that cannot answer it will blame the new code for the old code's behaviour. The
+ * acceptance script compares this against the file's mtime and says so before testing anything.
+ */
+const LOADED_AT = new Date().toISOString()
+const PROTOCOL = 2
+
 /** Forget claims whose guest no longer exists, so a closed tab's id is not held forever. */
 function pruneClaims() {
   const live = new Set(webContents.getAllWebContents().filter(c => c.getType() === 'webview').map(c => c.id))
@@ -118,6 +129,11 @@ async function handle(request) {
   // the allocation path only and the reuse path — which every later call takes — stayed blind,
   // so one session was handed another's page and counted another's tabs as its own.
   const owner = typeof request?.owner === 'string' && request.owner !== '' ? request.owner : 'anonymous'
+  // Which build is answering. The acceptance script asks this first, because everything else it
+  // measures is meaningless if the host is still running the previous bridge.
+  if (op === 'version') {
+    return { ok: true, loadedAt: LOADED_AT, protocol: PROTOCOL }
+  }
   if (op === 'list') {
     const all = webContents.getAllWebContents().map(describe)
     // A guest claimed by another owner is not this caller's to see or to drive. Its id, url and

@@ -7,7 +7,7 @@
 // Usage: node tools/accept-desktop.mjs
 // It sends real requests to the running bridge, so it DOES open pages. Every step reports what it
 // saw; nothing is inferred.
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { connect } from 'node:net'
 
 
@@ -102,6 +102,29 @@ async function check (name, ok, detail = '') {
 }
 
 console.log('=== post-restart acceptance ===')
+console.log('')
+
+// Which build is answering?
+//
+// Everything below measures the bridge's behaviour, and all of it is meaningless if the host is
+// still running the previous one — the bridge is imported once at boot, so a file edit does
+// nothing until the process restarts. A run that skips this check would blame the new code for the
+// old code's failures, which is the single most expensive way to misread an acceptance run.
+try {
+  const build = await call('version', {}, 10_000)
+  const loadedAt = String(build?.loadedAt ?? '')
+  const fileTime = statSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url)).mtime
+  const loadedMs = Date.parse(loadedAt)
+  const fresh = Number.isFinite(loadedMs) && loadedMs > fileTime.getTime()
+  console.log(`  bridge loaded at ${loadedAt}  (file written ${fileTime.toISOString()})`)
+  console.log(`  protocol ${String(build?.protocol ?? '?')}`)
+  check('the running bridge is the one on disk', fresh,
+    fresh ? '' : 'the host is running the PREVIOUS bridge — restart before trusting anything below')
+} catch (error) {
+  // An older bridge does not implement `version`; it answers `ok:false` or throws.
+  check('the running bridge is the one on disk', false,
+    'the bridge does not answer `version`, so it predates this build: ' + String(error.message).slice(0, 50))
+}
 console.log('')
 
 // ---------------------------------------------------------------- the sidebar itself
