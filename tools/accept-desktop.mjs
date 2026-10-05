@@ -50,10 +50,46 @@ function call (op, extra = {}, ms = 120_000) {
 await new Promise(resolve => socket.on('connect', resolve))
 
 const results = []
-/** Record one check and print it as it happens. */
-function check (name, ok, detail = '') {
+/**
+ * Record one check, and on failure print enough state to diagnose without another restart.
+ *
+ * The restart is the scarce resource here: a run that says only "FAIL" costs another one to
+ * interpret. So a failure also reads the strip back — how many tabs this session holds, and what
+ * the strip's own labels are, which is where 开始 entries with no page behind them show up.
+ */
+async function check (name, ok, detail = '') {
   results.push({ name, ok })
   console.log(`  ${ok ? 'ok  ' : 'FAIL'}  ${name}${detail === '' ? '' : '   ' + detail}`)
+  if (ok) return
+  try {
+    const state = await call('list', { owner: 'acceptance' }, 20_000)
+    const mine = state.sidebar ?? []
+    console.log(`        [diag] this session holds ${mine.length} page(s)`)
+    for (const guest of mine) {
+      console.log(`        [diag]   id=${guest.id} title=${JSON.stringify(String(guest.title ?? '').slice(0, 44))}`)
+    }
+    const shell = (state.guests ?? []).find(g => g.type === 'window')
+    if (shell !== undefined) {
+      const strip = await call('cdp', {
+        id: shell.id,
+        method: 'Runtime.evaluate',
+        params: {
+          expression: `(() => {
+            const strip = document.querySelector('[class*=_tabStrip]');
+            if (strip === null) return JSON.stringify({ strip: 'absent' });
+            const rows = Array.from(strip.querySelectorAll('button,[role=tab],[class*=tab]'))
+              .map(r => ((r.getAttribute('aria-label') || '') + ' ' + (r.textContent || '')).trim().slice(0, 18))
+              .filter(t => t !== '');
+            return JSON.stringify({ strip: 'present', labels: rows.slice(0, 14) });
+          })()`,
+          returnByValue: true,
+        },
+      }, 20_000)
+      console.log('        [diag] strip ' + String(strip?.result?.result?.value ?? 'unreadable').slice(0, 300))
+    }
+  } catch (error) {
+    console.log('        [diag] could not read state: ' + String(error.message).slice(0, 70))
+  }
 }
 
 console.log('=== post-restart acceptance ===')

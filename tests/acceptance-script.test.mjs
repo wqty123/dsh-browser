@@ -33,7 +33,10 @@ function makeBridge (broken = '') {
 
         if (request.op === 'list') {
           const mine = guests.filter(g => g.owner === owner)
-          reply({ ok: true, guests: mine, sidebar: mine.map(g => ({ id: g.id, url: g.url, title: g.title, type: 'webview' })) })
+          // The shell window travels with every list answer, which is what lets a FAILING run read
+          // the tab strip back and say what it saw instead of just "FAIL".
+          const shell = { id: 1, url: 'dsh-app://app/', title: 'shell', type: 'window' }
+          reply({ ok: true, guests: [shell, ...mine], sidebar: mine.map(g => ({ id: g.id, url: g.url, title: g.title, type: 'webview' })) })
           continue
         }
         if (request.op === 'ensureSidebar') {
@@ -108,6 +111,10 @@ test('the acceptance script passes against a correct bridge', async () => {
 test('the acceptance script FAILS when newTab reuses an existing page', async () => {
   const { code, out } = await runAgainst('reuse')
   assert.notEqual(code, 0, 'a bridge that reuses must not be reported as working:\n' + out)
+  // And it must say WHY. A run that prints only FAIL costs another restart to interpret, and the
+  // restart is the scarce resource.
+  assert.match(out, /\[diag\]/, 'a failure must carry state, not just a verdict:\n' + out)
+  assert.match(out, /\[diag\] strip/, 'including what the tab strip actually holds')
 })
 
 test('the acceptance script FAILS when extra pages appear', async () => {
