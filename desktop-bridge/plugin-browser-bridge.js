@@ -172,19 +172,35 @@ async function handle(request) {
       await key('keyDown')
       await key('keyUp')
       // The new tab starts on the guide page, so it has no address bar until it is the active
-      // tab. Activate the newest 浏览器 tab, then fall through to the address route, which will
-      // navigate it and thereby materialize its guest.
+      // tab. Activate THE TAB JUST CREATED, then fall through to the address route.
+      //
+      // Not "the newest tab whose label starts with 浏览器" — that was the previous attempt and it
+      // selected the WRONG tab. Measured on this shell, the strip reads:
+      //
+      //     ["浏览器","浏览器","浏览器","关闭","开始","开始","开始","关闭","分栏","全屏",...]
+      //
+      // The tab Ctrl+T creates is labelled 开始 (it is the guide page); the ones called 浏览器 are
+      // the pages that already exist. So the old selector activated an EXISTING browser tab, whose
+      // address bar is present, and the check below then concluded a page was already there and
+      // skipped the card click — leaving the newly created guide tab a guide tab forever. There
+      // was never a new guest, and the caller reported "could not open a sidebar tab".
+      //
+      // Ctrl+T puts its tab last, so the last tab row is the one to activate.
       for (let attempt = 0; attempt < 12; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 250))
         const activated = await sendCdp(shellForNewTab.id, 'Runtime.evaluate', {
           expression: `(() => {
             const strip = document.querySelector('[class*=_tabStrip]');
             if (strip === null) return 'NO_STRIP';
-            const rows = Array.from(strip.querySelectorAll('button,[role=tab],[class*=tab]'));
-            const browserTabs = rows.filter(r => ((r.getAttribute('aria-label') || '') + ' ' + (r.textContent || '')).trim().indexOf('浏览器') === 0);
-            if (browserTabs.length === 0) return 'NO_BROWSER_TAB';
-            browserTabs[browserTabs.length - 1].click();
-            return 'ACTIVATED:' + String(browserTabs.length);
+            const rows = Array.from(strip.querySelectorAll('button,[role=tab],[class*=tab]'))
+              .filter(r => {
+                const label = ((r.getAttribute('aria-label') || '') + ' ' + (r.textContent || '')).trim();
+                // Skip the strip's own controls: they are not tabs.
+                return label !== '' && !/^(关闭|分栏|全屏|收起右侧边栏|收起|close)$/.test(label);
+              });
+            if (rows.length === 0) return 'NO_TABS';
+            rows[rows.length - 1].click();
+            return 'ACTIVATED_LAST:' + String(rows.length);
           })()`,
           returnByValue: true,
         })
@@ -260,11 +276,17 @@ async function handle(request) {
     // second time: `newTab` already does that when the tab is still a guide page, and two clicks
     // make two pages. One card click per call, which is the same rule the retry loop needed.
     let cardClicked = false
-    if (request.newTab === true && await addressBarVisible() === 'YES') {
-      // Already a browser page (the guide was consumed elsewhere, or the host went straight
-      // there). Nothing to open, and clicking anything here would create a second one.
-      prepared = { result: { value: 'FOCUSED' } }
-    } else if (request.newTab === true) {
+    if (request.newTab === true) {
+      // `newTab` ALWAYS consumes a guide page, so the card is always clicked.
+      //
+      // The previous form skipped the click when an address bar was already visible, reasoning
+      // "a page exists, clicking would make a second one". That reasoning is wrong in both
+      // directions: the click does not create a tab, it turns the NEW tab from the guide page
+      // into a browser page — and an address bar being visible means the ACTIVATION below failed
+      // and some older tab is still frontmost, so the new tab is still a guide page and still
+      // needs the click. Skipping it left the new tab a guide tab forever, which is exactly the
+      // "could not open a sidebar tab" the user saw on the second open.
+      //
       // On the guide page: click its browser entry ONCE, then look for the address bar.
       const opened = await sendCdp(shell.id, 'Runtime.evaluate', {
         expression: `(() => {

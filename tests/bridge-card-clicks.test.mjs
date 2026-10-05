@@ -103,9 +103,17 @@ test('the first open (no url) clicks the launcher card exactly once', async () =
   assert.equal(clicks, 1, 'the host\'s first call has no url and must still create a page')
 })
 
-test('newTab with an address bar already visible clicks NOTHING', async () => {
+test('newTab ALWAYS consumes a guide page, even when an address bar is already visible', async () => {
+  // This assertion was the opposite a round ago, and the opposite was wrong.
+  //
+  // The reasoning was "a page exists, so clicking would create a second one". But the click does
+  // not create a tab — it turns the tab Ctrl+T just made from its guide page into a browser page.
+  // And an address bar being visible means the activation step failed and an older tab is still
+  // frontmost, so the new tab is STILL a guide page and still needs the click. Skipping it left
+  // the new tab a guide tab forever: the second `browser_open` of a session reported "could not
+  // open a sidebar tab" and the user saw a strip full of 开始 entries.
   const clicks = await run({ newTab: true }, { addressBar: true })
-  assert.equal(clicks, 0, 'a page already exists; clicking would create a second one')
+  assert.equal(clicks, 1, 'the new tab is a guide page regardless of what else is on screen')
 })
 
 test('newTab on a guide page clicks the card exactly once', async () => {
@@ -117,4 +125,22 @@ test('newTab with no url clicks the card exactly once, not twice', async () => {
   // Both routes are eligible here. They must not both fire.
   const clicks = await run({ newTab: true }, { addressBar: false })
   assert.equal(clicks, 1)
+})
+
+test('newTab activates the tab it just created, not one called 浏览器', () => {
+  // Measured on this shell, the strip reads:
+  //
+  //   ["浏览器","浏览器","浏览器","关闭","开始","开始","开始","关闭","分栏","全屏",...]
+  //
+  // Ctrl+T creates one labelled 开始 — it is the guide page. The tabs called 浏览器 are the pages
+  // that already exist, so selecting "the newest one whose label starts with 浏览器" activated an
+  // OLD tab, whose address bar is present; the branch then concluded a page existed and skipped
+  // the card click, leaving the new guide tab a guide tab forever.
+  const source = readFileSync('desktop-bridge/plugin-browser-bridge.js', 'utf8')
+  assert.ok(!/browserTabs/.test(source),
+    'the label-based tab selection must be gone; it picks the wrong tab')
+  assert.match(source, /rows\[rows\.length - 1\]\.click\(\)/,
+    'the last tab row is the one Ctrl+T just created')
+  assert.match(source, /ACTIVATED_LAST/,
+    'and the verdict must report which path ran')
 })
