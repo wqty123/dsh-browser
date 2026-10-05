@@ -226,16 +226,78 @@ async function handle(request) {
     const existing = []
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
-    // 1. Open the sidebar and put the caret in its address field IF that field is
-    //    reachable. It is not always: the sidebar may show another panel, or the
-    //    browser tab may be present but not active, in which case no address input
-    //    exists in the document at all. That must not be fatal — the restore route
-    //    below needs no address bar, and treating "no input" as a hard error is
-    //    exactly what made the first call after a restart fail.
-    const prepared = await sendCdp(shell.id, 'Runtime.evaluate', {
-      expression: shellPrepareSidebar(),
+    // With `newTab` the tab was just created and is sitting on its GUIDE page, whose address bar
+    // does not exist yet — the guide is a list of page types, and the browser page is what one of
+    // them creates.
+    //
+    // `shellPrepareSidebar` must therefore NOT run in that state: its whole job is "no address bar
+    // -> click the launcher card", and on a guide page that card IS the browser page, so every
+    // retry created another one. That is the reported "it keeps creating new browser entries".
+    // The guide page has to be turned into a browser page exactly once, and only then is there an
+    // address bar to type into.
+    const addressBarVisible = async () => String(await sendCdp(shell.id, 'Runtime.evaluate', {
+      expression: `(() => {
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          const s = getComputedStyle(el);
+          return s.display !== 'none' && s.visibility !== 'hidden';
+        };
+        return Array.from(document.querySelectorAll('input')).some(i => visible(i)
+          && /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || ''))) ? 'YES' : 'NO';
+      })()`,
       returnByValue: true,
-    })
+    }))?.result?.value
+    let prepared
+    if (request.newTab === true && await addressBarVisible() === 'YES') {
+      // Already a browser page (the guide was consumed elsewhere, or the host went straight
+      // there). Nothing to open, and clicking anything here would create a second one.
+      prepared = { result: { value: 'FOCUSED' } }
+    } else if (request.newTab === true) {
+      // On the guide page: click its browser entry ONCE, then look for the address bar.
+      const opened = await sendCdp(shell.id, 'Runtime.evaluate', {
+        expression: `(() => {
+          const clickables = (root, out = []) => {
+            for (const node of root.querySelectorAll('button,[role=button]')) {
+              out.push(node);
+              if (node.shadowRoot) clickables(node.shadowRoot, out);
+            }
+            return out;
+          };
+          const labelOf = (node) => ((node.textContent || '') + ' ' + (node.getAttribute('aria-label') || '')).trim();
+          // The card carries both halves; the strip's own tab carries only the title, and a
+          // prefix match would hit it instead and merely switch tabs.
+          const card = clickables(document).find(n => {
+            const own = (n.textContent || '').trim();
+            if (own.length > 24) return false;
+            return /浏览器/.test(own) && /浏览网页/.test(own);
+          });
+          if (card === undefined) return 'NO_CARD';
+          card.click();
+          return 'CLICKED_CARD';
+        })()`,
+        returnByValue: true,
+      })
+      const cardVerdict = String(opened?.result?.value ?? '')
+      // One click, then wait for the address bar it produces.
+      let focused = 'NO_ADDRESS_BAR'
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 250))
+        if (await addressBarVisible() === 'YES') { focused = 'FOCUSED'; break }
+      }
+      prepared = { result: { value: `${cardVerdict}/${focused}` } }
+    } else {
+      // 1. Open the sidebar and put the caret in its address field IF that field is
+      //    reachable. It is not always: the sidebar may show another panel, or the
+      //    browser tab may be present but not active, in which case no address input
+      //    exists in the document at all. That must not be fatal — the restore route
+      //    below needs no address bar, and treating "no input" as a hard error is
+      //    exactly what made the first call after a restart fail.
+      prepared = await sendCdp(shell.id, 'Runtime.evaluate', {
+        expression: shellPrepareSidebar(),
+        returnByValue: true,
+      })
+    }
     let verdict = String(prepared?.result?.value ?? '')
     // The last two verdicts mean the panel was only ASKED to open. It materialises
     // asynchronously — the shell has to construct the sidebar view — so acting immediately

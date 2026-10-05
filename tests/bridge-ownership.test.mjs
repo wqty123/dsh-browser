@@ -133,8 +133,7 @@ test('closeSidebarBrowser never considers another session’s guest', async () =
   assert.equal(claims.get(2), 'sessionA', 'A still holds its guest')
 })
 
-test('ensureSidebar waits for a NEW guest, never adopts one that was already open', async () => {
-  // The reported symptom, both halves from one line: with tabs already open, the "has a guest
+test('ensureSidebar waits for a NEW guest, never adopts one that was already open', async () => {  // The reported symptom, both halves from one line: with tabs already open, the "has a guest
   // appeared?" test was true on the first poll, so ensureSidebar returned `existing[0]` —
   // someone else's tab — navigated it to the requested url, and claimed success. The caller saw
   // a failure (its own tab never appeared) and the page showed up in another session.
@@ -159,4 +158,35 @@ test('ensureSidebar waits for a NEW guest, never adopts one that was already ope
   assert.equal(world.contents.length, before, 'and it must not have created anything in the stub')
   assert.equal(claims.get(2), 'sessionA', 'A’s guest is untouched')
   assert.equal(claims.get(3), 'sessionB', 'B’s guest is untouched')
+})
+
+test('newTab converts the guide page exactly once, never via shellPrepareSidebar', async () => {
+  // Static, and deliberately so: the symptom was a loop, and a loop is what the stub cannot
+  // reproduce. What CAN be asserted is the structural rule — the branch taken for `newTab` must
+  // not reach the function whose job is to click the launcher card.
+  const src = readFileSync(BRIDGE, 'utf8')
+  const lines = src.split('\n')
+
+  // Where the op handler decides what to prepare.
+  const opLine = lines.findIndex(l => l.includes("if (op === 'ensureSidebar')"))
+  assert.ok(opLine >= 0, 'ensureSidebar handler exists')
+
+  // Every call to shellPrepareSidebar must sit in the branch that does NOT ask for a new tab.
+  const calls = []
+  lines.forEach((l, i) => { if (/expression: shellPrepareSidebar\(\)/.test(l)) calls.push(i) })
+  assert.equal(calls.length, 1, 'exactly one call site')
+
+  const callLine = calls[0]
+  // Walk back to the nearest branch keyword and require the newTab guard to be present above it.
+  let guard = -1
+  for (let i = callLine; i >= 0; i--) {
+    if (lines[i].includes('request.newTab === true')) { guard = i; break }
+    if (lines[i].includes("if (op === 'ensureSidebar')")) break
+  }
+  assert.ok(guard > 0 && guard < callLine,
+    'shellPrepareSidebar is reached only from a branch that has already decided about newTab')
+
+  // And the guide is consumed by a single explicit click of the card, identified by BOTH halves.
+  assert.ok(src.includes('CLICKED_CARD'), 'the card is clicked explicitly on the guide page')
+  assert.ok(/if \(own\.length > 24\) return false/.test(src), 'the card test is bounded, so the strip tab cannot match')
 })
