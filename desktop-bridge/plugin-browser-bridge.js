@@ -807,18 +807,28 @@ function shellPrepareSidebar() {
     // workspace-files card reads "工作区文件浏览会话工作区的文件Ctrl+P" and merely CONTAINS
     // 浏览 — an unanchored /浏览/ would click the wrong card. The aria-label branch is kept
     // for shells that label the control explicitly.
-    const CARD = /^(浏览器|浏览网页|Browser)/;
+    // The launcher card, identified by BOTH halves of its text.
+    //
+    // This used to be a prefix test, anchored at the start and accepting the bare word, which
+    // also matches the browser TAB in the strip — its whole label is 浏览器. Clicking that only
+    // switches to an existing tab: no page is created, so no address bar ever appears and the
+    // caller polls to exhaustion. The card is the only element carrying the title AND the
+    // description 浏览网页, and it is short, so both are required. The same rule is used on the
+    // newTab path; two paths doing one job must not have two rules.
     for (const node of clickables()) {
-      const label = labelOf(node);
+      const own = (node.textContent || '').trim();
       const aria = node.getAttribute('aria-label') || '';
-      if (CARD.test(label) || /open browser|new browser tab|浏览网页/i.test(aria)) {
+      const isCard = own.length <= 24 && /浏览器/.test(own) && /浏览网页/.test(own);
+      if (isCard || /open browser|new browser tab/i.test(aria)) {
         node.click();
         return 'CLICKED_LAUNCHER';
       }
     }
 
-    // 4. Last resort: the keyboard shortcut the card advertises. Dispatched on the document so
-    //    a handler bound at the window level still sees it.
+    // 4. Last resort: the shortcut the host registers for browser.new. Dispatched on the
+    //    document, which reaches a handler bound at the window level; it does NOT reach a
+    //    shortcut table, so this is a fallback and not the primary route (the bridge sends a
+    //    real Ctrl+T through the Input domain on the newTab path, which does).
     try {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', code: 'KeyT', ctrlKey: true, bubbles: true }));
       return 'SENT_CTRL_T';
