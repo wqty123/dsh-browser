@@ -62,3 +62,33 @@ test('an opaque origin is refused outright', () => {
 test('an unparseable Origin is refused rather than throwing', () => {
   assert.equal(sameOrigin(request({ ...SAME_ORIGIN_WRITE, origin: 'not a url' }), true), false)
 })
+
+test('the desktop shell can write: its origin is dsh-app:// and it reads as cross-site', () => {
+  // The exact shape the desktop settings panel sends, measured against the running app. The
+  // shell serves its UI from Electron's own scheme while the route lives on 127.0.0.1, so the
+  // browser reports this CROSS-SCHEME request as `cross-site` — and the scheme test therefore
+  // has to run before the fetch-metadata check, not after it.
+  //
+  // Getting that order wrong is invisible: the panel accepts the change, shows it, and the
+  // document on disk never moves. Every desktop setting failed this way, and it surfaced only
+  // when a new option made "it did not save" obvious.
+  const desktop = { host: '127.0.0.1:65360', origin: 'dsh-app://app', 'sec-fetch-site': 'cross-site' }
+  assert.equal(sameOrigin(request(desktop), true), true, 'the panel must be able to save')
+  assert.equal(sameOrigin(request(desktop), false), true)
+  // The same for the other shell scheme, and without relying on the metadata header.
+  assert.equal(sameOrigin(request({ ...desktop, origin: 'dsh-desktop://app' }), true), true)
+  assert.equal(sameOrigin(request({ host: desktop.host, origin: 'dsh-app://app' }), true), true)
+  // An opaque or absent origin in that scheme is still not the panel.
+  assert.equal(sameOrigin(request({ ...desktop, origin: 'null' }), true), false)
+})
+
+test('accepting the shell scheme does not open the route to anything else', () => {
+  // The point of the scheme exception is that only the shell can mint such a document. A page
+  // cannot navigate to it, and no other local process can set the Origin header to it — so the
+  // refusals that matter must still hold.
+  const base = { host: '127.0.0.1:65360', 'sec-fetch-site': 'cross-site' }
+  assert.equal(sameOrigin(request({ ...base, origin: 'https://evil.example' }), true), false)
+  assert.equal(sameOrigin(request({ ...base, origin: 'http://127.0.0.1:9999' }), true), false)
+  assert.equal(sameOrigin(request({ ...base, origin: 'file:///etc/passwd' }), true), false)
+  assert.equal(sameOrigin(request({ host: base.host }), true), false, 'curl still cannot write')
+})
