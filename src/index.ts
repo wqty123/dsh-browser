@@ -1,4 +1,4 @@
-/**
+﻿/**
  * dsh-builtin-browser plugin entry: aggregates the shared-browser capability
  * pieces. The cordis.patch.yml rows reference subpath exports:
  *   - `dsh-builtin-browser/browser`          -> the ctx.browser seam (Service)
@@ -14,6 +14,8 @@
  */
 
 /** Plugin identity for the root row (the composition surface is the subpath rows). */
+import { probeLoad } from './load-probe.js'
+
 export const name = 'dsh-builtin-browser'
 
 /**
@@ -24,8 +26,9 @@ export const name = 'dsh-builtin-browser'
  * never reaches the browser (the plugin works, its client half is invisible).
  */
 export function apply(): void {
-  // Intentionally empty: see the module comment above.
+  probeLoad('dsh-builtin-browser')
 }
+
 
 export { BrowserError } from './browser/types.js'
 export type {

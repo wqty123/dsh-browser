@@ -1,3 +1,4 @@
+import { probeLoad } from './../load-probe.js'
 /**
  * Electron browser provider plugin entry: registers the Electron-backed
  * `BrowserProvider` with `ctx.browser`. The provider needs a view host (real
@@ -69,6 +70,7 @@ export const Config: z<Config> = z.object({
 
 /** Register the Electron browser provider with `ctx.browser`. */
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
+  probeLoad('dsh-builtin-browser/browser-electron')
   // One settings document per plugin instance: the settings panel writes it, the
   // provider reads it live, and both ends agree on the same file.
   const settings = new SettingsStore()
