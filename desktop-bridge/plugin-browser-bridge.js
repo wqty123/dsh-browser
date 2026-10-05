@@ -347,6 +347,12 @@ async function handle(request) {
     const rounds = 30
     let lastVerdict = ''
     let sawControl = false
+    // Each control is clicked AT MOST ONCE. Clicking is what creates a tab, so a click inside
+    // the retry loop spawns one tab per round — the previous version clicked the guide card up
+    // to 30 times and opened a dozen browsers. Retrying means waiting and re-reading the DOM,
+    // never re-clicking: the strip is the human's surface, and a loop must not spray into it.
+    let clickedPlus = false
+    let clickedGuide = false
     for (let attempt = 0; attempt < rounds; attempt++) {
       const guests = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
       // Hand back ONLY this owner's tabs plus tabs nobody has claimed, and claim what we hand
@@ -361,41 +367,47 @@ async function handle(request) {
         for (const id of chosen) claims.set(id, owner)
         return { ok: true, ids: chosen, verdict: lastVerdict, owner, claimed: chosen }
       }
-      const clicked = await sendCdp(shell.id, 'Runtime.evaluate', {
-        expression: `(() => {
-          const scan = (root) => {
-            for (const node of root.querySelectorAll('button,[role=button]')) {
-              const label = ((node.getAttribute('aria-label') || '') + ' ' + (node.textContent || '') + ' ' + (node.getAttribute('title') || '')).trim();
-              // The launcher card IS the new-tab control. The host registers the browser page
-              // type with a guide entry whose title is 浏览器 and whose description is 浏览网页,
-              // carrying the command browser.new — clicking that card is exactly how a second
-              // browser tab is created. Matching only /新标签页|新建标签|new tab/ therefore found
-              // nothing on this shell, and every request for a second tab failed as if the tab
-              // strip had no control at all.
-              //
-              // Anchored so it cannot fire on a neighbour: the workspace-files card reads
-              // 工作区文件浏览会话… and merely CONTAINS 浏览.
-              if (/^浏览器/.test(label) || /^(浏览网页)/.test(label)
-                || /新标签页|新建标签|new tab/i.test(label)) {
-                node.click();
-                return true;
+      // Two steps, because one is not a tab. Measured on this shell: the strip's "+" control
+      // (`aria-label 新标签页`) adds a START PAGE tab — a guide page listing the page types —
+      // and produces no webview at all. The guest only comes from the guide entry on that new
+      // tab, whose title is 浏览器 and whose command is browser.new. The loop previously did the
+      // first step and then waited for a guest that could never appear, reporting "the control
+      // was found and clicked, but no new guest appeared" — accurate, and pointing at the wrong
+      // thing.
+      if (!clickedPlus || !clickedGuide) {
+        const acted = await sendCdp(shell.id, 'Runtime.evaluate', {
+          expression: `(() => {
+            const labelOf = (node) => ((node.getAttribute('aria-label') || '') + ' ' + (node.textContent || '') + ' ' + (node.getAttribute('title') || '')).trim();
+            const clickables = (root, out = []) => {
+              for (const node of root.querySelectorAll('button,[role=button]')) {
+                out.push(node);
+                if (node.shadowRoot) clickables(node.shadowRoot, out);
               }
-              // A control inside a shadow root or a frame is invisible to a flat query, which
-              // is one of the ways this used to report "no control" for a strip that had one.
-              if (node.shadowRoot) { if (scan(node.shadowRoot)) return true }
+              return out;
+            };
+            const all = clickables(document);
+            const state = { plus: ${clickedPlus ? 'false' : 'true'}, guide: ${clickedGuide ? 'false' : 'true'} };
+            // A tab that is still a guide page: give it its browser page. This is the step that
+            // turns a start-page tab into a real webview.
+            if (state.guide) {
+              const guide = all.find(n => /^(浏览器|浏览网页)/.test(labelOf(n)));
+              if (guide !== undefined) { guide.click(); return 'CLICKED_GUIDE' }
             }
-            return false;
-          };
-          if (scan(document)) return 'CLICKED';
-          for (const frame of Array.from(document.querySelectorAll('iframe'))) {
-            try { if (frame.contentDocument && scan(frame.contentDocument)) return 'CLICKED' } catch { /* cross-origin */ }
-          }
-          return 'NO_NEW_TAB_CONTROL';
-        })()`,
-        returnByValue: true,
-      })
-      lastVerdict = String(clicked?.result?.value ?? '')
-      if (lastVerdict === 'CLICKED') sawControl = true
+            // Otherwise the strip needs another tab first; the guide appears on it, and the next
+            // round takes the step above.
+            if (state.plus) {
+              const plus = all.find(n => /新标签页|新建标签|new tab/i.test(labelOf(n)));
+              if (plus !== undefined) { plus.click(); return 'CLICKED_PLUS' }
+            }
+            return 'WAITING';
+          })()`,
+          returnByValue: true,
+        })
+        lastVerdict = String(acted?.result?.value ?? '')
+        if (lastVerdict === 'CLICKED_GUIDE') clickedGuide = true
+        if (lastVerdict === 'CLICKED_PLUS') clickedPlus = true
+        if (lastVerdict !== 'WAITING') sawControl = true
+      }
       await new Promise(resolve => setTimeout(resolve, 600))
     }
     if (!sawControl) {
