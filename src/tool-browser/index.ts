@@ -1,4 +1,3 @@
-import { probeLoad } from './../load-probe.js'
 /**
  * Model-facing browser tools over `ctx.browser`: `browser_open`,
  * `browser_snapshot`, `browser_execute`, `browser_content`,
@@ -281,7 +280,6 @@ function formatSnapshot(snapshot: {
 
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
-  probeLoad('dsh-builtin-browser/tool-browser')
   const timeoutMs = config.timeoutMs ?? 60_000
   /**
    * Longest wait `browser_wait` may poll for, leaving room for the tool call itself to

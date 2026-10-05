@@ -12,6 +12,7 @@
  * registers a row under the bare package name — see cordis.patch.yml.
  * @module dsh-builtin-browser
  */
+/** Plugin identity for the root row (the composition surface is the subpath rows). */
 export declare const name = "dsh-builtin-browser";
 /**
  * Inert application for the root row: the browser seam, the Electron provider and

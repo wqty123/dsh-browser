@@ -14,7 +14,6 @@
  */
 
 /** Plugin identity for the root row (the composition surface is the subpath rows). */
-import { probeLoad } from './load-probe.js'
 
 export const name = 'dsh-builtin-browser'
 
@@ -26,7 +25,6 @@ export const name = 'dsh-builtin-browser'
  * never reaches the browser (the plugin works, its client half is invisible).
  */
 export function apply(): void {
-  probeLoad('dsh-builtin-browser')
 }
 
 
