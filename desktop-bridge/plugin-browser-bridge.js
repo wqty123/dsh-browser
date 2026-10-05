@@ -163,27 +163,35 @@ async function handle(request) {
     //       (synthetic events do not move React's controlled input, and the field
     //       also loses focus to re-renders, so both halves are needed).
     let submitVerdict = 'n/a'
-    const restored = await sendCdp(shell.id, 'Runtime.evaluate', {
-      // Only real controls count, and only their OWN text does. Matching any
-      // node's `textContent` made a container that merely mentioned restoring a
-      // page report RESTORED — which skipped the address route below entirely
-      // and left the guest unmaterialized (measured on DSH 0.2.0-rc.2, where the
-      // sidebar shows no restore control at all).
-      expression: `(() => {
-        const nodes = Array.from(document.querySelectorAll('button,a,[role=button],div[role=link]'));
-        const hit = nodes.find(n => {
-          const own = (n.textContent || '').trim();
-          if (own.length > 24) return false;
-          return /^(恢复页面|恢复上次|恢复上次页面|上次打开)$/.test(own)
-            || /恢复|restore/i.test(n.getAttribute('aria-label') || n.getAttribute('title') || '');
-        });
-        if (hit === undefined) return 'NO_RESTORE';
-        hit.click();
-        return 'RESTORED';
-      })()`,
-      returnByValue: true,
-    })
-    if (restored?.result?.value !== 'RESTORED') {
+    // The address route runs FIRST when a url was asked for, and the restore affordance is only
+    // a fallback when there is none.
+    //
+    // It used to be the other way round, and that ordering was measured to be wrong: on this
+    // desktop the restore probe reports RESTORED for an element that does not actually restore
+    // anything, so the address route was skipped entirely and the guest was never materialised
+    // — ensureSidebar returned prepare=FOCUSED, restore=RESTORED, submit=n/a and the sidebar
+    // stayed empty. Driving the address bar instead is the route that works here; it produced
+    // `{"created":true,"via":"address"}` against the same empty sidebar.
+    let restored = { result: { value: 'NO_RESTORE' } }
+    const haveUrl = url !== ''
+    if (!haveUrl) {
+      restored = await sendCdp(shell.id, 'Runtime.evaluate', {
+        expression: `(() => {
+          const nodes = Array.from(document.querySelectorAll('button,a,[role=button],div[role=link]'));
+          const hit = nodes.find(n => {
+            const own = (n.textContent || '').trim();
+            if (own.length > 24) return false;
+            return /^(恢复页面|恢复上次|恢复上次页面|上次打开)$/.test(own)
+              || /恢复|restore/i.test(n.getAttribute('aria-label') || n.getAttribute('title') || '');
+          });
+          if (hit === undefined) return 'NO_RESTORE';
+          hit.click();
+          return 'RESTORED';
+        })()`,
+        returnByValue: true,
+      })
+    }
+    if (true) {
       if (url !== '') {
         // Set the value the way React accepts it, then SUBMIT THE FORM.
         //
