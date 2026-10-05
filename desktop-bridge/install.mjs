@@ -106,11 +106,31 @@ ${MARKER} pages.
 // Installed by apps/desktop/bridge/install.mjs — re-run it after a desktop upgrade.
 // A bridge failure is never fatal to the shell.
 app.whenReady().then(async () => {
+	const bridgeUrl = new URL("./plugin-browser-bridge.js", import.meta.url);
+	const loadBridge = async (why) => {
+		try {
+			// A plain import is cached for the process lifetime, so an edited bridge
+			// would need a shell restart. The stamp makes every load read the current
+			// bytes; start() itself stops the previous instance, so this reloads in place.
+			const bridge = await import(bridgeUrl.href + "?v=" + Date.now());
+			bridge.start();
+			console.log("[dsh-browser-bridge] started" + (why ? " (" + why + ")" : ""));
+		} catch (error) {
+			console.error("[dsh-browser-bridge] start failed:", error);
+		}
+	};
+	await loadBridge();
+	// Watch the module so an edit reloads it in place instead of forcing a shell
+	// restart. Debounced; a failure here is never fatal to the shell.
 	try {
-		const bridge = await import("./plugin-browser-bridge.js");
-		bridge.start();
+		const { watch } = await import("node:fs");
+		let timer = null;
+		watch(bridgeUrl, { persistent: false }, () => {
+			if (timer) clearTimeout(timer);
+			timer = setTimeout(() => void loadBridge("file changed"), 300);
+		});
 	} catch (error) {
-		console.error("[dsh-browser-bridge] start failed:", error);
+		console.error("[dsh-browser-bridge] watch failed:", error);
 	}
 });
 `

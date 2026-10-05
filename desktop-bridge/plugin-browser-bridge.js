@@ -134,7 +134,60 @@ async function handle(request) {
     // a no-op; otherwise the shell's own UI is driven to open the right sidebar
     // and submit an address — the same thing a human would do, and the only
     // supported way to make the sidebar own a page.
-    const existing = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
+    // `newTab: true` means "open ANOTHER browser page, in a new tab of this same sidebar".
+    //
+    // This is a different request from the first one, because the host's browser tab is created
+    // in two steps and the bridge previously assumed one. Measured on the running shell:
+    //
+    //   create the tab (Ctrl+T, or the strip's "+")  -> a 浏览器 tab exists, but NO webview
+    //   navigate inside that tab                     -> the webview appears
+    //
+    // So a caller that just asks for "a tab" waits forever for a guest that only appears when
+    // something navigates, while a caller that navigates gets one immediately. Hence: make the
+    // tab, activate it, and let the normal address-bar route below do the navigating.
+    if (request.newTab === true) {
+      const shellForNewTab = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+      if (shellForNewTab === undefined) throw new Error('no shell window to drive')
+      const before = new Set(webContents.getAllWebContents().filter(c => c.getType() === 'webview').map(c => c.id))
+      // Ctrl+T is the host's own shortcut for browser.new (registered for desktop:windows as
+      // primary+KeyT). A real key event through the Input domain reaches the shortcut table;
+      // a synthesized DOM KeyboardEvent does not.
+      const key = (type) => sendCdp(shellForNewTab.id, 'Input.dispatchKeyEvent', {
+        type,
+        modifiers: 2,
+        windowsVirtualKeyCode: 84,
+        nativeVirtualKeyCode: 84,
+        code: 'KeyT',
+        key: 't',
+        ...type === 'keyDown' ? { text: 't' } : {},
+      })
+      await key('keyDown')
+      await key('keyUp')
+      // The new tab starts on the guide page, so it has no address bar until it is the active
+      // tab. Activate the newest 浏览器 tab, then fall through to the address route, which will
+      // navigate it and thereby materialize its guest.
+      for (let attempt = 0; attempt < 12; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 250))
+        const activated = await sendCdp(shellForNewTab.id, 'Runtime.evaluate', {
+          expression: `(() => {
+            const strip = document.querySelector('[class*=_tabStrip]');
+            if (strip === null) return 'NO_STRIP';
+            const rows = Array.from(strip.querySelectorAll('button,[role=tab],[class*=tab]'));
+            const browserTabs = rows.filter(r => ((r.getAttribute('aria-label') || '') + ' ' + (r.textContent || '')).trim().indexOf('浏览器') === 0);
+            if (browserTabs.length === 0) return 'NO_BROWSER_TAB';
+            browserTabs[browserTabs.length - 1].click();
+            return 'ACTIVATED:' + String(browserTabs.length);
+          })()`,
+          returnByValue: true,
+        })
+        if (String(activated?.result?.value ?? '').startsWith('ACTIVATED')) break
+      }
+      void before
+    }
+    // Skip the reuse branch when a NEW tab was asked for: `existing[0]` is an older guest, and
+    // returning it would silently hand the caller the page it already had.
+    const reuse = request.newTab === true ? undefined : webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')[0]
+    const existing = reuse === undefined ? [] : [reuse]
     if (existing.length > 0) {
       const first = existing[0]
       if (request.url !== undefined && String(request.url) !== '') {
@@ -686,8 +739,34 @@ function publishEndpoint(port, token) {
   }
 }
 
+/**
+ * The running bridge instance, keyed on globalThis so it survives a reload.
+ *
+ * A cache-busted re-import evaluates a FRESH module instance with its own
+ * module-level state. A plain module-scoped variable would therefore leave the
+ * previous bridge running: two keepalives would alternate writing the endpoint
+ * file and hand clients a port that is already closed. Symbol.for keeps the key
+ * identical across every instance of this module.
+ */
+const ACTIVE = Symbol.for("dsh-builtin-browser.bridge.active")
+
+/**
+ * Stop the running bridge: clears its keepalive timer, closes its listener and
+ * drops its quit hook. Idempotent and never throws, so the shell can call it
+ * before re-importing an edited bridge.
+ */
+export function stop() {
+  const current = globalThis[ACTIVE]
+  globalThis[ACTIVE] = undefined
+  if (!current) return
+  try { clearInterval(current.keepalive) } catch { /* ignore */ }
+  try { current.server.close() } catch { /* already closed */ }
+  try { app.off('will-quit', current.onQuit) } catch { /* ignore */ }
+}
+
 /** Start the bridge: loopback listener + published endpoint file + token. */
 export function start() {
+  stop()
   const token = randomBytes(24).toString('hex')
   const server = createServer(socket => {
     let buffer = ''
@@ -742,9 +821,8 @@ export function start() {
     if (port !== 0) publishEndpoint(port, token)
   }, 15_000)
   keepalive.unref?.()
-  app.on('will-quit', () => {
-    clearInterval(keepalive)
-    try { server.close() } catch { /* already closed */ }
-  })
+  const onQuit = () => stop()
+  app.on('will-quit', onQuit)
+  globalThis[ACTIVE] = { server, keepalive, onQuit }
   return server
 }
