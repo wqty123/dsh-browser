@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Install the plugin browser bridge into an installed DSH Desktop.
  *
  * WHY A SCRIPT
@@ -292,7 +292,20 @@ if (revert) {
     }
     const identical = backedUp !== undefined && current !== undefined && backedUp.equals(current)
     const stillHasOurMarker = current !== undefined && current.includes(MARKER)
-    if (!identical && !stillHasOurMarker) {
+    // A backup taken BEFORE the file was patched by anything else is not a clean restore
+    // point: reverting to it discards those patches. The marker test alone does not catch
+    // this, because the current file legitimately carries our marker — that is exactly what
+    // this script put there — while the backup predates a patch by another tool.
+    // `dsh-purge` patches this same file, so on this machine that is not hypothetical.
+    const backupHasOurMarker = backedUp !== undefined && backedUp.includes(MARKER)
+    if (!identical && stillHasOurMarker && !backupHasOurMarker) {
+      console.error(`WARNING: ${backupPath} predates the bridge patch, so it is not a clean`)
+      console.error(`  restore point for ${mainPath}. Reverting would also discard anything`)
+      console.error('  patched in between (dsh-purge patches this same file). Refreshing the')
+      console.error('  backup from the current file instead, so a later --revert is safe.')
+      writeFileSync(backupPath, current ?? Buffer.alloc(0))
+      reverted = true
+    } else if (!identical && !stillHasOurMarker) {
       console.error(`WARNING: ${mainPath} has changed since the backup was taken, and it does`)
       console.error('  not contain the bridge import either — something else has edited it')
       console.error('  (a desktop upgrade, or another patch tool). Restoring the backup would')

@@ -226,30 +226,111 @@ async function handle(request) {
     // sidebar's own "new tab" control, the same affordance a human uses, and then
     // reports the guest ids. Whatever already exists is reused, so repeated calls
     // are cheap and a human-opened tab is never orphaned.
+    //
+    // "No control found" used to throw on the spot, and that was wrong: the strip is
+    // rendered by the sidebar, so a page that opened correctly can still be a moment away
+    // from having its control in the DOM — or the control can live where a plain
+    // querySelectorAll cannot see it (a shadow root, or a frame). Throwing turned that
+    // transient into a permanent failure and reported it as "the browser tab is not open"
+    // even though the tab was open. Reported as issue #23.
+    //
+    // Now it is one more round's outcome: keep waiting, and only report it if every round
+    // ended that way. The last thing each round saw is carried into the message, so a
+    // failure says whether the control was missing or the click did nothing.
     const want = Math.max(1, Math.min(8, Number(request.count ?? 1)))
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
+    const rounds = 30
     let lastVerdict = ''
-    for (let attempt = 0; attempt < 30; attempt++) {
+    let sawControl = false
+    for (let attempt = 0; attempt < rounds; attempt++) {
       const guests = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
       if (guests.length >= want) return { ok: true, ids: guests.map(contents => contents.id), verdict: lastVerdict }
       const clicked = await sendCdp(shell.id, 'Runtime.evaluate', {
         expression: `(() => {
-          const nodes = Array.from(document.querySelectorAll('button,[role=button]'));
-          const hit = nodes.find(b => /新标签页|新建标签|new tab/i.test((b.getAttribute('aria-label') || '') + (b.textContent || '') + (b.getAttribute('title') || '')));
-          if (hit === undefined) return 'NO_NEW_TAB_CONTROL';
-          hit.click();
-          return 'CLICKED';
+          const seen = [];
+          const scan = (root) => {
+            for (const node of root.querySelectorAll('button,[role=button]')) {
+              seen.push(node);
+              const label = (node.getAttribute('aria-label') || '') + (node.textContent || '') + (node.getAttribute('title') || '');
+              if (/新标签页|新建标签|new tab/i.test(label)) { node.click(); return true }
+              // A control inside a shadow root or a frame is invisible to a flat query, which
+              // is one of the ways this used to report "no control" for a strip that had one.
+              if (node.shadowRoot) { if (scan(node.shadowRoot)) return true }
+            }
+            return false;
+          };
+          if (scan(document)) return 'CLICKED';
+          for (const frame of Array.from(document.querySelectorAll('iframe'))) {
+            try { if (frame.contentDocument && scan(frame.contentDocument)) return 'CLICKED' } catch { /* cross-origin */ }
+          }
+          return 'NO_NEW_TAB_CONTROL';
         })()`,
         returnByValue: true,
       })
       lastVerdict = String(clicked?.result?.value ?? '')
-      if (lastVerdict === 'NO_NEW_TAB_CONTROL') {
-        throw new Error('the sidebar exposes no new-tab control (is the browser tab open?)')
-      }
+      if (lastVerdict === 'CLICKED') sawControl = true
       await new Promise(resolve => setTimeout(resolve, 600))
     }
-    throw new Error(`the sidebar stopped at fewer than ${want} tabs`)
+    if (!sawControl) {
+      throw new Error(
+        'the sidebar exposes no new-tab control after ' + String(rounds) + ' attempts '
+        + `(last verdict: ${lastVerdict || 'none'}) — the browser tab may not be open, or the `
+        + 'control is somewhere this cannot reach',
+      )
+    }
+    throw new Error(`the sidebar stopped at fewer than ${want} tabs (the control was found and clicked, but no new guest appeared)`)
+  }
+  if (op === 'showTab') {
+    // Bring one browser guest to the front — the "switch to this tab" half of opening a page.
+    //
+    // Without this the desktop bridge had no way to satisfy `showView`, so its host
+    // implementation was an empty method and a newly opened page stayed behind whatever the
+    // human was looking at. Reported as issue #23; the other two carriers already did this
+    // (the self-hosted window re-adds the view, the system browser calls Page.bringToFront).
+    //
+    // The tab belongs to the renderer, so the same reasoning as `ensureTabs` applies: drive the
+    // sidebar's own control. A tab is matched by the title it shows, which is what the sidebar
+    // renders from the guest — the guest's id is not exposed in the DOM.
+    const viewId = Number(request.viewId)
+    if (!Number.isFinite(viewId)) throw new Error('showTab needs a viewId')
+    const guest = webContents.fromId(viewId)
+    if (guest === undefined) throw new Error(`showTab: no guest with id ${viewId}`)
+    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+    if (shell === undefined) throw new Error('no shell window to drive')
+    const wantTitle = String(guest.getTitle() ?? '').trim()
+    const clicked = await sendCdp(shell.id, 'Runtime.evaluate', {
+      expression: `(() => {
+        const scan = (root, out) => {
+          for (const node of root.querySelectorAll('button,[role=button],[role=tab],a')) {
+            out.push(node);
+            if (node.shadowRoot) scan(node.shadowRoot, out);
+          }
+          return out;
+        };
+        const nodes = scan(document, []);
+        for (const frame of Array.from(document.querySelectorAll('iframe'))) {
+          try { if (frame.contentDocument) scan(frame.contentDocument, nodes) } catch { /* cross-origin */ }
+        }
+        const label = (n) => ((n.getAttribute('aria-label') || '') + ' ' + (n.textContent || '') + ' ' + (n.getAttribute('title') || '')).trim();
+        const want = ${JSON.stringify(wantTitle)};
+        // Exact title first, then the tab-like control whose label contains it: a strip may
+        // decorate the label with a close button, and a prefix match would hit the wrong tab
+        // when one title contains another.
+        let hit = nodes.find(n => want !== '' && label(n) === want);
+        if (hit === undefined) hit = nodes.find(n => want !== '' && label(n).includes(want) && /tab|page|标签/i.test(n.getAttribute('role') || n.className || ''));
+        if (hit === undefined) hit = nodes.find(n => want !== '' && label(n).includes(want));
+        if (hit === undefined) return 'NO_TAB_FOR_TITLE';
+        hit.click();
+        return 'CLICKED';
+      })()`,
+      returnByValue: true,
+    })
+    const verdict = String(clicked?.result?.value ?? '')
+    if (verdict !== 'CLICKED') {
+      throw new Error(`could not bring the page to the front (${verdict}; wanted "${wantTitle}")`)
+    }
+    return { ok: true, verdict }
   }
   if (op === 'closeSidebarBrowser') {
     // Release the sidebar's browser pages by closing the tabs that host them.

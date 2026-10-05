@@ -94,10 +94,19 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     createView(): ElectronViewHandle;
     destroyView(handle: ElectronViewHandle): void;
     /**
-     * Nothing to show: the sidebar is already on screen, and showing it again is
-     * the shell's business (it owns the tab strip and the visibility toggle).
+     * Bring this view's tab to the front in the sidebar.
+     *
+     * This used to be empty, on the reasoning that the sidebar is already on screen so there is
+     * nothing to show. That confused "the sidebar is visible" with "this page is the one being
+     * looked at": opening a page left it behind whatever the human had in front, which is issue
+     * #23. The other two carriers both do this — the self-hosted window re-adds the view and the
+     * system browser calls `Page.bringToFront` — so this carrier was the odd one out.
+     *
+     * Best-effort by design: the tab strip belongs to the shell's renderer, and failing to raise
+     * it must not fail the navigation that has already happened.
+     * @param handle - the view to bring forward.
      */
-    showView(): void;
+    showView(handle: ElectronViewHandle): void;
     onUserAction(handler: (action: BrowserUserAction) => void): void;
     /**
      * Release the sidebar's browser pages (requirements §3, `ui.closeWithSession`).
