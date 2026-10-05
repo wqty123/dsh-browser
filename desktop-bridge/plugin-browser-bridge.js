@@ -184,17 +184,38 @@ async function handle(request) {
       }
       void before
     }
-    // Skip the reuse branch when a NEW tab was asked for: `existing[0]` is an older guest, and
-    // returning it would silently hand the caller the page it already had.
-    const reuse = request.newTab === true ? undefined : webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')[0]
-    const existing = reuse === undefined ? [] : [reuse]
-    if (existing.length > 0) {
-      const first = existing[0]
-      if (request.url !== undefined && String(request.url) !== '') {
-        await sendCdp(first.id, 'Page.navigate', { url: String(request.url) })
+    // Which guest belongs to THIS caller.
+    //
+    // The owner ledger was added to the allocation path and NOT to this one, so a session calling
+    // here was handed `existing[0]` — whatever tab happened to be first, including another
+    // session's. That is exactly the cross-session bleed the ledger was introduced to stop:
+    // session B was given session A's page, and A's tabs were counted as B's when deciding how
+    // many more to create.
+    //
+    // Only a guest this owner already holds is reused; a claimed guest held by someone else is
+    // invisible here, and an unclaimed one is adopted on the spot (it is nobody's yet).
+    const owner = typeof request.owner === 'string' && request.owner !== '' ? request.owner : 'anonymous'
+    pruneClaims()
+    let reuseId = request.newTab === true ? undefined : [...claims.entries()]
+      .find(([guest, holder]) => holder === owner && guestById(guest) !== undefined)?.[0]
+    // An unclaimed webview is free to take: nobody has asked for it, and leaving it would make
+    // this caller create a tab it does not need.
+    if (reuseId === undefined && request.newTab !== true) {
+      const unclaimedGuest = webContents.getAllWebContents()
+        .filter(contents => contents.getType() === 'webview')
+        .find(contents => !claims.has(contents.id))
+      if (unclaimedGuest !== undefined) {
+        claims.set(unclaimedGuest.id, owner)
+        reuseId = unclaimedGuest.id
       }
-      return { ok: true, created: false, id: first.id }
     }
+    if (reuseId !== undefined) {
+      if (request.url !== undefined && String(request.url) !== '') {
+        await sendCdp(reuseId, 'Page.navigate', { url: String(request.url) })
+      }
+      return { ok: true, created: false, id: reuseId, owner, reused: true }
+    }
+    const existing = []
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
     // 1. Open the sidebar and put the caret in its address field IF that field is
