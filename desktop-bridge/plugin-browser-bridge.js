@@ -133,7 +133,29 @@ async function handle(request) {
       expression: shellPrepareSidebar(),
       returnByValue: true,
     })
-    const verdict = String(prepared?.result?.value ?? '')
+    let verdict = String(prepared?.result?.value ?? '')
+    // The last two verdicts mean the panel was only ASKED to open. It materialises
+    // asynchronously — the shell has to construct the sidebar view — so acting immediately
+    // finds no address bar and fails for a panel that is a moment away. Poll for it instead of
+    // treating "not there yet" as "cannot be opened", which is the same mistake the first call
+    // after a restart used to make.
+    if (verdict === 'CLICKED_LAUNCHER' || verdict === 'SENT_CTRL_T') {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 250))
+        const probe = await sendCdp(shell.id, 'Runtime.evaluate', {
+          expression: `(() => {
+            const inputs = Array.from(document.querySelectorAll('input'))
+              .filter(i => /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || '')));
+            if (inputs.length === 0) return 'NO_ADDRESS_BAR';
+            inputs[inputs.length - 1].focus();
+            return 'FOCUSED';
+          })()`,
+          returnByValue: true,
+        })
+        verdict = String(probe?.result?.value ?? '')
+        if (verdict !== 'NO_ADDRESS_BAR') break
+      }
+    }
     // 2. Materialize a guest. Two routes, cheapest first:
     //    a. the sidebar's own "restore last page" affordance — it navigates
     //       without depending on how the address field handles focus or input;
@@ -410,14 +432,68 @@ async function handle(request) {
 function shellPrepareSidebar() {
   return `(() => {
     const labelOf = el => ((el.getAttribute && el.getAttribute('aria-label')) || el.textContent || '').trim();
-    let opened = false;
-    for (const button of Array.from(document.querySelectorAll('button'))) {
-      if (/打开右侧边栏|右侧边栏/.test(labelOf(button))) { button.click(); opened = true; break; }
+
+    // Collect every clickable we might need, through shadow roots and frames: the launcher card
+    // lives in the shell's start page and the sidebar controls live in its own tree, and a flat
+    // query cannot see either if they are nested.
+    const clickables = () => {
+      const out = [];
+      const scan = (root) => {
+        for (const node of root.querySelectorAll('button,a,[role=button],[role=tab],div[tabindex]')) {
+          out.push(node);
+          if (node.shadowRoot) scan(node.shadowRoot);
+        }
+        for (const frame of Array.from(root.querySelectorAll('iframe'))) {
+          try { if (frame.contentDocument) scan(frame.contentDocument) } catch { /* cross-origin */ }
+        }
+        return out;
+      };
+      return scan(document);
+    };
+
+    const addressInput = () => Array.from(document.querySelectorAll('input'))
+      .filter(i => /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || '')));
+
+    // 1. Is there already an address bar? Then the sidebar is up; just focus it.
+    const existing = addressInput();
+    if (existing.length > 0) {
+      existing[existing.length - 1].focus();
+      return 'FOCUSED';
     }
-    const inputs = Array.from(document.querySelectorAll('input')).filter(i => /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || '')));
-    if (inputs.length === 0) return 'NO_ADDRESS_BAR:' + JSON.stringify(Array.from(document.querySelectorAll('input')).map(i => i.placeholder).slice(0, 6));
-    inputs[inputs.length - 1].focus();
-    return opened ? 'OPENED_AND_FOCUSED' : 'FOCUSED';
+
+    // 2. Try to open the right sidebar, if a control for that exists.
+    let opened = false;
+    for (const button of clickables()) {
+      if (/打开右侧边栏|右侧边栏/.test(labelOf(button))) { button.click(); opened = true; break }
+    }
+
+    // 3. Nothing yet: drive the shell's own launcher. The start page offers a 「浏览器」 card
+    //    (Ctrl+T) that opens the browser panel, and without this step the bridge simply gave up
+    //    — reporting NO_ADDRESS_BAR for a panel that was never opened. Reported as issue #23:
+    //    a human should not have to open the panel by hand before the agent can use it.
+    const afterOpen = addressInput();
+    if (afterOpen.length > 0) {
+      afterOpen[afterOpen.length - 1].focus();
+      return opened ? 'OPENED_AND_FOCUSED' : 'FOCUSED';
+    }
+    const CARD = /^(浏览器|浏览网页|Browser)$/;
+    for (const node of clickables()) {
+      const label = labelOf(node);
+      if (CARD.test(label) || /浏览网页|open browser|new browser tab/i.test(node.getAttribute('aria-label') || '')) {
+        node.click();
+        return 'CLICKED_LAUNCHER';
+      }
+    }
+
+    // 4. Last resort: the keyboard shortcut the card advertises. Dispatched on the document so
+    //    a handler bound at the window level still sees it.
+    try {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', code: 'KeyT', ctrlKey: true, bubbles: true }));
+      return 'SENT_CTRL_T';
+    } catch { /* fall through to the diagnostic */ }
+
+    const inputs = Array.from(document.querySelectorAll('input'));
+    return 'NO_ADDRESS_BAR:' + JSON.stringify(inputs.map(i => i.placeholder).slice(0, 6));
   })()`
 }
 
