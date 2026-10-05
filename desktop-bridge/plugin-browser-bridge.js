@@ -249,6 +249,10 @@ async function handle(request) {
       returnByValue: true,
     }))?.result?.value
     let prepared
+    // Set when the launcher card has been clicked, so the no-url route below cannot click it a
+    // second time: `newTab` already does that when the tab is still a guide page, and two clicks
+    // make two pages. One card click per call, which is the same rule the retry loop needed.
+    let cardClicked = false
     if (request.newTab === true && await addressBarVisible() === 'YES') {
       // Already a browser page (the guide was consumed elsewhere, or the host went straight
       // there). Nothing to open, and clicking anything here would create a second one.
@@ -279,6 +283,7 @@ async function handle(request) {
         returnByValue: true,
       })
       const cardVerdict = String(opened?.result?.value ?? '')
+      if (cardVerdict === 'CLICKED_CARD') cardClicked = true
       // One click, then wait for the address bar it produces.
       let focused = 'NO_ADDRESS_BAR'
       for (let attempt = 0; attempt < 20; attempt++) {
@@ -370,7 +375,12 @@ async function handle(request) {
       // browser page, empty, and the host navigates it a moment later. The restore affordance is
       // tried only after that, because on this desktop it reports RESTORED for an element that
       // restores nothing.
-      const created = await sendCdp(shell.id, 'Runtime.evaluate', {
+      //
+      // Skipped entirely if the newTab path above already clicked the card: two clicks make two
+      // pages, and this route runs after that one.
+      const created = cardClicked
+        ? { result: { value: 'ALREADY_CLICKED' } }
+        : await sendCdp(shell.id, 'Runtime.evaluate', {
         expression: `(() => {
           const clickables = (root, out = []) => {
             for (const node of root.querySelectorAll('button,[role=button]')) {
@@ -391,7 +401,10 @@ async function handle(request) {
         returnByValue: true,
       })
       const cardVerdict = String(created?.result?.value ?? '')
-      if (cardVerdict !== 'CLICKED_CARD') {
+      // Only when the card was NOT clicked: if it was, a browser page exists and the restore
+      // probe would either find nothing or — worse, given what that probe reports on this
+      // desktop — claim to have restored into a page that is already there.
+      if (cardVerdict !== 'CLICKED_CARD' && cardVerdict !== 'ALREADY_CLICKED') {
         restored = await sendCdp(shell.id, 'Runtime.evaluate', {
           expression: `(() => {
             const nodes = Array.from(document.querySelectorAll('button,a,[role=button],div[role=link]'));
