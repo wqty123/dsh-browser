@@ -389,8 +389,19 @@ async function handle(request) {
             const state = { plus: ${clickedPlus ? 'false' : 'true'}, guide: ${clickedGuide ? 'false' : 'true'} };
             // A tab that is still a guide page: give it its browser page. This is the step that
             // turns a start-page tab into a real webview.
+            //
+            // Identified by BOTH halves of the card, not by a prefix. The card carries the title
+            // 浏览器 and the description 浏览网页, while a tab in the strip carries only the
+            // title — so a prefix test would match the strip's own tab and merely switch to it,
+            // which looks like "clicked and nothing happened" and would burn a round per visit.
+            // The length bound keeps a container that happens to mention both out of it.
             if (state.guide) {
-              const guide = all.find(n => /^(浏览器|浏览网页)/.test(labelOf(n)));
+              const isCard = (n) => {
+                const own = (n.textContent || '').trim();
+                if (own.length > 24) return false;
+                return /浏览器/.test(own) && /浏览网页/.test(own);
+              };
+              const guide = all.find(isCard);
               if (guide !== undefined) { guide.click(); return 'CLICKED_GUIDE' }
             }
             // Otherwise the strip needs another tab first; the guide appears on it, and the next
