@@ -269,7 +269,11 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    * @param handle - the view to bring forward.
    */
   showView(handle: ElectronViewHandle): void {
-    void this.connection.call({ op: 'showTab', viewId: Number(handle.id) }, 5_000).catch(() => undefined)
+    // `owner` is required: the bridge refuses to bring forward a guest held by another session,
+    // and without this the caller is 'anonymous', so the guard rejects this session's own tab.
+    // Owned here means the same half-change that made the ownership work take four rounds — the
+    // ledger went into the bridge and the call sites were not carried with it.
+    void this.connection.call({ op: 'showTab', viewId: Number(handle.id), owner: this.owner }, 5_000).catch(() => undefined)
   }
 
 
@@ -301,7 +305,13 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     if (mine.length === 0) return
     let titles: string[]
     try {
-      const answer = await this.connection.call({ op: 'list' }, 5_000)
+      // `owner` is REQUIRED here now that the bridge filters `list` by it. Without it the bridge
+      // falls back to a different owner, so the guests this session holds are filtered out of the
+      // answer, `mine.includes(...)` matches nothing, the title list comes back empty and this
+      // returns without closing anything — the page stayed open and the human had to close it by
+      // hand. Adding the ledger to the bridge without updating this call site is exactly the kind
+      // of half-change that made the ownership work take four rounds.
+      const answer = await this.connection.call({ op: 'list', owner: this.owner }, 5_000)
       const sidebar = Array.isArray(answer.sidebar) ? answer.sidebar as Array<{ id?: unknown; title?: unknown }> : []
       titles = sidebar
         .filter(guest => mine.includes(Number(guest.id)))
@@ -314,7 +324,9 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     }
     if (titles.length === 0) return
     try {
-      await this.connection.call({ op: 'closeSidebarBrowser', titles }, 10_000)
+      // `owner` is required for the same reason as above: the bridge closes only the guests the
+      // caller holds, so an owner-less call closes nothing and the page stays open.
+      await this.connection.call({ op: 'closeSidebarBrowser', titles, owner: this.owner }, 10_000)
     } catch {
       // Best effort: the setting expresses a preference, and a shell that cannot
       // be reached is no reason to fail the session teardown that called us.
