@@ -103,7 +103,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
   <tr>
     <td width="50%" valign="top">
       <h3>任务级会话隔离</h3>
-      <p>每个 DSH 任务(会话)拥有独立的浏览器会话(独立标签页与历史),并发任务互不抢页面、互不污染;同一任务内多次调用复用同一会话。</p>
+      <p>每个 DSH 任务(会话)拥有独立的浏览器会话(独立标签页与历史),并发任务互不抢页面、互不污染;同一任务内**每次调用各开一个标签**(cookie / 历史 / 登录态在同一会话内共享)。</p>
     </td>
     <td width="50%" valign="top">
       <h3>登录态持久化</h3>
@@ -173,7 +173,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
 
 | 工具 | 用途 | 守卫 |
 | --- | --- | --- |
-| `browser_open` | 打开 URL(可选新标签),返回页面快照 | ✅ |
+| `browser_open` | 打开 URL,返回页面快照;**同一会话内再次调用会开一个新标签**(首次调用自动打开侧栏面板) | ✅ |
 | `browser_wait` | 等待页面加载完成(可选期望 URL / CSS 选择器),返回是否就绪 | – |
 | `browser_snapshot` | 交互元素(输入框/按钮/链接)带编号清单,元素可引用时附 `{#id}` / `{[name=x]}` 定位选择器(穿透同源 iframe 与 Shadow DOM) | – |
 | `browser_a11y` | 无障碍树:每个交互节点的语义角色/名称/值/状态,可引用时附 `{#id}` / `{[name=x]}`;坐标按需(`coords: true`,默认不含;穿透同源 iframe 与 Shadow DOM) | – |

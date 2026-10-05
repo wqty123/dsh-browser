@@ -103,7 +103,7 @@ See the full list in [Tool reference](#tool-reference).
   <tr>
     <td width="50%" valign="top">
       <h3>Per-task session isolation</h3>
-      <p>Each DSH task (session) gets its own browser session (own tabs and history); concurrent tasks never fight over the page or pollute each other. Calls within one task reuse the same session.</p>
+      <p>Each DSH task (session) gets its own browser session (own tabs and history); concurrent tasks never fight over the page or pollute each other. Within one task, <b>each call opens its own tab</b> (cookies, history and logins are shared across the session).</p>
     </td>
     <td width="50%" valign="top">
       <h3>Login persistence</h3>
@@ -173,7 +173,7 @@ See the full list in [Tool reference](#tool-reference).
 
 | Tool | Purpose | Guard |
 | --- | --- | --- |
-| `browser_open` | Open a URL (optionally in a new tab); returns a page snapshot | ✅ |
+| `browser_open` | Open a URL; returns a page snapshot. **A further call in the same session opens a new tab** (the first call opens the side panel automatically) | ✅ |
 | `browser_wait` | Wait for page load (optional expected URL / CSS selector), returns readiness | – |
 | `browser_snapshot` | Numbered inventory of interactive elements (inputs/buttons/links), each line carrying a `{#id}` / `{[name=x]}` selector when one is derivable (pierces same-origin iframes and Shadow DOM) | – |
 | `browser_a11y` | Accessibility tree: semantic role/name/value/states per interactive node, plus a `{#id}` / `{[name=x]}` selector when derivable; coordinates only on request (`coords: true`, off by default, pierces same-origin iframes and Shadow DOM) | – |
