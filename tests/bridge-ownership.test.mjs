@@ -132,3 +132,31 @@ test('closeSidebarBrowser never considers another session’s guest', async () =
   }
   assert.equal(claims.get(2), 'sessionA', 'A still holds its guest')
 })
+
+test('ensureSidebar waits for a NEW guest, never adopts one that was already open', async () => {
+  // The reported symptom, both halves from one line: with tabs already open, the "has a guest
+  // appeared?" test was true on the first poll, so ensureSidebar returned `existing[0]` —
+  // someone else's tab — navigated it to the requested url, and claimed success. The caller saw
+  // a failure (its own tab never appeared) and the page showed up in another session.
+  const openA = new FakeContents(2, 'webview', 'https://a.example/')
+  const openB = new FakeContents(3, 'webview', 'https://b.example/')
+  world.contents = [shell, openA, openB]
+  claims.clear()
+  claims.set(2, 'sessionA')
+  claims.set(3, 'sessionB')
+
+  const before = world.contents.length
+  // The stub has no real shell DOM, so the drive cannot complete; what matters is which guest
+  // the call is willing to RETURN. Either it keeps waiting, or it fails on the drive — both are
+  // acceptable. Handing back an existing guest is not.
+  let returned
+  try {
+    returned = await handle({ op: 'ensureSidebar', url: 'https://requested.example/', newTab: true, owner: 'sessionC' })
+  } catch {
+    returned = undefined
+  }
+  assert.equal(returned, undefined, 'it must not return an already-open guest')
+  assert.equal(world.contents.length, before, 'and it must not have created anything in the stub')
+  assert.equal(claims.get(2), 'sessionA', 'A’s guest is untouched')
+  assert.equal(claims.get(3), 'sessionB', 'B’s guest is untouched')
+})

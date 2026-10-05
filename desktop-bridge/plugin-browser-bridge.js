@@ -375,15 +375,25 @@ async function handle(request) {
       }
     }
     // The guest attaches asynchronously once the renderer creates the webview.
+    //
+    // Only a guest that was NOT there before counts. `created[0]` is simply the first webview in
+    // the process: with tabs already open the check is true immediately, so this returned someone
+    // else's tab, navigated it to the requested url and reported `created: true`. That is both
+    // halves of the reported symptom — "it says it failed" and "the page turned up in another
+    // session's tab" — from one line. The set difference is the guest this call made.
+    const before = new Set(webContents.getAllWebContents().filter(c => c.getType() === 'webview').map(c => c.id))
     for (let attempt = 0; attempt < 24; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 500))
-      const created = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
-      if (created.length > 0) {
+      const fresh = webContents.getAllWebContents()
+        .filter(contents => contents.getType() === 'webview')
+        .filter(contents => !before.has(contents.id))
+      if (fresh.length > 0) {
         // Now that a guest exists, navigation is a plain CDP call: no UI involved.
         if (url !== '') {
-          await sendCdp(created[0].id, 'Page.navigate', { url }).catch(() => undefined)
+          await sendCdp(fresh[0].id, 'Page.navigate', { url }).catch(() => undefined)
         }
-        return { ok: true, created: true, id: created[0].id, via: restored?.result?.value === 'RESTORED' ? 'restore' : 'address' }
+        claims.set(fresh[0].id, owner)
+        return { ok: true, created: true, id: fresh[0].id, via: restored?.result?.value === 'RESTORED' ? 'restore' : 'address', owner }
       }
     }
     throw new Error(`the sidebar did not create a browser guest (prepare=${String(verdict)}, restore=${String(restored?.result?.value)}, submit=${submitVerdict})`)
