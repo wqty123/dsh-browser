@@ -235,7 +235,14 @@ async function handle(request) {
     // retry created another one. That is the reported "it keeps creating new browser entries".
     // The guide page has to be turned into a browser page exactly once, and only then is there an
     // address bar to type into.
-    const addressBarVisible = async () => String(await sendCdp(shell.id, 'Runtime.evaluate', {
+    // String(...) must wrap the VALUE, not the response.
+    //
+    // Written the other way round first — `String(await sendCdp(...))?.result?.value` — which
+    // stringifies the whole reply, leaves `.result` undefined, and therefore returns undefined
+    // for every call. `=== 'YES'` was then never true, so the newTab path always took the "click
+    // the card" branch and made a page it did not need. Three rounds of "it keeps creating new
+    // browser entries" trace back to this one misplaced parenthesis.
+    const addressBarVisible = async () => String((await sendCdp(shell.id, 'Runtime.evaluate', {
       expression: `(() => {
         const visible = (el) => {
           const r = el.getBoundingClientRect();
@@ -247,7 +254,7 @@ async function handle(request) {
           && /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || ''))) ? 'YES' : 'NO';
       })()`,
       returnByValue: true,
-    }))?.result?.value
+    }))?.result?.value ?? '')
     let prepared
     // Set when the launcher card has been clicked, so the no-url route below cannot click it a
     // second time: `newTab` already does that when the tab is still a guide page, and two clicks
@@ -378,8 +385,15 @@ async function handle(request) {
       //
       // Skipped entirely if the newTab path above already clicked the card: two clicks make two
       // pages, and this route runs after that one.
-      const created = cardClicked
-        ? { result: { value: 'ALREADY_CLICKED' } }
+      //
+      // Also skipped when an address bar is ALREADY visible, even though no url was given: a
+      // visible address bar means a browser page exists, and the caller will navigate it in a
+      // moment. Clicking the card there creates a second page nobody asked for — which is how
+      // "it keeps creating new browser entries" came back a third time. Found by counting clicks
+      // in a harness, not by reading the code.
+      const addressBarAlready = await addressBarVisible() === 'YES'
+      const created = cardClicked || addressBarAlready
+        ? { result: { value: addressBarAlready ? 'ADDRESS_BAR_PRESENT' : 'ALREADY_CLICKED' } }
         : await sendCdp(shell.id, 'Runtime.evaluate', {
         expression: `(() => {
           const clickables = (root, out = []) => {
@@ -401,10 +415,11 @@ async function handle(request) {
         returnByValue: true,
       })
       const cardVerdict = String(created?.result?.value ?? '')
-      // Only when the card was NOT clicked: if it was, a browser page exists and the restore
-      // probe would either find nothing or — worse, given what that probe reports on this
-      // desktop — claim to have restored into a page that is already there.
-      if (cardVerdict !== 'CLICKED_CARD' && cardVerdict !== 'ALREADY_CLICKED') {
+      // Only when the card was NOT clicked. If it was — or if an address bar was already present,
+      // which means a page exists — the restore probe would either find nothing or, worse given
+      // what that probe reports on this desktop, claim to have restored into the page that is
+      // already there.
+      if (cardVerdict !== 'CLICKED_CARD' && cardVerdict !== 'ALREADY_CLICKED' && cardVerdict !== 'ADDRESS_BAR_PRESENT') {
         restored = await sendCdp(shell.id, 'Runtime.evaluate', {
           expression: `(() => {
             const nodes = Array.from(document.querySelectorAll('button,a,[role=button],div[role=link]'));
