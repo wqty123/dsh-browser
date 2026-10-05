@@ -121,6 +121,34 @@ const settings = await call('cdp', {
 check('the settings route answers the page', String(settings?.result?.result?.value ?? '') === '200',
   String(settings?.result?.result?.value ?? 'no answer'))
 
+// --------------------------------------------------------------------- closing a page
+// The release chain: the host resolves titles through `list` WITH an owner, then asks the bridge
+// to close them. Every one of those calls was missing its owner after the ledger landed, and the
+// failure was silent — nothing closed and nothing was reported. So this checks the OUTCOME, and
+// also that the other page survived, which is the isolation half of the same rule.
+const doomed = ids[1]
+const survivor = ids[0]
+if (Number.isFinite(doomed) && Number.isFinite(survivor)) {
+  const beforeClose = (await call('list', { owner: 'acceptance' })).sidebar ?? []
+  const doomedTitle = beforeClose.find(g => g.id === doomed)?.title
+  let closed = false
+  try {
+    const answer = await call('closeSidebarBrowser', {
+      owner: 'acceptance',
+      ...typeof doomedTitle === 'string' && doomedTitle !== '' ? { titles: [doomedTitle] } : {},
+    }, 30_000)
+    closed = Number(answer?.closed ?? 0) > 0
+  } catch (error) {
+    console.log(`        close attempt: ${String(error.message).slice(0, 60)}`)
+  }
+  await new Promise(resolve => setTimeout(resolve, 1_200))
+  const afterClose = (await call('list', { owner: 'acceptance' })).sidebar ?? []
+  check('closing one page actually closes it', closed && afterClose.every(g => g.id !== doomed),
+    closed ? `closed=${String(closed)}` : 'the bridge reported nothing closed')
+  check('and the other page survives', afterClose.some(g => g.id === survivor),
+    `survivor ${String(survivor)} present: ${String(afterClose.some(g => g.id === survivor))}`)
+}
+
 console.log('')
 const failed = results.filter(r => !r.ok)
 console.log(failed.length === 0

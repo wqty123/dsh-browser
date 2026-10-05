@@ -51,6 +51,22 @@ function makeBridge (broken = '') {
           continue
         }
         if (request.op === 'showTab') { reply({ ok: true, verdict: 'CLICKED' }); continue }
+        if (request.op === 'closeSidebarBrowser') {
+          // Actually close: the acceptance script checks the OUTCOME, so a fake that only
+          // pretends would make the close checks meaningless. Only this owner's guests, matching
+          // the bridge's rule, and only those the titles select.
+          const wanted = Array.isArray(request.titles) ? request.titles : undefined
+          let closed = 0
+          for (let i = guests.length - 1; i >= 0; i--) {
+            const guest = guests[i]
+            if (guest.owner !== owner) continue
+            if (wanted !== undefined && !wanted.some(w => String(guest.title).startsWith(w))) continue
+            guests.splice(i, 1)
+            closed += 1
+          }
+          reply({ ok: true, closed })
+          continue
+        }
         if (request.op === 'cdp') {
           const expression = String(request.params?.expression ?? '')
           reply({ ok: true, result: { result: { value: expression.includes('settings') ? '200' : 'https://example.com/' } } })
@@ -86,7 +102,7 @@ async function runAgainst (broken) {
 test('the acceptance script passes against a correct bridge', async () => {
   const { code, out } = await runAgainst('')
   assert.equal(code, 0, 'it should pass:\n' + out)
-  assert.match(out, /ALL 6 CHECKS PASS/)
+  assert.match(out, /ALL 8 CHECKS PASS/)
 })
 
 test('the acceptance script FAILS when newTab reuses an existing page', async () => {
