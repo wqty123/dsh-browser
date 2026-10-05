@@ -144,6 +144,31 @@ const other = await call('list', { owner: 'a-different-session' })
 const leaked = (other.sidebar ?? []).filter(guest => ids.includes(guest.id)).length
 check('another session cannot see these pages', leaked === 0, `${leaked} leaked`)
 
+// --------------------------------------------- two sessions, each opening its own page
+// The reported symptom was "the window another session wanted to open came into THIS one", and the
+// check above does not reach it: it only asks whether a stranger can SEE these pages. This asks
+// whether a second session that opens one of its own gets its own — the cross-session bleed that
+// took four rounds to fix, tested the way the user hit it.
+{
+  const sessionA = 'isolation-A'
+  const sessionB = 'isolation-B'
+  const a = await call('ensureSidebar', { owner: sessionA, url: 'https://example.com/' })
+  const b = await call('ensureSidebar', { owner: sessionB, url: 'https://example.org/' })
+  check('two sessions opening a page each get DIFFERENT pages',
+    Number.isFinite(a.id) && Number.isFinite(b.id) && a.id !== b.id,
+    `A=${String(a.id)} B=${String(b.id)}`)
+
+  const listA = ((await call('list', { owner: sessionA })).sidebar ?? []).map(g => g.id)
+  const listB = ((await call('list', { owner: sessionB })).sidebar ?? []).map(g => g.id)
+  check('and neither can see the other’s page',
+    listA.includes(Number(a.id)) && !listA.includes(Number(b.id))
+    && listB.includes(Number(b.id)) && !listB.includes(Number(a.id)),
+    `A sees ${JSON.stringify(listA)}, B sees ${JSON.stringify(listB)}`)
+
+  // Hand them back so the checks below start from the same place they would on a fresh run.
+  try { await call('closeSidebarBrowser', { owner: 'acceptance', titles: [] }, 20_000) } catch { /* best effort */ }
+}
+
 // ---------------------------------------------------------------------- settings write
 const settings = await call('cdp', {
   id: ids[0],

@@ -105,7 +105,7 @@ async function runAgainst (broken) {
 test('the acceptance script passes against a correct bridge', async () => {
   const { code, out } = await runAgainst('')
   assert.equal(code, 0, 'it should pass:\n' + out)
-  assert.match(out, /ALL 8 CHECKS PASS/)
+  assert.match(out, /ALL 10 CHECKS PASS/)
 })
 
 test('the acceptance script FAILS when newTab reuses an existing page', async () => {
