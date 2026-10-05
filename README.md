@@ -93,7 +93,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
   <tr>
     <td width="50%" valign="top">
       <h3>多标签会话</h3>
-      <p>并行打开 URL,查看/切换/关闭/重置标签,每个会话的状态独立保持。桌面端下<b>每个会话独占侧栏里自己的一个标签页</b>,结束一个会话不会影响另一个。</p>
+      <p>并行打开 URL,查看/切换/关闭/重置标签,每个会话的状态独立保持。桌面端下<b>每个会话独占侧栏里自己的标签页,并可在自己的会话里继续开新标签</b>,结束一个会话不会影响另一个。</p>
     </td>
     <td width="50%" valign="top">
       <h3>多格式内容</h3>
@@ -153,7 +153,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
   <tr>
     <td width="50%" valign="top">
       <h3>设置页里的「浏览器」栏</h3>
-      <p><b>用哪个浏览器</b>(内置 Electron / 本机 Chrome / 本机 Edge / 自动)、历史是否保留、侧栏是否自动展开、会话结束时是否关闭浏览器、是否显示光标、视觉策略、是否允许读取凭据 —— 这些开关都是<b>每次使用时现读</b>,改完即时生效,无需重启。<b>只有两个例外</b>:<code>browser.channel</code>(用哪个浏览器)与 <code>cookies.persist</code>(是否保留 cookies)在插件挂载时读取一次,改完需要<b>重新加载插件</b>(重启 dsh / 刷新页面)才生效。栏里另有一组「Agent 能做什么」的动作开关 —— <b>执行页面脚本</b>、<b>下载文件到磁盘</b>、<b>写入登录状态</b> —— 它们与 <code>browser_restrict</code> 不是一回事:后者是模型自己的软护栏,模型随时可以解除;这三项写在设置文档里,<b>没有任何工具能改它</b>,模型只能被拒。</p>
+      <p><b>用哪个浏览器</b>(侧栏浏览器 / 内置 Electron / 本机 Chrome / 本机 Edge / 自动)、历史是否保留、侧栏是否自动展开、会话结束时是否关闭浏览器、是否显示光标、视觉策略、是否允许读取凭据 —— 这些开关都是<b>每次使用时现读</b>,改完即时生效,无需重启。<b>只有两个例外</b>:<code>browser.channel</code>(用哪个浏览器)与 <code>cookies.persist</code>(是否保留 cookies)在插件挂载时读取一次,改完需要<b>重新加载插件</b>(重启 dsh / 刷新页面)才生效。栏里另有一组「Agent 能做什么」的动作开关 —— <b>执行页面脚本</b>、<b>下载文件到磁盘</b>、<b>写入登录状态</b> —— 它们与 <code>browser_restrict</code> 不是一回事:后者是模型自己的软护栏,模型随时可以解除;这三项写在设置文档里,<b>没有任何工具能改它</b>,模型只能被拒。</p>
     </td>
     <td width="50%" valign="top">
       <h3>收尾明确</h3>
@@ -379,7 +379,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 | Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
 | 本机 Chrome / Edge(可选载体) | `154.0.8037.58` / `154.0.4258.37` |
-| dsh-builtin-browser | `0.4.3`(未发布,开发分支) |
+| dsh-builtin-browser | `0.4.4`(未发布,开发分支) |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`。**核心链路在 Windows 上完整实测**;系统浏览器的查找已适配 Linux 与 macOS(先查 `PATH`,再查各平台的惯例安装位置,均可用 `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH` 覆盖),但这两个平台上的**端到端链路尚未实测**,暂不承诺。

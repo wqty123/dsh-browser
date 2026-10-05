@@ -93,7 +93,7 @@ See the full list in [Tool reference](#tool-reference).
   <tr>
     <td width="50%" valign="top">
       <h3>Multi-tab sessions</h3>
-      <p>Open URLs in parallel tabs; list/switch/close/reset tabs while each session keeps its own state. On the desktop <b>each session gets its own tab in the sidebar</b>, so ending one session does not disturb another.</p>
+      <p>Open URLs in parallel tabs; list/switch/close/reset tabs while each session keeps its own state. On the desktop <b>each session gets its own tab in the sidebar, and can open further tabs within it</b>, so ending one session does not disturb another.</p>
     </td>
     <td width="50%" valign="top">
       <h3>Multi-format content</h3>
@@ -153,7 +153,7 @@ See the full list in [Tool reference](#tool-reference).
   <tr>
     <td width="50%" valign="top">
       <h3>A "Browser" section in Settings</h3>
-      <p><b>Which browser</b> (bundled Electron / installed Chrome / installed Edge / automatic), keep history, auto-expand the side panel, close the browser when a session ends, show the cursor, vision strategy, allow credential reads — every one of these is <b>read fresh on each use</b>, so a change takes effect immediately with no restart. <b>Two exceptions</b>: <code>browser.channel</code> (which browser) and <code>cookies.persist</code> (keep cookies) are read once when the plugin is applied, so changing either needs a <b>plugin reload</b> (restart dsh / refresh the page). The section also carries a group of <b>"What the agent may do"</b> switches — <b>run scripts in the page</b>, <b>download files to disk</b>, <b>write login state</b>. They are not the same thing as <code>browser_restrict</code>: that one is the model's own soft guardrail and the model can lift it whenever it likes, while these live in the settings document, which <b>no tool can write</b> — the model can only be refused.</p>
+      <p><b>Which browser</b> (sidebar browser / bundled Electron / installed Chrome / installed Edge / automatic), keep history, auto-expand the side panel, close the browser when a session ends, show the cursor, vision strategy, allow credential reads — every one of these is <b>read fresh on each use</b>, so a change takes effect immediately with no restart. <b>Two exceptions</b>: <code>browser.channel</code> (which browser) and <code>cookies.persist</code> (keep cookies) are read once when the plugin is applied, so changing either needs a <b>plugin reload</b> (restart dsh / refresh the page). The section also carries a group of <b>"What the agent may do"</b> switches — <b>run scripts in the page</b>, <b>download files to disk</b>, <b>write login state</b>. They are not the same thing as <code>browser_restrict</code>: that one is the model's own soft guardrail and the model can lift it whenever it likes, while these live in the settings document, which <b>no tool can write</b> — the model can only be refused.</p>
     </td>
     <td width="50%" valign="top">
       <h3>Unambiguous teardown</h3>
@@ -379,7 +379,7 @@ The settings panel can point the plugin at an **installed Chrome or Edge** (`bro
 | Electron | `44.0.0` (≥ 40 recommended; 33.x has a compositor defect) |
 | Node.js | `22.20.0` |
 | Installed Chrome / Edge (optional carriers) | `154.0.8037.58` / `154.0.4258.37` |
-| dsh-builtin-browser | `0.4.3` (unreleased, on the development branch) |
+| dsh-builtin-browser | `0.4.4` (unreleased, on the development branch) |
 | OS | Windows 10 (10.0.26200) |
 
 > The plugin declares `electron >= 30`. The **core path is fully verified on Windows**; system-browser detection is now adapted for Linux and macOS (PATH first, then each platform's conventional install locations, all overridable with `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH`), but the end-to-end path on those platforms has not been measured, so no promise is made yet.
