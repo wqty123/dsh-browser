@@ -9,16 +9,33 @@
  * It is NOT authentication, and cannot be. The plugin has no credential to check: DSH hands
  * plugin routes the raw request (`packages/host/webserver/src/index.ts` registers handlers with
  * no gate of its own), so the strongest same-origin evidence available is what a browser
- * reliably sends — `Sec-Fetch-Site`, plus `Origin` on every write, same-origin included.
+ * reliably sends.
  *
  * What that buys and what it does not:
- *   - a plain HTTP client (curl, a script, another process) cannot WRITE any more, because it
- *     sends no `Origin`;
- *   - a page of THIS origin still can, because a browser sending a same-origin write looks
- *     exactly like the panel. That is inherent to exposing an HTTP endpoint at all, and it is
- *     why the settings panel's own text must not promise a lock that does not exist.
+ *   - a plain HTTP client (curl, a script, another process) cannot WRITE, because it sends no
+ *     `user-agent` and no `accept-language`;
+ *   - a page of THIS origin can, because a browser sending a same-origin write looks exactly
+ *     like the panel. That is inherent to exposing an HTTP endpoint at all, and it is why the
+ *     settings panel's own text must not promise a lock that does not exist.
  */
 import type { IncomingMessage } from 'node:http'
+
+/** The shell's own URL schemes. Only the shell can mint a document on one of these. */
+const APP_SCHEMES = ['dsh-app:', 'dsh-desktop:']
+
+/**
+ * The scheme of a header value, when it names a URL.
+ * @param value - a raw header value.
+ * @returns the scheme, or undefined when the value is absent, opaque or unparseable.
+ */
+function schemeOf(value: string): string | undefined {
+  if (value === '' || value === 'null') return undefined
+  try {
+    return new URL(value).protocol
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * Whether a request may touch the settings document.
@@ -28,39 +45,38 @@ import type { IncomingMessage } from 'node:http'
  */
 export function sameOrigin(request: IncomingMessage, writing = false): boolean {
   const origin = String(request.headers.origin ?? '').trim()
+  const site = String(request.headers['sec-fetch-site'] ?? '').toLowerCase()
 
-  // The desktop shell's own schemes come FIRST, before any header-based check.
+  // A shell URL, in either the Origin or the referrer: the strongest evidence there is.
+  if (APP_SCHEMES.includes(schemeOf(origin) ?? '')) return true
+  if (APP_SCHEMES.includes(schemeOf(String(request.headers.referer ?? '')) ?? '')) return true
+
+  // MEASURED on the running desktop, and what three earlier attempts each guessed wrong: a
+  // request from the shell's own settings panel carries NO origin, NO sec-fetch-site and NO
+  // referer. It is not "dsh-app://app" and it is not "null" — the headers are simply absent,
+  // because Chromium attaches no cross-origin metadata to a request leaving a custom scheme.
   //
-  // Order is the whole point here. The shell serves its UI from `dsh-app://app` while plugin
-  // routes live on `http://127.0.0.1:<port>`, so a request from the panel is a CROSS-SCHEME
-  // request and the browser reports `Sec-Fetch-Site: cross-site` for it — which the check below
-  // refuses before `Origin` is ever examined. Putting the scheme test afterwards (the first
-  // attempt) therefore changed nothing: the desktop panel still could not save a single setting,
-  // and the option looked present and inert.
-  //
-  // Accepting the scheme is sound rather than a loosening. Only the shell can mint a
-  // `dsh-app://` document: it is not a scheme a web page can navigate to, and no other process
-  // on the machine can set `Origin` to it. `Sec-Fetch-Site` remains the discriminator for
-  // http(s), where it is meaningful, and curl still cannot write because it sends no `Origin`.
-  const APP_SCHEMES = ['dsh-app:', 'dsh-desktop:']
-  if (origin !== '' && origin !== 'null') {
-    try {
-      if (APP_SCHEMES.includes(new URL(origin).protocol)) return true
-    } catch {
-      // An unparseable Origin falls through to the ordinary checks below.
-    }
+  // So the rule for that shape cannot be "a request without an Origin is a script", which is
+  // what refused every desktop save, and it cannot lean on `Sec-Fetch-Site` either. It has to
+  // test what a hand-rolled client does not send:
+  //   - a renderer sends a full Mozilla-compatible `user-agent` AND an `accept-language`;
+  //   - curl sends neither unless told to, and a local process that forges both can also read
+  //     the settings document directly — it sits readable on disk, as the panel's own text
+  //     says. This was never the boundary it looked like.
+  if (origin === '') {
+    const agent = String(request.headers['user-agent'] ?? '')
+    const language = String(request.headers['accept-language'] ?? '')
+    if (/^Mozilla\/5\.0/.test(agent) && language !== '') return true
+    // Reads stay open: they return the document the panel is already showing, and refusing them
+    // would only break hand-inspection of a file that sits readable on disk anyway.
+    return !writing
   }
 
-  const site = String(request.headers['sec-fetch-site'] ?? '').toLowerCase()
   // `cross-site` is another origin entirely; `same-site` is another origin of the same site
   // (a.example.com -> b.example.com), which is not this panel either. Both are refused.
   if (site === 'cross-site' || site === 'same-site') return false
-  // `Origin: null` is what a sandboxed or opaque-origin document sends. Never this panel.
+  // `Origin: null` is a sandboxed or opaque-origin document. Never this panel.
   if (origin === 'null') return false
-  // Reads are let through without an Origin: they return the document the panel is already
-  // showing, and refusing them would only break hand-inspection of a file that sits readable
-  // on disk anyway. Writes are not: a browser always sends `Origin` on one.
-  if (origin === '') return !writing
   try {
     const parsed = new URL(origin)
     // The host comparison is for http(s), where a page and its route share one host.

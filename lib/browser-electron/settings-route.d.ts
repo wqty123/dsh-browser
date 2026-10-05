@@ -9,14 +9,14 @@
  * It is NOT authentication, and cannot be. The plugin has no credential to check: DSH hands
  * plugin routes the raw request (`packages/host/webserver/src/index.ts` registers handlers with
  * no gate of its own), so the strongest same-origin evidence available is what a browser
- * reliably sends — `Sec-Fetch-Site`, plus `Origin` on every write, same-origin included.
+ * reliably sends.
  *
  * What that buys and what it does not:
- *   - a plain HTTP client (curl, a script, another process) cannot WRITE any more, because it
- *     sends no `Origin`;
- *   - a page of THIS origin still can, because a browser sending a same-origin write looks
- *     exactly like the panel. That is inherent to exposing an HTTP endpoint at all, and it is
- *     why the settings panel's own text must not promise a lock that does not exist.
+ *   - a plain HTTP client (curl, a script, another process) cannot WRITE, because it sends no
+ *     `user-agent` and no `accept-language`;
+ *   - a page of THIS origin can, because a browser sending a same-origin write looks exactly
+ *     like the panel. That is inherent to exposing an HTTP endpoint at all, and it is why the
+ *     settings panel's own text must not promise a lock that does not exist.
  */
 import type { IncomingMessage } from 'node:http';
 /**
