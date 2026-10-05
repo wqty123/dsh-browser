@@ -358,21 +358,56 @@ async function handle(request) {
     let restored = { result: { value: 'NO_RESTORE' } }
     const haveUrl = url !== ''
     if (!haveUrl) {
-      restored = await sendCdp(shell.id, 'Runtime.evaluate', {
+      // No url — and this is the ordinary case, not an edge one.
+      //
+      // The host reaches here FIRST with no url, because the command that opens a view is
+      // `documentStamp`, which evaluates a script rather than navigating; `Page.navigate` comes
+      // afterwards and carries the address. So "there is nothing to type" must still produce a
+      // usable page, or the first browser_open of every session dies waiting for a guest that
+      // nobody created. That was the real shape of "it worked the first time once".
+      //
+      // The route: the same launcher card the newTab path uses, clicked once. It creates the
+      // browser page, empty, and the host navigates it a moment later. The restore affordance is
+      // tried only after that, because on this desktop it reports RESTORED for an element that
+      // restores nothing.
+      const created = await sendCdp(shell.id, 'Runtime.evaluate', {
         expression: `(() => {
-          const nodes = Array.from(document.querySelectorAll('button,a,[role=button],div[role=link]'));
-          const hit = nodes.find(n => {
+          const clickables = (root, out = []) => {
+            for (const node of root.querySelectorAll('button,[role=button]')) {
+              out.push(node);
+              if (node.shadowRoot) clickables(node.shadowRoot, out);
+            }
+            return out;
+          };
+          const card = clickables(document).find(n => {
             const own = (n.textContent || '').trim();
             if (own.length > 24) return false;
-            return /^(恢复页面|恢复上次|恢复上次页面|上次打开)$/.test(own)
-              || /恢复|restore/i.test(n.getAttribute('aria-label') || n.getAttribute('title') || '');
+            return /浏览器/.test(own) && /浏览网页/.test(own);
           });
-          if (hit === undefined) return 'NO_RESTORE';
-          hit.click();
-          return 'RESTORED';
+          if (card === undefined) return 'NO_CARD';
+          card.click();
+          return 'CLICKED_CARD';
         })()`,
         returnByValue: true,
       })
+      const cardVerdict = String(created?.result?.value ?? '')
+      if (cardVerdict !== 'CLICKED_CARD') {
+        restored = await sendCdp(shell.id, 'Runtime.evaluate', {
+          expression: `(() => {
+            const nodes = Array.from(document.querySelectorAll('button,a,[role=button],div[role=link]'));
+            const hit = nodes.find(n => {
+              const own = (n.textContent || '').trim();
+              if (own.length > 24) return false;
+              return /^(恢复页面|恢复上次|恢复上次页面|上次打开)$/.test(own)
+                || /恢复|restore/i.test(n.getAttribute('aria-label') || n.getAttribute('title') || '');
+            });
+            if (hit === undefined) return 'NO_RESTORE';
+            hit.click();
+            return 'RESTORED';
+          })()`,
+          returnByValue: true,
+        })
+      }
     }
     // A deliberate no-op guard rather than a dead branch to clean up: this block used to be
     // conditional on the restore route not having run, the condition was removed, and unwrapping
