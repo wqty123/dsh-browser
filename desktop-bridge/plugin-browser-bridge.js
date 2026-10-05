@@ -114,9 +114,17 @@ async function sendCdp(id, method, params) {
 /** Handle one JSON request line; every answer is a JSON line too. */
 async function handle(request) {
   const op = String(request?.op ?? '')
+  // Who is asking. Declared once, for every op, because the first attempt at this put `owner` in
+  // the allocation path only and the reuse path — which every later call takes — stayed blind,
+  // so one session was handed another's page and counted another's tabs as its own.
+  const owner = typeof request?.owner === 'string' && request.owner !== '' ? request.owner : 'anonymous'
   if (op === 'list') {
     const all = webContents.getAllWebContents().map(describe)
-    return { ok: true, guests: all, sidebar: all.filter(g => g.type === 'webview') }
+    // A guest claimed by another owner is not this caller's to see or to drive. Its id, url and
+    // title are that session's business; handing them over is how a session came to list pages it
+    // never opened. The shell window is always reported: it is what every op drives.
+    const mineOrFree = all.filter(g => g.type !== 'webview' || !claims.has(g.id) || claims.get(g.id) === owner)
+    return { ok: true, guests: mineOrFree, sidebar: mineOrFree.filter(g => g.type === 'webview') }
   }
   if (op === 'cdp') {
     const id = Number(request.id)
@@ -529,6 +537,13 @@ async function handle(request) {
     if (!Number.isFinite(viewId)) throw new Error('showTab needs a viewId')
     const guest = webContents.fromId(viewId)
     if (guest === undefined) throw new Error(`showTab: no guest with id ${viewId}`)
+    // Only a guest this caller holds may be brought forward. Without the check, one session could
+    // switch the sidebar to another session's page — moving the human's view out from under it.
+    pruneClaims()
+    if (claims.has(viewId) && claims.get(viewId) !== owner) {
+      throw new Error(`showTab: guest ${viewId} belongs to another session`)
+    }
+    claims.set(viewId, owner)
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
     const wantTitle = String(guest.getTitle() ?? '').trim()
@@ -578,8 +593,19 @@ async function handle(request) {
     // ending one session must not tear down another's page. With no titles given the
     // call means "release everything", which is only appropriate when the caller
     // knows it owns them all.
+    //
+    // The comment above said that; the code below did not enforce it. It closed every webview
+    // whose title matched — and with no filter, EVERY webview — regardless of which session held
+    // it. So one session's `browser_reset_session` could destroy another session's page, which is
+    // the worst version of the bleed: not merely seeing someone else's tab, but closing it.
+    //
+    // Ownership is now the outer bound: only guests this owner holds are candidates at all, and
+    // the title filter narrows further within them.
+    pruneClaims()
     const wanted = Array.isArray(request.titles) ? request.titles.map(title => String(title).slice(0, 24)).filter(title => title !== '') : undefined
-    const guests = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
+    const guests = webContents.getAllWebContents()
+      .filter(contents => contents.getType() === 'webview')
+      .filter(contents => claims.get(contents.id) === owner)
     const titles = []
     for (const guest of guests) {
       try {
