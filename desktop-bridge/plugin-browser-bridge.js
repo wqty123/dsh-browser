@@ -374,6 +374,10 @@ async function handle(request) {
         returnByValue: true,
       })
     }
+    // A deliberate no-op guard rather than a dead branch to clean up: this block used to be
+    // conditional on the restore route not having run, the condition was removed, and unwrapping
+    // the braces now would re-indent sixty lines of the most delicate code in this file for no
+    // behavioural change. The rule this project runs on is not to disturb what works.
     if (true) {
       if (url !== '') {
         // Set the value the way React accepts it, then SUBMIT THE FORM.
