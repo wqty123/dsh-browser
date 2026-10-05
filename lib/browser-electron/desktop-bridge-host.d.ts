@@ -38,6 +38,17 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     private readonly connection;
     private readonly views;
     /**
+     * This process's identity with the bridge, for tab ownership.
+     *
+     * Every DSH session is its own plugin process, and the sidebar is one surface they all share.
+     * A session can only see its own `views` map, so before the bridge kept a ledger it adopted
+     * whichever tab it found — including one another session had opened, which is how a URL from
+     * one session appeared in another's sidebar. The id is per process, so two sessions never
+     * collide and one session's tabs are never handed to another; it is deliberately not the DSH
+     * session id, which this layer has no access to and does not need.
+     */
+    private readonly owner;
+    /**
      * Guests whose view is gone but whose page may still be open in the sidebar.
      *
      * The provider destroys its view handles before it asks for a release, so the
@@ -87,7 +98,7 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      */
     private guestFor;
     /**
-     * Ask for at least `count` sidebar tabs and return their guest ids.
+     * Ask for at least `count` tabs belonging to this session and return their guest ids.
      * @param count - minimum number of tabs.
      */
     private guestIds;

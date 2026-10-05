@@ -48,6 +48,27 @@ function endpointFile() {
 /** One CDP command against a guest, serialized per guest. */
 const queues = new Map()
 
+/**
+ * Which owner holds which sidebar guest.
+ *
+ * The sidebar is a single surface shared by every DSH session, and each session runs in its own
+ * plugin process with its own in-memory view map. A session could therefore only see its OWN
+ * claims, and would adopt any tab it found — including one another session had opened. The
+ * symptom was a URL opened in one session appearing in another's sidebar, with the first
+ * session reporting failure.
+ *
+ * The ledger lives here because this process is the one that owns the sidebar, so it is the only
+ * place where "who holds what" can be a single shared fact. Owners are per-process ids supplied
+ * by the plugin; an entry is dropped when its guest disappears so a closed tab can be reused.
+ */
+const claims = new Map()
+
+/** Forget claims whose guest no longer exists, so a closed tab's id is not held forever. */
+function pruneClaims() {
+  const live = new Set(webContents.getAllWebContents().filter(c => c.getType() === 'webview').map(c => c.id))
+  for (const id of [...claims.keys()]) if (!live.has(id)) claims.delete(id)
+}
+
 function guestById(id) {
   for (const contents of webContents.getAllWebContents()) {
     if (contents.id === id) return contents
@@ -270,12 +291,40 @@ async function handle(request) {
     const want = Math.max(1, Math.min(8, Number(request.count ?? 1)))
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
+
+    // Who is asking, and which guests are already theirs.
+    //
+    // The sidebar is ONE surface shared by every DSH session, and each session is its own
+    // process with its own in-memory view map — so a session could only see its OWN claims and
+    // would happily adopt a tab another session had opened. That is how a URL opened in one
+    // session showed up in another's sidebar. The ledger therefore lives HERE, in the single
+    // process that owns the sidebar, and the plugin passes a per-process owner id.
+    const owner = typeof request.owner === 'string' && request.owner !== '' ? request.owner : 'anonymous'
+    pruneClaims()
+    const mine = new Set()
+    for (const [guest, holder] of claims) if (holder === owner) mine.add(guest)
+
+    // Tabs that exist but belong to nobody: safe to hand out. Tabs held by another owner are
+    // never returned, which is the whole point — one session no longer drives another's page.
+    const unclaimed = (ids) => ids.filter(id => !claims.has(id) || claims.get(id) === owner)
+
     const rounds = 30
     let lastVerdict = ''
     let sawControl = false
     for (let attempt = 0; attempt < rounds; attempt++) {
       const guests = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
-      if (guests.length >= want) return { ok: true, ids: guests.map(contents => contents.id), verdict: lastVerdict }
+      // Hand back ONLY this owner's tabs plus tabs nobody has claimed, and claim what we hand
+      // out. Returning every guest — which is what this did — is how one session ended up
+      // driving another session's page: the ids were real, but the callers were not their owners.
+      const available = unclaimed(guests.map(contents => contents.id))
+      // Reclaim ours first so repeated calls from the same session are stable, then fill the
+      // remainder from unclaimed tabs, then — only if still short — grow the strip.
+      const ordered = [...mine, ...available.filter(id => !mine.has(id))]
+      if (ordered.length >= want) {
+        const chosen = ordered.slice(0, want)
+        for (const id of chosen) claims.set(id, owner)
+        return { ok: true, ids: chosen, verdict: lastVerdict, owner, claimed: chosen }
+      }
       const clicked = await sendCdp(shell.id, 'Runtime.evaluate', {
         expression: `(() => {
           const seen = [];
@@ -303,6 +352,16 @@ async function handle(request) {
       await new Promise(resolve => setTimeout(resolve, 600))
     }
     if (!sawControl) {
+      // The strip may genuinely have the tabs this owner needs while the "new tab" control is
+      // unreachable — a clickable strip without a plus button. Report what we can serve before
+      // declaring failure, so a session that already owns a tab is not told it has none.
+      const guests = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
+      const available = unclaimed(guests.map(contents => contents.id))
+      const ordered = [...mine, ...available.filter(id => !mine.has(id))]
+      if (ordered.length > 0) {
+        for (const id of ordered) claims.set(id, owner)
+        return { ok: true, ids: ordered, verdict: 'NO_CONTROL_BUT_REUSED', owner, claimed: ordered }
+      }
       throw new Error(
         'the sidebar exposes no new-tab control after ' + String(rounds) + ' attempts '
         + `(last verdict: ${lastVerdict || 'none'}) — the browser tab may not be open, or the `

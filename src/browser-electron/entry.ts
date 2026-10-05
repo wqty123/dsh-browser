@@ -123,9 +123,22 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // process, and dropping it on the floor is how a failed upgrade becomes a leak that only
       // shows up as a stray Electron in the task manager.
       try { host.dispose?.() } catch { /* the fallback below matters more than this */ }
-      unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(
-        new RemoteElectronViewHost(defaultHostMainPath()), providerConfig))
-      ctx.logger?.warn?.(`dsh-builtin-browser: could not adopt ${note} (${String(error)})`)
+      // The fallback registration gets its own guard, because THIS is the path taken when the
+      // context is already gone — and then `ctx.browser` throws `cannot get required service
+      // "browser" in inactive context`. Unguarded, that second throw escaped the async retry
+      // that calls `adopt`, became an unhandled rejection, and killed the host process with
+      // exit code 1: a failed upgrade, which should only ever cost a warning, took the whole
+      // session down instead. Observed 2026-10-05 (crash-…-host.log, phase: running).
+      try {
+        unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(
+          new RemoteElectronViewHost(defaultHostMainPath()), providerConfig))
+        ctx.logger?.warn?.(`dsh-builtin-browser: could not adopt ${note} (${String(error)})`)
+      } catch (fallbackError) {
+        ctx.logger?.warn?.(
+          `dsh-builtin-browser: could not adopt ${note} (${String(error)}), and the fallback `
+          + `registration also failed (${String(fallbackError)}) — no browser provider is `
+          + 'registered for this context')
+      }
     }
   }
 

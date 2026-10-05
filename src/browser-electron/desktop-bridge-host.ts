@@ -60,6 +60,17 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   private readonly connection: BridgeConnection
   private readonly views = new Map<string, number>()
   /**
+   * This process's identity with the bridge, for tab ownership.
+   *
+   * Every DSH session is its own plugin process, and the sidebar is one surface they all share.
+   * A session can only see its own `views` map, so before the bridge kept a ledger it adopted
+   * whichever tab it found — including one another session had opened, which is how a URL from
+   * one session appeared in another's sidebar. The id is per process, so two sessions never
+   * collide and one session's tabs are never handed to another; it is deliberately not the DSH
+   * session id, which this layer has no access to and does not need.
+   */
+  private readonly owner = randomUUID()
+  /**
    * Guests whose view is gone but whose page may still be open in the sidebar.
    *
    * The provider destroys its view handles before it asks for a release, so the
@@ -149,16 +160,20 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     // opens the sidebar (and, on a fresh shell, materializes the first guest).
     const sidebar = await this.connection.call({
       op: 'ensureSidebar',
+      owner: this.owner,
       ...url !== undefined ? { url } : {},
     })
     if (sidebar.ok !== true) throw new Error(`dsh-builtin-browser: sidebar unavailable (${String(sidebar.error)})`)
 
     const wanted = this.views.size + 1
+    // Ask for the tabs THIS session owns, not the ones the sidebar happens to hold. The bridge
+    // keeps the cross-session ledger — a session cannot see another's view map, so without this
+    // it adopted whatever tab it found and drove someone else's page.
     let ids = await this.guestIds(Math.max(1, wanted))
     const taken = new Set(this.views.values())
     let free = ids.find(id => !taken.has(id))
     if (free === undefined) {
-      // Every tab is already driving something: the strip has to grow.
+      // Every tab this session holds is already driving something: the strip has to grow.
       ids = await this.guestIds(ids.length + 1)
       free = ids.find(id => !taken.has(id))
     }
@@ -168,11 +183,11 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   }
 
   /**
-   * Ask for at least `count` sidebar tabs and return their guest ids.
+   * Ask for at least `count` tabs belonging to this session and return their guest ids.
    * @param count - minimum number of tabs.
    */
   private async guestIds(count: number): Promise<number[]> {
-    const answer = await this.connection.call({ op: 'ensureTabs', count })
+    const answer = await this.connection.call({ op: 'ensureTabs', count, owner: this.owner })
     if (answer.ok !== true) throw new Error(`dsh-builtin-browser: could not open a sidebar tab (${String(answer.error)})`)
     const ids = Array.isArray(answer.ids) ? answer.ids.map(Number).filter(Number.isFinite) : []
     if (ids.length === 0) throw new Error('dsh-builtin-browser: the sidebar reported no browser tabs')
