@@ -321,6 +321,10 @@ DSH Desktop is two layers: an Electron shell plus an `--expose-internals` **Node
 
 The result: **the page the agent works on is the page the human looks at**. The plugin no longer spawns its own Electron and no second window appears.
 
+**Which conversation a page lands in is decided by the conversation that asked, never by what is on screen.** The shell mounts one sidebar per conversation, and the plugin's client half opens that conversation's own panel **by session id** (DSH's `openTabIn`) without reading which conversation is displayed — so "ask in A, then switch to B" cannot deliver the page to B, and there is no path from one conversation's request to another's sidebar.
+
+> **One behaviour inherited from the shell**: it renders only the **displayed** conversation's sidebar. When the asking conversation is not the one on screen, its panel is still created (the tab really does land in that conversation), but the page attaches only once that conversation is shown. In practice: after switching away, a further request from A reports "a panel was placed, but the page can only attach while the conversation is displayed" — a notice, not a cross-conversation write.
+
 Install that bridge (it modifies an **installed** desktop app, so it is replayable):
 
 ```bash
