@@ -563,10 +563,168 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     ])
   }
 
+  // ===========================================================================
+  // Conversation panel service: the one place a sidebar panel is opened.
+  //
+  // The shell mounts one right sidebar per conversation, and DSH's own sidebar
+  // browser keeps that conversation's tabs and its webview guest inside it.
+  // `ctx.sidebarRight.openTab` acts on the conversation the shell is SHOWING
+  // (`mounted`), so every path that simulated a shortcut or clicked a card put
+  // the page into whichever conversation the human happened to be reading —
+  // that is the cross-conversation bleed, and it is a property of the path, not
+  // an accident of it.
+  //
+  // `openTabIn(sessionId, …)` is the same navigation aimed at a NAMED
+  // conversation, and it works for one that is not on screen. This service is
+  // the only caller; the plugin's host half reaches it by evaluating
+  // `globalThis.__dshBuiltinBrowser.openPanel(...)` inside the shell window, so
+  // no input event, no key dispatch and no element click is involved.
+  //
+  // Guest identity is read from the panel's own `<webview>` and only inside the
+  // subtree found for THAT conversation — never from the first match in the
+  // document, which belongs to somebody else's panel.
+  // ===========================================================================
+
+  /** The conversation a sidebar element belongs to, read off its React fiber. */
+  function sessionIdOfElement(element) {
+    const key = Object.keys(element).find(
+      name => name.startsWith("__reactFiber$") || name.startsWith("__reactInternalInstance$"),
+    )
+    if (key === undefined) return null
+    let fiber = element[key]
+    let depth = 0
+    while (fiber !== null && fiber !== undefined && depth < 60) {
+      const props = fiber.memoizedProps
+      if (props !== null && typeof props === "object" && typeof props.sessionId === "string") return props.sessionId
+      fiber = fiber.return
+      depth += 1
+    }
+    return null
+  }
+
+  /**
+   * This conversation's own sidebar strip, or null when the shell has not mounted it.
+   *
+   * Its presence is the precondition `openTabIn` needs: it is minted together with the
+   * conversation's surface store, and a call for a conversation whose store was never
+   * minted silently does nothing. Detecting it here turns that silence into a reason
+   * the caller can report, instead of a page that never appears.
+   */
+  function tabStripFor(sessionId) {
+    for (const strip of Array.from(document.querySelectorAll("[class*=_tabStrip]"))) {
+      if (sessionIdOfElement(strip) === sessionId) return strip
+    }
+    return null
+  }
+
+  /** Every live `<webview>` guest inside this conversation's panel subtree. */
+  function guestsInPanel(sessionId) {
+    const strip = tabStripFor(sessionId)
+    if (strip === null) return []
+    // Walk up to the first ancestor that owns a guest: the strip itself is outside the
+    // body region, so the search starts low and stops as soon as it has one. It never
+    // crosses out of this conversation's branch, which is what keeps it scoped.
+    let node = strip
+    while (node !== null && node !== undefined && node !== document.body) {
+      const found = Array.from(node.querySelectorAll("webview")).filter(view => {
+        try { return typeof view.getWebContentsId === "function" && view.getWebContentsId() > 0 }
+        catch (error) { return false }
+      })
+      if (found.length > 0) return found
+      node = node.parentElement
+    }
+    return []
+  }
+
+  /** Read this conversation's current guest, preferring the one actually drawn. */
+  function guestStateFor(sessionId) {
+    const strip = tabStripFor(sessionId)
+    if (strip === null) return { panel: false, guestId: null, url: "" }
+    const guests = guestsInPanel(sessionId)
+    if (guests.length === 0) return { panel: true, guestId: null, url: "" }
+    // A sidebar keeps every tab mounted (`keepMounted`), so a background tab's guest is
+    // in the tree too. Prefer the one with a drawn box; fall back to the newest.
+    const drawn = guests.find(view => {
+      const rect = view.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    })
+    const chosen = drawn === undefined ? guests[guests.length - 1] : drawn
+    let url = ""
+    try { url = String(chosen.getURL ? chosen.getURL() : "") } catch (error) { url = "" }
+    try { return { panel: true, guestId: chosen.getWebContentsId(), url } }
+    catch (error) { return { panel: true, guestId: null, url: "" } }
+  }
+
+  /**
+   * Publish the service every host-side panel request goes through.
+   *
+   * The binding is separate from the publication so the API exists from the first
+   * apply — a request arriving before `sidebarRight` is ready gets a named reason
+   * rather than a missing global, which is indistinguishable from a bridge that
+   * never loaded.
+   */
+  function installPanelService(ctx) {
+    let sidebarRight = null
+    // `inject` is how a client plugin waits for a service to appear. A host that does not offer it
+    // — an older composition, or a harness that mounted this bundle for its settings panel alone —
+    // must still get the panel, so the wait is skipped and the published API names the missing
+    // service when it is called. Failing the whole apply here would take the settings panel down
+    // with it, which is exactly the shape of regression this file has been bitten by before.
+    if (typeof ctx.inject === "function") {
+      ctx.inject(["sidebarRight"], (scope) => {
+        sidebarRight = scope.sidebarRight
+        scope.effect(() => () => {
+          if (sidebarRight === scope.sidebarRight) sidebarRight = null
+        }, "dsh-builtin-browser: conversation panel binding")
+      })
+    }
+    const api = {
+      /** @returns what happened: an existing guest, a newly opened tab, or a named refusal. */
+      openPanel(sessionId, url) {
+        const wanted = typeof sessionId === "string" ? sessionId : ""
+        if (!/^session-/.test(wanted)) {
+          return { ok: false, reason: "not a conversation id: " + JSON.stringify(sessionId), panel: false, guestId: null }
+        }
+        if (sidebarRight === null || typeof sidebarRight.openTabIn !== "function") {
+          return { ok: false, reason: "the shell's sidebar service is not available", panel: false, guestId: null }
+        }
+        const state = guestStateFor(wanted)
+        if (state.guestId !== null) {
+          return { ok: true, created: false, panel: true, guestId: state.guestId, url: state.url }
+        }
+        if (!state.panel) {
+          return {
+            ok: false,
+            reason: "this conversation's sidebar is not mounted, so a panel cannot be opened in it",
+            panel: false,
+            guestId: null,
+          }
+        }
+        try {
+          sidebarRight.openTabIn(wanted, "browser", url ? { params: { url: String(url) } } : {})
+        } catch (error) {
+          return { ok: false, reason: String((error && error.message) || error), panel: true, guestId: null }
+        }
+        return { ok: true, created: true, panel: true, guestId: null }
+      },
+      /** Read-only: this conversation's current guest, if it has one. */
+      panelGuest(sessionId) {
+        return guestStateFor(typeof sessionId === "string" ? sessionId : "")
+      },
+    }
+    ctx.effect(() => {
+      globalThis.__dshBuiltinBrowser = api
+      return () => {
+        if (globalThis.__dshBuiltinBrowser === api) delete globalThis.__dshBuiltinBrowser
+      }
+    }, "dsh-builtin-browser: conversation panel service")
+  }
+
   function apply(ctx) {
     // Before anything renders: the rows need a hover state, and inline styles cannot express
     // one. Idempotent, so a re-apply does not stack copies.
     installStyles()
+    installPanelService(ctx)
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-builtin-browser: dictionaries")
     const t = ctx.locale.bind(NS)
     translate = t

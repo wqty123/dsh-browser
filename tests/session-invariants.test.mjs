@@ -42,11 +42,13 @@ test('every guest-touching op consults the owner ledger', () => {
   assert.deepEqual(offenders, [], 'these ops touch guests without asking who is asking: ' + offenders.join(', '))
 })
 
-test('the launcher card is bounded to one click per call', () => {
-  const clickSites = (bridge.match(/card\.click\(\)/g) ?? []).length
-  const guards = (bridge.match(/cardClicked/g) ?? []).length
-  assert.equal(clickSites, 2, 'two routes may click the card; that is why a guard is required')
-  assert.ok(guards >= 3, 'the guard must be declared, set, and checked — ' + String(guards) + ' mentions')
+test('nothing in the bridge clicks or types into the shell any more', () => {
+  // The mechanism of the reported bug was "do what a human does": press the shell's shortcut,
+  // click the guide card, type into the address bar. Each of those reaches the conversation the
+  // shell DISPLAYS, so each was a route into somebody else's sidebar. That path is gone; the ops
+  // that still drive the sidebar do it by calling the shell's own operation.
+  assert.ok(!/card\.click\(\)/.test(bridge), 'the launcher card is never clicked')
+  assert.ok(!/Input\.dispatchKeyEvent/.test(bridge), 'and no key event is ever dispatched')
 })
 
 test('no CDP reply is stringified before its value is read', () => {
@@ -57,9 +59,12 @@ test('no CDP reply is stringified before its value is read', () => {
     'String() on a response leaves .result undefined, so the reader answers undefined forever')
 })
 
-test('shellPrepareSidebar has exactly one call site', () => {
-  const calls = (bridge.match(/expression: shellPrepareSidebar\(\)/g) ?? []).length
-  assert.equal(calls, 1, 'it clicks the launcher card, so the newTab path must not reach it')
+test('the superseded creation path is gone from the file', () => {
+  // Removed rather than renamed: a legacy branch that still exists is a branch somebody can call
+  // by hand, and this one opened pages into whatever conversation happened to be on screen.
+  assert.ok(!/shellPrepareSidebar/.test(bridge), 'the card clicker is removed')
+  assert.ok(!/legacyEnsureSidebar/.test(bridge), 'and so is the op that wrapped it')
+  assert.ok(!/if \(op === 'ensureTabs'\)/.test(bridge), 'the counting-only tab op is removed')
 })
 
 test('guest allocation claims what it returns', () => {
@@ -67,35 +72,34 @@ test('guest allocation claims what it returns', () => {
   assert.ok(claims >= 3, 'each allocation path must claim its guest — found ' + String(claims))
 })
 
-test('guestFor asks for a new tab from the second view onward', () => {
-  assert.match(host, /const needsNewTab = this\.views\.size > 0/,
-    'the first view takes the sidebar as it is; later views need a tab of their own')
-  assert.match(host, /\.\.\.needsNewTab \? \{ newTab: true \} : \{\}/,
-    'and that decision must reach the bridge')
+test('guestFor opens a page for its own conversation, whatever is on screen', () => {
+  assert.match(host, /private async guestFor/, 'the single entry point for every view')
+  assert.match(host, /op: 'ensureSidebar'/, 'one call materializes the page')
+  assert.match(host, /const owner = entry\?\.owner \?\? this\.owner/,
+    'the VIEW\'s own conversation decides, not the process\'s idea of one')
+  assert.ok(!/needsNewTab/.test(host), 'this carrier shows one page per conversation, not one per view')
+  assert.ok(!/sidebarOwnership/.test(host), 'and nothing decides from the displayed conversation')
 })
 
 test('every gated op is called with an owner from the host', () => {
-  const gated = ['ensureSidebar', 'ensureTabs', 'showTab', 'closeSidebarBrowser']
+  const gated = ['ensureSidebar', 'showTab', 'closeSidebarBrowser']
   const missing = gated.filter(name => {
-    const re = new RegExp("op: '" + name + "'[\\s\\S]{0,120}?owner:")
+    // `owner` travels as shorthand on some calls and as a key on others; both are that field.
+    const re = new RegExp("op: '" + name + "'[\\s\\S]{0,200}?owner\\s*[,:}]")
     return !re.test(host)
   })
   assert.deepEqual(missing, [], 'these are called without an owner and fail silently: ' + missing.join(', '))
 })
 
-test('ensureTabs counts, and does not create tabs', () => {
-  // It used to click the strip's "+" and then the guide card, in a loop of thirty. That could
-  // never work: a guest appears only once a page NAVIGATES, and this op never navigates — so the
-  // tab it made stayed a guide page, the count it waited for never arrived, and it spent eighteen
-  // seconds failing while leaving the empty guide tab behind. Those leftovers are what the user
-  // saw as "it keeps creating new browser entries".
-  //
-  // Tab creation belongs to ensureSidebar, which carries a url. This op only reports.
+test('the panel path asks the renderer, and names the conversation', () => {
+  // The only side that knows which sidebar is whose is the renderer, because that is where the
+  // shell keeps the session id. So the bridge asks it, by conversation id, and never looks at the
+  // DOM to decide where a page goes.
   const lines = bridge.split('\n')
-  const start = lines.findIndex(l => /if \(op === 'ensureTabs'\)/.test(l))
-  assert.ok(start >= 0, 'ensureTabs exists')
-  const end = lines.findIndex((l, i) => i > start && /if \(op === 'showTab'\)/.test(l))
-  const body = lines.slice(start, end > 0 ? end : start + 200).join('\n')
-  assert.ok(!/\.click\(\)/.test(body), 'ensureTabs must not click anything')
-  assert.ok(!/clickedPlus|clickedGuide/.test(body), 'nor keep round-scoped click flags')
+  const start = lines.findIndex(l => l.includes("if (op === 'ensureSidebar')"))
+  assert.ok(start >= 0, 'ensureSidebar exists')
+  const body = lines.slice(start, start + 80).join('\n')
+  assert.match(body, /evaluatePanelService\(/, 'it asks the plugin client half for this conversation panel')
+  assert.match(body, /\/\^session-\/\.test\(owner\)/, 'and refuses a caller that cannot name a conversation')
+  assert.ok(!/document\.querySelector/.test(body), 'no DOM query decides where the page goes')
 })

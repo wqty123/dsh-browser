@@ -36,6 +36,14 @@ export declare function bridgeEndpointPath(): string;
  */
 export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     private readonly connection;
+    /**
+     * One entry per view this host handed out: the conversation it serves, and the guest backing it.
+     *
+     * The conversation belongs to the ENTRY, not to this host. A single plugin process serves every
+     * conversation — DSH runs them all through one host instance — so an owner held on the host
+     * would be one conversation's id applied to all of them, and a page could still land in
+     * another's sidebar however carefully the bridge checked it.
+     */
     private readonly views;
     /**
      * This process's identity with the bridge, for tab ownership.
@@ -66,12 +74,13 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      */
     private readonly owner;
     /**
-     * Guests whose view is gone but whose page may still be open in the sidebar.
+     * Guests whose view is gone but whose page may still be open in the sidebar, with the
+     * conversation each belongs to.
      *
-     * The provider destroys its view handles before it asks for a release, so the
-     * mapping is dropped by then — keeping the guest ids here is what lets us close
-     * only our own tabs when several sessions are running (requirements §4: each
-     * session gets its own page).
+     * The provider destroys its view handles before it asks for a release, so the mapping is dropped
+     * by then — keeping the guest ids here is what lets us close only our own tabs when several
+     * conversations are running (requirements §4: each session gets its own page). The owner rides
+     * along for the same reason it does in {@link views}: a release names one conversation.
      */
     private readonly orphaned;
     /**
@@ -101,47 +110,23 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     /** Whether this host can back views: the bridge already answered `list`. */
     available(): boolean;
     /**
-     * The guest id backing a view, materialized on first use.
+     * The guest backing a view, materialized on first use.
      *
-     * The sidebar browser is itself a multi-tab surface, so each view gets its own
-     * tab's guest: the provider's tab bookkeeping then maps onto real tabs the human
-     * can see and switch between. Two rules keep that honest:
-     *   - a cached guest is used as-is: probing it first cost a round-trip on every
-     *     command, so liveness is established by the command failing instead;
-     *   - a fresh view takes an unclaimed guest, growing the tab strip only when
-     *     every existing guest is already spoken for.
+     * The conversation that called owns exactly one sidebar page on this carrier — a human and the
+     * agent look at the same page — so every view resolves to that conversation's own guest, and the
+     * page does not multiply behind the provider's own tab bookkeeping.
+     *
+     * A cached guest is used as-is: probing it first cost a round-trip on every command, so liveness
+     * is established by the command failing instead.
      * @param viewId - the view whose guest is wanted.
-     * @param url - address to use when a sidebar browser has to be opened first.
+     * @param url - address to use when this conversation has no page yet.
      */
-    /**
-     * The shell marks each sidebar container with the conversation it belongs to.
-     *
-     * Measured on the running desktop: two `[class*=_tabStrip]` containers sat in the DOM at once,
-     * each carrying `sessionId` on its React fiber (alongside `SessionProvider =
-     * ScopeAreaProvider`), and the hidden one's webview was unloaded. So "which sidebar is mine"
-     * has an answer the shell itself provides — it just has to be asked.
-     *
-     * Run through the bridge's `cdp` op, which executes in the shared main process. That keeps this
-     * on the plugin side of the seam: the bridge is imported once at host boot, so changing IT costs
-     * the user a restart, while this file is read per process start.
-     */
-    private static readonly SIDEBAR_OWNERSHIP_PROBE;
-    /**
-     * Is this conversation's own sidebar the one that can be operated right now?
-     *
-     * Without this the host drives "whatever sidebar is on screen". On this machine that meant
-     * typing into another conversation's address bar and navigating its page — the reported bug.
-     *
-     * @returns 'visible' when safe to proceed, otherwise a reason to refuse.
-     */
-    private sidebarOwnership;
     private guestFor;
     /**
-     * Ask for at least `count` tabs belonging to this session and return their guest ids.
-     * @param count - minimum number of tabs.
+     * @param owner - the conversation this view serves. Recorded WITH the view: one host instance
+     *   serves every conversation, so the owner cannot live on the host.
      */
-    private guestIds;
-    createView(): ElectronViewHandle;
+    createView(owner?: string): ElectronViewHandle;
     destroyView(handle: ElectronViewHandle): void;
     /**
      * Bring this view's tab to the front in the sidebar.
@@ -165,9 +150,11 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * belongs to the shell and would happily keep the page (and its renderer) alive.
      * Closing the tabs is what actually ends the page — and only the page: cookies
      * live in the partition, history on disk, so both survive.
+     * @param owner - the conversation whose pages to close. Omit to close every conversation's,
+     *   which is only correct from a teardown that is itself global.
      * @returns a promise that settles once the shell has been asked.
      */
-    releasePage(): Promise<void>;
+    releasePage(owner?: string): Promise<void>;
     /**
      * Fold the sidebar away without ending the page (`ui.autoExpandOnce` is off, or
      * the caller wants the screen back while work continues).

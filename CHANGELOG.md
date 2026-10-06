@@ -4,6 +4,106 @@
 
 ---
 
+# 第四十一轮(2026-10-06,桌面端:会话串扰的真正根因,以及一次架构级改正)
+
+用户报的症状只有一句:**"还是其他窗口的侧栏"**。前几轮都在 owner 台账上加检查,这一轮做的第一件事是**不采信台账的立论,把它实测一遍**。
+
+## 一、owner 台账的立论是错的
+
+上一轮写下并自称"实测过"的前提:
+
+> 每个 DSH 会话是自己的插件进程 …… 两个会话时桌面有两个 host 进程。
+
+这一轮把进程全量枚举:
+
+| pid | 命令行摘要 | 真实身份 |
+|---|---|---|
+| 47648 | `DeepSeek Harness.exe` | Electron 主进程 |
+| 27136 | `--expose-internals …dsh-desktop-host/lib/index.js <app> <profile> …` | **唯一**的 DSH 宿主进程 |
+| 44348 / 7648 / 39192 | `dsh-subprocess-local/runner.js -- powershell.exe …` | **工具执行的沙箱 runner**,随每次命令起落 |
+
+宿主进程的命令行里**没有任何会话标识**。上一轮看到的"第二个 host 进程"是**工具 runner**,不是会话进程。前提塌了,建在它上面的台账也就没有意义。
+
+**而且这不只是理论问题**:`entry.ts` 的 `readSessionId` 取 `ctx.get('agents').list()[0].id`。打包版 `dsh-desktop-host/lib/index.js` 自己用 `agents.list()` 只是为了判断"有没有活跃任务"(L144、L167)——它是**单例**进程,这个列表装着**所有**会话。`[0]` 是哪一个是完全不受控的,所以那个 `owner` 完全可能是**另一个会话的 id**。用户看到的"还是其他窗口的侧栏",这就是来源。
+
+## 二、真正的机制:创建面板的通路只看屏幕
+
+DSH 的 `browser.new`(`Ctrl+T`,或启动页的「浏览器」卡片)最终落到:
+
+    ui-sidebar-browser/src/client/index.ts:59-63   openTabFromTarget('browser', target)
+    ui-sidebar-right/src/client/service.ts:534     → this.require()
+    ui-sidebar-right/src/client/service.ts:727     const sessionId = this.mounted.getSnapshot()
+
+`mounted` 是**外壳此刻显示的那个会话**。所以任何"模拟按键 / 点卡片 / 往地址栏打字"的创建方式,**结构上只能建到人此刻在看的会话**——"在 A 里发指令、切到 B、页面落在 B",是这条通路的定义,不是偶发。
+
+## 三、正规入口本来就在
+
+    ui-sidebar-right/src/client/service.ts:358     openTabIn(sessionId, kind, options)
+    打包运行版实测存在:dsh-client-ui-sidebar-right/lib/client.js:6418
+
+它按**指定会话**导航,**完全不读 `mounted`**,而且"reaches any session's store by id … on screen or not"(同文件 L1-35 的设计说明)。这一轮把它变成唯一的创建通路。
+
+## 四、改了什么
+
+**1. 渲染侧:一个按会话工作的面板服务(新增)**
+
+`client.js` 发布 `globalThis.__dshBuiltinBrowser`:
+
+    openPanel(sessionId, url)   有页面就报 guest id;没有就 openTabIn 再等它出现
+    panelGuest(sessionId)       只读地报当前 guest
+
+面板按会话 id 在 React fiber 上找(`[class*=_tabStrip]` 上的 `sessionId`),**只在那个子树里**读 `<webview>` 的 `getWebContentsId()`。找不到该会话的侧栏就**具名拒绝**,不去够别人的。
+
+**2. 桥:创建通路换成一次求值**
+
+    ensureSidebar  →  evaluatePanelService(shell, owner, url)
+                    →  shell 里执行 __dshBuiltinBrowser.openPanel(sessionId, url)
+                    →  拿到该会话自己的 guest,CDP 驱动
+
+**没有点击、没有按键、没有 DOM 查询决定页面去哪**。
+
+**3. 宿主:owner 从"进程"搬到"视图"(架构改正)**
+
+一个插件进程服务**所有**会话,所以 owner 放在 host 上只能是一个会话的 id 施加给全部。现在:
+
+    ElectronBrowserViewHost.createView(owner?)      ← 新增参数,provider 传 label
+    DesktopBridgeViewHost.views: Map<viewId, { guest?, owner }>
+    releasePage(owner?)                             ← 具名释放,不再关掉别人的页面
+
+`showView` / `releasePage` / `orphaned` 全部随之带上归属。
+
+**4. 删除**
+
+上一轮为"串扰"写的补偿代码整体移除,共 **743 行**:`legacyEnsureSidebar`(Ctrl+T + 点卡片 + 往地址栏打字,517 行)、`ensureTabs`(只数不建的 84 行)、`shellPrepareSidebar`(108 行)、`sidebarState`、宿主侧的 `sidebarOwnership` + `SIDEBAR_OWNERSHIP_PROBE`。桥从 1357 行回到 614 行。
+
+删除而非改名:`legacyEnsureSidebar` 留着就是一个**能手工调用、且必然开错地方**的入口。
+
+## 五、验证
+
+`tests/` 从 222 条到 **230 条,229 通过、0 失败、1 跳过**(平台门控)。`tsc` 干净,两份产物 `node --check` 干净。
+
+新写的守护用例直接盯住这次的机制:
+
+| 用例 | 断言 |
+|---|---|
+| `opening a panel names the calling conversation and never the on-screen one` | 调 `openTabIn` 且**从不**调 `openTab` |
+| `the panel lookup never leaves the calling conversation subtree` | 同一文档里两个会话的侧栏,A 拿不到 B 的 guest |
+| `a conversation the shell has not mounted is refused by name, not driven` | 拒绝,**零次**导航 |
+| `nothing in the bridge clicks or types into the shell any more` | 全文件无 `card.click()`、无 `Input.dispatchKeyEvent` |
+| `two conversations asking in turn are each answered with their own page` | 路由按会话 id,不靠仲裁 |
+| `every view of one conversation drives that conversation's one page` | 该载体的语义是"一个会话一个可见页面" |
+
+**违反上一轮假设的用例被改写成守护新机制,而不是删掉**——旧用例记录的是旧通路,那正是现在要防止回归的东西。
+
+## 六、这一轮仍未被实机验证的部分
+
+`tsc` 与测试都是离线的。下面两条只有重启后的真机才能回答:
+
+1. **`exec.agent.id` 是否就是渲染侧的 sessionId**。工具层用它分桶(`tool-browser/index.ts:174` 的 `taskKey`),渲染侧用 `props.sessionId` 匹配;两者必须是同一个字符串,否则 `guestStateFor` 会返回 `panel: false` 并具名拒绝——**拒绝是安全的失败模式,但功能不会工作**。
+2. **插件 client 半边能否注入 `sidebarRight`**。依据是同机制:DSH 自带 `ui-sidebar-browser` 用 `inject = ['slots','locale','sidebarRight','sidebarRightTabs']` 取得了它。注入失败时 `openPanel` 会报 "the shell's sidebar service is not available",设置面板不受影响。
+
+---
+
 # 第四十轮(2026-10-05,桌面端:侧栏多标签、设置保存,以及一次收敛失败的自查)
 
 用户报的三个症状:**设置面板全部点不动**、**第二次打开浏览器报"认不出"**、**不断新建浏览器入口**。

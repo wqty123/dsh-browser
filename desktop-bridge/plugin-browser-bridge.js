@@ -164,36 +164,6 @@ async function evaluateInPanel(shellId, sessionId, method, params) {
   return answer
 }
 
-/**
- * Which sidebar container belongs to a session, and is it on screen?
- *
- * @param shellId - the shell window's webContents id.
- * @param sessionId - the conversation this process serves.
- * @returns the verdict, plus what the shell holds (for diagnostics).
- */
-async function sidebarState(shellId, sessionId) {
-  const answer = await sendCdp(shellId, 'Runtime.evaluate', {
-    expression: `(() => {
-      const panel = ${panelRootExpression(sessionId)};
-      const strip = panel === null ? null : panel.querySelector('[class*=_tabStrip]');
-      const shown = strip === null ? false : (() => {
-        const r = strip.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) return false;
-        const s = getComputedStyle(strip);
-        return s.display !== 'none' && s.visibility !== 'hidden';
-      })();
-      return JSON.stringify({ panel: panel !== null, visible: shown });
-    })()`,
-    returnByValue: true,
-  })
-  try {
-    const parsed = JSON.parse(String(answer?.result?.value ?? '{}'))
-    return { panel: Boolean(parsed.panel), visible: Boolean(parsed.visible) }
-  } catch {
-    return { panel: false, visible: false }
-  }
-}
-
 /** Forget claims whose guest no longer exists, so a closed tab's id is not held forever. */
 function pruneClaims() {
   const live = new Set(webContents.getAllWebContents().filter(c => c.getType() === 'webview').map(c => c.id))
@@ -242,6 +212,71 @@ async function sendCdp(id, method, params) {
   return await next
 }
 
+/**
+ * Ask the shell's renderer for THIS conversation's browser panel, and report its guest.
+ *
+ * The renderer is the only side that knows which sidebar belongs to which conversation: the
+ * shell mounts one per conversation and keeps the DSH session id on each. The plugin's own
+ * client half carries that knowledge and publishes it as `globalThis.__dshBuiltinBrowser`; it
+ * calls the shell's `openTabIn(sessionId, …)`, which navigates BY CONVERSATION ID rather than
+ * by what the shell happens to be displaying.
+ *
+ * Nothing here inspects the DOM, dispatches a key, or clicks an element — it evaluates one call
+ * on a global the plugin itself published, and that global does the scoping internally.
+ *
+ * @param shellId - the shell window's webContents id.
+ * @param sessionId - the conversation that asked (the request's `owner`).
+ * @param url - address to load when a panel has to be opened; empty to only read.
+ * @returns the renderer's verdict, normalized so a malformed answer is a named failure.
+ */
+async function evaluatePanelService(shellId, sessionId, url) {
+  const expression = `(() => {
+    const api = globalThis.__dshBuiltinBrowser;
+    if (api === undefined || api === null || typeof api.openPanel !== 'function') {
+      return JSON.stringify({ ok: false, reason: 'the plugin client half is not loaded in this window' });
+    }
+    try {
+      return JSON.stringify(api.openPanel(${JSON.stringify(String(sessionId))}, ${JSON.stringify(String(url ?? ''))}));
+    } catch (error) {
+      return JSON.stringify({ ok: false, reason: String((error && error.message) || error) });
+    }
+  })()`
+  const answer = await sendCdp(shellId, 'Runtime.evaluate', { expression, returnByValue: true })
+  // The fallback is on this line on purpose: a bare read of a reply value that drives a branch is
+  // the mistake class `tests/bridge-reply-shape.test.mjs` exists for — undefined takes the false
+  // path forever, and nothing else catches it.
+  const value = answer?.result?.value ?? ''
+  if (typeof value !== 'string' || value === '') {
+    return { ok: false, reason: 'the shell did not answer the panel request', panel: false, guestId: null, url: '' }
+  }
+  try {
+    const parsed = JSON.parse(value)
+    return {
+      ok: parsed?.ok === true,
+      reason: parsed?.reason === undefined ? undefined : String(parsed.reason),
+      panel: parsed?.panel === true,
+      created: parsed?.created === true,
+      guestId: typeof parsed?.guestId === 'number' && Number.isFinite(parsed.guestId) ? parsed.guestId : null,
+      url: typeof parsed?.url === 'string' ? parsed.url : '',
+    }
+  } catch (error) {
+    return { ok: false, reason: 'the shell answered a shape this bridge does not understand', panel: false, guestId: null, url: '' }
+  }
+}
+
+/** Whether a guest is already showing the requested address (so no navigation is needed). */
+function guestShows(id, url) {
+  if (url === '') return true
+  const guest = guestById(id)
+  if (guest === undefined) return false
+  try {
+    const current = guest.getURL()
+    return current !== '' && (current === url || current.startsWith(url))
+  } catch (error) {
+    return false
+  }
+}
+
 /** Handle one JSON request line; every answer is a JSON line too. */
 async function handle(request) {
   const op = String(request?.op ?? '')
@@ -269,600 +304,62 @@ async function handle(request) {
     return { ok: true, result, bridgeRequestId: request.bridgeRequestId }
   }
   if (op === 'ensureSidebar') {
+    // This conversation's OWN panel, opened through the shell's own navigation — never by
+    // simulating input.
+    //
+    // Every earlier version of this op drove the sidebar the way a human does: Ctrl+T, then a
+    // click on the 「浏览器」guide card, then typing into the address bar. All three land on the
+    // conversation the shell is DISPLAYING, because the shell routes keys and clicks to what it
+    // shows. So a page asked for while the human read another conversation was opened into THAT
+    // one, waiting for the screen to come back cost ten seconds, and when it never came back the
+    // retry loop left a tab per round. Three separate symptoms — "it opened in the wrong place",
+    // "it says it failed", "it opened a dozen browsers" — are one property of that path.
+    //
+    // The renderer can name the conversation instead. `openTabIn(sessionId, …)` is the shell's
+    // own navigation aimed at ONE conversation, and it does not read what is on screen at all —
+    // so this op no longer has an opinion about which conversation is displayed, and there is no
+    // path from here to somebody else's sidebar. DOM is not touched: the call is evaluated on the
+    // global the plugin's own client half published.
     const url = request.url === undefined ? '' : String(request.url)
-    // Does this conversation have a panel of its own? If not, ask the shell to make one.
-    //
-    // Everything else here is scoped to this conversation's panel, so a conversation without one
-    // has nothing to operate on — measured after the scoping landed: "the sidebar reported no free
-    // browser tab", because every DOM script returned NO_PANEL and nothing was ever created.
-    //
-    // Only `Ctrl+T` can create it: it is the host's own shortcut for browser.new and a KEY event,
-    // so the shell routes it to the conversation it is displaying. That makes this the one action
-    // whose correctness depends on which conversation is on screen — and why it is refused, not
-    // guessed, when that is not us:
-    //
-    //   showing us      -> Ctrl+T creates our panel            (correct)
-    //   showing someone -> Ctrl+T would create THEIRS          (so wait)
-    //
-    // A conversation that already has a panel never re-enters this, so it costs one check.
-    if (/^session-/.test(owner)) {
-      const shellForPanel = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-      if (shellForPanel !== undefined) {
-        const probe = await sendCdp(shellForPanel.id, 'Runtime.evaluate', {
-          expression: `(${panelRootExpression(owner)}) !== null`,
-          returnByValue: true,
-        })
-        if (String(probe?.result?.value ?? '') !== 'true') {
-          const shownNow = await sendCdp(shellForPanel.id, 'Runtime.evaluate', {
-            expression: `(() => {
-              const active = Array.from(document.querySelectorAll('[data-row-key^="session:"]'))
-                .find(el => el.getAttribute('aria-selected') === 'true');
-              return active === undefined || active === null
-                ? ''
-                : String(active.getAttribute('data-row-key')).replace('session:', '');
-            })()`,
-            returnByValue: true,
-          })
-          const onScreen = String(shownNow?.result?.value ?? '')
-          if (onScreen !== '' && onScreen !== owner) {
-            // Asking now would build the panel inside somebody else's window.
-            for (let attempt = 0; attempt < 20; attempt++) {
-              await new Promise(resolve => setTimeout(resolve, 500))
-              const again = await sendCdp(shellForPanel.id, 'Runtime.evaluate', {
-                expression: `(() => {
-                  const active = Array.from(document.querySelectorAll('[data-row-key^="session:"]'))
-                    .find(el => el.getAttribute('aria-selected') === 'true');
-                  return active === undefined || active === null
-                    ? ''
-                    : String(active.getAttribute('data-row-key')).replace('session:', '');
-                })()`,
-                returnByValue: true,
-              })
-              if (String(again?.result?.value ?? '') === owner) break
-            }
-            const finalCheck = await sendCdp(shellForPanel.id, 'Runtime.evaluate', {
-              expression: `(() => {
-                const active = Array.from(document.querySelectorAll('[data-row-key^="session:"]'))
-                  .find(el => el.getAttribute('aria-selected') === 'true');
-                return active === undefined || active === null
-                  ? ''
-                  : String(active.getAttribute('data-row-key')).replace('session:', '');
-              })()`,
-              returnByValue: true,
-            })
-            if (String(finalCheck?.result?.value ?? '') !== owner) {
-              throw new Error(
-                'this conversation has no browser panel yet, and the shell is showing another '
-                + 'conversation — switch back to this one and retry (creating it now would build '
-                + 'the panel inside that other conversation)',
-              )
-            }
-          }
-          const press = (type) => sendCdp(shellForPanel.id, 'Input.dispatchKeyEvent', {
-            type,
-            modifiers: 2,
-            windowsVirtualKeyCode: 84,
-            nativeVirtualKeyCode: 84,
-            code: 'KeyT',
-            key: 't',
-            ...type === 'keyDown' ? { text: 't' } : {},
-          })
-          await press('keyDown')
-          await press('keyUp')
-          // The shell builds the panel asynchronously; wait until it is addressable.
-          for (let attempt = 0; attempt < 20; attempt++) {
-            await new Promise(resolve => setTimeout(resolve, 250))
-            const ready = await sendCdp(shellForPanel.id, 'Runtime.evaluate', {
-              expression: `(${panelRootExpression(owner)}) !== null`,
-              returnByValue: true,
-            })
-            if (String(ready?.result?.value ?? '') === 'true') break
-          }
-        }
-      }
-    }
-    // Materialize a sidebar guest, optionally navigating it.
-    //
-    // The sidebar browser creates its guest lazily: an un-navigated sidebar is
-    // only an address bar and owns no webContents at all, so "there is no guest"
-    // is the normal state rather than a failure. When one already exists this is
-    // a no-op; otherwise the shell's own UI is driven to open the right sidebar
-    // and submit an address — the same thing a human would do, and the only
-    // supported way to make the sidebar own a page.
-    // `newTab: true` means "open ANOTHER browser page, in a new tab of this same sidebar".
-    //
-    // This is a different request from the first one, because the host's browser tab is created
-    // in two steps and the bridge previously assumed one. Measured on the running shell:
-    //
-    //   create the tab (Ctrl+T, or the strip's "+")  -> a 浏览器 tab exists, but NO webview
-    //   navigate inside that tab                     -> the webview appears
-    //
-    // So a caller that just asks for "a tab" waits forever for a guest that only appears when
-    // something navigates, while a caller that navigates gets one immediately. Hence: make the
-    // tab, activate it, and let the normal address-bar route below do the navigating.
-    if (request.newTab === true) {
-      const shellForNewTab = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-      if (shellForNewTab === undefined) throw new Error('no shell window to drive')
-      const before = new Set(webContents.getAllWebContents().filter(c => c.getType() === 'webview').map(c => c.id))
-      // Ctrl+T is the host's own shortcut for browser.new (registered for desktop:windows as
-      // primary+KeyT). A real key event through the Input domain reaches the shortcut table;
-      // a synthesized DOM KeyboardEvent does not.
-      const key = (type) => sendCdp(shellForNewTab.id, 'Input.dispatchKeyEvent', {
-        type,
-        modifiers: 2,
-        windowsVirtualKeyCode: 84,
-        nativeVirtualKeyCode: 84,
-        code: 'KeyT',
-        key: 't',
-        ...type === 'keyDown' ? { text: 't' } : {},
-      })
-      await key('keyDown')
-      await key('keyUp')
-      // The new tab starts on the guide page, so it has no address bar until it is the active
-      // tab. Activate THE TAB JUST CREATED, then fall through to the address route.
-      //
-      // Not "the newest tab whose label starts with 浏览器" — that was the previous attempt and it
-      // selected the WRONG tab. Measured on this shell, the strip reads:
-      //
-      //     ["浏览器","浏览器","浏览器","关闭","开始","开始","开始","关闭","分栏","全屏",...]
-      //
-      // The tab Ctrl+T creates is labelled 开始 (it is the guide page); the ones called 浏览器 are
-      // the pages that already exist. So the old selector activated an EXISTING browser tab, whose
-      // address bar is present, and the check below then concluded a page was already there and
-      // skipped the card click — leaving the newly created guide tab a guide tab forever. There
-      // was never a new guest, and the caller reported "could not open a sidebar tab".
-      //
-      // Ctrl+T puts its tab last, so the last tab row is the one to activate.
-      for (let attempt = 0; attempt < 12; attempt++) {
-        await new Promise(resolve => setTimeout(resolve, 250))
-        const activated = await evaluateInPanel(shellForNewTab.id, owner, 'Runtime.evaluate', {
-          expression: `(() => {
-            const strip = document.querySelector('[class*=_tabStrip]');
-            if (strip === null) return 'NO_STRIP';
-            const rows = Array.from(strip.querySelectorAll('button,[role=tab],[class*=tab]'))
-              .filter(r => {
-                const label = ((r.getAttribute('aria-label') || '') + ' ' + (r.textContent || '')).trim();
-                // Skip the strip's own controls: they are not tabs.
-                return label !== '' && !/^(关闭|分栏|全屏|收起右侧边栏|收起|close)$/.test(label);
-              });
-            if (rows.length === 0) return 'NO_TABS';
-            rows[rows.length - 1].click();
-            return 'ACTIVATED_LAST:' + String(rows.length);
-          })()`,
-          returnByValue: true,
-        })
-        if (String(activated?.result?.value ?? '').startsWith('ACTIVATED')) break
-      }
-      void before
-    }
-    // Which guest belongs to THIS caller.
-    //
-    // The owner ledger was added to the allocation path and NOT to this one, so a session calling
-    // here was handed `existing[0]` — whatever tab happened to be first, including another
-    // session's. That is exactly the cross-session bleed the ledger was introduced to stop:
-    // session B was given session A's page, and A's tabs were counted as B's when deciding how
-    // many more to create.
-    //
-    // Only a guest this owner already holds is reused; a claimed guest held by someone else is
-    // invisible here, and an unclaimed one is adopted on the spot (it is nobody's yet).
-    pruneClaims()
-    let reuseId = request.newTab === true ? undefined : [...claims.entries()]
-      .find(([guest, holder]) => holder === owner && guestById(guest) !== undefined)?.[0]
-    // An unclaimed webview is free to take: nobody has asked for it, and leaving it would make
-    // this caller create a tab it does not need.
-    if (reuseId === undefined && request.newTab !== true) {
-      const unclaimedGuest = webContents.getAllWebContents()
-        .filter(contents => contents.getType() === 'webview')
-        .find(contents => !claims.has(contents.id))
-      if (unclaimedGuest !== undefined) {
-        claims.set(unclaimedGuest.id, owner)
-        reuseId = unclaimedGuest.id
-      }
-    }
-    if (reuseId !== undefined) {
-      if (request.url !== undefined && String(request.url) !== '') {
-        await sendCdp(reuseId, 'Page.navigate', { url: String(request.url) })
-      }
-      return { ok: true, created: false, id: reuseId, owner, reused: true }
-    }
-    const existing = []
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
-    // With `newTab` the tab was just created and is sitting on its GUIDE page, whose address bar
-    // does not exist yet — the guide is a list of page types, and the browser page is what one of
-    // them creates.
-    //
-    // `shellPrepareSidebar` must therefore NOT run in that state: its whole job is "no address bar
-    // -> click the launcher card", and on a guide page that card IS the browser page, so every
-    // retry created another one. That is the reported "it keeps creating new browser entries".
-    // The guide page has to be turned into a browser page exactly once, and only then is there an
-    // address bar to type into.
-    // String(...) must wrap the VALUE, not the response.
-    //
-    // Written the other way round first — `String(await sendCdp(...))?.result?.value` — which
-    // stringifies the whole reply, leaves `.result` undefined, and therefore returns undefined
-    // for every call. `=== 'YES'` was then never true, so the newTab path always took the "click
-    // the card" branch and made a page it did not need. Three rounds of "it keeps creating new
-    // browser entries" trace back to this one misplaced parenthesis.
-    const addressBarVisible = async () => String((await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
-      expression: `(() => {
-        const visible = (el) => {
-          const r = el.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0) return false;
-          const s = getComputedStyle(el);
-          return s.display !== 'none' && s.visibility !== 'hidden';
-        };
-        return Array.from(document.querySelectorAll('input')).some(i => visible(i)
-          && /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || ''))) ? 'YES' : 'NO';
-      })()`,
-      returnByValue: true,
-    }))?.result?.value ?? '')
-    let prepared
-    // Set when the launcher card has been clicked, so the no-url route below cannot click it a
-    // second time: `newTab` already does that when the tab is still a guide page, and two clicks
-    // make two pages. One card click per call, which is the same rule the retry loop needed.
-    let cardClicked = false
-    if (request.newTab === true) {
-      // `newTab` ALWAYS consumes a guide page, so the card is always clicked.
-      //
-      // The previous form skipped the click when an address bar was already visible, reasoning
-      // "a page exists, clicking would make a second one". That reasoning is wrong in both
-      // directions: the click does not create a tab, it turns the NEW tab from the guide page
-      // into a browser page — and an address bar being visible means the ACTIVATION below failed
-      // and some older tab is still frontmost, so the new tab is still a guide page and still
-      // needs the click. Skipping it left the new tab a guide tab forever, which is exactly the
-      // "could not open a sidebar tab" the user saw on the second open.
-      //
-      // On the guide page: click its browser entry ONCE, then look for the address bar.
-      const opened = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
-        expression: `(() => {
-          const clickables = (root, out = []) => {
-            for (const node of root.querySelectorAll('button,[role=button]')) {
-              out.push(node);
-              if (node.shadowRoot) clickables(node.shadowRoot, out);
-            }
-            return out;
-          };
-          const labelOf = (node) => ((node.textContent || '') + ' ' + (node.getAttribute('aria-label') || '')).trim();
-          // The card carries both halves; the strip's own tab carries only the title, and a
-          // prefix match would hit it instead and merely switch tabs.
-          const card = clickables(document).find(n => {
-            const own = (n.textContent || '').trim();
-            if (own.length > 24) return false;
-            return /浏览器/.test(own) && /浏览网页/.test(own);
-          });
-          if (card === undefined) return 'NO_CARD';
-          card.click();
-          return 'CLICKED_CARD';
-        })()`,
-        returnByValue: true,
-      })
-      const cardVerdict = String(opened?.result?.value ?? '')
-      if (cardVerdict === 'CLICKED_CARD') cardClicked = true
-      // One click, then wait for the address bar it produces.
-      let focused = 'NO_ADDRESS_BAR'
-      for (let attempt = 0; attempt < 20; attempt++) {
-        await new Promise(resolve => setTimeout(resolve, 250))
-        if (await addressBarVisible() === 'YES') { focused = 'FOCUSED'; break }
-      }
-      prepared = { result: { value: `${cardVerdict}/${focused}` } }
-    } else {
-      // 1. Open the sidebar and put the caret in its address field IF that field is
-      //    reachable. It is not always: the sidebar may show another panel, or the
-      //    browser tab may be present but not active, in which case no address input
-      //    exists in the document at all. That must not be fatal — the restore route
-      //    below needs no address bar, and treating "no input" as a hard error is
-      //    exactly what made the first call after a restart fail.
-      prepared = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
-        expression: shellPrepareSidebar(),
-        returnByValue: true,
-      })
+    if (!/^session-/.test(owner)) {
+      throw new Error('this host supplied no conversation id, so its own panel cannot be identified')
     }
-    let verdict = String(prepared?.result?.value ?? '')
-    // The last two verdicts mean the panel was only ASKED to open. It materialises
-    // asynchronously — the shell has to construct the sidebar view — so acting immediately
-    // finds no address bar and fails for a panel that is a moment away. Poll for it instead of
-    // treating "not there yet" as "cannot be opened", which is the same mistake the first call
-    // after a restart used to make.
-    if (verdict === 'CLICKED_LAUNCHER' || verdict === 'SENT_CTRL_T') {
-      for (let attempt = 0; attempt < 20; attempt++) {
-        await new Promise(resolve => setTimeout(resolve, 250))
-        const probe = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
-          expression: `(() => {
-            const pickAddressInput = () => {
-              const visible = (el) => {
-                const r = el.getBoundingClientRect();
-                if (r.width <= 0 || r.height <= 0) return false;
-                const s = getComputedStyle(el);
-                return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
-              };
-              const labelOf = (i) => (i.placeholder || '') + ' ' + (i.getAttribute('aria-label') || '');
-              const all = Array.from(document.querySelectorAll('input')).filter(visible);
-              // The shell's own address bar first, by its exact placeholder, so a page that
-              // merely mentions a URL cannot win. Both spellings of the parenthesis are listed
-              // because the placeholder is localized.
-              const exact = all.filter(i => /^\s*输入\s*HTTP\(S\)\s*地址\s*$/.test(i.placeholder || '')
-                || /^(Enter|Type)\s+(an\s+)?HTTP\(S\)\s+address/i.test(i.placeholder || ''));
-              if (exact.length > 0) return exact[0];
-              // Otherwise any VISIBLE field that looks like an address bar.
-              const loose = all.filter(i => /HTTP|地址|url/i.test(labelOf(i)));
-              return loose.length > 0 ? loose[0] : undefined;
-            };
-            const input = pickAddressInput();
-            if (input === undefined) return 'NO_ADDRESS_BAR';
-            input.focus();
-            return 'FOCUSED';
-          })()`,
-          returnByValue: true,
-        })
-        verdict = String(probe?.result?.value ?? '')
-        if (verdict !== 'NO_ADDRESS_BAR') break
-      }
-    }
-    // 2. Materialize a guest. Two routes, cheapest first:
-    //    a. the sidebar's own "restore last page" affordance — it navigates
-    //       without depending on how the address field handles focus or input;
-    //    b. otherwise type into the address field and submit with REAL key input
-    //       (synthetic events do not move React's controlled input, and the field
-    //       also loses focus to re-renders, so both halves are needed).
-    let submitVerdict = 'n/a'
-    // The address route runs FIRST when a url was asked for, and the restore affordance is only
-    // a fallback when there is none.
-    //
-    // It used to be the other way round, and that ordering was measured to be wrong: on this
-    // desktop the restore probe reports RESTORED for an element that does not actually restore
-    // anything, so the address route was skipped entirely and the guest was never materialised
-    // — ensureSidebar returned prepare=FOCUSED, restore=RESTORED, submit=n/a and the sidebar
-    // stayed empty. Driving the address bar instead is the route that works here; it produced
-    // `{"created":true,"via":"address"}` against the same empty sidebar.
-    let restored = { result: { value: 'NO_RESTORE' } }
-    const haveUrl = url !== ''
-    if (!haveUrl) {
-      // No url — and this is the ordinary case, not an edge one.
-      //
-      // The host reaches here FIRST with no url, because the command that opens a view is
-      // `documentStamp`, which evaluates a script rather than navigating; `Page.navigate` comes
-      // afterwards and carries the address. So "there is nothing to type" must still produce a
-      // usable page, or the first browser_open of every session dies waiting for a guest that
-      // nobody created. That was the real shape of "it worked the first time once".
-      //
-      // The route: the same launcher card the newTab path uses, clicked once. It creates the
-      // browser page, empty, and the host navigates it a moment later. The restore affordance is
-      // tried only after that, because on this desktop it reports RESTORED for an element that
-      // restores nothing.
-      //
-      // Skipped entirely if the newTab path above already clicked the card: two clicks make two
-      // pages, and this route runs after that one.
-      //
-      // Also skipped when an address bar is ALREADY visible, even though no url was given: a
-      // visible address bar means a browser page exists, and the caller will navigate it in a
-      // moment. Clicking the card there creates a second page nobody asked for — which is how
-      // "it keeps creating new browser entries" came back a third time. Found by counting clicks
-      // in a harness, not by reading the code.
-      const addressBarAlready = await addressBarVisible() === 'YES'
-      const created = cardClicked || addressBarAlready
-        ? { result: { value: addressBarAlready ? 'ADDRESS_BAR_PRESENT' : 'ALREADY_CLICKED' } }
-        : await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
-        expression: `(() => {
-          const clickables = (root, out = []) => {
-            for (const node of root.querySelectorAll('button,[role=button]')) {
-              out.push(node);
-              if (node.shadowRoot) clickables(node.shadowRoot, out);
-            }
-            return out;
-          };
-          const card = clickables(document).find(n => {
-            const own = (n.textContent || '').trim();
-            if (own.length > 24) return false;
-            return /浏览器/.test(own) && /浏览网页/.test(own);
-          });
-          if (card === undefined) return 'NO_CARD';
-          card.click();
-          return 'CLICKED_CARD';
-        })()`,
-        returnByValue: true,
-      })
-      const cardVerdict = String(created?.result?.value ?? '')
-      // Only when the card was NOT clicked. If it was — or if an address bar was already present,
-      // which means a page exists — the restore probe would either find nothing or, worse given
-      // what that probe reports on this desktop, claim to have restored into the page that is
-      // already there.
-      if (cardVerdict !== 'CLICKED_CARD' && cardVerdict !== 'ALREADY_CLICKED' && cardVerdict !== 'ADDRESS_BAR_PRESENT') {
-        restored = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
-          expression: `(() => {
-            const nodes = Array.from(document.querySelectorAll('button,a,[role=button],div[role=link]'));
-            const hit = nodes.find(n => {
-              const own = (n.textContent || '').trim();
-              if (own.length > 24) return false;
-              return /^(恢复页面|恢复上次|恢复上次页面|上次打开)$/.test(own)
-                || /恢复|restore/i.test(n.getAttribute('aria-label') || n.getAttribute('title') || '');
-            });
-            if (hit === undefined) return 'NO_RESTORE';
-            hit.click();
-            return 'RESTORED';
-          })()`,
-          returnByValue: true,
-        })
-      }
-    }
-    // A deliberate no-op guard rather than a dead branch to clean up: this block used to be
-    // conditional on the restore route not having run, the condition was removed, and unwrapping
-    // the braces now would re-indent sixty lines of the most delicate code in this file for no
-    // behavioural change. The rule this project runs on is not to disturb what works.
-    if (true) {
-      if (url !== '') {
-        // Set the value the way React accepts it, then SUBMIT THE FORM.
-        //
-        // A dispatched Enter is not enough: the sidebar browser's toolbar is a
-        // `<form>` whose submission is wired to an explicit control (aria-label
-        // "前往" / "Go"), and implicit submission does not fire there — measured
-        // on DSH 0.2.0-rc.2, where Enter left the field filled and the guest
-        // uncreated. `requestSubmit()` goes through the same path the button
-        // does, so it works with React's onSubmit and needs no localized label.
-        const typed = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
-          expression: `(() => {
-            const pickAddressInput = () => {
-              const visible = (el) => {
-                const r = el.getBoundingClientRect();
-                if (r.width <= 0 || r.height <= 0) return false;
-                const s = getComputedStyle(el);
-                return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
-              };
-              const labelOf = (i) => (i.placeholder || '') + ' ' + (i.getAttribute('aria-label') || '');
-              const all = Array.from(document.querySelectorAll('input')).filter(visible);
-              // The shell's own address bar first, by its exact placeholder, so a page that
-              // merely mentions a URL cannot win. Both spellings of the parenthesis are listed
-              // because the placeholder is localized.
-              const exact = all.filter(i => /^\s*输入\s*HTTP\(S\)\s*地址\s*$/.test(i.placeholder || '')
-                || /^(Enter|Type)\s+(an\s+)?HTTP\(S\)\s+address/i.test(i.placeholder || ''));
-              if (exact.length > 0) return exact[0];
-              // Otherwise any VISIBLE field that looks like an address bar.
-              const loose = all.filter(i => /HTTP|地址|url/i.test(labelOf(i)));
-              return loose.length > 0 ? loose[0] : undefined;
-            };
-            const input = pickAddressInput();
-            if (input === undefined) return 'NO_ADDRESS_BAR';
-            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-            setter.call(input, ${JSON.stringify(String(request.url ?? ''))});
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.focus();
-            const form = input.form ?? input.closest('form');
-            if (form) { form.requestSubmit(); return 'SUBMITTED_FORM'; }
-            const button = input.parentElement
-              ? input.parentElement.querySelector('button[type=submit],button')
-              : null;
-            if (button) { button.click(); return 'CLICKED_SUBMIT'; }
-            return 'TYPED_ONLY';
-          })()`,
-          returnByValue: true,
-        })
-        submitVerdict = String(typed?.result?.value ?? 'n/a')
-        // Enter stays as the last resort for sidebars without a form.
-        if (submitVerdict === 'TYPED_ONLY') {
-          for (const type of ['keyDown', 'keyUp']) {
-            await sendCdp(shell.id, 'Input.dispatchKeyEvent', {
-              type,
-              key: 'Enter',
-              code: 'Enter',
-              windowsVirtualKeyCode: 13,
-              nativeVirtualKeyCode: 13,
-            })
-          }
-        }
-      }
-    }
-    // The guest attaches asynchronously once the renderer creates the webview.
-    //
-    // Only a guest that was NOT there before counts. `created[0]` is simply the first webview in
-    // the process: with tabs already open the check is true immediately, so this returned someone
-    // else's tab, navigated it to the requested url and reported `created: true`. That is both
-    // halves of the reported symptom — "it says it failed" and "the page turned up in another
-    // session's tab" — from one line. The set difference is the guest this call made.
-    const before = new Set(webContents.getAllWebContents().filter(c => c.getType() === 'webview').map(c => c.id))
-    // A guest appears only once something NAVIGATES. Without a url this call navigates nothing, so
-    // waiting the full twelve seconds is pure loss — and this is the host's FIRST call of every
-    // session (`documentStamp` runs before `Page.navigate`), which means the first browser_open of
-    // a session spends twelve seconds failing at something it was never able to do, before the
-    // navigation call succeeds a moment later. Four rounds still covers a page that is mid-load.
-    const rounds = haveUrl ? 24 : 4
-    for (let attempt = 0; attempt < rounds; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, 500))
-      const fresh = webContents.getAllWebContents()
-        .filter(contents => contents.getType() === 'webview')
-        .filter(contents => !before.has(contents.id))
-      if (fresh.length > 0) {
-        // Now that a guest exists, navigation is a plain CDP call: no UI involved.
-        if (url !== '') {
-          await sendCdp(fresh[0].id, 'Page.navigate', { url }).catch(() => undefined)
-        }
-        claims.set(fresh[0].id, owner)
-        return { ok: true, created: true, id: fresh[0].id, via: restored?.result?.value === 'RESTORED' ? 'restore' : 'address', owner }
-      }
-    }
-    throw new Error(`the sidebar did not create a browser guest (prepare=${String(verdict)}, restore=${String(restored?.result?.value)}, submit=${submitVerdict})`)
-  }
-  if (op === 'ensureTabs') {
-    // Grow the sidebar's browser tab strip to `count` tabs and report every guest.
-    //
-    // Tabs are the renderer's, so this cannot create them directly — it drives the
-    // sidebar's own "new tab" control, the same affordance a human uses, and then
-    // reports the guest ids. Whatever already exists is reused, so repeated calls
-    // are cheap and a human-opened tab is never orphaned.
-    //
-    // "No control found" used to throw on the spot, and that was wrong: the strip is
-    // rendered by the sidebar, so a page that opened correctly can still be a moment away
-    // from having its control in the DOM — or the control can live where a plain
-    // querySelectorAll cannot see it (a shadow root, or a frame). Throwing turned that
-    // transient into a permanent failure and reported it as "the browser tab is not open"
-    // even though the tab was open. Reported as issue #23.
-    //
-    // Now it is one more round's outcome: keep waiting, and only report it if every round
-    // ended that way. The last thing each round saw is carried into the message, so a
-    // failure says whether the control was missing or the click did nothing.
-    const want = Math.max(1, Math.min(8, Number(request.count ?? 1)))
-    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-    if (shell === undefined) throw new Error('no shell window to drive')
 
-    // Who is asking, and which guests are already theirs.
-    //
-    // The sidebar is ONE surface shared by every DSH session, and each session is its own
-    // process with its own in-memory view map — so a session could only see its OWN claims and
-    // would happily adopt a tab another session had opened. That is how a URL opened in one
-    // session showed up in another's sidebar. The ledger therefore lives HERE, in the single
-    // process that owns the sidebar, and the plugin passes a per-process owner id.
-    pruneClaims()
-    const mine = new Set()
-    for (const [guest, holder] of claims) if (holder === owner) mine.add(guest)
-
-    // Tabs that exist but belong to nobody: safe to hand out. Tabs held by another owner are
-    // never returned, which is the whole point — one session no longer drives another's page.
-    const unclaimed = (ids) => ids.filter(id => !claims.has(id) || claims.get(id) === owner)
-
-    // This op COUNTS. It does not create tabs.
-    //
-    // Creating one used to look right and is not: a guest appears only once something NAVIGATES,
-    // and nothing here navigates — so every tab this op made stayed a guide page. It could never
-    // satisfy the count it was waiting for, so it spent eighteen seconds (30 x 600ms) and then
-    // failed, AND it left the guide tab behind in the strip. That second effect is what the user
-    // saw as "it keeps creating new browser entries": entries with no page in them.
-    //
-    // Tab creation belongs to `ensureSidebar`, which carries a url and therefore navigates the
-    // page it makes. The host asks for a new tab there (see guestFor), so this path is only a
-    // fallback: it re-counts for a moment in case something else is materialising a guest, then
-    // reports what it actually has.
-    const rounds = 6
-    let lastVerdict = 'NO_CONTROL'
-    const sawControl = false
-    for (let attempt = 0; attempt < rounds; attempt++) {
-      const guests = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
-      // Hand back ONLY this owner's tabs plus tabs nobody has claimed, and claim what we hand
-      // out. Returning every guest — which is what this did — is how one session ended up
-      // driving another session's page: the ids were real, but the callers were not their owners.
-      const available = unclaimed(guests.map(contents => contents.id))
-      // Reclaim ours first so repeated calls from the same session are stable, then fill the
-      // remainder from unclaimed tabs.
-      const ordered = [...mine, ...available.filter(id => !mine.has(id))]
-      if (ordered.length >= want) {
-        const chosen = ordered.slice(0, want)
-        for (const id of chosen) claims.set(id, owner)
-        return { ok: true, ids: chosen, verdict: lastVerdict, owner, claimed: chosen }
-      }
-      await new Promise(resolve => setTimeout(resolve, 600))
+    const ask = async (withUrl) => {
+      const answer = await evaluatePanelService(shell.id, owner, withUrl ? url : '')
+      if (answer.ok !== true) throw new Error(String(answer.reason))
+      return answer
     }
-    // Nothing here creates tabs — see the note above. If the caller wants more than this
-    // session holds, say so plainly instead of leaving guide tabs behind: the fix is `newTab`
-    // on ensureSidebar, which carries a url and therefore navigates the page it makes.
-    const remaining = webContents.getAllWebContents().filter(contents => contents.getType() === 'webview')
-    const stillFree = unclaimed(remaining.map(contents => contents.id))
-    const serveable = [...mine, ...stillFree.filter(id => !mine.has(id))]
-    if (serveable.length > 0) {
-      for (const id of serveable) claims.set(id, owner)
-      return { ok: true, ids: serveable, verdict: 'REUSED', owner, claimed: serveable }
+
+    // Already has a page: reuse it. This is the common case after the first open of a session.
+    const first = await ask(url !== '')
+    if (first.guestId !== null) {
+      claims.set(first.guestId, owner)
+      if (!guestShows(first.guestId, url)) {
+        await sendCdp(first.guestId, 'Page.navigate', { url }).catch(() => undefined)
+      }
+      return { ok: true, created: false, id: first.guestId, via: 'panel', owner }
+    }
+
+    // A tab was just placed in this conversation's panel; its guest attaches once the renderer
+    // creates the webview. Poll INSIDE that panel, so a guest appearing in any other
+    // conversation cannot satisfy this wait — the scoping is what makes the wait safe.
+    const deadline = Date.now() + (url === '' ? 4_000 : 20_000)
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 250))
+      const polled = await ask(false)
+      if (polled.guestId === null) continue
+      claims.set(polled.guestId, owner)
+      if (!guestShows(polled.guestId, url)) {
+        await sendCdp(polled.guestId, 'Page.navigate', { url }).catch(() => undefined)
+      }
+      return { ok: true, created: true, id: polled.guestId, via: 'panel', owner }
     }
     throw new Error(
-      'this session holds no sidebar browser page after ' + String(rounds) + ' checks — '
-      + 'open one with ensureSidebar (newTab for a second). ensureTabs does not create tabs: '
-      + 'a guest appears only once a page navigates, and this op never navigates.',
+      'this conversation\'s browser panel produced no page within its budget '
+      + '(the shell placed no guest in this conversation\'s own sidebar)',
     )
   }
   if (op === 'showTab') {
@@ -1001,114 +498,6 @@ async function handle(request) {
   throw new Error(`unknown op ${JSON.stringify(op)}`)
 }
 
-/**
- * In-page script that opens the right sidebar and focuses its address field.
- *
- * Only preparation happens here; the address itself is typed with real input
- * (see `ensureSidebar`), because a controlled React input ignores text assigned
- * through synthetic events.
- * @returns a self-contained expression evaluating to a short verdict string.
- */
-function shellPrepareSidebar() {
-  return `(() => {
-    const labelOf = el => ((el.getAttribute && el.getAttribute('aria-label')) || el.textContent || '').trim();
-
-    // Collect every clickable we might need, through shadow roots and frames: the launcher card
-    // lives in the shell's start page and the sidebar controls live in its own tree, and a flat
-    // query cannot see either if they are nested.
-    const clickables = () => {
-      const out = [];
-      const scan = (root) => {
-        for (const node of root.querySelectorAll('button,a,[role=button],[role=tab],div[tabindex]')) {
-          out.push(node);
-          if (node.shadowRoot) scan(node.shadowRoot);
-        }
-        for (const frame of Array.from(root.querySelectorAll('iframe'))) {
-          try { if (frame.contentDocument) scan(frame.contentDocument) } catch { /* cross-origin */ }
-        }
-        return out;
-      };
-      return scan(document);
-    };
-
-    // Visibility-aware and exact-first: the page holds hidden URL inputs too, and picking
-    // one of those is issue #25 — the submit lands nowhere and the guest is never created.
-    const addressInput = () => {
-      const visible = (el) => {
-        const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) return false;
-        const s = getComputedStyle(el);
-        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
-      };
-      const all = Array.from(document.querySelectorAll('input')).filter(visible);
-      const exact = all.filter(i => /^\s*输入\s*HTTP\(S\)\s*地址\s*$/.test(i.placeholder || '')
-        || /^(Enter|Type)\s+(an\s+)?HTTP\(S\)\s+address/i.test(i.placeholder || ''));
-      const pool = exact.length > 0 ? exact : all.filter(i => /HTTP|地址|url/i.test((i.placeholder || '') + (i.getAttribute('aria-label') || '')));
-      return pool.length > 0 ? [pool[0]] : [];
-    };
-
-    // 1. Is there already an address bar? Then the sidebar is up; just focus it.
-    const existing = addressInput();
-    if (existing.length > 0) {
-      existing[existing.length - 1].focus();
-      return 'FOCUSED';
-    }
-
-    // 2. Try to open the right sidebar, if a control for that exists.
-    let opened = false;
-    for (const button of clickables()) {
-      if (/打开右侧边栏|右侧边栏/.test(labelOf(button))) { button.click(); opened = true; break }
-    }
-
-    // 3. Nothing yet: drive the shell's own launcher. The start page offers a 「浏览器」 card
-    //    (Ctrl+T) that opens the browser panel, and without this step the bridge simply gave up
-    //    — reporting NO_ADDRESS_BAR for a panel that was never opened. Reported as issue #23:
-    //    a human should not have to open the panel by hand before the agent can use it.
-    const afterOpen = addressInput();
-    if (afterOpen.length > 0) {
-      afterOpen[afterOpen.length - 1].focus();
-      return opened ? 'OPENED_AND_FOCUSED' : 'FOCUSED';
-    }
-    // The launcher card's textContent is the WHOLE card, not its title: measured on this
-    // desktop it reads "浏览器浏览网页Ctrl+T" (title + subtitle + shortcut). Matching the
-    // text against /^(浏览器)$/ therefore matched nothing and the panel was never asked to
-    // open — the click silently did nothing and the caller then failed after its poll.
-    //
-    // Anchor at the START instead: the card begins with 浏览器, while the neighbouring
-    // workspace-files card reads "工作区文件浏览会话工作区的文件Ctrl+P" and merely CONTAINS
-    // 浏览 — an unanchored /浏览/ would click the wrong card. The aria-label branch is kept
-    // for shells that label the control explicitly.
-    // The launcher card, identified by BOTH halves of its text.
-    //
-    // This used to be a prefix test, anchored at the start and accepting the bare word, which
-    // also matches the browser TAB in the strip — its whole label is 浏览器. Clicking that only
-    // switches to an existing tab: no page is created, so no address bar ever appears and the
-    // caller polls to exhaustion. The card is the only element carrying the title AND the
-    // description 浏览网页, and it is short, so both are required. The same rule is used on the
-    // newTab path; two paths doing one job must not have two rules.
-    for (const node of clickables()) {
-      const own = (node.textContent || '').trim();
-      const aria = node.getAttribute('aria-label') || '';
-      const isCard = own.length <= 24 && /浏览器/.test(own) && /浏览网页/.test(own);
-      if (isCard || /open browser|new browser tab/i.test(aria)) {
-        node.click();
-        return 'CLICKED_LAUNCHER';
-      }
-    }
-
-    // 4. Last resort: the shortcut the host registers for browser.new. Dispatched on the
-    //    document, which reaches a handler bound at the window level; it does NOT reach a
-    //    shortcut table, so this is a fallback and not the primary route (the bridge sends a
-    //    real Ctrl+T through the Input domain on the newTab path, which does).
-    try {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', code: 'KeyT', ctrlKey: true, bubbles: true }));
-      return 'SENT_CTRL_T';
-    } catch { /* fall through to the diagnostic */ }
-
-    const inputs = Array.from(document.querySelectorAll('input'));
-    return 'NO_ADDRESS_BAR:' + JSON.stringify(inputs.map(i => i.placeholder).slice(0, 6));
-  })()`
-}
 
 /**
  * Publish the endpoint, and keep it published.

@@ -22,6 +22,14 @@ class FakeContents extends EventEmitter {
     this.type = type
     this.url = url
     this.title = url
+    // The real bridge attaches a debugger and answers over CDP. A stub without one makes every
+    // `sendCdp` throw — which reads as "the code refused", for reasons that have nothing to do
+    // with what a test is actually asserting.
+    this.debugger = {
+      isAttached: () => true,
+      attach: () => {},
+      sendCommand: (method, params) => globalThis.__answerCdp__(this.id, method, params),
+    }
   }
   getType () { return this.type }
   getTitle () { return this.title }
@@ -44,6 +52,22 @@ globalThis.__electronStub__ = {
 }
 
 const BRIDGE = new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url)
+
+/**
+ * What the shell's renderer answers when the bridge asks it to open a conversation's panel.
+ *
+ * The panel path evaluates a call on the plugin's client half and reads the verdict from the
+ * reply, so this is where a test says what that conversation has.
+ */
+let panelVerdict = () => ({ ok: true, created: false, panel: true, guestId: 2, url: '' })
+
+/** The CDP answers a shell would give. */
+globalThis.__answerCdp__ = async (id, method, params) => {
+  if (method === 'Runtime.evaluate' && String(params?.expression ?? '').includes('__dshBuiltinBrowser')) {
+    return { result: { value: JSON.stringify(panelVerdict(String(params?.expression ?? ''))) } }
+  }
+  return { result: { value: 'OK' } }
+}
 
 /**
  * Load the bridge with its electron import stubbed and its boot calls removed.
@@ -80,28 +104,46 @@ test('list shows a session only its own guests, plus unclaimed ones', async () =
   assert.deepEqual(forB, [3, 4])
 })
 
-test('reuse hands a session its OWN guest, not whichever came first', async () => {
-  // This is the bug that reached the user: the allocation path was owner-aware and the reuse
-  // path — which every later call takes — was not, so a session was given another's page and
-  // counted another's tabs as its own.
+test('two conversations asking in turn are each answered with their own page', async () => {
+  // The bleed used to be possible because the request carried a process-level identity every
+  // session shared, and the bridge then looked for a guest to hand it. Now the id IS the
+  // conversation's own, the renderer resolves the panel from it, and there is no lookup in the
+  // bridge to get wrong — the answer is whichever page that conversation's panel holds.
   const a = new FakeContents(2, 'webview', 'https://a.example/')
   const b = new FakeContents(3, 'webview', 'https://b.example/')
   world.contents = [shell, a, b]
   claims.clear()
-  claims.set(2, 'sessionA')
-  claims.set(3, 'sessionB')
 
-  assert.equal((await handle({ op: 'ensureSidebar', owner: 'sessionB' })).id, 3)
-  assert.equal((await handle({ op: 'ensureSidebar', owner: 'sessionA' })).id, 2)
+  const asked = []
+  panelVerdict = (expression) => {
+    asked.push(expression)
+    // Real conversation ids carry the `session-` prefix; the bridge refuses anything that cannot
+    // name a conversation, so a bare 'sessionA' would be turned away before it got this far.
+    return expression.includes('session-aaa')
+      ? { ok: true, created: false, panel: true, guestId: 2, url: '' }
+      : { ok: true, created: false, panel: true, guestId: 3, url: '' }
+  }
+
+  assert.equal((await handle({ op: 'ensureSidebar', owner: 'session-aaa' })).id, 2)
+  assert.equal((await handle({ op: 'ensureSidebar', owner: 'session-bbb' })).id, 3)
+  assert.equal(asked.length, 2, 'one question per call')
+  assert.ok(asked[0].includes('session-aaa'), 'the first named session-aaa')
+  assert.ok(asked[1].includes('session-bbb'), 'the second named session-bbb')
+  assert.equal(claims.get(2), 'session-aaa', 'each guest is claimed by the conversation that asked')
+  assert.equal(claims.get(3), 'session-bbb')
 })
 
-test('an unclaimed guest is adopted rather than duplicated', async () => {
-  const free = new FakeContents(5, 'webview', 'https://free.example/')
-  world.contents = [shell, free]
-  claims.clear()
-  const answer = await handle({ op: 'ensureSidebar', owner: 'sessionC' })
-  assert.equal(answer.id, 5, 'the existing unclaimed tab is taken, not replaced')
-  assert.equal(claims.get(5), 'sessionC')
+test('the bridge no longer scans the process for a free guest', () => {
+  // It used to enumerate every webview looking for "one nobody has claimed", which is how a
+  // session came to be handed a page a human had opened, or one another session owned. The guest
+  // now comes from the conversation's own panel, so no scan exists for that to happen through.
+  const source = readFileSync(BRIDGE, 'utf8')
+  const lines = source.split('\n')
+  const start = lines.findIndex(l => l.includes("if (op === 'ensureSidebar')"))
+  assert.ok(start >= 0, 'ensureSidebar exists')
+  const body = lines.slice(start, start + 80).join('\n')
+  assert.ok(!/unclaimed/.test(body), 'no notion of an unclaimed tab remains in this op')
+  assert.ok(!/getType\(\) === 'webview'/.test(body), 'and it never enumerates guests looking for one')
 })
 
 test('showTab refuses a guest another session holds', async () => {
@@ -133,60 +175,36 @@ test('closeSidebarBrowser never considers another session’s guest', async () =
   assert.equal(claims.get(2), 'sessionA', 'A still holds its guest')
 })
 
-test('ensureSidebar waits for a NEW guest, never adopts one that was already open', async () => {  // The reported symptom, both halves from one line: with tabs already open, the "has a guest
-  // appeared?" test was true on the first poll, so ensureSidebar returned `existing[0]` —
-  // someone else's tab — navigated it to the requested url, and claimed success. The caller saw
-  // a failure (its own tab never appeared) and the page showed up in another session.
-  const openA = new FakeContents(2, 'webview', 'https://a.example/')
-  const openB = new FakeContents(3, 'webview', 'https://b.example/')
-  world.contents = [shell, openA, openB]
-  claims.clear()
-  claims.set(2, 'sessionA')
-  claims.set(3, 'sessionB')
-
-  const before = world.contents.length
-  // The stub has no real shell DOM, so the drive cannot complete; what matters is which guest
-  // the call is willing to RETURN. Either it keeps waiting, or it fails on the drive — both are
-  // acceptable. Handing back an existing guest is not.
-  let returned
-  try {
-    returned = await handle({ op: 'ensureSidebar', url: 'https://requested.example/', newTab: true, owner: 'sessionC' })
-  } catch {
-    returned = undefined
+test('a waiting call keeps asking about its own conversation, and nothing else', async () => {
+  // The wait exists because a guest attaches asynchronously once the renderer creates the
+  // webview. Every round asks the SAME question — this conversation's panel — so a guest
+  // appearing in any other conversation cannot satisfy it. The old wait compared sets of every
+  // webview in the process, which is exactly how it could.
+  let reads = 0
+  const asked = []
+  panelVerdict = (expression) => {
+    asked.push(expression)
+    reads += 1
+    return reads === 1
+      ? { ok: true, created: true, panel: true, guestId: null }
+      : { ok: true, created: false, panel: true, guestId: 9, url: '' }
   }
-  assert.equal(returned, undefined, 'it must not return an already-open guest')
-  assert.equal(world.contents.length, before, 'and it must not have created anything in the stub')
-  assert.equal(claims.get(2), 'sessionA', 'A’s guest is untouched')
-  assert.equal(claims.get(3), 'sessionB', 'B’s guest is untouched')
+
+  const answer = await handle({ op: 'ensureSidebar', owner: 'session-ccc' })
+  assert.equal(answer.id, 9, 'the page that eventually appeared is the one returned')
+  assert.equal(answer.created, true, 'and the caller is told a tab was placed')
+  assert.ok(asked.length >= 2, 'it polled rather than giving up after one read')
+  for (const expression of asked) {
+    assert.ok(expression.includes('session-ccc'), 'every round asked about this conversation only')
+  }
 })
 
-test('newTab converts the guide page exactly once, never via shellPrepareSidebar', async () => {
-  // Static, and deliberately so: the symptom was a loop, and a loop is what the stub cannot
-  // reproduce. What CAN be asserted is the structural rule — the branch taken for `newTab` must
-  // not reach the function whose job is to click the launcher card.
-  const src = readFileSync(BRIDGE, 'utf8')
-  const lines = src.split('\n')
-
-  // Where the op handler decides what to prepare.
-  const opLine = lines.findIndex(l => l.includes("if (op === 'ensureSidebar')"))
-  assert.ok(opLine >= 0, 'ensureSidebar handler exists')
-
-  // Every call to shellPrepareSidebar must sit in the branch that does NOT ask for a new tab.
-  const calls = []
-  lines.forEach((l, i) => { if (/expression: shellPrepareSidebar\(\)/.test(l)) calls.push(i) })
-  assert.equal(calls.length, 1, 'exactly one call site')
-
-  const callLine = calls[0]
-  // Walk back to the nearest branch keyword and require the newTab guard to be present above it.
-  let guard = -1
-  for (let i = callLine; i >= 0; i--) {
-    if (lines[i].includes('request.newTab === true')) { guard = i; break }
-    if (lines[i].includes("if (op === 'ensureSidebar')")) break
-  }
-  assert.ok(guard > 0 && guard < callLine,
-    'shellPrepareSidebar is reached only from a branch that has already decided about newTab')
-
-  // And the guide is consumed by a single explicit click of the card, identified by BOTH halves.
-  assert.ok(src.includes('CLICKED_CARD'), 'the card is clicked explicitly on the guide page')
-  assert.ok(/if \(own\.length > 24\) return false/.test(src), 'the card test is bounded, so the strip tab cannot match')
+test('the shell shortcut is simulated nowhere in the file', () => {
+  // Ctrl+T is the shell's binding for browser.new, and the shell delivers it to whatever it is
+  // displaying. That property is why it could not be the mechanism — and why a page asked for
+  // from one conversation landed in another. Assert no branch reaches for it any more.
+  const source = readFileSync(BRIDGE, 'utf8')
+  assert.ok(!/request\.newTab === true/.test(source), 'no branch keys off newTab any more')
+  assert.ok(!/Input\.dispatchKeyEvent/.test(source), 'and no key event is dispatched anywhere')
+  assert.ok(!/shellPrepareSidebar/.test(source), 'the launcher-card clicker is removed')
 })

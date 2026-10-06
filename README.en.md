@@ -103,7 +103,7 @@ See the full list in [Tool reference](#tool-reference).
   <tr>
     <td width="50%" valign="top">
       <h3>Per-task session isolation</h3>
-      <p>Each DSH task (session) gets its own browser session (own tabs and history); concurrent tasks never fight over the page or pollute each other. Within one task, <b>each call opens its own tab</b> (cookies, history and logins are shared across the session).</p>
+      <p>Each DSH task (session) drives <b>its own sidebar panel and its own page</b>: which conversation the shell happens to be displaying makes no difference, so a page requested in one conversation can never turn up in another's. Concurrent tasks never fight over the page or pollute each other (cookies, history and logins are shared across the session by design).</p>
     </td>
     <td width="50%" valign="top">
       <h3>Login persistence</h3>

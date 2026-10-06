@@ -49,7 +49,14 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
             }
             return { ok: true, guests: sidebar, sidebar }
           }
-          if (request.op === 'ensureSidebar') return { ok: true, created: state.tabs === 0, id: 1, prepared: 'OPENED_AND_FOCUSED', via: 'restore' }
+          if (request.op === 'ensureSidebar') {
+            // The real op answers with the page THIS conversation's panel holds, and that page
+            // changes when the human closes its tab. Returning a fixed id made the recovery path
+            // untestable: the host would be handed the id it had just proven dead.
+            let id = 1
+            while (state.dead.includes(id) && id < 50) id += 1
+            return { ok: true, created: state.tabs === 0, id, prepared: 'OPENED_AND_FOCUSED', via: 'panel' }
+          }
           if (request.op === 'ensureTabs') {
             state.tabs = Math.max(state.tabs, Number(request.count ?? 1))
             // A closed tab frees its slot: the real sidebar would hand out a NEW id,
@@ -131,7 +138,11 @@ test('commands are forwarded to the sidebar guest', async () => {
   }
 })
 
-test('each view takes its own tab, growing the strip only as needed', async () => {
+test('every view of one conversation drives that conversation\'s one page', async () => {
+  // This carrier exists so a human and the agent look at the SAME page, and the shell keeps one
+  // browser page per conversation. Two views are therefore two handles on one guest: the provider
+  // keeps its own tab bookkeeping, and the page does not multiply behind it. Keeping a page per
+  // view is what the self-hosted carrier does, and it is what this one deliberately does not.
   const bridge = await startFakeBridge({ tabs: 1, dead: [] })
   withEndpoint(bridge.port)
   try {
@@ -142,8 +153,10 @@ test('each view takes its own tab, growing the strip only as needed', async () =
     await second.sendCommand('Runtime.evaluate', { expression: '2' })
 
     const guestIds = bridge.requests.filter(r => r.op === 'cdp').map(r => r.id)
-    assert.equal(new Set(guestIds).size, 2, 'two views drove two different guests')
-    assert.ok(bridge.requests.some(r => r.op === 'ensureTabs'), 'the strip was extended for the second view')
+    assert.equal(new Set(guestIds).size, 1, 'both views drove the same page')
+    assert.ok(bridge.requests.some(r => r.op === 'ensureSidebar'), 'and each asked for its conversation page')
+    assert.ok(!bridge.requests.some(r => r.op === 'ensureTabs'),
+      'the strip is never grown to satisfy a second view: there is no second page to grow it for')
   } finally {
     bridge.close()
   }

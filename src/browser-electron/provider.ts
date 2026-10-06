@@ -118,8 +118,13 @@ export interface ElectronBrowserViewHost {
    * Create a new browser view and return a handle to its webContents-like
    * surface. The host owns windowing (adding the view to the window, sizing,
    * removal); the provider owns CDP-driven behavior.
+   * @param owner - the conversation this view serves. A host shared by several conversations
+   *   needs it to keep one conversation's page out of another's; a host with one conversation per
+   *   process may ignore it. It is per VIEW and not per host on purpose: the desktop's host is a
+   *   single instance that every conversation runs through, so an owner held there would be one
+   *   conversation's id applied to all of them.
    */
-  createView(): ElectronViewHandle
+  createView(owner?: string): ElectronViewHandle
   /**
    * Destroy a view created by this host. Called on session close; idempotent
    * for an already-destroyed view.
@@ -206,7 +211,12 @@ export interface ElectronBrowserViewHost {
    * (settings: ui.closeWithSession) has to be asked for explicitly there.
    * @returns a promise that settles once the release was attempted.
    */
-  releasePage?(): Promise<void>
+  /**
+   * Release this carrier's browser pages for one conversation.
+   * @param owner - the conversation whose pages to close. Omit to close every conversation's,
+   *   which is only correct from a teardown that is itself global.
+   */
+  releasePage?(owner?: string): Promise<void>
   /**
    * Fold the carrier's presentation away while keeping the page alive.
    *
@@ -698,7 +708,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * in the window title so a human can tell which task's page is visible.
    */
   open(label?: string): Promise<BrowserSessionId> {
-    const handle = this.host.createView()
+    // The label is the calling DSH task, and it is handed to the view as its owner: a host shared
+    // by several conversations (the desktop's) keeps one conversation's page out of another's on
+    // the strength of it, so it is not decoration.
+    const handle = this.host.createView(label)
     const id = `browser:${randomUUID()}`
     // Group the session's views under its own window (one window per
     // session), carrying the label for the window title. Hosts without
@@ -3074,7 +3087,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // the views above; the desktop's sidebar does not, so it is asked explicitly
       // — and its cookies plus the browsing history outlive the page either way.
       if (this.settingsSource !== undefined && this.settingsSource().ui.closeWithSession) {
-        void this.host.releasePage?.().catch(() => undefined)
+        // Named, because one host serves every conversation: an unnamed release would end the
+        // pages of conversations that are still running.
+        void this.host.releasePage?.(existing.label).catch(() => undefined)
       }
     }
     return Promise.resolve()
@@ -3098,7 +3113,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Append a fresh tab and make it active. */
   private newTab(s: Session): void {
-    const handle = this.host.createView()
+    const handle = this.host.createView(s.label)
     // Same window as the session's other tabs.
     this.host.groupView?.(handle, s.id, s.label)
     s.tabs.push({ id: `tab:${randomUUID()}`, handle })

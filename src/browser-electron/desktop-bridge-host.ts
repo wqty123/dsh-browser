@@ -45,7 +45,9 @@ export function bridgeEndpointPath(): string {
  */
 function isGuestGone(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return /guest \d+ is not available|sidebar unavailable|did not create a browser guest/i.test(message)
+  // The panel path reports its own failure when the renderer never produced a page, and that is the
+  // same class as a vanished guest — worth one retry on a fresh panel — so it is listed here too.
+  return /guest \d+ is not available|sidebar unavailable|produced no page/i.test(message)
 }
 
 /**
@@ -58,7 +60,15 @@ function isGuestGone(error: unknown): boolean {
  */
 export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   private readonly connection: BridgeConnection
-  private readonly views = new Map<string, number>()
+  /**
+   * One entry per view this host handed out: the conversation it serves, and the guest backing it.
+   *
+   * The conversation belongs to the ENTRY, not to this host. A single plugin process serves every
+   * conversation — DSH runs them all through one host instance — so an owner held on the host
+   * would be one conversation's id applied to all of them, and a page could still land in
+   * another's sidebar however carefully the bridge checked it.
+   */
+  private readonly views = new Map<string, { guest?: number; owner: string }>()
   /**
    * This process's identity with the bridge, for tab ownership.
    *
@@ -88,14 +98,15 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    */
   private readonly owner: string
   /**
-   * Guests whose view is gone but whose page may still be open in the sidebar.
+   * Guests whose view is gone but whose page may still be open in the sidebar, with the
+   * conversation each belongs to.
    *
-   * The provider destroys its view handles before it asks for a release, so the
-   * mapping is dropped by then — keeping the guest ids here is what lets us close
-   * only our own tabs when several sessions are running (requirements §4: each
-   * session gets its own page).
+   * The provider destroys its view handles before it asks for a release, so the mapping is dropped
+   * by then — keeping the guest ids here is what lets us close only our own tabs when several
+   * conversations are running (requirements §4: each session gets its own page). The owner rides
+   * along for the same reason it does in {@link views}: a release names one conversation.
    */
-  private readonly orphaned = new Set<number>()
+  private readonly orphaned = new Map<number, string>()
   /**
    * Registered by the provider, and deliberately never invoked on this carrier.
    *
@@ -155,181 +166,58 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   }
 
   /**
-   * The guest id backing a view, materialized on first use.
+   * The guest backing a view, materialized on first use.
    *
-   * The sidebar browser is itself a multi-tab surface, so each view gets its own
-   * tab's guest: the provider's tab bookkeeping then maps onto real tabs the human
-   * can see and switch between. Two rules keep that honest:
-   *   - a cached guest is used as-is: probing it first cost a round-trip on every
-   *     command, so liveness is established by the command failing instead;
-   *   - a fresh view takes an unclaimed guest, growing the tab strip only when
-   *     every existing guest is already spoken for.
+   * The conversation that called owns exactly one sidebar page on this carrier — a human and the
+   * agent look at the same page — so every view resolves to that conversation's own guest, and the
+   * page does not multiply behind the provider's own tab bookkeeping.
+   *
+   * A cached guest is used as-is: probing it first cost a round-trip on every command, so liveness
+   * is established by the command failing instead.
    * @param viewId - the view whose guest is wanted.
-   * @param url - address to use when a sidebar browser has to be opened first.
+   * @param url - address to use when this conversation has no page yet.
    */
-  /**
-   * The shell marks each sidebar container with the conversation it belongs to.
-   *
-   * Measured on the running desktop: two `[class*=_tabStrip]` containers sat in the DOM at once,
-   * each carrying `sessionId` on its React fiber (alongside `SessionProvider =
-   * ScopeAreaProvider`), and the hidden one's webview was unloaded. So "which sidebar is mine"
-   * has an answer the shell itself provides — it just has to be asked.
-   *
-   * Run through the bridge's `cdp` op, which executes in the shared main process. That keeps this
-   * on the plugin side of the seam: the bridge is imported once at host boot, so changing IT costs
-   * the user a restart, while this file is read per process start.
-   */
-  private static readonly SIDEBAR_OWNERSHIP_PROBE = (sessionId: string): string => `(() => {
-    const sessionOf = (el) => {
-      const key = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
-      if (key === undefined) return null;
-      let fiber = el[key];
-      let depth = 0;
-      while (fiber !== null && fiber !== undefined && depth < 60) {
-        const props = fiber.memoizedProps;
-        if (props !== null && typeof props === 'object' && typeof props.sessionId === 'string') return props.sessionId;
-        fiber = fiber.return;
-        depth += 1;
-      }
-      return null;
-    };
-    const visible = (el) => {
-      const r = el.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) return false;
-      const s = getComputedStyle(el);
-      return s.display !== 'none' && s.visibility !== 'hidden';
-    };
-    const wanted = ${JSON.stringify(sessionId)};
-    const strips = Array.from(document.querySelectorAll('[class*=_tabStrip]'))
-      .map(el => ({ session: sessionOf(el), visible: visible(el) }));
-    const mine = strips.find(x => x.session === wanted);
-    const shown = strips.find(x => x.visible);
-    return JSON.stringify({
-      mine: mine === undefined ? 'absent' : (mine.visible ? 'visible' : 'hidden'),
-      containers: strips.length,
-      shownBy: shown === undefined ? null : shown.session,
-    });
-  })()`
-
-  /**
-   * Is this conversation's own sidebar the one that can be operated right now?
-   *
-   * Without this the host drives "whatever sidebar is on screen". On this machine that meant
-   * typing into another conversation's address bar and navigating its page — the reported bug.
-   *
-   * @returns 'visible' when safe to proceed, otherwise a reason to refuse.
-   */
-  private async sidebarOwnership(): Promise<{ ok: true } | { ok: false; reason: string }> {
-    // Only meaningful when the owner really is a conversation id. A host that could not read one
-    // keeps a random uuid, and requiring a match would then refuse everything.
-    if (!this.owner.startsWith('session-')) return { ok: true }
-    try {
-      const listing = await this.connection.call({ op: 'list', owner: this.owner }, 5_000)
-      const guests = Array.isArray(listing?.guests) ? listing.guests as Array<{ id?: unknown; type?: unknown }> : []
-      const shell = guests.find(g => g.type === 'window')
-      if (shell === undefined || !Number.isFinite(Number(shell.id))) return { ok: true }
-      const answer = await this.connection.call({
-        op: 'cdp',
-        id: Number(shell.id),
-        method: 'Runtime.evaluate',
-        params: { expression: DesktopBridgeViewHost.SIDEBAR_OWNERSHIP_PROBE(this.owner), returnByValue: true },
-      }, 5_000)
-      const raw = (answer as { result?: { result?: { value?: unknown } } })?.result?.result?.value
-      const state = typeof raw === 'string' ? JSON.parse(raw) as { mine?: string; shownBy?: string | null } : undefined
-      const shown = state?.shownBy ?? null
-      // Only ONE thing is dangerous: something that is not ours is on screen. A container of ours
-      // that happens to be collapsed is not another conversation's panel — treating it as one made
-      // every call wait ten seconds and then fail, which the user saw as "the sidebar is slow and
-      // the browser will not open". Refusing is for strangers, not for our own collapsed panel.
-      if (shown !== null && shown !== this.owner) {
-        return {
-          ok: false,
-          reason: 'the sidebar on screen belongs to another conversation (' + String(shown)
-            + '); switch back to this one and retry',
-        }
-      }
-      return { ok: true }
-    } catch {
-      // A probe that cannot answer must not block the feature — it means an older bridge, not a
-      // foreign sidebar.
-      return { ok: true }
-    }
-  }
 
   private async guestFor(viewId: string, url?: string): Promise<number> {
-    const existing = this.views.get(viewId)
+    const entry = this.views.get(viewId)
     // No liveness check here: verifying the cached guest cost a round-trip on every
     // command. A guest that has gone away is detected by the command itself failing,
     // and `createView`'s sendCommand then discards the cache and calls back in here.
-    if (existing !== undefined) return existing
+    if (entry?.guest !== undefined) return entry.guest
 
-    // Refuse to drive somebody else's sidebar.
+    // The conversation THIS VIEW serves — read from the view, never from the process.
     //
-    // The shell shows one conversation's sidebar at a time, and this host drives "whatever is on
-    // screen" — so an operation issued while the human reads another conversation lands on THAT
-    // conversation's panel. Measured: it typed an address into their bar and navigated their page.
-    // The check lives here rather than in the bridge because the bridge is read once at host boot:
-    // a fix there costs a restart, a fix here does not.
-    const ownership = await this.sidebarOwnership()
-    if (!ownership.ok) throw new Error(`dsh-builtin-browser: ${ownership.reason}`)
-
-    // THE FIRST view takes the sidebar as it is; every LATER view asks for a new tab.
+    // The difference is the whole bug. This host is one instance shared by every conversation, so
+    // `this.owner` alone can only be "whichever conversation this process happens to name", and
+    // naming the wrong one is exactly how a page requested in one conversation appeared in
+    // another. The view was created for a conversation (`createView(owner)`), so that is what it
+    // asks for its page.
     //
-    // This distinction is what makes a second `browser_open` work. `ensureSidebar` without
-    // `newTab` reuses whatever this session already holds — correct for the first view, and
-    // wrong for the second, where the caller needs a page that is not already driving something.
-    // Leaving it out pushed the whole job onto `ensureTabs`, whose only means is clicking the
-    // strip's "+" and then the guide card: three separate bugs lived in that path, and it should
-    // not be carrying tab creation at all when the host has a shortcut for it.
-    const needsNewTab = this.views.size > 0
-    const sidebar = await this.connection.call({
+    // Nothing here asks which conversation is on screen: `ensureSidebar` reaches this
+    // conversation's own panel by id through the renderer, rather than by pressing the shell's
+    // shortcut or clicking its card, both of which the shell delivers to whatever it displays.
+    const owner = entry?.owner ?? this.owner
+    const answer = await this.connection.call({
       op: 'ensureSidebar',
-      owner: this.owner,
-      ...needsNewTab ? { newTab: true } : {},
-      ...url !== undefined ? { url } : {},
-    })
-    if (sidebar.ok !== true) throw new Error(`dsh-builtin-browser: sidebar unavailable (${String(sidebar.error)})`)
-
-    // The guest just created, when one was. Otherwise every tab this session holds.
-    if (needsNewTab && typeof sidebar.id === 'number' && Number.isFinite(sidebar.id)) {
-      const taken = new Set(this.views.values())
-      if (!taken.has(sidebar.id)) {
-        this.views.set(viewId, sidebar.id)
-        return sidebar.id
-      }
+      owner,
+      ...url !== undefined && url !== '' ? { url } : {},
+    }, 30_000)
+    if (answer.ok !== true) throw new Error(`dsh-builtin-browser: sidebar unavailable (${String(answer.error)})`)
+    const id = Number(answer.id)
+    if (!Number.isFinite(id) || id <= 0) {
+      throw new Error('dsh-builtin-browser: the sidebar reported no browser page for this conversation')
     }
-
-    const wanted = this.views.size + 1
-    // Ask for the tabs THIS session owns, not the ones the sidebar happens to hold. The bridge
-    // keeps the cross-session ledger — a session cannot see another's view map, so without this
-    // it adopted whatever tab it found and drove someone else's page.
-    let ids = await this.guestIds(Math.max(1, wanted))
-    const held = new Set(this.views.values())
-    let free = ids.find(id => !held.has(id))
-    if (free === undefined) {
-      // Every tab this session holds is already driving something: the strip has to grow.
-      ids = await this.guestIds(ids.length + 1)
-      free = ids.find(id => !held.has(id))
-    }
-    if (free === undefined) throw new Error('dsh-builtin-browser: the sidebar reported no free browser tab')
-    this.views.set(viewId, free)
-    return free
+    this.views.set(viewId, { guest: id, owner })
+    return id
   }
 
   /**
-   * Ask for at least `count` tabs belonging to this session and return their guest ids.
-   * @param count - minimum number of tabs.
+   * @param owner - the conversation this view serves. Recorded WITH the view: one host instance
+   *   serves every conversation, so the owner cannot live on the host.
    */
-  private async guestIds(count: number): Promise<number[]> {
-    const answer = await this.connection.call({ op: 'ensureTabs', count, owner: this.owner })
-    if (answer.ok !== true) throw new Error(`dsh-builtin-browser: could not open a sidebar tab (${String(answer.error)})`)
-    const ids = Array.isArray(answer.ids) ? answer.ids.map(Number).filter(Number.isFinite) : []
-    if (ids.length === 0) throw new Error('dsh-builtin-browser: the sidebar reported no browser tabs')
-    return ids
-  }
-
-  createView(): ElectronViewHandle {
+  createView(owner?: string): ElectronViewHandle {
     const viewId = randomUUID()
+    this.views.set(viewId, { owner: owner !== undefined && owner !== '' ? owner : this.owner })
     const navigateUrl = (method: string, params?: Record<string, unknown>): string | undefined =>
       method === 'Page.navigate' ? String((params as { url?: unknown })?.url ?? '') : undefined
     const run = async (guest: number, method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> => {
@@ -354,7 +242,10 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
           // The human closed the tab: the page is gone, so take a fresh one and
           // replay the command once. This is the "closing the interface ends the
           // session" rule, now paid for only when it actually happens.
-          this.views.delete(viewId)
+          // Drop the guest but keep the entry: the conversation it serves is what the retry needs,
+          // and removing the entry would lose it back to the process-wide fallback owner.
+          const lost = this.views.get(viewId)
+          if (lost !== undefined) delete lost.guest
           guest = await this.guestFor(viewId, url)
           return await run(guest, method, params)
         }
@@ -363,11 +254,12 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   }
 
   destroyView(handle: ElectronViewHandle): void {
-    const guest = this.views.get(handle.id)
-    if (guest !== undefined) {
-      // Remember it: the page outlives our handle, and a later release must be able
-      // to name exactly the tabs this plugin opened.
-      this.orphaned.add(guest)
+    const entry = this.views.get(handle.id)
+    if (entry !== undefined) {
+      // Remember the page: it outlives our handle, and a later release must be able to name
+      // exactly the tabs this conversation's views opened. The owner comes along so a release
+      // naming one conversation does not sweep up another's.
+      if (entry.guest !== undefined) this.orphaned.set(entry.guest, entry.owner)
       this.views.delete(handle.id)
     }
   }
@@ -386,11 +278,11 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    * @param handle - the view to bring forward.
    */
   showView(handle: ElectronViewHandle): void {
-    // `owner` is required: the bridge refuses to bring forward a guest held by another session,
-    // and without this the caller is 'anonymous', so the guard rejects this session's own tab.
-    // Owned here means the same half-change that made the ownership work take four rounds — the
-    // ledger went into the bridge and the call sites were not carried with it.
-    void this.connection.call({ op: 'showTab', viewId: Number(handle.id), owner: this.owner }, 5_000).catch(() => undefined)
+    // `owner` is required: the bridge refuses to bring forward a guest held by another session.
+    // It comes from the view, not the process — with several conversations live, a process-wide
+    // owner would raise the wrong conversation's tab.
+    const owner = this.views.get(handle.id)?.owner ?? this.owner
+    void this.connection.call({ op: 'showTab', viewId: Number(handle.id), owner }, 5_000).catch(() => undefined)
   }
 
 
@@ -408,15 +300,26 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    * belongs to the shell and would happily keep the page (and its renderer) alive.
    * Closing the tabs is what actually ends the page — and only the page: cookies
    * live in the partition, history on disk, so both survive.
+   * @param owner - the conversation whose pages to close. Omit to close every conversation's,
+   *   which is only correct from a teardown that is itself global.
    * @returns a promise that settles once the shell has been asked.
    */
-  async releasePage(): Promise<void> {
-    // Only our own tabs: the ids come from the views we handed out (and their
-    // orphans), never from "every webview currently visible". With two sessions
-    // live, releasing one must leave the other's page alone.
-    const mine = [...this.views.values(), ...this.orphaned]
-    this.views.clear()
-    this.orphaned.clear()
+  async releasePage(owner?: string): Promise<void> {
+    // Only this conversation's tabs. The host is ONE instance shared by every conversation, so a
+    // release that named none would close pages other conversations are still driving — "every
+    // webview currently visible" is precisely what must never be used here.
+    const mine: number[] = []
+    for (const [viewId, entry] of [...this.views]) {
+      if (owner !== undefined && entry.owner !== owner) continue
+      if (entry.guest !== undefined) mine.push(entry.guest)
+      this.views.delete(viewId)
+    }
+    // A view destroyed before the release still owns its page; its guest is collected here.
+    for (const [guest, holder] of [...this.orphaned]) {
+      if (owner !== undefined && holder !== owner) continue
+      mine.push(guest)
+      this.orphaned.delete(guest)
+    }
     // Nothing of ours is open: release nothing. Falling through to an unfiltered
     // release here would close tabs a human opened, or another session's page.
     if (mine.length === 0) return
@@ -428,7 +331,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       // returns without closing anything — the page stayed open and the human had to close it by
       // hand. Adding the ledger to the bridge without updating this call site is exactly the kind
       // of half-change that made the ownership work take four rounds.
-      const answer = await this.connection.call({ op: 'list', owner: this.owner }, 5_000)
+      const answer = await this.connection.call({ op: 'list', owner: owner ?? this.owner }, 5_000)
       const sidebar = Array.isArray(answer.sidebar) ? answer.sidebar as Array<{ id?: unknown; title?: unknown }> : []
       titles = sidebar
         .filter(guest => mine.includes(Number(guest.id)))
@@ -443,7 +346,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     try {
       // `owner` is required for the same reason as above: the bridge closes only the guests the
       // caller holds, so an owner-less call closes nothing and the page stays open.
-      await this.connection.call({ op: 'closeSidebarBrowser', titles, owner: this.owner }, 10_000)
+      await this.connection.call({ op: 'closeSidebarBrowser', titles, owner: owner ?? this.owner }, 10_000)
     } catch {
       // Best effort: the setting expresses a preference, and a shell that cannot
       // be reached is no reason to fail the session teardown that called us.

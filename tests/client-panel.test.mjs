@@ -25,6 +25,42 @@ const ROUTE = '/dsh-builtin-browser/settings'
  */
 let activeFetch = async () => ({ ok: false, status: 500, json: async () => ({}) })
 
+/**
+ * The document the bundle sees while it runs.
+ *
+ * The conversation panel service reads the shell's sidebar out of the page, so a test that
+ * exercises it has to be able to present one. Every access is forwarded rather than captured,
+ * because the sandbox is a separate realm and a method captured at load time would go stale the
+ * moment a test swaps the document.
+ */
+/**
+ * A document complete enough for the bundle's own page work: the stylesheet step (`getElementById`,
+ * `createElement`, `head.appendChild`) and the sidebar lookup the conversation panel service makes.
+ * An incomplete one is worse than none — the bundle's `typeof document` guard passes, and the
+ * failure then surfaces as a missing method rather than as "no page here".
+ */
+function makeDocument(overrides = {}) {
+  return {
+    body: {},
+    head: { appendChild: () => {} },
+    getElementById: () => null,
+    createElement: () => ({}),
+    querySelectorAll: () => [],
+    ...overrides,
+  }
+}
+
+let activeDocument = makeDocument()
+
+/**
+ * The sandbox the bundle last ran in.
+ *
+ * A contextified sandbox IS that realm's `globalThis`, so anything the bundle publishes globally
+ * (the conversation panel service does) is readable here as a property of this object. Without
+ * it the test could not see the API at all: the bundle runs in its own realm on purpose.
+ */
+let activeSandbox = null
+
 /** Load the bundle the way the host's ModuleLoader does, and return its factory. */
 function bundleFactory() {
   let factory
@@ -35,7 +71,15 @@ function bundleFactory() {
     clearTimeout,
     queueMicrotask,
     fetch: (...args) => activeFetch(...args),
+    document: {
+      get body() { return activeDocument.body },
+      get head() { return activeDocument.head },
+      getElementById: (id) => activeDocument.getElementById(id),
+      createElement: (tag) => activeDocument.createElement(tag),
+      querySelectorAll: (selector) => activeDocument.querySelectorAll(selector),
+    },
   }
+  activeSandbox = sandbox
   vm.runInNewContext(SOURCE, sandbox, { filename: 'client.js' })
   assert.ok(typeof factory === 'function', 'the bundle registered a factory')
   return factory
@@ -136,6 +180,7 @@ function elements(node, found = []) {
 /** Wire the bundle up to a host and render it. */
 async function mount(options = {}) {
   const settings = options.settings ?? DEFAULT_SETTINGS
+  if (options.document !== undefined) activeDocument = options.document
   const host = makeHost(settings)
   const exports = bundleFactory()(host.requireFn)
 
@@ -147,13 +192,20 @@ async function mount(options = {}) {
       inject: (_name, fn) => fn(),
       register: (spec, Component) => { registration = { spec, Component } },
     },
+    // The panel service waits for `sidebarRight`. A host that never provides one leaves the
+    // service unbound and the API names that when called — which is the shape every settings test
+    // here runs in, and also what an older composition looks like.
+    inject: (_names, fn) => {
+      if (options.sidebarRight === undefined) return
+      fn({ sidebarRight: options.sidebarRight, effect: (run) => { run() } })
+    },
   }
   exports.apply(ctx)
   assert.ok(registration !== undefined, 'apply() registered a settings section')
   assert.equal(registration.spec.name, 'settings.section')
 
   const tree = await renderPanel(registration.Component, host)
-  return { tree, host, exports, registration }
+  return { tree, host, exports, registration, panel: activeSandbox.__dshBuiltinBrowser }
 }
 
 test('the bundle loads and registers the settings section', async () => {
@@ -240,4 +292,128 @@ test('flipping a switch sends exactly that patch', async () => {
   assert.equal(writes.length, 1, 'one write, not a burst')
   assert.equal(writes[0].url, ROUTE)
   assert.deepEqual(JSON.parse(writes[0].init.body), { actions: { allowDownload: false } })
+})
+
+// ---------------------------------------------------------------------------
+// The conversation panel service.
+//
+// This is the half that makes a page land in the conversation that ASKED for it. The shell mounts
+// one sidebar per conversation and keeps the DSH session id on each, so the panel is found by id
+// and nested lookups never leave its subtree. Two things are load-bearing here and both are
+// asserted below: it calls `openTabIn` and NEVER the on-screen `openTab`, and it reports a named
+// refusal when the conversation has no panel rather than reaching for somebody else's.
+// ---------------------------------------------------------------------------
+
+/** A sidebar strip belonging to `sessionId`, carrying the React fiber the shell marks it with. */
+function makeStrip(sessionId, guests = []) {
+  const views = guests.map(id => ({
+    getWebContentsId: () => id,
+    getBoundingClientRect: () => ({ width: 320, height: 200 }),
+    getURL: () => 'https://example.com/',
+  }))
+  return {
+    __reactFiber$test: { memoizedProps: { sessionId }, return: null },
+    querySelectorAll: (selector) => (selector === 'webview' ? views : []),
+    parentElement: null,
+  }
+}
+
+/** A document holding just these strips. */
+function documentWith(...strips) {
+  return makeDocument({
+    querySelectorAll: (selector) => (selector === '[class*=_tabStrip]' ? strips : []),
+  })
+}
+
+/** A shell sidebar service that records which navigation the panel service chose to call. */
+function recordingSidebar() {
+  const calls = []
+  return {
+    calls,
+    service: {
+      openTabIn: (...args) => { calls.push(['openTabIn', ...args]) },
+      // The on-screen variant. Nothing may call it: it acts on the conversation the shell is
+      // displaying, which is the entire class of bug this service exists to remove.
+      openTab: (...args) => { calls.push(['openTab', ...args]) },
+    },
+  }
+}
+
+test('the panel service is published even when the host offers no sidebar service', async () => {
+  const { panel } = await mount()
+  assert.ok(panel !== undefined, 'the API is published on the global the bridge calls')
+  assert.equal(typeof panel.openPanel, 'function')
+  // And a call names the missing service instead of throwing into the bridge's evaluate.
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.ok, false)
+  assert.match(String(verdict.reason), /sidebar service/)
+})
+
+test('opening a panel names the calling conversation and never the on-screen one', async () => {
+  const { calls, service } = recordingSidebar()
+  const { panel } = await mount({
+    sidebarRight: service,
+    document: documentWith(makeStrip('session-a')),
+  })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.ok, true)
+  assert.equal(verdict.created, true, 'the panel had no guest, so a tab was placed')
+
+  assert.equal(calls.length, 1, 'exactly one navigation')
+  const [method, sessionId, kind, options] = calls[0]
+  assert.equal(method, 'openTabIn', 'the conversation-scoped call is the one used')
+  assert.equal(sessionId, 'session-a', 'the call carries the CALLING conversation id')
+  assert.equal(kind, 'browser')
+  // Field by field: the options object is built inside the bundle's own realm, so a deep compare
+  // against a host-realm literal fails on the prototype rather than on the contents — the same
+  // cross-realm caveat the exports.inject assertion above carries.
+  assert.equal(options.params.url, 'https://example.com/', 'the address rides along to the shell')
+  assert.ok(!calls.some(call => call[0] === 'openTab'), 'the on-screen variant is never called')
+})
+
+test('the panel lookup never leaves the calling conversation subtree', async () => {
+  const { calls, service } = recordingSidebar()
+  // Two conversations have sidebars at once, which is the normal state of the shell. The guest
+  // that exists belongs to the OTHER one.
+  const { panel } = await mount({
+    sidebarRight: service,
+    document: documentWith(makeStrip('session-a'), makeStrip('session-b', [77])),
+  })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.guestId, null, 'session-b\'s guest is not handed to session-a')
+  assert.equal(calls.length, 1, 'session-a still opens its own panel')
+  assert.equal(calls[0][1], 'session-a')
+
+  // And the other direction reads its own guest without navigating at all.
+  const own = panel.panelGuest('session-b')
+  assert.equal(own.guestId, 77, 'session-b reads its own guest')
+  assert.equal(calls.length, 1, 'reading an existing guest navigates nothing')
+})
+
+test('a conversation the shell has not mounted is refused by name, not driven', async () => {
+  const { calls, service } = recordingSidebar()
+  const { panel } = await mount({
+    sidebarRight: service,
+    document: documentWith(makeStrip('session-other')),
+  })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.ok, false)
+  assert.equal(verdict.panel, false, 'it reports that the panel is absent')
+  assert.match(String(verdict.reason), /not mounted/)
+  assert.equal(calls.length, 0, 'nothing is navigated for a conversation with no sidebar')
+})
+
+test('a non-conversation owner is refused before any lookup', async () => {
+  const { calls, service } = recordingSidebar()
+  const { panel } = await mount({ sidebarRight: service, document: documentWith(makeStrip('session-a')) })
+
+  for (const owner of ['anonymous', 'default', '', undefined]) {
+    const verdict = panel.openPanel(owner, 'https://example.com/')
+    assert.equal(verdict.ok, false, `${String(owner)} is refused`)
+    assert.equal(verdict.guestId, null)
+  }
+  assert.equal(calls.length, 0, 'no navigation is attempted for an unidentifiable caller')
 })

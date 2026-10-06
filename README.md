@@ -173,7 +173,7 @@ node <本仓库路径>/desktop-bridge/install.mjs
 
 | 工具 | 用途 | 守卫 |
 | --- | --- | --- |
-| `browser_open` | 打开 URL,返回页面快照;**同一会话内再次调用会开一个新标签**(首次调用自动打开侧栏面板) | ✅ |
+| `browser_open` | 打开 URL,返回页面快照;**每个会话只使用自己的侧栏面板,外壳此刻显示哪个会话完全无关**(首次调用自动为发起会话打开面板) | ✅ |
 | `browser_wait` | 等待页面加载完成(可选期望 URL / CSS 选择器),返回是否就绪 | – |
 | `browser_snapshot` | 交互元素(输入框/按钮/链接)带编号清单,元素可引用时附 `{#id}` / `{[name=x]}` 定位选择器(穿透同源 iframe 与 Shadow DOM) | – |
 | `browser_a11y` | 无障碍树:每个交互节点的语义角色/名称/值/状态,可引用时附 `{#id}` / `{[name=x]}`;坐标按需(`coords: true`,默认不含;穿透同源 iframe 与 Shadow DOM) | – |
