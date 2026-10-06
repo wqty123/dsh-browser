@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 /**
  * Transport for the desktop shell's browser bridge: one long-lived connection to a
  * loopback TCP service.
@@ -80,8 +81,41 @@ export class BridgeConnection {
 
   /**
    * @param endpoint - the shell's published bridge endpoint.
+   * @param endpointPath - where that endpoint is republished, so a moved port can be followed.
    */
-  constructor(private readonly endpoint: BridgeEndpoint) {}
+  constructor(private endpoint: BridgeEndpoint, private readonly endpointPath?: string) {}
+
+  /**
+   * Re-read the published endpoint, and adopt it if the shell has moved.
+   *
+   * The bridge binds an ephemeral port and picks a NEW one whenever its server is recreated. The
+   * endpoint file is rewritten every fifteen seconds, but a host that adopted the old one keeps
+   * dialling a dead port forever: measured here as `connect ECONNREFUSED 127.0.0.1:52276` while
+   * the live bridge sat on 52411. Discarding the socket is not enough — the comment below says a
+   * dead connection must never become a dead plugin, and a stale PORT makes exactly that happen.
+   *
+   * Cheap and safe: one small file read per call, no socket work.
+   *
+   * @returns true when a different endpoint was adopted.
+   */
+  private refreshEndpoint(): boolean {
+    if (this.endpointPath === undefined) return false
+    try {
+      const raw = JSON.parse(readFileSync(this.endpointPath, 'utf8')) as Partial<BridgeEndpoint>
+      if (typeof raw.port !== 'number' || typeof raw.token !== 'string') return false
+      if (raw.port === this.endpoint.port && raw.token === this.endpoint.token) return false
+      this.endpoint = {
+        port: raw.port,
+        token: raw.token,
+        pid: typeof raw.pid === 'number' ? raw.pid : this.endpoint.pid,
+      }
+      // The old socket belongs to the old port.
+      this.reset(new Error('dsh-builtin-browser: the bridge moved; reconnecting to the new port'))
+      return true
+    } catch {
+      return false
+    }
+  }
 
   /**
    * Send one request, reusing the socket if it is still healthy.
@@ -102,6 +136,8 @@ export class BridgeConnection {
     // straight-line re-dial rather than a retry loop: an earlier revision re-entered call()
     // from inside its own promise executor, which left an orphaned pending entry behind and,
     // when the condition could not clear, spun until the process ran out of heap.
+    // Follow the shell if its bridge moved to a new port (see refreshEndpoint).
+    this.refreshEndpoint()
     let socket = this.ensureSocket()
     if (this.serialisable && this.queue.length > 0) {
       this.reset(new Error('dsh-builtin-browser: bridge connection reopened so replies stay attributable'))

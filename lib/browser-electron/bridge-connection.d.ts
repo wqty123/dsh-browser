@@ -1,22 +1,3 @@
-/**
- * Transport for the desktop shell's browser bridge: one long-lived connection to a
- * loopback TCP service.
- *
- * WHY THIS IS ITS OWN MODULE
- * The bridge used to be reached with a fresh connection per request, which measured
- * at ~25ms per call (TCP handshake + token exchange) against ~0.2ms when the socket
- * is reused. A single browser action issues several CDP commands, so that cost was
- * multiplied on every tool call — the difference between a snappy agent and a
- * visibly sluggish one. Reuse is therefore a property of the transport, and keeping
- * it here means the view host above does not have to think about sockets at all.
- *
- * PROTOCOL
- * The first line on a connection carries the token; the service marks the socket
- * authenticated and ignores that line as a command. Requests and answers are then
- * newline-delimited JSON, one answer per request, in order.
- *
- * @module dsh-browser/browser-electron/bridge-connection
- */
 /** Where the shell publishes its bridge endpoint. */
 export interface BridgeEndpoint {
     readonly port: number;
@@ -40,7 +21,8 @@ export interface BridgeEndpoint {
  * become a dead plugin.
  */
 export declare class BridgeConnection {
-    private readonly endpoint;
+    private endpoint;
+    private readonly endpointPath?;
     private socket;
     private buffer;
     /** Outstanding requests by id. */
@@ -54,8 +36,23 @@ export declare class BridgeConnection {
     private serialisable;
     /**
      * @param endpoint - the shell's published bridge endpoint.
+     * @param endpointPath - where that endpoint is republished, so a moved port can be followed.
      */
-    constructor(endpoint: BridgeEndpoint);
+    constructor(endpoint: BridgeEndpoint, endpointPath?: string | undefined);
+    /**
+     * Re-read the published endpoint, and adopt it if the shell has moved.
+     *
+     * The bridge binds an ephemeral port and picks a NEW one whenever its server is recreated. The
+     * endpoint file is rewritten every fifteen seconds, but a host that adopted the old one keeps
+     * dialling a dead port forever: measured here as `connect ECONNREFUSED 127.0.0.1:52276` while
+     * the live bridge sat on 52411. Discarding the socket is not enough — the comment below says a
+     * dead connection must never become a dead plugin, and a stale PORT makes exactly that happen.
+     *
+     * Cheap and safe: one small file read per call, no socket work.
+     *
+     * @returns true when a different endpoint was adopted.
+     */
+    private refreshEndpoint;
     /**
      * Send one request, reusing the socket if it is still healthy.
      *

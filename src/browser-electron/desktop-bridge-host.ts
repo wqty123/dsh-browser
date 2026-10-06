@@ -113,7 +113,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    */
   private constructor(endpoint: BridgeEndpoint, sessionId?: string) {
     this.owner = sessionId !== undefined && sessionId !== String.fromCharCode(39,39) ? sessionId : randomUUID()
-    this.connection = new BridgeConnection(endpoint)
+    this.connection = new BridgeConnection(endpoint, bridgeEndpointPath())
   }
 
   /**
@@ -136,7 +136,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     try {
       // A throwaway connection for discovery: the adopted host opens its own, and a
       // rejected endpoint must not leave a socket behind.
-      const probe = new BridgeConnection(endpoint)
+      const probe = new BridgeConnection(endpoint, bridgeEndpointPath())
       try {
         const answer = await probe.call({ op: 'list' }, 5_000)
         return answer.ok === true ? new DesktopBridgeViewHost(endpoint, sessionId) : undefined
@@ -236,17 +236,19 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       }, 5_000)
       const raw = (answer as { result?: { result?: { value?: unknown } } })?.result?.result?.value
       const state = typeof raw === 'string' ? JSON.parse(raw) as { mine?: string; shownBy?: string | null } : undefined
-      if (state?.mine === 'visible') return { ok: true }
       const shown = state?.shownBy ?? null
-      if (state?.mine === 'absent' && shown === null) {
-        // Nothing of ours is on screen AND nothing else is either: the ordinary first open.
-        return { ok: true }
+      // Only ONE thing is dangerous: something that is not ours is on screen. A container of ours
+      // that happens to be collapsed is not another conversation's panel — treating it as one made
+      // every call wait ten seconds and then fail, which the user saw as "the sidebar is slow and
+      // the browser will not open". Refusing is for strangers, not for our own collapsed panel.
+      if (shown !== null && shown !== this.owner) {
+        return {
+          ok: false,
+          reason: 'the sidebar on screen belongs to another conversation (' + String(shown)
+            + '); switch back to this one and retry',
+        }
       }
-      return {
-        ok: false,
-        reason: 'the sidebar on screen belongs to another conversation (' + String(shown ?? 'unknown')
-          + '); switch back to this one and retry',
-      }
+      return { ok: true }
     } catch {
       // A probe that cannot answer must not block the feature — it means an older bridge, not a
       // foreign sidebar.
