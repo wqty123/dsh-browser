@@ -72,7 +72,7 @@ src = src.replace(
 src += '\nglobalThis.__bridge_handle__ = handle;\nglobalThis.__bridge_claims__ = claims;\n'
 
 /** Everything the harness observed, reset per scenario. */
-const seen = { evaluates: [], navigations: [], keys: [], clicks: [] }
+const seen = { evaluates: [], reads: [], placements: [], navigations: [], keys: [], clicks: [] }
 
 /**
  * Scripted shell.
@@ -94,7 +94,23 @@ let panelGuest = null
 globalThis.__evalInShell__ = async (id, code) => {
   seen.evaluates.push({ id, expression: code })
   if (code.includes('.click(')) seen.clicks.push(code)
-  const verdict = panelScript(seen.evaluates.length)
+  // `panelGuest` is the READ form and `openPanel` the one that CREATES. Keeping them apart here is
+  // what lets the suite assert that a wait never places anything.
+  if (code.includes('panelGuest')) {
+    seen.reads.push(code)
+    // What the conversation holds RIGHT NOW. A placement that already happened is visible to a
+    // read — that is precisely why the wait polls with the read form, and a stub that always
+    // answered "nothing" would make every wait run to its deadline.
+    const placed = panelGuest !== null && seen.placements.length > 0
+    return JSON.stringify({
+      ok: true,
+      panel: true,
+      guestId: placed ? panelGuest.id : null,
+      url: placed ? panelGuest.url : '',
+    })
+  }
+  seen.placements.push(code)
+  const verdict = panelScript(seen.placements.length)
   if (panelGuest !== null && !world.contents.includes(panelGuest)) world.contents.push(panelGuest)
   return JSON.stringify(verdict)
 }
@@ -132,6 +148,8 @@ function reset (script, guest = null) {
   panelScript = script
   panelGuest = guest
   seen.evaluates.length = 0
+  seen.reads.length = 0
+  seen.placements.length = 0
   seen.navigations.length = 0
   seen.keys.length = 0
   seen.clicks.length = 0
@@ -233,6 +251,28 @@ test('a panel that never produces a page fails within its budget', async () => {
   const elapsed = Date.now() - started
   assert.ok(elapsed < 8_000, 'a no-url request uses the short budget; it took ' + String(elapsed) + 'ms')
   assert.deepEqual(seen.clicks, [], 'and it never fell back to clicking anything')
+})
+
+test('waiting for a page READS; it never places one', async () => {
+  // The wait polls because a guest attaches asynchronously after the renderer creates the webview.
+  // Polling with the CREATING call is what turned a 20-second budget into one empty tab every
+  // 250ms — reported as "it opens a pile of blank pages at once, and only the last one is any
+  // good". A wait must never be a write.
+  reset(() => ({ ok: true, created: true, panel: true, guestId: null }))
+
+  await assert.rejects(
+    () => handle({ op: 'ensureSidebar', owner: 'session-a', url: 'https://example.com/' }),
+    /produced no page/,
+  )
+
+  assert.equal(seen.placements.length, 1, 'exactly ONE placement, however long the wait was')
+  assert.ok(seen.reads.length >= 2, 'and every round of the wait used the read form')
+  for (const read of seen.reads) {
+    // The CALL, not the name: every expression carries `typeof api.openPanel !== 'function'` as a
+    // capability check, so a substring test for the name would fail on a correct read.
+    assert.ok(read.includes('api.panelGuest('), 'reads call panelGuest')
+    assert.ok(!read.includes('api.openPanel('), 'and never call the creating form')
+  }
 })
 
 test('the old path is gone from the file, not merely unreachable', () => {

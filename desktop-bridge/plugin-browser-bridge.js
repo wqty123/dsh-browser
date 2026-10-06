@@ -238,17 +238,26 @@ async function sendCdp(id, method, params) {
  *
  * @param shellId - the shell window's webContents id.
  * @param sessionId - the conversation that asked (the request's `owner`).
- * @param url - address to load when a panel has to be opened; empty to only read.
+ * @param url - address to load when a panel has to be opened; `null` to only READ.
  * @returns the renderer's verdict, normalized so a malformed answer is a named failure.
  */
 async function evaluatePanelService(shellId, sessionId, url) {
+  // `null` means read-only. This distinction is not cosmetic: `openPanel` CREATES a tab when the
+  // conversation has none, so polling with it turned a 20-second wait into one empty tab every
+  // 250ms — the "it opens a pile of blank pages at once" report. A wait must never be a write.
+  const reading = url === null
+  const call = reading
+    // `panelGuest` reports state, not success, so the read form supplies the verdict itself: a
+    // conversation with no panel yet is a legitimate answer to "what do you have", not a failure.
+    ? `JSON.stringify({ ok: true, ...api.panelGuest(${JSON.stringify(String(sessionId))}) })`
+    : `JSON.stringify(api.openPanel(${JSON.stringify(String(sessionId))}, ${JSON.stringify(String(url ?? ''))}))`
   const expression = `(() => {
     const api = globalThis.__dshBuiltinBrowser;
     if (api === undefined || api === null || typeof api.openPanel !== 'function') {
       return JSON.stringify({ ok: false, reason: 'the plugin client half is not loaded in this window' });
     }
     try {
-      return JSON.stringify(api.openPanel(${JSON.stringify(String(sessionId))}, ${JSON.stringify(String(url ?? ''))}));
+      return ${call};
     } catch (error) {
       return JSON.stringify({ ok: false, reason: String((error && error.message) || error) });
     }
@@ -361,7 +370,9 @@ async function handle(request) {
     }
 
     const ask = async (withUrl) => {
-      const answer = await evaluatePanelService(shell.id, owner, withUrl ? url : '')
+      // `null` reads, a string places or navigates. Every round of the wait below uses the READ
+      // form, because a wait must never create anything.
+      const answer = await evaluatePanelService(shell.id, owner, withUrl ? url : null)
       if (answer.ok !== true) {
         // Carry the renderer's own findings into the failure: it is the side that can see why the
         // lookup missed, and a bare "not mounted" leaves the next reader guessing between a real
