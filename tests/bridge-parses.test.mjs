@@ -1,11 +1,24 @@
 // The bridge is a script the shell loads once at boot; if it does not parse, the bridge never
 // starts and every browser call fails with a connection error.
 //
-// This exists because I broke it three times in one session in the same way: writing a comment
-// that quotes a regex or a parameter name with backticks, inside one of the file's many
-// `expression: \`...\`` templates. Each time the template ended early and the file stopped
-// parsing. `node --check` catches it in one line, which is the point — it is the JS parser, not a
-// hand-rolled scanner.
+// This exists because I broke it four times in one session the same way: writing a comment that
+// quotes a name or a regex with backticks, inside one of the file's `expression: \`...\``
+// templates. The template ended early and the file stopped parsing.
+//
+// Two attempts to build a more targeted check were made and both were deleted, which is worth
+// recording so nobody rebuilds them:
+//
+//   - a scanner for a backtick inside a template, shape-based: false-positive on a one-line
+//     template (`expression: \`(${...}) !== null\``), which closes on its own line, so every later
+//     comment read as a violation;
+//   - the same scanner, parity-based: a single stray backtick reads as a CLOSE, so it went blind —
+//     verified by injection, after which it reported zero offenders;
+//   - and a "prove the parser always catches it" test, which could not be made to hold: injecting
+//     the quoted-name shape at the natural place still parsed, because what follows the dangling
+//     backtick happened to be valid. A test that cannot fail reliably is not a test.
+//
+// What remains is the real parser. It caught all four of my mistakes, and it cannot both miss and
+// misfire the way a heuristic can.
 import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -17,24 +30,4 @@ test('the bridge file parses', () => {
     const detail = String(error.stderr ?? error.message).split('\n').slice(0, 6).join('\n')
     assert.fail('desktop-bridge/plugin-browser-bridge.js does not parse:\n' + detail)
   }
-})
-
-test('no backtick appears inside an evaluated page script', async () => {
-  // Deliberately narrow: only the lines BETWEEN `expression: \`` and its closing `})()\``, which
-  // is the region where a stray backtick ends the template. A general scanner produces false
-  // positives on the file's ordinary backticks, as my first attempt did.
-  const fs = await import('node:fs')
-  const source = fs.readFileSync('desktop-bridge/plugin-browser-bridge.js', 'utf8')
-  const tick = String.fromCharCode(96)
-  const lines = source.split('\n')
-  const offenders = []
-  let open = false
-  let openedAt = 0
-  lines.forEach((line, index) => {
-    if (!open && line.includes('expression: ' + tick)) { open = true; openedAt = index + 1; return }
-    if (!open) return
-    if (line.includes('})()' + tick) || line.includes('})()' + tick + ',')) { open = false; return }
-    if (line.includes(tick)) offenders.push('L' + (index + 1) + ' (template at L' + openedAt + '): ' + line.trim().slice(0, 64))
-  })
-  assert.deepEqual(offenders, [], 'a backtick inside a template ends it early:\n' + offenders.join('\n'))
 })

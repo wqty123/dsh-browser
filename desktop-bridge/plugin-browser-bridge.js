@@ -270,6 +270,97 @@ async function handle(request) {
   }
   if (op === 'ensureSidebar') {
     const url = request.url === undefined ? '' : String(request.url)
+    // Does this conversation have a panel of its own? If not, ask the shell to make one.
+    //
+    // Everything else here is scoped to this conversation's panel, so a conversation without one
+    // has nothing to operate on — measured after the scoping landed: "the sidebar reported no free
+    // browser tab", because every DOM script returned NO_PANEL and nothing was ever created.
+    //
+    // Only `Ctrl+T` can create it: it is the host's own shortcut for browser.new and a KEY event,
+    // so the shell routes it to the conversation it is displaying. That makes this the one action
+    // whose correctness depends on which conversation is on screen — and why it is refused, not
+    // guessed, when that is not us:
+    //
+    //   showing us      -> Ctrl+T creates our panel            (correct)
+    //   showing someone -> Ctrl+T would create THEIRS          (so wait)
+    //
+    // A conversation that already has a panel never re-enters this, so it costs one check.
+    if (/^session-/.test(owner)) {
+      const shellForPanel = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+      if (shellForPanel !== undefined) {
+        const probe = await sendCdp(shellForPanel.id, 'Runtime.evaluate', {
+          expression: `(${panelRootExpression(owner)}) !== null`,
+          returnByValue: true,
+        })
+        if (String(probe?.result?.value ?? '') !== 'true') {
+          const shownNow = await sendCdp(shellForPanel.id, 'Runtime.evaluate', {
+            expression: `(() => {
+              const active = Array.from(document.querySelectorAll('[data-row-key^="session:"]'))
+                .find(el => el.getAttribute('aria-selected') === 'true');
+              return active === undefined || active === null
+                ? ''
+                : String(active.getAttribute('data-row-key')).replace('session:', '');
+            })()`,
+            returnByValue: true,
+          })
+          const onScreen = String(shownNow?.result?.value ?? '')
+          if (onScreen !== '' && onScreen !== owner) {
+            // Asking now would build the panel inside somebody else's window.
+            for (let attempt = 0; attempt < 20; attempt++) {
+              await new Promise(resolve => setTimeout(resolve, 500))
+              const again = await sendCdp(shellForPanel.id, 'Runtime.evaluate', {
+                expression: `(() => {
+                  const active = Array.from(document.querySelectorAll('[data-row-key^="session:"]'))
+                    .find(el => el.getAttribute('aria-selected') === 'true');
+                  return active === undefined || active === null
+                    ? ''
+                    : String(active.getAttribute('data-row-key')).replace('session:', '');
+                })()`,
+                returnByValue: true,
+              })
+              if (String(again?.result?.value ?? '') === owner) break
+            }
+            const finalCheck = await sendCdp(shellForPanel.id, 'Runtime.evaluate', {
+              expression: `(() => {
+                const active = Array.from(document.querySelectorAll('[data-row-key^="session:"]'))
+                  .find(el => el.getAttribute('aria-selected') === 'true');
+                return active === undefined || active === null
+                  ? ''
+                  : String(active.getAttribute('data-row-key')).replace('session:', '');
+              })()`,
+              returnByValue: true,
+            })
+            if (String(finalCheck?.result?.value ?? '') !== owner) {
+              throw new Error(
+                'this conversation has no browser panel yet, and the shell is showing another '
+                + 'conversation — switch back to this one and retry (creating it now would build '
+                + 'the panel inside that other conversation)',
+              )
+            }
+          }
+          const press = (type) => sendCdp(shellForPanel.id, 'Input.dispatchKeyEvent', {
+            type,
+            modifiers: 2,
+            windowsVirtualKeyCode: 84,
+            nativeVirtualKeyCode: 84,
+            code: 'KeyT',
+            key: 't',
+            ...type === 'keyDown' ? { text: 't' } : {},
+          })
+          await press('keyDown')
+          await press('keyUp')
+          // The shell builds the panel asynchronously; wait until it is addressable.
+          for (let attempt = 0; attempt < 20; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 250))
+            const ready = await sendCdp(shellForPanel.id, 'Runtime.evaluate', {
+              expression: `(${panelRootExpression(owner)}) !== null`,
+              returnByValue: true,
+            })
+            if (String(ready?.result?.value ?? '') === 'true') break
+          }
+        }
+      }
+    }
     // Materialize a sidebar guest, optionally navigating it.
     //
     // The sidebar browser creates its guest lazily: an un-navigated sidebar is
