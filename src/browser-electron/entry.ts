@@ -67,50 +67,48 @@ export const Config: z<Config> = z.object({
   contentMaxChars: z.number(),
 })
 
+/**
+ * This process's session id, read the way DSH's own desktop host reads it.
+ *
+ * `dsh-desktop-host/lib/index.js` does `ctx.get('agents')` then `agents.list()`, and uses
+ * `agent.id` directly as a sessionId. One conversation per process, so the list holds this one.
+ *
+ * Returns undefined rather than throwing when the service is absent — an older host, or a
+ * non-desktop composition. The caller falls back to a random id, which is what the bridge used
+ * before and is safe: it only means "this process", not "this conversation".
+ *
+ * @param ctx - the plugin context.
+ * @returns the session id, or undefined when it cannot be read.
+ */
+function readSessionId(ctx: unknown): string | undefined {
+  try {
+    const surface = ctx as { get?: (name: string) => unknown }
+    if (typeof surface.get !== 'function') return undefined
+    const agents = surface.get('agents') as { list?: () => unknown } | undefined
+    const list = typeof agents?.list === 'function' ? agents.list() : undefined
+    if (!Array.isArray(list) || list.length === 0) return undefined
+    const first = list[0] as { id?: unknown } | undefined
+    return typeof first?.id === 'string' && first.id !== '' ? first.id : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Register the Electron browser provider with `ctx.browser`. */
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
   // Which session is this process serving?
   //
-  // Needed because the desktop shell shows ONE sidebar at a time — the one belonging to the
-  // conversation the human is looking at — while the bridge runs in the shared main process and
-  // therefore cannot tell whose sidebar it is driving. Measured on the running shell: the bridge
-  // ended up typing into another conversation's address bar and navigating that page.
+  // The desktop shell keeps ONE sidebar per conversation — measured: two `[class*=_tabStrip]`
+  // containers sat in the DOM at once, each carrying its own session id on the React fiber, and
+  // the invisible one's webview was unloaded. So the bridge CAN tell which sidebar belongs to
+  // whom; what it lacked was the other half, this process's own identity. Without it, the bridge
+  // drove "whatever sidebar is on screen" and — measured on the running shell — typed into another
+  // conversation's address bar and navigated that page.
   //
-  // The other half is readable: the shell's conversation list carries
-  // `data-row-key="session:<id>"` with `aria-selected="true"` on the active one. So if this
-  // process can name its own session, the bridge can compare and refuse to touch a foreign
-  // sidebar.
-  //
-  // Probe for it rather than guess at a field name, and write to a file this work can read rather
-  // than into DSH's log — the logger's destination is not known from here and guessing cost a
-  // round already. One small file per process, overwritten on each start.
-  try {
-    const surface = ctx as unknown as Record<string, unknown>
-    const lines: string[] = [`pid=${String(process.pid)}`, `cwd=${String(process.cwd())}`]
-    for (const key of Object.keys(process.env)) {
-      if (/SESSION|AGENT|DSH_/i.test(key)) lines.push(`env ${key}=${String(process.env[key]).slice(0, 60)}`)
-    }
-    const names = Object.keys(surface).filter(k => !k.startsWith('_')).sort()
-    lines.push('ctx keys=' + names.join(','))
-    for (const key of ['agents', 'sessions', 'session', 'agent', 'scope', 'sessionId', 'agentId']) {
-      const value = surface[key]
-      if (value === undefined) { lines.push(`ctx.${key}=absent`); continue }
-      let detail = typeof value
-      if (value !== null && typeof value === 'object') {
-        detail += ' keys=' + Object.keys(value as object).slice(0, 20).join('|')
-        for (const probe of ['id', 'sessionId', 'current', 'active']) {
-          const inner = (value as Record<string, unknown>)[probe]
-          if (inner !== undefined) detail += ` ${probe}=${typeof inner === 'function' ? 'fn' : String(inner).slice(0, 44)}`
-        }
-      }
-      lines.push(`ctx.${key}=${detail}`)
-    }
-    const { appendFileSync } = require('node:fs') as typeof import('node:fs')
-    appendFileSync('D:/dsh-home/logs/session-probe.log', lines.join('\n') + '\n---\n')
-    ctx.logger?.info?.('dsh-builtin-browser: session probe written')
-  } catch (error) {
-    ctx.logger?.warn?.('dsh-builtin-browser: session probe failed: ' + String(error))
-  }
+  // The identity is available here, and DSH's own desktop host shows how
+  // (`dsh-desktop-host/lib/index.js`: `ctx.get('agents').list()`, with `agent.id` used directly as
+  // a sessionId). One conversation per process, so the list holds this one.
+  const sessionId = readSessionId(ctx)
 
   // One settings document per plugin instance: the settings panel writes it, the
   // provider reads it live, and both ends agree on the same file.
@@ -261,7 +259,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
       let sidebar: Awaited<ReturnType<typeof DesktopBridgeViewHost.discover>>
       try {
-        sidebar = await DesktopBridgeViewHost.discover()
+        sidebar = await DesktopBridgeViewHost.discover(sessionId)
       } catch {
         sidebar = undefined // discovery is documented not to throw; never let it stop the retries
       }

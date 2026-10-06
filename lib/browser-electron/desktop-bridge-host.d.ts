@@ -52,6 +52,17 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * gpu/utility pair). If sessions ever shared a process, every owner check in the bridge would
      * compare equal and the bleed would return in a new shape — so a change to how DSH spawns
      * sessions invalidates this file, not just this comment.
+     *
+     * It is now the CONVERSATION id rather than an invented uuid, read from the plugin's ctx by the
+     * same path DSH's own desktop host uses. That matters because the shell keeps one sidebar per
+     * conversation and writes its session id onto each sidebar container (on the React fiber,
+     * measured on the running app) — so the bridge can only answer "is this sidebar mine" if it has
+     * a comparable id. With an invented uuid it never could, which is how a command came to be typed
+     * into another conversation's address bar.
+     *
+     * Falls back to a random uuid when the host cannot supply one — an older DSH, or a non-desktop
+     * composition. That is no worse than before: the bridge then knows only "this process", and it
+     * refuses to operate on a sidebar it cannot prove is its own.
      */
     private readonly owner;
     /**
@@ -86,7 +97,7 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * caller falls back to self-hosting, which always works.
      * @returns the host, or undefined when no bridge is available.
      */
-    static discover(): Promise<DesktopBridgeViewHost | undefined>;
+    static discover(sessionId?: string): Promise<DesktopBridgeViewHost | undefined>;
     /** Whether this host can back views: the bridge already answered `list`. */
     available(): boolean;
     /**

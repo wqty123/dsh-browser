@@ -80,6 +80,74 @@ function pruneClaims() {
   for (const id of [...claims.keys()]) if (!live.has(id)) claims.delete(id)
 }
 
+/**
+ * Which sidebar container belongs to a session, and is it on screen?
+ *
+ * The shell keeps one sidebar per conversation and mounts all of them; measured on the running app,
+ * two `[class*=_tabStrip]` containers sat in the DOM at once with different session ids, and the
+ * hidden one's webview was unloaded. Each container carries the conversation it belongs to on the
+ * React fiber (`memoizedProps.sessionId`) — so a container can be matched against the id this
+ * process was given at start-up.
+ *
+ * Why this matters, in one sentence: without it the bridge drives "whatever sidebar is on screen",
+ * and on this machine that meant typing into another conversation's address bar and navigating its
+ * page. The three answers therefore mean three different things:
+ *
+ *   'visible' - operate normally; every visible element belongs to this container
+ *   'hidden'  - the container exists but the human is looking elsewhere: wait, never touch it
+ *   'absent'  - this conversation has no browser panel yet: opening one requires the human's shell
+ *               to build it, and driving another conversation's shell cannot do that
+ *
+ * `owner` doubles as the session id, so no extra field travels the protocol.
+ *
+ * @param shellId - the shell window's webContents id.
+ * @param sessionId - the conversation this process serves.
+ * @returns the verdict, plus what the shell actually holds (for diagnostics).
+ */
+async function sidebarState(shellId, sessionId) {
+  const answer = await sendCdp(shellId, 'Runtime.evaluate', {
+    expression: `(() => {
+      const sessionOf = (el) => {
+        const key = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+        if (key === undefined) return null;
+        let fiber = el[key];
+        let depth = 0;
+        while (fiber !== null && fiber !== undefined && depth < 60) {
+          const props = fiber.memoizedProps;
+          if (props !== null && typeof props === 'object' && typeof props.sessionId === 'string') return props.sessionId;
+          fiber = fiber.return;
+          depth += 1;
+        }
+        return null;
+      };
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        const s = getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      const wanted = ${JSON.stringify(String(sessionId))};
+      const strips = Array.from(document.querySelectorAll('[class*=_tabStrip]'))
+        .map(el => ({ el, session: sessionOf(el), visible: visible(el) }));
+      const mine = strips.find(x => x.session === wanted);
+      const anyVisible = strips.find(x => x.visible);
+      return JSON.stringify({
+        verdict: mine === undefined ? 'absent' : (mine.visible ? 'visible' : 'hidden'),
+        containers: strips.length,
+        heldBy: strips.map(x => x.session),
+        visibleSession: anyVisible === undefined ? null : anyVisible.session,
+      });
+    })()`,
+    returnByValue: true,
+  })
+  try {
+    return JSON.parse(String(answer?.result?.value ?? '{}'))
+  } catch {
+    return { verdict: 'absent', containers: 0, heldBy: [], visibleSession: null }
+  }
+}
+
+
 function guestById(id) {
   for (const contents of webContents.getAllWebContents()) {
     if (contents.id === id) return contents
@@ -150,6 +218,40 @@ async function handle(request) {
   }
   if (op === 'ensureSidebar') {
     const url = request.url === undefined ? '' : String(request.url)
+    // Whose sidebar is on screen?
+    //
+    // Before touching anything, establish that this conversation's own sidebar is the one that can
+    // be operated. The shell mounts one sidebar per conversation and shows one; measured on the
+    // running app, an operation issued while the human was reading another conversation typed into
+    // THAT conversation's address bar and navigated its page. Nothing here is a nicety — it is the
+    // difference between driving your own panel and driving somebody else's.
+    //
+    // Only meaningful when the owner really is a session id. A host that could not supply one gets
+    // a random uuid, and requiring a match would then refuse everything; in that case the guard is
+    // skipped and the caller keeps the old, unverified behaviour rather than losing the feature.
+    const sessionBound = /^session-/.test(owner)
+    if (sessionBound) {
+      const shellWindow = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+      if (shellWindow !== undefined) {
+        let state = await sidebarState(shellWindow.id, owner)
+        // 'hidden' means the container exists and the human is looking elsewhere: wait for it to
+        // come back rather than acting on whatever replaced it on screen.
+        for (let attempt = 0; attempt < 20 && state.verdict === 'hidden'; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 500))
+          state = await sidebarState(shellWindow.id, owner)
+        }
+        // 'absent' with SOMETHING ELSE on screen is the dangerous case: opening a panel now would
+        // open it inside another conversation's shell. 'absent' with nothing on screen is the
+        // ordinary first open, and is fine.
+        const foreignOnScreen = state.visibleSession !== null && state.visibleSession !== owner
+        if (state.verdict === 'hidden' || (state.verdict === 'absent' && foreignOnScreen)) {
+          throw new Error(
+            'the sidebar on screen belongs to another conversation (' + String(state.visibleSession ?? 'unknown')
+            + '), so this call will not touch it; switch back to this conversation and retry',
+          )
+        }
+      }
+    }
     // Materialize a sidebar guest, optionally navigating it.
     //
     // The sidebar browser creates its guest lazily: an un-navigated sidebar is
@@ -234,7 +336,6 @@ async function handle(request) {
     //
     // Only a guest this owner already holds is reused; a claimed guest held by someone else is
     // invisible here, and an unclaimed one is adopted on the spot (it is nobody's yet).
-    const owner = typeof request.owner === 'string' && request.owner !== '' ? request.owner : 'anonymous'
     pruneClaims()
     let reuseId = request.newTab === true ? undefined : [...claims.entries()]
       .find(([guest, holder]) => holder === owner && guestById(guest) !== undefined)?.[0]
@@ -600,7 +701,6 @@ async function handle(request) {
     // would happily adopt a tab another session had opened. That is how a URL opened in one
     // session showed up in another's sidebar. The ledger therefore lives HERE, in the single
     // process that owns the sidebar, and the plugin passes a per-process owner id.
-    const owner = typeof request.owner === 'string' && request.owner !== '' ? request.owner : 'anonymous'
     pruneClaims()
     const mine = new Set()
     for (const [guest, holder] of claims) if (holder === owner) mine.add(guest)
