@@ -423,9 +423,9 @@ async function handle(request) {
     // human was looking at. Reported as issue #23; the other two carriers already did this
     // (the self-hosted window re-adds the view, the system browser calls Page.bringToFront).
     //
-    // The tab belongs to the renderer, so the same reasoning as `ensureTabs` applies: drive the
-    // sidebar's own control. A tab is matched by the title it shows, which is what the sidebar
-    // renders from the guest — the guest's id is not exposed in the DOM.
+    // The tab strip belongs to the renderer, so raising one means asking the sidebar to do it. A
+    // tab is matched by the title it shows, which is what the sidebar renders from the guest —
+    // the guest's id is not exposed in the DOM.
     const viewId = Number(request.viewId)
     if (!Number.isFinite(viewId)) throw new Error('showTab needs a viewId')
     const guest = webContents.fromId(viewId)
