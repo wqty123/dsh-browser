@@ -692,20 +692,44 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         if (state.guestId !== null) {
           return { ok: true, created: false, panel: true, guestId: state.guestId, url: state.url }
         }
-        if (!state.panel) {
-          return {
-            ok: false,
-            reason: "this conversation's sidebar is not mounted, so a panel cannot be opened in it",
-            panel: false,
-            guestId: null,
-          }
-        }
+        // A mounted panel is NOT required to place a tab.
+        //
+        // `openTabIn` acts on the conversation's own surface store, and the sidebar-right service
+        // keeps one for every conversation the shell has shown — "reaches any session's store by
+        // id … on screen or not". What a DISPLAYED conversation adds is the DOM to read the guest
+        // back out of, which is a separate question. So the tab is placed either way, and `tabsIn`
+        // (a public method) is what says whether it actually landed: `openTabIn` SILENTLY ignores a
+        // conversation whose store was never minted, and a silent no-op must never be reported as
+        // success.
+        let before = 0
+        try { before = sidebarRight.tabsIn(wanted).length } catch (error) { before = 0 }
         try {
           sidebarRight.openTabIn(wanted, "browser", url ? { params: { url: String(url) } } : {})
         } catch (error) {
-          return { ok: false, reason: String((error && error.message) || error), panel: true, guestId: null }
+          return { ok: false, reason: String((error && error.message) || error), panel: state.panel, guestId: null }
         }
-        return { ok: true, created: true, panel: true, guestId: null }
+        let placed = 0
+        try { placed = sidebarRight.tabsIn(wanted).length } catch (error) { placed = before }
+        if (placed <= before) {
+          // Name what was FOUND, not just what was missing: "no panel" has two very different
+          // causes — the shell has mounted no sidebar for this conversation (nothing this side can
+          // do), or it writes its session id somewhere this lookup does not read (fixable) — and a
+          // refusal that says only "not mounted" cannot tell them apart.
+          const strips = Array.from(document.querySelectorAll("[class*=_tabStrip]"))
+          return {
+            ok: false,
+            reason: "this conversation's sidebar is not mounted, so a panel cannot be opened in it",
+            panel: state.panel,
+            guestId: null,
+            found: {
+              wanted: wanted,
+              strips: strips.length,
+              owners: strips.slice(0, 8).map(strip => sessionIdOfElement(strip)),
+              reactKeys: strips.length === 0 ? [] : Object.keys(strips[0]).filter(key => key.startsWith("__react")).slice(0, 4),
+            },
+          }
+        }
+        return { ok: true, created: true, panel: state.panel, guestId: null, tabs: placed }
       },
       /** Read-only: this conversation's current guest, if it has one. */
       panelGuest(sessionId) {

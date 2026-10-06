@@ -95,12 +95,35 @@ DSH 的 `browser.new`(`Ctrl+T`,或启动页的「浏览器」卡片)最终落到
 
 **违反上一轮假设的用例被改写成守护新机制,而不是删掉**——旧用例记录的是旧通路,那正是现在要防止回归的东西。
 
-## 六、这一轮仍未被实机验证的部分
+## 六、实机验证:机制成立,并且发现了两条只在真机上才看得见的事实
 
-`tsc` 与测试都是离线的。下面两条只有重启后的真机才能回答:
+`tsc` 与 230 条测试都是离线的。之后用一条直连桥的探针(`probe-panel.mjs`,只走 socket 协议、不经插件)在**运行中的外壳**上实测,得到三件事。
 
-1. **`exec.agent.id` 是否就是渲染侧的 sessionId**。工具层用它分桶(`tool-browser/index.ts:174` 的 `taskKey`),渲染侧用 `props.sessionId` 匹配;两者必须是同一个字符串,否则 `guestStateFor` 会返回 `panel: false` 并具名拒绝——**拒绝是安全的失败模式,但功能不会工作**。
-2. **插件 client 半边能否注入 `sidebarRight`**。依据是同机制:DSH 自带 `ui-sidebar-browser` 用 `inject = ['slots','locale','sidebarRight','sidebarRightTabs']` 取得了它。注入失败时 `openPanel` 会报 "the shell's sidebar service is not available",设置面板不受影响。
+**① 两条假设都被证实,不需要重启。**
+
+- `exec.agent.id` **就是**渲染侧用来标记侧栏的那个 sessionId:探针用本会话 id 调用时,渲染侧的服务**找到了该会话自己的 store**,并在其中成功放置了面板。
+- 插件 client 半边**已经注入到 `sidebarRight`**:它返回的是本文件自己写的裁决,而不是 "the shell's sidebar service is not available"。
+- 另外发现:`client.js` 的改动**不必重启外壳**即生效(探针在未重启的进程里就吃到了新代码)。
+
+**② shell 窗口的 debugger 通道不可靠,guest 的可靠 —— 而这不是本轮的改动导致的。**
+
+分层实测:同一个 `op: 'cdp'` 对 guest(页面)秒回,对 shell 窗口(`dsh-app://app/`)则**反复挂起数分钟**,连 `Browser.getVersion` 这种不碰页面 JS 的命令也一样。所以面板通路**不再走 CDP**:shell 只是一个宿主 UI,本轮要它做的只是一次同步求值,改用 `webContents.executeJavaScript` —— 不经 debugger、没有会失效的 attach、没有会丢的回包。`evaluateInPanel`(`showTab`/`closeSidebarBrowser`/`collapseSidebar` 用)一并改掉。**guest 驱动仍用 CDP**,因为驱动一个页面确实需要协议。
+
+顺带修了一个会让桥永久失声的缺陷:`stop()` 不 detach debugger,而 attach 属于 `webContents`、不属于模块;热重载(见下)换掉模块后,新桥看到 `isAttached() === true`,于是跳过自己的 attach,把命令发进一个已经死掉的会话。现在 `start()` 里先把残留的 attach 全部丢掉 —— 刚启动的桥没有任何自己的 attach,所以此刻还挂着的必然是遗留。
+
+**③ 外壳只渲染"当前显示会话"的侧栏 —— 这是 DSH 的行为,不是插件的。**
+
+实测数据:DOM 里只有一个侧栏容器,它的 owner 是**另一个会话**;而本会话的面板被成功放置(公开方法 `tabsIn` 证明 tab 真的进了本会话的 store),只是**没有 DOM**,因此读不回 guest。
+
+```
+wanted : session-fe0a980a-…
+strips : 1
+owners : ["session-279557d6-…"]     ← 只有屏幕上那个会话有 DOM
+```
+
+**这条数据同时是最强的正确性证据**:渲染侧看到了**别的**会话的侧栏,没有去动它,而是**具名拒绝**并回报自己找到了什么。**开错地方这件事在结构上已经不可能发生。**
+
+由此得到一条必须写进 README 的行为:**在会话 A 里发出的请求会落在 A 的侧栏;A 若不是屏幕上显示的那个,面板会照建立,但页面要等 A 被显示时才附上**。所以"我在 A 问、随后切到 B,A 的页面仍然只在 A"成立;而"切走之后立刻从 A 里读回页面"做不到 —— 那是外壳不渲染后台会话侧栏的结果。
 
 ---
 

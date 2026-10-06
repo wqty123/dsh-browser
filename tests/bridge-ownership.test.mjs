@@ -30,6 +30,9 @@ class FakeContents extends EventEmitter {
       attach: () => {},
       sendCommand: (method, params) => globalThis.__answerCdp__(this.id, method, params),
     }
+    // The panel path reaches the shell through `executeJavaScript`; it resolves with the value
+    // itself, not a CDP envelope.
+    this.executeJavaScript = code => Promise.resolve(JSON.stringify(panelVerdict(String(code))))
   }
   getType () { return this.type }
   getTitle () { return this.title }

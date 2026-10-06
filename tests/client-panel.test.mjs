@@ -325,13 +325,25 @@ function documentWith(...strips) {
   })
 }
 
-/** A shell sidebar service that records which navigation the panel service chose to call. */
-function recordingSidebar() {
+/**
+ * A shell sidebar service that records which navigation the panel service chose to call.
+ * @param placed - how many tabs the conversation's store accepts. Zero models a conversation whose
+ *   surface was never minted, where `openTabIn` is a silent no-op — the case that must never be
+ *   reported as success.
+ */
+function recordingSidebar(placed = 1) {
   const calls = []
+  let tabs = []
   return {
     calls,
+    get tabs() { return tabs },
     service: {
-      openTabIn: (...args) => { calls.push(['openTabIn', ...args]) },
+      // Public method, and the only proof that a placed tab actually landed.
+      tabsIn: () => tabs,
+      openTabIn: (...args) => {
+        calls.push(['openTabIn', ...args])
+        if (placed > 0) tabs = [...tabs, { id: `tab:${args[1]}`, kind: args[1] }]
+      },
       // The on-screen variant. Nothing may call it: it acts on the conversation the shell is
       // displaying, which is the entire class of bug this service exists to remove.
       openTab: (...args) => { calls.push(['openTab', ...args]) },
@@ -392,8 +404,11 @@ test('the panel lookup never leaves the calling conversation subtree', async () 
   assert.equal(calls.length, 1, 'reading an existing guest navigates nothing')
 })
 
-test('a conversation the shell has not mounted is refused by name, not driven', async () => {
-  const { calls, service } = recordingSidebar()
+test('a conversation whose surface was never minted is refused by name, not driven', async () => {
+  // `openTabIn` SILENTLY ignores a conversation the shell has never shown, so its returning cannot
+  // be read as success. `tabsIn` is what proves a tab landed, and this is the case where it did
+  // not — reported with what the lookup actually found, so the reason is actionable.
+  const { calls, service } = recordingSidebar(0)
   const { panel } = await mount({
     sidebarRight: service,
     document: documentWith(makeStrip('session-other')),
@@ -401,9 +416,11 @@ test('a conversation the shell has not mounted is refused by name, not driven', 
 
   const verdict = panel.openPanel('session-a', 'https://example.com/')
   assert.equal(verdict.ok, false)
-  assert.equal(verdict.panel, false, 'it reports that the panel is absent')
   assert.match(String(verdict.reason), /not mounted/)
-  assert.equal(calls.length, 0, 'nothing is navigated for a conversation with no sidebar')
+  assert.equal(calls.length, 1, 'it tried exactly once')
+  assert.equal(calls[0][0], 'openTabIn', 'through the conversation-scoped call, never the on-screen one')
+  assert.equal(verdict.found.wanted, 'session-a')
+  assert.deepEqual([...verdict.found.owners], ['session-other'], 'and it reports what it did find')
 })
 
 test('a non-conversation owner is refused before any lookup', async () => {

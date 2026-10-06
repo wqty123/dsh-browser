@@ -139,7 +139,7 @@ async function evaluateInPanel(shellId, sessionId, method, params) {
     return sendCdp(shellId, method, params)
   }
   const body = params.expression
-  const wrapped = `(() => {
+  const script = `(() => {
     const panel = ${panelRootExpression(sessionId)};
     if (panel === null) return JSON.stringify({ noPanel: true });
     const realQuery = document.querySelector.bind(document);
@@ -153,15 +153,27 @@ async function evaluateInPanel(shellId, sessionId, method, params) {
       document.querySelectorAll = realQueryAll;
     }
   })()`
-  const answer = await sendCdp(shellId, 'Runtime.evaluate', { expression: wrapped, returnByValue: true })
+  const shell = guestById(shellId)
+  if (shell === undefined || shell.isDestroyed()) return { result: { value: 'NO_SHELL' } }
+  // `executeJavaScript`, for the same measured reason as `evaluatePanelService`: the debugger
+  // attachment to the shell WINDOW hangs while the same channel to a guest page answers at once.
+  // These calls are the same kind — one synchronous page script whose answer is a string — so none
+  // of them needs the protocol. The reply keeps the CDP shape because every caller reads
+  // `answer.result.value`.
+  let value
+  try {
+    value = await shell.executeJavaScript(script, true)
+  } catch (error) {
+    return { result: { value: '' } }
+  }
   // `typeof` below already tolerates an absent value; the fallback keeps the shape explicit for
   // the scanner in tests/bridge-reply-shape.test.mjs, which exists because a bare read of a reply
   // once made a probe answer `undefined` forever.
-  const value = answer?.result?.value ?? ''
-  if (typeof value === 'string' && value.includes('"noPanel":true')) {
+  const text = typeof value === 'string' ? value : ''
+  if (text.includes('"noPanel":true')) {
     return { result: { value: 'NO_PANEL' } }
   }
-  return answer
+  return { result: { value: text } }
 }
 
 /** Forget claims whose guest no longer exists, so a closed tab's id is not held forever. */
@@ -241,11 +253,30 @@ async function evaluatePanelService(shellId, sessionId, url) {
       return JSON.stringify({ ok: false, reason: String((error && error.message) || error) });
     }
   })()`
-  const answer = await sendCdp(shellId, 'Runtime.evaluate', { expression, returnByValue: true })
-  // The fallback is on this line on purpose: a bare read of a reply value that drives a branch is
-  // the mistake class `tests/bridge-reply-shape.test.mjs` exists for — undefined takes the false
-  // path forever, and nothing else catches it.
-  const value = answer?.result?.value ?? ''
+  // `executeJavaScript`, NOT the debugger/CDP path.
+  //
+  // Measured on the running shell: the debugger attachment to the shell WINDOW is unreliable — its
+  // commands hang, repeatedly and for minutes, while the same channel to a guest page answers at
+  // once. Nothing here needs the protocol: it is one synchronous call on a global the plugin itself
+  // published. `executeJavaScript` reaches the page's main world directly, with no attachment to go
+  // stale and no reply to be lost. The guest path keeps CDP, because driving a PAGE genuinely needs
+  // it (`Runtime.evaluate`, `Page.*`, `Input.*`).
+  const shell = guestById(shellId)
+  if (shell === undefined || shell.isDestroyed()) {
+    return { ok: false, reason: 'the shell window is gone', panel: false, guestId: null, url: '' }
+  }
+  let value
+  try {
+    value = await shell.executeJavaScript(expression, true)
+  } catch (error) {
+    return {
+      ok: false,
+      reason: 'the shell refused the panel request: ' + String((error && error.message) || error),
+      panel: false,
+      guestId: null,
+      url: '',
+    }
+  }
   if (typeof value !== 'string' || value === '') {
     return { ok: false, reason: 'the shell did not answer the panel request', panel: false, guestId: null, url: '' }
   }
@@ -258,6 +289,8 @@ async function evaluatePanelService(shellId, sessionId, url) {
       created: parsed?.created === true,
       guestId: typeof parsed?.guestId === 'number' && Number.isFinite(parsed.guestId) ? parsed.guestId : null,
       url: typeof parsed?.url === 'string' ? parsed.url : '',
+      // A refusal carries what the renderer found, so the reason is actionable rather than a guess.
+      found: parsed?.found === undefined ? undefined : parsed.found,
     }
   } catch (error) {
     return { ok: false, reason: 'the shell answered a shape this bridge does not understand', panel: false, guestId: null, url: '' }
@@ -329,7 +362,13 @@ async function handle(request) {
 
     const ask = async (withUrl) => {
       const answer = await evaluatePanelService(shell.id, owner, withUrl ? url : '')
-      if (answer.ok !== true) throw new Error(String(answer.reason))
+      if (answer.ok !== true) {
+        // Carry the renderer's own findings into the failure: it is the side that can see why the
+        // lookup missed, and a bare "not mounted" leaves the next reader guessing between a real
+        // absence and a lookup that reads the wrong place.
+        const detail = answer.found === undefined ? '' : ' — renderer found ' + JSON.stringify(answer.found)
+        throw new Error(String(answer.reason) + detail)
+      }
       return answer
     }
 
@@ -343,9 +382,23 @@ async function handle(request) {
       return { ok: true, created: false, id: first.guestId, via: 'panel', owner }
     }
 
-    // A tab was just placed in this conversation's panel; its guest attaches once the renderer
-    // creates the webview. Poll INSIDE that panel, so a guest appearing in any other
-    // conversation cannot satisfy this wait — the scoping is what makes the wait safe.
+    // A tab was placed, but this conversation is not the one the shell is displaying.
+    //
+    // The shell renders the sidebar of the conversation it SHOWS. A background conversation's panel
+    // exists in its own surface store — which is exactly why the tab could be placed at all — but
+    // it has no DOM, so no webview attaches and no amount of waiting would produce one. Waiting
+    // would turn a true statement into a timeout, and the page is genuinely there: it appears the
+    // moment the conversation is shown.
+    if (first.panel === false) {
+      throw new Error(
+        'a panel was placed in this conversation\'s sidebar, but its page can only attach while the '
+        + 'conversation is the one displayed — show it and the page appears',
+      )
+    }
+
+    // A guest attaches asynchronously once the renderer creates the webview. Poll INSIDE this
+    // conversation's panel, so a guest appearing in any other conversation cannot satisfy the wait
+    // — the scoping is what makes the wait safe.
     const deadline = Date.now() + (url === '' ? 4_000 : 20_000)
     while (Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 250))
@@ -556,6 +609,20 @@ export function stop() {
 /** Start the bridge: loopback listener + published endpoint file + token. */
 export function start() {
   stop()
+  // Drop any debugger attachment this process is still holding.
+  //
+  // An attachment belongs to the webContents, not to this module, so it outlives both the listener
+  // and the reload `main.js` performs when the file changes. A stale one is the worst kind of
+  // broken: `isAttached()` answers true, so the next bridge skips its own attach, and every command
+  // sent into it hangs — no error, no reply, nothing to see. A bridge that has JUST started has no
+  // attachments of its own, which makes whatever is attached right now a leftover: safe to drop,
+  // and exact. (If DevTools happens to be open on the shell it loses that session; the shell itself
+  // is unaffected, and that is the cheaper cost.)
+  try {
+    for (const contents of webContents.getAllWebContents()) {
+      try { if (contents.debugger.isAttached()) contents.debugger.detach() } catch { /* gone */ }
+    }
+  } catch { /* no webContents at all; nothing to detach */ }
   const token = randomBytes(24).toString('hex')
   const server = createServer(socket => {
     let buffer = ''

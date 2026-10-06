@@ -34,6 +34,10 @@ class FakeContents extends EventEmitter {
   isDestroyed () { return false }
   setWindowOpenHandler () {}
   close () {}
+  // The panel path evaluates on the shell through `executeJavaScript`, not through the debugger.
+  // Measured on the running shell: the debugger attachment to the WINDOW hangs for minutes while
+  // the same channel to a guest page answers at once — so the shell no longer uses it at all.
+  executeJavaScript (code) { return globalThis.__evalInShell__(this.id, code) }
 }
 
 const world = { contents: [] }
@@ -80,6 +84,22 @@ const seen = { evaluates: [], navigations: [], keys: [], clicks: [] }
 let panelScript = () => ({ ok: true, created: true, panel: true, guestId: null })
 let panelGuest = null
 
+/**
+ * The shell answering a page script.
+ *
+ * `executeJavaScript` resolves with the value itself, not a CDP envelope, so this returns the
+ * verdict string directly — and registers the guest the panel will report, since a real renderer
+ * attaches one asynchronously after the tab is placed.
+ */
+globalThis.__evalInShell__ = async (id, code) => {
+  seen.evaluates.push({ id, expression: code })
+  if (code.includes('.click(')) seen.clicks.push(code)
+  const verdict = panelScript(seen.evaluates.length)
+  if (panelGuest !== null && !world.contents.includes(panelGuest)) world.contents.push(panelGuest)
+  return JSON.stringify(verdict)
+}
+
+/** The CDP answers a shell would give for the guest path. */
 globalThis.__answerCdp__ = async (id, method, params) => {
   if (method === 'Input.dispatchKeyEvent') {
     seen.keys.push(params)
@@ -88,12 +108,6 @@ globalThis.__answerCdp__ = async (id, method, params) => {
   if (method === 'Runtime.evaluate') {
     const expression = String(params?.expression ?? '')
     if (expression.includes('.click(')) seen.clicks.push(expression)
-    if (expression.includes('__dshBuiltinBrowser')) {
-      seen.evaluates.push({ id, expression })
-      const verdict = panelScript(seen.evaluates.length)
-      if (panelGuest !== null && !world.contents.includes(panelGuest)) world.contents.push(panelGuest)
-      return { result: { value: JSON.stringify(verdict) } }
-    }
     return { result: { value: 'OK' } }
   }
   if (method === 'Page.navigate') {
