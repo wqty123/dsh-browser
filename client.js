@@ -617,15 +617,30 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     return null
   }
 
-  /** Every live `<webview>` guest inside this conversation's panel subtree. */
+  /**
+   * Every live `<webview>` guest inside this conversation's panel subtree.
+   *
+   * The walk up stops the moment an ancestor carries ANOTHER conversation's sidebar, and that stop
+   * condition is the whole point of this function. The shell mounts every conversation's panel in
+   * the same document — hidden ones included — so one step too far lands on a subtree that holds
+   * all of them, and the first guest found there belongs to whichever conversation the shell
+   * happens to render first. Measured: a GitHub login page opened in a different conversation was
+   * reported as this one's guest, which is the cross-conversation bleed this service exists to
+   * prevent. A sibling strip is the exact, class-name-independent signature of having stepped
+   * outside; a conversation may legitimately own more than one strip of its own, so the test is
+   * "is there one that is NOT mine", never a count.
+   */
   function guestsInPanel(sessionId) {
     const strip = tabStripFor(sessionId)
     if (strip === null) return []
-    // Walk up to the first ancestor that owns a guest: the strip itself is outside the
-    // body region, so the search starts low and stops as soon as it has one. It never
-    // crosses out of this conversation's branch, which is what keeps it scoped.
+    // Start at the strip itself: it is by construction this conversation's own, so the foreign test
+    // below cannot trip on it, and a shell that renders the guest as a sibling of the strip is
+    // still reached.
     let node = strip
     while (node !== null && node !== undefined && node !== document.body) {
+      const foreign = Array.from(node.querySelectorAll("[class*=_tabStrip]"))
+        .some(el => sessionIdOfElement(el) !== sessionId)
+      if (foreign) break
       const found = Array.from(node.querySelectorAll("webview")).filter(view => {
         try { return typeof view.getWebContentsId === "function" && view.getWebContentsId() > 0 }
         catch (error) { return false }

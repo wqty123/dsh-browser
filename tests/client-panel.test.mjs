@@ -326,6 +326,55 @@ function documentWith(...strips) {
 }
 
 /**
+ * A minimal page shaped like the shell's: an application root holding one container per
+ * conversation, each with its own strip (and possibly its own guest).
+ *
+ * The shell mounts EVERY conversation's panel in the same document — hidden ones included — which
+ * is what makes "walk up until you find a guest" wrong: one step too far reaches a subtree holding
+ * all of them.
+ */
+function makeShellTree({ own, other }) {
+  const body = {}
+  const panelOf = (sessionId, guestIds) => {
+    const views = guestIds.map(id => ({
+      getWebContentsId: () => id,
+      getBoundingClientRect: () => ({ width: 100, height: 100 }),
+      getURL: () => 'about:blank',
+    }))
+    const strip = {
+      __reactFiber$t: { memoizedProps: { sessionId }, return: null },
+      querySelectorAll: () => [],
+      parentElement: null,
+    }
+    const panel = {
+      parentElement: null,
+      querySelectorAll: (selector) => {
+        if (selector === '[class*=_tabStrip]') return [strip]
+        if (selector === 'webview') return views
+        return []
+      },
+    }
+    strip.parentElement = panel
+    return panel
+  }
+  const ownPanel = panelOf(own.sessionId, own.guestIds ?? [])
+  const otherPanel = panelOf(other.sessionId, other.guestIds ?? [])
+  const panels = [ownPanel, otherPanel]
+  const root = {
+    parentElement: body,
+    querySelectorAll: (selector) => panels.flatMap(panel => panel.querySelectorAll(selector)),
+  }
+  ownPanel.parentElement = root
+  otherPanel.parentElement = root
+  return makeDocument({
+    body,
+    querySelectorAll: (selector) => (selector === '[class*=_tabStrip]'
+      ? panels.flatMap(panel => panel.querySelectorAll(selector))
+      : []),
+  })
+}
+
+/**
  * A shell sidebar service that records which navigation the panel service chose to call.
  * @param placed - how many tabs the conversation's store accepts. Zero models a conversation whose
  *   surface was never minted, where `openTabIn` is a silent no-op — the case that must never be
@@ -428,6 +477,31 @@ test('a conversation that already holds the page is never mistaken for an unmoun
   const second = panel.openPanel('session-a', 'https://example.com/')
   assert.equal(second.ok, true, 'the second call is NOT refused')
   assert.equal(second.created, false, 'and reports that nothing new was placed')
+})
+
+test('the walk up stops at this conversation, never reaching the shell root', async () => {
+  // Measured on the running shell: a GitHub login page opened in a DIFFERENT conversation was
+  // reported as this one's guest, because the walk up to the first ancestor holding a guest reached
+  // the application root — where every conversation's panel is mounted, hidden ones included.
+  const { calls, service } = recordingSidebar()
+  const { panel } = await mount({
+    sidebarRight: service,
+    document: makeShellTree({
+      own: { sessionId: 'session-a', guestIds: [] },        // this conversation has no page yet
+      other: { sessionId: 'session-b', guestIds: [99] },    // a neighbour has one
+    }),
+  })
+
+  const seen = panel.panelGuest('session-a')
+  assert.equal(seen.panel, true, 'this conversation\'s sidebar is found')
+  assert.equal(seen.guestId, null, 'and the neighbour\'s guest is NOT reported as this one\'s')
+  assert.notEqual(seen.guestId, 99)
+
+  // Opening a panel must not navigate the neighbour's guest either.
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.guestId, null, 'no foreign guest is handed back')
+  assert.equal(calls.length, 1, 'it placed its own tab')
+  assert.equal(calls[0][1], 'session-a', 'naming its own conversation')
 })
 
 test('a conversation whose surface was never minted is refused by name, not driven', async () => {
