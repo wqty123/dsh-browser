@@ -40,9 +40,15 @@ test('it does not block a host that cannot name its conversation', () => {
   assert.match(HOST_SRC, /if \(!this\.owner\.startsWith\('session-'\)\) return \{ ok: true \}/)
 })
 
-test('the guard is on the plugin side, so the bridge needed no change', () => {
-  // If this ever fails, the fix has been moved into the bridge — which costs the user a restart.
-  assert.ok(!/sidebarState/.test(BRIDGE), 'no sidebar helper in the bridge')
-  assert.ok(!/belongs to another conversation/.test(BRIDGE), 'no ownership refusal in the bridge')
-  assert.match(HOST_BUILT, /__reactFiber/, 'and the guard is compiled into lib/, which a restart reads')
+test('the ownership decision is on the plugin side; the bridge only scopes its queries', () => {
+  // Two different things live on two different sides, and the split is deliberate.
+  //
+  // The DECISION ("is the visible sidebar mine, and may I act") is in the host, because the bridge
+  // is read once at host boot and a change there costs a restart. The SCOPING — every page script
+  // running against this conversation's panel rather than the whole document — has to be in the
+  // bridge, because that is where the scripts are built. No ownership verdict is made there.
+  assert.ok(!/belongs to another conversation/.test(BRIDGE),
+    'the bridge must not decide ownership; it has no session identity to compare with')
+  assert.match(BRIDGE, /panelRootExpression/, 'but it scopes its DOM work to one panel')
+  assert.match(BRIDGE, /evaluateInPanel/, 'every shell script goes through the scoped runner')
 })

@@ -74,6 +74,126 @@ const claims = new Map()
 const LOADED_AT = new Date().toISOString()
 const PROTOCOL = 2
 
+/**
+ * The DOM root of THIS conversation's sidebar, as JavaScript to embed in a page script.
+ *
+ * The shell mounts one sidebar per conversation. Only one is on screen, but every conversation's
+ * panel is addressable — each carries its conversation id on the React fiber of its tab strip
+ * (measured on the running app: two containers, two ids). So an operation belongs to the panel of
+ * the conversation that asked, and NOT to whatever happens to be on screen.
+ *
+ * That distinction is the whole bug: driving "whatever is on screen" meant an operation issued
+ * while the human read another conversation typed into THAT conversation's address bar and
+ * navigated its page. Scoping every query to this root is what makes sessions unable to interfere
+ * with each other — there is no path from here to somebody else's panel.
+ *
+ * @param sessionId - the conversation this process serves (the request's `owner`).
+ * @returns an expression evaluating to the panel element, or null when there is none.
+ */
+function panelRootExpression(sessionId) {
+  return `(() => {
+    const sessionOf = (el) => {
+      const key = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+      if (key === undefined) return null;
+      let fiber = el[key];
+      let depth = 0;
+      while (fiber !== null && fiber !== undefined && depth < 60) {
+        const props = fiber.memoizedProps;
+        if (props !== null && typeof props === 'object' && typeof props.sessionId === 'string') return props.sessionId;
+        fiber = fiber.return;
+        depth += 1;
+      }
+      return null;
+    };
+    const wanted = ${JSON.stringify(String(sessionId))};
+    const mine = Array.from(document.querySelectorAll('[class*=_tabStrip]')).find(el => sessionOf(el) === wanted);
+    if (mine === undefined) return null;
+    return mine.closest('[class*=_tabHost]') ?? mine.parentElement ?? mine;
+  })()`
+}
+
+/**
+ * Run a page script against THIS conversation's panel.
+ *
+ * Rather than editing ten DOM queries to use a different root — and leaving the eleventh to be
+ * forgotten — the document-level lookups are redirected for the duration of the script. Every
+ * existing query then answers from the right panel without knowing it, and a script that would
+ * have reached somebody else's panel finds nothing instead.
+ *
+ * The redirection is synchronous and restored in a `finally`, so React's own event handlers (which
+ * capture their references) are unaffected.
+ *
+ * @param shellId - the shell window's webContents id.
+ * @param expression - the page script to run.
+ * @param sessionId - the conversation this process serves.
+ * @returns the CDP answer, or a synthetic NO_PANEL verdict.
+ */
+async function evaluateInPanel(shellId, sessionId, method, params) {
+  // Only a real conversation id can be matched against the shell's panels. A host that could not
+  // supply one keeps the previous, unscoped behaviour: losing the scoping beats losing every DOM
+  // path, and the ownership guard treats such a host the same way.
+  if (typeof sessionId !== 'string' || !sessionId.startsWith('session-')) {
+    return sendCdp(shellId, method, params)
+  }
+  if (method !== 'Runtime.evaluate' || typeof params?.expression !== 'string') {
+    return sendCdp(shellId, method, params)
+  }
+  const body = params.expression
+  const wrapped = `(() => {
+    const panel = ${panelRootExpression(sessionId)};
+    if (panel === null) return JSON.stringify({ noPanel: true });
+    const realQuery = document.querySelector.bind(document);
+    const realQueryAll = document.querySelectorAll.bind(document);
+    document.querySelector = (selector) => panel.querySelector(selector);
+    document.querySelectorAll = (selector) => panel.querySelectorAll(selector);
+    try {
+      return (${body});
+    } finally {
+      document.querySelector = realQuery;
+      document.querySelectorAll = realQueryAll;
+    }
+  })()`
+  const answer = await sendCdp(shellId, 'Runtime.evaluate', { expression: wrapped, returnByValue: true })
+  // `typeof` below already tolerates an absent value; the fallback keeps the shape explicit for
+  // the scanner in tests/bridge-reply-shape.test.mjs, which exists because a bare read of a reply
+  // once made a probe answer `undefined` forever.
+  const value = answer?.result?.value ?? ''
+  if (typeof value === 'string' && value.includes('"noPanel":true')) {
+    return { result: { value: 'NO_PANEL' } }
+  }
+  return answer
+}
+
+/**
+ * Which sidebar container belongs to a session, and is it on screen?
+ *
+ * @param shellId - the shell window's webContents id.
+ * @param sessionId - the conversation this process serves.
+ * @returns the verdict, plus what the shell holds (for diagnostics).
+ */
+async function sidebarState(shellId, sessionId) {
+  const answer = await sendCdp(shellId, 'Runtime.evaluate', {
+    expression: `(() => {
+      const panel = ${panelRootExpression(sessionId)};
+      const strip = panel === null ? null : panel.querySelector('[class*=_tabStrip]');
+      const shown = strip === null ? false : (() => {
+        const r = strip.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        const s = getComputedStyle(strip);
+        return s.display !== 'none' && s.visibility !== 'hidden';
+      })();
+      return JSON.stringify({ panel: panel !== null, visible: shown });
+    })()`,
+    returnByValue: true,
+  })
+  try {
+    const parsed = JSON.parse(String(answer?.result?.value ?? '{}'))
+    return { panel: Boolean(parsed.panel), visible: Boolean(parsed.visible) }
+  } catch {
+    return { panel: false, visible: false }
+  }
+}
+
 /** Forget claims whose guest no longer exists, so a closed tab's id is not held forever. */
 function pruneClaims() {
   const live = new Set(webContents.getAllWebContents().filter(c => c.getType() === 'webview').map(c => c.id))
@@ -204,7 +324,7 @@ async function handle(request) {
       // Ctrl+T puts its tab last, so the last tab row is the one to activate.
       for (let attempt = 0; attempt < 12; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 250))
-        const activated = await sendCdp(shellForNewTab.id, 'Runtime.evaluate', {
+        const activated = await evaluateInPanel(shellForNewTab.id, owner, 'Runtime.evaluate', {
           expression: `(() => {
             const strip = document.querySelector('[class*=_tabStrip]');
             if (strip === null) return 'NO_STRIP';
@@ -234,7 +354,6 @@ async function handle(request) {
     //
     // Only a guest this owner already holds is reused; a claimed guest held by someone else is
     // invisible here, and an unclaimed one is adopted on the spot (it is nobody's yet).
-    const owner = typeof request.owner === 'string' && request.owner !== '' ? request.owner : 'anonymous'
     pruneClaims()
     let reuseId = request.newTab === true ? undefined : [...claims.entries()]
       .find(([guest, holder]) => holder === owner && guestById(guest) !== undefined)?.[0]
@@ -274,7 +393,7 @@ async function handle(request) {
     // for every call. `=== 'YES'` was then never true, so the newTab path always took the "click
     // the card" branch and made a page it did not need. Three rounds of "it keeps creating new
     // browser entries" trace back to this one misplaced parenthesis.
-    const addressBarVisible = async () => String((await sendCdp(shell.id, 'Runtime.evaluate', {
+    const addressBarVisible = async () => String((await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
       expression: `(() => {
         const visible = (el) => {
           const r = el.getBoundingClientRect();
@@ -304,7 +423,7 @@ async function handle(request) {
       // "could not open a sidebar tab" the user saw on the second open.
       //
       // On the guide page: click its browser entry ONCE, then look for the address bar.
-      const opened = await sendCdp(shell.id, 'Runtime.evaluate', {
+      const opened = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
         expression: `(() => {
           const clickables = (root, out = []) => {
             for (const node of root.querySelectorAll('button,[role=button]')) {
@@ -343,7 +462,7 @@ async function handle(request) {
       //    exists in the document at all. That must not be fatal — the restore route
       //    below needs no address bar, and treating "no input" as a hard error is
       //    exactly what made the first call after a restart fail.
-      prepared = await sendCdp(shell.id, 'Runtime.evaluate', {
+      prepared = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
         expression: shellPrepareSidebar(),
         returnByValue: true,
       })
@@ -357,7 +476,7 @@ async function handle(request) {
     if (verdict === 'CLICKED_LAUNCHER' || verdict === 'SENT_CTRL_T') {
       for (let attempt = 0; attempt < 20; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 250))
-        const probe = await sendCdp(shell.id, 'Runtime.evaluate', {
+        const probe = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
           expression: `(() => {
             const pickAddressInput = () => {
               const visible = (el) => {
@@ -432,7 +551,7 @@ async function handle(request) {
       const addressBarAlready = await addressBarVisible() === 'YES'
       const created = cardClicked || addressBarAlready
         ? { result: { value: addressBarAlready ? 'ADDRESS_BAR_PRESENT' : 'ALREADY_CLICKED' } }
-        : await sendCdp(shell.id, 'Runtime.evaluate', {
+        : await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
         expression: `(() => {
           const clickables = (root, out = []) => {
             for (const node of root.querySelectorAll('button,[role=button]')) {
@@ -458,7 +577,7 @@ async function handle(request) {
       // what that probe reports on this desktop, claim to have restored into the page that is
       // already there.
       if (cardVerdict !== 'CLICKED_CARD' && cardVerdict !== 'ALREADY_CLICKED' && cardVerdict !== 'ADDRESS_BAR_PRESENT') {
-        restored = await sendCdp(shell.id, 'Runtime.evaluate', {
+        restored = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
           expression: `(() => {
             const nodes = Array.from(document.querySelectorAll('button,a,[role=button],div[role=link]'));
             const hit = nodes.find(n => {
@@ -489,7 +608,7 @@ async function handle(request) {
         // on DSH 0.2.0-rc.2, where Enter left the field filled and the guest
         // uncreated. `requestSubmit()` goes through the same path the button
         // does, so it works with React's onSubmit and needs no localized label.
-        const typed = await sendCdp(shell.id, 'Runtime.evaluate', {
+        const typed = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
           expression: `(() => {
             const pickAddressInput = () => {
               const visible = (el) => {
@@ -600,7 +719,6 @@ async function handle(request) {
     // would happily adopt a tab another session had opened. That is how a URL opened in one
     // session showed up in another's sidebar. The ledger therefore lives HERE, in the single
     // process that owns the sidebar, and the plugin passes a per-process owner id.
-    const owner = typeof request.owner === 'string' && request.owner !== '' ? request.owner : 'anonymous'
     pruneClaims()
     const mine = new Set()
     for (const [guest, holder] of claims) if (holder === owner) mine.add(guest)
@@ -681,7 +799,7 @@ async function handle(request) {
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
     const wantTitle = String(guest.getTitle() ?? '').trim()
-    const clicked = await sendCdp(shell.id, 'Runtime.evaluate', {
+    const clicked = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
       expression: `(() => {
         const scan = (root, out) => {
           for (const node of root.querySelectorAll('button,[role=button],[role=tab],a')) {
@@ -755,7 +873,7 @@ async function handle(request) {
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
     if (titles.length === 0 && wanted !== undefined) return { ok: true, closed: 0 }
-    const clicked = await sendCdp(shell.id, 'Runtime.evaluate', {
+    const clicked = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
       expression: `(() => {
         const wanted = ${JSON.stringify(titles.map(title => title.slice(0, 24)))};
         let closed = 0;
@@ -778,7 +896,7 @@ async function handle(request) {
     // guest keeps running — collapsing is presentation, exactly as §3 asks.
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
-    const folded = await sendCdp(shell.id, 'Runtime.evaluate', {
+    const folded = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
       expression: `(() => {
         const button = Array.from(document.querySelectorAll('button')).find(b => /收起右侧边栏/.test((b.getAttribute('aria-label') || '') + (b.textContent || '')));
         if (button === undefined) return 'NOT_OPEN';
