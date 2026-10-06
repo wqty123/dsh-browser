@@ -113,6 +113,28 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * @param viewId - the view whose guest is wanted.
      * @param url - address to use when a sidebar browser has to be opened first.
      */
+    /**
+     * The shell marks each sidebar container with the conversation it belongs to.
+     *
+     * Measured on the running desktop: two `[class*=_tabStrip]` containers sat in the DOM at once,
+     * each carrying `sessionId` on its React fiber (alongside `SessionProvider =
+     * ScopeAreaProvider`), and the hidden one's webview was unloaded. So "which sidebar is mine"
+     * has an answer the shell itself provides — it just has to be asked.
+     *
+     * Run through the bridge's `cdp` op, which executes in the shared main process. That keeps this
+     * on the plugin side of the seam: the bridge is imported once at host boot, so changing IT costs
+     * the user a restart, while this file is read per process start.
+     */
+    private static readonly SIDEBAR_OWNERSHIP_PROBE;
+    /**
+     * Is this conversation's own sidebar the one that can be operated right now?
+     *
+     * Without this the host drives "whatever sidebar is on screen". On this machine that meant
+     * typing into another conversation's address bar and navigating its page — the reported bug.
+     *
+     * @returns 'visible' when safe to proceed, otherwise a reason to refuse.
+     */
+    private sidebarOwnership;
     private guestFor;
     /**
      * Ask for at least `count` tabs belonging to this session and return their guest ids.
