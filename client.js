@@ -710,7 +710,18 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         }
         let placed = 0
         try { placed = sidebarRight.tabsIn(wanted).length } catch (error) { placed = before }
-        if (placed <= before) {
+        // `openTabIn` DEDUPLICATES, so "the count grew" is the wrong test for "is this
+        // conversation's surface mounted".
+        //
+        // Placing a page kind the conversation already holds leaves the count unchanged — the shell
+        // reveals the tab it has. Testing for growth therefore reported a conversation that already
+        // held the page as UNMOUNTED, and refused to drive a page that was right there: that is the
+        // "it will not reopen what it already opened" behaviour, and it bites hardest on the second
+        // open of an address, which is exactly when a human expects a fast answer.
+        //
+        // A count that started at zero and stayed there is the real signature of a surface the
+        // shell has never minted, because that is the only case where `openTabIn` is a silent no-op.
+        if (placed <= before && before === 0) {
           // Name what was FOUND, not just what was missing: "no panel" has two very different
           // causes — the shell has mounted no sidebar for this conversation (nothing this side can
           // do), or it writes its session id somewhere this lookup does not read (fixable) — and a
@@ -729,7 +740,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
             },
           }
         }
-        return { ok: true, created: true, panel: state.panel, guestId: null, tabs: placed }
+        return { ok: true, created: placed > before, panel: state.panel, guestId: null, tabs: placed }
       },
       /** Read-only: this conversation's current guest, if it has one. */
       panelGuest(sessionId) {

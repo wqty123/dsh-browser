@@ -342,7 +342,13 @@ function recordingSidebar(placed = 1) {
       tabsIn: () => tabs,
       openTabIn: (...args) => {
         calls.push(['openTabIn', ...args])
-        if (placed > 0) tabs = [...tabs, { id: `tab:${args[1]}`, kind: args[1] }]
+        const kind = args[1]
+        // The shell DEDUPLICATES a page kind: a second request for one the conversation already
+        // holds reveals that tab instead of adding another. A fake that always appended would hide
+        // the very case this suite now guards.
+        if (placed > 0 && !tabs.some(tab => tab.kind === kind)) {
+          tabs = [...tabs, { id: `tab:${kind}`, kind }]
+        }
       },
       // The on-screen variant. Nothing may call it: it acts on the conversation the shell is
       // displaying, which is the entire class of bug this service exists to remove.
@@ -402,6 +408,26 @@ test('the panel lookup never leaves the calling conversation subtree', async () 
   const own = panel.panelGuest('session-b')
   assert.equal(own.guestId, 77, 'session-b reads its own guest')
   assert.equal(calls.length, 1, 'reading an existing guest navigates nothing')
+})
+
+test('a conversation that already holds the page is never mistaken for an unmounted one', async () => {
+  // The shell deduplicates a page kind, so a second request leaves the tab count unchanged. Reading
+  // "the count did not grow" as "this conversation has no sidebar" refused to drive a page that was
+  // right there — the "it will not reopen what it already opened" report, worst on exactly the
+  // second open of an address, which is when a human expects the fastest answer.
+  const { service } = recordingSidebar()
+  const { panel } = await mount({
+    sidebarRight: service,
+    document: documentWith(makeStrip('session-a')),
+  })
+
+  const first = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(first.ok, true, 'the first call succeeds')
+  assert.equal(first.created, true, 'and reports that it placed the tab')
+
+  const second = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(second.ok, true, 'the second call is NOT refused')
+  assert.equal(second.created, false, 'and reports that nothing new was placed')
 })
 
 test('a conversation whose surface was never minted is refused by name, not driven', async () => {
