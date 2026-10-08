@@ -42,3 +42,23 @@ export declare const Config: z<Config>;
 export declare function apply(ctx: Context & {
     browser: BrowserRuntime;
 }, config: Config): void;
+/**
+ * Move a browser profile left behind by the old layout into the directory the plugin uses now.
+ *
+ * Before the `?.dsh` component was added here, a desktop launched from a shortcut (no `DSH_HOME`
+ * in the environment) put its browser profile in `<homedir>/dsh-builtin-browser-host/` while its
+ * settings and history lived in `<homedir>/.dsh/dsh-builtin-browser-host/`. Login state lives
+ * INSIDE the browser profile, so leaving the old directory behind silently signs the user out of
+ * everything they had signed into — reported after the fix shipped, as a one-time cost of it.
+ *
+ * That cost does not have to be paid. The move happens only when the new location is absent, so a
+ * profile in use is never overwritten, and every failure — a cross-device rename, a permission
+ * problem, a profile another process holds — falls through to an empty profile, which is exactly
+ * what would have happened without this function. The old directory is then left untouched rather
+ * than deleted, because a half-moved profile is worse than a stale one.
+ *
+ * @param profileRoot - the root the plugin resolves today (`<DSH_HOME>/dsh-builtin-browser-host`).
+ * @param legacyRoot - the pre-`DSH_HOME` layout's root. Injected so the move can be exercised
+ *   without touching the real home directory.
+ */
+export declare function adoptLegacyProfileRoot(profileRoot: string, legacyRoot?: string): void;

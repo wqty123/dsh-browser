@@ -17,8 +17,9 @@ import type { BrowserRuntime } from '../browser/runtime.js'
 import { ElectronBrowserProvider } from './provider.js'
 import type { ElectronBrowserViewHost } from './provider.js'
 import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.js'
 import { DesktopBridgeViewHost } from './desktop-bridge-host.js'
 import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.js'
@@ -225,6 +226,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // throwaway directory that is removed when the browser is released.
       const persist = settings.get().cookies.persist
       const profileRoot = join(home, BROWSER_PROFILE_DIR)
+      adoptLegacyProfileRoot(profileRoot)
       const profileDir = persist
         ? join(profileRoot, `${detected.kind}-profile`)
         : join(profileRoot, ephemeralProfileName(detected.kind, randomUUID()))
@@ -292,6 +294,41 @@ const SETTINGS_ROUTE = '/dsh-builtin-browser/settings'
  * root than the settings document is a pair that silently never meets.
  */
 const BROWSER_PROFILE_DIR = 'dsh-builtin-browser-host'
+
+/**
+ * Move a browser profile left behind by the old layout into the directory the plugin uses now.
+ *
+ * Before the `?.dsh` component was added here, a desktop launched from a shortcut (no `DSH_HOME`
+ * in the environment) put its browser profile in `<homedir>/dsh-builtin-browser-host/` while its
+ * settings and history lived in `<homedir>/.dsh/dsh-builtin-browser-host/`. Login state lives
+ * INSIDE the browser profile, so leaving the old directory behind silently signs the user out of
+ * everything they had signed into — reported after the fix shipped, as a one-time cost of it.
+ *
+ * That cost does not have to be paid. The move happens only when the new location is absent, so a
+ * profile in use is never overwritten, and every failure — a cross-device rename, a permission
+ * problem, a profile another process holds — falls through to an empty profile, which is exactly
+ * what would have happened without this function. The old directory is then left untouched rather
+ * than deleted, because a half-moved profile is worse than a stale one.
+ *
+ * @param profileRoot - the root the plugin resolves today (`<DSH_HOME>/dsh-builtin-browser-host`).
+ * @param legacyRoot - the pre-`DSH_HOME` layout's root. Injected so the move can be exercised
+ *   without touching the real home directory.
+ */
+export function adoptLegacyProfileRoot(
+  profileRoot: string,
+  legacyRoot: string = join(homedir(), BROWSER_PROFILE_DIR),
+): void {
+  try {
+    if (legacyRoot === profileRoot) return
+    if (!existsSync(legacyRoot) || existsSync(profileRoot)) return
+    // `renameSync` needs the destination's PARENT to exist, and on a fresh install it does not:
+    // the old layout never created `.dsh` at all. Creating it is harmless if it is already there.
+    mkdirSync(dirname(profileRoot), { recursive: true })
+    renameSync(legacyRoot, profileRoot)
+  } catch {
+    // Nothing here is worth failing an apply over; the fallback is the pre-existing behaviour.
+  }
+}
 
 /** The host web-server surface this plugin uses, described structurally. */
 interface WebServerHost {
