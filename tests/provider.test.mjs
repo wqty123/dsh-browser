@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import vm from 'node:vm'
@@ -17,7 +17,7 @@ function makeHost(overrides = {}) {
   const views = new Map()
   const showCalls = []
   const groupCalls = []
-  const events = { terminate: 0, move: 0, press: 0, release: 0, keyDown: 0, keyUp: 0, focus: 0, order: [], navigateHistory: 0, reload: 0, history: { entries: [], currentIndex: -1 }, insertText: '', keyDownParams: null }
+  const events = { terminate: 0, move: 0, press: 0, release: 0, keyDown: 0, keyUp: 0, focus: 0, order: [], navigateHistory: 0, reload: 0, history: { entries: [], currentIndex: -1 }, insertText: '', keyDownParams: null, evaluates: [] }
   const mouseSequence = []
   const page = { url: 'about:blank', wait: { urlOk: true, loadedOk: true, foundOk: true } }
   let userActionHandler = null
@@ -56,6 +56,10 @@ function makeHost(overrides = {}) {
           if (method === 'Page.stopLoading') return {}
           if (method === 'Runtime.evaluate') {
             const expr = params.expression || ''
+            // Every evaluate is recorded, so a test can assert that one did NOT happen — which is
+            // the only way to see the blank-tab short-circuit, since its whole effect is the round
+            // trip that is never made.
+            events.evaluates.push(expr)
             if (expr.includes('urlOk')) return { result: { value: page.wait } }
             // Only the bare URL probe (currentUrl) is exact; bigger scripts
             // merely CONTAIN location.href and must reach the overrides.
@@ -111,11 +115,12 @@ test('open/list/switch/close/reset tab lifecycle', async () => {
   assert.equal(t1.length, 2)
   assert.equal(t1.find(t => t.active).url, 'https://a.example/')
 
-  // Reset closes everything back to one blank tab.
+  // Reset closes everything back to one blank tab. Its URL is '' rather than 'about:blank': a tab
+  // that has never navigated is not probed any more, and '' is what "never navigated" means.
   await p.reset(sid)
   const t2 = await p.listTabs(sid)
   assert.equal(t2.length, 1)
-  assert.equal(t2[0].url, 'about:blank')
+  assert.equal(t2[0].url, '')
 
   await p.close(sid)
   await assert.rejects(() => p.listTabs(sid), /not open/)
@@ -361,8 +366,11 @@ test('user actions from the host UI route into the session model', async () => {
   const sid = await p.open('task-9')
   // newTab with a URL, then activate the first tab, then reload, then close.
   host.userAction({ type: 'newTab', windowId: sid, url: 'https://a.example/' })
-  await waitFor(async () => (await p.listTabs(sid)).length === 2)
+  // Wait for the URL, not just the tab count: the new tab appears synchronously while its
+  // navigation is still in flight, and a tab that has not navigated is no longer probed.
+  await waitFor(async () => (await p.listTabs(sid)).find(t => t.active)?.url === 'https://a.example/')
   let tabs = await p.listTabs(sid)
+  assert.equal(tabs.length, 2)
   assert.equal(tabs.find(t => t.active).url, 'https://a.example/')
   const firstId = tabs[0].id
 
@@ -471,6 +479,9 @@ test('a11y returns semantic nodes from the page', async () => {
   })
   const p = new ElectronBrowserProvider(host)
   const sid = await p.open()
+  // Navigate first: a tab that has never navigated has no committed document, so a11y answers the
+  // empty page immediately instead of running the collector (see the blank short-circuit).
+  await p.openUrl(sid, { url: 'https://a.example/' })
   const r = await p.a11y(sid, { maxNodes: 50 })
   assert.equal(r.count, 2)
   assert.equal(r.nodes[1].role, 'textbox')
@@ -652,4 +663,73 @@ test('a selector that is legal but finds nothing reports the miss with its own s
   )
   assert.ok(counts.css >= 2, 'a legal selector must still poll until its budget')
   await p.close(sid)
+})
+
+// ---------------------------------------------------------------------------
+// Tab URL tracking and the blank-tab short-circuit.
+//
+// A fresh session starts on a blank, uncommitted tab. Two things follow, and both were reported
+// from real use: probing that tab wastes a round trip that can only answer nothing, and running a
+// collector in it hangs until the whole budget is gone. `url` is what makes the distinction
+// possible — "never navigated" versus "navigated, but the URL could not be read" — and the tests
+// below pin both halves.
+// ---------------------------------------------------------------------------
+
+test('a tab that never navigated is not probed, and reports itself as blank', async () => {
+  const host = makeHost()
+  const p = new ElectronBrowserProvider(host)
+  const sid = await p.open()
+
+  const before = host.events.evaluates.length
+  const tabs = await p.listTabs(sid)
+
+  assert.equal(tabs.length, 1)
+  assert.equal(tabs[0].url, '', 'a never-navigated tab reports blank')
+  assert.equal(host.events.evaluates.length, before,
+    'and reading it made no round trip at all — that is the point')
+
+  // Once it HAS navigated, the URL is known without probing too, and a later read refreshes it.
+  await p.openUrl(sid, { url: 'https://a.example/' })
+  const after = await p.listTabs(sid)
+  assert.equal(after[0].url, 'https://a.example/')
+
+  await p.close(sid)
+})
+
+test('snapshot and a11y answer a blank tab immediately instead of running a collector', async () => {
+  const host = makeHost()
+  const p = new ElectronBrowserProvider(host)
+  const sid = await p.open()
+
+  const started = Date.now()
+  const snap = await p.snapshot(sid)
+  const a11y = await p.a11y(sid, {})
+  const elapsed = Date.now() - started
+
+  assert.equal(snap.url, '', 'the empty page is reported as empty')
+  assert.deepEqual([...snap.elements], [])
+  assert.equal(snap.truncated, false)
+  assert.equal(a11y.count, 0)
+  assert.deepEqual([...a11y.nodes], [])
+  // Not the 30s budget: a blank tab that waited would cost every read the same wait.
+  assert.ok(elapsed < 2_000, 'neither call waited on the collector; took ' + String(elapsed) + 'ms')
+
+  await p.close(sid)
+})
+
+test('a timed-out read is recoverable: the view is replaced, the tab id survives', () => {
+  // The timeout itself is 30s, so what is asserted here is the SHAPE of the recovery rather than
+  // waiting for it: the error carries a routable code, and the replacement path exists and keeps
+  // the public id. Removing either while refactoring is what this catches.
+  const source = readFileSync(new URL('../src/browser-electron/provider.ts', import.meta.url), 'utf8')
+  assert.match(source, /BROWSER_SNAPSHOT_TIMEOUT/, 'snapshot reports its own code')
+  assert.match(source, /BROWSER_A11Y_TIMEOUT/, 'a11y too')
+  assert.match(source, /private replaceTabWithBlank\(s: Session, tab: Tab\): void \{/,
+    'and a wedged view is replaced in place')
+  // The replacement preserves the id, which is what makes the recovery invisible to callers.
+  assert.match(source, /s\.tabs\[index\] = \{ id: tab\.id, handle, url: '' \}/,
+    'the tab keeps the id its caller holds')
+  // And both timeout branches actually call it.
+  const calls = (source.match(/this\.replaceTabWithBlank\(s, tab\)/g) ?? []).length
+  assert.equal(calls, 2, 'snapshot and a11y both recover, not just one')
 })

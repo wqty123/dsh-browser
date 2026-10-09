@@ -312,10 +312,21 @@ export interface ElectronViewHandle {
   capture?(opts?: ScreenshotOptions): Promise<{ base64: string; mime: string; width?: number; height?: number }>
 }
 
-/** One tab inside a session: its view plus a stable id. */
+/**
+ * One tab inside a session: its view, a stable id, and the last URL this provider accepted.
+ *
+ * `url` does two jobs. It separates "never navigated" from "navigated, but the URL could not be
+ * read" — the two used to collapse into the same empty string — and it lets `listTabs` skip
+ * probing a tab it already knows is blank, where a probe is a round trip on an uncommitted view
+ * that can only answer nothing.
+ *
+ * `handle` is deliberately NOT readonly: a view that has wedged is replaced in place, and the tab
+ * keeps its public id across that replacement (see `replaceTabWithBlank`).
+ */
 interface Tab {
   readonly id: string
-  readonly handle: ElectronViewHandle
+  handle: ElectronViewHandle
+  url: string
 }
 
 /** One live browser session: an ordered list of tabs, one active. */
@@ -717,7 +728,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // session), carrying the label for the window title. Hosts without
     // groupView keep the shared-window behavior.
     this.host.groupView?.(handle, id, label)
-    this.sessions.set(id, { id, label, tabs: [{ id: `tab:${randomUUID()}`, handle }], activeIndex: 0, history: [], nextSeq: 1 })
+    this.sessions.set(id, { id, label, tabs: [{ id: `tab:${randomUUID()}`, handle, url: '' }], activeIndex: 0, history: [], nextSeq: 1 })
     return Promise.resolve(id)
   }
 
@@ -737,9 +748,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
     for (let i = 0; i < s.tabs.length; i++) {
       const tab = s.tabs[i]
       if (tab === undefined) continue // defensive: array can shift under concurrency
+      // A tab we know has never navigated is NOT probed: its view has committed no document, so
+      // the round trip can only answer nothing — and it is the round trip that costs. A tab that
+      // HAS navigated is re-read, because the page may have moved itself since; a read that fails
+      // keeps the last accepted URL rather than reporting the tab as blank.
+      const liveUrl = tab.url === '' ? '' : await this.currentUrl(tab.handle).catch(() => tab.url)
+      if (liveUrl !== '') tab.url = liveUrl
       result.push({
         id: tab.id,
-        url: await this.currentUrl(tab.handle).catch(() => ''),
+        url: liveUrl,
         active: i === s.activeIndex,
       })
     }
@@ -825,7 +842,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Navigate the active tab's view to a URL, honoring HTTP(S)-only admission. */
   async navigate(session: BrowserSessionId, request: { readonly url: string }, signal?: AbortSignal): Promise<void> {
     const s = this.session(session)
-    const { handle } = this.activeTab(s)
+    const tab = this.activeTab(s)
+    const { handle } = tab
     const url = request.url
     try {
       if (this.httpOnly) {
@@ -870,6 +888,11 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // the visit written to the persistent history for a navigation nobody awaits any more.
       signal?.throwIfAborted()
       this.record(s, 'navigate', { url }, true)
+      // The tab now holds a committed document, which is what the blank short-circuit in
+      // `snapshot`/`a11y` keys on. Recorded here rather than after the settle below: the
+      // navigation HAS committed, and a tab wrongly treated as blank would return empty results
+      // for a page that is really there.
+      tab.url = url
       await this.settleDocument(handle, before, signal)
       this.recordVisit(s, handle)
       this.showActive(s)
@@ -1205,6 +1228,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
+    // A tab that has never navigated is a blank, uncommitted view. The collector cannot answer in
+    // it — there is no document to commit — so the call would sit out its whole budget before
+    // saying anything. Answering the empty page immediately is both faster and more truthful.
+    if (tab.url === '') return { url: '', elements: [], truncated: false }
     const script = `(() => {
       const cap = ${String(this.snapshotMaxElements)}
       const url = location.href
@@ -1277,13 +1304,31 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // Same hang guard as execute: a renderer that has not committed after
     // navigate would otherwise block snapshot forever.
     const timeoutMs = 30_000
-    const result = await withTimeout(
-      handleSendEvaluate(tab.handle, script),
-      timeoutMs,
-      signal,
-      `browser: snapshot timed out after ${timeoutMs}ms`,
-      () => terminatePage(tab.handle),
-    )
+    let result: { ok: true; value: unknown } | { ok: false; exception: string }
+    try {
+      result = await withTimeout(
+        handleSendEvaluate(tab.handle, script),
+        timeoutMs,
+        signal,
+        `browser: snapshot timed out after ${timeoutMs}ms`,
+        () => terminatePage(tab.handle),
+      ) as { ok: true; value: unknown } | { ok: false; exception: string }
+    } catch (error) {
+      // A timeout leaves the wedged view in the session, so every later read would pay the same
+      // 30 seconds again — and `terminatePage` only interrupts the running script, it does not
+      // make the view readable. Replacing it is what turns a permanent loss into one bad call:
+      // the tab keeps the id the caller holds, and the next browser_open with the real URL
+      // repopulates it.
+      if (error instanceof Error && error.name === 'TimeoutError') {
+        this.replaceTabWithBlank(s, tab)
+        throw new BrowserError(
+          'browser: snapshot timed out; the stuck tab was reset to blank. Call browser_open with the real target URL before reading it again.',
+          'BROWSER_SNAPSHOT_TIMEOUT',
+          { cause: error },
+        )
+      }
+      throw error
+    }
     if (!result.ok) throw new BrowserError(`browser: snapshot evaluation failed: ${result.exception}`, 'BROWSER_SNAPSHOT_FAILED')
     const value = result.value as BrowserSnapshotResult
     return value
@@ -1301,6 +1346,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
+    // Same short-circuit as `snapshot`: a tab that never navigated has no committed document, so
+    // the tree cannot be read and the call would spend its whole budget discovering that.
+    if (tab.url === '') return { url: '', title: undefined, count: 0, nodes: [], truncated: false }
     const includeHidden = request.includeHidden === true
     // 150 rather than 500. The cap fills on any real page, and 500 nodes measured 38,953
       // characters — 10k-13k tokens for a single call. A caller that needs more asks for it.
@@ -1462,13 +1510,28 @@ export class ElectronBrowserProvider implements BrowserProvider {
       return { url: location.href, title: document.title || undefined, count: out.length, nodes: out, truncated: out.length >= maxNodes }
     })()`
     const timeoutMs = 30_000
-    const result = await withTimeout(
-      handleSendEvaluate(tab.handle, script),
-      timeoutMs,
-      signal,
-      `browser: a11y timed out after ${timeoutMs}ms`,
-      () => terminatePage(tab.handle),
-    )
+    let result: { ok: true; value: unknown } | { ok: false; exception: string }
+    try {
+      result = await withTimeout(
+        handleSendEvaluate(tab.handle, script),
+        timeoutMs,
+        signal,
+        `browser: a11y timed out after ${timeoutMs}ms`,
+        () => terminatePage(tab.handle),
+      ) as { ok: true; value: unknown } | { ok: false; exception: string }
+    } catch (error) {
+      // As in `snapshot`: a timeout means the view is wedged, and leaving it in the session would
+      // charge every later read the same 30 seconds. Replaced in place, so the tab id survives.
+      if (error instanceof Error && error.name === 'TimeoutError') {
+        this.replaceTabWithBlank(s, tab)
+        throw new BrowserError(
+          'browser: a11y timed out; the stuck tab was reset to blank. Call browser_open with the real target URL before reading it again.',
+          'BROWSER_A11Y_TIMEOUT',
+          { cause: error },
+        )
+      }
+      throw error
+    }
     if (!result.ok) throw new BrowserError(`browser: a11y evaluation failed: ${result.exception}`, 'BROWSER_A11Y_FAILED')
     const value = result.value as BrowserA11yResult
     this.record(s, 'a11y', { includeHidden, maxNodes }, true, { result: `${value.count} nodes` })
@@ -3116,9 +3179,39 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const handle = this.host.createView(s.label)
     // Same window as the session's other tabs.
     this.host.groupView?.(handle, s.id, s.label)
-    s.tabs.push({ id: `tab:${randomUUID()}`, handle })
+    s.tabs.push({ id: `tab:${randomUUID()}`, handle, url: '' })
     s.activeIndex = s.tabs.length - 1
     this.showActive(s)
+  }
+
+  /**
+   * Swap a wedged view for a fresh blank one, keeping the tab's public id.
+   *
+   * A view whose renderer never commits cannot be read again: every evaluate into it runs out its
+   * whole budget. Replacing it is what turns that from permanent into one bad call — the tab id
+   * callers hold stays valid, and the next `browser_open` with the real URL re-populates it.
+   *
+   * The old view is destroyed AFTER the new one is in place, so a failure here cannot leave the
+   * session holding a handle that is already gone.
+   * @param s - the session owning the tab.
+   * @param tab - the tab to reset.
+   */
+  private replaceTabWithBlank(s: Session, tab: Tab): void {
+    const index = s.tabs.indexOf(tab)
+    if (index < 0) return
+    let handle: ElectronViewHandle
+    try {
+      handle = this.host.createView(s.label)
+      this.host.groupView?.(handle, s.id, s.label)
+    } catch {
+      // Creating the replacement failed: leaving the wedged tab in place is worse than nothing
+      // only for the caller, who is about to be told the tab timed out either way.
+      return
+    }
+    const wedged = tab.handle
+    s.tabs[index] = { id: tab.id, handle, url: '' }
+    if (index === s.activeIndex) this.showActive(s)
+    this.host.destroyView(wedged)
   }
 
   /** Find a session's tab by its backing view id (toolbar actions carry view ids). */

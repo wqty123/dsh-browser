@@ -705,6 +705,19 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     private activeTab;
     /** Append a fresh tab and make it active. */
     private newTab;
+    /**
+     * Swap a wedged view for a fresh blank one, keeping the tab's public id.
+     *
+     * A view whose renderer never commits cannot be read again: every evaluate into it runs out its
+     * whole budget. Replacing it is what turns that from permanent into one bad call — the tab id
+     * callers hold stays valid, and the next `browser_open` with the real URL re-populates it.
+     *
+     * The old view is destroyed AFTER the new one is in place, so a failure here cannot leave the
+     * session holding a handle that is already gone.
+     * @param s - the session owning the tab.
+     * @param tab - the tab to reset.
+     */
+    private replaceTabWithBlank;
     /** Find a session's tab by its backing view id (toolbar actions carry view ids). */
     private tabByViewId;
     /**
