@@ -120,6 +120,17 @@ export interface ElectronBrowserViewHost {
      */
     releasePage?(owner?: string): Promise<void>;
     /**
+     * Report that this carrier can no longer serve anything, so its owner may replace it.
+     *
+     * A carrier that borrows an outside process can lose it: the desktop shell exits, and every call
+     * after that would dial a port nobody owns. Without this signal the swap happens only at
+     * startup, so the choice made then is final for the process's life — which is what a user
+     * experiences as "the browser stopped working until I restart DSH". Optional: a carrier that
+     * owns its own lifetime has nothing to report.
+     * @param listener - called once, when the carrier concludes it is gone.
+     */
+    onLost?(listener: () => void): void;
+    /**
      * Fold the carrier's presentation away while keeping the page alive.
      *
      * The desktop sidebar keeps running regardless of the plugin, so "do not take

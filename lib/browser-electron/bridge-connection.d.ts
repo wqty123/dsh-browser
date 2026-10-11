@@ -23,6 +23,7 @@ export interface BridgeEndpoint {
 export declare class BridgeConnection {
     private endpoint;
     private readonly endpointPath?;
+    private readonly onLost?;
     private socket;
     private buffer;
     /** Outstanding requests by id. */
@@ -34,11 +35,14 @@ export declare class BridgeConnection {
     private idLessBridge;
     /** True once this connection may only have one request in flight at a time. */
     private serialisable;
+    /** True once the shell behind this connection has been reported gone. */
+    private lostNotified;
     /**
      * @param endpoint - the shell's published bridge endpoint.
      * @param endpointPath - where that endpoint is republished, so a moved port can be followed.
+     * @param onLost - called once when this connection concludes the shell behind it is gone.
      */
-    constructor(endpoint: BridgeEndpoint, endpointPath?: string | undefined);
+    constructor(endpoint: BridgeEndpoint, endpointPath?: string | undefined, onLost?: (() => void) | undefined);
     /**
      * Re-read the published endpoint, and adopt it if the shell has moved.
      *
@@ -53,6 +57,8 @@ export declare class BridgeConnection {
      * @returns true when a different endpoint was adopted.
      */
     private refreshEndpoint;
+    /** Report once that the shell is gone, so the surface can fall back instead of dialling it. */
+    private notifyLost;
     /**
      * Send one request, reusing the socket if it is still healthy.
      *

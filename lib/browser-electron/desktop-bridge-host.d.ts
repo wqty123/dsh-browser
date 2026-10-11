@@ -94,10 +94,21 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * the desktop sidebar is the carrier — by design, not by omission.
      */
     private userActionHandler;
+    /** Told when the shell behind this bridge exits; see `onLost`. */
+    private lostListener;
     /**
      * @param endpoint - the shell's published bridge endpoint.
      */
     private constructor();
+    /**
+     * Called by the transport once the shell behind it is gone.
+     *
+     * Forwarded rather than acted on here: only the entry point owns the swap back to the self-hosted
+     * browser, and a host that tried to replace itself would be reaching outside its own contract.
+     */
+    private reportLost;
+    /** Register the "this carrier is gone" listener (see the interface's `onLost`). */
+    onLost(listener: () => void): void;
     /**
      * Find a usable desktop bridge, if this surface has one.
      *

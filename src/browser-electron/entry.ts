@@ -147,6 +147,35 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   })
 
   /**
+   * Put the self-hosted browser back after an adopted carrier reports that it is gone.
+   *
+   * This is the half the startup retries never covered: a bridge that was alive at apply time and
+   * exited later left every subsequent call dialling a port nobody owns, because the swap happened
+   * once and only in one direction. Reaching here means the shell is gone, so the choice made at
+   * startup is no longer a choice — the alternative to falling back is a browser surface that does
+   * nothing until DSH is restarted.
+   * @param adopted - the carrier that reported the loss, disposed once its replacement is in place.
+   */
+  const restoreSelfHosted = (adopted: ElectronBrowserViewHost): void => {
+    try {
+      const restored = new RemoteElectronViewHost(defaultHostMainPath())
+      unregister()
+      unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(restored, providerConfig))
+      ctx.logger?.warn?.(
+        'dsh-builtin-browser: the desktop shell backed the sidebar browser and has exited, so the '
+        + 'browser this plugin hosts itself takes over. Pages from the sidebar are gone with it; '
+        + 'open the page again.',
+      )
+    } catch (error) {
+      // Nothing better is available: the adopted carrier is gone and a provider that throws is
+      // worse than one that explains.
+      ctx.logger?.warn?.(`dsh-builtin-browser: could not fall back to the self-hosted browser: ${String(error)}`)
+    } finally {
+      adopted.dispose?.()
+    }
+  }
+
+  /**
    * Swap the provider to another carrier, releasing the previous one.
    * @param host - the carrier to adopt.
    * @param note - a one-line description for the log.
@@ -159,6 +188,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, providerConfig))
       selfHosted.dispose()
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
+      // A borrowed carrier can lose the process behind it, and this is the only notification that
+      // will ever arrive. Registering AFTER the swap succeeded means a listener can never fire
+      // against a provider that was never installed.
+      host.onLost?.(() => { restoreSelfHosted(host) })
     } catch (error) {
       // Never leave the surface without a provider. The half-built host is disposed FIRST: an
       // adopt that got as far as constructing it may already hold a socket, a listener or a child

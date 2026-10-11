@@ -52,6 +52,16 @@ const MAX_BUFFER_BYTES = 128 * 1024 * 1024
 const REQUEST_ID_FIELD = 'bridgeRequestId'
 
 /**
+ * How long the published endpoint may go un-refreshed before its shell is presumed gone.
+ *
+ * A live shell rewrites the file every fifteen seconds (its keep-alive), so four missed refreshes
+ * is not a slow shell — it is a shell that exited and left its last write behind. The distinction
+ * matters because the file is the ONLY thing that says where the bridge is: a tombstone names a
+ * port nobody owns, and a client that trusts it dials that port for the rest of its life.
+ */
+const ENDPOINT_TTL_MS = 60_000
+
+/**
  * A reusable connection to the bridge.
  *
  * Requests may be in flight CONCURRENTLY, so answers are correlated by id rather than by
@@ -78,12 +88,19 @@ export class BridgeConnection {
   private idLessBridge = false
   /** True once this connection may only have one request in flight at a time. */
   private serialisable = false
+  /** True once the shell behind this connection has been reported gone. */
+  private lostNotified = false
 
   /**
    * @param endpoint - the shell's published bridge endpoint.
    * @param endpointPath - where that endpoint is republished, so a moved port can be followed.
+   * @param onLost - called once when this connection concludes the shell behind it is gone.
    */
-  constructor(private endpoint: BridgeEndpoint, private readonly endpointPath?: string) {}
+  constructor(
+    private endpoint: BridgeEndpoint,
+    private readonly endpointPath?: string,
+    private readonly onLost?: () => void,
+  ) {}
 
   /**
    * Re-read the published endpoint, and adopt it if the shell has moved.
@@ -103,6 +120,13 @@ export class BridgeConnection {
     try {
       const raw = JSON.parse(readFileSync(this.endpointPath, 'utf8')) as Partial<BridgeEndpoint>
       if (typeof raw.port !== 'number' || typeof raw.token !== 'string') return false
+      // A shell that exited stops refreshing the file, and what it left names a port nobody owns.
+      // Trusting it is how a host ends up dialling a dead port for the rest of the process's life
+      // — reported as "the browser stopped working and only restarting DSH brought it back".
+      if (endpointExpired(raw.updatedAt)) {
+        this.notifyLost()
+        return false
+      }
       if (raw.port === this.endpoint.port && raw.token === this.endpoint.token) return false
       this.endpoint = {
         port: raw.port,
@@ -114,6 +138,17 @@ export class BridgeConnection {
       return true
     } catch {
       return false
+    }
+  }
+
+  /** Report once that the shell is gone, so the surface can fall back instead of dialling it. */
+  private notifyLost(): void {
+    if (this.lostNotified) return
+    this.lostNotified = true
+    try {
+      this.onLost?.()
+    } catch {
+      // A listener must never break the transport: the caller's error is the one that matters.
     }
   }
 
@@ -138,6 +173,16 @@ export class BridgeConnection {
     // when the condition could not clear, spun until the process ran out of heap.
     // Follow the shell if its bridge moved to a new port (see refreshEndpoint).
     this.refreshEndpoint()
+    // The shell behind this connection is gone, and the endpoint file says so. Refusing here is
+    // what turns a permanent ECONNREFUSED into one named error the surface can act on — by
+    // falling back to the browser it hosts itself, instead of dialling a dead port until DSH is
+    // restarted.
+    if (this.lostNotified) {
+      throw new Error(
+        'dsh-builtin-browser: the desktop shell that backed this browser has exited '
+        + '(its published endpoint stopped being refreshed)',
+      )
+    }
     let socket = this.ensureSocket()
     if (this.serialisable && this.queue.length > 0) {
       this.reset(new Error('dsh-builtin-browser: bridge connection reopened so replies stay attributable'))
@@ -288,8 +333,21 @@ export class BridgeConnection {
   }
 }
 
-/** The request id a raw answer line echoes back, when it carries one. */
-function echoOf(line: string): number | undefined {
+/**
+ * Whether a published endpoint has gone un-refreshed long enough to be a tombstone.
+ *
+ * A missing or unparseable stamp is NOT expired: an older bridge that never wrote one must keep
+ * working, and guessing "stale" from absence would break every shell that predates the field.
+ * @param updatedAt - the file's own refresh stamp, when it carries one.
+ */
+function endpointExpired(updatedAt: unknown): boolean {
+  if (typeof updatedAt !== 'string') return false
+  const at = Date.parse(updatedAt)
+  if (!Number.isFinite(at)) return false
+  return Date.now() - at > ENDPOINT_TTL_MS
+}
+
+/** The request id a raw answer line echoes back, when it carries one. */function echoOf(line: string): number | undefined {
   try {
     const answer = JSON.parse(line) as Record<string, unknown>
     const value = answer[REQUEST_ID_FIELD]
