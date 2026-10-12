@@ -70,13 +70,20 @@ export declare const DEFAULT_SETTINGS: BrowserSettings;
  */
 export declare function settingsPath(): string;
 /**
+ * The channels a settings document may name.
+ *
+ * Exported so the log line and the error message can quote the same set the parser accepts: a
+ * message that lists a value the code rejects (or omits one it takes) is worse than no message.
+ */
+export declare const BROWSER_CHANNELS: readonly ["chrome", "edge", "auto", "bundled", "sidebar"];
+/**
  * Resolve a raw settings document (already parsed, shape unknown) into the full
  * document, field by field. Unknown keys are dropped: the file is not a place to
  * smuggle configuration.
  * @param raw - the parsed file contents.
  * @returns the resolved settings.
  */
-export declare function resolveSettings(raw: unknown): BrowserSettings;
+export declare function resolveSettings(raw: unknown, warn?: (message: string) => void): BrowserSettings;
 /**
  * File-backed settings with an in-memory snapshot. Reads re-stat the file so an
  * edit from another process (or the settings panel writing through a second
@@ -85,13 +92,14 @@ export declare function resolveSettings(raw: unknown): BrowserSettings;
  */
 export declare class SettingsStore {
     private readonly file;
+    private readonly log?;
     private cached;
     /** Last observed mtime, used to invalidate the cache on external edits. */
     private cachedMtimeMs;
     /**
      * @param file - settings file path (defaults beside the browser profile).
      */
-    constructor(file?: string);
+    constructor(file?: string, log?: ((message: string) => void) | undefined);
     /** Path this store reads and writes. */
     path(): string;
     /**

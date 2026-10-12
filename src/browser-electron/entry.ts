@@ -112,9 +112,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   const sessionId = readSessionId(ctx)
 
   // One settings document per plugin instance: the settings panel writes it, the
-  // provider reads it live, and both ends agree on the same file.
-  const settings = new SettingsStore()
-  installSettingsRoute(ctx, settings)
+  // provider reads it live, and both ends agree on the same file. The logger is passed so a
+  // discarded value (a mistyped channel, most of all) is reported instead of being silently
+  // replaced by the default — "my setting did nothing" and "I misspelled it" must not look alike.
+  const settings = new SettingsStore(undefined, message => ctx.logger?.warn?.(message))
 
   const providerConfig = {
     httpOnly: config.httpOnly,
@@ -129,6 +130,17 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   if (config.viewHost !== undefined) {
     const external = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(config.viewHost as ElectronBrowserViewHost, providerConfig))
     ctx.effect(() => () => { external() })
+    // The composition supplied the carrier, so `browser.channel` is not ours to honour on this
+    // surface. Saying so is the difference between a setting that cannot apply and a setting that
+    // appears not to have worked — the second is what sends people looking for a bug elsewhere.
+    const asked = settings.get().browser.channel
+    if (asked !== 'sidebar' && asked !== 'bundled') {
+      ctx.logger?.warn?.(
+        `dsh-builtin-browser: browser.channel is "${asked}", but this surface's carrier was `
+        + 'supplied by its composition (the desktop shell), which outranks the setting. Set it to '
+        + '"sidebar" to record the intent, or run on a surface that picks its own carrier.',
+      )
+    }
     return
   }
 
@@ -140,6 +152,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   const selfHosted = new RemoteElectronViewHost(defaultHostMainPath())
   let unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(selfHosted, providerConfig))
   let upgraded = false
+  /** The carrier an `adopt` installed, so a later choice can release it. */
+  let adoptedCarrier: ElectronBrowserViewHost | undefined
 
   ctx.effect(() => () => {
     unregister()
@@ -181,7 +195,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * @param note - a one-line description for the log.
    */
   const adopt = (host: ElectronBrowserViewHost, note: string): void => {
-    if (upgraded) { host.dispose?.(); return }
+    // This guard used to make the FIRST choice final, disposing anything that arrived later. That
+    // is right against two carriers racing in, and exactly wrong for a user changing the setting:
+    // `chooseCarrier` runs again on purpose, and a refusal here is indistinguishable from the
+    // write having done nothing. The previous carrier is now released by the replacement instead.
     upgraded = true
     try {
       unregister()
@@ -192,6 +209,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // will ever arrive. Registering AFTER the swap succeeded means a listener can never fire
       // against a provider that was never installed.
       host.onLost?.(() => { restoreSelfHosted(host) })
+      const previous = adoptedCarrier
+      adoptedCarrier = host
+      // Released AFTER the replacement is installed, so the surface is never without a provider.
+      if (previous !== undefined && previous !== host) {
+        try { previous.dispose?.() } catch { /* the replacement is already serving */ }
+      }
     } catch (error) {
       // Never leave the surface without a provider. The half-built host is disposed FIRST: an
       // adopt that got as far as constructing it may already hold a socket, a listener or a child
@@ -217,6 +240,16 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }
   }
 
+  /**
+   * Choose and install the carrier that `browser.channel` names RIGHT NOW.
+   *
+   * A function rather than straight-line code because the setting is read live everywhere else:
+   * the settings route writes the file and the provider picks the change up on its next call, so a
+   * channel that could only be honoured at apply time was the one setting whose write silently did
+   * nothing. Re-entrant by design — changing the channel means replacing the carrier, which is
+   * exactly what a second call does.
+   */
+  const chooseCarrier = (): void => {
   // A browser the user explicitly asked for outranks every automatic choice: the
   // whole point of the setting is that they know which browser they want. It is
   // launched with a plugin-owned profile, so their own windows are untouched.
@@ -314,6 +347,14 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       )
     }
   })()
+  }
+
+  chooseCarrier()
+
+  // Wired AFTER the chooser exists, because the handler re-runs it: a settings write that changes
+  // `browser.channel` is a request to switch carriers, and answering `ok` without switching is the
+  // one thing a caller cannot tell apart from a write that worked.
+  installSettingsRoute(ctx, settings, () => { chooseCarrier() })
 }
 
 /** Route the settings panel reads and writes. */
@@ -386,7 +427,11 @@ interface WebServerHost {
  * @param ctx - the plugin context.
  * @param settings - the settings document to expose.
  */
-function installSettingsRoute(ctx: Context, settings: SettingsStore): void {
+function installSettingsRoute(
+  ctx: Context,
+  settings: SettingsStore,
+  onChannelChange?: () => void,
+): void {
   const inject = (ctx as unknown as {
     inject?: (deps: readonly string[], callback: (host: WebServerHost) => void) => void
   }).inject
@@ -396,7 +441,7 @@ function installSettingsRoute(ctx: Context, settings: SettingsStore): void {
       host.effect(() => host.webServer.register({
         kind: 'exact',
         path: SETTINGS_ROUTE,
-        handler: (request, response) => handleSettingsRequest(request, response, settings),
+        handler: (request, response) => handleSettingsRequest(request, response, settings, onChannelChange),
       }, 'dsh-builtin-browser: settings'))
     })
   } catch {
@@ -410,11 +455,13 @@ function installSettingsRoute(ctx: Context, settings: SettingsStore): void {
  * @param request - the incoming request.
  * @param response - the response to write.
  * @param settings - the settings document.
+ * @param onChannelChange - re-runs the carrier choice when this write changed `browser.channel`.
  */
 async function handleSettingsRequest(
   request: IncomingMessage,
   response: ServerResponse,
   settings: SettingsStore,
+  onChannelChange?: () => void,
 ): Promise<void> {
   const json = (status: number, body: unknown): void => {
     response.writeHead(status, {
@@ -440,7 +487,19 @@ async function handleSettingsRequest(
   try {
     const body = await readBody(request)
     const patch: unknown = body.trim() === '' ? {} : JSON.parse(body)
-    json(200, { ok: true, settings: settings.update(patch) })
+    const before = settings.get().browser.channel
+    const updated = settings.update(patch)
+    // A changed `browser.channel` is a request to switch carriers, not just a value to store. The
+    // choice is re-run here so the write takes effect now — and the response says so, because a
+    // caller that cannot tell "applied" from "stored for later" has no way to know what it got,
+    // which is exactly how a write that did nothing read as a success.
+    const channelChanged = updated.browser.channel !== before
+    if (channelChanged) onChannelChange?.()
+    json(200, {
+      ok: true,
+      settings: updated,
+      ...channelChanged ? { carrierRechosen: true } : {},
+    })
   } catch (error) {
     json(400, { ok: false, error: `invalid settings patch: ${String(error)}` })
   }

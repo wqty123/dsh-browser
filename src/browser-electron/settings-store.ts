@@ -130,15 +130,34 @@ const SETTINGS_WHEN_UNREADABLE: BrowserSettings = {
 }
 
 /**
+ * The channels a settings document may name.
+ *
+ * Exported so the log line and the error message can quote the same set the parser accepts: a
+ * message that lists a value the code rejects (or omits one it takes) is worse than no message.
+ */
+export const BROWSER_CHANNELS = ['chrome', 'edge', 'auto', 'bundled', 'sidebar'] as const
+
+/**
  * Coerce the browser channel, keeping the default when it is not one of the
  * known choices. A hand-edited typo must not silently select a different browser.
+ *
+ * Coercing is right; coercing QUIETLY is not. A typo and "the setting did nothing" look exactly
+ * the same to whoever typed it, which is why every discarded value is reported.
  * @param value - the raw value from the settings document.
+ * @param warn - where to report a discarded value, when the caller has somewhere to put it.
  * @returns a valid channel.
  */
-function resolveChannel(value: unknown): BrowserChannel {
-  return value === 'chrome' || value === 'edge' || value === 'auto' || value === 'bundled' || value === 'sidebar'
-    ? value
-    : DEFAULT_SETTINGS.browser.channel
+function resolveChannel(value: unknown, warn?: (message: string) => void): BrowserChannel {
+  // Absent is the ordinary case, not a mistake: a document that never mentioned the channel gets
+  // the default without a word.
+  if (value === undefined) return DEFAULT_SETTINGS.browser.channel
+  if ((BROWSER_CHANNELS as readonly unknown[]).includes(value)) return value as BrowserChannel
+  warn?.(
+    `dsh-builtin-browser: browser.channel ${JSON.stringify(value)} is not a known channel, so the `
+    + `default "${DEFAULT_SETTINGS.browser.channel}" was used instead. Expected one of: `
+    + `${BROWSER_CHANNELS.join(', ')}.`,
+  )
+  return DEFAULT_SETTINGS.browser.channel
 }
 
 /** Coerce one positive-integer field, keeping the default when invalid. */
@@ -181,7 +200,7 @@ function section(source: Record<string, unknown>, key: string): Record<string, u
  * @param raw - the parsed file contents.
  * @returns the resolved settings.
  */
-export function resolveSettings(raw: unknown): BrowserSettings {
+export function resolveSettings(raw: unknown, warn?: (message: string) => void): BrowserSettings {
   const source = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : {}
   const history = section(source, 'history')
   const cookies = section(source, 'cookies')
@@ -208,7 +227,7 @@ export function resolveSettings(raw: unknown): BrowserSettings {
       virtualCursor: bool(ui?.virtualCursor, DEFAULT_SETTINGS.ui.virtualCursor),
     },
     vision: { strategy: vision?.strategy === 'nonVisual' ? 'nonVisual' : DEFAULT_SETTINGS.vision.strategy },
-    browser: { channel: resolveChannel(browser?.channel) },
+    browser: { channel: resolveChannel(browser?.channel, warn) },
     credentials: {
       // `gate` returns false for anything present-and-not-a-boolean, so an unreadable section
       // is refused here for free: the section itself is the "present but wrong" value.
@@ -244,7 +263,7 @@ export class SettingsStore {
   /**
    * @param file - settings file path (defaults beside the browser profile).
    */
-  constructor(private readonly file: string = settingsPath()) {}
+  constructor(private readonly file: string = settingsPath(), private readonly log?: (message: string) => void) {}
 
   /** Path this store reads and writes. */
   path(): string {
@@ -291,7 +310,7 @@ export class SettingsStore {
       // value in it: the document looked correct, and the plugin quietly ran on
       // defaults — including switches the user had just turned off.
       const body = text?.replace(/^\uFEFF/, '')
-      this.cached = body === undefined ? DEFAULT_SETTINGS : resolveSettings(JSON.parse(body))
+      this.cached = body === undefined ? DEFAULT_SETTINGS : resolveSettings(JSON.parse(body), m => this.log?.(m))
     } catch {
       // A document that EXISTS but cannot be parsed is not the same as no document at all: the
       // first is a corrupted or half-written file whose contents were the operator's decisions,
@@ -311,7 +330,7 @@ export class SettingsStore {
    */
   update(patch: unknown): BrowserSettings {
     const current = this.get()
-    const merged = resolveSettings(deepMerge(current as unknown as Record<string, unknown>, patch))
+    const merged = resolveSettings(deepMerge(current as unknown as Record<string, unknown>, patch), m => this.log?.(m))
     try {
       mkdirSync(dirname(this.file), { recursive: true })
       writeFileAtomic(this.file, `${JSON.stringify(merged, null, 2)}\n`)
