@@ -25,18 +25,44 @@
 
 ## 快速开始
 
+**先确认你在哪一端** —— 两端是两份独立安装,**更新其中一端不会带上另一端**,浏览器的承载方式也不同。
+
+### DSH Desktop(桌面端)
+
 ```sh
-# 从 npm 安装(把 --profile 换成你的 profile:DSH Desktop 用 desktop)
+dsh plugin --profile desktop add dsh-builtin-browser
+```
+
+桌面端默认驱动**官方侧栏**里那个浏览器面板 —— 不额外开窗口,也不依赖 Electron,agent 操作的就是你在界面上看到的那一个页面。
+
+要让插件驱动侧栏,还需要一条 bridge(它装在**桌面端自己的安装目录**里,不在 profile 中):
+
+```sh
+node desktop-bridge/install.mjs            # 幂等;首次会备份 main.js.before-bridge
+node desktop-bridge/install.mjs --revert   # 回滚
+```
+
+> **这不是必做项**:不装 bridge,插件自动退回自托管 —— 功能完全一样,只是会多出一个独立窗口。**桌面端升级后要重跑一次**,因为升级会替换 `resources/app/`,bridge 随之消失。
+
+### Web 端(`dsh web`)
+
+```sh
 dsh plugin --profile web add dsh-builtin-browser
 ```
 
-装完直接让 agent 用它 —— 不需要额外配置:
+Web 端**没有侧栏,也没有 bridge**:共享浏览器由插件**自托管**拉起一个独立窗口(标题 `dsh-browser`),自带完整工具栏(地址栏 / 后退前进刷新 / 标签条),你可以像用普通浏览器一样直接用它。
+
+> 首次安装若缺少 Electron 二进制(44+ 不再随安装下载),按报错提示执行一次 `npx install-electron`,需要网络。
+
+### 两端通用
+
+装完不需要其它配置,直接让 agent 用它:
 
 ```
 帮我打开 https://example.com，把页面上的主要内容用中文总结一下。
 ```
 
-浏览器窗口(桌面端是侧栏面板)会随第一次调用自动出现;你可以随时在那个窗口里自己操作,agent 会接着往下走。
+浏览器窗口会随第一次调用出现;你可以随时在那个窗口里自己操作,agent 会接着往下走。**两端都可以在设置里改用你本机已安装的 Chrome / Edge**,那是行为完全一致的选项。
 
 ## 文档
 

@@ -25,18 +25,44 @@ In one line: **install the plugin and you have a real browser shared with, and d
 
 ## Quick start
 
+**First, which side are you on** — these are two separate installs; updating one does not update the other, and they host the browser differently.
+
+### DSH Desktop
+
 ```sh
-# From npm (point --profile at yours; DSH Desktop uses `desktop`)
+dsh plugin --profile desktop add dsh-builtin-browser
+```
+
+On the desktop the plugin drives the browser panel inside the **official side panel** — no extra window, no Electron dependency, and the agent operates the very page you see in the interface.
+
+Driving that panel also needs a bridge, installed into **the desktop app's own install directory** rather than the profile:
+
+```sh
+node desktop-bridge/install.mjs            # idempotent; backs up main.js.before-bridge first
+node desktop-bridge/install.mjs --revert   # roll back
+```
+
+> **Optional**: without the bridge the plugin falls back to self-hosting — identical capability, just one extra standalone window. **Re-run it after every desktop upgrade**, which replaces `resources/app/` and takes the bridge with it.
+
+### Web (`dsh web`)
+
+```sh
 dsh plugin --profile web add dsh-builtin-browser
 ```
 
-Then just ask the agent to use it — no further setup:
+There is **no side panel and no bridge** on the web side: the shared browser is **self-hosted** in a standalone window (titled `dsh-browser`) with a full toolbar (address bar, back/forward/reload, tab strip) you can use like any browser.
+
+> If the Electron binary is missing on first install (44+ no longer downloads it), run `npx install-electron` once as the error suggests — it needs network.
+
+### Both sides
+
+No further configuration; just ask the agent:
 
 ```
 Open https://example.com and summarise the main content for me.
 ```
 
-The browser window (the side panel, on the desktop) appears with the first call. You can operate in that window yourself at any point, and the agent carries on from wherever you left it.
+The browser window appears with the first call, and you can operate in it yourself at any point. **Either side can be pointed at your own installed Chrome / Edge** in settings — that option behaves identically on both.
 
 ## Documentation
 
@@ -62,7 +88,7 @@ This plugin claims the global **`dsh_browser_*`** namespace (34 tools).
 
 **If your log shows `could not register dsh_browser_xxx`**: another plugin holds that name. From 0.4.8 every tool registers **independently**, so a collision costs that one name and nothing else — the check exists so the next collision is visible at a glance rather than starting from "the plugin is broken".
 
-**Who should update to 0.4.8:** only names changed, not behaviour. **If this is your only browser plugin, you do not need to update.** If you also run another browser plugin (Tencent BrowserSkill especially), updating is recommended. See [the upgrade note](docs/user-guide.md#from-047-to-048).
+**Who should update to 0.4.8:** only names changed, not behaviour. **If this is your only browser plugin, you do not need to update.** If you also run another browser plugin (Tencent BrowserSkill especially), updating is recommended. The upgrade note is at the end of the [user guide](docs/user-guide.md) (Chinese).
 
 ## Release history
 
