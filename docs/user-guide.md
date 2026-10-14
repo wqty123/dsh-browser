@@ -155,3 +155,59 @@ DSH Desktop 上②命中即可用(0.1.18+ 插件自带 electron 包;44+ 二进�
 | 工具超时 | 页面卡死/未渲染完成 | 稍后重试;`dsh_browser_reset` 重置标签 |
 | 导航被拒 | 非 HTTP(S) 协议 | 检查 URL;`httpOnly` 配置 |
 | 快照为空 | 页面尚未加载 | 等待后重试 `dsh_browser_snapshot` |
+
+## 验证过的版本
+
+| 组件 | 版本 |
+| --- | --- |
+| DeepSeek Harness(dsh) | `0.2.1-alpha.1`(peer 声明 `>=0.1.1-rc.2 <0.3.0`;更早的 `0.2.0-rc.2`、`0.1.x` 亦有实测记录) |
+| Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
+| Node.js | `22.20.0` |
+| 本机 Chrome / Edge(可选载体) | `154.0.8037.58` / `154.0.4258.37` |
+| 操作系统 | Windows 10 (10.0.26200) |
+
+> 插件声明 `electron >= 30`。**核心链路在 Windows 上完整实测**;系统浏览器的查找已适配 Linux 与 macOS(先查 `PATH`,再查各平台的惯例安装位置,均可用 `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH` 覆盖),但这两个平台上的**端到端链路尚未实测**,暂不承诺。
+
+> **宿主兼容性可以随时复验**:`node scripts/verify-host-compat.mjs` 会用某个 profile 里**真实安装**的 `@deepseek-ai/*` 包组装一个宿主,加载本插件的编译产物并真调两个工具。详见[开发](development.md)。
+
+## 更新方式(两端不同)
+
+插件在两种宿主里各有一份安装,更新路径也不同 —— **更新其中一端不会连带更新另一端**。
+
+**桌面端(DSH Desktop)**
+
+- 插件是桌面端 profile 里的依赖(profile 目录通常是 `$DSH_HOME/profiles/desktop`)。更新它 = 把该 profile 里的依赖更新到新版本,然后**重启 DSH Desktop**,客户端设置栏与工具才会换成新代码。
+- **桌面端还多一步,而 Web 端没有**:让插件驱动侧栏的那条 bridge 装在**桌面端自己的安装目录**里(`resources/app/`),插件更新**不会**带上它。桌面端升级会替换该目录、bridge 随之消失,所以请重跑一次:
+  ```bash
+  node desktop-bridge/install.mjs            # 幂等;已装则只刷新模块
+  node desktop-bridge/install.mjs --revert   # 回滚
+  ```
+  bridge 不在时插件自动退回自托管(多出一个独立窗口),功能不中断。
+- 浏览器内核默认由桌面端自带的 Electron 提供,插件不会再下载一份 Electron;也可以在设置里改用它自己装的 Chrome / Edge。
+- **升级桌面端本身不会带上插件**,按上面的方法单独更新它。
+
+**Web 端(`dsh web`)**
+
+- 插件是 web profile 里的依赖(`$DSH_HOME/profiles/web`),更新后**重启 `dsh web`** 生效。
+- Web 端**没有侧栏、也没有 bridge**:共享浏览器由插件自托管拉起。首次安装可能需要 Electron 二进制;若包管理器的构建白名单拦下了它(pnpm v10+ 会拦 `electron` 的 postinstall),执行一次 `npx install-electron` 补上即可。
+- 同样可以在设置里改用本机 Chrome / Edge —— 这是两端**行为一致**的选项。
+- 更新方式与首次安装它时一致(按 npm 包名 `dsh-builtin-browser`、按 GitHub 仓库 `wqty123/dsh-browser`,或本地目录)。
+
+**两端一致的体验**
+
+- 工具集、设置页里的「浏览器」栏、浏览历史与 cookie 的持久化行为完全相同;差别只在页面由谁承载(桌面端=官方侧栏,Web 端=插件自托管窗口,或你在设置里指定的本机浏览器)。
+- 升级不会丢数据:浏览历史与设置都在 `$DSH_HOME/dsh-builtin-browser-host/`(`history.jsonl`、`settings.json`),登录状态在同一 profile 目录里 —— 包括使用本机浏览器时的 `<chrome|edge>-profile`。
+- 升级后如果历史记录不符合预期,先去「设置 → 浏览器」确认这些开关:历史默认**开**、侧栏自动展开默认**开**、会话结束时自动关闭浏览器默认**关**、载体默认**内置**。
+
+## 从 0.4.7 升级到 0.4.8
+
+**这是一个改名版本:34 个工具从 `browser_*` 移入 `dsh_browser_*`,功能一字未改。**
+
+| | |
+| --- | --- |
+| **只装这一个浏览器插件** | **不必更新。** 旧版继续正常工作。 |
+| **还装了别的浏览器插件**(尤其腾讯 BrowserSkill) | **建议更新**,否则对方那套工具注册不上。 |
+
+改名原因见 [README 的工具名空间一节](../README.md#工具名空间)。更新后 `browser_open` → `dsh_browser_open`(其余同理),并**重启 DSH** 使其生效。
+
+> **0.4.8 起,一个名字被占不再毁掉整套工具。** 此前 34 个工具是顺序直接注册的,一个重名抛错会中断余下的注册,表现成"插件装了但没反应"。现在每个工具独立注册,碰撞只产生一条点名报错的日志(`could not register dsh_browser_xxx`),其余工具照常可用。
