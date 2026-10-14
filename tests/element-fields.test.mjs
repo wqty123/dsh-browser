@@ -2,8 +2,8 @@
 //
 // WHY THIS FILE EXISTS
 //
-// Two bugs shipped through the same gap, a round apart: `browser_a11y`'s `selector` and
-// `browser_screenshot`'s `width`/`height`. In both cases the provider computed the value, the
+// Two bugs shipped through the same gap, a round apart: `dsh_browser_a11y`'s `selector` and
+// `dsh_browser_screenshot`'s `width`/`height`. In both cases the provider computed the value, the
 // output schema declared it, and a hand-written projection in the tool layer dropped it. The
 // tests at the time were green, because not one of them ran a tool.
 //

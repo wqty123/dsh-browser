@@ -1,6 +1,6 @@
 // The operator switches must actually refuse — and they are the operator's, not the model's.
 //
-// These are the settings panel's "what the agent may do" switches. Unlike `browser_restrict`
+// These are the settings panel's "what the agent may do" switches. Unlike `dsh_browser_restrict`
 // (a soft guardrail the model owns and can lift whenever it likes) they live in the settings
 // document, which no tool can write, so a refusal here stands. The tests pin the refusal and
 // its immediacy; that nothing can lift it follows from there being no tool that writes the

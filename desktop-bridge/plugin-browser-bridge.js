@@ -500,7 +500,7 @@ async function handle(request) {
     //
     // The comment above said that; the code below did not enforce it. It closed every webview
     // whose title matched — and with no filter, EVERY webview — regardless of which session held
-    // it. So one session's `browser_reset_session` could destroy another session's page, which is
+    // it. So one session's `dsh_browser_reset_session` could destroy another session's page, which is
     // the worst version of the bleed: not merely seeing someone else's tab, but closing it.
     //
     // Ownership is now the outer bound: only guests this owner holds are candidates at all, and

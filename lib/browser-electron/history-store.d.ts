@@ -1,6 +1,6 @@
 /**
  * Persistent browsing history: which pages the shared browser actually visited,
- * kept independently from any session's operation log (`browser_history`) and
+ * kept independently from any session's operation log (`dsh_browser_history`) and
  * from the browser process's lifetime.
  *
  * It lives beside the browser profile (`$DSH_HOME/dsh-builtin-browser-host/

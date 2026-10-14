@@ -1,14 +1,14 @@
 /**
- * Model-facing browser tools over `ctx.browser`: `browser_open`,
- * `browser_snapshot`, `browser_execute`, `browser_content`,
- * `browser_screenshot`, and tab management (`browser_list_tabs`,
- * `browser_switch_tab`, `browser_close_tab`, `browser_reset`).
+ * Model-facing browser tools over `ctx.browser`: `dsh_browser_open`,
+ * `dsh_browser_snapshot`, `dsh_browser_execute`, `dsh_browser_content`,
+ * `dsh_browser_screenshot`, and tab management (`dsh_browser_list_tabs`,
+ * `dsh_browser_switch_tab`, `dsh_browser_close_tab`, `dsh_browser_reset`).
  *
  * The tool layer owns only the model-facing schema, argument validation, and
  * result formatting — never provider selection or page driving, which belong
  * to the seam. Session lifecycle is owned here at the plugin level: each
  * calling task (a DSH session) gets its own browser session — the first
- * `browser_open` (or any tool when no session exists) opens it, and later
+ * `dsh_browser_open` (or any tool when no session exists) opens it, and later
  * tools in the same task reuse it. Concurrent tasks therefore never fight
  * over tabs, history, or navigation state.
  * @module dsh-browser/tool-browser
@@ -38,7 +38,7 @@ export interface Config {
  * Tools that only observe, plus the ones that undo a restriction.
  *
  * Never subject to an allow-list: restricting what the agent may *do* must not also
- * blind it or trap it, and the tool descriptions promise as much. browser_restrict
+ * blind it or trap it, and the tool descriptions promise as much. dsh_browser_restrict
  * is in here so a task that restricted everything can still lift it.
  */
 export declare const READ_ONLY_TOOLS: ReadonlySet<string>;

@@ -4,7 +4,7 @@
 //
 // A page script here is a template string that runs inside the browser. TypeScript cannot see
 // inside it, so a syntax error ships silently and only shows up when a tool is called: that
-// happened once, and `browser_content` was broken for all four of its formats until someone
+// happened once, and `dsh_browser_content` was broken for all four of its formats until someone
 // noticed.
 //
 // The existing guard drove click/type/setValue and parsed whatever those paths happened to

@@ -1,7 +1,7 @@
 // Cookies and screenshots over CDP, on carriers that are not self-hosted.
 //
 // Two limits used to be described as carrier limits when they were really implementation
-// limits: `browser_auth` refused to run unless the self-hosted handle provided a native
+// limits: `dsh_browser_auth` refused to run unless the self-hosted handle provided a native
 // method, and JPEG was denied to every CDP path because Electron's CDP JPEG encoder
 // hangs. The behaviour lives in three pure functions — the cookie mapping in both
 // directions and the layout sizing — so those are what is pinned here. Driving a whole

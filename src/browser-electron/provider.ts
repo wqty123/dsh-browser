@@ -393,7 +393,7 @@ export interface ElectronBrowserProviderConfig {
    */
   readonly contentMaxChars?: number
   /**
-   * Directory `browser_download` save paths must resolve inside (prevents a
+   * Directory `dsh_browser_download` save paths must resolve inside (prevents a
    * prompt-injected agent from writing arbitrary machine paths). Default:
    * `~/Downloads`. NOTE: this default is a convenience, not a security
    * boundary — on Windows it may resolve to OneDrive/redirected paths;
@@ -477,7 +477,7 @@ export function layoutSize(metrics: Record<string, unknown>): { width: number; h
 }
 
 /**
- * Map CDP cookies onto the shape `browser_auth` exports.
+ * Map CDP cookies onto the shape `dsh_browser_auth` exports.
  *
  * CDP reports a cookie as domain + path rather than a URL, and in seconds rather than
  * milliseconds, so both are converted. Entries missing a name, value or domain are
@@ -955,9 +955,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /**
    * Page.navigate resolves at navigation COMMIT, not at load: the new document
    * is already current (so location.href and document.title are the new page's)
-   * while its DOM is still being parsed. browser_open snapshots immediately
+   * while its DOM is still being parsed. dsh_browser_open snapshots immediately
    * after navigating, which is why it could report the right title with zero
-   * interactive elements — and why a separate browser_snapshot right after
+   * interactive elements — and why a separate dsh_browser_snapshot right after
    * always found them.
    *
    * Wait — bounded, best-effort — for the new document to settle: readyState
@@ -1077,7 +1077,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
    *
    * A renderer only delivers key events to the view that holds web focus. A
    * view that was created but never clicked holds none — and `Input` events
-   * injected over CDP do not grant it — so the FIRST `browser_key` of a fresh
+   * injected over CDP do not grant it — so the FIRST `dsh_browser_key` of a fresh
    * session vanished inside the renderer while the command still answered
    * success. Hosts that cannot focus a view (a test double, a different shell
    * adapter) simply have no `focus`, and nothing changes for them.
@@ -1086,7 +1086,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (handle.focus === undefined) return
     try {
       // Bounded, unlike the rest of this call: the child RPC has no timeout of its own,
-      // and this runs before typing, so an unresponsive child would hang browser_key for
+      // and this runs before typing, so an unresponsive child would hang dsh_browser_key for
       // good. A timeout is caught below exactly like any other focus failure, so the
       // best-effort contract is unchanged.
       await withTimeout(handle.focus(), 5_000, undefined, 'browser: focusing the view timed out')
@@ -1328,12 +1328,12 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // A timeout leaves the wedged view in the session, so every later read would pay the same
       // 30 seconds again — and `terminatePage` only interrupts the running script, it does not
       // make the view readable. Replacing it is what turns a permanent loss into one bad call:
-      // the tab keeps the id the caller holds, and the next browser_open with the real URL
+      // the tab keeps the id the caller holds, and the next dsh_browser_open with the real URL
       // repopulates it.
       if (error instanceof Error && error.name === 'TimeoutError') {
         this.replaceTabWithBlank(s, tab)
         throw new BrowserError(
-          'browser: snapshot timed out; the stuck tab was reset to blank. Call browser_open with the real target URL before reading it again.',
+          'browser: snapshot timed out; the stuck tab was reset to blank. Call dsh_browser_open with the real target URL before reading it again.',
           'BROWSER_SNAPSHOT_TIMEOUT',
           { cause: error },
         )
@@ -1536,7 +1536,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       if (error instanceof Error && error.name === 'TimeoutError') {
         this.replaceTabWithBlank(s, tab)
         throw new BrowserError(
-          'browser: a11y timed out; the stuck tab was reset to blank. Call browser_open with the real target URL before reading it again.',
+          'browser: a11y timed out; the stuck tab was reset to blank. Call dsh_browser_open with the real target URL before reading it again.',
           'BROWSER_A11Y_TIMEOUT',
           { cause: error },
         )
@@ -2003,7 +2003,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       placeholder: f.placeholder ?? null,
       // A field with NO kind is a field with no kind FILTER: absent, not 'text'. Defaulting
       // it to 'text' here made `if (spec.kind)` above always true, so every unspecified
-      // field was narrowed to an <input> — browser_fill on a <textarea> reported
+      // field was narrowed to an <input> — dsh_browser_fill on a <textarea> reported
       // `no "text" control matched`, and a contenteditable could not match any kind at all.
       // The value stays a string or null (never undefined): the in-page check tests truthiness,
       // and JSON drops an undefined member entirely, which is the same thing here.
@@ -2138,7 +2138,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
             el.dispatchEvent(new Event('change', { bubbles: true }))
             out.push({ ok: true, method: 'select', target: describe(spec) })
           } else if (type === 'file') {
-            out.push({ ok: false, error: 'file inputs cannot be set from script; use browser_download or ask the human', target: describe(spec) })
+            out.push({ ok: false, error: 'file inputs cannot be set from script; use dsh_browser_download or ask the human', target: describe(spec) })
           } else if (type === 'checkbox') {
             const want = spec.value === true || spec.value === 'true' || spec.value === 'on'
             if (el.checked !== want) el.click()
@@ -2592,7 +2592,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * Refuse an action the settings have switched off.
    *
    * These switches belong to the OPERATOR. The settings document is written through the
-   * plugin's own panel and no tool can reach it, so — unlike `browser_restrict`, which the
+   * plugin's own panel and no tool can reach it, so — unlike `dsh_browser_restrict`, which the
    * model owns and can lift at will — a refusal here stands for as long as the setting does.
    * That is the point of them: a deployment can take page-script execution, downloads, or
    * login-state writes off the table without relying on the model's cooperation.
@@ -2619,7 +2619,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /**
    * Admit a caller-supplied save path for a file the browser writes to disk.
-   * ONE gate for both `browser_download` and `browser_screenshot`: the path
+   * ONE gate for both `dsh_browser_download` and `dsh_browser_screenshot`: the path
    * must be absolute, must resolve inside `downloadDir`, and must not already
    * exist. Without it a prompt-injected agent could write — or silently
    * replace — any file the DSH process can reach, which also escapes the file
@@ -3053,7 +3053,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /**
-   * List persisted visits, newest first — what `browser_visited` reads back.
+   * List persisted visits, newest first — what `dsh_browser_visited` reads back.
    * @param options - result cap and an optional hostname filter.
    * @returns the matching visits, or an empty list when history is disabled.
    */
@@ -3200,7 +3200,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
    *
    * A view whose renderer never commits cannot be read again: every evaluate into it runs out its
    * whole budget. Replacing it is what turns that from permanent into one bad call — the tab id
-   * callers hold stays valid, and the next `browser_open` with the real URL re-populates it.
+   * callers hold stays valid, and the next `dsh_browser_open` with the real URL re-populates it.
    *
    * The old view is destroyed AFTER the new one is in place, so a failure here cannot leave the
    * session holding a handle that is already gone.

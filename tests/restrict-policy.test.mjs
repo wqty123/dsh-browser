@@ -12,15 +12,15 @@ import { READ_ONLY_TOOLS } from '../lib/tool-browser/index.js'
 
 /** Every browser tool this plugin registers. */
 const REGISTERED = [
-  'browser_a11y', 'browser_auth', 'browser_back', 'browser_challenge',
-  'browser_check', 'browser_clear', 'browser_click', 'browser_close_tab',
-  'browser_content', 'browser_download', 'browser_execute', 'browser_fill',
-  'browser_forward', 'browser_get_value', 'browser_history', 'browser_key',
-  'browser_list_tabs', 'browser_open', 'browser_refresh', 'browser_replay',
-  'browser_reset', 'browser_reset_session', 'browser_restrict', 'browser_scrape',
-  'browser_screenshot', 'browser_scroll', 'browser_select', 'browser_session',
-  'browser_set_value', 'browser_snapshot', 'browser_switch_tab', 'browser_type',
-  'browser_visited', 'browser_wait',
+  'dsh_browser_a11y', 'dsh_browser_auth', 'dsh_browser_back', 'dsh_browser_challenge',
+  'dsh_browser_check', 'dsh_browser_clear', 'dsh_browser_click', 'dsh_browser_close_tab',
+  'dsh_browser_content', 'dsh_browser_download', 'dsh_browser_execute', 'dsh_browser_fill',
+  'dsh_browser_forward', 'dsh_browser_get_value', 'dsh_browser_history', 'dsh_browser_key',
+  'dsh_browser_list_tabs', 'dsh_browser_open', 'dsh_browser_refresh', 'dsh_browser_replay',
+  'dsh_browser_reset', 'dsh_browser_reset_session', 'dsh_browser_restrict', 'dsh_browser_scrape',
+  'dsh_browser_screenshot', 'dsh_browser_scroll', 'dsh_browser_select', 'dsh_browser_session',
+  'dsh_browser_set_value', 'dsh_browser_snapshot', 'dsh_browser_switch_tab', 'dsh_browser_type',
+  'dsh_browser_visited', 'dsh_browser_wait',
 ]
 
 test('the read-only set contains only tools that exist', () => {
@@ -31,7 +31,7 @@ test('the read-only set contains only tools that exist', () => {
   }
 })
 
-// browser_auth is deliberately absent: it is a two-action tool whose "restore" WRITES
+// dsh_browser_auth is deliberately absent: it is a two-action tool whose "restore" WRITES
 // cookies to arbitrary domains, so exempting it would let a task that restricted its own
 // actions still rewrite the shared browser state. "flush" alone would qualify, but a tool
 // is exempt or not — the action is what the allow-list governs.
@@ -39,9 +39,9 @@ test('every observing tool is exempt from an allow-list', () => {
   // Restricting what the agent may DO must not blind it: the tools that only look must
   // survive any allow-list.
   const observing = [
-    'browser_snapshot', 'browser_a11y', 'browser_content', 'browser_scrape', 'browser_screenshot',
-    'browser_get_value', 'browser_wait', 'browser_challenge', 'browser_list_tabs',
-    'browser_session', 'browser_history', 'browser_visited',
+    'dsh_browser_snapshot', 'dsh_browser_a11y', 'dsh_browser_content', 'dsh_browser_scrape', 'dsh_browser_screenshot',
+    'dsh_browser_get_value', 'dsh_browser_wait', 'dsh_browser_challenge', 'dsh_browser_list_tabs',
+    'dsh_browser_session', 'dsh_browser_history', 'dsh_browser_visited',
   ]
   for (const name of observing) {
     assert.ok(READ_ONLY_TOOLS.has(name), `${name} observes, so it must never be blocked`)
@@ -51,13 +51,13 @@ test('every observing tool is exempt from an allow-list', () => {
 test('the tools that undo a restriction are exempt', () => {
   // Without these, a task that restricted everything could neither recover nor be
   // released — the allow-list would be a trap rather than a guard.
-  for (const name of ['browser_restrict', 'browser_reset_session', 'browser_reset']) {
+  for (const name of ['dsh_browser_restrict', 'dsh_browser_reset_session', 'dsh_browser_reset']) {
     assert.ok(READ_ONLY_TOOLS.has(name), `${name} must stay usable to escape a restriction`)
   }
 })
 
 test('acting tools are NOT exempt, or the allow-list would do nothing', () => {
-  for (const name of ['browser_open', 'browser_click', 'browser_type', 'browser_fill', 'browser_execute', 'browser_download']) {
+  for (const name of ['dsh_browser_open', 'dsh_browser_click', 'dsh_browser_type', 'dsh_browser_fill', 'dsh_browser_execute', 'dsh_browser_download']) {
     assert.ok(!READ_ONLY_TOOLS.has(name), `${name} is an action and must remain restrictable`)
   }
 })

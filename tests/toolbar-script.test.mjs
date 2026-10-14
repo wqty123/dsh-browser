@@ -23,7 +23,7 @@ import vm from 'node:vm'
  * the address bar ignores Enter, back/forward/reload/new-tab are dead, the tab
  * strip stays empty forever, and no error is ever surfaced to the user (the
  * error strip is wired up by that same script). The page itself keeps working,
- * so `browser_*` tools look healthy while the visible window is unusable.
+ * so `dsh_browser_*` tools look healthy while the visible window is unusable.
  *
  * NOTE ON DETECTION: this cannot be caught by parsing the script in `node:vm`.
  * vm does not model the restriction for `const` (it does for `let`), nor does

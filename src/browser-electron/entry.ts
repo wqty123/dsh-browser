@@ -5,7 +5,7 @@
  * `ctx.electronViewHost`, that host is used (embedded, human-machine shared
  * view). Otherwise the plugin self-hosts: it spawns its own Electron child
  * (`host-main.js`) and drives it over a local TCP JSON-RPC socket, so
- * installing the plugin is enough for `browser_*` tools to work on any
+ * installing the plugin is enough for `dsh_browser_*` tools to work on any
  * surface.
  * @module dsh-browser/browser-electron
  */
@@ -48,7 +48,7 @@ export interface Config {
   /** Allow navigation only to HTTP(S) URLs. Default true. */
   readonly httpOnly?: boolean
   /**
-   * Directory `browser_download` save paths must resolve inside (prevents a
+   * Directory `dsh_browser_download` save paths must resolve inside (prevents a
    * prompt-injected agent from writing arbitrary machine paths). Default:
    * the user's Downloads folder; override to confine downloads elsewhere.
    */

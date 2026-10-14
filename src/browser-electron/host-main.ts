@@ -41,7 +41,7 @@ import { dirname, join } from 'node:path'
 // several Electron instances sharing Roaming\Electron fight over the GPU
 // cache/session locks, which can leave the window without a display surface
 // (capturePage then fails). A dedicated userData also persists cookies across
-// host restarts (on top of browser_auth). Must run before app is ready.
+// host restarts (on top of dsh_browser_auth). Must run before app is ready.
 try {
   const base = process.env.DSH_HOME ?? app.getPath('appData')
   app.setPath('userData', join(base, 'dsh-builtin-browser-host'))
@@ -769,7 +769,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         const entry = win?.views.get(viewId)
         if (win === undefined || entry === undefined) throw new Error(`focus: unknown view ${viewId}`)
         // Keys go to the view that holds web focus. A view that was never
-        // clicked holds none, so the FIRST browser_key of a session was dropped
+        // clicked holds none, so the FIRST dsh_browser_key of a session was dropped
         // by the renderer while CDP still answered the dispatch with success —
         // and `document.hasFocus()` inside the page even read true.
         const contents = entry.webContentsView.webContents
@@ -881,7 +881,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
           throw new Error('capture produced no image (view not painted)')
         }
         // The measured size travels with the image. Without it the native path — which is the
-        // default self-hosted one — could never answer `browser_screenshot`'s width/height,
+        // default self-hosted one — could never answer `dsh_browser_screenshot`'s width/height,
         // because the seam's only channel was {base64, mime} and the provider had nothing to
         // forward. The caller's `maxWidth`/`maxHeight` are applied here, so this is the only
         // place that knows what came back.

@@ -8,9 +8,9 @@
  * and the tool's `output.schema` declared the properties. Nothing connected them, and the
  * result is this project's most repeatable bug:
  *
- *   - `browser_a11y`'s `selector` — computed by the provider, declared by the schema,
+ *   - `dsh_browser_a11y`'s `selector` — computed by the provider, declared by the schema,
  *     printed by the renderer, and dropped by the projection. 134 tests stayed green.
- *   - `browser_screenshot`'s `width`/`height` — measured by the provider, declared by the
+ *   - `dsh_browser_screenshot`'s `width`/`height` — measured by the provider, declared by the
  *     schema, and dropped by the projection. 172 tests stayed green. It was found a round
  *     later, by reading the three places that agree and noticing the fourth did not.
  *
@@ -24,7 +24,7 @@
  * projection forgets is silently dropped. One table cannot get either wrong on its own.
  */
 /**
- * The `elements` item schema for browser_snapshot and browser_open.
+ * The `elements` item schema for dsh_browser_snapshot and dsh_browser_open.
  *
  * Written as a literal rather than generated, because `defineTool` validates the output schema
  * against its own `ValueSchemaSpec` and a generated `Record<string, …>` is too wide to satisfy
@@ -65,7 +65,7 @@ export declare const ELEMENT_ITEM_SCHEMA: {
     };
 };
 /**
- * The `nodes` item schema for browser_a11y.
+ * The `nodes` item schema for dsh_browser_a11y.
  *
  * Same reasoning as {@link ELEMENT_ITEM_SCHEMA}: literal for the type checker, table-backed by
  * test.

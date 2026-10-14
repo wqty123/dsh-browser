@@ -1,7 +1,7 @@
 // Issue #21: a browser that dies mid-session must not poison every later call.
 //
 // The report: with chrome/edge as the carrier, closing the browser window left every
-// browser_* call hanging for 30s with no new process ever started, recoverable only by
+// dsh_browser_* call hanging for 30s with no new process ever started, recoverable only by
 // restarting DSH. The cause was that nothing watched the process after startup, so
 // ensureClient() kept returning a connection to a dead browser.
 //

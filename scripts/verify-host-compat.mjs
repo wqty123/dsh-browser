@@ -169,20 +169,20 @@ try {
 
 const exec = { agent: { id: 'verify-host-compat' } }
 try {
-  const value = await registered.get('browser_session').execute({}, exec)
-  ok('browser_session ran', value !== undefined, JSON.stringify(value).slice(0, 100))
+  const value = await registered.get('dsh_browser_session').execute({}, exec)
+  ok('dsh_browser_session ran', value !== undefined, JSON.stringify(value).slice(0, 100))
 } catch (error) {
-  ok('browser_session ran', false, String(error && error.message))
+  ok('dsh_browser_session ran', false, String(error && error.message))
 }
 
 try {
-  const tool = registered.get('browser_a11y')
+  const tool = registered.get('dsh_browser_a11y')
   const value = await tool.execute({}, exec)
   const text = JSON.stringify(tool.output.render({}, value))
-  ok('browser_a11y ran and rendered', value?.nodes?.length === 1, '')
+  ok('dsh_browser_a11y ran and rendered', value?.nodes?.length === 1, '')
   ok('its renderer emits the element selector', text.includes('#probe'), text.slice(0, 120))
 } catch (error) {
-  ok('browser_a11y ran', false, String(error && error.message))
+  ok('dsh_browser_a11y ran', false, String(error && error.message))
 }
 
 console.log('')

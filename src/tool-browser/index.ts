@@ -1,14 +1,14 @@
 /**
- * Model-facing browser tools over `ctx.browser`: `browser_open`,
- * `browser_snapshot`, `browser_execute`, `browser_content`,
- * `browser_screenshot`, and tab management (`browser_list_tabs`,
- * `browser_switch_tab`, `browser_close_tab`, `browser_reset`).
+ * Model-facing browser tools over `ctx.browser`: `dsh_browser_open`,
+ * `dsh_browser_snapshot`, `dsh_browser_execute`, `dsh_browser_content`,
+ * `dsh_browser_screenshot`, and tab management (`dsh_browser_list_tabs`,
+ * `dsh_browser_switch_tab`, `dsh_browser_close_tab`, `dsh_browser_reset`).
  *
  * The tool layer owns only the model-facing schema, argument validation, and
  * result formatting — never provider selection or page driving, which belong
  * to the seam. Session lifecycle is owned here at the plugin level: each
  * calling task (a DSH session) gets its own browser session — the first
- * `browser_open` (or any tool when no session exists) opens it, and later
+ * `dsh_browser_open` (or any tool when no session exists) opens it, and later
  * tools in the same task reuse it. Concurrent tasks therefore never fight
  * over tabs, history, or navigation state.
  * @module dsh-browser/tool-browser
@@ -72,7 +72,7 @@ interface ToolBrowserState {
    *
    * Two different things share this policy. A restriction from `cordis.patch.yml` is an
    * operator decision about the whole plugin, so it applies to everyone and lives in
-   * `configRestrictedTo`. One set by `browser_restrict` is a decision by one task about
+   * `configRestrictedTo`. One set by `dsh_browser_restrict` is a decision by one task about
    * its own work, so it is keyed by task — a single shared value let one task lock the
    * browser tools of every other task, which is not what any caller asks for. Sessions
    * beside it were already keyed this way; this was not.
@@ -98,33 +98,33 @@ const liveStates = new Set<ToolBrowserState>()
  * Tools that only observe, plus the ones that undo a restriction.
  *
  * Never subject to an allow-list: restricting what the agent may *do* must not also
- * blind it or trap it, and the tool descriptions promise as much. browser_restrict
+ * blind it or trap it, and the tool descriptions promise as much. dsh_browser_restrict
  * is in here so a task that restricted everything can still lift it.
  */
 export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   // Tools that only observe.
-  'browser_snapshot', 'browser_a11y', 'browser_content', 'browser_scrape',
-  'browser_screenshot', 'browser_get_value', 'browser_wait', 'browser_challenge',
-  'browser_list_tabs', 'browser_session', 'browser_history', 'browser_visited',
-  // browser_auth reads cookies out of the browser: an observation, and one the
+  'dsh_browser_snapshot', 'dsh_browser_a11y', 'dsh_browser_content', 'dsh_browser_scrape',
+  'dsh_browser_screenshot', 'dsh_browser_get_value', 'dsh_browser_wait', 'dsh_browser_challenge',
+  'dsh_browser_list_tabs', 'dsh_browser_session', 'dsh_browser_history', 'dsh_browser_visited',
+  // dsh_browser_auth reads cookies out of the browser: an observation, and one the
   // credentials switch gates on its own (see credentials.allowRead in the settings).
-  // browser_auth is deliberately NOT here. It reads cookies on "flush" but WRITES them on
+  // dsh_browser_auth is deliberately NOT here. It reads cookies on "flush" but WRITES them on
   // "restore", to arbitrary domains, which is an action like any other — exempting the tool
   // would let a task that restricted its own actions rewrite the shared browser's logins.
   //
   // Getting out of a bad state, or lifting the restriction itself. Without these a task
   // that restricted everything could neither recover nor be released.
-  'browser_restrict', 'browser_reset_session', 'browser_reset',
+  'dsh_browser_restrict', 'dsh_browser_reset_session', 'dsh_browser_reset',
 ])
 function assertAllowed(state: ToolBrowserState, toolName: string, task: string): void {
-  // browser_restrict must stay usable, or a task that restricted everything
+  // dsh_browser_restrict must stay usable, or a task that restricted everything
   // could never lift it again.
   // An allow-list is a statement about ACTIONS, so it must not take away the ability to
   // look, or to get out of a bad state. The tool description and both READMEs promise
   // that read-only tools are never blocked; before this they were, because only
-  // browser_restrict itself was exempt — a narrow list then locked browser_history,
-  // browser_reset_session and browser_auth away with no way back.
-  if (READ_ONLY_TOOLS.has(toolName) || toolName === 'browser_restrict') return
+  // dsh_browser_restrict itself was exempt — a narrow list then locked dsh_browser_history,
+  // dsh_browser_reset_session and dsh_browser_auth away with no way back.
+  if (READ_ONLY_TOOLS.has(toolName) || toolName === 'dsh_browser_restrict') return
   const config = state.configRestrictedTo
   if (config !== undefined && !config.includes(toolName)) {
     throw new Error(`browser action "${toolName}" is restricted by the plugin configuration (allow-list: ${config.join(', ')})`)
@@ -172,7 +172,7 @@ function assertNotBareDshWebUrl(rawUrl: string): void {
   // The authenticated URL printed by `dsh web` carries a token; the bare root does not.
   if (target.searchParams.has('token')) return
   throw new Error(
-    'browser_open: refusing the bare DSH web root (' + dsh.origin + '/) because it carries no '
+    'dsh_browser_open: refusing the bare DSH web root (' + dsh.origin + '/) because it carries no '
     + 'authentication token, so it answers with a 401 page that reads like a real site. Open the '
     + 'target site instead; to open DSH itself, use the authenticated URL printed by `dsh web`.',
   )
@@ -314,17 +314,17 @@ function formatSnapshot(snapshot: {
 export function apply(ctx: Context, config: Config = {}): void {
   const timeoutMs = config.timeoutMs ?? 60_000
   /**
-   * Longest wait `browser_wait` may poll for, leaving room for the tool call itself to
+   * Longest wait `dsh_browser_wait` may poll for, leaving room for the tool call itself to
    * finish and report.
    *
-   * `browser_wait` promises a VERDICT — `{ready:false, reason}` — and the enclosing tool
+   * `dsh_browser_wait` promises a VERDICT — `{ready:false, reason}` — and the enclosing tool
    * call aborts at `timeoutMs`. A caller-supplied budget longer than that aborted the call
    * instead, so the documented verdict never arrived. Clamping to just inside the budget is
    * what keeps the promise: the polling stops, the reason is returned.
    */
   const maxWaitMs = Math.max(250, timeoutMs - 5_000)
   /**
-   * Most fields `browser_fill` accepts in one batch.
+   * Most fields `dsh_browser_fill` accepts in one batch.
    *
    * The batch runs as ONE page evaluation, so hundreds of fields do not produce hundreds of
    * per-field verdicts — they produce a single evaluate that exceeds the tool budget and
@@ -346,11 +346,35 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Tool guidance band is 100-199; 150 keeps clear of the common 110/120
     // tool sections so ordering does not depend on plugin load sequence.
     order: 150,
-    text: 'Use the browser_* tools to operate the built-in browser. Each task gets its own browser session AND its own window (with a real toolbar: address bar, back/forward/reload, tab strip) — the human can see it, use it like any browser, and take over at any time; your tabs and history are isolated from other tasks, so do not assume another task\'s navigation state is visible to you. Understand a page with browser_a11y (semantic roles/names/states — the best structure map) or browser_snapshot (numbered interactive elements), then drive it: browser_click/browser_type accept a target {by: css|text|xpath, value} for semantic locating, or coordinates from browser_screenshot for visual targeting. For form filling prefer browser_fill (batch) or browser_set_value/browser_check/browser_select/browser_clear (single control, target-based); verify with browser_get_value. Use browser_scrape for structured extraction from list pages instead of hand-written browser_execute. After navigating on slow sites, browser_wait for the page. Keep the human informed of what you are doing on the page. If a snapshot or browser_challenge reports a human-verification challenge (CAPTCHA), stop retrying and ask the human to complete it in the browser window, then re-check.',
+    text: 'Use the dsh_browser_* tools to operate the built-in browser. Each task gets its own browser session AND its own window (with a real toolbar: address bar, back/forward/reload, tab strip) — the human can see it, use it like any browser, and take over at any time; your tabs and history are isolated from other tasks, so do not assume another task\'s navigation state is visible to you. Understand a page with dsh_browser_a11y (semantic roles/names/states — the best structure map) or dsh_browser_snapshot (numbered interactive elements), then drive it: dsh_browser_click/dsh_browser_type accept a target {by: css|text|xpath, value} for semantic locating, or coordinates from dsh_browser_screenshot for visual targeting. For form filling prefer dsh_browser_fill (batch) or dsh_browser_set_value/dsh_browser_check/dsh_browser_select/dsh_browser_clear (single control, target-based); verify with dsh_browser_get_value. Use dsh_browser_scrape for structured extraction from list pages instead of hand-written dsh_browser_execute. After navigating on slow sites, dsh_browser_wait for the page. Keep the human informed of what you are doing on the page. If a snapshot or dsh_browser_challenge reports a human-verification challenge (CAPTCHA), stop retrying and ask the human to complete it in the browser window, then re-check.',
   })
 
-  ctx.tools.register(defineTool({
-    name: 'browser_open',
+  /**
+   * Register one tool, turning a name collision into a warning instead of a dead apply.
+   *
+   * Registering the tools in sequence without this is how ONE taken name becomes thirty-two
+   * missing ones: the throw aborts the rest of the apply, and what the user sees is a plugin that
+   * half-exists. That is precisely the shape of the failure reported against a sibling plugin,
+   * where the first spec collided and all six vanished behind a `console.warn` a desktop user
+   * never sees.
+   *
+   * A name this plugin cannot have is worth a sentence in the log, not the toolset.
+   * @param definition - the tool to register.
+   */
+  const registerSafely = (definition: ReturnType<typeof defineTool>): void => {
+    try {
+      ctx.tools.register(definition)
+    } catch (error) {
+      ctx.logger?.warn?.(
+        `dsh-builtin-browser: could not register ${definition.name} (${String(error)}). Another `
+        + 'plugin has probably taken that name — browser tool names are a shared namespace. The '
+        + 'rest of this plugin\'s tools are unaffected.',
+      )
+    }
+  }
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_open',
     description: 'Open a URL in the shared browser window. Opens this task\'s browser session on first use; optionally opens in a new tab. Returns the resulting page snapshot. A fresh session starts on a blank, uncommitted tab: call this with the REAL target URL before reading, because reading that tab returns an empty page instead of waiting. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target website — it requires the authenticated URL printed by `dsh web`, and the bare root is refused outright.',
     parameters: {
       url: { type: 'string', required: true, description: 'The URL to open (HTTP/HTTPS).' },
@@ -367,7 +391,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           elements: {
             type: 'array',
             required: true,
-            // Same shared item schema as browser_open's, so the two cannot drift apart.
+            // Same shared item schema as dsh_browser_open's, so the two cannot drift apart.
             items: ELEMENT_ITEM_SCHEMA,
           },
           challenge: {
@@ -381,15 +405,15 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         },
       },
-      // browser_open is an overview of what just loaded, not a locator: it has no
-      // `coords` parameter, so coordinates stay off here (browser_snapshot owns
+      // dsh_browser_open is an overview of what just loaded, not a locator: it has no
+      // `coords` parameter, so coordinates stay off here (dsh_browser_snapshot owns
       // that switch for callers that actually target pixels).
       render: (args, value) => [{ type: 'text', text: formatSnapshot(value, {}) }],
     },
     timeoutMs,
     isConcurrencySafe: () => false, // opens tabs / navigates; exclusive within a task
     async execute(args, exec) {
-      assertAllowed(state, 'browser_open', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_open', taskKey(exec))
       assertNotBareDshWebUrl(args.url)
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
@@ -409,9 +433,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_snapshot',
-    description: 'Return an AI-friendly snapshot of the current shared-browser page: numbered interactive elements (inputs, buttons, links) the model can cite. This is the primary way to understand a page, and it needs no image input — every listed element can afterwards be addressed by a semantic target (browser_click, browser_type, browser_check, …) rather than by coordinates.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_snapshot',
+    description: 'Return an AI-friendly snapshot of the current shared-browser page: numbered interactive elements (inputs, buttons, links) the model can cite. This is the primary way to understand a page, and it needs no image input — every listed element can afterwards be addressed by a semantic target (dsh_browser_click, dsh_browser_type, dsh_browser_check, …) rather than by coordinates.',
     parameters: {
       coords: { type: 'boolean', description: 'Also print each element\'s viewport coordinates. Off by default; only useful when a vision pass is going to click a pixel position.' },
     },
@@ -475,9 +499,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_a11y',
-    description: 'Read the page\'s accessibility tree: every interactive node with its semantic role (button/link/textbox/checkbox/…), accessible name, current value, and states (enabled/disabled/checked/expanded/…), (coordinates only when coords: true). Prefer this over browser_snapshot to understand a page\'s structure and find the right element: roles and names tell you WHAT each node is, and the name is what browser_click matches when you target by text. Penetrates same-origin iframes and shadow roots.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_a11y',
+    description: 'Read the page\'s accessibility tree: every interactive node with its semantic role (button/link/textbox/checkbox/…), accessible name, current value, and states (enabled/disabled/checked/expanded/…), (coordinates only when coords: true). Prefer this over dsh_browser_snapshot to understand a page\'s structure and find the right element: roles and names tell you WHAT each node is, and the name is what dsh_browser_click matches when you target by text. Penetrates same-origin iframes and shadow roots.',
     parameters: {
       includeHidden: { type: 'boolean', description: 'Include hidden elements (default false).' },
       maxNodes: { type: 'number', description: 'Maximum nodes (default 150, range 10-5000).' },
@@ -560,9 +584,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_challenge',
-    description: 'Check whether a human-verification challenge (CAPTCHA / bot detection: Cloudflare "Just a moment", reCAPTCHA, hCaptcha, Turnstile) is blocking the current page. When blocked, do NOT keep retrying automated steps — ask the human to complete the verification in the shared browser window, then re-check with browser_snapshot.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_challenge',
+    description: 'Check whether a human-verification challenge (CAPTCHA / bot detection: Cloudflare "Just a moment", reCAPTCHA, hCaptcha, Turnstile) is blocking the current page. When blocked, do NOT keep retrying automated steps — ask the human to complete the verification in the shared browser window, then re-check with dsh_browser_snapshot.',
     parameters: {},
     output: {
       schema: {
@@ -594,15 +618,15 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...challenge.kind !== undefined ? { kind: challenge.kind } : {},
         ...challenge.reason !== undefined ? { reason: challenge.reason } : {},
         hint: challenge.blocked
-          ? 'Ask the human to complete the verification in the shared browser window (the page is visible to them), then re-check with browser_snapshot.'
+          ? 'Ask the human to complete the verification in the shared browser window (the page is visible to them), then re-check with dsh_browser_snapshot.'
           : '',
       }
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_wait',
-    description: 'Wait until the shared-browser page is ready: load complete, and optionally the expected URL and/or a CSS selector present (top document or same-origin iframes). Use after browser_open on slow sites instead of snapshotting a white page — wait for the URL you navigated to first. Returns ready=true/false with a short reason; a miss is not an error.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_wait',
+    description: 'Wait until the shared-browser page is ready: load complete, and optionally the expected URL and/or a CSS selector present (top document or same-origin iframes). Use after dsh_browser_open on slow sites instead of snapshotting a white page — wait for the URL you navigated to first. Returns ready=true/false with a short reason; a miss is not an error.',
     parameters: {
       timeoutMs: { type: 'number', description: 'Maximum wait in ms (default 30000).' },
       url: { type: 'string', description: 'Expected page URL (exact or prefix), e.g. the URL you opened.' },
@@ -636,8 +660,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_execute',
+  registerSafely(defineTool({
+    name: 'dsh_browser_execute',
     description: 'Execute JavaScript in the shared-browser page context. This is the primary way to interact with page elements: focus, fill inputs (use the native value setter for framework-controlled inputs, then dispatch an input event), click buttons (element.click() or a constructed MouseEvent). Returns the evaluation result by value, or the exception text.',
     parameters: {
       script: { type: 'string', required: true, description: 'The JavaScript expression to evaluate in the page context.' },
@@ -661,7 +685,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         const rendered = String(value.value ?? '')
         const cap = 50_000
         const text = rendered.length > cap
-          ? `Result: ${rendered.slice(0, cap)}\n(result truncated at ${cap} of ${rendered.length} characters — return a smaller value, or write it with browser_execute + a variable)`
+          ? `Result: ${rendered.slice(0, cap)}\n(result truncated at ${cap} of ${rendered.length} characters — return a smaller value, or write it with dsh_browser_execute + a variable)`
           : `Result: ${rendered}`
         return [{ type: 'text', text }]
       },
@@ -669,7 +693,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // page JS can be stateful
     async execute(args, exec) {
-      assertAllowed(state, 'browser_execute', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_execute', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -686,8 +710,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_content',
+  registerSafely(defineTool({
+    name: 'dsh_browser_content',
     description: 'Fetch the current shared-browser page content in a chosen format: html (raw DOM), markdown (structured reading), txt (plain text), or json. Optionally scope to a CSS selector and cap the length. Use this to read page content, not to interact.',
     parameters: {
       format: { type: 'string', required: true, enum: ['html', 'markdown', 'txt', 'json'], description: 'Output format.' },
@@ -722,9 +746,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_scrape',
-    description: 'Extract structured data from a page: give the container CSS selector (item) and a field map (name -> selector, optionally selector@attr to take an attribute; a@href yields the absolute URL). Returns one object per item. Static CSS queries only — no arbitrary code runs — so it is safe on any page. Use for list pages (search results, cards, tables) instead of hand-writing browser_execute.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_scrape',
+    description: 'Extract structured data from a page: give the container CSS selector (item) and a field map (name -> selector, optionally selector@attr to take an attribute; a@href yields the absolute URL). Returns one object per item. Static CSS queries only — no arbitrary code runs — so it is safe on any page. Use for list pages (search results, cards, tables) instead of hand-writing dsh_browser_execute.',
     parameters: {
       item: { type: 'string', required: true, description: 'CSS selector of each result container (e.g. "div.card").' },
       fields: {
@@ -759,7 +783,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      assertAllowed(state, 'browser_scrape', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_scrape', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -773,9 +797,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_click',
-    description: 'Click in the shared browser. Prefer the semantic target: pass target {by: css|text|xpath, value, index?} and the element is located from the DOM, scrolled into view and clicked at its centre — this needs no image input and is the only form that works without vision. The alternative is viewport coordinates (x/y), which are meaningful only after a vision model has located the element on a browser_screenshot; coordinate clicks are refused outright under the non-visual strategy. Provide exactly one of target or x/y.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_click',
+    description: 'Click in the shared browser. Prefer the semantic target: pass target {by: css|text|xpath, value, index?} and the element is located from the DOM, scrolled into view and clicked at its centre — this needs no image input and is the only form that works without vision. The alternative is viewport coordinates (x/y), which are meaningful only after a vision model has located the element on a dsh_browser_screenshot; coordinate clicks are refused outright under the non-visual strategy. Provide exactly one of target or x/y.',
     parameters: {
       target: {
         type: 'object',
@@ -787,7 +811,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         },
         description: 'Locate the element semantically and click it (css/text/xpath).',
       },
-      x: { type: 'number', description: 'Viewport x coordinate (CSS px), taken from a browser_screenshot read by a vision model. Prefer a semantic target — it works without image input.' },
+      x: { type: 'number', description: 'Viewport x coordinate (CSS px), taken from a dsh_browser_screenshot read by a vision model. Prefer a semantic target — it works without image input.' },
       y: { type: 'number', description: 'Viewport y coordinate (CSS px), taken from the same screenshot as x.' },
     },
     output: {
@@ -797,7 +821,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed(state, 'browser_click', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_click', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -819,7 +843,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         }, exec.signal)
       } else {
         if (typeof args.x !== 'number' || typeof args.y !== 'number') {
-          throw new Error('browser_click: provide a target (css/text/xpath) or x/y coordinates')
+          throw new Error('dsh_browser_click: provide a target (css/text/xpath) or x/y coordinates')
         }
         await browser.click(session, { x: args.x, y: args.y }, exec.signal)
       }
@@ -827,9 +851,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_type',
-    description: 'Type text into the focused element of the shared browser, or into a located element (pass target {by: css|text|xpath, value, index?} to focus it first). Text is inserted at the focus via CDP Input.insertText. For setting whole field values (and React-controlled inputs) prefer browser_set_value; use browser_key for Enter/Tab/arrows.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_type',
+    description: 'Type text into the focused element of the shared browser, or into a located element (pass target {by: css|text|xpath, value, index?} to focus it first). Text is inserted at the focus via CDP Input.insertText. For setting whole field values (and React-controlled inputs) prefer dsh_browser_set_value; use dsh_browser_key for Enter/Tab/arrows.',
     parameters: {
       text: { type: 'string', required: true, description: 'The text to insert.' },
       target: {
@@ -850,7 +874,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed(state, 'browser_type', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_type', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -878,8 +902,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_scroll',
+  registerSafely(defineTool({
+    name: 'dsh_browser_scroll',
     description: 'Scroll the shared-browser page: by pixel deltas (deltaX/deltaY), to a CSS selector\'s element, or to the top/bottom. Use to reveal below-the-fold content before snapshotting or clicking.',
     parameters: {
       deltaX: { type: 'number', description: 'Horizontal scroll delta in CSS pixels.' },
@@ -895,7 +919,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // mutates page scroll state; exclusive within a task
     async execute(args, exec) {
-      assertAllowed(state, 'browser_scroll', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_scroll', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -910,8 +934,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_back',
+  registerSafely(defineTool({
+    name: 'dsh_browser_back',
     description: 'Go back one step in the shared-browser page history. A no-op when there is no previous entry.',
     parameters: {},
     output: {
@@ -921,7 +945,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // mutates page state; exclusive within a task
     async execute(_args, exec) {
-      assertAllowed(state, 'browser_back', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_back', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -930,8 +954,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_forward',
+  registerSafely(defineTool({
+    name: 'dsh_browser_forward',
     description: 'Go forward one step in the shared-browser page history. A no-op when there is no next entry.',
     parameters: {},
     output: {
@@ -941,7 +965,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // mutates page state; exclusive within a task
     async execute(_args, exec) {
-      assertAllowed(state, 'browser_forward', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_forward', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -950,8 +974,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_refresh',
+  registerSafely(defineTool({
+    name: 'dsh_browser_refresh',
     description: 'Reload the current page in the shared browser (like a browser\'s refresh button). Use after a page got stuck, to apply script changes, or to re-fetch a page.',
     parameters: {},
     output: {
@@ -961,7 +985,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // reloads the page; exclusive within a task
     async execute(_args, exec) {
-      assertAllowed(state, 'browser_refresh', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_refresh', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -970,8 +994,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_key',
+  registerSafely(defineTool({
+    name: 'dsh_browser_key',
     description: 'Press one named key in the shared-browser page (Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space). Use after focusing an input to submit a chat box (Enter), move focus (Tab), or navigate a list (arrows).',
     parameters: {
       key: { type: 'string', required: true, enum: ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Space'], description: 'The key to press.' },
@@ -983,7 +1007,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // mutates page state; exclusive within a task
     async execute(args, exec) {
-      assertAllowed(state, 'browser_key', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_key', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -992,9 +1016,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_fill',
-    description: 'Fill a form in one batch: pass fields with a CSS selector or name/label/placeholder text and the value to set (string, number, or boolean for checkbox/radio; for selects or radio groups pass the option value or visible text). Values are applied with the native setter plus input/change events, so React/Vue controlled inputs update correctly. Optionally submit the containing form. Prefer this over hand-written browser_execute for form filling; per-field failures are reported instead of throwing.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_fill',
+    description: 'Fill a form in one batch: pass fields with a CSS selector or name/label/placeholder text and the value to set (string, number, or boolean for checkbox/radio; for selects or radio groups pass the option value or visible text). Values are applied with the native setter plus input/change events, so React/Vue controlled inputs update correctly. Optionally submit the containing form. Prefer this over hand-written dsh_browser_execute for form filling; per-field failures are reported instead of throwing.',
     parameters: {
       fields: {
         type: 'array',
@@ -1052,13 +1076,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed(state, 'browser_fill', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_fill', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const requested = args.fields ?? []
       if (requested.length > maxFillFields) {
-        throw new Error(`browser_fill: ${requested.length} fields in one call exceeds the ${maxFillFields}-field limit; split it into several calls so each one can report per-field results instead of timing out as a batch`)
+        throw new Error(`dsh_browser_fill: ${requested.length} fields in one call exceeds the ${maxFillFields}-field limit; split it into several calls so each one can report per-field results instead of timing out as a batch`)
       }
       const fields = requested.map((f: { selector?: string; name?: string; label?: string; placeholder?: string; kind?: string; value?: string }) => {
         // A missing value is a caller mistake, not a request to clear the field. Turning
@@ -1067,7 +1091,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         // a call can still arrive without it.
         if (f.value === undefined) {
           const matcher = f.selector ?? f.name ?? f.label ?? f.placeholder ?? '(no matcher)'
-          throw new Error(`browser_fill: field "${matcher}" has no "value"; pass one (use "false" to uncheck, or "" to clear deliberately)`)
+          throw new Error(`dsh_browser_fill: field "${matcher}" has no "value"; pass one (use "false" to uncheck, or "" to clear deliberately)`)
         }
         return {
           ...f.selector !== undefined ? { selector: f.selector } : {},
@@ -1104,9 +1128,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     description: 'Locate the element (css/text/xpath).',
   }
 
-  ctx.tools.register(defineTool({
-    name: 'browser_set_value',
-    description: 'Set the value of ONE input/textarea/select/contenteditable, located by css/text/xpath. Uses the native setter plus input/change events, so React/Vue controlled inputs update correctly. For selects pass the option value or visible text. For a whole form at once prefer browser_fill.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_set_value',
+    description: 'Set the value of ONE input/textarea/select/contenteditable, located by css/text/xpath. Uses the native setter plus input/change events, so React/Vue controlled inputs update correctly. For selects pass the option value or visible text. For a whole form at once prefer dsh_browser_fill.',
     parameters: {
       target: targetParam,
       value: { type: 'string', required: true, description: 'The value to set (string form; numbers/booleans accepted).' },
@@ -1125,7 +1149,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // mutates a field; exclusive within a task
     async execute(args, exec) {
-      assertAllowed(state, 'browser_set_value', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_set_value', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1142,8 +1166,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_check',
+  registerSafely(defineTool({
+    name: 'dsh_browser_check',
     description: 'Check (or uncheck, with checked=false) a checkbox or radio button, located by css/text/xpath.',
     parameters: {
       target: targetParam,
@@ -1156,7 +1180,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // mutates a field; exclusive within a task
     async execute(args, exec) {
-      assertAllowed(state, 'browser_check', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_check', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1173,8 +1197,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_select',
+  registerSafely(defineTool({
+    name: 'dsh_browser_select',
     description: 'Select one option of a <select>, located by css/text/xpath — by option value, visible text, or 0-based index (provide exactly one).',
     parameters: {
       target: targetParam,
@@ -1196,7 +1220,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // mutates a field; exclusive within a task
     async execute(args, exec) {
-      assertAllowed(state, 'browser_select', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_select', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1215,8 +1239,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_clear',
+  registerSafely(defineTool({
+    name: 'dsh_browser_clear',
     description: 'Clear an input/textarea/contenteditable, or uncheck a checkbox/radio, located by css/text/xpath.',
     parameters: {
       target: targetParam,
@@ -1228,7 +1252,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // mutates a field; exclusive within a task
     async execute(args, exec) {
-      assertAllowed(state, 'browser_clear', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_clear', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1244,8 +1268,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_get_value',
+  registerSafely(defineTool({
+    name: 'dsh_browser_get_value',
     description: 'Read the current value of one input/textarea/select/contenteditable, located by css/text/xpath. Use to VERIFY that a fill worked (e.g. before submitting).',
     parameters: {
       target: targetParam,
@@ -1269,7 +1293,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      assertAllowed(state, 'browser_get_value', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_get_value', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1289,9 +1313,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_screenshot',
-    description: 'Capture the current shared-browser page as a screenshot (PNG default, JPEG optional). This is for models that can read images: layout checks, charts, designs, CAPTCHAs, or locating an element by eye before clicking its coordinates. A model without image input gains nothing from it — browser_snapshot, browser_a11y and browser_content carry the same page as text, and browser_scrape extracts structured data. Supports full-page capture, save-to-file, JPEG encoding, and downscaling (maxWidth/maxHeight) to cut vision-tool token cost. JPEG needs a browser whose CDP encoder works — the self-hosted browser and an installed Chrome/Edge; some carriers (the desktop sidebar) return PNG instead. Downscaling works on every carrier.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_screenshot',
+    description: 'Capture the current shared-browser page as a screenshot (PNG default, JPEG optional). This is for models that can read images: layout checks, charts, designs, CAPTCHAs, or locating an element by eye before clicking its coordinates. A model without image input gains nothing from it — dsh_browser_snapshot, dsh_browser_a11y and dsh_browser_content carry the same page as text, and dsh_browser_scrape extracts structured data. Supports full-page capture, save-to-file, JPEG encoding, and downscaling (maxWidth/maxHeight) to cut vision-tool token cost. JPEG needs a browser whose CDP encoder works — the self-hosted browser and an installed Chrome/Edge; some carriers (the desktop sidebar) return PNG instead. Downscaling works on every carrier.',
     parameters: {
       fullPage: { type: 'boolean', description: 'Capture the full scrollable page instead of the viewport (default false).' },
       savePath: { type: 'string', description: 'Absolute file path to also save the image to (e.g. for read_image vision location). Must resolve inside the configured downloadDir (default: the system Downloads folder, localized names such as ~/下载 included); an existing file is never overwritten.' },
@@ -1341,8 +1365,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   }))
 
   if (config.tabTools !== false) {
-    ctx.tools.register(defineTool({
-      name: 'browser_list_tabs',
+    registerSafely(defineTool({
+      name: 'dsh_browser_list_tabs',
       description: 'List the shared-browser session\'s tabs with their URLs and which is active.',
       parameters: {},
       output: {
@@ -1382,9 +1406,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
     }))
 
-    ctx.tools.register(defineTool({
-      name: 'browser_switch_tab',
-      description: 'Switch the shared browser to a tab by id (from browser_list_tabs).',
+    registerSafely(defineTool({
+      name: 'dsh_browser_switch_tab',
+      description: 'Switch the shared browser to a tab by id (from dsh_browser_list_tabs).',
       parameters: {
         tabId: { type: 'string', required: true, description: 'The tab id to switch to.' },
       },
@@ -1395,7 +1419,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       timeoutMs,
       isConcurrencySafe: () => false, // mutates the active tab; exclusive within a task
       async execute(args, exec) {
-        assertAllowed(state, 'browser_switch_tab', taskKey(exec))
+        assertAllowed(state, 'dsh_browser_switch_tab', taskKey(exec))
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1404,8 +1428,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
     }))
 
-    ctx.tools.register(defineTool({
-      name: 'browser_close_tab',
+    registerSafely(defineTool({
+      name: 'dsh_browser_close_tab',
       description: 'Close a tab in the shared browser by id. Closing the active tab activates the next.',
       parameters: {
         tabId: { type: 'string', required: true, description: 'The tab id to close.' },
@@ -1417,7 +1441,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       timeoutMs,
       isConcurrencySafe: () => false, // mutates the tab list; exclusive within a task
       async execute(args, exec) {
-        assertAllowed(state, 'browser_close_tab', taskKey(exec))
+        assertAllowed(state, 'dsh_browser_close_tab', taskKey(exec))
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1426,8 +1450,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
     }))
 
-    ctx.tools.register(defineTool({
-      name: 'browser_reset',
+    registerSafely(defineTool({
+      name: 'dsh_browser_reset',
       description: 'Close every tab in the shared browser and start fresh with one blank tab.',
       parameters: {},
       output: {
@@ -1437,7 +1461,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       timeoutMs,
       isConcurrencySafe: () => false, // closes every tab; exclusive within a task
       async execute(_args, exec) {
-        assertAllowed(state, 'browser_reset', taskKey(exec))
+        assertAllowed(state, 'dsh_browser_reset', taskKey(exec))
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1447,8 +1471,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     }))
   }
 
-  ctx.tools.register(defineTool({
-    name: 'browser_history',
+  registerSafely(defineTool({
+    name: 'dsh_browser_history',
     description: 'List the shared browser session\'s recorded operation history (navigate/execute/click/type), newest last, with per-step success/error. Use to understand what the agent did and to pick a step to replay.',
     parameters: {
       verbose: { type: 'boolean', description: "Include each operation's parameters (default false). They are what you just sent, so they are omitted unless asked for." },
@@ -1544,9 +1568,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_visited',
-    description: 'List pages the shared browser has visited, newest first, from the PERSISTENT browsing history: it survives closing the browser and restarting DSH, so it is how you (or the human) find a page again afterwards. Reopen one by passing its url to browser_open. Not to be confused with browser_history, which is only the current session\'s operation log (navigate/click/type) and disappears with the session.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_visited',
+    description: 'List pages the shared browser has visited, newest first, from the PERSISTENT browsing history: it survives closing the browser and restarting DSH, so it is how you (or the human) find a page again afterwards. Reopen one by passing its url to dsh_browser_open. Not to be confused with dsh_browser_history, which is only the current session\'s operation log (navigate/click/type) and disappears with the session.',
     parameters: {
       limit: { type: 'number', description: 'Maximum entries to return (default 30, capped at 200).' },
       domain: { type: 'string', description: 'Only visits whose hostname contains this text (case-insensitive).' },
@@ -1623,9 +1647,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_replay',
-    description: 'Replay one recorded browser operation by its history sequence number (from browser_history). Navigate/click/type are re-issued against the current page; execute re-runs its script. The replayed step is appended to history as a new entry.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_replay',
+    description: 'Replay one recorded browser operation by its history sequence number (from dsh_browser_history). Navigate/click/type are re-issued against the current page; execute re-runs its script. The replayed step is appended to history as a new entry.',
     parameters: {
       seq: { type: 'number', required: true, description: 'The history entry sequence number to replay.' },
     },
@@ -1636,7 +1660,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed(state, 'browser_replay', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_replay', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1645,8 +1669,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_download',
+  registerSafely(defineTool({
+    name: 'dsh_browser_download',
     description: 'Download a URL to a local file, keeping the browser session\'s cookies and login state. Use for fetching files behind authentication or from the current page context. Available on the self-hosted browser; the desktop shell delegates downloads to the real browser UI.',
     parameters: {
       url: { type: 'string', required: true, description: 'The URL to download.' },
@@ -1659,7 +1683,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed(state, 'browser_download', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_download', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1668,8 +1692,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_session',
+  registerSafely(defineTool({
+    name: 'dsh_browser_session',
     description: 'Show THIS task\'s browser session: its id and open tabs. Each task (DSH session) has its own browser session, so this reflects what your task drives. The window is shared with the human and other tasks, but tab sets and history are isolated per task.',
     parameters: {},
     output: {
@@ -1709,9 +1733,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_reset_session',
-    description: 'Reset THIS task\'s browser session: close it entirely so the next browser_* call starts a fresh session with one blank tab. Other tasks\' sessions are untouched. Use when a session is in a bad state or you want a clean slate.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_reset_session',
+    description: 'Reset THIS task\'s browser session: close it entirely so the next dsh_browser_* call starts a fresh session with one blank tab. Other tasks\' sessions are untouched. Use when a session is in a bad state or you want a clean slate.',
     parameters: {},
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { reset: { type: 'boolean', required: true } } },
@@ -1720,7 +1744,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false, // closes the whole session; exclusive within a task
     async execute(_args, exec) {
-      assertAllowed(state, 'browser_reset_session', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_reset_session', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const key = taskKey(exec)
@@ -1738,9 +1762,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_restrict',
-    description: 'Restrict which browser actions are allowed, to prevent stray clicks/navigation. Pass a list of browser tool names (e.g. ["browser_snapshot","browser_content","browser_click"]) — any other browser_* call is refused. Pass an empty list or omit to lift the restriction. Never blocked, whatever the list says: the observing tools (snapshot/a11y/content/scrape/screenshot/get_value/wait/challenge/list_tabs/session/history/visited) and the three that lift a restriction or recover from a bad state (restrict/reset/reset_session) — so a restriction can always be read around and undone. IMPORTANT: this is a SOFT guardrail against accidental actions, NOT a security boundary — you (the model) can lift it yourself with an empty list.',
+  registerSafely(defineTool({
+    name: 'dsh_browser_restrict',
+    description: 'Restrict which browser actions are allowed, to prevent stray clicks/navigation. Pass a list of browser tool names (e.g. ["dsh_browser_snapshot","dsh_browser_content","dsh_browser_click"]) — any other dsh_browser_* call is refused. Pass an empty list or omit to lift the restriction. Never blocked, whatever the list says: the observing tools (snapshot/a11y/content/scrape/screenshot/get_value/wait/challenge/list_tabs/session/history/visited) and the three that lift a restriction or recover from a bad state (restrict/reset/reset_session) — so a restriction can always be read around and undone. IMPORTANT: this is a SOFT guardrail against accidental actions, NOT a security boundary — you (the model) can lift it yourself with an empty list.',
     parameters: {
       allowed: {
         type: 'array',
@@ -1757,9 +1781,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     async execute(args, exec) {
       // Always allowed so the guard can be lifted.
       const allowed = args.allowed ?? []
-      const unknown = allowed.filter((t: string) => !t.startsWith('browser_'))
+      const unknown = allowed.filter((t: string) => !t.startsWith('dsh_browser_'))
       if (unknown.length > 0) {
-        throw new Error(`browser_restrict: unknown tool name(s) ${unknown.map(t => `"${t}"`).join(', ')} (must start with "browser_")`)
+        throw new Error(`dsh_browser_restrict: unknown tool name(s) ${unknown.map(t => `"${t}"`).join(', ')} (must start with "dsh_browser_")`)
       }
       // Empty list (or omitted) lifts this task's restriction; a non-empty list is its
       // new allow-list. Per task, not per plugin: this state object is shared by every
@@ -1772,8 +1796,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'browser_auth',
+  registerSafely(defineTool({
+    name: 'dsh_browser_auth',
     description: 'Export or restore the browser session\'s cookies (login state). Use "flush" to get a JSON cookie list (save it to a private file to persist logins), or "restore" with that list to put logins back (e.g. after the browser host restarted). Available on all three carriers: the self-hosted browser reads its own session, while the desktop sidebar and an installed Chrome/Edge go through CDP. Refused entirely when the credential switch is off. Exported cookies are LIVE CREDENTIALS: treat them as secrets — do not echo them into the conversation, keep them out of logs, and store the list in a private file.',
     parameters: {
       action: { type: 'string', required: true, enum: ['flush', 'restore'], description: 'flush = export cookies; restore = import cookies.' },
@@ -1793,7 +1817,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     timeoutMs,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      assertAllowed(state, 'browser_auth', taskKey(exec))
+      assertAllowed(state, 'dsh_browser_auth', taskKey(exec))
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
@@ -1805,7 +1829,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // empty call returned {restored: 0} and rendered 'Restored 0 cookies.', which
       // reads as success and would leave the caller believing the login was restored.
       if (!Array.isArray(args.cookies) || args.cookies.length === 0) {
-        throw new Error('browser_auth: action "restore" needs a non-empty "cookies" array (get one from action "flush" on the same profile)')
+        throw new Error('dsh_browser_auth: action "restore" needs a non-empty "cookies" array (get one from action "flush" on the same profile)')
       }
       const list = args.cookies as unknown[]
       const restored = await browser.restoreAuth(session, list as never)

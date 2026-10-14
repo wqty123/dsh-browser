@@ -23,7 +23,7 @@ process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-hostlog-recovery-'))
  * process that spawned it was restarted), an ALREADY-MATERIALIZED view
  * handle used to fail forever with "browser host is not running" — the cached
  * materialization stayed bound to the dead child, so no operation could ever
- * trigger a restart. Only a brand-new view (new session / browser_reset_session)
+ * trigger a restart. Only a brand-new view (new session / dsh_browser_reset_session)
  * recovered. The fix: a dead-host failure drops the cached materialization,
  * rebuilds the view against a freshly spawned child, and retries the
  * operation once — so surviving sessions self-heal on their first call.

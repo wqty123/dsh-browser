@@ -3,7 +3,7 @@
  * pieces. The cordis.patch.yml rows reference subpath exports:
  *   - `dsh-builtin-browser/browser`          -> the ctx.browser seam (Service)
  *   - `dsh-builtin-browser/browser-electron` -> the Electron CDP provider
- *   - `dsh-builtin-browser/tool-browser`     -> the model-facing browser_* tools
+ *   - `dsh-builtin-browser/tool-browser`     -> the model-facing dsh_browser_* tools
  * The capability itself is composed by those rows; this root entry exists for
  * programmatic imports AND because the host's client-module scan identifies a
  * package's browser half through a loader row whose specifier resolves to the

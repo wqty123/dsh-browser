@@ -3,7 +3,7 @@
 ## 三层结构
 
 ```
-agent (browser_* 工具)
+agent (dsh_browser_* 工具)
   → ctx.browser (seam, dsh-builtin-browser/browser)
   → dsh-builtin-browser/browser-electron (provider)
   → ElectronBrowserViewHost (由宿主外壳提供)
@@ -37,24 +37,24 @@ agent (browser_* 工具)
 
 ### 工具层(`src/tool-browser/`)
 
-34 个 `browser_*` 工具,按**调用方任务**(`exec.agent.id`)维护独立浏览器会话:
+34 个 `dsh_browser_*` 工具,按**调用方任务**(`exec.agent.id`)维护独立浏览器会话:
 
 - 会话缓存 `sessionsByTask`:同一任务复用同一会话,并发首开去重;
-- `browser_reset_session` 关闭本任务会话并遗忘映射(即使 close 抛错也清除,下次调用重建);
+- `dsh_browser_reset_session` 关闭本任务会话并遗忘映射(即使 close 抛错也清除,下次调用重建);
 - 会话生命周期绑定 agent 作用域 ctx:agent(DSH 会话)销毁时自动关闭对应浏览器会话,任务结束后不再泄漏窗口/视图;
 - 会话/开启动态/白名单都是**每插件实例(每 context)作用域**的,多 context 互不共享、互不污染;
-- `browser_restrict` 维护本任务白名单,守卫所有非只读工具;
-- 输出 schema 与返回值严格一致(DSH 运行时会校验,`additionalProperties: false` 下多一个字段都会报错):元素与节点的字段集在 `element-fields.ts` 里**只声明一次**,item schema 与投影都由它导出 —— 手写白名单漏一个字段会**静默丢数据**、多一个会让**整个结果被拒**,同源之后这两个方向都不可能单独出错(`browser_a11y` 的 `selector` 与 `browser_screenshot` 的 `width`/`height` 都是这么丢的)。
+- `dsh_browser_restrict` 维护本任务白名单,守卫所有非只读工具;
+- 输出 schema 与返回值严格一致(DSH 运行时会校验,`additionalProperties: false` 下多一个字段都会报错):元素与节点的字段集在 `element-fields.ts` 里**只声明一次**,item schema 与投影都由它导出 —— 手写白名单漏一个字段会**静默丢数据**、多一个会让**整个结果被拒**,同源之后这两个方向都不可能单独出错(`dsh_browser_a11y` 的 `selector` 与 `dsh_browser_screenshot` 的 `width`/`height` 都是这么丢的)。
 
 ### 输出尺寸(工具层)
 
 工具输出花的是调用方的上下文,所以工具层对几处返回设了明确上限,并在截断时**说明截断**:
 
-- `browser_a11y` 默认 150 个节点(上限 5000)、一层一个空格缩进、`states` 只省略字面量 `enabled`(`unchecked`、`collapsed` 等仍会打印);
-- `browser_snapshot` 与 `browser_a11y` 在元素有 `id`/`name` 时给出 `{#id}` / `{[name=x]}` 引用选择器(页面脚本一直算,工具层此前丢掉;输出 schema 必须声明该字段,否则 `additionalProperties: false` 会拒绝整个结果);
-- `browser_content` 的上限按格式:html/json 50 000,txt/markdown 20 000,`maxChars` 可覆盖;
-- `browser_execute` 的返回值上限 50 000 字符;
-- `browser_scrape` 输出紧凑 JSON;`browser_history` 默认只渲染最近 20 条且不回显参数(`verbose: true` 才带);`browser_visited` 的时间戳精确到分钟、会话标记只在变化时打印一次。
+- `dsh_browser_a11y` 默认 150 个节点(上限 5000)、一层一个空格缩进、`states` 只省略字面量 `enabled`(`unchecked`、`collapsed` 等仍会打印);
+- `dsh_browser_snapshot` 与 `dsh_browser_a11y` 在元素有 `id`/`name` 时给出 `{#id}` / `{[name=x]}` 引用选择器(页面脚本一直算,工具层此前丢掉;输出 schema 必须声明该字段,否则 `additionalProperties: false` 会拒绝整个结果);
+- `dsh_browser_content` 的上限按格式:html/json 50 000,txt/markdown 20 000,`maxChars` 可覆盖;
+- `dsh_browser_execute` 的返回值上限 50 000 字符;
+- `dsh_browser_scrape` 输出紧凑 JSON;`dsh_browser_history` 默认只渲染最近 20 条且不回显参数(`verbose: true` 才带);`dsh_browser_visited` 的时间戳精确到分钟、会话标记只在变化时打印一次。
 
 ## 自托管实现(纯 `dsh web`)
 
@@ -74,7 +74,7 @@ RemoteElectronViewHost  ──TCP JSON-RPC──▶  host-main.js
 - **稳健性**:子进程/套接字都有 `error` 监听(否则未捕获事件会炸掉整个 DSH 进程);子进程退出自动重启,已物化的视图句柄在下次调用时**自动重建并重试一次**(会话跨崩溃存活,仅页面状态丢失,不再出现 "browser host is not running" 僵尸态);物化失败可重试;下载仅限 HTTP(S)、`savePath` 必须绝对路径(`downloadDir` 已配置时用它;未配置时按序探测 —— 存在的 `XDG_DOWNLOAD_DIR` → home 下第一个存在的 `Downloads`/`下载`/`下載` → 回退 `~/Downloads`,首次使用时创建)、流式限流 + Content-Length 提前拒绝、256MB 上限与 60s 超时,文件由**子进程直接落盘**(临时文件 + rename,不再经 RPC 传 base64);cookie 导出/恢复有 30s 超时,两者受**不同**的门控:导出是**读**动作,读 `credentials.allowRead`,关闭时抛 `BROWSER_AUTH_DISABLED`;恢复是**写**动作,读 `actions.allowCredentialWrite`,关闭时抛 `BROWSER_AUTH_WRITE_DISABLED`(允许读取的操作者因此仍能拒绝写入)。有原生方法时优先用它,否则走 CDP 的 `Network.getCookies` / `Storage.setCookies`(三种载体都可用);**导出的范围收敛到本会话当前所在页面的 URL**,页面 URL 取不到时**拒绝而不是放宽**(CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`,自托管侧栏按 view 自己的 URL 过滤);`cookies.get`/`cookies.set`(后者每条 cookie 一次)与下载的 `Runtime.evaluate` 都套同一套 `COMMAND_TIMEOUT_MS` —— 这三条曾经是无上限的 await,会让串行操作队列永久停在那一条上;
 - **视图可见性**:多标签/多会话时,`showView` 隐藏其他视图并把目标视图置顶(remove+re-add),确保用户看到的是活动标签;目标是当前可见视图时**跳过** remove/re-add(否则每次操作都闪烁);窗口标题实时显示当前可见会话的任务标识 + 页面标题/URL(`showView` 携带会话 label,子进程读 `getTitle`/`getURL`);窗口 resize 时视图 bounds 自动跟随;
 - **孤儿防护**:父进程断开时子进程自动退出,不留僵尸窗口;
-- **cookie 落盘**:子进程使用独立 userData 目录(`<DSH_HOME>/dsh-builtin-browser-host`),登录态跨重启保留(另有 `browser_auth` 手动导出/恢复)。
+- **cookie 落盘**:子进程使用独立 userData 目录(`<DSH_HOME>/dsh-builtin-browser-host`),登录态跨重启保留(另有 `dsh_browser_auth` 手动导出/恢复)。
 
 ## 关键设计决策
 

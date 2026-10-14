@@ -1,5 +1,5 @@
-// Save-path admission (issue #13): browser_screenshot must go through the SAME
-// gate as browser_download — absolute, inside downloadDir, never an existing
+// Save-path admission (issue #13): dsh_browser_screenshot must go through the SAME
+// gate as dsh_browser_download — absolute, inside downloadDir, never an existing
 // file — and the default download directory must honor localized names.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'

@@ -49,15 +49,15 @@ export interface BrowserSettings {
      *
      * These are OPERATOR switches: the settings panel is not reachable from the model, so a
      * value here refuses whatever the model asks for, and no tool can lift it. That is what
-     * separates them from `browser_restrict`, which is the model's own soft guardrail. All
+     * separates them from `dsh_browser_restrict`, which is the model's own soft guardrail. All
      * three default to on, which is the documented out-of-the-box behaviour.
      */
     readonly actions: {
-        /** Run arbitrary page scripts in the active tab (`browser_execute`). */
+        /** Run arbitrary page scripts in the active tab (`dsh_browser_execute`). */
         readonly allowExecute: boolean;
-        /** Download a URL to disk (`browser_download`). */
+        /** Download a URL to disk (`dsh_browser_download`). */
         readonly allowDownload: boolean;
-        /** Write cookies — importing login state (`browser_auth` restore). */
+        /** Write cookies — importing login state (`dsh_browser_auth` restore). */
         readonly allowCredentialWrite: boolean;
     };
 }

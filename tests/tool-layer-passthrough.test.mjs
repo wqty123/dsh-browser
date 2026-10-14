@@ -76,11 +76,11 @@ async function run(tools, name) {
   return await tool.execute({}, { task: 'test' })
 }
 
-test('browser_a11y hands the selector on', async () => {
+test('dsh_browser_a11y hands the selector on', async () => {
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
   apply(ctx)
 
-  const value = await run(tools, 'browser_a11y')
+  const value = await run(tools, 'dsh_browser_a11y')
 
   assert.equal(value.nodes.length, 1, 'one node came back')
   assert.equal(
@@ -90,11 +90,11 @@ test('browser_a11y hands the selector on', async () => {
   )
 })
 
-test('browser_snapshot hands the selector on', async () => {
+test('dsh_browser_snapshot hands the selector on', async () => {
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
   apply(ctx)
 
-  const value = await run(tools, 'browser_snapshot')
+  const value = await run(tools, 'dsh_browser_snapshot')
   assert.equal(value.elements[0].selector, '#probe-btn', 'the snapshot mapping carries selector')
 })
 
@@ -104,8 +104,8 @@ test('both element mappings carry the same field set', async () => {
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
   apply(ctx)
 
-  const a11y = await run(tools, 'browser_a11y')
-  const snapshot = await run(tools, 'browser_snapshot')
+  const a11y = await run(tools, 'dsh_browser_a11y')
+  const snapshot = await run(tools, 'dsh_browser_snapshot')
 
   const a11yKeys = Object.keys(a11y.nodes[0]).sort()
   const snapshotKeys = Object.keys(snapshot.elements[0]).sort()
@@ -126,7 +126,7 @@ test('a required field in the output schema is one the tool can actually produce
   apply(ctx)
 
   const problems = []
-  for (const name of ['browser_a11y', 'browser_snapshot']) {
+  for (const name of ['dsh_browser_a11y', 'dsh_browser_snapshot']) {
     const tool = tools.get(name)
     const properties = tool?.output?.schema?.properties ?? {}
     const value = await run(tools, name)

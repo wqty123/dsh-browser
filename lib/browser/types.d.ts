@@ -58,7 +58,7 @@ export interface BrowserScrollRequest {
 }
 /** Press one named key (Enter, Tab, arrows, …). */
 export interface BrowserKeyRequest {
-    /** Key name from the supported set (see the browser_key tool). */
+    /** Key name from the supported set (see the dsh_browser_key tool). */
     readonly key: string;
 }
 /**
@@ -333,7 +333,7 @@ export interface BrowserSnapshotElement {
     /**
      * True when the element lives inside an (same-origin) iframe: coordinates
      * are still top-document, but DOM selectors are frame-scoped — reach the
-     * element via `iframe.contentDocument` in browser_execute.
+     * element via `iframe.contentDocument` in dsh_browser_execute.
      */
     readonly frame?: boolean;
 }

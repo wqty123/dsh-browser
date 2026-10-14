@@ -8,7 +8,7 @@
 # though every tool works — hence the inert root row under the bare package name.
 #
 # The browser seam (ctx.browser) is always mounted, and the Electron provider plus
-# the browser_* tools are always registered. The CARRIER is chosen at run time:
+# the dsh_browser_* tools are always registered. The CARRIER is chosen at run time:
 #
 #   1. a browser the user selected in settings (their installed Chrome / Edge),
 #      launched with a plugin-owned profile;
@@ -47,14 +47,14 @@
       # Every field is optional, so an empty mapping uses the defaults:
       #
       #   allowedActions: operator-level allow-list of browser tool names, applied to every
-      #     task in the deployment (a task can still narrow it further with browser_restrict).
-      #     READ_ONLY_TOOLS and browser_restrict are never blocked, whatever the list says.
+      #     task in the deployment (a task can still narrow it further with dsh_browser_restrict).
+      #     READ_ONLY_TOOLS and dsh_browser_restrict are never blocked, whatever the list says.
       #   timeoutMs: cooperative per-call budget in ms (default 60000).
       #   tabTools: whether the tab-management tools are registered (default true).
       #
       # To restrict a deployment, replace this with, for example:
       #   config:
-      #     allowedActions: [browser_snapshot, browser_a11y, browser_content, browser_click]
+      #     allowedActions: [dsh_browser_snapshot, dsh_browser_a11y, dsh_browser_content, dsh_browser_click]
       #
       # The settings panel's "What the agent may do" switches are a SEPARATE layer with the
       # same property — the model cannot lift them either — and they need no patch file at
