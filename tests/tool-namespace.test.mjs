@@ -16,16 +16,20 @@ const source = () => readFileSync(new URL('../src/tool-browser/index.ts', import
 const readSrc = name => readFileSync(new URL(`../src/${name}`, import.meta.url), 'utf8')
 
 test('every registered tool is in the dsh_browser_ namespace, and nothing else is', () => {
-  const names = [...source().matchAll(/name: '(dsh_browser_[a-z_]+)'/g)].map(m => m[1])
+  // `[a-z0-9_]`, not `[a-z_]`: `dsh_browser_a11y` contains digits, and the narrower class silently
+  // matched it as `dsh_browser_a` — which made this assertion count 33 tools where there are 34,
+  // and left the very name it was written to protect only half-checked.
+  const names = [...source().matchAll(/name: '(dsh_browser_[a-z0-9_]+)'/g)].map(m => m[1])
 
-  assert.equal(names.length, 33, 'thirty-three tools')
+  assert.equal(names.length, 34, 'thirty-four tools')
   assert.equal(new Set(names).size, names.length, 'names are unique')
   assert.ok(names.includes('dsh_browser_open'))
   assert.ok(names.includes('dsh_browser_session'), 'including the one that used to collide')
+  assert.ok(names.includes('dsh_browser_a11y'), 'and the one with digits in it')
 
   // No bare name survives: a single `browser_open` left behind would be the old collision waiting
-  // to happen all over again, and it would fail silently because the other 32 still load.
-  const bare = [...source().matchAll(/name: '(?!dsh_browser_)(browser_[a-z_]+)'/g)].map(m => m[1])
+  // to happen all over again, and it would fail silently because the other 33 still load.
+  const bare = [...source().matchAll(/name: '(?!dsh_browser_)(browser_[a-z0-9_]+)'/g)].map(m => m[1])
   assert.deepEqual(bare, [], 'no tool may be registered under the bare namespace')
 })
 
