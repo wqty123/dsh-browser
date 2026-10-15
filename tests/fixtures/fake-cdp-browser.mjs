@@ -15,7 +15,28 @@ import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 
 /** The subset of CDP this plugin needs: create a target, attach to it. */
-function createFakeBrowser() {
+/**
+ * @param options - knobs for the behaviours a test needs to observe.
+ * @param options.browserName - what `/json/version` reports as `Browser`. The default deliberately
+ *   does NOT look like Chrome: adoption requires the endpoint to name a real browser, so a fake
+ *   that claimed to be one would be adopted by every test that only wanted a launch. Tests about
+ *   adoption pass a Chrome-like name explicitly.
+ * @param options.blanks - target ids that exist as blank pages BEFORE this client connects, which
+ *   is the state a real Chrome is in (it opens more than one page on start).
+ */
+function createFakeBrowser(options = {}) {
+  const browserName = options.browserName ?? 'Fake/1.0'
+  /** Pages that exist before the client connects; never created by a command. */
+  const preexisting = [...(options.blanks ?? [])]
+  /** Pages created through `Target.createTarget`. */
+  const created = []
+  /** Target ids closed through `Target.closeTarget`. */
+  const closed = []
+  /** Target ids attached through `Target.attachToTarget`, oldest first. */
+  const attached = []
+  /** Whether discovery was turned on before the first listing. */
+  let discoveryEnabled = false
+  let listedBeforeDiscovery = 0
   /** The last session id handed out, for a test to observe. */
   let lastSessionId = ''
   /** Debugging connections accepted so far: a drop plus a reconnect is two. */
@@ -24,7 +45,10 @@ function createFakeBrowser() {
   const server = createServer((request, response) => {
     if (request.url === '/json/version') {
       response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({ Browser: 'Fake/1.0', webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser` }))
+      response.end(JSON.stringify({
+        Browser: browserName,
+        webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser`,
+      }))
       return
     }
     response.writeHead(404)
@@ -63,16 +87,42 @@ function createFakeBrowser() {
     })
   })
 
-  /** Answer the two commands the carrier sends, on the live target. */
+  /** Answer the commands the carrier sends, on the live target. */
   function handleCommand(message, state) {
     if (message.id === undefined) return undefined
+    if (message.method === 'Target.setDiscoverTargets') {
+      discoveryEnabled = true
+      return { id: message.id, result: {} }
+    }
+    if (message.method === 'Target.getTargets') {
+      // A listing before discovery is a listing a real browser may not complete: pages that
+      // existed before the client connected can be missing from it. That is the failure the
+      // first attempt at this fix hit silently, so the fake reproduces it.
+      if (!discoveryEnabled) listedBeforeDiscovery += 1
+      const ids = discoveryEnabled ? [...preexisting, ...created] : [...created]
+      return {
+        id: message.id,
+        result: { targetInfos: ids.map(targetId => ({ targetId, type: 'page', url: 'about:blank' })) },
+      }
+    }
+    if (message.method === 'Target.closeTarget') {
+      closed.push(message.params?.targetId)
+      return { id: message.id, result: { success: true } }
+    }
+    if (message.method === 'Browser.getVersion') {
+      // The protocol half of adoption's evidence. A bare-looking product is refused there, so
+      // this mirrors the HTTP half rather than answering something the real browser would not.
+      return { id: message.id, result: { product: browserName } }
+    }
     if (message.method === 'Target.createTarget') {
       state.targetId = `target-${randomUUID()}`
+      created.push(state.targetId)
       return { id: message.id, result: { targetId: state.targetId } }
     }
     if (message.method === 'Target.attachToTarget') {
       state.sessionId = `session-${randomUUID()}`
       lastSessionId = state.sessionId
+      attached.push(message.params?.targetId)
       return { id: message.id, result: { sessionId: state.sessionId } }
     }
     // Every page command goes to the current session; a stale one is a protocol error,
@@ -87,6 +137,14 @@ function createFakeBrowser() {
     get port() { return server.address().port },
     get sessionId() { return lastSessionId },
     get connections() { return connections },
+    /** Target ids closed through the protocol, so a test can see what was tidied away. */
+    get closed() { return [...closed] },
+    /** Target ids attached, so a test can see WHICH page a view ended up on. */
+    get attached() { return [...attached] },
+    /** Pages created by the client, which adoption is supposed to avoid needing. */
+    get created() { return [...created] },
+    /** How many list attempts arrived before discovery was enabled (should be none). */
+    get listedBeforeDiscovery() { return listedBeforeDiscovery },
     async listen() {
       await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
       return server.address().port
