@@ -188,9 +188,10 @@ test('the next launch uses the port its own browser wrote, not the stale file', 
   /** Whether the previous browser's file was still on disk AT SPAWN TIME. */
   let staleAtSpawn
   const host = new SystemBrowserViewHost({ kind: 'chrome', path: 'fake-browser' }, profileDir, [], undefined, () => {
-    // The fix removes the stale file BEFORE spawning, so it must already be gone here.
-    // Only the freshness check would survive without this observation, which is why
-    // deleting the removal left every assertion green before.
+    // The file is deliberately NOT removed before spawning any more. Removing it protected
+    // nothing — `freshPort()` refuses any file older than the spawn, which is what the
+    // "never contacted" assertion below actually proves — while destroying the only record of a
+    // browser that may still be running for this profile. `adoptRunningBrowser` reads it.
     staleAtSpawn = existsSync(portFile)
     // This launch's browser writes ITS OWN port when it comes up, exactly as a real one
     // does — so both halves of the behaviour are decidable: the stale file is refused, and
@@ -217,8 +218,9 @@ test('the next launch uses the port its own browser wrote, not the stale file', 
     assert.notEqual(first.sessionId, undefined, 'the first fake is real')
     assert.equal(first.sessionId, '', 'the host never spoke to the browser named by the stale port file')
 
-    // And the stale file was actually removed, not merely judged stale.
-    assert.equal(staleAtSpawn, false, 'the stale port file was still on disk when the browser was spawned')
+    // And the stale file is left where it is, on purpose. The freshness check above is what
+    // refuses it; keeping it is what lets a later launch find a browser that is still running.
+    assert.equal(staleAtSpawn, true, 'the port file is left in place for the next launch to inspect')
   } finally {
     // A failing assertion must not leave two listening servers behind: the test process
     // would then never exit, and a mutation run would hang instead of reporting red.

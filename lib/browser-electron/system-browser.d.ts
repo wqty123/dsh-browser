@@ -111,6 +111,16 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      */
     private clientSuspect;
     private child;
+    /**
+     * True when the browser in use was adopted from a previous run rather than launched here.
+     *
+     * Worth recording because the two differ on teardown: a browser this host spawned is its to
+     * kill, while one it merely took over belongs to a process that is already gone — closing it is
+     * still right (it holds the profile nobody else can use), but it is a decision, not cleanup.
+     */
+    private adoptedRunning;
+    /** Whether this connection's surplus blank pages have been collapsed already. */
+    private blanksNormalized;
     private starting;
     /**
      * Browsers that ignored a kill.
@@ -167,6 +177,25 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      */
     private forgetBrowserState;
     private ensureClient;
+    /**
+     * Take over a browser already serving this profile, instead of racing it.
+     *
+     * A previous DSH process leaves its browser running: the child handle died with that process, so
+     * nothing here knows about it, and `start()`'s cleanup branch is skipped because it keys on
+     * `this.child`. Launching then does something worse than fail — on Windows Chrome hands the
+     * request to the instance already holding the profile and exits 0, and that exit is read as a
+     * launch failure. The user is told to go kill the leftovers by hand, on every restart, which is
+     * exactly what was reported.
+     *
+     * The launch loop deliberately refuses to trust a `<profile>/DevToolsActivePort` left by a
+     * previous launch, and it is right to: a stale port number can be reused by something that is
+     * not a browser at all. What makes adoption safe HERE is that this runs BEFORE launching, on a
+     * file that lives inside this plugin's own profile directory — only a browser started with this
+     * `--user-data-dir` writes it — and the endpoint is then asked to identify itself.
+     * @param why - a short phrase for the log, naming which attempt this is.
+     * @returns a connected client for the running browser, or undefined when there is none.
+     */
+    private adoptRunningBrowser;
     /**
      * Launch the browser with a private profile and connect over CDP.
      *
@@ -236,6 +265,37 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private ensureSession;
     /** Create and attach the target for one view. Serialised by {@link ensureSession}. */
     private buildSession;
+    /**
+     * Take an unclaimed blank page, if the browser has one to spare.
+     *
+     * "Unclaimed" is what matters: a blank page the plugin is already driving belongs to a view, and
+     * handing the same target to a second view would make two views share one page. The page kept by
+     * {@link normalizeBlankPages} is exactly the unclaimed one this is looking for.
+     * @param client - the connected browser.
+     * @returns the target id to reuse, or undefined when a new page has to be created.
+     */
+    private adoptBlankTarget;
+    /** Create one page, refusing to go on without an id. */
+    private createTarget;
+    /**
+     * Collapse the blank pages a freshly started browser comes with down to one.
+     *
+     * Chrome opens more than one page when it is given a URL on top of its own start page, and this
+     * is the browser's behaviour rather than a session restore: measured on a cleanly exited profile
+     * as well as a crashed one, both pages appear within a second of launch. There is nothing to
+     * configure away — by the time a client can talk to the browser, both already exist.
+     *
+     * Left alone the surplus page is invisible to the plugin's tab model and therefore unclosable
+     * through the tools, so it survives every navigation and accumulates for as long as the window
+     * lives. One is kept deliberately: {@link buildSession} adopts it instead of creating a third.
+     *
+     * `Target.setDiscoverTargets` has to come first. Without it the browser may omit pages that
+     * existed before this client connected — which is precisely the page that needs closing, and the
+     * reason the first attempt at this fix failed silently.
+     * @param client - the connected browser.
+     * @returns how many surplus blank pages were closed.
+     */
+    private normalizeBlankPages;
     /** Views whose session is being created right now, so a second caller waits for the first. */
     private readonly sessionBuilding;
     /** sessionId -> targetId, so a destroyed view can close the right page. */
