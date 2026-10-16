@@ -66,12 +66,29 @@ test('carrier pages are merged into the listing under a distinguishable id', () 
   const body = listTabs.slice(0, listTabs.indexOf('\n  }'))
   assert.match(body, /this\.host\.listPages\?\.\(\)/, 'the listing asks the carrier')
   assert.match(body, /`page:\$\{page\.id\}`/, 'and marks those rows as carrier-owned')
-  // Deduplication is not cosmetic: the provider's own views appear in the carrier's list too, so
-  // without it every tab we created would be reported twice.
-  assert.match(body, /known\.has\(page\.id\)/, 'pages we created are not listed twice')
   // A blank page the carrier opened for itself is not something a caller can act on, and the
   // blank normalisation already closes those.
   assert.match(body, /about:blank/, 'and blanks are skipped')
+  // Deduplication is NOT here, and that is the point: a provider tab is known by the provider's
+  // own id and a carrier page by the carrier's, so a comparison at this level matches nothing.
+  // A first version did compare them and listed every page twice — measured on a live window.
+  assert.doesNotMatch(body, /known\.has\(/, 'and it does not try to dedupe across id spaces here')
+})
+
+test('each host excludes the views it opened, where the mapping exists', () => {
+  // This is the only place the match CAN be made: the host keeps the view id next to the carrier's
+  // own id for it. Sidebar: `views` holds the guest number. Installed browser: `sessions` holds
+  // the CDP target id.
+  const sidebarList = bridgeHost.slice(bridgeHost.indexOf('async listPages()'))
+  const sidebarBody = sidebarList.slice(0, sidebarList.indexOf('\n  }'))
+  assert.match(sidebarBody, /for \(const view of this\.views\.values\(\)\)/, 'the sidebar host walks its own views')
+  assert.match(sidebarBody, /ours\.add\(view\.guest\)/, 'collecting the guests it opened')
+  assert.match(sidebarBody, /!ours\.has\(guest\.id\)/, 'and excludes them')
+
+  const browserList = systemHost.slice(systemHost.indexOf('async listPages()'))
+  const browserBody = browserList.slice(0, browserList.indexOf('\n  }'))
+  assert.match(browserBody, /this\.sessions\.values\(\)/, 'the browser host walks its sessions')
+  assert.match(browserBody, /!ours\.has\(entry\.targetId as string\)/, 'and excludes its own targets')
 })
 
 test('closeTab understands those ids instead of refusing them', () => {

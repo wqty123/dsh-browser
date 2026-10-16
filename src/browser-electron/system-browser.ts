@@ -893,14 +893,33 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * `Target.getTargets` also lists pages that existed before this client connected.
    * @returns the browser's pages, or an empty list when it cannot answer.
    */
+  /**
+   * Every page the browser holds that THIS HOST did not open.
+   *
+   * Chrome and Edge own their own page creation. A click on a link that opens a new page — or any
+   * `window.open` — produces a page the provider never asked for, and nothing reports it back.
+   * Those pages are real: they hold memory and stay until something closes them. Measured on a real
+   * window: four pages present while `dsh_browser_list_tabs` reported one.
+   *
+   * Pages this host opened are EXCLUDED here rather than deduplicated by the caller, because the
+   * caller cannot do it: the provider knows a tab by its own id, the carrier knows a page by its
+   * CDP target id, and the two never match. The first version returned everything and relied on the
+   * caller to filter, which reported the same page twice.
+   *
+   * Discovery is already on at connection time (see the blank-page normalisation), so
+   * `Target.getTargets` also lists pages that existed before this client connected.
+   * @returns the browser's pages that are not ours, or an empty list when it cannot answer.
+   */
   async listPages(): Promise<readonly CarrierPage[]> {
     try {
       const client = await this.ensureClient()
       const listed = await client.send('Target.getTargets', {}) as {
         targetInfos?: Array<{ targetId?: string; type?: string; url?: string; title?: string }>
       }
+      const ours = new Set(this.sessions.values())
       return (listed?.targetInfos ?? [])
         .filter(entry => entry.type === 'page' && typeof entry.targetId === 'string')
+        .filter(entry => !ours.has(entry.targetId as string))
         .map(entry => ({
           id: entry.targetId as string,
           url: typeof entry.url === 'string' ? entry.url : '',

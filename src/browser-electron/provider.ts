@@ -168,10 +168,13 @@ export interface ElectronBrowserViewHost {
    * `dsh_browser_list_tabs` and unclosable through `dsh_browser_close_tab`, accumulating for the
    * life of the browser.
    *
-   * Measured: on the sidebar carrier three clicks produced three sidebar webview guests while
-   * `dsh_browser_list_tabs` reported one tab; on the installed-browser carrier the window held
-   * four pages and the tool reported one.
-   * @returns every page the carrier currently holds, including ones the provider created.
+   * Views the host itself opened are NOT included. That exclusion belongs to the host, which is the
+   * only side that can make it: a provider tab is identified by the provider's own id and a carrier
+   * page by the carrier's, so a caller comparing the two matches nothing and reports every page
+   * twice. Measured on the sidebar carrier: three clicks produced three webview guests while
+   * `dsh_browser_list_tabs` reported one tab; on the installed-browser carrier the window held four
+   * pages and the tool reported one.
+   * @returns every page the carrier holds that this host did not open.
    */
   listPages?(): Promise<readonly CarrierPage[]>
   /**
@@ -817,12 +820,14 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // `dsh_browser_close_tab`, so they accumulated for the life of the browser. Measured on the
     // sidebar carrier: three clicks produced three webview guests while this listed one tab.
     //
+    // `listPages` already excludes the pages it opened the view for — that filtering cannot happen
+    // here, because a tab is known by this provider's own id and a carrier page by the carrier's,
+    // and the two never match. A first version compared them anyway and listed every page twice.
+    //
     // They are appended under a `page:` prefix so a caller can tell the two kinds apart — the
     // prefix is also what `closeTab` uses to decide whether to close a view or a carrier page.
     const pages = await this.host.listPages?.().catch(() => undefined) ?? []
-    const known = new Set(s.tabs.map(tab => tab.handle.id))
     for (const page of pages) {
-      if (known.has(page.id)) continue
       // A page with no URL is a blank one the carrier opened for itself. Listing it would invite a
       // caller to act on nothing, and the blank normalisation already closes those.
       if (page.url === '' || page.url === 'about:blank') continue

@@ -70,10 +70,13 @@ export interface ElectronBrowserViewHost {
      * `dsh_browser_list_tabs` and unclosable through `dsh_browser_close_tab`, accumulating for the
      * life of the browser.
      *
-     * Measured: on the sidebar carrier three clicks produced three sidebar webview guests while
-     * `dsh_browser_list_tabs` reported one tab; on the installed-browser carrier the window held
-     * four pages and the tool reported one.
-     * @returns every page the carrier currently holds, including ones the provider created.
+     * Views the host itself opened are NOT included. That exclusion belongs to the host, which is the
+     * only side that can make it: a provider tab is identified by the provider's own id and a carrier
+     * page by the carrier's, so a caller comparing the two matches nothing and reports every page
+     * twice. Measured on the sidebar carrier: three clicks produced three webview guests while
+     * `dsh_browser_list_tabs` reported one tab; on the installed-browser carrier the window held four
+     * pages and the tool reported one.
+     * @returns every page the carrier holds that this host did not open.
      */
     listPages?(): Promise<readonly CarrierPage[]>;
     /**

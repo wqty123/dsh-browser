@@ -143,6 +143,21 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * this asks for it rather than reaching into the shell again.
      * @returns the panel's pages, or an empty list when the bridge cannot answer.
      */
+    /**
+     * Every sidebar page this conversation holds that THIS HOST did not open.
+     *
+     * The shell owns page creation inside the panel: a link the user or the agent clicks may open a
+     * new page, and nothing tells the provider. Those pages are real — they are what the human sees
+     * — but without this the tab model reports only the ones the provider created, so the rest are
+     * invisible to `dsh_browser_list_tabs` and unclosable through `dsh_browser_close_tab`.
+     *
+     * Pages this host opened are EXCLUDED here rather than deduplicated by the caller, because the
+     * caller cannot do it: the provider knows a tab by its own id and the carrier knows a page by the
+     * guest id, and the two never match. The first version returned everything and relied on the
+     * caller to filter, which reported the same page twice — the mapping that makes the match
+     * possible exists only here.
+     * @returns the panel's pages that are not ours, or an empty list when the bridge cannot answer.
+     */
     listPages(): Promise<readonly CarrierPage[]>;
     /**
      * Close one sidebar page by the id {@link listPages} reported.
