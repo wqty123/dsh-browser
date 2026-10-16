@@ -721,11 +721,37 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // The port file is deliberately NOT deleted here, and that is a reversal.
     //
     // It used to be removed so the launch loop below could not read a previous browser's port. But
-    // the loop already refuses any file older than the spawn (`freshPort` compares mtimes), so the
-    // deletion never protected it — while it DID destroy the only record of a browser that may
-    // still be running for this profile. That record is what `adoptRunningBrowser` needs when the
-    // launch comes back as a hand-off: the browser was alive the whole time, and without the file
-    // there is no way to find it again.
+    // the loop judges freshness against a snapshot taken below, so the deletion never protected it
+    // — while it DID destroy the only record of a browser that may still be running for this
+    // profile. That record is what `adoptRunningBrowser` needs when the launch comes back as a
+    // hand-off: the browser was alive the whole time, and without the file there is no way to find
+    // it again.
+    const portFile = join(this.profileDir, 'DevToolsActivePort')
+    /**
+     * What the port file was like BEFORE this launch, so "fresh" is judged against a snapshot
+     * rather than against a clock.
+     *
+     * The test used to be `mtimeMs < spawnedAt` — a filesystem timestamp compared to `Date.now()`.
+     * Those are different clocks with different resolutions, and CI is where it showed: a file the
+     * fake browser had just written was rejected as stale, so the loop waited out its full 30s
+     * against a browser that was already listening, because the file's mtime had rounded down
+     * below the spawn time. That is not a test-only problem: on any filesystem whose mtime
+     * resolution is coarser than a millisecond, the plugin would fail to see the browser it had
+     * just launched, and report a CDP timeout for a browser that was up the whole time.
+     *
+     * `undefined` means there was no file, so any file that appears afterwards is fresh. When one
+     * existed, a later mtime OR different contents makes the new one fresh. Byte-identical contents
+     * with an unchanged mtime is the PREVIOUS browser's port, and adopting it is what this whole
+     * check exists to prevent: it may name a port that now belongs to something else entirely.
+     */
+    const portFileBefore = ((): { mtimeMs: number; contents: string } | undefined => {
+      try {
+        return { mtimeMs: statSync(portFile).mtimeMs, contents: readFileSync(portFile, 'utf8') }
+      } catch {
+        return undefined
+      }
+    })()
+    // Kept for the failure message and for the exit listener's diagnostics; no longer a judgement.
     const spawnedAt = Date.now()
     let child: ReturnType<typeof spawn>
     try {
@@ -759,20 +785,26 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // Clearing these is what makes the restart usable rather than merely alive.
       this.forgetBrowserState()
     })
-    const portFile = join(this.profileDir, 'DevToolsActivePort')
     /**
      * The port this launch wrote, or undefined while it has not written one yet.
      *
-     * A file left by the PREVIOUS browser is not evidence about this one. Its contents
-     * name a port that may now belong to something else entirely — another Chromium, a
-     * node --inspect — and connecting there publishes a client this host does not own and
-     * dispose() can never kill. Only a file written after the spawn counts.
+     * A file left by the PREVIOUS browser is not evidence about this one. Its contents name a port
+     * that may now belong to something else entirely — another Chromium, a `node --inspect` — and
+     * connecting there publishes a client this host does not own and dispose() can never kill.
+     * Only a file that CHANGED across this launch counts, which is what `portFileBefore` records.
      */
     const freshPort = (): number | undefined => {
       try {
         if (!existsSync(portFile)) return undefined
-        if (statSync(portFile).mtimeMs < spawnedAt) return undefined
-        const value = Number(readFileSync(portFile, 'utf8').split('\n')[0]?.trim() ?? '')
+        const after = statSync(portFile)
+        const contents = readFileSync(portFile, 'utf8')
+        // Unchanged since before the launch: this is the previous browser's file, whatever its
+        // mtime says. Comparing against the snapshot rather than the spawn time is what keeps this
+        // correct on a filesystem whose timestamps are coarser than the clock behind spawnedAt.
+        if (portFileBefore !== undefined
+          && after.mtimeMs <= portFileBefore.mtimeMs
+          && contents === portFileBefore.contents) return undefined
+        const value = Number(contents.split('\n')[0]?.trim() ?? '')
         return Number.isInteger(value) && value > 0 ? value : undefined
       } catch {
         return undefined
