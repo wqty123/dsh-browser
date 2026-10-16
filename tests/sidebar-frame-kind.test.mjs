@@ -56,5 +56,8 @@ test('a panel that produces no page returns the surface to the self-hosted brows
   const block = call.slice(0, call.indexOf('this.views.set'))
   assert.match(block, /String\(answer\.error\)\.includes\('produced no page'\)/,
     'the unproducible-page failure is recognised')
-  assert.match(block, /this\.reportLost\(\)/, 'and treated as carrier loss')
+  // `panel-unusable`, not a bare reportLost(): the shell is alive and answered this very request, so
+  // the fallback must not tell the user their desktop shell exited. That is what it did before this
+  // reason existed, and a reporter read it as their shell having crashed.
+  assert.match(block, /this\.reportLost\('panel-unusable'\)/, 'and treated as an unusable PANEL, not an exited shell')
 })

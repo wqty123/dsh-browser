@@ -30,7 +30,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
 import type { BrowserUserAction } from './provider.js'
-import type { CarrierPage } from '../browser/types.js'
+import type { CarrierPage, CarrierLossReason } from '../browser/types.js'
 
 
 /** Absolute path of the endpoint file the shell writes. */
@@ -120,32 +120,35 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    */
   private userActionHandler: ((action: BrowserUserAction) => void) | undefined
   /** Told when the shell behind this bridge exits; see `onLost`. */
-  private lostListener: (() => void) | undefined
+  private lostListener: ((reason: CarrierLossReason) => void) | undefined
 
   /**
    * @param endpoint - the shell's published bridge endpoint.
    */
   private constructor(endpoint: BridgeEndpoint, sessionId?: string) {
     this.owner = sessionId !== undefined && sessionId !== String.fromCharCode(39,39) ? sessionId : randomUUID()
-    this.connection = new BridgeConnection(endpoint, bridgeEndpointPath(), () => this.reportLost())
+    // The transport reaches this only by concluding the shell stopped refreshing its endpoint, which
+    // is `shell-exited`.
+    this.connection = new BridgeConnection(endpoint, bridgeEndpointPath(), () => this.reportLost('shell-exited'))
   }
 
   /**
-   * Called by the transport once the shell behind it is gone.
+   * Called when this carrier concludes it cannot serve anything more.
    *
    * Forwarded rather than acted on here: only the entry point owns the swap back to the self-hosted
    * browser, and a host that tried to replace itself would be reaching outside its own contract.
+   * @param reason - which failure this was, so the fallback can say so accurately.
    */
-  private reportLost(): void {
+  private reportLost(reason: CarrierLossReason): void {
     try {
-      this.lostListener?.()
+      this.lostListener?.(reason)
     } catch {
       // The listener's failure is not the transport's problem.
     }
   }
 
   /** Register the "this carrier is gone" listener (see the interface's `onLost`). */
-  onLost(listener: () => void): void {
+  onLost(listener: (reason: CarrierLossReason) => void): void {
     this.lostListener = listener
   }
 
@@ -335,7 +338,11 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       // shell whose sidebar panel is an iframe, that is every call forever. Reported as "installing
       // the bridge made it worse than not installing it": the carrier was switched to one that
       // cannot work, with no path back to the one that does.
-      if (String(answer.error).includes('produced no page')) this.reportLost()
+      //
+      // `panel-unusable`, not `shell-exited`: the shell is alive and answered this very request. The
+      // fallback's message used to announce an exiting shell unconditionally, which told the user
+      // their desktop had crashed when it was running normally.
+      if (String(answer.error).includes('produced no page')) this.reportLost('panel-unusable')
       throw new Error(`dsh-builtin-browser: sidebar unavailable (${String(answer.error)})`)
     }
     const id = Number(answer.id)

@@ -472,6 +472,22 @@ export interface CarrierPage {
     readonly url: string;
     readonly title?: string;
 }
+/**
+ * Why a carrier reported that it can no longer be used.
+ *
+ * Two different failures reach the same fallback, and saying which one is the difference between a
+ * message a user can act on and one that misleads them:
+ *
+ * - `shell-exited`: the shell process behind the carrier is gone. Its published endpoint stops
+ *   being refreshed, which is the condition the fallback was originally written for.
+ * - `panel-unusable`: the shell is alive and answering, but its sidebar panel cannot provide a page
+ *   — on a shell that renders that panel as an iframe there is no webContents and no CDP endpoint,
+ *   so the carrier is undrivable rather than merely unready.
+ *
+ * The fallback announced the first of these unconditionally, so a `panel-unusable` fallback told
+ * the user their desktop shell had exited while it was running normally. Reported as such.
+ */
+export type CarrierLossReason = 'shell-exited' | 'panel-unusable';
 /** Request to open a URL: into the active tab or a new tab. */ export interface BrowserOpenRequest {
     /** The URL to open. */
     readonly url: string;

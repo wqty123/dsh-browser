@@ -610,6 +610,20 @@ async function handle(request) {  const op = String(request?.op ?? '')
 
 
 /**
+ * When the bridge instance currently running was constructed.
+ *
+ * Recorded once and republished unchanged, because a reader uses it to answer "how long has this
+ * bridge been up". Refreshing it on every keepalive made it mean "the last keepalive" instead: a
+ * reporter read two values 15 seconds apart, concluded the bridge had restarted, and only noticed
+ * otherwise because the port had not changed. Each module evaluation gets its own value, so a
+ * genuinely new instance is still reported as such.
+ */
+const instanceStartedAt = (() => {
+  const at = new Date().toISOString()
+  return () => at
+})()
+
+/**
  * Publish the endpoint, and keep it published.
  *
  * A single write at startup is not enough: two shells can overlap during a
@@ -624,7 +638,7 @@ function publishEndpoint(port, token) {
     port,
     token,
     pid: process.pid,
-    startedAt: new Date().toISOString(),
+    startedAt: instanceStartedAt(),
     updatedAt: new Date().toISOString(),
   }
   try {

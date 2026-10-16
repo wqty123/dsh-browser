@@ -16,6 +16,7 @@ import z from '@deepseek-ai/schemastery'
 import type { BrowserRuntime } from '../browser/runtime.js'
 import { ElectronBrowserProvider } from './provider.js'
 import type { ElectronBrowserViewHost } from './provider.js'
+import type { CarrierLossReason } from '../browser/types.js'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -165,27 +166,50 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    *
    * This is the half the startup retries never covered: a bridge that was alive at apply time and
    * exited later left every subsequent call dialling a port nobody owns, because the swap happened
-   * once and only in one direction. Reaching here means the shell is gone, so the choice made at
-   * startup is no longer a choice — the alternative to falling back is a browser surface that does
-   * nothing until DSH is restarted.
+   * once and only in one direction. Reaching here means the carrier cannot serve anything more, so
+   * the choice made at startup is no longer a choice — the alternative to falling back is a browser
+   * surface that does nothing until DSH is restarted.
+   *
+   * Two failures arrive here and the message must distinguish them. The first draft announced an
+   * exiting shell unconditionally, so a fallback caused by an undrivable sidebar panel told the
+   * user their desktop shell had exited while it was running normally.
    * @param adopted - the carrier that reported the loss, disposed once its replacement is in place.
+   * @param reason - which failure this was; see {@link CarrierLossReason}.
    */
-  const restoreSelfHosted = (adopted: ElectronBrowserViewHost): void => {
+  const restoreSelfHosted = (adopted: ElectronBrowserViewHost, reason: CarrierLossReason): void => {
     try {
       const restored = new RemoteElectronViewHost(defaultHostMainPath())
       unregister()
       unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(restored, providerConfig))
       ctx.logger?.warn?.(
-        'dsh-builtin-browser: the desktop shell backed the sidebar browser and has exited, so the '
-        + 'browser this plugin hosts itself takes over. Pages from the sidebar are gone with it; '
-        + 'open the page again.',
+        reason === 'shell-exited'
+          ? 'dsh-builtin-browser: the desktop shell backed the sidebar browser and has exited, so the '
+            + 'browser this plugin hosts itself takes over. Pages from the sidebar are gone with it; '
+            + 'open the page again.'
+          : 'dsh-builtin-browser: this desktop shell renders the sidebar browser panel in a way that '
+            + 'cannot be driven (no webContents, so no CDP endpoint), so the browser this plugin hosts '
+            + 'itself takes over. The shell is still running and nothing else is affected; the page '
+            + 'opens in this plugin\'s own window. Set browser.channel to another value to silence this.',
       )
     } catch (error) {
       // Nothing better is available: the adopted carrier is gone and a provider that throws is
       // worse than one that explains.
       ctx.logger?.warn?.(`dsh-builtin-browser: could not fall back to the self-hosted browser: ${String(error)}`)
     } finally {
-      adopted.dispose?.()
+      // Disposed on a LATER turn of the event loop, deliberately.
+      //
+      // Disposing synchronously here closes the bridge socket while the request that triggered this
+      // fallback is still settling, and the close rejects every call still waiting on that socket —
+      // so the caller received "bridge closed" instead of the reason it actually failed for. The
+      // fallback is what the user is supposed to be able to understand; replacing its explanation
+      // with one about the connection loses exactly the information this path exists to convey.
+      setImmediate(() => {
+        try {
+          adopted.dispose?.()
+        } catch {
+          // A carrier that cannot be released is not the caller's problem; the swap already happened.
+        }
+      })
     }
   }
 
@@ -208,7 +232,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // A borrowed carrier can lose the process behind it, and this is the only notification that
       // will ever arrive. Registering AFTER the swap succeeded means a listener can never fire
       // against a provider that was never installed.
-      host.onLost?.(() => { restoreSelfHosted(host) })
+      host.onLost?.(reason => { restoreSelfHosted(host, reason) })
       const previous = adoptedCarrier
       adoptedCarrier = host
       // Released AFTER the replacement is installed, so the surface is never without a provider.

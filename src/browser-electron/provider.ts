@@ -51,7 +51,7 @@ import type {
   ExportedCookie,
 } from '../browser/types.js'
 import { BrowserError } from '../browser/types.js'
-import type { CarrierPage } from '../browser/types.js'
+import type { CarrierPage, CarrierLossReason } from '../browser/types.js'
 
 /**
  * Page-context human-verification (CAPTCHA / bot-detection) detection. Runs
@@ -255,9 +255,14 @@ export interface ElectronBrowserViewHost {
    * startup, so the choice made then is final for the process's life — which is what a user
    * experiences as "the browser stopped working until I restart DSH". Optional: a carrier that
    * owns its own lifetime has nothing to report.
+   *
+   * The listener receives WHY, because the fallback's message has to match what happened: a shell
+   * that exited and a shell whose panel cannot provide a page both reach the same fallback, and
+   * announcing "the shell has exited" for the second tells the user their desktop crashed when it
+   * did not.
    * @param listener - called once, when the carrier concludes it is gone.
    */
-  onLost?(listener: () => void): void
+  onLost?(listener: (reason: CarrierLossReason) => void): void
   /**
    * Fold the carrier's presentation away while keeping the page alive.
    *

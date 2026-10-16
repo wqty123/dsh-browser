@@ -71,13 +71,16 @@ test('a carrier that borrows an outside process can report its loss', () => {
   // The interface point the fallback hangs on. Removing `onLost` from the bridge host while
   // leaving `adopt`'s listener would be a silent regression: the listener would simply never run.
   const host = readFileSync(new URL('../src/browser-electron/desktop-bridge-host.ts', import.meta.url), 'utf8')
-  assert.match(host, /onLost\(listener: \(\) => void\): void \{/, 'the bridge host accepts a listener')
-  assert.match(host, /new BridgeConnection\(endpoint, bridgeEndpointPath\(\), \(\) => this\.reportLost\(\)\)/,
-    'and wires it into the transport')
+  assert.match(host, /onLost\(listener: \(reason: CarrierLossReason\) => void\): void \{/,
+    'the bridge host accepts a listener carrying the reason')
+  // The transport can only conclude one thing — the shell stopped refreshing its endpoint — so it
+  // reports that, while the panel failure is reported where it is observed.
+  assert.match(host, /new BridgeConnection\(endpoint, bridgeEndpointPath\(\), \(\) => this\.reportLost\('shell-exited'\)\)/,
+    'and wires it into the transport, which reports an exiting shell')
 
   const entry = readFileSync(new URL('../src/browser-electron/entry.ts', import.meta.url), 'utf8')
-  assert.match(entry, /host\.onLost\?\.\(\(\) => \{ restoreSelfHosted\(host\) \}\)/,
+  assert.match(entry, /host\.onLost\?\.\(reason => \{ restoreSelfHosted\(host, reason\) \}\)/,
     'entry point reacts by restoring the self-hosted browser')
-  assert.match(entry, /const restoreSelfHosted = \(adopted: ElectronBrowserViewHost\): void => \{/,
+  assert.match(entry, /const restoreSelfHosted = \(adopted: ElectronBrowserViewHost, reason: CarrierLossReason\): void => \{/,
     'through a function that exists precisely for it')
 })

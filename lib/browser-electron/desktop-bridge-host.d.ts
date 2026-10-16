@@ -24,7 +24,7 @@
  */
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js';
 import type { BrowserUserAction } from './provider.js';
-import type { CarrierPage } from '../browser/types.js';
+import type { CarrierPage, CarrierLossReason } from '../browser/types.js';
 /** Absolute path of the endpoint file the shell writes. */
 export declare function bridgeEndpointPath(): string;
 /**
@@ -102,14 +102,15 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      */
     private constructor();
     /**
-     * Called by the transport once the shell behind it is gone.
+     * Called when this carrier concludes it cannot serve anything more.
      *
      * Forwarded rather than acted on here: only the entry point owns the swap back to the self-hosted
      * browser, and a host that tried to replace itself would be reaching outside its own contract.
+     * @param reason - which failure this was, so the fallback can say so accurately.
      */
     private reportLost;
     /** Register the "this carrier is gone" listener (see the interface's `onLost`). */
-    onLost(listener: () => void): void;
+    onLost(listener: (reason: CarrierLossReason) => void): void;
     /**
      * Find a usable desktop bridge, if this surface has one.
      *
