@@ -4,6 +4,52 @@
 
 ---
 
+# 第四十七轮(2026-10-16,侧栏面板是 iframe 的外壳:装上 bridge 反而把浏览器弄坏)
+
+报告者的现象一句话概括:**不装 bridge 时自托管载体工作正常;装上 bridge 反而彻底不能用** —— 载体被换成侧栏,而侧栏在那个外壳上给不出 guest,且没有任何回退路径。他的排查给出了两条独立的硬约束与七处证据(含对照实验与完整预算观察)。
+
+## 一、为什么这个外壳的侧栏不可驱动
+
+官方侧栏浏览器面板只在**外壳同时满足**两个条件时才是 `<webview>`:
+
+1. `preload` 暴露 `dshDesktop.browser`(而不只是 `protocolVersion`);
+2. 外壳窗口开启 `webviewTag`。
+
+**DSH Desktop 2.0.17 两者皆无**。报告者给出的证据链:主窗口 preload 为 `lib/preload.cjs`,其中 `exposeInMainWorld("dshDesktop", Object.freeze({ protocolVersion: 1 }))`;官方面板据此二选一(`carrier?.protocolVersion === 1 ? carrier.browser : void 0` → `undefined`),走 `createIframePage`;而窗口的 `webPreferences` 里 `webviewTag: false`。**carrier 是 `Object.freeze` 的,页面脚本也补不上 `browser` 字段。**
+
+两条各自独立成立,所以这不是配置问题。**iframe 没有 webContents、没有 `getWebContentsId()`、没有 CDP 端点** —— 而本插件的 34 个工具全部建立在 CDP 之上,所以不是"暂时取不到",是原理上够不着。
+
+**本机无法复现**:这台机器的桌面端是另一种布局(`resources/app.asar` 存在、无 `preload.cjs`、desktop profile 里没有装 `dsh-client-ui-sidebar-browser`)。因此这一轮的依据是**报告者给出的行号与代码片段**,以及我们这侧可以独立核实的三处(见下)。
+
+## 二、修法一:接管之前先读面板形态
+
+面板自己带标记:官方客户端在两种呈现上都写 `element.dataset.sidebarBrowserFrame = "webview" | "iframe"`。插件从这一轮起在 `list` 探活时**一并返回该属性**,`discover()` 判到 `iframe` 就**不接管**,自然停在自托管。
+
+判据被刻意收窄:`none`(面板尚未建立)与 `unknown`(读不到)**都不算拒绝** —— 前者是每个会话首次打开时的正常状态,后者只说明这次探测跑早了。
+
+**形态的读取不带会话**:两个条件都在**窗口创建时**固定,答案不随会话变化。这一点同时保住了一条既有不变量 —— **探活必须保持 owner-less,因为它不代表任何会话**。(第一版实现传了 `sessionId`,被 `tests/bridge-boundary.test.mjs` 的"探活是唯一 owner-less 的 list 调用"当场拦下。)
+
+## 三、修法二:让"面板给不出 guest"也能触发回退
+
+这是"装桥更糟"的直接原因。`ensureSidebar` 超时后抛 `produced no page`,而 `isGuestGone()` 把它归为"值得换一个 guest 重试一次" —— **重试的仍是同一个不可用的载体**。真正能救场的 `restoreSelfHosted` 只由 `host.onLost?.()` 触发,而它挂在 `BridgeConnection.notifyLost()` 上,**只有"外壳进程退出、端点停止刷新"才会到达**。外壳活着、面板却给不出 guest,这个组合不在任何回退条件里,于是每次调用都失败,重启后又选中侧栏继续失败。
+
+修法:`ensureSidebar` 的失败若指名 `produced no page`,即视为载体丢失,走同一条回退路径 —— 机制本来就有,只是触发面太窄。
+
+## 四、修法三:文档写明前置条件
+
+`docs/limitations.md` 的"载体行为"新增这两条前置条件,并写明 DSH Desktop 2.0.17 两者皆无、以及 0.4.10 起的行为是"能用但多一个窗口"。此前 README 首页的"装好即用,载体自动选择"与桌面端小节的"bridge 不是必做项"叠加,会让人以为 `dsh plugin add` 之后就应当看到侧栏。
+
+## 五、这一轮里被抓到的两个自己的错误
+
+两条既有守护测试当场拦下了我第一版实现里的错误,值得记下来:
+
+1. **`the liveness probe is the only owner-less list call`** —— 我给探活传了 `sessionId` 以便"读那个会话的面板",破坏了"探活无主"这条不变量。修正后形态改从外壳级读取,不涉及会话。
+2. **`every reply value that drives a branch has a fallback`** —— 我写的是 `answer.frame === 'iframe'`,而对方可能不给这个字段。改成 `String(answer.frame ?? 'unknown')`。
+
+**测试**:268 → 272(新增 4 条:`tests/sidebar-frame-kind.test.mjs`)。`tsc` 与 `node --check` 干净。
+
+---
+
 # 第四十六轮(2026-10-16,desktop-bridge/install.mjs 的三处缺陷:回滚毁掉还原点、默认路径过期、提示语误导)
 
 报告者逐条给了行号、字节数与复现清单。**第 1 条最严重:它让回滚在正常情形下执行"销毁还原点"而不是"还原"。**

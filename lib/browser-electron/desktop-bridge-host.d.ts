@@ -118,6 +118,16 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * @returns the host, or undefined when no bridge is available.
      */
     static discover(sessionId?: string): Promise<DesktopBridgeViewHost | undefined>;
+    /**
+     * Whether the last discovery refused a bridge because its sidebar panel is an iframe.
+     *
+     * Recorded so the entry point can say WHY the plugin is self-hosting on a shell that does have a
+     * bridge. Otherwise the user sees a second browser window and no explanation, on a machine where
+     * they just followed instructions to install the bridge.
+     */
+    private static refuseIframe;
+    /** Whether discovery refused a bridge for an undrivable sidebar panel (see {@link discover}). */
+    static refusedIframePanel(): boolean;
     /** Whether this host can back views: the bridge already answered `list`. */
     available(): boolean;
     /**

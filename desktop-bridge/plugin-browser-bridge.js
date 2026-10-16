@@ -319,9 +319,49 @@ function guestShows(id, url) {
   }
 }
 
+/**
+ * Which kind of frame the sidebar browser panel is built from, on this shell.
+ *
+ * The official panel renders as a `<webview>` only where the shell exposes `dshDesktop.browser`
+ * AND enables `webviewTag`; where it does neither it renders as an `<iframe>`. An iframe has no
+ * webContents, no `getWebContentsId()` and therefore no CDP endpoint — and every tool this plugin
+ * offers is built on CDP. So a bridge adopted against one cannot work, and reports a failure on
+ * every call instead of falling back to a carrier that does.
+ *
+ * Measured on DSH Desktop 2.0.17: `lib/preload.cjs` exposes only `protocolVersion`, and the shell
+ * window sets `webviewTag: false`. Neither is something the plugin can repair, and both are visible
+ * from the renderer — which is why this is read rather than inferred from a timeout 20 seconds
+ * later.
+ *
+ * Read WITHOUT a conversation, because the answer is a property of the shell rather than of any
+ * panel: both conditions are fixed when the window is created. That also keeps the liveness probe
+ * owner-less, which it must stay — it is not acting for anyone.
+ *
+ * @param shellId - the shell window's webContents id, when one is visible.
+ * @returns 'webview' | 'iframe' | 'none' (no panel yet) | 'unknown' (could not be read).
+ */
+async function sidebarFrameKind(shellId) {
+  if (typeof shellId !== 'number') return 'unknown'
+  try {
+    // `executeJavaScript`, not the debugger: the same measured reason as every other shell-side
+    // read — an attachment to the shell WINDOW hangs while the same call answers immediately.
+    const shell = guestById(shellId)
+    if (shell === undefined || shell.isDestroyed()) return 'unknown'
+    const value = await shell.executeJavaScript(`(() => {
+      const el = document.querySelector('[data-sidebar-browser-frame]');
+      if (el === null || el === undefined) return 'none';
+      return el.getAttribute('data-sidebar-browser-frame') || 'unknown';
+    })()`, true)
+    return typeof value === 'string' && value !== '' ? value : 'unknown'
+  } catch {
+    // An unreadable panel is not evidence of an iframe: 'unknown' keeps discovery from refusing a
+    // carrier merely because this probe ran before the panel existed.
+    return 'unknown'
+  }
+}
+
 /** Handle one JSON request line; every answer is a JSON line too. */
-async function handle(request) {
-  const op = String(request?.op ?? '')
+async function handle(request) {  const op = String(request?.op ?? '')
   // Who is asking. Declared once, for every op, because the first attempt at this put `owner` in
   // the allocation path only and the reuse path — which every later call takes — stayed blind,
   // so one session was handed another's page and counted another's tabs as its own.
@@ -337,7 +377,13 @@ async function handle(request) {
     // title are that session's business; handing them over is how a session came to list pages it
     // never opened. The shell window is always reported: it is what every op drives.
     const mineOrFree = all.filter(g => g.type !== 'webview' || !claims.has(g.id) || claims.get(g.id) === owner)
-    return { ok: true, guests: mineOrFree, sidebar: mineOrFree.filter(g => g.type === 'webview') }
+    const shell = all.find(g => g.type !== 'webview')
+    return {
+      ok: true,
+      guests: mineOrFree,
+      sidebar: mineOrFree.filter(g => g.type === 'webview'),
+      frame: await sidebarFrameKind(shell?.id, owner),
+    }
   }
   if (op === 'cdp') {
     const id = Number(request.id)

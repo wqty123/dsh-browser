@@ -32,6 +32,14 @@
 
 ## 载体行为
 
+- **侧栏载体有前置条件**,不是装上 bridge 就成立。官方侧栏浏览器面板只在**外壳同时满足**两个条件时才是 `<webview>`:
+  1. `preload` 暴露 `dshDesktop.browser`(而不只是 `protocolVersion`);
+  2. 外壳窗口开启 `webviewTag`。
+
+  **两个条件缺任一个,面板就是 `<iframe>`** —— 没有 webContents、没有 `getWebContentsId()`、没有 CDP 端点,而本插件的全部工具都建立在 CDP 之上。**DSH Desktop 2.0.17 两者皆无**(`lib/preload.cjs` 只暴露 `protocolVersion`;窗口设置里 `webviewTag: false`),所以那个版本上的侧栏面板不可驱动。
+
+  插件从 0.4.10 起**在接管之前先读面板形态**(面板自己带的 `data-sidebar-browser-frame` 属性),判到 `iframe` 就不接管,直接用自托管载体,并在日志里说明原因。**结果是"能用但多一个窗口",而不是"装完就坏"。**
+
 - **侧栏载体不上报"用户操作"事件**:人在那个页面里点击是外壳自己的事件,而 bridge 没有用于回报它的操作。因此依赖该事件的功能(如自定义的接管提示)在桌面端侧栏下不会触发;换到自托管载体则可以。
 - **本机 Chrome / Edge 载体使用插件自己的 profile**:插件用它自己的用户数据目录启动浏览器(`$DSH_HOME/dsh-builtin-browser-host/<chrome|edge>-profile`),所以你日常浏览器里的书签、扩展与登录态**不会自动继承** —— 这是刻意的,避免插件操作与你的个人会话混在一起;登录态是否跨重启保留由 `cookies.persist` 决定。
 - 页面弹窗(`window.open` / `target=_blank`)不再覆盖当前视图:HTTP(S) 弹窗会在同一会话窗口**新开一个标签页**并计入历史,原页面与 opener 上下文保留;非 HTTP(S) 弹窗(空 URL 弹窗承接、`mailto:`、自定义协议)仍**放行原生窗口**,交给系统处理 —— 这类弹窗不纳入会话模型。

@@ -171,7 +171,26 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       const probe = new BridgeConnection(endpoint, bridgeEndpointPath())
       try {
         const answer = await probe.call({ op: 'list' }, 5_000)
-        return answer.ok === true ? new DesktopBridgeViewHost(endpoint, sessionId) : undefined
+        if (answer.ok !== true) return undefined
+        // Refuse a panel this plugin cannot drive, before adopting it.
+        //
+        // The sidebar browser renders as a <webview> only where the shell exposes
+        // `dshDesktop.browser` and enables `webviewTag`. Where it renders as an <iframe> there is
+        // no webContents, no `getWebContentsId()` and no CDP endpoint — and every tool here is
+        // built on CDP, so adopting it means failing every call, with no path back to a carrier
+        // that works. Reported on DSH Desktop 2.0.17 with both conditions measured.
+        //
+        // Read here WITHOUT an owner on purpose, because the question is not about a conversation:
+        // whether the panel is a webview is decided by the shell's preload and window options, so
+        // it is the same answer for every conversation and needs no session context.
+        //
+        // `none` and `unknown` are NOT refusals: a panel that does not exist yet is created by the
+        // first open, and a probe that could not read the attribute has learned nothing.
+        if (String(answer.frame ?? 'unknown') === 'iframe') {
+          DesktopBridgeViewHost.refuseIframe = true
+          return undefined
+        }
+        return new DesktopBridgeViewHost(endpoint, sessionId)
       } finally {
         probe.close()
       }
@@ -179,6 +198,20 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       // Dead endpoint or an older bridge: self-hosting remains the answer.
       return undefined
     }
+  }
+
+  /**
+   * Whether the last discovery refused a bridge because its sidebar panel is an iframe.
+   *
+   * Recorded so the entry point can say WHY the plugin is self-hosting on a shell that does have a
+   * bridge. Otherwise the user sees a second browser window and no explanation, on a machine where
+   * they just followed instructions to install the bridge.
+   */
+  private static refuseIframe = false
+
+  /** Whether discovery refused a bridge for an undrivable sidebar panel (see {@link discover}). */
+  static refusedIframePanel(): boolean {
+    return this.refuseIframe
   }
 
   /** Whether this host can back views: the bridge already answered `list`. */
@@ -223,7 +256,16 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       owner,
       ...url !== undefined && url !== '' ? { url } : {},
     }, 30_000)
-    if (answer.ok !== true) throw new Error(`dsh-builtin-browser: sidebar unavailable (${String(answer.error)})`)
+    if (answer.ok !== true) {
+      // A bridge that answers but cannot produce a page is as unusable as one that has exited, and
+      // the difference matters here: `onLost` is what returns the surface to the self-hosted
+      // browser. Without this the same failure repeats on every call until DSH is restarted — on a
+      // shell whose sidebar panel is an iframe, that is every call forever. Reported as "installing
+      // the bridge made it worse than not installing it": the carrier was switched to one that
+      // cannot work, with no path back to the one that does.
+      if (String(answer.error).includes('produced no page')) this.reportLost()
+      throw new Error(`dsh-builtin-browser: sidebar unavailable (${String(answer.error)})`)
+    }
     const id = Number(answer.id)
     if (!Number.isFinite(id) || id <= 0) {
       throw new Error('dsh-builtin-browser: the sidebar reported no browser page for this conversation')
