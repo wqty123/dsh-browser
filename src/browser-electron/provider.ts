@@ -413,6 +413,15 @@ export interface CdpNavigateParams {
  * CDP method/params for `Input.dispatchMouseEvent`: a pointer move, or one half
  * of a click's press+release pair. `button`/`clickCount` belong to the press and
  * release halves; a move carries only the position.
+ *
+ * `buttons` is a BITMASK of what is held down at the moment of the event, and it is not the same
+ * field as `button` — `button` says which one this event is about, `buttons` says which ones are
+ * down. Chromium needs both to recognise a synthesized press as a real button press: with
+ * `buttons` omitted (0), the event still reaches the page and a `click` listener still fires, but
+ * the element's DEFAULT ACTION does not run. Measured on the sidebar carrier: a click on an
+ * anchor sent `mousedown`/`mouseup`/`click` to the page with `isTrusted: true` and
+ * `defaultPrevented: false`, and the browser did not follow the link — including for an anchor
+ * injected by the test itself, so the page was not responsible.
  */
 export interface CdpMouseParams {
   readonly type: 'mouseMoved' | 'mousePressed' | 'mouseReleased'
@@ -420,6 +429,8 @@ export interface CdpMouseParams {
   readonly y: number
   readonly button?: 'left'
   readonly clickCount?: number
+  /** Buttons held during the event: 1 = primary down. A move carries 0. */
+  readonly buttons?: number
 }
 
 /** CDP method/params for `Input.insertText`. */
@@ -1747,7 +1758,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // landed because the first had quietly established the target. Move the
     // pointer first so a click is self-contained.
     try {
-      await send({ type: 'mouseMoved', x, y } satisfies CdpMouseParams, 'move')
+      await send({ type: 'mouseMoved', x, y, buttons: 0 } satisfies CdpMouseParams, 'move')
     } catch (error) {
       throw new BrowserError(`browser: click failed: ${String(error)}`, 'BROWSER_CLICK_FAILED', { cause: error })
     }
@@ -1767,12 +1778,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
           x,
           y,
           button: 'left',
+          buttons: 0,
           clickCount: 1,
         } satisfies CdpMouseParams)
         .catch(() => {})
     }
     try {
-      await send({ type: 'mousePressed', x, y, button: 'left', clickCount: 1 }, 'press')
+      await send({ type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 }, 'press')
     } catch (error) {
       // The press may still land late; release best-effort so the button is
       // never left in a stuck pressed state.
@@ -1780,7 +1792,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       throw new BrowserError(`browser: click failed: ${String(error)}`, 'BROWSER_CLICK_FAILED', { cause: error })
     }
     try {
-      await send({ type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, 'release')
+      await send({ type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 }, 'release')
     } catch (error) {
       // The press already landed; retry the release so the button is not
       // left pressed before surfacing the failure.

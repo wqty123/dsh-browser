@@ -303,6 +303,15 @@ export interface CdpNavigateParams {
  * CDP method/params for `Input.dispatchMouseEvent`: a pointer move, or one half
  * of a click's press+release pair. `button`/`clickCount` belong to the press and
  * release halves; a move carries only the position.
+ *
+ * `buttons` is a BITMASK of what is held down at the moment of the event, and it is not the same
+ * field as `button` — `button` says which one this event is about, `buttons` says which ones are
+ * down. Chromium needs both to recognise a synthesized press as a real button press: with
+ * `buttons` omitted (0), the event still reaches the page and a `click` listener still fires, but
+ * the element's DEFAULT ACTION does not run. Measured on the sidebar carrier: a click on an
+ * anchor sent `mousedown`/`mouseup`/`click` to the page with `isTrusted: true` and
+ * `defaultPrevented: false`, and the browser did not follow the link — including for an anchor
+ * injected by the test itself, so the page was not responsible.
  */
 export interface CdpMouseParams {
     readonly type: 'mouseMoved' | 'mousePressed' | 'mouseReleased';
@@ -310,6 +319,8 @@ export interface CdpMouseParams {
     readonly y: number;
     readonly button?: 'left';
     readonly clickCount?: number;
+    /** Buttons held during the event: 1 = primary down. A move carries 0. */
+    readonly buttons?: number;
 }
 /** CDP method/params for `Input.insertText`. */
 export interface CdpInsertTextParams {
