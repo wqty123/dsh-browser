@@ -4,6 +4,61 @@
 
 ---
 
+# 第四十六轮(2026-10-16,desktop-bridge/install.mjs 的三处缺陷:回滚毁掉还原点、默认路径过期、提示语误导)
+
+报告者逐条给了行号、字节数与复现清单。**第 1 条最严重:它让回滚在正常情形下执行"销毁还原点"而不是"还原"。**
+
+## 一、`--revert` 在正常安装后不还原,并把原始备份覆盖掉
+
+**判据是反的**。原代码:
+
+```js
+const identical = backedUp.equals(current)
+if (!identical && stillHasOurMarker && !backupHasOurMarker) {
+  writeFileSync(backupPath, current)   // 刷新备份(销毁原始)
+  reverted = true                       // 且以 0 退出
+} else if (!identical && !stillHasOurMarker) { /* 跳过 */ }
+else { copyFileSync(backupPath, mainPath) }   // 真正的还原
+```
+
+**刚装完的稳定状态恰好满足第一个条件**:备份取于补丁**之前**(无 marker),当前文件是补丁**之后**(有 marker),两者必然不同。所以**正常回滚必定走进"刷新备份"分支** —— `main.js` 没还原,原始备份(213913 B)被覆盖成补丁版(215576 B),第二次 `--revert` 更无从下手。而 `reverted = true` 让脚本以退出码 0 结束并打印成功语义,调用方无法察觉回滚没有发生。
+
+注释里要防的是 `dsh-purge` 那类第三方补丁,但 `stillHasOurMarker && !backupHasOurMarker` **无法区分"第三方补丁过"与"我们刚补丁过"**。
+
+**修法**:安装是在末尾 `export {};` 之前插入 `SNIPPET`,因此反向切除是精确可逆的。判据改为**"切除我们的片段之后是否恰好等于备份"**(`withoutOurSnippet`),不再需要任何启发式:
+
+- 成立 → 还原,`reverted = true`;
+- 当前文件无我们的 marker 且与备份不同 → 别人改过,跳过(原逻辑,保留);
+- **有我们的 marker 但切除后不等于备份** → 中间确有别的改动 → **不写任何文件**,备份保持不动,并说明原因;
+- 与备份相同 → 无需还原。
+
+第 3 条分支是新加的:原实现里这个情形会走进"刷新备份",而那是**用猜测覆盖唯一的还原依据**。
+
+## 二、`DEFAULT_INSTALL` 指向不存在的目录名
+
+原为 `%LOCALAPPDATA%\Programs\DeepSeek Harness`,而当前 DSH Desktop 的安装目录是 `...\Programs\DSH Desktop` —— 于是 README 与用户指南里**不带参数的裸命令必定失败**。两个名字在不同构建上都出现过(本机即 `DeepSeek Harness`),所以固定猜测不可靠。
+
+**修法**:改为按**形状**探测 —— `resources/app/lib/main.js` 或 `resources/app.asar` 存在即为一个安装;先试 `DSH Desktop` 与 `DeepSeek Harness` 两个已知名,再扫描 `Programs` 下的目录,全部落空才回退到历史默认值(并在错误信息里给出具体路径)。
+
+## 三、unpacked 布局下提示删除正在使用的目录
+
+回滚结束时无条件打印 `note: <resources/app> is inert while app.asar exists; delete it to reclaim ~350 MB`。**unpacked 布局里 `app.asar` 并不存在,`resources/app` 正是 Electron 实际加载的目录** —— 这句话会让用户删掉应用本体。
+
+**修法**:按已有的 `packedLayout` 判定后再打印。
+
+## 四、验证方式:先确认断言能区分修复前后
+
+本节的价值不在于"新代码通过测试",而在于**同一组断言在修复前的脚本上失败**。
+
+- 回滚往返:取 `git show HEAD:desktop-bridge/install.mjs` 在沙箱里跑同一组断言 —— 旧脚本 `revert restored main.js: false`、`backup still the original: false`(正是报告描述的两条);新脚本两项皆真。
+- 默认探测:把 `LOCALAPPDATA` 指向一个只含 `Programs\Some Other Name\resources\app\lib\main.js` 的假目录 —— 旧脚本以 `not a DSH Desktop install` 退出 1,新脚本找到并备份。
+
+**一个恒真的断言不能构成证据**,这一点在第 44 轮已经付过代价(守护测试漏掉含数字的工具名却"通过")。
+
+**测试**:264 → 268(新增 4 条:`tests/install-revert.test.mjs`,驱动真实脚本对真实目录形状做逐字节比对)。`tsc` 干净。`node --check` 干净。
+
+---
+
 # 第四十五轮(2026-10-15,系统浏览器载体的启动生命周期:多开空白页 + 重启后孤儿)
 
 报告者给了一份很硬的证据链 —— CDP `/json/list` 每 200ms 采样的时序、五处建议改法、以及**一条自我更正**(他撤回的第一条建议:去掉启动参数里的 URL 会让 Chrome 变成两个窗口,更糟)。两个问题都发生"把浏览器拉起来"的那一刻,除此之外毫无关系。

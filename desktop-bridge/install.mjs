@@ -61,10 +61,56 @@
  * Default path: %LOCALAPPDATA%\Programs\DeepSeek Harness
  * Pass --revert to restore the pre-bridge state instead.
  */
-import { copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-const DEFAULT_INSTALL = join(process.env.LOCALAPPDATA ?? '', 'Programs', 'DeepSeek Harness')
+const DEFAULT_INSTALL = findDefaultInstall()
+/**
+ * The desktop install to patch when none is given on the command line.
+ *
+ * Not a fixed name: the product directory is `DeepSeek Harness` on some builds and `DSH Desktop`
+ * on others, and the README's bare `node desktop-bridge/install.mjs` therefore fails outright
+ * when the guess is wrong. The shape that identifies an install — `resources/app/lib/main.js` or
+ * `resources/app.asar` — is stable across both, so that is what is probed.
+ * @returns the install directory, or the historical default when nothing matches.
+ */
+function findDefaultInstall() {
+  const programs = join(process.env.LOCALAPPDATA ?? '', 'Programs')
+  const looksInstalled = candidate => existsSync(join(candidate, 'resources', 'app', 'lib', 'main.js'))
+    || existsSync(join(candidate, 'resources', 'app.asar'))
+  for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
+    const candidate = join(programs, named)
+    if (looksInstalled(candidate)) return candidate
+  }
+  try {
+    for (const entry of readdirSync(programs, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const candidate = join(programs, entry.name)
+      if (looksInstalled(candidate)) return candidate
+    }
+  } catch {
+    // No Programs directory, or it cannot be read: fall through so the error below names a
+    // concrete path instead of throwing before the check that explains what to pass.
+  }
+  return join(programs, 'DeepSeek Harness')
+}
+
+/**
+ * Remove our patch from a main.js body, or undefined when it is not present verbatim.
+ *
+ * Exact rather than heuristic: installation inserts SNIPPET immediately before the trailing
+ * `export {};`, so removing that same string reproduces the original byte-for-byte. A snippet
+ * from a different version therefore reads as "not cleanly ours" and reaches the branch that asks
+ * a human — the correct outcome for a file this script did not patch.
+ * @param text - the current main.js body.
+ * @returns the body with our snippet cut out, or undefined when the snippet is absent.
+ */
+function withoutOurSnippet(text) {
+  const at = text.indexOf(SNIPPET)
+  if (at === -1) return undefined
+  return text.slice(0, at) + text.slice(at + SNIPPET.length)
+}
+
 const args = process.argv.slice(2)
 const revert = args.includes('--revert')
 const installRoot = args.find(arg => !arg.startsWith('--')) ?? DEFAULT_INSTALL
@@ -311,29 +357,36 @@ if (revert) {
       current = undefined
     }
     const identical = backedUp !== undefined && current !== undefined && backedUp.equals(current)
-    const stillHasOurMarker = current !== undefined && current.includes(MARKER)
-    // A backup taken BEFORE the file was patched by anything else is not a clean restore
-    // point: reverting to it discards those patches. The marker test alone does not catch
-    // this, because the current file legitimately carries our marker — that is exactly what
-    // this script put there — while the backup predates a patch by another tool.
-    // `dsh-purge` patches this same file, so on this machine that is not hypothetical.
-    const backupHasOurMarker = backedUp !== undefined && backedUp.includes(MARKER)
-    if (!identical && stillHasOurMarker && !backupHasOurMarker) {
-      console.error(`WARNING: ${backupPath} predates the bridge patch, so it is not a clean`)
-      console.error(`  restore point for ${mainPath}. Reverting would also discard anything`)
-      console.error('  patched in between (dsh-purge patches this same file). Refreshing the')
-      console.error('  backup from the current file instead, so a later --revert is safe.')
-      writeFileSync(backupPath, current ?? Buffer.alloc(0))
+    // The unambiguous test for "this file is the backup plus our patch and nothing else": remove
+    // our snippet and see whether what remains IS the backup.
+    //
+    // The test this replaces asked whether the current file carries our marker while the backup
+    // does not — which is true of EVERY freshly installed file, because the backup is taken before
+    // patching. So a normal `--revert` took the "something else patched this" branch, refreshed
+    // the backup from the patched file, and destroyed the restore point it had just declined to
+    // use — while setting `reverted`, so the script exited 0 and said nothing was wrong.
+    const pristine = current === undefined ? undefined : withoutOurSnippet(current.toString('utf8'))
+    const isCleanlyOurs = pristine !== undefined && backedUp !== undefined
+      && pristine === backedUp.toString('utf8')
+    if (isCleanlyOurs) {
+      copyFileSync(backupPath, mainPath)
+      console.log(`restored ${mainPath} from ${backupPath}`)
       reverted = true
-    } else if (!identical && !stillHasOurMarker) {
+    } else if (!identical && current !== undefined && !current.includes(MARKER)) {
       console.error(`WARNING: ${mainPath} has changed since the backup was taken, and it does`)
       console.error('  not contain the bridge import either — something else has edited it')
       console.error('  (a desktop upgrade, or another patch tool). Restoring the backup would')
       console.error(`  discard that. The backup is at ${backupPath}; restore it by hand if that`)
       console.error('  is what you want. Skipping this file.')
+    } else if (!identical) {
+      // It carries our marker but does not reduce to the backup: something was patched around
+      // our snippet. The backup is left untouched, because guessing here is what destroyed it.
+      console.error(`WARNING: ${mainPath} carries the bridge import, but removing it does not`)
+      console.error(`  reproduce ${backupPath} — another tool has patched this file too`)
+      console.error('  (dsh-purge patches it). Reverting would discard those changes, so nothing')
+      console.error('  was written. Restore by hand from the backup if that is what you want.')
     } else {
-      copyFileSync(backupPath, mainPath)
-      console.log(`restored ${mainPath} from ${backupPath}`)
+      console.log(`${mainPath} already matches the backup; nothing to restore`)
       reverted = true
     }
   }
@@ -351,7 +404,12 @@ if (revert) {
     console.error(`nothing to revert in ${installRoot}`)
     process.exit(1)
   }
-  console.log(`note: ${appDir} is inert while app.asar exists; delete it to reclaim ~350 MB`)
+  // Only where an archive actually exists. In the unpacked layout `resources/app` IS what Electron
+  // loads, so telling the user it is inert and safe to delete would invite them to remove the
+  // application.
+  if (packedLayout) {
+    console.log(`note: ${appDir} is inert while app.asar exists; delete it to reclaim ~350 MB`)
+  }
   process.exit(0)
 }
 
