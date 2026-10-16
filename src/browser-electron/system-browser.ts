@@ -188,6 +188,19 @@ const INSTALL_LOCATIONS: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.P
  * @returns the path with %NAME% references replaced, or the entry unchanged when unknown.
  */
 /**
+ * Whether a browser's self-reported product name is one this carrier could have launched.
+ *
+ * `edg`, not `edge`: Edge reports itself as `Edg/155.0.4283.45`, both over HTTP and over the
+ * protocol. Testing for the full word rejected a live Edge that had just been started, so the
+ * call failed with the hand-off error this check was added to prevent — while the browser was
+ * running the whole time, answering on its own port.
+ * @param product - the product string a browser reports about itself.
+ */
+function isBrowserProduct(product: unknown): boolean {
+  return typeof product === 'string' && /chrome|chromium|edg/i.test(product)
+}
+
+/**
  * Whether a target URL is one of the blanks a browser opens by itself.
  *
  * Deliberately narrow: `about:blank` and Chrome's own new-tab pages, and nothing else. A wider
@@ -619,13 +632,13 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       if (typeof version.webSocketDebuggerUrl !== 'string') return undefined
       // The port number alone proves nothing — it can be reused once the browser that owned it
       // exits. The endpoint's own answer is the evidence, and it has to name a browser.
-      if (typeof version.Browser !== 'string' || !/chrome|chromium|edge/i.test(version.Browser)) return undefined
+      if (!isBrowserProduct(version.Browser)) return undefined
       const client = new CdpClient(version.webSocketDebuggerUrl)
       await client.whenReady()
       // Asked through the protocol too, so a websocket that merely accepts connections is not
       // mistaken for a browser that answers.
       const info = await client.send('Browser.getVersion', {}) as { product?: string }
-      if (typeof info?.product !== 'string' || !/chrome|chromium|edge/i.test(info.product)) {
+      if (!isBrowserProduct(info?.product)) {
         client.close()
         return undefined
       }

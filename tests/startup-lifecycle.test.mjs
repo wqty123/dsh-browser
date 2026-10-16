@@ -40,9 +40,14 @@ test('a browser left running by a previous DSH is adopted, not raced', async () 
   const adopt = body('adoptRunningBrowser')
   // A port number proves nothing on its own — it can be reused once the browser that owned it
   // exits. The endpoint has to identify itself, twice, through two different channels.
-  assert.match(adopt, /version\.Browser/, 'the HTTP endpoint is asked to name itself')
+  assert.match(adopt, /isBrowserProduct\(version\.Browser\)/, 'the HTTP endpoint is asked to name itself')
   assert.match(adopt, /Browser\.getVersion/, 'and the protocol is asked too')
-  assert.match(adopt, /chrome\|chromium\|edge/i, 'and the answer must name a browser')
+  assert.match(adopt, /isBrowserProduct\(info\?\.product\)/, 'and its answer is checked the same way')
+
+  // The product test must accept what Edge actually reports. `Edg/155.0.4283.45` does not contain
+  // the word "edge", and a check written for the word rejected a live Edge the plugin had just
+  // started — so every attempt failed with the hand-off error this code exists to prevent.
+  assert.match(source(), /\/chrome\|chromium\|edg\/i/, 'the product test matches Edg, not just edge')
 })
 
 test('a hand-off reads as "the browser is already there", not as a failure', () => {
