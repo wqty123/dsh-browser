@@ -30,6 +30,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
 import type { BrowserUserAction } from './provider.js'
+import type { CarrierPage } from '../browser/types.js'
 
 
 /** Absolute path of the endpoint file the shell writes. */
@@ -217,6 +218,57 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   /** Whether this host can back views: the bridge already answered `list`. */
   available(): boolean {
     return true
+  }
+
+  /**
+   * Every page this conversation's sidebar panel currently holds.
+   *
+   * The shell owns page creation inside the panel: a link the user or the agent clicks may open a
+   * new page, and nothing tells the provider. Those pages are real — they are what the human sees
+   * — but without this the tab model reports only the ones the provider created, so the rest are
+   * invisible to `dsh_browser_list_tabs` and unclosable through `dsh_browser_close_tab`.
+   *
+   * The bridge's `list` already answers with the sidebar guests, which is the same information, so
+   * this asks for it rather than reaching into the shell again.
+   * @returns the panel's pages, or an empty list when the bridge cannot answer.
+   */
+  async listPages(): Promise<readonly CarrierPage[]> {
+    try {
+      const answer = await this.connection.call({ op: 'list', owner: this.owner }, 5_000)
+      const guests = Array.isArray(answer.sidebar) ? answer.sidebar : []
+      return guests
+        .filter((guest): guest is { id: number; url?: unknown } => typeof guest?.id === 'number')
+        .map(guest => ({
+          id: String(guest.id),
+          url: typeof guest.url === 'string' ? guest.url : '',
+        }))
+    } catch {
+      // A bridge that cannot answer has a real problem, and the next command reports it. Failing
+      // the tab LIST here would make a listing worse than the driving it exists to describe.
+      return []
+    }
+  }
+
+  /**
+   * Close one sidebar page by the id {@link listPages} reported.
+   *
+   * The bridge closes sidebar pages by TITLE, and only the ones the caller owns — that is what
+   * stopped one conversation's teardown from destroying another's page. So the title is looked up
+   * through the same listing, and a page that no longer appears is treated as already gone rather
+   * than as an error: the caller asked for it to be closed, and it is.
+   * @param id - the sidebar guest id, as a string.
+   */
+  async closePage(id: string): Promise<void> {
+    const numeric = Number(id)
+    if (!Number.isFinite(numeric)) throw new Error(`not a sidebar page id: ${id}`)
+    const answer = await this.connection.call({ op: 'list', owner: this.owner }, 5_000)
+    const guests = Array.isArray(answer.sidebar) ? answer.sidebar : []
+    const title = guests
+      .filter((guest): guest is { id: number; title?: unknown } => Number(guest?.id) === numeric)
+      .map(guest => String(guest.title ?? ''))
+      .find(candidate => candidate !== '')
+    if (title === undefined) return
+    await this.connection.call({ op: 'closeSidebarBrowser', titles: [title], owner: this.owner }, 10_000)
   }
 
   /**

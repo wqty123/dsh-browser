@@ -9,6 +9,7 @@
 import { type VisitedPage } from './history-store.js';
 import type { BrowserSettings } from './settings-store.js';
 import type { BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserElementTarget, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, ExportedCookie } from '../browser/types.js';
+import type { CarrierPage } from '../browser/types.js';
 /** Stable provider id registered with `ctx.browser`. */
 export declare const ELECTRON_BROWSER_PROVIDER_ID = "electron";
 /**
@@ -58,6 +59,32 @@ export interface ElectronBrowserViewHost {
      * @param label - human-readable session/task label, as in {@link showView}.
      */
     presentView?(handle: ElectronViewHandle, label?: string): Promise<void>;
+    /**
+     * Optional: pages this carrier holds that the provider never created.
+     *
+     * A sidebar panel and an installed browser both own their own page creation. Clicking a link
+     * that opens a new page — or any `window.open` the page performs — produces a page the provider
+     * did not ask for and therefore never recorded. Those pages are real: they are what the human
+     * sees, they hold memory, and they persist until something closes them. Without this the tab
+     * model reports only what the provider itself made, so the extras are invisible to
+     * `dsh_browser_list_tabs` and unclosable through `dsh_browser_close_tab`, accumulating for the
+     * life of the browser.
+     *
+     * Measured: on the sidebar carrier three clicks produced three sidebar webview guests while
+     * `dsh_browser_list_tabs` reported one tab; on the installed-browser carrier the window held
+     * four pages and the tool reported one.
+     * @returns every page the carrier currently holds, including ones the provider created.
+     */
+    listPages?(): Promise<readonly CarrierPage[]>;
+    /**
+     * Optional: close one page reported by {@link listPages}.
+     *
+     * The pair exists because listing a page the caller cannot close is worse than not listing it:
+     * `dsh_browser_list_tabs` would report pages that `dsh_browser_close_tab` answers "not open in
+     * this session" about, which reads as a contradiction rather than a boundary.
+     * @param id - the carrier's own page id, as {@link listPages} reported it.
+     */
+    closePage?(id: string): Promise<void>;
     /**
      * Optional cheap usability probe (no network): whether the host can back
      * views at all right now. The self-hosted host checks for a usable Electron

@@ -503,8 +503,15 @@ export interface BrowserTab {
   readonly active: boolean
 }
 
-/** Request to open a URL: into the active tab or a new tab. */
-export interface BrowserOpenRequest {
+/** One page a carrier holds, whether or not this plugin created it. */
+export interface CarrierPage {
+  /** Stable within one carrier session; used to address the page. */
+  readonly id: string
+  readonly url: string
+  readonly title?: string
+}
+
+/** Request to open a URL: into the active tab or a new tab. */export interface BrowserOpenRequest {
   /** The URL to open. */
   readonly url: string
   /** Open in a new tab (parallel). Default false (reuse the active tab). */

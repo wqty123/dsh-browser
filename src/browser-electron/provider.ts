@@ -51,6 +51,7 @@ import type {
   ExportedCookie,
 } from '../browser/types.js'
 import { BrowserError } from '../browser/types.js'
+import type { CarrierPage } from '../browser/types.js'
 
 /**
  * Page-context human-verification (CAPTCHA / bot-detection) detection. Runs
@@ -156,6 +157,32 @@ export interface ElectronBrowserViewHost {
    * @param label - human-readable session/task label, as in {@link showView}.
    */
   presentView?(handle: ElectronViewHandle, label?: string): Promise<void>
+  /**
+   * Optional: pages this carrier holds that the provider never created.
+   *
+   * A sidebar panel and an installed browser both own their own page creation. Clicking a link
+   * that opens a new page — or any `window.open` the page performs — produces a page the provider
+   * did not ask for and therefore never recorded. Those pages are real: they are what the human
+   * sees, they hold memory, and they persist until something closes them. Without this the tab
+   * model reports only what the provider itself made, so the extras are invisible to
+   * `dsh_browser_list_tabs` and unclosable through `dsh_browser_close_tab`, accumulating for the
+   * life of the browser.
+   *
+   * Measured: on the sidebar carrier three clicks produced three sidebar webview guests while
+   * `dsh_browser_list_tabs` reported one tab; on the installed-browser carrier the window held
+   * four pages and the tool reported one.
+   * @returns every page the carrier currently holds, including ones the provider created.
+   */
+  listPages?(): Promise<readonly CarrierPage[]>
+  /**
+   * Optional: close one page reported by {@link listPages}.
+   *
+   * The pair exists because listing a page the caller cannot close is worse than not listing it:
+   * `dsh_browser_list_tabs` would report pages that `dsh_browser_close_tab` answers "not open in
+   * this session" about, which reads as a contradiction rather than a boundary.
+   * @param id - the carrier's own page id, as {@link listPages} reported it.
+   */
+  closePage?(id: string): Promise<void>
   /**
    * Optional cheap usability probe (no network): whether the host can back
    * views at all right now. The self-hosted host checks for a usable Electron
@@ -782,6 +809,25 @@ export class ElectronBrowserProvider implements BrowserProvider {
         active: i === s.activeIndex,
       })
     }
+    // Pages the CARRIER holds that this provider never created.
+    //
+    // A sidebar panel and an installed browser both open pages on their own: a click on a link
+    // that targets a new page, or any `window.open`, produces a page nothing tells us about.
+    // Reporting only our own tabs made those invisible to this tool and unclosable through
+    // `dsh_browser_close_tab`, so they accumulated for the life of the browser. Measured on the
+    // sidebar carrier: three clicks produced three webview guests while this listed one tab.
+    //
+    // They are appended under a `page:` prefix so a caller can tell the two kinds apart — the
+    // prefix is also what `closeTab` uses to decide whether to close a view or a carrier page.
+    const pages = await this.host.listPages?.().catch(() => undefined) ?? []
+    const known = new Set(s.tabs.map(tab => tab.handle.id))
+    for (const page of pages) {
+      if (known.has(page.id)) continue
+      // A page with no URL is a blank one the carrier opened for itself. Listing it would invite a
+      // caller to act on nothing, and the blank normalisation already closes those.
+      if (page.url === '' || page.url === 'about:blank') continue
+      result.push({ id: `page:${page.id}`, url: page.url, active: false })
+    }
     return result
   }
 
@@ -795,6 +841,19 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Close one tab; closing the active tab activates the next. */
   closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
+    // A page the carrier owns rather than a view we created. It was reported by `listTabs` under
+    // this prefix, so closing it here is what keeps the two tools consistent — a page that can be
+    // listed must be closable, or the listing reads as a contradiction.
+    if (tabId.startsWith('page:')) {
+      const id = tabId.slice('page:'.length)
+      if (this.host.closePage === undefined) {
+        return Promise.reject(new BrowserError(
+          'browser: this carrier does not expose the pages it opens on its own, so that page cannot be closed',
+          'BROWSER_TAB_NOT_FOUND',
+        ))
+      }
+      return this.host.closePage(id)
+    }
     const found = this.locateTab(session, tabId)
     const s = found.s
     const index = found.index

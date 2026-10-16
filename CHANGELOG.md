@@ -4,6 +4,78 @@
 
 ---
 
+# 第四十八轮(2026-10-16,实机四载体检验:三次误判、一个真 bug、一个跨载体缺陷)
+
+YG 要求逐个检验四种载体(侧栏 / 自托管 / Chrome / Edge)能否正常拉开并操作。检验过程里我犯了一个贯穿始终的错误,也发现了两个真实缺陷。
+
+## 一、我判断错了:"点击无效"是我用错了判据
+
+我反复报告"点击不触发导航",依据是**点击后当前标签的 `location.href` 没有变化**。**这个判据是错的。**
+
+实测数据:点击确实开出新页面 —— 侧栏载体上三次点击产生三个 webview guest,Chrome 窗口里有四个页面:
+
+```
+frame=webview   guests=4   sidebar(webview)=3
+  id=5  webview  https://example.com/                    ← 点击注入链接的结果
+  id=4  webview  https://www.4399.com/flash_fl/5_1.htm   ← 点击"益智"的结果
+  id=3  webview  https://www.4399.com/flash_fl/3_1.htm   ← 点击"体育"的结果
+  id=1  window   dsh-app://app/
+```
+
+另一次独立验证:点击 `#chskin` 后 DOM 从 236014 字符变为 237758。
+
+**根因是我把两个不同的信号混淆了**:
+1. **虚拟光标**(`showCursor` 在点击位置画的红色标记)—— 那是给用户看"agent 正在此处操作"的,不代表导航;
+2. **真实的页面变化**。
+
+而我把"当前标签地址未变"当成了失败的证据。**页面开在新标签里,当前标签的地址当然不变。**
+
+这个错误值得记下来,因为它有代价:它让我把一个**正常工作的功能**报了三次故障,并据此写了一个错误的修复(`buttons` 位掩码 —— 见下,那个改动本身是对的,但当时被当成了根因)。
+
+## 二、修复一:`buttons` 位掩码(改动正确,但不是根因)
+
+`Input.dispatchMouseEvent` 需要两个不同字段:`button`(这个事件关于哪个键)与 `buttons`(**事件发生时有哪些键被按住**的位掩码)。原来只发 `button`,不发 `buttons`。
+
+改动本身是对 CDP 语义的正确修正(合成按压应当声明"主键按下中"),实测页面上 `mousedown` 现在带 `buttons: 1`、`mouseup`/`click` 带 `buttons: 0`,序列完整。**但它不是"导航失败"的原因** —— 那个现象不存在。
+
+## 三、修复二:Edge 自报为 `Edg`,被我的判据拒绝
+
+切换到 `edge` 载体时报:
+
+```
+edge (...) exited immediately after launch (exit code 0). That means it handed the request to an
+instance already using this profile directory and quit
+```
+
+**而 Edge 全程都在运行**:插件自己的 profile 上有 15 个进程,`/json/version` 回答 `Browser=Edg/155.0.4283.45`。
+
+接管判据写的是 `/chrome|chromium|edge/i`,而 **Edge 的产品名是 `Edg`** —— 三个字母,不含 "edge"。于是活的 Edge 被拒绝,接管返回 undefined,移交被报告成启动失败。**那正是我加接管逻辑要消除的错误,被我对字符串的假设重新引入了。**
+
+改为 `isBrowserProduct()`,匹配 `edg`,同时仍然拒绝 `Fake/1.0`、`not-a-browser/1.0` 这类不声称自己是浏览器的应答。
+
+## 四、修复三:载体自己开的页面不进标签模型(跨载体的真实缺陷)
+
+每个载体都会自己创建页面:点击一个在新页面打开的链接,或页面里的任何 `window.open`。**这些页面没有任何路径回报给插件**,于是 `dsh_browser_list_tabs` 只报插件自己创建的那些 —— 而那些页面**看得见(用户在浏览器窗口里看得到)、占内存、关不掉**,会一直累积到浏览器退出。
+
+**三个载体的差别决定了这是宿主层能力而不是 provider 自己能做的事**:
+
+- **自托管**:Electron 的 `setWindowOpenHandler` 把弹窗转成 `newTab` user action,provider 的 `case 'newTab'` **确实使用了 url**(L3347-3349),所以这条路径本来就正确,无需改动;
+- **侧栏**:页面由外壳在面板内创建,只经 `list` 的 `sidebar` 字段报出;
+- **Chrome/Edge**:页面由浏览器创建,只经 `Target.getTargets` 报出。
+
+**修法**:接口加一对能力 —— `listPages?()` 与 `closePage?(id)`。一对,不是单个:**列出一个关不掉的页面比不列出更糟**,两个工具会互相矛盾。
+
+- `DesktopBridgeViewHost` 用 bridge 的 `list` 取 sidebar guests,关闭走 `closeSidebarBrowser`(**按标题、且只关调用者自己的 guest** —— 那条限制阻止过"一个会话的清理销毁另一个会话的页面",所以是查标题而不是绕过它);
+- `SystemBrowserViewHost` 用 `Target.getTargets` 列、`Target.closeTarget` 关;
+- provider 的 `listTabs` 以 `page:` 前缀合并这些页面并**去重**(provider 自己的 view 也在载体的列表里,不去重会每个标签报两次),空白页跳过;
+- `closeTab` 认得 `page:` 前缀并走宿主关闭;宿主不支持关闭时明确报错,而不是假装该 id 不存在。
+
+**测试**:272 → 278(新增 6 条:`tests/carrier-pages.test.mjs`)。`tsc` 干净。
+
+**未验证部分**:上述修复**都还没有在实机上跑过** —— 运行中的插件进程加载的是改动之前的 `lib/`。检验方法已就绪(四种载体逐个切换 + 桥探针读 guests + CDP `/json/list` 读真实页面),等一次重启。
+
+---
+
 # 第四十七轮(2026-10-16,侧栏面板是 iframe 的外壳:装上 bridge 反而把浏览器弄坏)
 
 报告者的现象一句话概括:**不装 bridge 时自托管载体工作正常;装上 bridge 反而彻底不能用** —— 载体被换成侧栏,而侧栏在那个外壳上给不出 guest,且没有任何回退路径。他的排查给出了两条独立的硬约束与七处证据(含对照实验与完整预算观察)。

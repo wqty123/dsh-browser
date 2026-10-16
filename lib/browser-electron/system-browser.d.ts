@@ -36,6 +36,7 @@
 export type BrowserLauncher = (path: string, args: readonly string[]) => ReturnType<typeof spawn>;
 import { spawn } from 'node:child_process';
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js';
+import type { CarrierPage } from '../browser/types.js';
 /** Which browser the user asked for. */
 export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'auto' | 'sidebar';
 /** A resolved browser installation. */
@@ -213,6 +214,28 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * make the plugin fall back for no reason.
      */
     available(): boolean;
+    /**
+     * Every page the browser currently holds, including ones this plugin did not create.
+     *
+     * Chrome and Edge own their own page creation. A click on a link that opens a new page — or any
+     * `window.open` — produces a page the provider never asked for, and nothing reports it back.
+     * Those pages are real: they hold memory and stay until something closes them. Measured on a real
+     * window: four pages present while `dsh_browser_list_tabs` reported one.
+     *
+     * Discovery is already on at connection time (see the blank-page normalisation), so
+     * `Target.getTargets` also lists pages that existed before this client connected.
+     * @returns the browser's pages, or an empty list when it cannot answer.
+     */
+    listPages(): Promise<readonly CarrierPage[]>;
+    /**
+     * Close one page by the target id {@link listPages} reported.
+     *
+     * `Target.closeTarget` is the browser's own close, so it works for pages this plugin never
+     * created. The page may already be gone if the human closed it in the meantime — the caller
+     * asked for it to be closed and it is, so that is not an error.
+     * @param id - the CDP target id.
+     */
+    closePage(id: string): Promise<void>;
     createView(): ElectronViewHandle;
     destroyView(handle: ElectronViewHandle): void;
     /** Nothing to show: the browser owns its own windows. */
