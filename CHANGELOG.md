@@ -4,6 +4,51 @@
 
 ---
 
+# 第四十九轮(2026-10-17,DSH 0.2.1 的兼容性新规:版本范围必须写在 `engines.dsh`)
+
+DSH 升到 **`0.2.1-rc.1`** 后,兼容性判定规则变了。本插件把版本范围写在一个**没有任何代码读取**的位置,当时的"兼容"是靠回退规则蒙对的。
+
+## 一、规则变了什么
+
+官方迁移指南:`docs/upgrade-guide/v0.2.1-alpha.3/plugin-engines-dsh/`(英文/中文各一份)。判定实现在 `packages/boot/app-boot/src/plugin-compatibility.ts`。
+
+**新规**:**有 `engines.dsh` 就只看它**,`@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*` 的 `peerDependencies` **被忽略**;**没有** `engines.dsh` 才回退到 peer 规则。另有三条附带约束:
+
+- `engines.dsh` 里**不接受** `workspace:` 值(只有 peers 接受),写成那样等于声明不兼容;
+- 非对象 `engines` 或非字符串 `engines.dsh` → manifest 对兼容性而言**不可读** → 拒绝该包;
+- `IncompatiblePlugin` / `PluginCompatibility` 的 `peers` 字段**改名为 `requirements`**,键为 `engines.dsh` 或 peer 包名。
+
+## 二、本插件的处境
+
+范围原来写在 **`dsh.compatibility.dsh`**:`>=0.1.1-rc.1 <0.3.0`。**那一块没有任何代码读取** —— 在 `packages/boot` 里搜 `manifest.dsh` 只命中 `dsh.bundle` 与 `dsh.profile.bundles`,`dshReleases` 零匹配。当时的兼容完全是 peer 回退规则(`@deepseek-ai/dsh-*: >=0.1.1-rc.2 <0.3.0`)顺带成立的。
+
+于是这个声明在两个意义上都是虚的:写在没人读的地方,而且它的下限也与 peers 的 `<0.1.1-rc.2` 不一致。
+
+## 三、改法
+
+`engines` 里加 `dsh: ">=0.1.1-rc.2 <0.3.0"`,**与 peers 逐字相同**。迁移指南第 1 条明确要求"范围必须覆盖所有支持的 release,因为 peers 不再增减它" —— 取与 peers 相同的值,是保证"换规则前后答案不变"最直接的方式。
+
+`dsh.compatibility` 块保留但**去掉 `dsh` 字段**,并加 `_comment` 说明它现在只是给人看的兼容性记录、不参与任何判定;`dshReleases` 补记 `0.2.1-rc.1`。留着比删掉好 —— 逐版本的支持记录对人有价值,而且它不会被误认为判定依据了:真正的判据在 `engines.dsh` 里一眼可见。
+
+第三条不受影响:插件代码从不读 `IncompatiblePlugin` / `PluginCompatibility`(`src/` 里那三处 `requirements` 是注释里对需求文档的引用,与 API 无关)。
+
+## 四、验证:用 DSH 自己的判定函数
+
+不靠推断,直接 import `packages/boot/app-boot/lib/types/plugin-compatibility.js` 里的 `evaluatePluginCompatibility`:
+
+| manifest | `engines.dsh` | 0.2.1-rc.1 上的判定 |
+| --- | --- | --- |
+| 改之前 | 无(靠 peers 回退) | compatible |
+| 改之后 | `>=0.1.1-rc.2 <0.3.0` | compatible |
+
+范围真的生效,两个方向都试了:`0.3.0` → BLOCKED、`0.1.0-rc.8` → BLOCKED、`0.2.0-rc.2` → compatible;非字符串的 `engines.dsh` 被明确拒绝(`Plugin manifest engines.dsh must be a string`)。
+
+**改前改后都是 compatible,这一点值得说清楚**:这一轮不是修一个"装不上"的故障,而是把一个**恰好成立的默认**换成**显式成立的声明**。区别在于今后 DSH 再收紧规则、或有人照着 `dsh.compatibility` 去改范围时,行为会与声明一致,而不是继续靠巧合。
+
+**测试**:285 → 289(新增 4 条:`tests/manifest-compatibility.test.mjs`)。其中第 4 条直接调用 DSH 的判定函数,在 checkout 不存在时跳过(CI 上没有那个 checkout)。`tsc` 干净。
+
+---
+
 # 第四十八轮(2026-10-16,实机四载体检验:三次误判、一个真 bug、一个跨载体缺陷)
 
 YG 要求逐个检验四种载体(侧栏 / 自托管 / Chrome / Edge)能否正常拉开并操作。检验过程里我犯了一个贯穿始终的错误,也发现了两个真实缺陷。

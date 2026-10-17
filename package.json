@@ -65,7 +65,8 @@
     "url": "https://github.com/wqty123/dsh-browser/issues"
   },
   "engines": {
-    "node": ">=22.19"
+    "node": ">=22.19",
+    "dsh": ">=0.1.1-rc.2 <0.3.0"
   },
   "dependencies": {
     "electron": ">= 30.0.0"
@@ -97,7 +98,7 @@
       ]
     },
     "compatibility": {
-      "dsh": ">=0.1.1-rc.1 <0.3.0",
+      "_comment": "Documentation only. DSH decides plugin compatibility from engines.dsh (falling back to @deepseek-ai/dsh* peerDependencies when it is absent); nothing reads this block. Kept because the release-by-release record is useful to a human and costs nothing.",
       "profiles": [
         "web",
         "desktop"
@@ -108,7 +109,8 @@
         "0.1.1-rc.2": "compatible",
         "0.2.0-rc.1": "compatible",
         "0.2.0-rc.2": "compatible",
-        "0.2.1-alpha.1": "compatible"
+        "0.2.1-alpha.1": "compatible",
+        "0.2.1-rc.1": "compatible"
       }
     }
   }

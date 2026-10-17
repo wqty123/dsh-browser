@@ -31,8 +31,16 @@ node scripts/verify-host-compat.mjs
 
 它用某个 profile 里**真实安装**的 `@deepseek-ai/*` 包组装一个宿主,加载本插件的编译产物、经宿主自己的 `defineTool` 注册工具、再用一个假 provider 真调两个工具(`dsh_browser_session` / `dsh_browser_a11y`)。默认读 `$DSH_HOME/profiles` 下的 profile,可用 `DSH_PROFILE` / `DSH_HOME` 指定。
 
-## 关于 peer 范围的 semver 语义
+## 关于 DSH 版本范围
 
-插件声明 `>=0.1.1-rc.2 <0.3.0`。这个范围在 **semver 默认语义**下**不匹配**任何带预发布标签的版本(如 `0.2.1-alpha.1`)—— 这是规范行为:预发布只被"同一 major.minor.patch 元组"的比较器允许。
+插件在 **`engines.dsh`** 里声明 `>=0.1.1-rc.2 <0.3.0`。
 
-DSH 判定插件兼容性时用的是 `includePrerelease: true`(`packages/boot/app-boot/src/plugin-compatibility.ts`),因此这些预发布宿主**实际都在范围内**。若某个外部工具用默认语义得出"不兼容",那是它的语义与 DSH 不同,不是这里的声明写错了。
+位置不是随便选的。DSH 从 0.2.1-alpha.3 之后改成:**有 `engines.dsh` 就只看它,`@deepseek-ai/dsh*` 的 `peerDependencies` 被忽略;没有 `engines.dsh` 才回退到 peer 规则**(`packages/boot/app-boot/src/plugin-compatibility.ts`;官方迁移指南在 `docs/upgrade-guide/v0.2.1-alpha.3/plugin-engines-dsh/`)。
+
+本插件 0.4.12 之前把范围写在 `dsh.compatibility.dsh` 里 —— 那个位置**没有任何代码读取**,当时的兼容性实际是靠 peer 回退蒙对的。现在两处一致(`engines.dsh` 与 peers 同范围),所以哪条规则生效都得到同一个答案。
+
+这个范围在 **semver 默认语义**下**不匹配**任何带预发布标签的版本(如 `0.2.1-rc.1`)—— 规范如此:预发布只被"同一 major.minor.patch 元组"的比较器允许。
+
+DSH 判定时用的是 `includePrerelease: true`,因此这些预发布宿主**实际都在范围内**。若某个外部工具用默认语义得出"不兼容",那是它的语义与 DSH 不同,不是这里的声明写错了。
+
+`engines.dsh` 里不接受 `workspace:` 值(只有 peers 接受);写成那样等于声明不兼容。
