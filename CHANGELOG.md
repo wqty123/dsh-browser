@@ -4,6 +4,51 @@
 
 ---
 
+# 第五十轮(2026-10-17,对齐 DSH 0.2.1 的插件契约 + 工具描述瘦身)
+
+## 一、版本范围改到 DSH 真正读取的位置
+
+DSH 从 0.2.1-alpha.3 起改成:**有 `engines.dsh` 就只看它**,`@deepseek-ai/dsh*` 的 `peerDependencies` 被忽略;没有才回退到 peer 规则(官方指南 `docs/upgrade-guide/v0.2.1-alpha.3/plugin-engines-dsh/`)。
+
+本插件原来把范围写在 **`dsh.compatibility.dsh`** —— **那一块没有任何代码读取**(在 `packages/boot` 里搜 `manifest.dsh` 只命中 `dsh.bundle` 与 `dsh.profile.bundles`,`dshReleases` 零匹配)。当时的兼容完全是 peer 回退规则顺带成立的,而且声明下限还与 peers 不一致。
+
+现在 `engines.dsh: ">=0.1.1-rc.2 <0.3.0"`,与 peers 逐字相同。用 DSH 自己的 `evaluatePluginCompatibility` 验证:改前改后在 `0.2.1-rc.1` 上都是 compatible,`0.3.0` 与 `0.1.0-rc.8` 两个方向都被 BLOCKED,非字符串取值被明确拒绝。
+
+## 二、更新路径改成两步
+
+`plugin-install-over-installed`(0.2.1-alpha.2):`installBundle` 对已依赖的包**在跑 pnpm 之前就失败**,报 `already-installed`(代码证据:`plugin-manager/src/index.ts:439`、`:444`)。原文档写的"更新它 = 把依赖更新到新版本"照做会撞上这个失败。已改为明确的 `remove` 然后 `add <版本>`,两版 README 与用户指南都同步。
+
+## 三、工具描述瘦身(省 5%)
+
+先测量,再动手。34 个工具的**模型可见**开销是 `name + description + parameters` —— 注意**不含 `output.schema`**:DSH 的 `schemaOf()` 只投影前三个字段,所以第一版把 `output` 算进去得出的 79k 字符 / 22k tokens 是**高估**,实际是 20,348 字符 / 约 5,650 tokens。
+
+据此重排优先级:参数 9,782 字符(48%)、描述 9,932 字符(49%),平均每个工具 166 tokens —— **已经算紧凑**,所以"精简能省一大截"不成立。
+
+只压最长的 6 条描述(restrict / screenshot / auth / click / open / fill / a11y),保留全部操作约束、参数含义与安全警告,删掉解释性从句与重复列举。结果:
+
+| | 改前 | 改后 |
+| --- | --- | --- |
+| 描述合计 | 9,932 字符 | 8,932 字符 |
+| 模型可见合计 | 20,348 字符 | 19,348 字符 |
+| 估算 token | 约 5,650 | 约 5,374 |
+
+**收益 5%,如实记录**:不是数量级改进,但它是确定性的、无风险的部分。
+
+## 四、评估后不做的两条
+
+- **`presentationMeta`**:查了 `packages/core/tools/src/presentation.ts`,它是把结构化数据存进会话日志、由 `presentResult` 读回来渲染成**特定卡片类型**(`card: 'read'`、`'search'`)。UI 只认已定义的卡片,浏览器元素没有对应类型,加了只会回退到原始文本 —— **收益为零**,不做。
+- **`ToolSchema.deferLoading`**:看似正是为这种情况设计的(Anthropic 的 `defer_loading`)。但 DSH 的语义是"延迟的基线工具仍需一次 tool-addition 才能激活",且在不支持 tool-update 的路由上标志会被**剥掉、全部立即加载**。插件单方面标记它的风险是工具直接不可用,不做。
+
+**真正能省一个量级的是 PTC 模式**:prompt 里从 34 个工具变成 `run_code` 一个入口,省掉约 5,000 tokens。但它需要宿主有 `ctx.ptcRuntime` 且 agent preset 切到 `mode: ptc` —— **插件无法单方面启用**,只能写进文档由使用者选择。
+
+## 五、验证
+
+- `scripts/verify-host-compat.mjs` 在 **0.2.1-rc.1** 上全绿:34 个工具注册、`dsh_browser_session` 与 `dsh_browser_a11y` 实跑成功;
+- DSH 自己的 `evaluatePluginCompatibility` 对改动前后、四个版本边界逐一验证;
+- **测试 290 → 290(289 通过 + 1 条平台门控跳过)**,`tsc` 干净。
+
+---
+
 # 第四十九轮(2026-10-17,DSH 0.2.1 的兼容性新规:版本范围必须写在 `engines.dsh`)
 
 DSH 升到 **`0.2.1-rc.1`** 后,兼容性判定规则变了。本插件把版本范围写在一个**没有任何代码读取**的位置,当时的"兼容"是靠回退规则蒙对的。
