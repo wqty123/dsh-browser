@@ -174,6 +174,23 @@ DSH Desktop 上②命中即可用(0.1.18+ 插件自带 electron 包;44+ 二进�
 
 插件在两种宿主里各有一份安装,更新路径也不同 —— **更新其中一端不会连带更新另一端**。
 
+### 先移除,再安装
+
+**DSH 0.2.1-alpha.2 起,对已经装着的包再执行一次安装会直接失败**,报 `already-installed`,并且在跑 pnpm 之前就失败、不改任何 profile 文件(官方迁移指南:`docs/upgrade-guide/v0.2.1-alpha.2/plugin-install-over-installed/`)。这条在启用 HMR 的 profile 上生效,而自带 profile 都启用 HMR。
+
+所以更新一个**已安装**的插件是两步:
+
+```bash
+dsh plugin --profile web remove dsh-builtin-browser
+dsh plugin --profile web add dsh-builtin-browser@<目标版本>
+```
+
+移除会停掉该 bundle 的插件并清掉它的包映射,新版本随即重新映射,因此**不需要重启**就能生效(桌面端仍需重启,理由见下)。
+
+替代做法:Web 界面的插件管理页对官方插件提供 Update 按钮,它自己会先移除再安装。桌面端尚无可用的新版,按上面的两步来。
+
+## 桌面端细节
+
 **桌面端(DSH Desktop)**
 
 - 插件是桌面端 profile 里的依赖(profile 目录通常是 `$DSH_HOME/profiles/desktop`)。更新它 = 把该 profile 里的依赖更新到新版本,然后**重启 DSH Desktop**,客户端设置栏与工具才会换成新代码。
@@ -186,12 +203,14 @@ DSH Desktop 上②命中即可用(0.1.18+ 插件自带 electron 包;44+ 二进�
 - 浏览器内核默认由桌面端自带的 Electron 提供,插件不会再下载一份 Electron;也可以在设置里改用它自己装的 Chrome / Edge。
 - **升级桌面端本身不会带上插件**,按上面的方法单独更新它。
 
+## Web 端细节
+
 **Web 端(`dsh web`)**
 
 - 插件是 web profile 里的依赖(`$DSH_HOME/profiles/web`),更新后**重启 `dsh web`** 生效。
 - Web 端**没有侧栏、也没有 bridge**:共享浏览器由插件自托管拉起。首次安装可能需要 Electron 二进制;若包管理器的构建白名单拦下了它(pnpm v10+ 会拦 `electron` 的 postinstall),执行一次 `npx install-electron` 补上即可。
 - 同样可以在设置里改用本机 Chrome / Edge —— 这是两端**行为一致**的选项。
-- 更新方式与首次安装它时一致(按 npm 包名 `dsh-builtin-browser`、按 GitHub 仓库 `wqty123/dsh-browser`,或本地目录)。
+- 更新方式与首次安装它时一致(按 npm 包名 `dsh-builtin-browser`、按 GitHub 仓库 `wqty123/dsh-browser`,或本地目录),但**已安装时先按上面的两步移除再装**。
 
 **两端一致的体验**
 

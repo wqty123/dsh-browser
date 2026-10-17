@@ -69,3 +69,29 @@ test('DSH itself agrees, when the checkout is available', async () => {
       'and the refusal names engines.dsh, not a peer package')
   }
 })
+
+test('the documented update path matches what DSH now refuses', () => {
+  // DSH 0.2.1-alpha.2 made `installBundle` fail with `already-installed` — before pnpm runs and
+  // without touching the profile — when the spec names a package the profile already depends on.
+  // Its own error text says what to do: "to install another version, call remove_bundle first".
+  //
+  // Documenting a one-step update would send every existing user into that failure. The guide is
+  // docs/upgrade-guide/v0.2.1-alpha.2/plugin-install-over-installed/; the branch is at
+  // packages/boot/plugin-manager/src/index.ts (`refused('already-installed', ...)`).
+  const read = p => readFileSync(new URL(p, import.meta.url), 'utf8')
+  const guide = read('../docs/user-guide.md')
+  const readme = read('../README.md')
+  const readmeEn = read('../README.en.md')
+
+  assert.match(guide, /already-installed/, 'the user guide names the failure')
+  assert.match(guide, /dsh plugin --profile \S+ remove dsh-builtin-browser/, 'and gives the remove step')
+  assert.match(guide, /dsh plugin --profile \S+ add dsh-builtin-browser@/, 'followed by the versioned add')
+  // The add must not be presented as sufficient on its own.
+  const removeAt = guide.indexOf('remove dsh-builtin-browser')
+  const addAt = guide.indexOf('add dsh-builtin-browser@')
+  assert.ok(removeAt !== -1 && addAt !== -1 && removeAt < addAt,
+    'the guide orders removal before installation')
+
+  assert.match(readme, /remove dsh-builtin-browser/, 'the README entry point carries the two-step note too')
+  assert.match(readmeEn, /remove dsh-builtin-browser/, 'and so does the English one')
+})

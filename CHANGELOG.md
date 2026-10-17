@@ -45,7 +45,32 @@ DSH 升到 **`0.2.1-rc.1`** 后,兼容性判定规则变了。本插件把版本
 
 **改前改后都是 compatible,这一点值得说清楚**:这一轮不是修一个"装不上"的故障,而是把一个**恰好成立的默认**换成**显式成立的声明**。区别在于今后 DSH 再收紧规则、或有人照着 `dsh.compatibility` 去改范围时,行为会与声明一致,而不是继续靠巧合。
 
-**测试**:285 → 289(新增 4 条:`tests/manifest-compatibility.test.mjs`)。其中第 4 条直接调用 DSH 的判定函数,在 checkout 不存在时跳过(CI 上没有那个 checkout)。`tsc` 干净。
+**测试**:285 → 290(新增 5 条:`tests/manifest-compatibility.test.mjs`)。其中一条直接调用 DSH 的判定函数,在 checkout 不存在时跳过(CI 上没有那个 checkout);另一条守住下面那条文档要求。`tsc` 干净。
+
+## 五、其余迁移指南逐条核对(结论:一条要改文档,其余无关)
+
+0.2.1 前后共有 40 余份迁移指南。按"本插件是否用到被改动的 API/配置"逐条核对,用 grep 确认而非推断:
+
+| 指南 | 是否影响 | 依据 |
+| --- | --- | --- |
+| `plugin-engines-dsh` | **是,已改** | 见上文 |
+| `plugin-install-over-installed` | **是,改文档** | 见下 |
+| `tool-presentation-mode` | 否 | 搜索 `presentAs` / `mode: both` / `DSH_TOOLS_MODE` 零匹配 |
+| `jsonl-persistence-plugin` | 否 | 不使用 `sessionPersistence`,自有一份 history 存储 |
+| `web-listener-trust-config` | 否 | 不注入 `webRuntime`,设置路由走 `ctx.webServer` |
+| `remove-runtime-invariants` | 否 | 不导入 `@deepseek-ai/dsh-invariants` |
+| `working-directory` | 否 | 34 个工具用的 `output` 是返回值 JSON Schema,不是 `output.presentationMeta`(该字段零匹配) |
+| `instruction-home-override` | 否 | 不配置 `agent-instructions` |
+| `subpath-plugin-display-manifest` | 否 | 本包是包根插件,不是子路径插件 |
+| `plugin-option-placement` | 否 | 那是 CLI 参数位置,不影响已安装的包 |
+| `experimental-package-composition` | 否 | 本包的 `dsh.bundle.patch` 是完整 insertion,不是"只启用被移除的行" |
+| `new-session-generations`、`account-*`、`pi-ai-*`、`sdk-*`、`subagent-*`、`python-*`、`desktop-*`、`schedule-*` 等 | 否 | 均不涉及浏览器插件使用的任何接缝 |
+
+**`plugin-install-over-installed` 要改的是文档,不是代码**:从 0.2.1-alpha.2 起,`installBundle` 对 profile 已依赖的包**在跑 pnpm 之前就失败**,报 `already-installed`,且不改任何 profile 文件。代码侧证据:`packages/boot/plugin-manager/src/index.ts:439`、`:444` 的 `refused('already-installed', ...)`,以及 `tools.ts:18` 的错误文案本身就写着"to install another version, call remove_bundle first, then install_bundle again"。
+
+原来的文档只说"更新它 = 把依赖更新到新版本",**照做会撞上这个失败**。已改为明确的两步(`remove` 然后 `add <版本>`),并写明替代路径(Web 插件管理页的 Update 按钮会自己先移除再安装),README 中英两版都加了这一步的提示。
+
+这一条加了一条守护测试:断言文档里 `remove` 出现在 `add` 之前,且 README 两版都带这步 —— 否则下次改文档时很容易又把一步写回去。
 
 ---
 

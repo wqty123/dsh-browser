@@ -27,6 +27,8 @@ In one line: **install the plugin and you have a real browser shared with, and d
 
 **First, which side are you on** — these are two separate installs; updating one does not update the other, and they host the browser differently.
 
+> **Updating an installed plugin takes two steps** (since DSH 0.2.1-alpha.2, installing over an installed package fails outright with `already-installed`): run `dsh plugin --profile <profile> remove dsh-builtin-browser` first, then `add` the target version. See the [user guide](docs/user-guide.md) (Chinese).
+
 ### DSH Desktop
 
 ```sh
