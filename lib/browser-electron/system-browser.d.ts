@@ -24,6 +24,7 @@
  * only the carrier differs.
  * @module dsh-browser/browser-electron/system-browser
  */
+import type { HeadlessMode } from './settings-store.js';
 /**
  * Starts a browser process and returns a handle to it.
  *
@@ -79,6 +80,11 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private readonly extraArgs;
     private readonly ephemeralDir?;
     private readonly launcher;
+    /**
+     * Whether this launch should get a window. See {@link resolveLaunchMode} for how `auto` decides
+     * and why a display-less host needs headless at all (issue #32).
+     */
+    private readonly headlessMode;
     /**
      * viewId -> the session that view rides, and the client that issued it.
      *
@@ -145,7 +151,12 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      *   removing every sessions.clear() left the recovery tests green. A launcher lets a test
      *   provide something that actually speaks CDP, so the state those tests describe exists.
      */
-    constructor(browser: DetectedBrowser, profileDir: string, extraArgs?: readonly string[], ephemeralDir?: string | undefined, launcher?: BrowserLauncher);
+    constructor(browser: DetectedBrowser, profileDir: string, extraArgs?: readonly string[], ephemeralDir?: string | undefined, launcher?: BrowserLauncher, 
+    /**
+     * Whether this launch should get a window. See {@link resolveLaunchMode} for how `auto` decides
+     * and why a display-less host needs headless at all (issue #32).
+     */
+    headlessMode?: HeadlessMode);
     /** Which product this host would drive (for diagnostics). */
     get kind(): DetectedBrowser['kind'];
     /** Whether the browser has actually been started yet (diagnostics and tests). */

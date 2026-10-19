@@ -17,6 +17,17 @@ import type { BrowserChannel } from './system-browser.js'
 /** Vision/operation strategy the provider prefers when the model can see. */
 export type VisionStrategy = 'auto' | 'nonVisual'
 
+/**
+ * Whether a launched browser gets a window.
+ *
+ * Split from {@link VisionStrategy} because these answer different questions: that one is how the
+ * agent examines a page, this one is whether the browser has anywhere to draw.
+ */
+export type HeadlessMode = 'auto' | 'headless' | 'windowed'
+
+/** Every value {@link HeadlessMode} accepts, for validation and the settings UI. */
+export const HEADLESS_MODES = ['auto', 'headless', 'windowed'] as const
+
 /** The full settings document, with every field resolved. */
 export interface BrowserSettings {
   /** Persistent browsing history (visited pages). */
@@ -45,6 +56,21 @@ export interface BrowserSettings {
   /** Which browser binary carries the agent's pages. */
   readonly browser: {
     readonly channel: BrowserChannel
+    /**
+     * Whether the browser gets a window.
+     *
+     * `auto` (the default) launches headless when the process has no display — no `DISPLAY` and no
+     * `WAYLAND_DISPLAY` — and with a window otherwise. That combination is what makes the plugin
+     * work under systemd, in a container, or on an SSH-only server while leaving desktop users
+     * with the visible window they expect. `true` forces headless (CI, screenshot-only servers);
+     * `false` forces a window, so a misconfigured display fails loudly instead of silently
+     * degrading into a browser nobody can see.
+     *
+     * Reported as issue #32: as a systemd service there is no display, Chromium exits with
+     * "could not connect to display", and every `dsh_browser_*` call failed with "exited
+     * immediately after launch".
+     */
+    readonly headless: HeadlessMode
   }
   /** Whether the agent may read cookies / export login state. */
   readonly credentials: {
@@ -77,7 +103,7 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   // Bundled by default: it needs nothing installed, and on the desktop the carrier
   // is the sidebar anyway. Choosing a system browser is an explicit opt-in because
   // it starts a real Chrome/Edge with its own profile.
-  browser: { channel: 'bundled' },
+  browser: { channel: 'bundled', headless: 'auto' },
   credentials: { allowRead: true },
   actions: { allowExecute: true, allowDownload: true, allowCredentialWrite: true },
 }
@@ -136,6 +162,33 @@ const SETTINGS_WHEN_UNREADABLE: BrowserSettings = {
  * message that lists a value the code rejects (or omits one it takes) is worse than no message.
  */
 export const BROWSER_CHANNELS = ['chrome', 'edge', 'auto', 'bundled', 'sidebar'] as const
+
+/**
+ * Coerce the headless mode, keeping `auto` when the value is not one of the known choices.
+ *
+ * Booleans are accepted as a convenience because "headless: true" is what anyone writing this by
+ * hand would try first, and rejecting it over a type difference would be pedantry: `true` maps to
+ * `headless`, `false` to `windowed`. Anything else is reported rather than silently defaulted,
+ * for the same reason as {@link resolveChannel}: a discarded value and an honoured one must not
+ * look alike.
+ * @param value - the raw value from the settings document.
+ * @param warn - where to report a discarded value.
+ * @returns a valid mode.
+ */
+function resolveHeadless(value: unknown, warn?: (message: string) => void): HeadlessMode {
+  if (value === undefined) return DEFAULT_SETTINGS.browser.headless
+  if (value === true) return 'headless'
+  if (value === false) return 'windowed'
+  if (typeof value === 'string' && (HEADLESS_MODES as readonly string[]).includes(value)) {
+    return value as HeadlessMode
+  }
+  warn?.(
+    `dsh-builtin-browser: browser.headless ${JSON.stringify(value)} is not a known mode, so the `
+    + `default "${DEFAULT_SETTINGS.browser.headless}" was used instead. Expected one of: `
+    + `${HEADLESS_MODES.join(', ')} (or a boolean).`,
+  )
+  return DEFAULT_SETTINGS.browser.headless
+}
 
 /**
  * Coerce the browser channel, keeping the default when it is not one of the
@@ -227,7 +280,10 @@ export function resolveSettings(raw: unknown, warn?: (message: string) => void):
       virtualCursor: bool(ui?.virtualCursor, DEFAULT_SETTINGS.ui.virtualCursor),
     },
     vision: { strategy: vision?.strategy === 'nonVisual' ? 'nonVisual' : DEFAULT_SETTINGS.vision.strategy },
-    browser: { channel: resolveChannel(browser?.channel, warn) },
+    browser: {
+      channel: resolveChannel(browser?.channel, warn),
+      headless: resolveHeadless(browser?.headless, warn),
+    },
     credentials: {
       // `gate` returns false for anything present-and-not-a-boolean, so an unreadable section
       // is refused here for free: the section itself is the "present but wrong" value.

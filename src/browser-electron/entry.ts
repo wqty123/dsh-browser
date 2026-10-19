@@ -327,7 +327,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         sweepAbandonedEphemeralProfiles(profileRoot, detected.kind)
         claimEphemeralProfile(profileDir)
       }
-      adopt(new SystemBrowserViewHost(detected, profileDir, [], persist ? undefined : profileDir),
+      // The headless mode rides along so a display-less host (systemd, container, SSH-only server)
+      // still gets a working browser instead of "exited immediately after launch" — issue #32.
+      adopt(new SystemBrowserViewHost(detected, profileDir, [], persist ? undefined : profileDir,
+        undefined, settings.get().browser.headless),
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
   }

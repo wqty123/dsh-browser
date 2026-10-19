@@ -11,6 +11,15 @@
 import type { BrowserChannel } from './system-browser.js';
 /** Vision/operation strategy the provider prefers when the model can see. */
 export type VisionStrategy = 'auto' | 'nonVisual';
+/**
+ * Whether a launched browser gets a window.
+ *
+ * Split from {@link VisionStrategy} because these answer different questions: that one is how the
+ * agent examines a page, this one is whether the browser has anywhere to draw.
+ */
+export type HeadlessMode = 'auto' | 'headless' | 'windowed';
+/** Every value {@link HeadlessMode} accepts, for validation and the settings UI. */
+export declare const HEADLESS_MODES: readonly ["auto", "headless", "windowed"];
 /** The full settings document, with every field resolved. */
 export interface BrowserSettings {
     /** Persistent browsing history (visited pages). */
@@ -39,6 +48,21 @@ export interface BrowserSettings {
     /** Which browser binary carries the agent's pages. */
     readonly browser: {
         readonly channel: BrowserChannel;
+        /**
+         * Whether the browser gets a window.
+         *
+         * `auto` (the default) launches headless when the process has no display — no `DISPLAY` and no
+         * `WAYLAND_DISPLAY` — and with a window otherwise. That combination is what makes the plugin
+         * work under systemd, in a container, or on an SSH-only server while leaving desktop users
+         * with the visible window they expect. `true` forces headless (CI, screenshot-only servers);
+         * `false` forces a window, so a misconfigured display fails loudly instead of silently
+         * degrading into a browser nobody can see.
+         *
+         * Reported as issue #32: as a systemd service there is no display, Chromium exits with
+         * "could not connect to display", and every `dsh_browser_*` call failed with "exited
+         * immediately after launch".
+         */
+        readonly headless: HeadlessMode;
     };
     /** Whether the agent may read cookies / export login state. */
     readonly credentials: {

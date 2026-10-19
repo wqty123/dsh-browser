@@ -28,6 +28,9 @@
 import { readFileSync, rmSync, statSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+// Type-only: settings-store imports BrowserChannel from here, so a value import would be a cycle.
+// `hasDisplay` lives here instead of there for the same reason — it is a runtime function.
+import type { HeadlessMode } from './settings-store.js'
 
 /**
  * How long a killed browser is given to actually exit before the launch proceeds.
@@ -199,6 +202,81 @@ const INSTALL_LOCATIONS: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.P
  */
 function isBrowserProduct(product: unknown): boolean {
   return typeof product === 'string' && /chrome|chromium|edg/i.test(product)
+}
+
+/**
+ * Whether this process has somewhere to draw a window.
+ *
+ * The same test Chromium makes: with neither `DISPLAY` nor `WAYLAND_DISPLAY` set it cannot open a
+ * window and exits with "could not connect to display". Declared here rather than in
+ * settings-store because that module imports from this one, and a value import back would be a
+ * cycle; the equivalent export there delegates to this.
+ * @param env - the environment to inspect; defaults to the current process.
+ * @returns true when a display is advertised.
+ */
+function hasDisplay(env: NodeJS.ProcessEnv = process.env): boolean {
+  // Windows and macOS use neither variable, and always have a window server.
+  if (process.platform === 'win32' || process.platform === 'darwin') return true
+  return (env.DISPLAY ?? '') !== '' || (env.WAYLAND_DISPLAY ?? '') !== ''
+}
+
+/**
+ * Whether Chromium's own sandbox cannot start here.
+ *
+ * Two cases, both of which make the browser exit at once rather than degrade: running as root
+ * (the sandbox refuses), and running inside a container that lacks the namespaces it needs. The
+ * check is deliberately conservative — when it is unsure it answers false, so the default is the
+ * sandboxed launch and the weaker mode only happens where it is required.
+ * @param env - the environment to inspect; defaults to the current process.
+ * @returns true when `--no-sandbox` is required for the browser to start at all.
+ */
+function needsNoSandbox(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (process.platform === 'win32') return false
+  try {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) return true
+  } catch {
+    // No getuid: not a POSIX process; the container checks below still apply.
+  }
+  if ((env.container ?? '') !== '') return true
+  try {
+    if (existsSync('/.dockerenv')) return true
+  } catch {
+    // An unreadable root is not evidence of a container.
+  }
+  return false
+}
+
+/**
+ * Resolve `auto` into a concrete decision, and say why.
+ *
+ * Chromium refuses to start without a display: with neither `DISPLAY` nor `WAYLAND_DISPLAY` set it
+ * exits at once with "could not connect to display", and the caller sees only "exited immediately
+ * after launch (exit code 1)". That is the ordinary state of a systemd service, a container, and an
+ * SSH-only server — the deployment where a server-side browser is most useful, and the one reported
+ * as issue #32: every `dsh_browser_*` call failed, with nothing in the message pointing at the
+ * display.
+ *
+ * `auto` therefore launches headless exactly when there is no display, which leaves desktop and
+ * sidebar users with the visible window they expect. An environment override wins over the setting
+ * so an operator can fix a running deployment without editing settings: `DSH_BROWSER_HEADLESS=1`
+ * forces headless, `=0` forces a window.
+ * @param mode - the configured mode.
+ * @param env - the environment to inspect; defaults to the current process.
+ * @returns whether to launch headless, and a one-line reason for the log.
+ */
+function resolveLaunchMode(
+  mode: HeadlessMode,
+  env: NodeJS.ProcessEnv = process.env,
+): { readonly headless: boolean; readonly why: string } {
+  const override = env.DSH_BROWSER_HEADLESS
+  if (override === '1' || override === 'true') return { headless: true, why: 'DSH_BROWSER_HEADLESS' }
+  if (override === '0' || override === 'false') return { headless: false, why: 'DSH_BROWSER_HEADLESS' }
+  if (mode === 'headless') return { headless: true, why: 'browser.headless = headless' }
+  if (mode === 'windowed') return { headless: false, why: 'browser.headless = windowed' }
+  const display = hasDisplay(env)
+  return display
+    ? { headless: false, why: 'a display is available' }
+    : { headless: true, why: 'no DISPLAY or WAYLAND_DISPLAY' }
 }
 
 /**
@@ -494,6 +572,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private readonly extraArgs: readonly string[] = [],
     private readonly ephemeralDir?: string,
     private readonly launcher: BrowserLauncher = defaultLauncher,
+    /**
+     * Whether this launch should get a window. See {@link resolveLaunchMode} for how `auto` decides
+     * and why a display-less host needs headless at all (issue #32).
+     */
+    private readonly headlessMode: HeadlessMode = 'auto',
   ) {}
 
   /** Which product this host would drive (for diagnostics). */
@@ -667,6 +750,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // after launch (exit code 0)" that required killing seven processes by hand.
     const adopted = await this.adoptRunningBrowser('before launch')
     if (adopted !== undefined) return adopted
+    const launch = resolveLaunchMode(this.headlessMode)
     const args = [
       '--remote-debugging-port=0',
       `--user-data-dir=${this.profileDir}`,
@@ -677,9 +761,29 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       '--disable-features=Translate,MediaRouter',
       '--disable-session-crashed-bubble',
       '--hide-crash-restore-bubble',
+      // Headless only where there is nothing to draw on. `--headless=new` rather than the legacy
+      // flag: the new mode behaves like a windowed browser, which matters because every command
+      // here was written and measured against one — including CDP input, which Chromium silently
+      // drops for a view it believes has no display surface. `--disable-gpu` and
+      // `--disable-dev-shm-usage` are what make that mode usable on a server: no GPU, and a
+      // /dev/shm far smaller than a desktop. See resolveLaunchMode for why this is conditional.
+      ...launch.headless ? ['--headless=new', '--disable-gpu', '--disable-dev-shm-usage'] : [],
       ...this.extraArgs,
       'about:blank',
     ]
+    // Chromium's own sandbox cannot start in some of these environments — running as root, or
+    // inside a container without the namespaces it needs — and it exits rather than degrading.
+    // Only then is the sandbox dropped, and never silently: a setting that weakens process
+    // isolation must be visible in the log, because whoever reads it has to be able to disagree.
+    if (launch.headless && needsNoSandbox()) {
+      args.splice(args.length - 2, 0, '--no-sandbox')
+      process.stderr.write('[dsh-browser] launching with --no-sandbox: '
+        + 'this process runs as root or in a container, where the Chromium sandbox cannot start\n')
+    }
+    if (launch.headless) {
+      process.stderr.write(`[dsh-browser] launching headless (${launch.why}); `
+        + 'the browser has no window but every tool works the same\n')
+    }
     // A browser from a previous attempt may still be running with this same
     // --user-data-dir. On Windows the new one would merely hand off to it and exit, and that
     // exit would then be treated as the launch failing.
