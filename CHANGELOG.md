@@ -4,6 +4,50 @@
 
 ---
 
+# 第五十一轮(2026-10-19,无显示环境无法启动浏览器:自动 headless)
+
+报告者把一个 systemd 服务上的部署失败追到了底:Debian 13、`dsh web` 以服务常驻、**进程里没有 `DISPLAY` / `WAYLAND_DISPLAY`**,于是每次 `dsh_browser_*` 都报 `exited immediately after launch (exit code 1)`,`DevToolsActivePort` 从不出现,整组工具不可用。底层原因是 Chromium 打印 `qt.qpa.xcb: could not connect to display` 后立即退出,而我们的启动参数从来不含 `--headless`。
+
+他给了本地补丁(改在 `node_modules` 里)、端到端验证(重启服务后成功打开页面并产出 780×437 的 PNG),并明确要求**上游做成设置驱动**,因为 `node_modules` 的改动会被插件更新覆盖。
+
+## 一、核实
+
+`start()` 的参数确实只有 `--remote-debugging-port=0`、`--user-data-dir`、`--no-first-run`、`--no-default-browser-check`、`--disable-features`、两个 bubble 开关 —— **没有 `--headless`,也没有 `--no-sandbox`**。而 `--headless` 缺席时,无显示的 Chromium 必然退出。这不是配置问题:桌面端有显示所以能开窗,服务端没有所以必然失败,而服务端恰好是"用截图把结果回传"的主流用法。
+
+## 二、改法:设置项 + 环境变量,而不是只在源码里加参数
+
+新增 **`browser.headless`**,取值 `auto`(默认) / `headless` / `windowed`:
+
+| 值 | 行为 |
+| --- | --- |
+| `auto` | 有显示 → 窗口;**无显示 → headless** |
+| `headless` | 强制 headless |
+| `windowed` | 强制窗口;显示不可用时**明确失败**,不悄悄退化 |
+
+**为什么是三个字符串而不是布尔三元组**:JSON 文档里混用 string 与 boolean 会产生歧义(手写 `true` 与 `"true"` 是两回事)。但手写 `true` / `false` 仍然接受,分别映射到 `headless` / `windowed` —— 那是任何人第一次写这个设置时会写的形态,因为类型差异拒绝它属于咬文嚼字。任何不认识的值都会被**报告**并回落到 `auto`,理由与 `browser.channel` 相同:被丢弃的值和生效的值看起来必须不一样。
+
+**环境变量优先于设置**:`DSH_BROWSER_HEADLESS=1` / `=0` 覆盖设置项。报告者第 4.3 条提的就是这个 —— 运维改一个运行中的部署不该需要编辑文件。测试里专门断言了**覆盖在模式判断之前生效**,否则存下来的设置会压过运维的应急开关。
+
+## 三、headless 时补的三个开关与一条安全约束
+
+`--headless=new`(不是旧 `--headless`):新模式的行为更接近有窗口的浏览器,而本插件所有命令都是对着有窗口的浏览器写并实测的 —— 包括 CDP 输入,Chromium 会静默丢弃"它认为没有显示表面"的视图的输入。
+
+`--disable-gpu`、`--disable-dev-shm-usage`:无 GPU、`/dev/shm` 远小于桌面的环境里,这两个是让 headless 可用的前提。
+
+**`--no-sandbox` 只在必要时加**,按报告者第 4.4 条:只有"以 root 运行"或"在容器内"(`/.dockerenv` 或 `container` 环境变量)才加,并且**在 stderr 明确写出这次降级**。默认仍走沙箱;降低进程隔离这件事必须让人能看见并反对。
+
+## 四、验证:先证明断言能区分修复前后
+
+5 条新断言,把源码回退到修复前跑同一组:**4 条失败**(其中"启动参数"那条等了 30 秒超时 —— 那正是没有 `--headless` 时浏览器起不来的表现),修复后 5 条全过。唯一在旧代码上也通过的是"windowed 不加 headless",它本来就该一直成立。
+
+`--no-sandbox` 那条是静态断言(检查它挂在 `headless && needsNoSandbox()` 条件下、且会打印),因为本机是 Windows、`needsNoSandbox()` 恒为 false,无法在这里触发真实的 root/容器分支。
+
+**未验证部分**:本次没有在真实的 systemd / 无显示环境里跑过。报告者已经用等价补丁做过端到端验证(页面打开 + PNG 产出),而我实现的路径与他的补丁在同一处、同样的开关;但仍需在真实无显示环境复测,这一点如实记下。
+
+**测试**:290 → 295(新增 5 条:`tests/headless-launch.test.mjs`)。`tsc` 干净。
+
+---
+
 # 第五十轮(2026-10-17,对齐 DSH 0.2.1 的插件契约 + 工具描述瘦身)
 
 ## 一、版本范围改到 DSH 真正读取的位置

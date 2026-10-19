@@ -32,6 +32,20 @@
 
 ## 载体行为
 
+- **无显示环境会自动改用 headless**,不需要额外配置。Chromium 在没有 `DISPLAY` 与 `WAYLAND_DISPLAY` 时会以 `could not connect to display` 立即退出,而 systemd 服务、容器、只有 SSH 的服务器正好都是这个状态——那偏偏是服务端浏览器最有用的部署形态。`browser.headless` 的默认值 `auto` 就是"有显示开窗口,没显示走 headless",桌面端与侧栏用户不受影响。
+
+  想显式控制时:
+
+  | 设置 | 行为 |
+  | --- | --- |
+  | `"auto"`(默认) | 有显示 → 窗口;无显示 → headless |
+  | `"headless"` | 强制 headless(服务器 / 截图专用 / CI) |
+  | `"windowed"` | 强制窗口;显示不可用时**直接报错**,而不是悄悄退化 |
+
+  手写 `true` / `false` 也接受,分别等价于 `headless` / `windowed`。运行中的部署可以用环境变量覆盖设置,不必改文件:`DSH_BROWSER_HEADLESS=1` 强制 headless,`=0` 强制窗口(环境变量优先于设置项)。
+
+  headless 启动会自动带上 `--disable-gpu` 与 `--disable-dev-shm-usage`;`--no-sandbox` **只在必要时**加(以 root 运行,或在容器内),并且会在 stderr 明确写出——降低进程隔离这件事必须让人能看见并反对。
+
 - **侧栏载体有前置条件**,不是装上 bridge 就成立。官方侧栏浏览器面板只在**外壳同时满足**两个条件时才是 `<webview>`:
   1. `preload` 暴露 `dshDesktop.browser`(而不只是 `protocolVersion`);
   2. 外壳窗口开启 `webviewTag`。
