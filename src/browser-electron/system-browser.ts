@@ -69,6 +69,21 @@ const CLOSE_GRACE_MS = 6_000
 const PORT_PROBE_MS = 250
 
 /**
+ * How long to keep trying to adopt a browser after a launcher reported a clean exit.
+ *
+ * Exit code 0 means the launcher handed the request to an instance already holding this profile —
+ * but on Windows that stub exits BEFORE the real browser writes `DevToolsActivePort`. Measured on
+ * Chrome 156: stub gone at 300 ms, port file present at 441 ms (issue #33). A single attempt read
+ * too early and reported a launch failure for a browser that was starting normally, so this is a
+ * retry rather than one shot.
+ *
+ * 8 s is the reporter's measured-working bound and is generous against that ~150 ms gap: an honest
+ * hand-off resolves in well under a second, and a launch that genuinely failed still reaches the
+ * error within the same budget the CDP loop already allows.
+ */
+const HANDOFF_ADOPT_MS = 8_000
+
+/**
  * Starts a browser process and returns a handle to it.
  *
  * Injectable so tests can supply something that speaks CDP — the seam a recovery test needs
@@ -769,7 +784,18 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // /dev/shm far smaller than a desktop. See resolveLaunchMode for why this is conditional.
       ...launch.headless ? ['--headless=new', '--disable-gpu', '--disable-dev-shm-usage'] : [],
       ...this.extraArgs,
-      'about:blank',
+      // NOT `about:blank`. Every page this plugin drives is created by `Target.createTarget` when a
+      // session first needs one (`buildSession`, which adopts a blank if the browser opened one and
+      // creates one otherwise), so a startup page is a tab nobody asked for and nobody closes: the
+      // tab strip showed `about:blank` next to the real page while `dsh_browser_list_tabs` reported
+      // only the real one. Reported as issue #33, banner and all.
+      //
+      // `--no-startup-window` keeps the browser alive with no window and no initial page; measured
+      // by the reporter on Chrome 156 as writing DevToolsActivePort in 599 ms, answering
+      // `/json/version`, listing two extension targets and no page, and then creating windows
+      // normally through `Target.createTarget`. A browser that does start a blank despite this is
+      // still handled: `normalizeBlankPages` closes the surplus and `buildSession` adopts the rest.
+      '--no-startup-window',
     ]
     // Chromium's own sandbox cannot start in some of these environments — running as root, or
     // inside a container without the namespaces it needs — and it exits rather than degrading.
@@ -984,9 +1010,21 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // Exit code 0 IS the hand-off: the request went to an instance already holding this profile,
       // so that instance is our browser and it is running right now. Adopting it turns the
       // reported "kill the leftovers by hand, on every restart" into a call that just works.
+      //
+      // Adopted with a bounded RETRY, because on Windows the launcher stub exits before the browser
+      // has written its port file: measured 300 ms to exit against 441 ms for DevToolsActivePort.
+      // One attempt therefore read too early and reported "exited immediately after launch" for a
+      // browser that was starting normally — reported as issue #33, where the reporter's own
+      // retry loop fixed it. 8 s at 250 ms is their measured-working bound and is generous against
+      // the ~150 ms gap, without turning a genuinely failed launch into a slow failure.
       if (clean) {
-        const recovered = await this.adoptRunningBrowser('after a hand-off')
-        if (recovered !== undefined) return recovered
+        const deadline = Date.now() + HANDOFF_ADOPT_MS
+        for (;;) {
+          const recovered = await this.adoptRunningBrowser('after a hand-off')
+          if (recovered !== undefined) return recovered
+          if (this.disposed || Date.now() >= deadline) break
+          await new Promise(resolve => setTimeout(resolve, PORT_PROBE_MS))
+        }
       }
       throw new Error(
         clean
