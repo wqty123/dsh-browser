@@ -4,6 +4,36 @@
 
 ---
 
+# 第五十二轮(2026-10-19,两个启动缺陷:hand-off 只认一次、启动参数白送一个空标签)
+
+报告者在 Windows 11 + Chrome 156 上报了两个,并自己定位了位置。他先报在 0.4.7 上,**升到 0.4.14 复测后两个都仍在** —— 我核实确认。
+
+## 一、exit 0 的认领只做一次(0.4.14 上是"读早了")
+
+`start()` 在 child 退出后判 `clean = exitCode === 0 && signal === null`,然后调**一次** `adoptRunningBrowser('after a hand-off')`。0.4.14 已经把"exit 0 当作移交而不是失败"做对了,但**只认一次**。
+
+报告者测出了为什么必然失败:Windows 上启动器 stub **300 ms 就退出**,而 `DevToolsActivePort` **441 ms 才落地** —— stub 退出那一刻文件还不存在,认领返回 undefined,于是仍然抛 `exited immediately after launch (exit code 0)`,而浏览器其实已经在启动。
+
+改法按他的建议做成**有界重试**:`HANDOFF_ADOPT_MS = 8_000`、间隔复用既有的 `PORT_PROBE_MS`(250 ms),`this.disposed` 或超时即停。8 秒是他实测可用的上界,相对那约 150 ms 的间隙是宽裕的;真正失败的启动仍会在同一预算内报错,不会被拖成"慢失败"。
+
+**重试只在 `clean` 分支内**。非 0 退出码或信号仍然立即判死并给出"它没有把请求交给谁"的措辞 —— 把它们也重试会把一句明确的"检查它能不能跑"变成 8 秒停顿后同一句话。
+
+## 二、启动参数 `about:blank` 白送一个空标签
+
+参数列表原来以 `'about:blank'` 结尾。插件自己的页面是首次使用时由 `Target.createTarget` 建的(`buildSession`),**开头那个标签从来不复用也不关闭** —— 标签栏是"空页 + 目标页"两行,而 `dsh_browser_list_tabs` 只报 1 个,因为那个空标签不在插件的模型里。这正是报告者描述的形态。
+
+改为 **`--no-startup-window`**:不建窗口、不起初始 page,浏览器仍然存活并可连 CDP。报告者实测(用正确引号重测后):`DevToolsActivePort` 599 ms 落地、`/json/version` 200、`/json/list` 只有两个 extension target 没有 page、然后 `Target.createTarget` 能正常建出窗口与页面。
+
+**兼容性没丢**:若某个浏览器仍开了一个空白页,`normalizeBlankPages` 会关掉多余的、`buildSession` 会领养留下来的那个 —— 这条路径本来就在,现在只是不再主动制造它。
+
+## 三、验证:先证明断言能区分修复前后
+
+3 条新断言,把源码回退到修复前跑同一组:**3 条全失败**(其中启动参数那条等了 30 秒超时),修复后 3 条全过。全量 **295 → 298**(297 通过 + 1 条平台门控跳过),`tsc` 干净。
+
+**未验证部分**:我没有在 Windows 上跑真实的 Chrome 156 复现那 150 ms 的间隙。两个改动都按报告者的实测参数落地(8 秒 / 250 ms、`--no-startup-window`),但真实时序仍需在他的机器上复测。
+
+---
+
 # 第五十一轮(2026-10-19,无显示环境无法启动浏览器:自动 headless)
 
 报告者把一个 systemd 服务上的部署失败追到了底:Debian 13、`dsh web` 以服务常驻、**进程里没有 `DISPLAY` / `WAYLAND_DISPLAY`**,于是每次 `dsh_browser_*` 都报 `exited immediately after launch (exit code 1)`,`DevToolsActivePort` 从不出现,整组工具不可用。底层原因是 Chromium 打印 `qt.qpa.xcb: could not connect to display` 后立即退出,而我们的启动参数从来不含 `--headless`。
