@@ -65,6 +65,17 @@ test('a missing file resolves to the documented defaults', () => {
   assert.equal(store.get().history.enabled, true, 'history records by default')
   assert.equal(store.get().ui.autoExpandOnce, true, 'auto-expand is once-per-task by default')
   assert.equal(store.get().ui.closeWithSession, false, 'closing the interface is not the default end of a session')
+  assert.equal(store.get().ui.quiet, false, 'quiet mode is opt-in: the default shares the window with the human')
+})
+
+test('quiet mode is opt-in, and a mistyped value cannot turn it on', () => {
+  // Presentation policy, not a capability gate: a document that predates the switch, or a
+  // hand-edited `"true"`, must keep the documented default (off) rather than quietly making
+  // every operation stop presenting itself.
+  assert.equal(resolveSettings({}).ui.quiet, false, 'absent keeps the default')
+  assert.equal(resolveSettings({ ui: {} }).ui.quiet, false, 'an existing section without the key keeps it too')
+  assert.equal(resolveSettings({ ui: { quiet: true } }).ui.quiet, true, 'the switch is honoured when present')
+  assert.equal(resolveSettings({ ui: { quiet: 'true' } }).ui.quiet, false, 'a string is not a boolean')
 })
 
 test('partial and mistyped fields fall back per field, unknown keys are dropped', () => {

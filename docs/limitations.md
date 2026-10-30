@@ -6,7 +6,7 @@
 
 - JPEG 在**自托管**与**本机 Chrome / Edge** 上可用;**桌面端侧栏**走外壳的 `webContents.debugger`,其 Electron 的 CDP JPEG 编码会挂起,因此该载体下请求 JPEG 会返回 PNG。
 - 降采样(`maxWidth`/`maxHeight`)**三种载体都支持**(经 CDP `clip.scale`,或自托管走原生 `capturePage`)。
-- 自托管截图优先走 Electron 原生 `capturePage`(CDP `captureScreenshot` 在多视图下会挂起);截图前自动把目标标签置顶。
+- 自托管截图优先走 Electron 原生 `capturePage`(CDP `captureScreenshot` 在多视图下会挂起);截图前自动把目标标签置顶 —— 除非开启**安静模式**,那时不碰窗口(见下)。
 - `fullPage` 在部分主机的**软件合成**下不稳定 —— 请求 `fullPage` 时**原生 `capturePage` 路径被整体跳过**(它没有捕获滚动区以外内容的能力),因此**三种载体都走 CDP 的 `captureBeyondViewport`**。也就是说 `fullPage` 的不稳定性与载体无关,任何载体都可能碰到;只有视口截图才优先走原生路径。
 
 ## 验证与登录
@@ -62,6 +62,24 @@
 - 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建** —— 仅页面状态丢失,无需手动 `dsh_browser_reset_session`。`dsh_browser_reset_session` 仍可用于主动重置。
 - 新视图创建前会先有界加载 `about:blank`(3 秒上限,保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时。
 - 子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`;写之前若该文件已超过 2 MiB,则**丢弃旧内容、只写入一行带时间戳的轮转记录**(形如 `<ISO 时间戳> log rotated: previous content exceeded 2097152 bytes and was discarded`)—— 旧内容就此消失不留副本,但那一行证明"曾发生过轮转",纯 `dsh web` 自托管可据此自助排查崩溃循环。
+
+## 安静模式(`ui.quiet`)
+
+默认关闭。默认契约是"人机共享同一个窗口":每次操作把窗口带到前面,用户能直接看见 agent 在做什么。开启后,自托管的 Electron 载体改成"能操作,但不接管屏幕":
+
+| 操作 | 默认 | 安静模式 |
+| --- | --- | --- |
+| 截图 | 显示 / 还原 / 聚焦窗口,再 `capturePage` | 不碰窗口;窗口不可见时直接走 CDP `Page.captureScreenshot` |
+| 输入(点击 / 输入 / 按键) | `show()` + `moveTop()` + 聚焦 | 最小化则 `restore()`,不可见则 `showInactive()`;不激活应用、不抢键盘焦点、不 `moveTop()` |
+| 标签切换 / 导航 | 同输入,把窗口置前 | 只换窗口内可见的标签,最小化的窗口保持最小化 |
+
+它不是"不显示窗口"。合成输入(CDP `Input.*`)仍需要视图有**显示表面**,Chromium 对没有表面的视图会静默丢弃输入 —— 所以点击/输入可能把最小化的窗口恢复成可见,但不会成为 key window,也不会盖在用户正在用的窗口上。截图和导航没有这个约束,因此是安静模式下完全不动窗口的操作。
+
+边界:
+
+- **只作用于自托管 Electron 载体**(插件的 `host-main` 子进程)。桌面端侧栏由外壳承载,`ui.quiet` 不改变外壳的展示策略;安装版 Chrome / Edge 载体各自管理自己的窗口。
+- 用户主动操作(点工具栏、切标签)不受影响 —— 它们本来就发生在那个窗口里。
+- 窗口完全不可见时,安静模式仍会让它出现在屏幕上(只是不聚焦)。要"连出现都不要",请在截图之外使用非视觉能力(snapshot / a11y / content),它们本来就不需要显示表面。
 
 ## 不提供的东西
 

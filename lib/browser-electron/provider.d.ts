@@ -43,8 +43,10 @@ export interface ElectronBrowserViewHost {
      * @param label - human-readable session/task label, when the provider knows
      * one; the host may surface it (e.g. in the window title) so a human can
      * tell which task's page is currently visible.
+     * @param options - presentation policy; `quiet` asks for a surface without taking
+     * over the screen (see {@link PresentOptions}).
      */
-    showView?(handle: ElectronViewHandle, label?: string): void;
+    showView?(handle: ElectronViewHandle, label?: string, options?: PresentOptions): void;
     /**
      * Optional: (re)present a view and WAIT until the host confirms it. Chromium
      * silently drops CDP-synthesized input (`Input.*`) for a view that has no
@@ -57,8 +59,9 @@ export interface ElectronBrowserViewHost {
      * assumed to present every view (headless/probe hosts).
      * @param handle - the handle to present.
      * @param label - human-readable session/task label, as in {@link showView}.
+     * @param options - presentation policy, as in {@link showView}.
      */
-    presentView?(handle: ElectronViewHandle, label?: string): Promise<void>;
+    presentView?(handle: ElectronViewHandle, label?: string, options?: PresentOptions): Promise<void>;
     /**
      * Optional: pages this carrier holds that the provider never created.
      *
@@ -419,12 +422,34 @@ export declare function toExportedCookies(raw: unknown): ExportedCookie[];
  * @returns the CDP cookie, or undefined when it lacks a usable domain.
  */
 export declare function toCdpCookie(cookie: ExportedCookie): Record<string, unknown> | undefined;
+/**
+ * How the carrier should present a view before it is used.
+ *
+ * `quiet` is the resolved `ui.quiet` switch. It does not mean "invisible": Chromium drops
+ * synthesized `Input.*` for a view without a display surface, so input still needs one. It means
+ * the carrier must get that surface without taking the screen over — no application activation
+ * and no keyboard focus. Navigation and tab switching only reveal the view inside its window; the
+ * pre-input barrier may restore a minimized window (it needs the surface), but even then it shows
+ * it inactive instead of focusing or raising it. A host that cannot honour this (a headless probe,
+ * the desktop sidebar) simply ignores it.
+ */
+export interface PresentOptions {
+    readonly quiet?: boolean;
+}
 /** Native capture options the self-hosted view handle understands. */
 export interface ScreenshotOptions {
     readonly format?: 'png' | 'jpeg';
     readonly quality?: number;
     readonly maxWidth?: number;
     readonly maxHeight?: number;
+    /**
+     * Capture without presenting the window first (`ui.quiet`).
+     *
+     * The self-hosted host answers this by skipping its restore/show/focus step: a visible window
+     * still captures through `capturePage()`, and a minimized or hidden one falls through to the
+     * CDP path, which needs no display surface.
+     */
+    readonly quiet?: boolean;
 }
 /** CDP method for runtime evaluation (the execute path). */
 export declare const CDP_RUNTIME_EVALUATE = "Runtime.evaluate";
@@ -885,6 +910,14 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
      *    diagnostics: it can never be allowed to become the failure.
      */
     private notifyUserActionError;
+    /**
+     * Whether the operator asked for quiet mode (`ui.quiet`).
+     *
+     * Read live on every call rather than captured at construction: the panel writes the document
+     * and the next operation is expected to honour it, without a restart.
+     * @returns true when the carrier must present views without taking the screen over.
+     */
+    private isQuiet;
     /**
      * Ask the host to show the active tab's view, carrying the session label.
      *

@@ -565,8 +565,17 @@ function updateWindowTitle(win: HostWindow, viewId: string | undefined, label: s
   } catch { /* destroyed */ }
 }
 
-/** Make one view the visible (topmost) one within its window. */
-function showViewInWindow(win: HostWindow, viewId: string, label?: string): void {
+/**
+ * Make one view the visible (topmost) one WITHIN its window, leaving the window itself alone.
+ *
+ * Split out of {@link showViewInWindow} for quiet-mode capture: a screenshot still has to look
+ * at the active tab rather than another tab of the same window, but it must not show, restore,
+ * raise or focus the window to do it. Everything here is contentView-local.
+ * @param win - the window holding the view.
+ * @param viewId - the view to reveal.
+ * @param label - session/task label, when known, for the window title.
+ */
+function revealViewInWindow(win: HostWindow, viewId: string, label?: string): void {
   const entry = win.views.get(viewId)
   if (entry === undefined) return
   // A navigation replaced this view's renderer, and the new one has no
@@ -598,11 +607,39 @@ function showViewInWindow(win: HostWindow, viewId: string, label?: string): void
   // Always refresh the title: it reflects the CURRENT page of the visible
   // view, which changes as the agent navigates.
   updateWindowTitle(win, viewId, label)
+}
+
+/**
+ * Make one view the visible one within its window, and — outside quiet mode — raise the window.
+ * @param win - the window holding the view.
+ * @param viewId - the view to present.
+ * @param label - session/task label, when known, for the window title.
+ * @param quiet - `ui.quiet`: present without taking the screen over.
+ * @param needSurface - quiet mode only: this presentation is the barrier before synthesized
+ *   input, so the window has to be visible even if the user minimized it. A navigation or a tab
+ *   switch does not need that and leaves a minimized window alone.
+ */
+function showViewInWindow(win: HostWindow, viewId: string, label?: string, quiet = false, needSurface = false): void {
+  revealViewInWindow(win, viewId, label)
   // Raise this session's window so the human sees the page being worked on
   // (moveTop raises without stealing keyboard focus).
+  //
+  // Quiet mode (`ui.quiet`): the user asked not to be interrupted, so this must not
+  // activate the application, steal keyboard focus, or pull the window in front of the one
+  // they are using. Chromium drops `Input.*` for a view with no display surface, so the one
+  // case that still needs a visible window — the barrier before synthesized input — restores
+  // it with `showInactive()`, which shows it without becoming the key window, and never calls
+  // `moveTop()`. Everything else (navigation, tab switching, screenshots) leaves a minimized
+  // window minimized.
   try {
-    if (!win.window.isVisible()) win.window.show()
-    win.window.moveTop()
+    if (quiet) {
+      if (!needSurface) return
+      if (win.window.isMinimized()) win.window.restore()
+      if (!win.window.isVisible()) win.window.showInactive()
+    } else {
+      if (!win.window.isVisible()) win.window.show()
+      win.window.moveTop()
+    }
   } catch { /* closing */ }
 }
 
@@ -619,7 +656,7 @@ function scheduleWindowClose(win: HostWindow): void {
 }
 
 /** Handle one command. */
-async function handle(op: string, msg: { id: number; viewId?: string; windowId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; label?: string; format?: string; quality?: number; maxWidth?: number; maxHeight?: number; message?: string }): Promise<void> {
+async function handle(op: string, msg: { id: number; viewId?: string; windowId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; label?: string; format?: string; quality?: number; maxWidth?: number; maxHeight?: number; message?: string; quiet?: boolean; needSurface?: boolean }): Promise<void> {
   try {
     switch (op) {
       case 'ping':
@@ -741,7 +778,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         const viewId = msg.viewId
         if (viewId === undefined) throw new Error('showView missing viewId')
         const win = windowOfView(viewId)
-        if (win !== undefined) showViewInWindow(win, viewId, typeof msg.label === 'string' ? msg.label : undefined)
+        if (win !== undefined) showViewInWindow(win, viewId, typeof msg.label === 'string' ? msg.label : undefined, msg.quiet === true, msg.needSurface === true)
         reply(msg.id, { ok: true })
         return
       }
@@ -811,12 +848,25 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         const wantQuality = typeof msg.quality === 'number' ? msg.quality : 80
         const maxW = typeof msg.maxWidth === 'number' ? msg.maxWidth : 0
         const maxH = typeof msg.maxHeight === 'number' ? msg.maxHeight : 0
+        // Quiet mode: a screenshot is not a reason to take the screen over. Skipping the
+        // raise below is what makes a minimized window survive a screenshot: capturePage on
+        // a hidden view returns an empty image, and the CDP fallback captures without needing
+        // a display surface. The default path keeps the raise, because there a screenshot is
+        // how the human follows what the agent is doing.
+        const quiet = msg.quiet === true
         let mime = 'image/png'
-        try {
-          if (!win.window.isVisible()) win.window.show()
-        } catch { /* closing */ }
-        try { win.window.restore() } catch { /* not minimized */ }
-        win.window.focus()
+        if (quiet) {
+          // The active tab has to be the visible one INSIDE the window, or the capture may read
+          // another tab. Keep that switch contentView-local: show/restore/focus are precisely
+          // what quiet mode forbids.
+          revealViewInWindow(win, viewId)
+        } else {
+          try {
+            if (!win.window.isVisible()) win.window.show()
+          } catch { /* closing */ }
+          try { win.window.restore() } catch { /* not minimized */ }
+          win.window.focus()
+        }
         let base64 = ''
         let renderedSize: { width: number; height: number } | undefined
         try {
@@ -1143,7 +1193,7 @@ void app.whenReady().then(() => {
   rl.on('line', line => {
     const text = line.trim()
     if (text === '') return
-    let msg: { id: number; op?: string; viewId?: string; windowId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; label?: string; format?: string; quality?: number; maxWidth?: number; maxHeight?: number; message?: string }
+    let msg: { id: number; op?: string; viewId?: string; windowId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; label?: string; format?: string; quality?: number; maxWidth?: number; maxHeight?: number; message?: string; quiet?: boolean; needSurface?: boolean }
     try {
       msg = JSON.parse(text) as typeof msg
     } catch {

@@ -87,6 +87,14 @@ declare module 'electron' {
     isMinimized(): boolean
     isFocused(): boolean
     show(): void
+    /**
+     * Show the window without activating the application or taking keyboard focus.
+     *
+     * Not in the type definitions of older Electron releases, but present since Electron 2 —
+     * quiet mode (`ui.quiet`) depends on it to give a view a display surface without stealing
+     * the foreground.
+     */
+    showInactive(): void
     restore(): void
     focus(): void
     moveTop(): void
