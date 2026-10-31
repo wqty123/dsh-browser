@@ -43,6 +43,31 @@ export interface BrowserClickRequest {
   readonly y: number
 }
 
+/**
+ * A run of coordinate clicks in one call.
+ *
+ * Each point is clicked in order with the same real CDP sequence the single click uses. Between
+ * points the call waits `intervalMs`, because a canvas that receives two presses inside one frame
+ * treats them as a double click — or drops the second entirely, which looks like a silently wrong
+ * board rather than an error.
+ */
+export interface BrowserClickSequenceRequest {
+  /** Points to click, in order, in viewport CSS pixels. */
+  readonly points: readonly { readonly x: number; readonly y: number }[]
+  /** Milliseconds to wait between points; defaults to 40. */
+  readonly intervalMs?: number
+}
+
+/** Result of a click run: how many landed, and where it stopped if it did not finish. */
+export interface BrowserClickSequenceResult {
+  /** Points that were clicked successfully. */
+  readonly clicked: number
+  /** Index of the point that failed, when one did. */
+  readonly failedAt?: number
+  /** Why that point failed. */
+  readonly error?: string
+}
+
 /** Type text into the focused element. */
 export interface BrowserTypeRequest {
   /** The text to insert. */
@@ -624,6 +649,17 @@ export interface BrowserProvider {
    * request carries a `target`. Honor `signal` for cancellation.
    */
   click(session: BrowserSessionId, request: BrowserClickRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void>
+  /**
+   * Click several points in order, in one round trip.
+   *
+   * Exists because a canvas page accepts only genuine input: one click per call meant two calls
+   * per cell on a 9x9 board. Stops at the first point that fails rather than pressing through a
+   * page that has moved under it, and reports how far it got.
+   * @param session - the session to click in.
+   * @param request - the points and the interval between them.
+   * @param signal - cancellation between points.
+   */
+  clickSequence(session: BrowserSessionId, request: BrowserClickSequenceRequest, signal?: AbortSignal): Promise<BrowserClickSequenceResult>
   /**
    * Type into the focused element, or focus a located element first when the
    * request carries a `target`. Honor `signal` for cancellation.

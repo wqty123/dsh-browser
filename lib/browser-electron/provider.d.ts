@@ -8,7 +8,7 @@
  */
 import { type VisitedPage } from './history-store.js';
 import type { BrowserSettings } from './settings-store.js';
-import type { BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserElementTarget, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, ExportedCookie } from '../browser/types.js';
+import type { BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserClickSequenceRequest, BrowserClickSequenceResult, BrowserContentRequest, BrowserContentResult, BrowserElementTarget, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, ExportedCookie } from '../browser/types.js';
 import type { CarrierPage, CarrierLossReason } from '../browser/types.js';
 /** Stable provider id registered with `ctx.browser`. */
 export declare const ELECTRON_BROWSER_PROVIDER_ID = "electron";
@@ -605,6 +605,21 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     click(session: BrowserSessionId, request: BrowserClickRequest | {
         readonly target: BrowserElementTarget;
     }, signal?: AbortSignal): Promise<void>;
+    /**
+     * Click many points in order, once.
+     *
+     * The same wire sequence as {@link click}, looped — only the round-trip count changes. Presenting
+     * happens ONCE: the display-surface barrier is per view, not per press, and paying it for every
+     * point is what made an 86-cell board expensive.
+     *
+     * Stops at the first point that fails and reports where: a run that pressed through a page which
+     * had navigated or lost its surface would fill the wrong cells and still answer success.
+     * @param session - the session to click in.
+     * @param request - the points and the interval between them.
+     * @param signal - cancellation between points.
+     * @returns how many points landed, and where it stopped if it did not finish.
+     */
+    clickSequence(session: BrowserSessionId, request: BrowserClickSequenceRequest, signal?: AbortSignal): Promise<BrowserClickSequenceResult>;
     /**
      * Type into the focused element, or focus a located element (css/text/xpath)
      * first and then insert the text.
