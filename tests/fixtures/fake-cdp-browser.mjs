@@ -23,6 +23,7 @@ import { createServer } from 'node:http'
  *   adoption pass a Chrome-like name explicitly.
  * @param options.blanks - target ids that exist as blank pages BEFORE this client connects, which
  *   is the state a real Chrome is in (it opens more than one page on start).
+ * @param options.failAttaches - number of initial attach commands refused, for creation recovery.
  */
 function createFakeBrowser(options = {}) {
   const browserName = options.browserName ?? 'Fake/1.0'
@@ -41,6 +42,7 @@ function createFakeBrowser(options = {}) {
   let lastSessionId = ''
   /** Debugging connections accepted so far: a drop plus a reconnect is two. */
   let connections = 0
+  let attachFailuresLeft = options.failAttaches ?? 0
 
   const server = createServer((request, response) => {
     if (request.url === '/json/version') {
@@ -66,7 +68,7 @@ function createFakeBrowser(options = {}) {
     // This connection's own CDP state: a page attached here is addressable here and nowhere
     // else, so an id issued before a drop is rejected afterwards rather than quietly reused.
     connections += 1
-    const state = { targetId: '', sessionId: '' }
+    const state = { targetId: '', sessionId: '', sessions: new Set() }
     // Frames can be split across chunks, so accumulate until a whole one is present:
     // decoding chunk by chunk truncated the JSON and looked like a protocol failure.
     let buffered = Buffer.alloc(0)
@@ -120,14 +122,19 @@ function createFakeBrowser(options = {}) {
       return { id: message.id, result: { targetId: state.targetId } }
     }
     if (message.method === 'Target.attachToTarget') {
-      state.sessionId = `session-${randomUUID()}`
-      lastSessionId = state.sessionId
       attached.push(message.params?.targetId)
+      if (attachFailuresLeft > 0) {
+        attachFailuresLeft -= 1
+        return { id: message.id, error: { message: 'attach refused by test browser' } }
+      }
+      state.sessionId = `session-${randomUUID()}`
+      state.sessions.add(state.sessionId)
+      lastSessionId = state.sessionId
       return { id: message.id, result: { sessionId: state.sessionId } }
     }
-    // Every page command goes to the current session; a stale one is a protocol error,
+    // Every page command goes to an attached session; a stale one is a protocol error,
     // which is exactly the failure H3 produced.
-    if (message.sessionId !== undefined && message.sessionId !== state.sessionId) {
+    if (message.sessionId !== undefined && !state.sessions.has(message.sessionId)) {
       return { id: message.id, sessionId: message.sessionId, error: { message: 'Session with given id not found.' } }
     }
     return { id: message.id, sessionId: message.sessionId, result: {} }

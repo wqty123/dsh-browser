@@ -349,6 +349,8 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private normalizeBlankPages;
     /** Views whose session is being created right now, so a second caller waits for the first. */
     private readonly sessionBuilding;
+    /** Serialises page selection/creation and attachment for each browser connection. */
+    private readonly targetBuilds;
     /** sessionId -> targetId, so a destroyed view can close the right page. */
     private readonly sessions;
 }

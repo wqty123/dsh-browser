@@ -33,6 +33,41 @@ import { homedir } from 'node:os'
 import { extname, join } from 'node:path'
 import path from 'node:path'
 
+/** Consume option values so a profile name can never become the package version. */
+function parseArguments(args) {
+  let profile
+  let version
+  let verifyOnly = false
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === '--profile') {
+      const value = args[++i]
+      if (profile !== undefined || value === undefined || value === '' || value.startsWith('-')) {
+        throw new Error('--profile requires exactly one profile name')
+      }
+      profile = value
+    } else if (arg === '--verify') {
+      verifyOnly = true
+    } else if (arg.startsWith('-')) {
+      throw new Error(`unknown argument: ${arg}`)
+    } else if (version !== undefined) {
+      throw new Error('pass at most one package version')
+    } else {
+      version = arg
+    }
+  }
+  return { profile, version, verifyOnly }
+}
+
+let parsed
+try {
+  parsed = parseArguments(process.argv.slice(2))
+} catch (error) {
+  console.error(`invalid arguments: ${error.message}`)
+  process.exit(2)
+}
+const { version, verifyOnly } = parsed
+
 /**
  * Where the DSH home is.
  *
@@ -66,11 +101,7 @@ if (HARNESS === undefined || HARNESS === '') {
  * `dsh-client-modules/lib/index.js`, the `entry.fiber === void 0` check).
  * @returns the profile name, from `--profile` or `DSH_PROFILE`, defaulting to `web`.
  */
-const PROFILE_NAME = (() => {
-  const flag = process.argv.indexOf('--profile')
-  if (flag !== -1 && process.argv[flag + 1] !== undefined) return process.argv[flag + 1]
-  return process.env.DSH_PROFILE ?? 'web'
-})()
+const PROFILE_NAME = parsed.profile ?? process.env.DSH_PROFILE ?? 'web'
 const PROFILE = join(HOME, 'profiles', PROFILE_NAME)
 const PACKAGE = join(PROFILE, 'package.json')
 const PLUGIN = 'dsh-builtin-browser'
@@ -142,10 +173,6 @@ const CHECKS = [
   { path: join(HARNESS, 'packages', 'core', 'tools', 'node_modules'), expect: 'directory' },
   { path: join(HOME, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-tools'), expect: 'junction' },
 ]
-
-const args = process.argv.slice(2)
-const verifyOnly = args.includes('--verify')
-const version = args.find(arg => !arg.startsWith('--'))
 
 /** Run a command, streaming nothing but failing loudly. */
 /**
@@ -223,6 +250,24 @@ if (!existsSync(PACKAGE)) {
   process.exit(1)
 }
 
+// All prerequisites are read-only checks. Failure must leave the original pin,
+// peer links and backups untouched, not merely avoid running pnpm.
+const peerRoot = PROFILE_NAME === 'desktop' ? desktopPeerRoot() : undefined
+if (PROFILE_NAME === 'desktop' && peerRoot === undefined) {
+  console.error('step 1b: could not find the desktop\'s own copies of the plugin\'s peers.')
+  console.error('  Set DSH_DESKTOP_APP to the `dsh` directory inside the desktop install')
+  console.error('  (the one containing node_modules), then re-run. Without them the plugin')
+  console.error('  will be linked but will not load, and its settings panel will be missing.')
+  process.exit(1)
+}
+const repair = findRepairTool()
+if (repair === undefined) {
+  console.error('  no repair tool found — refusing to run the install that would break the profile.')
+  console.error('  Set DSH_REPAIR_TOOL to repair-web-profile.mjs (it is not part of this package: the')
+  console.error('  profile layout it repairs is specific to the machine DSH is installed on).')
+  process.exit(1)
+}
+
 // ---- 1. pin the version -----------------------------------------------------
 if (version !== undefined) {
   const pinned = currentPin()
@@ -243,6 +288,7 @@ if (version !== undefined) {
   } else {
     copyFileSync(PACKAGE, `${PACKAGE}.bak-before-${version}`)
     const document = JSON.parse(readFileSync(PACKAGE, 'utf8'))
+    document.dependencies ??= {}
     document.dependencies[PLUGIN] = version
     writeFileSync(PACKAGE, `${JSON.stringify(document, null, 2)}\n`)
     console.log(`step 1: pinned ${version} (backup: ${PACKAGE}.bak-before-${version})`)
@@ -260,14 +306,6 @@ if (version !== undefined) {
 // way that looks like success: it is linked, it is in `dsh.profile.bundles`, and its tools
 // and settings panel are simply absent. Linking the shipped copies is what closes it.
 if (PROFILE_NAME === 'desktop' && !verifyOnly) {
-  const peerRoot = desktopPeerRoot()
-  if (peerRoot === undefined) {
-    console.error('step 1b: could not find the desktop\'s own copies of the plugin\'s peers.')
-    console.error('  Set DSH_DESKTOP_APP to the `dsh` directory inside the desktop install')
-    console.error('  (the one containing node_modules), then re-run. Without them the plugin')
-    console.error('  will be linked but will not load, and its settings panel will be missing.')
-    process.exit(1)
-  }
   const document = JSON.parse(readFileSync(PACKAGE, 'utf8'))
   document.dependencies ??= {}
   const linked = []
@@ -292,18 +330,6 @@ if (PROFILE_NAME === 'desktop' && !verifyOnly) {
 }
 
 // ---- 2. install -------------------------------------------------------------
-  // Resolve the repair tool BEFORE installing. Step 2 is the step that breaks the
-  // profile, and this script depends on a repair tool that ships outside this package —
-  // so checking afterwards meant the default outcome was to damage the profile and then
-  // report that it could not be fixed.
-  const repair = findRepairTool()
-  if (repair === undefined) {
-    console.error('  no repair tool found — refusing to run the install that would break the profile.')
-    console.error('  Set DSH_REPAIR_TOOL to repair-web-profile.mjs (it is not part of this package: the')
-    console.error('  profile layout it repairs is specific to the machine DSH is installed on).')
-    process.exit(1)
-  }
-
 console.log('step 2: pnpm install (this is the step that causes the damage)')
 run('pnpm', ['install', '--ignore-scripts'], PROFILE)
 

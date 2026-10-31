@@ -453,14 +453,18 @@ class ElectronChildClient {
     private readonly executable?: string,
   ) {
     const electron = this.executable ?? resolveElectronPath()
+    const source = this.executable !== undefined
+      ? 'provided'
+      : electron === process.env.ELECTRON_PATH ? 'ELECTRON_PATH' : 'auto'
     // Record what is about to be spawned — with existence checks — BEFORE the
     // attempt. When Electron cannot load the app entry it exits 1 with EMPTY
     // stderr, and that signature is otherwise indistinguishable from a missing
     // binary: writing both paths (and whether they exist) in advance is what
     // turns the next occurrence into a named cause instead of a guess.
-    process.stderr.write(`[dsh-browser host] spawning electron: ${electron}\n`)
+    process.stderr.write(`[dsh-browser host] spawning electron: ${electron} source=${source}\n`)
     appendHostLog(
       `${hostStamp()} spawning: electron=${electron} (exists=${String(existsSync(electron))})`
+      + ` source=${source}`
       + ` hostMain=${this.hostMainPath} (exists=${String(existsSync(this.hostMainPath))})`
       + ` port=${String(this.port)}\n`,
     )

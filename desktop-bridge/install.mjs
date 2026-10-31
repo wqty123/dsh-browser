@@ -333,7 +333,12 @@ if (!existsSync(mainPath) && !existsSync(asarPath)) {
 if (revert) {
   let reverted = false
   if (existsSync(asarMoved)) {
-    if (existsSync(asarPath)) rmSync(asarPath, { force: true })
+    if (existsSync(asarPath)) {
+      console.error('refusing to replace an app archive that already exists: a desktop upgrade may have installed a newer build')
+      console.error(`  current archive: ${asarPath}`)
+      console.error(`  preserved backup: ${asarMoved}`)
+      process.exit(1)
+    }
     renameSync(asarMoved, asarPath)
     console.log(`restored the app archive: app.asar.before-bridge -> app.asar`)
     reverted = true

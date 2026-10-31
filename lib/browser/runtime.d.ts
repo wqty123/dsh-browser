@@ -8,9 +8,9 @@
  */
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-import type { BrowserA11yRequest, BrowserA11yResult, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserElementTarget, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserChallenge, ExportedCookie, VisitedPage } from './types.js';
+import type { BrowserA11yRequest, BrowserA11yResult, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserElementTarget, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserPreviewFrame, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserChallenge, ExportedCookie, VisitedPage } from './types.js';
 export { BrowserError, } from './types.js';
-export type { BrowserA11yNode, BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentFormat, BrowserElementTarget, BrowserGetValueRequest, BrowserGetValueResult, BrowserScrapeField, BrowserScrapeRequest, BrowserScrapeResult, BrowserSelectRequest, BrowserSelectResult, BrowserSetValueRequest, BrowserSetValueResult, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillField, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, ExportedCookie, } from './types.js';
+export type { BrowserA11yNode, BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentFormat, BrowserElementTarget, BrowserGetValueRequest, BrowserGetValueResult, BrowserScrapeField, BrowserScrapeRequest, BrowserScrapeResult, BrowserSelectRequest, BrowserSelectResult, BrowserSetValueRequest, BrowserSetValueResult, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillField, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserPreviewFrame, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, ExportedCookie, } from './types.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
         browser: BrowserRuntime;
@@ -114,6 +114,17 @@ export declare class BrowserRuntime extends Service {
     scrape(session: BrowserSessionId, request: BrowserScrapeRequest, signal?: AbortSignal): Promise<BrowserScrapeResult>;
     /** Capture the current page through the selected provider. */
     screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult>;
+    /**
+     * Capture the active page without presenting it, through the selected provider.
+     *
+     * Optional throughout: a provider that cannot do this keeps working for every other tool, and the
+     * caller gets exactly one error code meaning "watching is not available here" — which the viewer
+     * renders as paused rather than as a failure of the browser.
+     * @param session - the session whose active page to capture.
+     * @param signal - cancellation for the wait, never for the capture itself.
+     * @returns the encoded frame.
+     */
+    capturePassive(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserPreviewFrame>;
     /** Check for a human-verification challenge on the active tab. */
     detectChallenge(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserChallenge>;
     /** Return the session's chronological operation log through the provider. */

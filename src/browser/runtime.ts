@@ -28,6 +28,7 @@ import type {
   BrowserHistoryEntry,
   BrowserNavigateRequest,
   BrowserOpenRequest,
+  BrowserPreviewFrame,
   BrowserProvider,
   BrowserScrapeRequest,
   BrowserScrapeResult,
@@ -88,6 +89,7 @@ export type {
   BrowserHistoryEntry,
   BrowserNavigateRequest,
   BrowserOpenRequest,
+  BrowserPreviewFrame,
   BrowserProvider,
   BrowserScreenshotRequest,
   BrowserScreenshotResult,
@@ -334,6 +336,27 @@ export class BrowserRuntime extends Service {
   /** Capture the current page through the selected provider. */
   async screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult> {
     return this.resolveProvider().screenshot(session, request, signal)
+  }
+
+  /**
+   * Capture the active page without presenting it, through the selected provider.
+   *
+   * Optional throughout: a provider that cannot do this keeps working for every other tool, and the
+   * caller gets exactly one error code meaning "watching is not available here" — which the viewer
+   * renders as paused rather than as a failure of the browser.
+   * @param session - the session whose active page to capture.
+   * @param signal - cancellation for the wait, never for the capture itself.
+   * @returns the encoded frame.
+   */
+  async capturePassive(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserPreviewFrame> {
+    const provider = this.resolveProvider()
+    if (typeof provider.capturePassive !== 'function') {
+      throw new BrowserError(
+        'browser: this carrier cannot provide a passive preview (watching is unavailable here)',
+        'BROWSER_PREVIEW_UNAVAILABLE',
+      )
+    }
+    return provider.capturePassive(session, signal)
   }
 
   /** Check for a human-verification challenge on the active tab. */

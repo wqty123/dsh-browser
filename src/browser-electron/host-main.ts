@@ -27,9 +27,19 @@
 import { app, BrowserWindow, WebContentsView } from 'electron'
 import { createInterface } from 'node:readline'
 import { createConnection } from 'node:net'
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { writeFileNoReplace } from './file-write.js'
+import { electronRuntimeDiagnosticLines } from './runtime-diagnostics.js'
+import { createRpcLineReader } from './rpc-input.js'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
+
+// Report the binary actually running this child, even when ELECTRON_PATH
+// intentionally selects a different version from the plugin's dependency.
+// The parent mirrors stderr to the host log; discovery stays filesystem-only.
+for (const line of electronRuntimeDiagnosticLines(process.versions)) {
+  process.stderr.write(line + '\n')
+}
 
 /**
  * The spawn token the parent sent via stdin (first line). Must be echoed in
@@ -959,18 +969,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
           const detail = (result as { exceptionDetails?: { exception?: { description?: string } } }).exceptionDetails
           throw new Error(`download failed: ${detail?.exception?.description ?? 'no data'}`)
         }
-        // Temp file + rename keeps the write atomic-ish: a crash mid-write
-        // leaves only a `.part` file, never a half-written final file.
-        const tmpPath = savePath + '.part'
-        mkdirSync(dirname(savePath), { recursive: true })
-        writeFileSync(tmpPath, Buffer.from(value, 'base64'))
-        try {
-          renameSync(tmpPath, savePath)
-        } catch (error) {
-          // A failed rename must not leave a stray .part behind.
-          try { unlinkSync(tmpPath) } catch { /* already gone */ }
-          throw error
-        }
+        writeFileNoReplace(savePath, Buffer.from(value, 'base64'))
         reply(msg.id, { ok: true, result: { path: savePath } })
         return
       }
@@ -1131,7 +1130,9 @@ void app.whenReady().then(() => {
       stdinLines.once('close', send)
     }
   }
-  const rl = createInterface({ input: socket })
+  const rl = createRpcLineReader(socket, error => {
+    process.stderr.write(`[dsh-browser host] socket error: ${String(error)}\n`)
+  })
   // Handle messages STRICTLY in order. Ops depend on each other completing:
   // a `command` for a view must not overtake the `createView` that makes it,
   // and the parent's present-barrier (`showView` then `ping`) is only
@@ -1153,9 +1154,6 @@ void app.whenReady().then(() => {
     // deferred callback (msg is a mutable binding).
     const op = msg.op
     queue = queue.then(() => handle(op, msg)).catch(() => { /* reply already sent inside handle */ })
-  })
-  socket.on('error', error => {
-    process.stderr.write(`[dsh-browser host] socket error: ${String(error)}\n`)
   })
   // The parent owns our lifetime: when it closes the socket (dispose) or dies
   // without cleanup, exit so no zombie Electron window is left behind.

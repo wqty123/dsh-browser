@@ -159,7 +159,7 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * possible exists only here.
      * @returns the panel's pages that are not ours, or an empty list when the bridge cannot answer.
      */
-    listPages(): Promise<readonly CarrierPage[]>;
+    listPages(owner?: string): Promise<readonly CarrierPage[]>;
     /**
      * Close one sidebar page by the id {@link listPages} reported.
      *
@@ -169,7 +169,7 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * than as an error: the caller asked for it to be closed, and it is.
      * @param id - the sidebar guest id, as a string.
      */
-    closePage(id: string): Promise<void>;
+    closePage(id: string, owner?: string): Promise<void>;
     /**
      * The guest backing a view, materialized on first use.
      *

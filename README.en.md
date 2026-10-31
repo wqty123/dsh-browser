@@ -16,9 +16,9 @@
 
 `dsh-builtin-browser` gives [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) browser capability:
 
-- **A real page, not a relay**: pages are hosted by a **real browser** — on the desktop that is the official side panel, on `dsh web` it is a window this plugin launches, and you can point it at **your own installed Chrome / Edge** instead. The user watches what the agent is doing and can take over at any time;
+- **A real page, not a relay**: pages are hosted by a **real browser** — the official desktop side panel when the shell and bridge support it, otherwise a window this plugin launches. You can also select **your own installed Chrome / Edge**. The user watches what the agent is doing and can take over at any time;
 - **Human and agent on the same page** (desktop): the page the agent drives is the *same* page the human sees — no more acting inside a window you cannot watch;
-- **Works on install**: the carrier is chosen automatically (desktop side panel first, otherwise self-hosted), and plain `dsh web` needs no extra configuration;
+- **Automatic carrier selection**: the desktop side panel is preferred when available, otherwise the plugin self-hosts. When the host allows installation scripts and the download is available, the plugin prepares the Electron binary during installation;
 - **One plugin, one toolset**: installing it gives the agent 34 `dsh_browser_*` tools (open, read, accessibility tree, wait, semantic/coordinate actions, scroll, history navigation, batch and single-control form filling, keys, structured extraction, screenshots, downloads, login-state management).
 
 In one line: **install the plugin and you have a real browser shared with, and drivable by, the user's agent.**
@@ -29,22 +29,23 @@ In one line: **install the plugin and you have a real browser shared with, and d
 
 > **Updating an installed plugin takes two steps** (since DSH 0.2.1-alpha.2, installing over an installed package fails outright with `already-installed`): run `dsh plugin --profile <profile> remove dsh-builtin-browser` first, then `add` the target version. See the [user guide](docs/user-guide.md) (Chinese).
 
+> **0.4.16 is being prepared for release**, with security, stability and desktop rc.5 sidebar fixes. Existing users should update once it is published. Updating the plugin does not update the DSH desktop shell, refresh its bridge, or change an existing `ELECTRON_PATH` override. Back up first and follow the [0.4.16 upgrade notes](docs/user-guide.md#升级到-0416) (Chinese).
+
 ### DSH Desktop
 
 ```sh
 dsh plugin --profile desktop add dsh-builtin-browser
 ```
 
-On the desktop the plugin drives the browser panel inside the **official side panel** — no extra window, no Electron dependency, and the agent operates the very page you see in the interface.
+When the desktop shell provides a controllable `<webview>` and the bridge is installed, the plugin drives the **official side panel**: the agent operates the very page you see. Otherwise it falls back to the plugin's own Electron window.
 
 Driving that panel also needs a bridge, installed into **the desktop app's own install directory** rather than the profile:
 
 ```sh
-node desktop-bridge/install.mjs            # idempotent; backs up main.js.before-bridge first
-node desktop-bridge/install.mjs --revert   # roll back
+node desktop-bridge/install.mjs "<DSH Desktop install directory>"
 ```
 
-> **Optional**: without the bridge the plugin falls back to self-hosting — identical capability, just one extra standalone window. **Re-run it after every desktop upgrade**, which replaces `resources/app/` and takes the bridge with it.
+> Run this from the updated plugin directory after closing the desktop app and backing up its `resources` directory and browser data. **The bridge is optional**: without it, the plugin uses a standalone window. **Reinstall the bridge with the new script after plugin or desktop shell upgrades**, then restart the desktop app. See [carrier limitations](docs/limitations.md) (Chinese).
 
 ### Web (`dsh web`)
 
@@ -54,11 +55,11 @@ dsh plugin --profile web add dsh-builtin-browser
 
 There is **no side panel and no bridge** on the web side: the shared browser is **self-hosted** in a standalone window (titled `dsh-browser`) with a full toolbar (address bar, back/forward/reload, tab strip) you can use like any browser.
 
-> If the Electron binary is missing on first install (44+ no longer downloads it), run `npx install-electron` once as the error suggests — it needs network.
+> 0.4.16 normally prepares the Electron binary through its installation script. DSH rc.5 uses pnpm 11.7 with `strict-dep-builds`, so first installation may require approval of this plugin's build script in the host's native plugin manager; the plugin does not change `allowBuilds`. After `--ignore-scripts` or an explicit download skip, run `npx --no dsh-browser-install-electron` from the correct profile directory to prepare it manually (network required). The command also respects `ELECTRON_SKIP_BINARY_DOWNLOAD`. See the [setup guide](docs/user-guide.md#准备-electron-二进制) (Chinese).
 
 ### Both sides
 
-No further configuration; just ask the agent:
+Once installation and any required build script approval are complete, ask the agent:
 
 ```
 Open https://example.com and summarise the main content for me.
@@ -90,7 +91,7 @@ This plugin claims the global **`dsh_browser_*`** namespace (34 tools).
 
 **If your log shows `could not register dsh_browser_xxx`**: another plugin holds that name. From 0.4.8 every tool registers **independently**, so a collision costs that one name and nothing else — the check exists so the next collision is visible at a glance rather than starting from "the plugin is broken".
 
-**Who should update to 0.4.8:** only names changed, not behaviour. **If this is your only browser plugin, you do not need to update.** If you also run another browser plugin (Tencent BrowserSkill especially), updating is recommended. The upgrade note is at the end of the [user guide](docs/user-guide.md) (Chinese).
+When upgrading from 0.4.7 or earlier, also replace `browser_*` with `dsh_browser_*` in custom prompts. Follow the current [0.4.16 upgrade notes](docs/user-guide.md#升级到-0416) (Chinese).
 
 ## Release history
 
@@ -98,6 +99,8 @@ The full record — per round, with the cause and the evidence for each fix — 
 
 | Version | Date | Theme |
 | --- | --- | --- |
+| **0.4.16 (local release candidate)** | 2026-10-31 | Security and stability: concurrent page ownership, downloads/screenshots that refuse overwrite, bridge and settings safeguards, carrier switching recovery, desktop rc.5 sidebar support; Electron `^44.10.0` and binary preparation during installation |
+| **0.4.9**–**0.4.15** | 2026-10-15–19 | Sidebar capability detection and fallback, host contract alignment, headless Chrome/Edge and startup hand-off fixes; see CHANGELOG |
 | **0.4.8** | 2026-10-14 | **Tool namespace**: 34 tools move to `dsh_browser_*`; one taken name can no longer cost the whole toolset |
 | **0.4.7** | 2026-10-12 | Three defects of one shape: a hardcoded carrier, a dead host never replaced, a setting read once; takes the four suggestions from #26 |
 | **0.4.6** | 2026-10-08 | Reading another conversation's sidebar, blank pages spawned while waiting, sign-outs on upgrade |

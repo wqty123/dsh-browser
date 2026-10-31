@@ -42,7 +42,7 @@ test('every op the host sends exists on the bridge', () => {
 test('every op that gates on owner is called with an owner', () => {
   // Ops whose bridge handler consults the claims ledger. A call without `owner` becomes
   // 'anonymous' and either gets refused by a guard or matches nothing.
-  const gated = ['ensureSidebar', 'showTab', 'closeSidebarBrowser']
+  const gated = ['ensureSidebar', 'showTab', 'closeSidebarBrowser', 'closePage']
   const missing = []
   for (const call of hostCalls()) {
     if (gated.includes(call.op) && !call.owner) missing.push(call.op)
@@ -53,7 +53,7 @@ test('every op that gates on owner is called with an owner', () => {
 test('the bridge still gates those ops — the list above is not stale', () => {
   // If an op stops using the ledger, this test tells the previous one to be relaxed rather than
   // leaving it asserting a rule that no longer exists.
-  for (const op of ['ensureSidebar', 'showTab', 'closeSidebarBrowser']) {
+  for (const op of ['ensureSidebar', 'showTab', 'closeSidebarBrowser', 'closePage']) {
     const start = BRIDGE.indexOf(`if (op === '${op}')`)
     assert.ok(start >= 0, `${op} exists on the bridge`)
     const rest = BRIDGE.slice(start)

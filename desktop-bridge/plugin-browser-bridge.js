@@ -360,6 +360,24 @@ async function sidebarFrameKind(shellId) {
   }
 }
 
+/** Read the exact guest set from the named conversation's renderer, never from free globals. */
+async function panelGuestIds(shell, owner) {
+  if (!/^session-/.test(owner)) return []
+  const value = await shell.executeJavaScript(`(() => {
+    const api = globalThis.__dshBuiltinBrowser;
+    if (!api || typeof api.panelGuests !== 'function') {
+      throw new Error('sidebar page identity API is unavailable; refresh or upgrade the browser plugin client');
+    }
+    return JSON.stringify(api.panelGuests(${JSON.stringify(owner)}));
+  })()`, true)
+  let ids
+  try { ids = JSON.parse(value) } catch { throw new Error('invalid sidebar page identity reply; refresh or upgrade the browser plugin client') }
+  if (!Array.isArray(ids) || ids.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new Error('invalid sidebar page identity reply; refresh or upgrade the browser plugin client')
+  }
+  return ids
+}
+
 /** Handle one JSON request line; every answer is a JSON line too. */
 async function handle(request) {  const op = String(request?.op ?? '')
   // Who is asking. Declared once, for every op, because the first attempt at this put `owner` in
@@ -372,18 +390,53 @@ async function handle(request) {  const op = String(request?.op ?? '')
     return { ok: true, loadedAt: LOADED_AT, protocol: PROTOCOL }
   }
   if (op === 'list') {
+    pruneClaims()
     const all = webContents.getAllWebContents().map(describe)
     // A guest claimed by another owner is not this caller's to see or to drive. Its id, url and
     // title are that session's business; handing them over is how a session came to list pages it
     // never opened. The shell window is always reported: it is what every op drives.
-    const mineOrFree = all.filter(g => g.type !== 'webview' || !claims.has(g.id) || claims.get(g.id) === owner)
-    const shell = all.find(g => g.type !== 'webview')
+    const shell = webContents.getAllWebContents().find(g => g.getType() === 'window')
+    const panelIds = shell === undefined ? [] : await panelGuestIds(shell, owner)
+    for (const id of panelIds) {
+      if (!claims.has(id) || claims.get(id) === owner) claims.set(id, owner)
+    }
+    const mineOrFree = all.filter(g => g.type !== 'webview'
+      || (claims.get(g.id) === owner && (!/^session-/.test(owner) || panelIds.includes(g.id))))
     return {
       ok: true,
       guests: mineOrFree,
       sidebar: mineOrFree.filter(g => g.type === 'webview'),
-      frame: await sidebarFrameKind(shell?.id, owner),
+      frame: await sidebarFrameKind(shell?.id),
     }
+  }
+  if (op === 'closePage') {
+    const id = Number(request.id)
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('closePage requires a numeric guest id')
+    const shell = webContents.getAllWebContents().find(g => g.getType() === 'window')
+    if (shell === undefined) throw new Error('no shell window to drive')
+    if (!(await panelGuestIds(shell, owner)).includes(id)) throw new Error('the page does not belong to this conversation panel')
+    pruneClaims()
+    if (claims.has(id) && claims.get(id) !== owner) throw new Error('the page belongs to another session')
+    const value = await shell.executeJavaScript(`(() => {
+      const api = globalThis.__dshBuiltinBrowser;
+      if (!api || typeof api.closePanelGuest !== 'function') {
+        throw new Error('sidebar close API is unavailable; refresh or upgrade the browser plugin client');
+      }
+      return JSON.stringify(api.closePanelGuest(${JSON.stringify(owner)}, ${id}));
+    })()`, true)
+    let answer
+    try { answer = JSON.parse(value) } catch { throw new Error('invalid sidebar close reply') }
+    if (answer?.ok !== true || answer.closed !== 1) throw new Error(String(answer?.reason ?? 'the sidebar did not close the requested page'))
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+      const guest = guestById(id)
+      if (guest === undefined || guest.isDestroyed()) {
+        claims.delete(id)
+        return { ok: true, closed: 1 }
+      }
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    throw new Error('the sidebar close action did not remove the requested page')
   }
   if (op === 'cdp') {
     const id = Number(request.id)
@@ -698,19 +751,41 @@ export function start() {
   const server = createServer(socket => {
     let buffer = ''
     let authed = false
+    socket.setEncoding('utf8')
+    const authenticationDeadline = setTimeout(() => socket.destroy(), 5_000)
+    authenticationDeadline.unref?.()
+    socket.on('close', () => clearTimeout(authenticationDeadline))
     socket.on('data', chunk => {
-      buffer += chunk.toString('utf8')
+      if (Buffer.byteLength(buffer, 'utf8') + Buffer.byteLength(chunk, 'utf8') > 128 * 1024 * 1024) {
+        socket.destroy()
+        return
+      }
+      buffer += chunk
       let newline = buffer.indexOf('\n')
       while (newline !== -1) {
         const line = buffer.slice(0, newline).trim()
+        if (Buffer.byteLength(line, 'utf8') > (authed ? 128 * 1024 * 1024 : 64 * 1024)) {
+          socket.destroy()
+          return
+        }
         buffer = buffer.slice(newline + 1)
         newline = buffer.indexOf('\n')
         if (line === '') continue
         let request
-        try { request = JSON.parse(line) } catch { socket.write(JSON.stringify({ ok: false, error: 'bad json' }) + '\n'); continue }
+        try { request = JSON.parse(line) } catch {
+          socket.write(JSON.stringify({ ok: false, error: 'bad json' }) + '\n')
+          if (!authed) { socket.destroy(); return }
+          continue
+        }
+        if (request === null || typeof request !== 'object' || Array.isArray(request)) {
+          socket.write(JSON.stringify({ ok: false, error: 'request must be a JSON object' }) + '\n')
+          socket.destroy()
+          return
+        }
         if (!authed) {
           if (request.token !== token) { socket.write(JSON.stringify({ ok: false, error: 'bad token' }) + '\n'); socket.destroy(); return }
           authed = true
+          clearTimeout(authenticationDeadline)
           // The authenticating message is NOT a command: a client that sends the
           // token on its own line would otherwise be answered `unknown op ""`.
           // (A client may also put the token on its first real request; both work.)
@@ -728,6 +803,9 @@ export function start() {
           .then(answer => socket.write(JSON.stringify({ ...answer, bridgeRequestId: request.bridgeRequestId }) + '\n'))
           .catch(error => socket.write(JSON.stringify({ ok: false, error: String(error?.message ?? error), bridgeRequestId: request.bridgeRequestId }) + '\n'))
       }
+      // Authentication may share a TCP chunk with the first real (larger) command. Apply the
+      // unauthenticated cap to that frame, not to bytes belonging to an authenticated successor.
+      if (Buffer.byteLength(buffer, 'utf8') > (authed ? 128 * 1024 * 1024 : 64 * 1024)) socket.destroy()
     })
     socket.on('error', () => { /* client went away */ })
   })

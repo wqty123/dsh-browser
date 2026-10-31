@@ -57,7 +57,7 @@ test('DSH itself agrees, when the checkout is available', async () => {
   const { evaluatePluginCompatibility } = await import(`file:///${checker}`)
 
   // Supported: the version this was verified on, and the two earlier ones the docs record.
-  for (const supported of ['0.2.1-rc.1', '0.2.0-rc.2', '0.1.1-rc.2']) {
+  for (const supported of ['0.2.1-rc.5', '0.2.1-rc.1', '0.2.0-rc.2', '0.1.1-rc.2']) {
     assert.equal(evaluatePluginCompatibility(manifest, {}, supported), undefined,
       `${supported} must be accepted`)
   }

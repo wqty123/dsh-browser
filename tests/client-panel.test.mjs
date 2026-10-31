@@ -534,3 +534,250 @@ test('a non-conversation owner is refused before any lookup', async () => {
   }
   assert.equal(calls.length, 0, 'no navigation is attempted for an unidentifiable caller')
 })
+
+test('panelGuests lists only all guests of the named conversation', async () => {
+  const { panel } = await mount({ document: documentWith(makeStrip('session-a', [11, 12]), makeStrip('session-b', [99])) })
+  assert.deepEqual(Array.from(panel.panelGuests('session-a')), [11, 12])
+  assert.deepEqual(Array.from(panel.panelGuests('session-b')), [99])
+  assert.deepEqual(Array.from(panel.panelGuests('anonymous')), [])
+})
+
+test('closePanelGuest matches a tab by identity and cannot close a same-title neighbour', async () => {
+  const clicks = []
+  const button = id => ({ getAttribute: key => key === 'aria-label' ? 'Close' : null, click: () => clicks.push(id) })
+  const header = (tabId, id) => ({
+    __reactFiber$test: { memoizedProps: { tab: { id: tabId } }, return: null },
+    getAttribute: () => null,
+    querySelectorAll: () => [button(id)],
+  })
+  const headers = [header('tab-a', 11), header('tab-b', 12)]
+  const views = [11, 12].map((id, index) => ({
+    getWebContentsId: () => id,
+    __reactFiber$test: { memoizedProps: { tab: { id: index ? 'tab-b' : 'tab-a' } }, return: null },
+  }))
+  const strip = makeStrip('session-a')
+  strip.querySelectorAll = selector => selector === 'webview' ? views : selector === '[role=tab]' ? headers : []
+  const { panel } = await mount({
+    document: documentWith(strip, makeStrip('session-b', [99])),
+    sidebarRight: { tabsIn: () => [{ id: 'tab-a' }, { id: 'tab-b' }] },
+  })
+  assert.equal(panel.closePanelGuest('session-a', 12).ok, true)
+  assert.deepEqual(clicks, [12])
+  assert.equal(panel.closePanelGuest('session-a', 99).ok, false)
+  assert.deepEqual(clicks, [12])
+})
+
+// rc.5 creates webviews imperatively inside data-sidebar-right-tab containers. The guest
+// itself has no React fiber; DockKit may place the same conversation in several panes.
+function rc5Tree() {
+  class Node {
+    constructor(tag, attributes = {}, children = []) {
+      this.tag = tag; this.attributes = attributes; this.children = children
+      for (const child of children) child.parentElement = this
+    }
+    getAttribute(name) { return this.attributes[name] ?? null }
+    matches(selector) {
+      return selector.split(',').some(raw => {
+        const item = raw.trim()
+        if (item === this.tag) return true
+        if (item === '[class*=_tabStrip]') return (this.attributes.class ?? '').includes('_tabStrip')
+        const match = /^\[([^=\]]+)(?:=["']?([^"'\]]+)["']?)?\]$/.exec(item)
+        return match !== null && (match[2] === undefined ? match[1] in this.attributes : this.getAttribute(match[1]) === match[2])
+      })
+    }
+    querySelectorAll(selector) { return this.children.flatMap(child => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]) }
+    closest(selector) { for (let node = this; node; node = node.parentElement) if (node.matches(selector)) return node; return null }
+    contains(other) { for (let node = other; node; node = node.parentElement) if (node === this) return true; return false }
+  }
+  const guest = (sessionId, id, tabId) => {
+    const view = new Node('webview')
+    view.getWebContentsId = () => id
+    view.getBoundingClientRect = () => ({ width: 100, height: 100 })
+    view.getURL = () => `https://page${id}.example/`
+    const header = new Node('button', { role: 'tab', 'data-dockkit-tab': tabId })
+    const strip = new Node('div', { class: '_tabStrip_fixture', 'data-dockkit-strip': '' }, [header])
+    strip.__reactFiber$fixture = { memoizedProps: { sessionId }, return: null }
+    return new Node('div', { 'data-dockkit-pane': `pane${id}` }, [strip, new Node('div', { 'data-sidebar-right-tab': tabId }, [view])])
+  }
+  // rc.5 has BOTH SessionView and SidebarPanel session markers (installed client.js:
+  // 1704 and 1529), not a single owning element. All panes live inside the latter.
+  const ownPanel = new Node('div', { 'data-sidebar-right-session': 'session-a', 'data-sidebar-right-panel': 'push' }, [guest('session-a', 11, 'tab1'), guest('session-a', 12, 'tab2')])
+  const own = new Node('div', { 'data-sidebar-right-session': 'session-a' }, [ownPanel])
+  const foreign = new Node('div', { 'data-sidebar-right-session': 'session-b' }, [guest('session-b', 99, 'tab1')])
+  const body = new Node('body', {}, [own, foreign])
+  return { document: makeDocument({ body, querySelectorAll: selector => body.querySelectorAll(selector) }), own, ownPanel, foreign, body, Node, guest }
+}
+
+test('rc5 lists all imperative guests across one conversation panes without foreign pages', async () => {
+  const fixture = rc5Tree()
+  const { panel } = await mount({ document: fixture.document })
+  assert.deepEqual(Array.from(panel.panelGuests('session-a')), [11, 12])
+  assert.deepEqual(Array.from(panel.panelGuests('session-b')), [99])
+})
+
+test('rc5 closes an imperative guest through closeIn using verified session and tab attributes', async () => {
+  const fixture = rc5Tree()
+  const calls = []
+  let tabs = [{ id: 'tab1' }, { id: 'tab2' }]
+  const { panel } = await mount({ document: fixture.document, sidebarRight: {
+    tabsIn: () => tabs,
+    closeIn: (sessionId, tabId) => { calls.push([sessionId, tabId]); tabs = tabs.filter(tab => tab.id !== tabId) },
+  } })
+  assert.equal(panel.closePanelGuest('session-a', 12).ok, true)
+  assert.deepEqual(calls, [['session-a', 'tab2']])
+  assert.equal(panel.closePanelGuest('session-a', 99).ok, false)
+  assert.deepEqual(calls, [['session-a', 'tab2']])
+})
+
+test('rc5 reads the visible guest with nested SessionView and SidebarPanel ownership', async () => {
+  const fixture = rc5Tree()
+  const { panel } = await mount({ document: fixture.document })
+  assert.equal(panel.panelGuest('session-a').guestId, 11)
+  assert.equal(panel.panelGuest('session-a').url, 'https://page11.example/')
+})
+
+test('rc5 includes its floating pane once and excludes a nested foreign session', async () => {
+  const fixture = rc5Tree()
+  const floating = fixture.guest('session-a', 13, 'tab3')
+  floating.attributes = { 'data-dockkit-float': 'float13' }
+  floating.parentElement = fixture.ownPanel
+  fixture.ownPanel.children.push(floating)
+  // A foreign session can also have a tab1. It must never become session-a's guest.
+  fixture.body.children = [fixture.own]
+  fixture.foreign.parentElement = fixture.ownPanel
+  fixture.ownPanel.children.push(fixture.foreign)
+  const { panel } = await mount({ document: fixture.document })
+  assert.deepEqual(Array.from(panel.panelGuests('session-a')), [11, 12, 13])
+  assert.deepEqual(Array.from(panel.panelGuests('session-b')), [99])
+})
+
+test('rc5 missing requested owner cannot fall back to another owner stale React session', async () => {
+  const fixture = rc5Tree()
+  fixture.body.children = [fixture.foreign]
+  const staleStrip = fixture.foreign.querySelectorAll('[class*=_tabStrip]')[0]
+  staleStrip.__reactFiber$fixture.memoizedProps.sessionId = 'session-a'
+  const calls = []
+  const { panel } = await mount({ document: fixture.document, sidebarRight: {
+    tabsIn: () => [{ id: 'tab1' }],
+    closeIn: (...args) => calls.push(args),
+  } })
+  assert.deepEqual(Array.from(panel.panelGuests('session-a')), [])
+  assert.equal(panel.panelGuest('session-a').panel, false)
+  assert.equal(panel.closePanelGuest('session-a', 99).ok, false)
+  assert.deepEqual(calls, [])
+})
+
+test('rc5 refuses conflicting tab attributes rather than choosing one stable id', async () => {
+  const fixture = rc5Tree()
+  const marker = fixture.ownPanel.querySelectorAll('[data-sidebar-right-tab]')[1]
+  marker.attributes['data-dockkit-tab'] = 'tab1'
+  const calls = []
+  const { panel } = await mount({ document: fixture.document, sidebarRight: {
+    tabsIn: () => [{ id: 'tab1' }, { id: 'tab2' }],
+    closeIn: (...args) => calls.push(args),
+  } })
+  assert.equal(panel.closePanelGuest('session-a', 12).ok, false)
+  assert.deepEqual(calls, [])
+})
+
+test('rc5 reports a no-op closeIn as refused and never tries an alternative tab', async () => {
+  const fixture = rc5Tree()
+  const calls = []
+  const { panel } = await mount({ document: fixture.document, sidebarRight: {
+    tabsIn: () => [{ id: 'tab1' }, { id: 'tab2' }],
+    closeIn: (...args) => calls.push(args),
+  } })
+  const result = panel.closePanelGuest('session-a', 12)
+  assert.equal(result.ok, false)
+  assert.equal(result.closed, 0)
+  assert.match(result.reason, /did not remove/)
+  assert.deepEqual(calls, [['session-a', 'tab2']])
+})
+
+test('rc5 reuses its imperative guest without opening another conversation tab', async () => {
+  const fixture = rc5Tree()
+  const calls = []
+  const { panel } = await mount({ document: fixture.document, sidebarRight: {
+    openTabIn: (...args) => calls.push(args),
+  } })
+  const result = panel.openPanel('session-a', 'https://new.example/')
+  assert.equal(result.ok, true)
+  assert.equal(result.created, false)
+  assert.equal(result.guestId, 11)
+  assert.deepEqual(calls, [])
+})
+
+test('rc5 never infers missing DOM tab identity from React or another session tab list', async () => {
+  for (const mode of ['missing-marker', 'foreign-list', 'outside-owner', 'conflicting-ancestor']) {
+    const fixture = rc5Tree()
+    const view = fixture.ownPanel.querySelectorAll('webview')[1]
+    const marker = view.parentElement
+    // Even a plausible React fallback must not override the authoritative modern DOM.
+    view.__reactFiber$fixture = { memoizedProps: { tab: { id: 'tab2' } }, return: null }
+    if (mode === 'missing-marker' || mode === 'outside-owner') delete marker.attributes['data-sidebar-right-tab']
+    if (mode === 'outside-owner') fixture.own.attributes['data-sidebar-right-tab'] = 'tab2'
+    if (mode === 'conflicting-ancestor') marker.parentElement.attributes['data-dockkit-tab'] = 'tab1'
+    const calls = []
+    const { panel } = await mount({ document: fixture.document, sidebarRight: {
+      tabsIn: () => [{ id: mode === 'foreign-list' ? 'other-tab' : 'tab2' }],
+      closeIn: (...args) => calls.push(args),
+    } })
+    assert.equal(panel.closePanelGuest('session-a', 12).ok, false, mode)
+    assert.deepEqual(calls, [], mode)
+  }
+})
+
+test('rc5 reports cleanup errors from closeIn without clicking another tab control', async () => {
+  const fixture = rc5Tree()
+  const calls = []
+  const { panel } = await mount({ document: fixture.document, sidebarRight: {
+    tabsIn: () => [{ id: 'tab1' }, { id: 'tab2' }],
+    closeIn: (...args) => { calls.push(args); throw new Error('cleanup refused') },
+  } })
+  const result = panel.closePanelGuest('session-a', 12)
+  assert.equal(result.ok, false)
+  assert.equal(result.closed, 0)
+  assert.match(result.reason, /cleanup refused/)
+  assert.deepEqual(calls, [['session-a', 'tab2']])
+})
+
+test('a shell without closeIn uses only the exact session and tab DOM close button', async () => {
+  const fixture = rc5Tree()
+  const clicks = []
+  for (const header of fixture.body.querySelectorAll('[role=tab]')) {
+    const owner = header.closest('[data-sidebar-right-session]').getAttribute('data-sidebar-right-session')
+    const button = new fixture.Node('button', { 'aria-label': 'Close same title' })
+    button.click = () => clicks.push([owner, header.getAttribute('data-dockkit-tab')])
+    button.parentElement = header
+    header.children.push(button)
+  }
+  const { panel } = await mount({ document: fixture.document, sidebarRight: {
+    tabsIn: () => [{ id: 'tab1' }, { id: 'tab2' }],
+  } })
+  assert.equal(panel.closePanelGuest('session-a', 12).ok, true)
+  assert.deepEqual(clicks, [['session-a', 'tab2']])
+})
+
+test('rc5 refuses duplicate matching fallback tab controls', async () => {
+  const fixture = rc5Tree()
+  const duplicate = new fixture.Node('button', { role: 'tab', 'data-dockkit-tab': 'tab2' })
+  duplicate.parentElement = fixture.ownPanel
+  fixture.ownPanel.children.push(duplicate)
+  const { panel } = await mount({ document: fixture.document, sidebarRight: {
+    tabsIn: () => [{ id: 'tab1' }, { id: 'tab2' }],
+  } })
+  const result = panel.closePanelGuest('session-a', 12)
+  assert.equal(result.ok, false)
+  assert.match(result.reason, /one matching tab control/)
+})
+
+test('rc5 ignores unready or destroyed guests while listing live guests in its panes', async () => {
+  const fixture = rc5Tree()
+  const views = fixture.ownPanel.querySelectorAll('webview')
+  views[0].getWebContentsId = () => { throw new Error('guest destroyed') }
+  views[1].getWebContentsId = () => 0
+  const { panel } = await mount({ document: fixture.document })
+  assert.deepEqual(Array.from(panel.panelGuests('session-a')), [])
+  assert.equal(panel.panelGuest('session-a').panel, true)
+  assert.equal(panel.panelGuest('session-a').guestId, null)
+})

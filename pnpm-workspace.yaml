@@ -8,9 +8,9 @@
 # `undici` is a transitive dependency here: nothing in this plugin imports it
 # (the tools use Node's built-in fetch, and the browser host speaks CDP over
 # node:net). It still ends up in the dependency tree, so the resolution is pinned
-# to the release carrying the fix for CVE-2026-84961 (BalancedPool option
-# handling). Pinned within the same major on purpose: nothing here needs undici
+# to a release carrying the later Agent TLS and fetch error-handling fixes,
+# in addition to CVE-2026-84961. Pinned within the same major: nothing needs undici
 # 8, and a major jump in a transitive dependency is a compatibility risk for no
 # benefit.
 overrides:
-  undici: 7.29.1
+  undici: 7.30.1

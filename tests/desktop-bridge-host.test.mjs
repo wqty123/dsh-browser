@@ -74,6 +74,7 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
             return { ok: true, result: { echo: request.method, guest: request.id } }
           }
           if (request.op === 'closeSidebarBrowser') return { ok: true, closed: state.tabs }
+          if (request.op === 'closePage') return { ok: true, closed: state.closeCount ?? 1 }
           if (request.op === 'collapseSidebar') return { ok: true, result: 'COLLAPSED' }
           return { ok: false, error: `unknown op ${String(request.op)}` }
         })()
@@ -258,5 +259,44 @@ test('collapse folds the sidebar without releasing anything', async () => {
     )
   } finally {
     bridge.close()
+  }
+})
+
+test('showView sends the materialized numeric guest instead of the UUID view id', async () => {
+  const bridge = await startFakeBridge({ tabs: 1, dead: [] })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a')
+    const view = host.createView('session-a')
+    await view.sendCommand('Runtime.evaluate', { expression: '1' })
+    host.showView(view)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    const show = bridge.requests.find(request => request.op === 'showTab')
+    assert.equal(show?.viewId, 1, 'the guest id is sent, never NaN/null')
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('carrier page listing and closing carry the requesting conversation identity', async () => {
+  const bridge = await startFakeBridge({ tabs: 2, dead: [] })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a')
+    await host.listPages('session-b')
+    await host.closePage('2', 'session-b')
+    const list = bridge.requests.filter(request => request.op === 'list').at(-1)
+    const close = bridge.requests.find(request => request.op === 'closePage')
+    assert.equal(list.owner, 'session-b')
+    assert.equal(close.owner, 'session-b')
+    assert.equal(close.id, 2)
+    bridge.state.closeCount = 0
+    await assert.rejects(host.closePage('2', 'session-b'), /did not close|could not close/)
+  } finally {
+    host?.dispose()
+    await bridge.close()
   }
 })

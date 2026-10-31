@@ -465,6 +465,17 @@ export interface BrowserTab {
     /** Whether this tab is the active one. */
     readonly active: boolean;
 }
+/**
+ * One passive preview frame: an encoded image plus its dimensions.
+ *
+ * The image is a data URL so it travels the existing JSON seam unchanged; the media type is part of
+ * the URL rather than a separate field because every consumer needs them together.
+ */
+export interface BrowserPreviewFrame {
+    readonly dataUrl: string;
+    readonly width?: number;
+    readonly height?: number;
+}
 /** One page a carrier holds, whether or not this plugin created it. */
 export interface CarrierPage {
     /** Stable within one carrier session; used to address the page. */
@@ -587,6 +598,21 @@ export interface BrowserProvider {
     fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult>;
     /** Capture the current page. Honor `signal` for cancellation. */
     screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult>;
+    /**
+     * Capture the active page WITHOUT presenting it, for a remote live view (issue #34).
+     *
+     * Optional, and it must stay optional: a third-party provider that cannot do this simply does not
+     * offer watching, while every existing tool keeps working. That is the design's requirement, not
+     * a convenience — a mandatory member would make every provider implement a feature most never
+     * need.
+     *
+     * The contract is narrower than {@link screenshot} in every direction: viewport only, no save
+     * path, no full page, and no side effects on what the host displays. A provider that would have to
+     * focus, restore, expand or recreate anything to produce a frame must throw
+     * BROWSER_PREVIEW_UNAVAILABLE instead — the viewer shows a paused state, it does not rearrange the
+     * host's screen.
+     */
+    capturePassive?(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserPreviewFrame>;
     /** Download a URL to a local file. Honor `signal` for cancellation. */
     download(session: BrowserSessionId, request: BrowserDownloadRequest, signal?: AbortSignal): Promise<{
         readonly path: string;

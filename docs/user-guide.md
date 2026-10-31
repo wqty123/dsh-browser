@@ -4,8 +4,8 @@
 
 - DeepSeek Harness(dsh),已安装对应 profile(`web` / `desktop` 等)
 - **Electron 运行时**(必装依赖,随插件自动安装):
-  - **DSH Desktop**:打包宿主 exe(`DSH Desktop.exe`)**不复用**——打包应用无法按脚本参数拉起,误用会秒退(issue #6);直接使用随包 electron,开发模式的**裸** Electron 宿主仍可复用;
-  - **纯 `dsh web` 自托管**:直接使用随插件安装的 electron 包(建议 ≥ 40,33.x 存在截图合成器缺陷;44+ 二进制首次缺失时按报错提示先 `npx install-electron`,需网络)。
+  - **DSH Desktop**:侧栏可驱动时使用外壳的页面;自托管回退使用插件的 electron。打包宿主 exe(`DSH Desktop.exe`)**不能作为自托管运行时复用**——打包应用无法按脚本参数拉起,误用会秒退(issue #6);开发模式的**裸** Electron 宿主仍可复用;
+  - **纯 `dsh web` 自托管**:使用随插件安装的 electron 包。0.4.16 声明 `^44.10.0`(即 `>=44.10.0 <45`),锁文件解析到 `44.10.0`;本插件在获准执行安装脚本时准备二进制,需网络,详见下节。
 
 ## 安装
 
@@ -27,6 +27,20 @@ dsh plugin --profile web add <本仓库路径>
 | `tool-browser` | `dsh-builtin-browser/tool-browser` | `dsh_browser_*` 模型侧工具 |
 
 > 没有桌面外壳时插件**自托管**:自己拉起一个标题为 `dsh-browser` 的 Electron 窗口,`dsh_browser_*` 工具照常可用。
+
+### 准备 Electron 二进制
+
+Electron 44 将二进制下载改为懒下载,仅安装 npm 包并不保证已有可执行文件。0.4.16 增加本插件的 `postinstall`:宿主允许安装脚本且下载可用时,明确运行所依赖 electron 包的 `install.js`,通常在安装阶段就准备好二进制。下载失败会保留错误并返回非零退出码,应先处理错误再重试。
+
+**DSH rc.5 使用 pnpm 11.7 的 `strict-dep-builds`。** 首次安装若提示构建脚本尚未批准,请在宿主原生插件管理器中审阅并批准 `dsh-builtin-browser` 的构建脚本,再按宿主提示重试安装或构建。插件不会自行改写 `allowBuilds`;审批和宿主策略仍由用户控制。
+
+使用 `--ignore-scripts`、明确跳过下载,或需要重试下载时,进入**安装本插件的 profile 目录**(通常为 `$DSH_HOME/profiles/web` 或 `$DSH_HOME/profiles/desktop`),运行本插件已经安装的本地命令:
+
+```sh
+npx --no dsh-browser-install-electron
+```
+
+`--no` 用于拒绝临时下载缺失命令;命令不存在时先检查 profile 与插件安装,不要改用同名第三方包。该命令与安装脚本都遵守 `ELECTRON_SKIP_BINARY_DOWNLOAD`:若之前有意设置该变量,需要下载时先撤销跳过设置,否则继续跳过。离线部署可保留跳过设置并预装合适的裸 Electron,通过 `ELECTRON_PATH` 指向它。只有明确知道本插件所依赖 electron 包目录时,才可改用 `node "<已安装的 electron 包目录>/install.js"`。
 
 ## 配置
 
@@ -125,10 +139,10 @@ dsh plugin --profile web add <本仓库路径>
 **Q:找不到 Electron?**
 插件按顺序自动定位:① `ELECTRON_PATH` 环境变量(显式覆盖,优先于一切自动发现)→ ② 随插件安装的 electron 包(纯文件系统探测,不触发 44+ 懒下载)→ ③ DSH 锚点(profile / 全局 prefix 中单独安装的 electron)中版本最新者 → ④ 当前进程就是**裸** Electron(dev 模式)时复用宿主二进制 → ⑤ 进程祖先树中的裸 Electron 二进制。**打包应用不参与复用**:旁有 `resources/app.asar` 的可执行文件(如 DSH Desktop.exe)无法按脚本参数拉起,spawn 会启动应用本体并秒退(单实例锁)——一律跳过。
 
-DSH Desktop 上②命中即可用(0.1.18+ 插件自带 electron 包;44+ 二进制缺失时先 `npx install-electron`,需网络);dev 模式宿主走④复用,亦零安装。全部落空时,报错会给出指引:electron 已随插件安装,44+ 二进制缺失时先 `npx install-electron`(需网络);必要时可设置 `ELECTRON_PATH`。
+DSH Desktop 上②命中即可用;dev 模式宿主仍可走④复用。插件在运行时只探测现有文件,不会在 DSH 启动时隐式下载。0.4.16 的安装脚本通常提前准备二进制,但脚本批准、网络、`--ignore-scripts` 与下载跳过设置都可能影响结果。缺失时按[准备 Electron 二进制](#准备-electron-二进制)在正确 profile 执行 `npx --no dsh-browser-install-electron`。必要时可把 `ELECTRON_PATH` 指向已核验版本的裸 Electron 二进制,不能指向 `DSH Desktop.exe`。
 
 **Q:截图失败或挂起?**
-确保 Electron ≥ 40(33.x 有合成器缺陷)。自托管截图优先走原生 `capturePage`,多视图/窗口未激活时自动兜底到 CDP。
+先核对实际使用的 Electron 版本和 `ELECTRON_PATH`。0.4.16 依赖为 `^44.10.0`;旧覆盖仍可能选中旧内核,安全最低阈值为 `44.9.1`。自托管截图优先走原生 `capturePage`,多视图/窗口未激活时自动兜底到 CDP。
 
 **Q:浏览器窗口不见了?**
 窗口标题为 `dsh-browser`(自托管)。若子进程崩溃(或宿主 DSH 重启)会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `dsh_browser_reset_session`。`dsh_browser_reset_session` 仍可用于主动重置。
@@ -156,23 +170,35 @@ DSH Desktop 上②命中即可用(0.1.18+ 插件自带 electron 包;44+ 二进�
 | 导航被拒 | 非 HTTP(S) 协议 | 检查 URL;`httpOnly` 配置 |
 | 快照为空 | 页面尚未加载 | 等待后重试 `dsh_browser_snapshot` |
 
-## 验证过的版本
+## 兼容范围与验证记录
 
 | 组件 | 版本 |
 | --- | --- |
-| DeepSeek Harness(dsh) | `0.2.1-rc.1`(`engines.dsh` 声明 `>=0.1.1-rc.2 <0.3.0`;更早的 `0.2.1-alpha.1`、`0.2.0-rc.2`、`0.1.x` 亦有实测记录) |
-| Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
+| DeepSeek Harness(dsh) | `engines.dsh` 声明 `>=0.1.1-rc.2 <0.3.0`;rc.5 已做真实宿主 peer 的 34 工具注册和两个假 provider 调用验证,以及对应 DOM 结构的侧栏回归测试;较早的 `0.2.1-rc.1` 等版本有历史验证记录 |
+| Electron | 0.4.16 依赖为 `^44.10.0`,锁文件 `44.10.0`;真实 `44.10.0` 已通过隔离自托管烟测,详见[变更记录](../CHANGELOG.md#发布准备验证2026-10-31);安全最低阈值 `44.9.1` |
 | Node.js | `22.20.0` |
 | 本机 Chrome / Edge(可选载体) | `154.0.8037.58` / `154.0.4258.37` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
-> 插件声明 `electron >= 30`。**核心链路在 Windows 上完整实测**;系统浏览器的查找已适配 Linux 与 macOS(先查 `PATH`,再查各平台的惯例安装位置,均可用 `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH` 覆盖),但这两个平台上的**端到端链路尚未实测**,暂不承诺。
+> 本表区分依赖声明与验证证据,不表示每种宿主/载体组合都做过端到端测试。系统浏览器的查找已适配 Linux 与 macOS(先查 `PATH`,再查各平台的惯例安装位置,均可用 `DSH_BROWSER_CHROME_PATH` / `DSH_BROWSER_EDGE_PATH` 覆盖),但这两个平台上的**端到端链路尚未实测**。
 
 > **宿主兼容性可以随时复验**:`node scripts/verify-host-compat.mjs` 会用某个 profile 里**真实安装**的 `@deepseek-ai/*` 包组装一个宿主,加载本插件的编译产物并真调两个工具。详见[开发](development.md)。
 
 ## 更新方式(两端不同)
 
 插件在两种宿主里各有一份安装,更新路径也不同 —— **更新其中一端不会连带更新另一端**。
+
+### 升级到 0.4.16
+
+0.4.16 正在本地准备,尚未发布到 npm。它集中修复并发选页、下载/截图覆盖风险、bridge 边界、设置门控、载体切换与桌面 rc.5 侧栏适配。**所有现有用户都建议在发布后更新**,包括只安装本插件的用户。更新时按下列顺序处理:
+
+1. 先保存正在进行的任务并关闭相关浏览器。备份实际 `$DSH_HOME` 下的对应 profile 和 `dsh-builtin-browser-host/`(设置、历史与浏览器登录数据)。若使用侧栏 bridge,还要关闭 DSH Desktop 并备份其安装目录的 `resources/`。
+2. 按下节对实际使用的 `web` 或 `desktop` profile **先移除插件、再安装目标版本**。版本发布后目标版本填 `0.4.16`;测试本地候选包时,`add` 后传入已提供的 `.tgz` 绝对路径。按宿主提示批准构建脚本;脚本被跳过或二进制缺失时按上方说明手动准备。这里移除的是 profile 中的插件,不涉及卸载 DSH Desktop。
+3. 检查启动 DSH 的环境中的 `ELECTRON_PATH`。它是最高优先级的显式覆盖,**旧路径仍存在就会盖过新版插件依赖**。需要自托管时,清除不再使用的覆盖或改指向已核验的裸 Electron `44.10.0` 等 `44.x` 二进制(安全最低阈值为 `44.9.1`);环境变量改变后重启 DSH 进程。
+4. 使用侧栏时,从**新版插件目录**运行下节的 bridge 安装脚本并重启桌面端。插件更新不会更新外壳或外壳内 bridge;外壳升级也不会更新 profile 中的插件。外壳缺少可驱动的 `<webview>` 时仍回退自托管。
+5. 重启对应宿主后,让 agent 打开测试页、列出本任务标签并保存一张截图,确认载体、页面归属与保存路径符合预期。原有设置与数据通常保留;先保留备份,再继续正式任务。
+
+本次未扩展服务器上的内置 Electron 无头能力。`browser.headless` 与 `cookies.persist` 仍只控制本机 Chrome / Edge,详见[已知限制](limitations.md)。
 
 ### 先移除,再安装
 
@@ -185,9 +211,9 @@ dsh plugin --profile web remove dsh-builtin-browser
 dsh plugin --profile web add dsh-builtin-browser@<目标版本>
 ```
 
-移除会停掉该 bundle 的插件并清掉它的包映射,新版本随即重新映射,因此**不需要重启**就能生效(桌面端仍需重启,理由见下)。
+移除会停掉该 bundle 的插件并清掉它的包映射,新版本随即重新映射。更新完成后重启对应宿主,确保客户端、bridge 与浏览器子进程使用同一版代码。
 
-替代做法:Web 界面的插件管理页对官方插件提供 Update 按钮,它自己会先移除再安装。桌面端尚无可用的新版,按上面的两步来。
+若宿主的插件管理页提供适用于该插件的更新按钮,也可使用它;已安装的包不能直接重复 `add`。
 
 ## 桌面端细节
 
@@ -196,11 +222,11 @@ dsh plugin --profile web add dsh-builtin-browser@<目标版本>
 - 插件是桌面端 profile 里的依赖(profile 目录通常是 `$DSH_HOME/profiles/desktop`)。更新它 = 把该 profile 里的依赖更新到新版本,然后**重启 DSH Desktop**,客户端设置栏与工具才会换成新代码。
 - **桌面端还多一步,而 Web 端没有**:让插件驱动侧栏的那条 bridge 装在**桌面端自己的安装目录**里(`resources/app/`),插件更新**不会**带上它。桌面端升级会替换该目录、bridge 随之消失,所以请重跑一次:
   ```bash
-  node desktop-bridge/install.mjs            # 幂等;已装则只刷新模块
-  node desktop-bridge/install.mjs --revert   # 回滚
+  node desktop-bridge/install.mjs "<DSH Desktop 安装目录>"
   ```
-  bridge 不在时插件自动退回自托管(多出一个独立窗口),功能不中断。
-- 浏览器内核默认由桌面端自带的 Electron 提供,插件不会再下载一份 Electron;也可以在设置里改用它自己装的 Chrome / Edge。
+  从新版插件目录运行,先关闭桌面端并备份 `resources/`。插件升级后也要重跑以刷新 bridge 模块。安装脚本会维护 `.before-bridge` 备份;保留这些文件。若需要回滚,使用新版脚本的 `--revert`,遇到已有 `app.asar` 或无法确认补丁归属的拒绝应停止,保留当前应用与备份。不要手动删除当前 `app.asar` 来强行回滚。
+  bridge 不在时插件自动退回自托管(多出一个独立窗口);载体差异见[已知限制](limitations.md)。
+- 使用侧栏时浏览器内核来自桌面外壳,**插件更新不会升级这份内核**;自托管回退使用插件依赖的 Electron。也可以在设置里改用自己安装的 Chrome / Edge。
 - **升级桌面端本身不会带上插件**,按上面的方法单独更新它。
 
 ## Web 端细节
@@ -208,23 +234,25 @@ dsh plugin --profile web add dsh-builtin-browser@<目标版本>
 **Web 端(`dsh web`)**
 
 - 插件是 web profile 里的依赖(`$DSH_HOME/profiles/web`),更新后**重启 `dsh web`** 生效。
-- Web 端**没有侧栏、也没有 bridge**:共享浏览器由插件自托管拉起。首次安装可能需要 Electron 二进制;若包管理器的构建白名单拦下了它(pnpm v10+ 会拦 `electron` 的 postinstall),执行一次 `npx install-electron` 补上即可。
+- Web 端**没有侧栏、也没有 bridge**:共享浏览器由插件自托管拉起。Electron 包自身使用懒下载,0.4.16 由本插件的安装脚本提前准备二进制;是否执行受宿主脚本批准与跳过设置控制。缺失时在该 profile 目录执行 `npx --no dsh-browser-install-electron`,见[准备 Electron 二进制](#准备-electron-二进制)。
 - 同样可以在设置里改用本机 Chrome / Edge —— 这是两端**行为一致**的选项。
 - 更新方式与首次安装它时一致(按 npm 包名 `dsh-builtin-browser`、按 GitHub 仓库 `wqty123/dsh-browser`,或本地目录),但**已安装时先按上面的两步移除再装**。
 
 **两端一致的体验**
 
-- 工具集、设置页里的「浏览器」栏、浏览历史与 cookie 的持久化行为完全相同;差别只在页面由谁承载(桌面端=官方侧栏,Web 端=插件自托管窗口,或你在设置里指定的本机浏览器)。
-- 升级不会丢数据:浏览历史与设置都在 `$DSH_HOME/dsh-builtin-browser-host/`(`history.jsonl`、`settings.json`),登录状态在同一 profile 目录里 —— 包括使用本机浏览器时的 `<chrome|edge>-profile`。
+- 两端提供相同的工具集、浏览器设置页和浏览历史功能。`cookies.persist` 与 `browser.headless` 仅控制设置中选择的本机 Chrome / Edge,修改后重新选择载体或重启 DSH 生效;内置 Electron 与官方侧栏的登录态由各自载体保存。
+- 插件的数据目录独立于包安装目录:浏览历史与设置都在 `$DSH_HOME/dsh-builtin-browser-host/`(`history.jsonl`、`settings.json`),本机浏览器的登录状态在其中的 `<chrome|edge>-profile`。更新前仍应备份;侧栏登录态保存在桌面外壳自己的数据目录,需单独保留。
 - 升级后如果历史记录不符合预期,先去「设置 → 浏览器」确认这些开关:历史默认**开**、侧栏自动展开默认**开**、会话结束时自动关闭浏览器默认**关**、载体默认**内置**。
 
 ## 从 0.4.7 升级到 0.4.8
+
+> 以下为历史改名说明,不代表当前版本的升级建议。当前请参照[升级到 0.4.16](#升级到-0416)。
 
 **这是一个改名版本:34 个工具从 `browser_*` 移入 `dsh_browser_*`,功能一字未改。**
 
 | | |
 | --- | --- |
-| **只装这一个浏览器插件** | **不必更新。** 旧版继续正常工作。 |
+| **只装这一个浏览器插件** | 当时的 0.4.8 仅改工具名;当前版本另有安全与稳定性修复,请按上方说明升级。 |
 | **还装了别的浏览器插件**(尤其腾讯 BrowserSkill) | **建议更新**,否则对方那套工具注册不上。 |
 
 改名原因见 [README 的工具名空间一节](../README.md#工具名空间)。更新后 `browser_open` → `dsh_browser_open`(其余同理),并**重启 DSH** 使其生效。

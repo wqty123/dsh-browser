@@ -1288,23 +1288,28 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       dying.once('exit', () => { clearTimeout(timer) })
     }
     const ephemeral = this.ephemeralDir
-    if (ephemeral !== undefined && this.child !== undefined) {
-      // The browser flushes its profile while shutting down, so deleting later avoids
-      // racing it. Leftovers are only a stray temp directory, never a live credential.
-      //
-      // The timer is unref'd, so it never holds the process open — which also means that a
-      // process which exits inside this 3s window (a CLI probe, a DSH restart) leaves the
-      // directory behind for good, silently contradicting the user's "keep no profile"
-      // choice. The exit hook below is the same delete, run synchronously as a last resort;
-      // the callback is idempotent, so whichever runs first wins and the other is a no-op.
+    if (ephemeral !== undefined) {
       const removeEphemeral = (): void => {
         try { rmSync(ephemeral, { recursive: true, force: true }) } catch { /* best effort */ }
       }
-      setTimeout(removeEphemeral, 3_000).unref?.()
-      process.once('exit', removeEphemeral)
-    } else if (ephemeral !== undefined) {
-      // Never started, so nothing can be holding it open.
-      try { rmSync(ephemeral, { recursive: true, force: true }) } catch { /* best effort */ }
+      // `this.child` was cleared above; the saved processes still own the profile until
+      // their exit events arrive. Deleting it now races Chromium's final cookie flush.
+      const live = doomed.filter(child => child.exitCode === null && child.signalCode === null)
+      if (live.length > 0) {
+        const remaining = new Set(live)
+        for (const child of live) child.once('exit', () => {
+          remaining.delete(child)
+          if (remaining.size === 0) removeEphemeral()
+        })
+      } else if (client !== undefined) {
+        // A handed-off browser has no process handle. Give its graceful close time to
+        // finish; abandoned profiles remain eligible for the next startup's safe sweep.
+        setTimeout(() => {
+          if (!client.isAlive()) removeEphemeral()
+        }, CLOSE_GRACE_MS).unref?.()
+      } else {
+        removeEphemeral()
+      }
     }
   }
 
@@ -1332,22 +1337,34 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   /** Create and attach the target for one view. Serialised by {@link ensureSession}. */
   private async buildSession(viewId: string): Promise<string> {
     const client = await this.ensureClient()
-    // Adopt a blank page the browser opened on its own before creating another one.
-    //
-    // Chrome starts with more than one page when handed a URL on top of its own start page, so
-    // creating a target here discarded the original and left it behind as a tab that is not in
-    // the plugin's tab model — invisible to `dsh_browser_list_tabs`, and therefore unclosable
-    // through the tools. Taking the blank instead makes the page the browser already opened the
-    // one the caller gets.
-    const adopted = await this.adoptBlankTarget(client)
-    const targetId = adopted ?? await this.createTarget(client)
-    const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
-    const sessionId = attached?.sessionId
-    if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
-    // The session id is what page commands ride; the target id is what closes it.
-    this.sessions.set(sessionId, targetId)
-    this.views.set(viewId, { session: sessionId, client })
-    return sessionId
+    // Different views can initialise concurrently. Selecting an unclaimed page and attaching
+    // it must be one transaction, including when the page is created by a preceding view.
+    const previous = this.targetBuilds.get(client) ?? Promise.resolve()
+    let release!: () => void
+    const building = new Promise<void>(resolve => { release = resolve })
+    this.targetBuilds.set(client, building)
+    await previous
+    try {
+      // Adopt a blank page the browser opened on its own before creating another one.
+      //
+      // Chrome starts with more than one page when handed a URL on top of its own start page, so
+      // creating a target here discarded the original and left it behind as a tab that is not in
+      // the plugin's tab model — invisible to `dsh_browser_list_tabs`, and therefore unclosable
+      // through the tools. Taking the blank instead makes the page the browser already opened the
+      // one the caller gets.
+      const adopted = await this.adoptBlankTarget(client)
+      const targetId = adopted ?? await this.createTarget(client)
+      const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
+      const sessionId = attached?.sessionId
+      if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
+      // The session id is what page commands ride; the target id is what closes it.
+      this.sessions.set(sessionId, targetId)
+      this.views.set(viewId, { session: sessionId, client })
+      return sessionId
+    } finally {
+      release()
+      if (this.targetBuilds.get(client) === building) this.targetBuilds.delete(client)
+    }
   }
 
   /**
@@ -1438,6 +1455,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
 
   /** Views whose session is being created right now, so a second caller waits for the first. */
   private readonly sessionBuilding = new Map<string, Promise<string>>()
+
+  /** Serialises page selection/creation and attachment for each browser connection. */
+  private readonly targetBuilds = new WeakMap<CdpClient, Promise<void>>()
 
   /** sessionId -> targetId, so a destroyed view can close the right page. */
   private readonly sessions = new Map<string, string>()

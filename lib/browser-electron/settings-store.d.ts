@@ -4,8 +4,8 @@
  * they survive the browser process and DSH restarts.
  *
  * Every field is optional on disk and falls back to a default, so a hand-edited
- * or older file never breaks startup; an unreadable file is treated as "all
- * defaults" rather than an error.
+ * or older file never breaks startup; an unreadable document refuses capability
+ * gates while retaining the defaults for presentation and other conveniences.
  * @module dsh-browser/browser-electron/settings-store
  */
 import type { BrowserChannel } from './system-browser.js';
@@ -67,6 +67,19 @@ export interface BrowserSettings {
     /** Whether the agent may read cookies / export login state. */
     readonly credentials: {
         readonly allowRead: boolean;
+    };
+    /**
+     * Live view of the browser for a remote operator (issue #34).
+     *
+     * OFF by default, and that default is the feature's main safety property: a live browser frame can
+     * contain a CAPTCHA, an account name, or logged-in content, so nobody should be able to watch
+     * without the host having said yes first. The remote side also cannot turn it on: this file is
+     * written through the plugin's own settings route, which admits only same-origin requests from the
+     * host's own UI, and the frame endpoint refuses everything when this is false.
+     */
+    readonly remoteView: {
+        /** Serve browser frames to a remote viewer. */
+        readonly enabled: boolean;
     };
     /**
      * What the agent is allowed to DO, as opposed to what it may look at.

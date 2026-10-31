@@ -76,9 +76,10 @@ export interface ElectronBrowserViewHost {
      * twice. Measured on the sidebar carrier: three clicks produced three webview guests while
      * `dsh_browser_list_tabs` reported one tab; on the installed-browser carrier the window held four
      * pages and the tool reported one.
-     * @returns every page the carrier holds that this host did not open.
+     * @param owner - the calling task/conversation; shared sidebar hosts must scope to it.
+     * @returns every page this conversation's carrier holds that this host did not open.
      */
-    listPages?(): Promise<readonly CarrierPage[]>;
+    listPages?(owner?: string): Promise<readonly CarrierPage[]>;
     /**
      * Optional: close one page reported by {@link listPages}.
      *
@@ -86,8 +87,9 @@ export interface ElectronBrowserViewHost {
      * `dsh_browser_list_tabs` would report pages that `dsh_browser_close_tab` answers "not open in
      * this session" about, which reads as a contradiction rather than a boundary.
      * @param id - the carrier's own page id, as {@link listPages} reported it.
+     * @param owner - the same task/conversation used for listing; never a global fallback.
      */
-    closePage?(id: string): Promise<void>;
+    closePage?(id: string, owner?: string): Promise<void>;
     /**
      * Optional cheap usability probe (no network): whether the host can back
      * views at all right now. The self-hosted host checks for a usable Electron
@@ -694,6 +696,27 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     flushAuth(session: BrowserSessionId): Promise<readonly ExportedCookie[]>;
     /** Import cookies into the session (restore login state). Self-hosted only. */
     restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number>;
+    /**
+     * Capture the active page WITHOUT presenting it.
+     *
+     * `screenshot` calls `showActive()` before capturing, and that is right for a tool whose point is
+     * that the human sees what the model just captured. It is also what makes that path unusable for a
+     * live preview: presenting on every frame would move focus, switch tabs and expand windows on the
+     * host's screen — exactly the side effects a viewer must not cause (issue #34).
+     *
+     * So this does the capture and nothing else. Deliberately narrow: viewport only, JPEG at the
+     * preview defaults, a short timeout, no save path, no history entry, no carrier recovery. A
+     * preview that rebuilt a vanished carrier would make watching a way to start a browser, which the
+     * design forbids: no page means "nothing to watch", not "open one".
+     * @param session - the session whose active page to capture.
+     * @returns the encoded image and its dimensions; throws BROWSER_PREVIEW_UNAVAILABLE when the page
+     *   is not painted, which the caller turns into a "paused" state rather than an error.
+     */
+    capturePassive(session: BrowserSessionId): Promise<{
+        readonly dataUrl: string;
+        readonly width?: number;
+        readonly height?: number;
+    }>;
     /** Capture the current page, optionally full-page, PNG or JPEG, scalable. */
     screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<{
         readonly dataUrl: string;

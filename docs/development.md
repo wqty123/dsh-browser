@@ -3,11 +3,28 @@
 ## 构建与测试
 
 ```sh
+pnpm install --frozen-lockfile --ignore-scripts  # CI 使用 pnpm 11.7.0,不下载 Electron 二进制
 npm run build     # 类型检查 + 构建到 lib/
 npm test          # tsc -p tsconfig.json + node --test "tests/*.test.mjs"
 ```
 
 测试用**假 host**(`tests/` 里的 stub),**不需要 Electron、也不需要网络** —— 所以它可以在 CI 与任何开发机上跑。
+
+本插件从 0.4.16 起用 `postinstall` 调用 `scripts/install-electron.mjs`,明确解析所依赖 electron 包的 `install.js`。上述 `--ignore-scripts` 会跳过此步骤,适合不启动浏览器的 CI。需要真实浏览器时,可在源码目录运行 `node scripts/install-electron.mjs`,或在安装插件的 profile 目录运行 `npx --no dsh-browser-install-electron`;命令使用本地安装,不应临时下载同名包。它们遵守 `ELECTRON_SKIP_BINARY_DOWNLOAD`,下载失败返回非零并保留错误。
+
+DSH rc.5 的 pnpm 11.7 使用 `strict-dep-builds`,依赖脚本未批准时应经宿主原生插件管理器批准并重试。插件不自动改写 profile 的 `allowBuilds`;不要以全局放开依赖脚本替代宿主审批流程。
+
+## 0.4.16 发布前验证
+
+本仓库正在准备 0.4.16,本地版本号、测试通过或生成 `.tgz` 均不表示已发布。审核与 rc.5 适配记录见 [CHANGELOG](../CHANGELOG.md)。
+
+- `npm test` 覆盖系统浏览器并发选页、保存文件不覆盖、bridge 输入与会话归属、设置失败关闭、历史保留和 rc.5 对应 DOM 结构。假 host 测试不能证明真实浏览器、侧栏或无显示服务器端到端可用。
+- 检查可安装包的 `postinstall`、本地 `dsh-browser-install-electron` 命令、宿主构建脚本批准、显式跳过与下载失败返回路径。包管理器许可脚本与网络均满足时才期望自动准备二进制;保留 `--ignore-scripts` 安装测试,避免把 CI 下载成功当作用户侧已经批准脚本。
+- 使用锁文件中的 Electron `44.10.0` 做独立用户数据目录的真实烟测:从可安装 `.tgz` 加载插件,验证导航、读页、截图落盘、窗口/进程退出。启动时显式核对 `ELECTRON_PATH`,避免旧覆盖把测试换成其他内核。
+- 侧栏需单独检查外壳版本、webview 能力和已部署的 bridge。真实宿主 peer 下的工具注册与假 provider 调用只证明宿主契约;实际侧栏列页、关闭与会话隔离需要独立验证。
+- 发布前检查压缩包内容、双语 README 的版本与升级入口,再执行发布流程。仅做本地准备时保留候选状态,不要将发布、部署或真实烟测写成已经完成。
+
+依赖声明 Electron `^44.10.0`,锁文件为 `44.10.0`;安全最低阈值为 `44.9.1`,`undici` override 为 `7.30.1`。升级插件不会替换桌面外壳内核、安装侧 bridge 或用户的环境变量覆盖。
 
 ## 代码结构
 

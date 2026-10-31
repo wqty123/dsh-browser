@@ -4,8 +4,8 @@
  * they survive the browser process and DSH restarts.
  *
  * Every field is optional on disk and falls back to a default, so a hand-edited
- * or older file never breaks startup; an unreadable file is treated as "all
- * defaults" rather than an error.
+ * or older file never breaks startup; an unreadable document refuses capability
+ * gates while retaining the defaults for presentation and other conveniences.
  * @module dsh-browser/browser-electron/settings-store
  */
 
@@ -77,6 +77,19 @@ export interface BrowserSettings {
     readonly allowRead: boolean
   }
   /**
+   * Live view of the browser for a remote operator (issue #34).
+   *
+   * OFF by default, and that default is the feature's main safety property: a live browser frame can
+   * contain a CAPTCHA, an account name, or logged-in content, so nobody should be able to watch
+   * without the host having said yes first. The remote side also cannot turn it on: this file is
+   * written through the plugin's own settings route, which admits only same-origin requests from the
+   * host's own UI, and the frame endpoint refuses everything when this is false.
+   */
+  readonly remoteView: {
+    /** Serve browser frames to a remote viewer. */
+    readonly enabled: boolean
+  }
+  /**
    * What the agent is allowed to DO, as opposed to what it may look at.
    *
    * These are OPERATOR switches: the settings panel is not reachable from the model, so a
@@ -105,6 +118,9 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   // it starts a real Chrome/Edge with its own profile.
   browser: { channel: 'bundled', headless: 'auto' },
   credentials: { allowRead: true },
+  // Off unless the host turns it on. A frame can show a CAPTCHA, an account name, or logged-in
+  // content, so watching is an explicit decision rather than something a remote client can arrange.
+  remoteView: { enabled: false },
   actions: { allowExecute: true, allowDownload: true, allowCredentialWrite: true },
 }
 
@@ -254,7 +270,8 @@ function section(source: Record<string, unknown>, key: string): Record<string, u
  * @returns the resolved settings.
  */
 export function resolveSettings(raw: unknown, warn?: (message: string) => void): BrowserSettings {
-  const source = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return SETTINGS_WHEN_UNREADABLE
+  const source = raw as Record<string, unknown>
   const history = section(source, 'history')
   const cookies = section(source, 'cookies')
   const ui = section(source, 'ui')
@@ -262,6 +279,7 @@ export function resolveSettings(raw: unknown, warn?: (message: string) => void):
   const credentials = section(source, 'credentials')
   const browser = section(source, 'browser')
   const actions = section(source, 'actions')
+  const remoteView = section(source, 'remoteView')
   // A section that is present but unreadable refuses its gates rather than defaulting them
   // open. The rest of a broken section keeps its defaults: refusing history or presentation
   // would punish the user for a bad file without protecting anything.
@@ -302,6 +320,14 @@ export function resolveSettings(raw: unknown, warn?: (message: string) => void):
         ? false
         : gate(actionsUsable.allowCredentialWrite, DEFAULT_SETTINGS.actions.allowCredentialWrite),
     },
+    // Fail-closed, and stated separately from `gate`'s fallback so the intent is visible: an
+    // unreadable or absent section means nobody watches. Unlike the other switches, whose defaults
+    // are "on", this one has no safe default other than off.
+    remoteView: {
+      enabled: remoteView === undefined
+        ? false
+        : gate((remoteView as { enabled?: unknown }).enabled, false),
+    },
   }
 }
 
@@ -336,8 +362,14 @@ export class SettingsStore {
       // stat directly: existsSync costs about thirteen times what the stat does, and the
       // stat already throws when the file is missing — which the catch below handles.
       mtimeMs = statSync(this.file).mtimeMs
-    } catch {
-      // Unreadable file: fall through to defaults below.
+    } catch (error) {
+      // Only an absent document means first-run defaults. Access/storage errors do not
+      // erase the operator's decisions, even when an earlier read was cached.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.cached = undefined
+        this.cachedMtimeMs = -1
+        return SETTINGS_WHEN_UNREADABLE
+      }
       mtimeMs = -1
     }
     // Return the cache BEFORE reading. The read used to happen first "just in case", which

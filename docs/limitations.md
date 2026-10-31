@@ -27,12 +27,12 @@
 
 - `dsh_browser_download` 在页面上下文内 `fetch`(带登录态),受同源/CORS 约束;仅允许 HTTP(S) 目标。
 - `savePath` 必须为**绝对路径**且位于 `downloadDir` 内(默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`,可用 `downloadDir` 覆盖),**不覆盖已存在文件**;`dsh_browser_screenshot` 的 `savePath` 走同一准入门。
-- 单文件上限 **256MB**(流式限流,按 Content-Length 提前拒绝),文件由浏览器子进程直接落盘(临时文件 + 原子改名)。
+- 单文件上限 **256MB**(流式限流,按 Content-Length 提前拒绝),文件由浏览器子进程直接落盘。下载与截图使用独占的随机临时文件,不会覆盖既有 `.part` 或最终文件;支持硬链接的文件系统原子提交,不支持时用独占复制提交,该回退在进程崩溃时可能留下未完成的新文件。
 - 准入还会解析路径的**真实归属**:`downloadDir` 里的符号链接无法把写入带出目录,悬空链接同样被拒(它读作"名字已被占用",而不是"路径空闲")。
 
 ## 载体行为
 
-- **无显示环境会自动改用 headless**,不需要额外配置。Chromium 在没有 `DISPLAY` 与 `WAYLAND_DISPLAY` 时会以 `could not connect to display` 立即退出,而 systemd 服务、容器、只有 SSH 的服务器正好都是这个状态——那偏偏是服务端浏览器最有用的部署形态。`browser.headless` 的默认值 `auto` 就是"有显示开窗口,没显示走 headless",桌面端与侧栏用户不受影响。
+- **本机 Chrome / Edge 载体**在无显示环境会自动改用 headless。`browser.headless` 仅作用于这个载体:默认 `auto` 是"有显示开窗口,没显示走 headless"。使用 systemd、容器或 SSH 服务器时,应选择已安装的 Chrome / Edge;默认内置 Electron 和桌面侧栏没有接入此设置,不能据此保证无显示启动。修改后重新选择载体或重启 DSH 生效。
 
   想显式控制时:
 
@@ -54,6 +54,8 @@
 
   插件从 0.4.10 起**在接管之前先读面板形态**(面板自己带的 `data-sidebar-browser-frame` 属性),判到 `iframe` 就不接管,直接用自托管载体,并在日志里说明原因。**结果是"能用但多一个窗口",而不是"装完就坏"。**
 
+  0.4.16 适配 rc.5 的嵌套会话标记和无 React fiber 的 webview。列页和关闭仍须能确认请求会话与 tab 身份;归属缺失、身份冲突或未知宿主结构会明确拒绝。**插件更新不会更新外壳或外壳内的 bridge**,使用侧栏需另行备份并重装新版 bridge。
+
 - **侧栏载体不上报"用户操作"事件**:人在那个页面里点击是外壳自己的事件,而 bridge 没有用于回报它的操作。因此依赖该事件的功能(如自定义的接管提示)在桌面端侧栏下不会触发;换到自托管载体则可以。
 - **本机 Chrome / Edge 载体使用插件自己的 profile**:插件用它自己的用户数据目录启动浏览器(`$DSH_HOME/dsh-builtin-browser-host/<chrome|edge>-profile`),所以你日常浏览器里的书签、扩展与登录态**不会自动继承** —— 这是刻意的,避免插件操作与你的个人会话混在一起;登录态是否跨重启保留由 `cookies.persist` 决定。
 - 页面弹窗(`window.open` / `target=_blank`)不再覆盖当前视图:HTTP(S) 弹窗会在同一会话窗口**新开一个标签页**并计入历史,原页面与 opener 上下文保留;非 HTTP(S) 弹窗(空 URL 弹窗承接、`mailto:`、自定义协议)仍**放行原生窗口**,交给系统处理 —— 这类弹窗不纳入会话模型。
@@ -68,4 +70,6 @@
 
 ## Electron 运行时
 
-- Electron 随插件安装;但 **Electron 44+ 不再随安装下载二进制**(约 100MB,需网络)—— 插件探测是**纯文件系统**、不触发其懒下载,二进制缺失时首次使用会报错并提示先 `npx install-electron`;也可用 `ELECTRON_PATH` 预装指定的二进制。
+- Electron 包自身在 44+ 使用懒下载。0.4.16 通过**本插件的 `postinstall`**明确准备二进制(约 100MB,需网络);这要求宿主允许构建脚本且下载可用,不保证所有环境自动完成。DSH rc.5 的 pnpm 11.7 `strict-dep-builds` 首次可能需在原生插件管理器批准脚本,插件不会改写 `allowBuilds`。
+- `--ignore-scripts` 或显式跳过下载会保留未下载状态。可在正确 profile 目录运行 `npx --no dsh-browser-install-electron`,它也遵守 `ELECTRON_SKIP_BINARY_DOWNLOAD`;需要下载时先撤销跳过设置。运行时探测仍为纯文件系统操作,不自动下载。离线时可用 `ELECTRON_PATH` 指定预装二进制,详见[用户指南](user-guide.md#准备-electron-二进制)。
+- 0.4.16 的依赖为 `^44.10.0`,锁文件解析到 `44.10.0`,安全最低阈值为 `44.9.1`。**已有且有效的 `ELECTRON_PATH` 优先于这份依赖**,升级插件不会更改该覆盖;旧覆盖可能让实际使用的内核继续停在旧版。侧栏使用的是桌面外壳的内核,也不随插件升级。

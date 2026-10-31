@@ -8,7 +8,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
+import { writeFileNoReplace } from './file-write.js'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { HistoryStore, type VisitedPage } from './history-store.js'
@@ -174,9 +175,10 @@ export interface ElectronBrowserViewHost {
    * twice. Measured on the sidebar carrier: three clicks produced three webview guests while
    * `dsh_browser_list_tabs` reported one tab; on the installed-browser carrier the window held four
    * pages and the tool reported one.
-   * @returns every page the carrier holds that this host did not open.
+   * @param owner - the calling task/conversation; shared sidebar hosts must scope to it.
+   * @returns every page this conversation's carrier holds that this host did not open.
    */
-  listPages?(): Promise<readonly CarrierPage[]>
+  listPages?(owner?: string): Promise<readonly CarrierPage[]>
   /**
    * Optional: close one page reported by {@link listPages}.
    *
@@ -184,8 +186,9 @@ export interface ElectronBrowserViewHost {
    * `dsh_browser_list_tabs` would report pages that `dsh_browser_close_tab` answers "not open in
    * this session" about, which reads as a contradiction rather than a boundary.
    * @param id - the carrier's own page id, as {@link listPages} reported it.
+   * @param owner - the same task/conversation used for listing; never a global fallback.
    */
-  closePage?(id: string): Promise<void>
+  closePage?(id: string, owner?: string): Promise<void>
   /**
    * Optional cheap usability probe (no network): whether the host can back
    * views at all right now. The self-hosted host checks for a usable Electron
@@ -831,7 +834,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     //
     // They are appended under a `page:` prefix so a caller can tell the two kinds apart — the
     // prefix is also what `closeTab` uses to decide whether to close a view or a carrier page.
-    const pages = await this.host.listPages?.().catch(() => undefined) ?? []
+    const pages = await this.host.listPages?.(s.label) ?? []
     for (const page of pages) {
       // A page with no URL is a blank one the carrier opened for itself. Listing it would invite a
       // caller to act on nothing, and the blank normalisation already closes those.
@@ -851,6 +854,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Close one tab; closing the active tab activates the next. */
   closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
+    const owner = this.session(session).label
     // A page the carrier owns rather than a view we created. It was reported by `listTabs` under
     // this prefix, so closing it here is what keeps the two tools consistent — a page that can be
     // listed must be closable, or the listing reads as a contradiction.
@@ -862,7 +866,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
           'BROWSER_TAB_NOT_FOUND',
         ))
       }
-      return this.host.closePage(id)
+      return this.host.closePage(id, owner)
     }
     const found = this.locateTab(session, tabId)
     const s = found.s
@@ -2929,9 +2933,85 @@ export class ElectronBrowserProvider implements BrowserProvider {
     return restored
   }
 
+  /**
+   * Capture the active page WITHOUT presenting it.
+   *
+   * `screenshot` calls `showActive()` before capturing, and that is right for a tool whose point is
+   * that the human sees what the model just captured. It is also what makes that path unusable for a
+   * live preview: presenting on every frame would move focus, switch tabs and expand windows on the
+   * host's screen — exactly the side effects a viewer must not cause (issue #34).
+   *
+   * So this does the capture and nothing else. Deliberately narrow: viewport only, JPEG at the
+   * preview defaults, a short timeout, no save path, no history entry, no carrier recovery. A
+   * preview that rebuilt a vanished carrier would make watching a way to start a browser, which the
+   * design forbids: no page means "nothing to watch", not "open one".
+   * @param session - the session whose active page to capture.
+   * @returns the encoded image and its dimensions; throws BROWSER_PREVIEW_UNAVAILABLE when the page
+   *   is not painted, which the caller turns into a "paused" state rather than an error.
+   */
+  async capturePassive(session: BrowserSessionId): Promise<{
+    readonly dataUrl: string
+    readonly width?: number
+    readonly height?: number
+  }> {
+    const s = this.session(session)
+    const { handle } = this.activeTab(s)
+    const timeoutMs = PREVIEW_CAPTURE_MS
+    const timeoutMessage = `browser: preview capture timed out after ${timeoutMs}ms`
+    // The self-hosted carrier encodes in the child from a NativeImage; it is the only path that can
+    // produce JPEG under Electron 43, whose CDP JPEG encoder hangs.
+    if (typeof handle.capture === 'function') {
+      const shot = await withTimeout(
+        handle.capture({
+          format: 'jpeg',
+          quality: PREVIEW_QUALITY,
+          maxWidth: PREVIEW_MAX_WIDTH,
+          maxHeight: PREVIEW_MAX_HEIGHT,
+        }),
+        timeoutMs,
+        undefined,
+        timeoutMessage,
+      )
+      if (shot.base64 === '') {
+        // A hidden or minimized window is not a failure to report as one: the design says the
+        // viewer shows pause and does not open a window to fix it.
+        throw new BrowserError(
+          'browser: preview unavailable (the page is not painted; the window may be hidden or minimized)',
+          'BROWSER_PREVIEW_UNAVAILABLE',
+        )
+      }
+      return {
+        dataUrl: `data:${shot.mime};base64,${shot.base64}`,
+        ...shot.width !== undefined && shot.height !== undefined
+          ? { width: shot.width, height: shot.height }
+          : {},
+      }
+    }
+    // Real Chrome/Edge (and the sidebar): CDP. Viewport only — `captureBeyondViewport` would pull
+    // the whole document, which is neither what a viewer shows nor bounded in size.
+    const result = await withTimeout(
+      handle.sendCommand(CDP_PAGE_CAPTURE_SCREENSHOT, {
+        format: 'jpeg',
+        quality: PREVIEW_QUALITY,
+        fromSurface: true,
+        captureBeyondViewport: false,
+      }),
+      timeoutMs,
+      undefined,
+      timeoutMessage,
+    ) as { data?: unknown }
+    const base64 = typeof result?.data === 'string' ? result.data : ''
+    if (base64 === '') {
+      throw new BrowserError(
+        'browser: preview unavailable (the carrier returned no image)',
+        'BROWSER_PREVIEW_UNAVAILABLE',
+      )
+    }
+    return { dataUrl: `data:image/jpeg;base64,${base64}` }
+  }
+
   /** Capture the current page, optionally full-page, PNG or JPEG, scalable. */
-  async screenshot(
-    session: BrowserSessionId,
+  async screenshot(    session: BrowserSessionId,
     request?: BrowserScreenshotRequest,
     signal?: AbortSignal,
   ): Promise<{ readonly dataUrl: string; readonly path?: string; readonly width?: number; readonly height?: number }> {
@@ -3059,8 +3139,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // path, not a disk problem.
       const target = this.admitSavePath(savePath, 'screenshot')
       try {
-        mkdirSync(dirname(target), { recursive: true })
-        writeFileSync(target, Buffer.from(base64, 'base64'))
+        writeFileNoReplace(target, Buffer.from(base64, 'base64'))
         return { dataUrl: `data:${mime};base64,${base64}`, path: target, ...rendered }
       } catch (error) {
         // Report the write problem but keep the capture usable.
@@ -3455,6 +3534,19 @@ export class ElectronBrowserProvider implements BrowserProvider {
  * best-effort: a page that never settles must not fail the navigation.
  */
 const SETTLE_TIMEOUT_MS = 5_000
+
+/**
+ * Bounds for one passive preview frame.
+ *
+ * The design's numbers (issue #34): viewport only, JPEG quality 70, fit inside 1280x720 without
+ * enlarging, and a 2 s capture ceiling so a stuck frame ends the viewer's wait instead of piling up
+ * behind the control queue. These are deliberately not configurable in v1 — one canonical spec per
+ * target is what lets several viewers share a single capture.
+ */
+const PREVIEW_CAPTURE_MS = 2_000
+const PREVIEW_QUALITY = 70
+const PREVIEW_MAX_WIDTH = 1280
+const PREVIEW_MAX_HEIGHT = 720
 
 /**
  * When the document already looks settled but its identity has NOT changed

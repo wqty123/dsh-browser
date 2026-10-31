@@ -26,19 +26,18 @@ const selfHosted = read('../src/browser-electron/host-main.ts')
 test('the seam declares both halves, and closing is part of listing', () => {
   // Listing a page the caller cannot close is worse than not listing it: the two tools would
   // contradict each other, which reads as a bug in whichever one the caller tried second.
-  assert.match(provider, /listPages\?\(\): Promise<readonly CarrierPage\[\]>/, 'listPages is declared')
-  assert.match(provider, /closePage\?\(id: string\): Promise<void>/, 'and closePage with it')
+  assert.match(provider, /listPages\?\(owner\?: string\): Promise<readonly CarrierPage\[\]>/, 'listPages is declared')
+  assert.match(provider, /closePage\?\(id: string, owner\?: string\): Promise<void>/, 'and closePage with it')
 })
 
 test('the sidebar carrier lists and closes the panel pages the shell owns', () => {
-  assert.match(bridgeHost, /async listPages\(\): Promise<readonly CarrierPage\[\]>/, 'implemented')
+  assert.match(bridgeHost, /async listPages\(owner: string = this.owner\): Promise<readonly CarrierPage\[\]>/, 'implemented')
   assert.match(bridgeHost, /answer\.sidebar/, 'from the bridge answer that already carries them')
-  assert.match(bridgeHost, /async closePage\(id: string\): Promise<void>/, 'and closePage too')
+  assert.match(bridgeHost, /async closePage\(id: string, owner: string = this.owner\): Promise<void>/, 'and closePage too')
   // The bridge closes by title and only for the caller's own guests — that restriction is what
   // stopped one conversation's teardown destroying another's page, so the title is looked up
   // rather than the restriction being worked around.
-  assert.match(bridgeHost, /closeSidebarBrowser/, 'closing goes through the owner-scoped op')
-  assert.match(bridgeHost, /owner: this\.owner/, 'scoped to this conversation')
+  assert.match(bridgeHost, /op: 'closePage', id: numeric, owner/, 'closing carries the exact guest and requesting conversation')
 })
 
 test('the installed-browser carrier lists and closes its pages by target id', () => {
@@ -64,7 +63,7 @@ test('the self-hosted carrier already routes popups into the model, url included
 test('carrier pages are merged into the listing under a distinguishable id', () => {
   const listTabs = provider.slice(provider.indexOf('async listTabs('))
   const body = listTabs.slice(0, listTabs.indexOf('\n  }'))
-  assert.match(body, /this\.host\.listPages\?\.\(\)/, 'the listing asks the carrier')
+  assert.match(body, /this\.host\.listPages\?\.\(s.label\)/, 'the listing asks the carrier for this conversation')
   assert.match(body, /`page:\$\{page\.id\}`/, 'and marks those rows as carrier-owned')
   // A blank page the carrier opened for itself is not something a caller can act on, and the
   // blank normalisation already closes those.
@@ -79,7 +78,7 @@ test('each host excludes the views it opened, where the mapping exists', () => {
   // This is the only place the match CAN be made: the host keeps the view id next to the carrier's
   // own id for it. Sidebar: `views` holds the guest number. Installed browser: `sessions` holds
   // the CDP target id.
-  const sidebarList = bridgeHost.slice(bridgeHost.indexOf('async listPages()'))
+  const sidebarList = bridgeHost.slice(bridgeHost.indexOf('async listPages('))
   const sidebarBody = sidebarList.slice(0, sidebarList.indexOf('\n  }'))
   assert.match(sidebarBody, /for \(const view of this\.views\.values\(\)\)/, 'the sidebar host walks its own views')
   assert.match(sidebarBody, /ours\.add\(view\.guest\)/, 'collecting the guests it opened')
@@ -95,7 +94,7 @@ test('closeTab understands those ids instead of refusing them', () => {
   const closeTab = provider.slice(provider.indexOf('closeTab(session: BrowserSessionId'))
   const body = closeTab.slice(0, closeTab.indexOf('\n  }'))
   assert.match(body, /tabId\.startsWith\('page:'\)/, 'the prefix selects the carrier path')
-  assert.match(body, /this\.host\.closePage\(id\)/, 'which closes through the host')
+  assert.match(body, /this\.host\.closePage\(id, owner\)/, 'which closes through the host for this conversation')
   // A carrier that cannot close what it lists says so, rather than pretending the id is unknown.
   assert.match(body, /BROWSER_TAB_NOT_FOUND/, 'and a host without closePage reports why')
 })

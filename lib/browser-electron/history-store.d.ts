@@ -34,22 +34,16 @@ export declare function visitedHistoryPath(): string;
  */
 export declare class HistoryStore {
     private readonly file;
-    /**
-     * File size at which the next rewrite happens.
-     *
-     * Advanced after each rewrite so the cost is paid once per PRUNE_SLACK appends
-     * rather than on every append: asking "is it over the cap?" was true from the first
-     * over-cap write onwards, which is what made every later navigation rewrite the file.
-     */
+    /** Entry count at which another batched rewrite is due. */
     private pruneThreshold;
-    /**
-     * Appends since the last rewrite.
-     *
-     * prune() runs after every navigation, and the answer is almost always "nothing to
-     * do" — but working that out from the file costs a full parse. Counting instead makes
-     * the common case a comparison.
-     */
+    /** Number of entries at the last full read, unknown until the first prune. */
+    private knownEntries;
+    /** Successful appends since the last full read. */
     private appendedSincePrune;
+    /** Earliest retained visit's expiry; time can require a prune without any new visit. */
+    private nextExpiryAt;
+    /** Changing retention invalidates both the count and the age calculation. */
+    private limitsChanged;
     private maxEntries;
     private maxAgeMs;
     /**
@@ -89,11 +83,6 @@ export declare class HistoryStore {
         readonly query?: string;
         readonly session?: string;
     }): VisitedPage[];
-    /**
-     * Enforce retention: drop entries past the age limit, then the oldest beyond
-     * the count cap. Cheap no-op until the file grows past the cap, so callers can
-     * run it after every append.
-     */
     /**
      * How far past the cap the file may grow before it is rewritten.
      *

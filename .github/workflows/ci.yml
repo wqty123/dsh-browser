@@ -12,20 +12,15 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      # Which node and npm actually ran. A job that passes locally and fails here is
-      # unactionable without them: `node-version: 22` resolves to whatever 22.x the runner
-      # currently carries, and the install below behaves differently across npm majors.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      # CI resolves exactly the graph checked into pnpm-lock.yaml.
       - run: node -v
-      - run: npm -v
-      # `--ignore-scripts` skips electron's postinstall, which downloads ~100MB from GitHub
-      # releases for a package these tests never launch — every test drives a fixture child
-      # script in place of the real host. That download is the only step in this job whose
-      # outcome depends on something other than the npm registry, and it costs minutes on a
-      # runner. Users still get the binary; this changes what CI pays, not what ships.
-      #
-      # It is NOT a fix for run #51. That run's steps show install and tsc BOTH succeeding, with
-      # the test step failing — a flaky case, fixed in the test file itself. This line is here
-      # because the download is dead weight, not because it was ever a suspect.
-      - run: npm install --no-save --ignore-scripts
-      - run: npx tsc -p tsconfig.json
+      - run: pnpm -v
+      # Unit tests use fixture children and do not need an Electron binary.
+      # Keep package lifecycle scripts disabled. Electron 44 downloads its binary
+      # lazily on first require; discovery must remain a pure filesystem probe.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm run build
       - run: node --test "tests/*.test.mjs"

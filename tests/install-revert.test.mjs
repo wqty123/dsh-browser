@@ -123,3 +123,20 @@ test('the default install is found by shape, not by a fixed product name', () =>
     rmSync(fake, { recursive: true, force: true })
   }
 })
+
+test('--revert preserves a newer archive installed over the old bridge backup', () => {
+  const { root } = makeInstall()
+  const archive = join(root, 'resources', 'app.asar')
+  const backup = `${archive}.before-bridge`
+  try {
+    writeFileSync(archive, 'new-desktop-build')
+    writeFileSync(backup, 'old-desktop-build')
+    const result = run([root, '--revert'])
+    assert.equal(readFileSync(archive, 'utf8'), 'new-desktop-build')
+    assert.equal(readFileSync(backup, 'utf8'), 'old-desktop-build')
+    assert.notEqual(result.code, 0)
+    assert.match(result.out, /archive.*exists|newer|refus/i)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

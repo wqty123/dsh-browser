@@ -91,7 +91,7 @@ async function loadBridge () {
 const { handle, claims } = await loadBridge()
 const shell = new FakeContents(1, 'window', 'dsh-app://app/')
 
-test('list shows a session only its own guests, plus unclaimed ones', async () => {
+test('list never exposes an unclaimed guest without a verified conversation panel', async () => {
   const a = new FakeContents(2, 'webview', 'https://a.example/')
   const b = new FakeContents(3, 'webview', 'https://b.example/')
   const free = new FakeContents(4, 'webview', 'https://free.example/')
@@ -101,10 +101,10 @@ test('list shows a session only its own guests, plus unclaimed ones', async () =
   claims.set(3, 'sessionB')
 
   const forA = (await handle({ op: 'list', owner: 'sessionA' })).sidebar.map(g => g.id)
-  assert.deepEqual(forA, [2, 4], 'A sees its own guest and the unclaimed one, never B’s')
+  assert.deepEqual(forA, [2], 'A sees only its own claimed guest, never a global unclaimed page')
 
   const forB = (await handle({ op: 'list', owner: 'sessionB' })).sidebar.map(g => g.id)
-  assert.deepEqual(forB, [3, 4])
+  assert.deepEqual(forB, [3])
 })
 
 test('two conversations asking in turn are each answered with their own page', async () => {

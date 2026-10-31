@@ -30,7 +30,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   const zh = {
     nav: "浏览器",
     title: "浏览器(Browser Use)",
-    lead: "这些开关控制共享浏览器如何工作;改动立即生效,不需要重启 DSH。",
+    lead: "多数设置立即生效。保留 cookies 与无头模式仅适用于本机 Chrome / Edge,修改后需重新选择载体或重启 DSH。",
     loading: "读取设置…",
     failed: "读取设置失败:",
     retry: "重试",
@@ -41,7 +41,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "history.hint": "记录访问过的页面;关闭浏览器后仍可查询并重新打开,关闭此开关后不再记录新访问。",
     "cookies.title": "登录状态",
     "cookies.persist": "保留 cookies",
-    "cookies.hint": "关闭后每次启动浏览器都是未登录状态。",
+    "cookies.hint": "仅控制本机 Chrome / Edge 的独立 profile:关闭后下次启动使用临时 profile;需重新选择载体或重启 DSH。内置 Electron 与桌面侧栏的登录态由各自载体保存。",
     "ui.title": "展示",
     "ui.autoExpandOnce": "侧栏自动展开(每轮一次)",
     "ui.autoExpandOnce.hint": "Agent 首次操作时自动展开;你手动收起后,本轮不再打扰。",
@@ -78,7 +78,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   const en = {
     nav: "Browser",
     title: "Browser (Browser Use)",
-    lead: "These switches decide how the shared browser behaves; changes apply immediately, no DSH restart.",
+    lead: "Most settings apply immediately. Cookie persistence and headless mode apply only to installed Chrome / Edge; reselect the carrier or restart DSH after changing them.",
     loading: "Loading settings…",
     failed: "Could not load settings:",
     retry: "Retry",
@@ -89,7 +89,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "history.hint": "Records visited pages so they can be found and reopened after the browser is closed; off means no new visits are recorded.",
     "cookies.title": "Login state",
     "cookies.persist": "Keep cookies",
-    "cookies.hint": "Off makes every browser start a signed-out session.",
+    "cookies.hint": "Controls only the separate Chrome / Edge profile: off uses a temporary profile on the next launch. Reselect the carrier or restart DSH. Bundled Electron and the desktop sidebar retain login state through their own carrier.",
     "ui.title": "Presentation",
     "ui.autoExpandOnce": "Auto-expand the side panel (once per task)",
     "ui.autoExpandOnce.hint": "Expands when the agent first operates; after you collapse it, this task stays quiet.",
@@ -617,6 +617,13 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     return null
   }
 
+  /** rc.5 marks both SessionView and its nested SidebarPanel, including floating panes. */
+  function panelRootsFor(sessionId) {
+    const roots = Array.from(document.querySelectorAll("[data-sidebar-right-session]"))
+    // Only shells without DOM ownership markers may use the legacy React adapter.
+    return roots.length === 0 ? undefined : roots.filter(root => root.getAttribute("data-sidebar-right-session") === sessionId)
+  }
+
   /**
    * Every live `<webview>` guest inside this conversation's panel subtree.
    *
@@ -631,6 +638,17 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
    * "is there one that is NOT mine", never a count.
    */
   function guestsInPanel(sessionId) {
+    const roots = panelRootsFor(sessionId)
+    if (roots !== undefined) {
+      // The nested markers can enumerate a guest twice. Its closest owner must still
+      // name this session, so an embedded foreign session never enters the result.
+      return Array.from(new Set(roots.flatMap(root => Array.from(root.querySelectorAll("webview"))))).filter(view => {
+        try {
+          return roots.includes(view.closest("[data-sidebar-right-session]"))
+            && typeof view.getWebContentsId === "function" && view.getWebContentsId() > 0
+        } catch { return false }
+      })
+    }
     const strip = tabStripFor(sessionId)
     if (strip === null) return []
     // Start at the strip itself: it is by construction this conversation's own, so the foreign test
@@ -653,8 +671,8 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 
   /** Read this conversation's current guest, preferring the one actually drawn. */
   function guestStateFor(sessionId) {
-    const strip = tabStripFor(sessionId)
-    if (strip === null) return { panel: false, guestId: null, url: "" }
+    const roots = panelRootsFor(sessionId)
+    if (roots === undefined ? tabStripFor(sessionId) === null : roots.length === 0) return { panel: false, guestId: null, url: "" }
     const guests = guestsInPanel(sessionId)
     if (guests.length === 0) return { panel: true, guestId: null, url: "" }
     // A sidebar keeps every tab mounted (`keepMounted`), so a background tab's guest is
@@ -668,6 +686,33 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     try { url = String(chosen.getURL ? chosen.getURL() : "") } catch (error) { url = "" }
     try { return { panel: true, guestId: chosen.getWebContentsId(), url } }
     catch (error) { return { panel: true, guestId: null, url: "" } }
+  }
+
+  /** Resolve a shell tab by its stable id, never by the page's displayed title. */
+  function tabIdOfElement(element, allowed, roots) {
+    if (roots !== undefined) {
+      const owner = element.closest("[data-sidebar-right-session]")
+      if (!roots.includes(owner)) return null
+      let id = null
+      for (let node = element; node && node !== owner; node = node.parentElement) {
+        for (const value of [node.getAttribute("data-sidebar-right-tab"), node.getAttribute("data-dockkit-tab")]) {
+          if (value === null) continue
+          if (id !== null && id !== value) return null
+          id = value
+        }
+      }
+      return allowed.has(id) ? id : null
+    }
+    const key = Object.keys(element).find(name => name.startsWith("__reactFiber$") || name.startsWith("__reactInternalInstance$"))
+    let fiber = key === undefined ? null : element[key]
+    for (let depth = 0; fiber && depth < 60; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps
+      if (!props || typeof props !== "object") continue
+      for (const id of [props.tabId, props.tab && props.tab.id]) {
+        if (typeof id === "string" && allowed.has(id)) return id
+      }
+    }
+    return null
   }
 
   /**
@@ -760,6 +805,44 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       /** Read-only: this conversation's current guest, if it has one. */
       panelGuest(sessionId) {
         return guestStateFor(typeof sessionId === "string" ? sessionId : "")
+      },
+      /** All guest ids verified inside this conversation, including shell-created popup tabs. */
+      panelGuests(sessionId) {
+        if (typeof sessionId !== "string" || !/^session-/.test(sessionId)) return []
+        return guestsInPanel(sessionId).map(view => view.getWebContentsId())
+      },
+      /** Close exactly the tab hosting this guest. An unknown shell shape must fail closed. */
+      closePanelGuest(sessionId, guestId) {
+        const refuse = reason => ({ ok: false, reason, closed: 0 })
+        if (typeof sessionId !== "string" || !/^session-/.test(sessionId)) return refuse("a conversation id is required")
+        const view = guestsInPanel(sessionId).find(candidate => candidate.getWebContentsId() === guestId)
+        if (view === undefined) return refuse("the guest does not belong to this conversation panel")
+        const roots = panelRootsFor(sessionId)
+        const containers = roots === undefined ? [tabStripFor(sessionId)].filter(Boolean) : roots
+        if (containers.length === 0 || sidebarRight === null || typeof sidebarRight.tabsIn !== "function") {
+          return refuse("the shell cannot identify its tabs; refresh or upgrade the browser plugin client")
+        }
+        let tabs
+        try { tabs = sidebarRight.tabsIn(sessionId) } catch { return refuse("the conversation tabs are unavailable") }
+        const allowed = new Set(tabs.map(tab => tab.id))
+        const id = tabIdOfElement(view, allowed, roots)
+        if (id === null) return refuse("the shell does not expose this guest's tab identity; refresh or upgrade the desktop")
+        // rc.5's scoped controller runs registered cleanup and removes the shell tab as one action.
+        if (typeof sidebarRight.closeIn === "function") {
+          try {
+            sidebarRight.closeIn(sessionId, id)
+            if (sidebarRight.tabsIn(sessionId).some(tab => tab.id === id)) return refuse("the shell did not remove the requested conversation tab")
+            return { ok: true, closed: 1 }
+          } catch (error) { return refuse("the shell could not close the conversation tab: " + String(error?.message ?? error)) }
+        }
+        const headers = Array.from(new Set(containers.flatMap(container => Array.from(container.querySelectorAll("[role=tab]")))))
+          .filter(tab => tabIdOfElement(tab, allowed, roots) === id)
+        if (headers.length !== 1) return refuse("the shell does not expose one matching tab control; refresh or upgrade the desktop")
+        const buttons = Array.from(headers[0].querySelectorAll("button"))
+          .filter(button => /关闭|close/i.test((button.getAttribute("aria-label") || "") + " " + (button.getAttribute("title") || "")))
+        if (buttons.length !== 1) return refuse("the shell does not expose one matching close control; refresh or upgrade the desktop")
+        buttons[0].click()
+        return { ok: true, closed: 1 }
       },
     }
     ctx.effect(() => {

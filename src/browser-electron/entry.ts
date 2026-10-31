@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { setTimeout as wait } from 'node:timers/promises'
 import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.js'
 import { DesktopBridgeViewHost } from './desktop-bridge-host.js'
 import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.js'
@@ -28,6 +29,7 @@ import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralPro
 import { MissingSystemBrowserHost } from './missing-system-browser.js'
 import { SettingsStore } from './settings-store.js'
 import { sameOrigin } from './settings-route.js'
+import { handlePreviewFrame, PREVIEW_ROUTE } from './preview-route.js'
 
 export {
   ELECTRON_BROWSER_PROVIDER_ID,
@@ -152,12 +154,18 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // otherwise would leave a stray window behind.
   const selfHosted = new RemoteElectronViewHost(defaultHostMainPath())
   let unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(selfHosted, providerConfig))
-  let upgraded = false
+  let disposed = false
+  let carrierChoice = 0
+  let discovery: AbortController | undefined
   /** The carrier an `adopt` installed, so a later choice can release it. */
   let adoptedCarrier: ElectronBrowserViewHost | undefined
 
   ctx.effect(() => () => {
+    disposed = true
+    carrierChoice += 1
+    discovery?.abort()
     unregister()
+    adoptedCarrier?.dispose?.()
     selfHosted.dispose()
   })
 
@@ -177,10 +185,13 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * @param reason - which failure this was; see {@link CarrierLossReason}.
    */
   const restoreSelfHosted = (adopted: ElectronBrowserViewHost, reason: CarrierLossReason): void => {
+    // A replaced carrier may finish an outstanding request after the new choice is installed.
+    if (disposed || adoptedCarrier !== adopted) return
     try {
       const restored = new RemoteElectronViewHost(defaultHostMainPath())
       unregister()
       unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(restored, providerConfig))
+      adoptedCarrier = restored
       ctx.logger?.warn?.(
         reason === 'shell-exited'
           ? 'dsh-builtin-browser: the desktop shell backed the sidebar browser and has exited, so the '
@@ -218,23 +229,26 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * @param host - the carrier to adopt.
    * @param note - a one-line description for the log.
    */
-  const adopt = (host: ElectronBrowserViewHost, note: string): void => {
+  const adopt = (host: ElectronBrowserViewHost, note: string, choice = carrierChoice): void => {
+    if (disposed || choice !== carrierChoice) {
+      try { host.dispose?.() } catch { /* a stale result must not escape its retry */ }
+      return
+    }
     // This guard used to make the FIRST choice final, disposing anything that arrived later. That
     // is right against two carriers racing in, and exactly wrong for a user changing the setting:
     // `chooseCarrier` runs again on purpose, and a refusal here is indistinguishable from the
     // write having done nothing. The previous carrier is now released by the replacement instead.
-    upgraded = true
+    const previous = adoptedCarrier
     try {
       unregister()
       unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, providerConfig))
       selfHosted.dispose()
+      adoptedCarrier = host
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
       // A borrowed carrier can lose the process behind it, and this is the only notification that
       // will ever arrive. Registering AFTER the swap succeeded means a listener can never fire
       // against a provider that was never installed.
       host.onLost?.(reason => { restoreSelfHosted(host, reason) })
-      const previous = adoptedCarrier
-      adoptedCarrier = host
       // Released AFTER the replacement is installed, so the surface is never without a provider.
       if (previous !== undefined && previous !== host) {
         try { previous.dispose?.() } catch { /* the replacement is already serving */ }
@@ -252,8 +266,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // exit code 1: a failed upgrade, which should only ever cost a warning, took the whole
       // session down instead. Observed 2026-10-05 (crash-…-host.log, phase: running).
       try {
-        unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(
-          new RemoteElectronViewHost(defaultHostMainPath()), providerConfig))
+        const fallback = new RemoteElectronViewHost(defaultHostMainPath())
+        unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(fallback, providerConfig))
+        adoptedCarrier = fallback
+        if (previous !== undefined && previous !== host) {
+          try { previous.dispose?.() } catch { /* fallback is already serving */ }
+        }
         ctx.logger?.warn?.(`dsh-builtin-browser: could not adopt ${note} (${String(error)})`)
       } catch (fallbackError) {
         ctx.logger?.warn?.(
@@ -274,6 +292,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * exactly what a second call does.
    */
   const chooseCarrier = (): void => {
+  if (disposed) return
+  const choice = ++carrierChoice
+  discovery?.abort()
+  const controller = new AbortController()
+  discovery = controller
+  const { signal } = controller
   // A browser the user explicitly asked for outranks every automatic choice: the
   // whole point of the setting is that they know which browser they want. It is
   // launched with a plugin-owned profile, so their own windows are untouched.
@@ -298,6 +322,9 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // confusing error about Electron later on. Report it instead.
       if (channel === 'auto') {
         ctx.logger?.warn?.('dsh-builtin-browser: no installed browser was found; using the bundled browser')
+        if (adoptedCarrier !== undefined) {
+          adopt(new RemoteElectronViewHost(defaultHostMainPath()), 'using the bundled browser', choice)
+        }
       } else {
         adopt(new MissingSystemBrowserHost(channel, searchSummary(channel)),
           `the selected ${channel} is not installed — commands will explain how to fix it`)
@@ -333,6 +360,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         undefined, settings.get().browser.headless),
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
+  } else if (adoptedCarrier !== undefined) {
+    // The original self-hosted carrier was disposed by the first adoption. Switching back
+    // must install a new one, even when no sidebar is found during the discovery below.
+    adopt(new RemoteElectronViewHost(defaultHostMainPath()), 'using the bundled browser', choice)
   }
 
   // An explicit choice was already adopted above; discovering the sidebar here would
@@ -347,19 +378,26 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // was never adopted for the rest of the process's life. Retry a handful of times over roughly
   // half a minute, then stop: this is a convenience, not a promise, and the session the user is
   // already driving in the self-hosted window is not worth replacing minutes into their work.
-  // `adopt` is itself one-shot (its `upgraded` guard), so the only possible effect of a retry
-  // that lands late is adopting a bridge that showed up just after startup.
+  // Each attempt belongs to this choice. A later settings write or teardown cancels its waits,
+  // and an endpoint returned by an already-running discovery is disposed instead of installed.
   void (async () => {
     for (const delay of [0, 2_000, 5_000, 15_000]) {
-      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
+      if (delay > 0) {
+        try { await wait(delay, undefined, { signal }) } catch { return }
+      }
+      if (signal.aborted || disposed) return
       let sidebar: Awaited<ReturnType<typeof DesktopBridgeViewHost.discover>>
       try {
         sidebar = await DesktopBridgeViewHost.discover(sessionId)
       } catch {
         sidebar = undefined // discovery is documented not to throw; never let it stop the retries
       }
+      if (signal.aborted || disposed) {
+        try { sidebar?.dispose?.() } catch { /* the choice no longer owns this result */ }
+        return
+      }
       if (sidebar === undefined) continue
-      adopt(sidebar, 'driving the desktop sidebar browser')
+      adopt(sidebar, 'driving the desktop sidebar browser', choice)
       return
     }
     // A bridge exists but its sidebar panel is an iframe. Saying nothing here would leave the user
@@ -396,7 +434,38 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // Wired AFTER the chooser exists, because the handler re-runs it: a settings write that changes
   // `browser.channel` is a request to switch carriers, and answering `ok` without switching is the
   // one thing a caller cannot tell apart from a write that worked.
+  /**
+   * Expose the live-view frame endpoint on the host's web server (issue #34).
+   *
+   * Registered exactly like the settings route and skipped the same way when a surface has no web
+   * server: a CLI session simply has no viewer, which is not a plugin-startup failure. The endpoint
+   * is inert until the host turns `remoteView.enabled` on, and it refuses a request whose session the
+   * plugin never handed out.
+   * @param ctx - the plugin context.
+   * @param settings - the settings document, for the share switch.
+   */
+  function installPreviewRoute(ctx: Context, settings: SettingsStore): void {
+    const injectPreview = (ctx as unknown as {
+      inject?: (deps: readonly string[], callback: (host: WebServerHost) => void) => void
+    }).inject
+    if (typeof injectPreview !== 'function') return
+    try {
+      injectPreview(['webServer', 'browser'], (host) => {
+        const browser = (ctx as unknown as { browser?: PreviewBrowser }).browser
+        if (browser === undefined) return
+        host.effect(() => host.webServer.register({
+          kind: 'exact',
+          path: PREVIEW_ROUTE,
+          handler: (request, response) => handlePreviewFrame(request, response, settings, browser),
+        }, 'dsh-builtin-browser: live view frame'))
+      })
+    } catch {
+      // No web server on this surface: watching is simply unavailable, and nothing else changes.
+    }
+  }
+
   installSettingsRoute(ctx, settings, () => { chooseCarrier() })
+  installPreviewRoute(ctx, settings)
 }
 
 /** Route the settings panel reads and writes. */
@@ -444,6 +513,12 @@ export function adoptLegacyProfileRoot(
   } catch {
     // Nothing here is worth failing an apply over; the fallback is the pre-existing behaviour.
   }
+}
+
+/** What the frame route needs from the browser service. */
+interface PreviewBrowser {
+  exists(session: string): boolean
+  capturePassive(session: string, signal?: AbortSignal): Promise<{ readonly dataUrl: string }>
 }
 
 /** The host web-server surface this plugin uses, described structurally. */

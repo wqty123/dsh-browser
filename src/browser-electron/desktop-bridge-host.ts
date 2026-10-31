@@ -250,26 +250,21 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    * possible exists only here.
    * @returns the panel's pages that are not ours, or an empty list when the bridge cannot answer.
    */
-  async listPages(): Promise<readonly CarrierPage[]> {
-    try {
-      const answer = await this.connection.call({ op: 'list', owner: this.owner }, 5_000)
-      const guests = Array.isArray(answer.sidebar) ? answer.sidebar : []
-      const ours = new Set<number>()
-      for (const view of this.views.values()) {
-        if (typeof view.guest === 'number') ours.add(view.guest)
-      }
-      return guests
-        .filter((guest): guest is { id: number; url?: unknown } => typeof guest?.id === 'number')
-        .filter(guest => !ours.has(guest.id))
-        .map(guest => ({
-          id: String(guest.id),
-          url: typeof guest.url === 'string' ? guest.url : '',
-        }))
-    } catch {
-      // A bridge that cannot answer has a real problem, and the next command reports it. Failing
-      // the tab LIST here would make a listing worse than the driving it exists to describe.
-      return []
+  async listPages(owner: string = this.owner): Promise<readonly CarrierPage[]> {
+    const answer = await this.connection.call({ op: 'list', owner }, 5_000)
+    if (answer.ok !== true) throw new Error(String(answer.error ?? 'sidebar page listing failed'))
+    const guests = Array.isArray(answer.sidebar) ? answer.sidebar : []
+    const ours = new Set<number>()
+    for (const view of this.views.values()) {
+      if (typeof view.guest === 'number') ours.add(view.guest)
     }
+    return guests
+      .filter((guest): guest is { id: number; url?: unknown } => typeof guest?.id === 'number')
+      .filter(guest => !ours.has(guest.id))
+      .map(guest => ({
+        id: String(guest.id),
+        url: typeof guest.url === 'string' ? guest.url : '',
+      }))
   }
 
   /**
@@ -281,17 +276,13 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    * than as an error: the caller asked for it to be closed, and it is.
    * @param id - the sidebar guest id, as a string.
    */
-  async closePage(id: string): Promise<void> {
+  async closePage(id: string, owner: string = this.owner): Promise<void> {
     const numeric = Number(id)
-    if (!Number.isFinite(numeric)) throw new Error(`not a sidebar page id: ${id}`)
-    const answer = await this.connection.call({ op: 'list', owner: this.owner }, 5_000)
-    const guests = Array.isArray(answer.sidebar) ? answer.sidebar : []
-    const title = guests
-      .filter((guest): guest is { id: number; title?: unknown } => Number(guest?.id) === numeric)
-      .map(guest => String(guest.title ?? ''))
-      .find(candidate => candidate !== '')
-    if (title === undefined) return
-    await this.connection.call({ op: 'closeSidebarBrowser', titles: [title], owner: this.owner }, 10_000)
+    if (!Number.isSafeInteger(numeric) || numeric <= 0) throw new Error(`not a sidebar page id: ${id}`)
+    const answer = await this.connection.call({ op: 'closePage', id: numeric, owner }, 10_000)
+    if (answer.ok !== true || answer.closed !== 1) {
+      throw new Error(`dsh-builtin-browser: could not close sidebar page ${id}: ${String(answer.error ?? 'the shell did not close the requested page; refresh or upgrade the desktop bridge')}`)
+    }
   }
 
   /**
@@ -424,7 +415,11 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     // It comes from the view, not the process — with several conversations live, a process-wide
     // owner would raise the wrong conversation's tab.
     const owner = this.views.get(handle.id)?.owner ?? this.owner
-    void this.connection.call({ op: 'showTab', viewId: Number(handle.id), owner }, 5_000).catch(() => undefined)
+    const guest = this.views.get(handle.id)?.guest
+    // showActive also runs before a view has navigated; do not materialize a blank page just to
+    // present it. Once materialized, only the shell's numeric guest id can name its tab.
+    if (guest === undefined) return
+    void this.connection.call({ op: 'showTab', viewId: guest, owner }, 5_000).catch(() => undefined)
   }
 
 
