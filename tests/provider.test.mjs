@@ -737,3 +737,32 @@ test('a timed-out read is recoverable: the view is replaced, the tab id survives
   const calls = (source.match(/this\.replaceTabWithBlank\(s, tab\)/g) ?? []).length
   assert.equal(calls, 2, 'snapshot and a11y both recover, not just one')
 })
+
+// Issue #37's other half: a blank page must not read as a successful, empty read.
+//
+// The report: after a carrier swap started a fresh window, every tool answered against
+// about:blank with success values — location.href was "about:blank", the snapshot had zero
+// elements, and list_tabs still showed the old URL. Silent failures are worse than refusals.
+test('a blank page reports itself as blank instead of as a page with no elements', async () => {
+  const host = makeHost()
+  const p = new ElectronBrowserProvider(host)
+  const sid = await p.open()
+  // The fixture's view starts at about:blank, which is exactly the reported condition: a window
+  // that exists and has a document, but nothing opened in it. Before this flag the snapshot answered
+  // "(no interactive elements found)" — a success value for a browser showing nothing.
+  const blank = await p.snapshot(sid)
+  assert.equal(blank.blank, true, 'a view with nothing opened is blank')
+  assert.deepEqual(blank.elements, [])
+  // Two URLs reach this state, and both are blank: never navigated (''), and the explicit
+  // about:blank that a fresh carrier window starts on. The note must explain the state either way.
+  assert.match(String(blank.note), /no page has been opened|about:blank/i, 'and the note explains it')
+  assert.match(String(blank.note), /nothing has been opened|no page has been opened/i,
+    'and says what the state means')
+
+  // A real page must NOT carry the flag: it would turn every sparse page into a refusal.
+  // https, because navigation refuses non-HTTP(S) schemes by design.
+  await p.navigate(sid, { url: 'https://example.com/' })
+  const real = await p.snapshot(sid)
+  assert.equal(real.blank, undefined, 'a real page carries no blank flag')
+  await p.close(sid)
+})

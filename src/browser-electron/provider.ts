@@ -1334,7 +1334,23 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // A tab that has never navigated is a blank, uncommitted view. The collector cannot answer in
     // it — there is no document to commit — so the call would sit out its whole budget before
     // saying anything. Answering the empty page immediately is both faster and more truthful.
-    if (tab.url === '') return { url: '', elements: [], truncated: false }
+    //
+    // `about:blank` needs the same answer for a different reason: it HAS a document, so the collector
+    // runs, finds nothing, and returns zero elements — indistinguishable from a real page with nothing
+    // interactive. A caller then acts on it and receives success values, which is how a carrier swap
+    // that started a fresh window looked like working tools operating on the wrong page (issue #37).
+    const blankUrl = tab.url === '' || tab.url === 'about:blank'
+    if (blankUrl) {
+      return {
+        url: tab.url,
+        elements: [],
+        truncated: false,
+        blank: true,
+        note: tab.url === ''
+          ? 'no page has been opened in this browser yet'
+          : 'the page is about:blank — nothing has been opened in this browser, so there is nothing to read or drive',
+      }
+    }
     const script = `(() => {
       const cap = ${String(this.snapshotMaxElements)}
       const url = location.href

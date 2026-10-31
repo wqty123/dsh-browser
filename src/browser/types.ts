@@ -381,6 +381,20 @@ export interface BrowserSnapshotResult {
   readonly truncated: boolean
   /** Human-verification challenge blocking the page, when one is detected. */
   readonly challenge?: BrowserChallenge
+  /**
+   * True when this is a blank page — no document to read, nothing to drive.
+   *
+   * Zero elements means two very different things: a page that genuinely has nothing interactive,
+   * and a browser that has not opened anything at all. Without this flag they look identical, so a
+   * caller can act on a blank page and get a success value back — reported as issue #37, where every
+   * tool after a carrier swap answered against `about:blank` while appearing to work.
+   *
+   * Set for `about:blank` and for a view that has never navigated. A caller seeing it should treat
+   * the page as absent, not as empty.
+   */
+  readonly blank?: boolean
+  /** A sentence a caller can show instead of reporting an empty page as a successful read. */
+  readonly note?: string
 }
 
 /**
