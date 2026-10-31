@@ -243,9 +243,21 @@ async function mount(options = {}) {
     // The panel service waits for `sidebarRight`. A host that never provides one leaves the
     // service unbound and the API names that when called — which is the shape every settings test
     // here runs in, and also what an older composition looks like.
-    inject: (_names, fn) => {
-      if (options.sidebarRight === undefined) return
-      fn({ sidebarRight: options.sidebarRight, effect: (run) => { run() } })
+    //
+    // Each service is dispatched by name, so a host that offers one and not the other is
+    // expressible: that is the case the two separate `inject` calls in the bundle exist for.
+    inject: (names, fn) => {
+      const scope = { effect: (run) => { run() } }
+      let bound = false
+      if (names.includes('sidebarRight') && options.sidebarRight !== undefined) {
+        scope.sidebarRight = options.sidebarRight
+        bound = true
+      }
+      if (names.includes('uiWorkspace') && options.uiWorkspace !== undefined) {
+        scope.uiWorkspace = options.uiWorkspace
+        bound = true
+      }
+      if (bound) fn(scope)
     },
   }
   exports.apply(ctx)
@@ -841,4 +853,185 @@ test('rc5 ignores unready or destroyed guests while listing live guests in its p
   assert.deepEqual(Array.from(panel.panelGuests('session-a')), [])
   assert.equal(panel.panelGuest('session-a').panel, true)
   assert.equal(panel.panelGuest('session-a').guestId, null)
+})
+
+// ---------------------------------------------------------------------------
+// A placed tab is not a shown page.
+//
+// Measured on the running shell: the bridge read `panel: true, guestId: null` and an empty
+// sidebar guest list for its whole 20 s budget, then reported the panel unusable and swapped the
+// surface to a separate window. The cause is a layout fact, not a timing one: the shell renders
+// the body of the ACTIVE tab and only while the column is expanded, so a folded column keeps its
+// strip (hence `panel: true`) and never creates the `<webview>`. Placements alone therefore have
+// no way to produce a guest, and no amount of polling fixes that — the column has to be asked to
+// open, and the tab has to be made the active one.
+// ---------------------------------------------------------------------------
+
+/**
+ * A sidebar service whose column can be folded, recording what the panel service asked for.
+ *
+ * `tabsIn` reports the tab even while folded, which is exactly the shape that fooled the old
+ * code: the store knows about the page, the DOM does not.
+ */
+function revealingSidebar({ expanded = false, tabs = [{ id: 'tab:browser', kind: 'browser' }], onScreen = 'session-a' } = {}) {
+  const state = { expanded, expandCalls: 0, focusCalls: [], placementCalls: [] }
+  const held = [...tabs]
+  return {
+    state,
+    service: {
+      // The shell's own answer to "which conversation is displayed". Pass `onScreen: null` to model
+      // a shell that will not say, which both callers must treat as "not this conversation".
+      screen: () => (onScreen === null ? undefined : { sessionId: onScreen, surface: {} }),
+      tabsIn: () => held,
+      openTabIn: (sessionId, kind, options) => {
+        state.placementCalls.push([sessionId, kind, options])
+        // The shell records the page and DEDUPLICATES by kind; a stub that never recorded it
+        // would make every placement look like a conversation whose surface was never minted.
+        if (!held.some(tab => tab.kind === kind)) held.push({ id: `tab:${kind}`, kind })
+      },
+      isExpanded: () => state.expanded,
+      toggleExpanded: () => {
+        state.expandCalls += 1
+        state.expanded = !state.expanded
+      },
+      focus: (id) => { state.focusCalls.push(id) },
+    },
+  }
+}
+
+test('a page placed in a folded column is expanded and focused so its webview can exist', async () => {
+  const { state, service } = revealingSidebar()
+  const { panel } = await mount({ sidebarRight: service, document: documentWith(makeStrip('session-a')) })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.ok, true)
+  assert.equal(verdict.expanded, true, 'the folded column is opened')
+  assert.equal(state.expandCalls, 1, 'once per open, not once per poll')
+  assert.equal(verdict.focused, 'tab:browser', 'and the placed tab becomes the active one')
+  assert.deepEqual(state.focusCalls, ['tab:browser'])
+  assert.equal(state.expanded, true, 'the column really ends up open')
+})
+
+test('an already expanded column is focused but never folded', async () => {
+  // `toggleExpanded` is a toggle, not "make sure expanded": calling it unconditionally would close
+  // a column that was already open, which is the same class of mistake in the other direction.
+  const { state, service } = revealingSidebar({ expanded: true })
+  const { panel } = await mount({ sidebarRight: service, document: documentWith(makeStrip('session-a')) })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.ok, true)
+  assert.equal(verdict.expanded, undefined, 'nothing was expanded')
+  assert.equal(state.expandCalls, 0)
+  assert.equal(state.expanded, true, 'and it is still open')
+  assert.deepEqual(state.focusCalls, ['tab:browser'])
+})
+
+test('a conversation the shell is not showing never moves the column a human is reading', async () => {
+  // `toggleExpanded` acts on the ON-SCREEN session, so a request from a background conversation that
+  // called it would fold the panel of the conversation the human IS reading. `screen()` is what
+  // separates the two, and this is the case it must refuse.
+  const { state, service } = revealingSidebar({ onScreen: 'session-b' })
+  const { panel } = await mount({ sidebarRight: service, document: documentWith() })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.switched, undefined, 'no workspace service was offered, so nothing is claimed')
+  assert.equal(verdict.panel, false, 'no panel for this conversation was found')
+  assert.equal(state.expandCalls, 0)
+  assert.deepEqual(state.focusCalls, [])
+})
+
+test('a displayed conversation whose column was never opened is opened, not skipped', async () => {
+  // The measured case: a freshly started shell has NO right sidebar at all until something asks for
+  // one. The conversation is displayed, its panel DOM is absent, and the old guard ("only expand
+  // when the panel DOM exists") meant nothing could ever open it — every call failed, and the fix
+  // that had just shipped was unreachable on a fresh window.
+  const { state, service } = revealingSidebar({ onScreen: 'session-a', expanded: false })
+  const { panel } = await mount({ sidebarRight: service, document: documentWith() })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.displayed, true, 'the shell says this conversation is the displayed one')
+  assert.equal(verdict.expanded, true, 'so the column is opened')
+  assert.equal(state.expandCalls, 1)
+  assert.deepEqual(state.focusCalls, ['tab:browser'])
+})
+
+test('a shell without the expansion API is still driven, and only placed', async () => {
+  // An older shell exposes `tabsIn`/`openTabIn` and nothing else. The reveal step must degrade to
+  // "place only" instead of throwing into the bridge's evaluate, which would have turned a working
+  // carrier on a slightly older desktop into a hard failure.
+  const { state, service } = revealingSidebar()
+  delete service.isExpanded
+  delete service.toggleExpanded
+  delete service.focus
+  const { panel } = await mount({ sidebarRight: service, document: documentWith(makeStrip('session-a')) })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.ok, true, 'the placement still reports success')
+  assert.equal(verdict.expanded, undefined)
+  assert.equal(verdict.focused, undefined)
+  assert.equal(state.placementCalls.length, 1, 'and the tab was placed exactly once')
+})
+
+// ---------------------------------------------------------------------------
+// A conversation that is not the one on screen.
+//
+// The shell renders ONE sidebar — the displayed conversation's — so a page requested from a
+// background conversation could be placed in its store and never grow a webview. The previous
+// answer told the human to click over to that conversation; that is a working carrier whose
+// usability depends on their timing. The fix asks the shell to display it, which is the same
+// navigation its own session list performs.
+// ---------------------------------------------------------------------------
+
+/** A workspace service that records which conversation the panel asked the shell to show. */
+function recordingWorkspace() {
+  const calls = []
+  return {
+    calls,
+    service: {
+      openSession: (sessionId) => { calls.push(sessionId) },
+    },
+  }
+}
+
+test('a page for a conversation the shell is not showing asks the shell to show it', async () => {
+  const { service } = revealingSidebar({ onScreen: 'session-b' })
+  const workspace = recordingWorkspace()
+  // No strip for session-a: this conversation's panel DOM is absent, and another conversation is
+  // the one on screen.
+  const { panel } = await mount({
+    sidebarRight: service,
+    uiWorkspace: workspace.service,
+    document: documentWith(),
+  })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.deepEqual(workspace.calls, ['session-a'], 'the shell is asked to display that conversation, once')
+  assert.equal(verdict.switched, true, 'and the verdict says so, so the caller retries instead of failing')
+  assert.equal(verdict.panel, false, 'the panel really was absent at the time of the request')
+})
+
+test('a conversation whose panel is already mounted is never switched away from', async () => {
+  // The guard that keeps this from being a view-hijack: the shell is asked to change what it shows
+  // only when this conversation has no sidebar DOM at all.
+  const { service } = revealingSidebar()
+  const workspace = recordingWorkspace()
+  const { panel } = await mount({
+    sidebarRight: service,
+    uiWorkspace: workspace.service,
+    document: documentWith(makeStrip('session-a')),
+  })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.deepEqual(workspace.calls, [])
+  assert.equal(verdict.switched, undefined)
+  assert.equal(verdict.ok, true)
+})
+
+test('a host without the workspace service still places the tab and reports no switch', async () => {
+  const { service, state } = revealingSidebar()
+  const { panel } = await mount({ sidebarRight: service, document: documentWith() })
+
+  const verdict = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(verdict.switched, undefined, 'nothing was switched, and nothing claims it was')
+  assert.equal(state.placementCalls.length, 1, 'the placement path still ran')
 })

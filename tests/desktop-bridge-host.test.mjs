@@ -57,6 +57,28 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
             // `panelNotDisplayed` reproduces issue #37: the panel exists, the shell is showing a
             // different conversation, so no webview has attached. The real bridge reports that with
             // a code, and the plugin must treat it as a display state rather than a dead carrier.
+            if (state.panelUncodedLeft > 0) {
+              // What a bridge installed BEFORE issue #37 answers: the same refusal, with no code.
+              // Measured on this machine — the installed copy has no `panel-not-displayed` in it —
+              // so classifying by the code alone failed exactly the users who never reinstalled.
+              state.panelUncodedLeft -= 1
+              return {
+                ok: false,
+                error: 'a panel was placed in this conversation\'s sidebar, but its page can only '
+                  + 'attach while the conversation is the one displayed — show it and the page appears',
+              }
+            }
+            if (state.panelNotDisplayedLeft > 0) {
+              // The shape a just-switched conversation produces: the shell has been asked to show
+              // it, the render has not happened yet, so this refusal is true and already stale.
+              state.panelNotDisplayedLeft -= 1
+              return {
+                ok: false,
+                code: 'panel-not-displayed',
+                error: 'a panel was placed in this conversation\'s sidebar, but its page can only '
+                  + 'attach while the conversation is the one displayed — show it and the page appears',
+              }
+            }
             if (state.panelNotDisplayed === true) {
               return {
                 ok: false,
@@ -364,6 +386,55 @@ test('a panel this shell can never drive still falls back', async () => {
     const view = host.createView('session-a')
     await assert.rejects(view.sendCommand('Page.navigate', { url: 'https://example.com/' }))
     assert.deepEqual(losses, ['panel-unusable'], 'an undrivable panel does fall back')
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('a display refusal is retried while the shell renders the conversation it was asked to show', async () => {
+  // The client half asks the shell to display the conversation a page was requested for
+  // (`openSession`), and React renders that one pass later. Failing the tool call on the first
+  // refusal reported a problem the plugin had already fixed, and left the page — which IS there —
+  // reachable only by a second call. The retry is what makes one call enough.
+  const bridge = await startFakeBridge({ tabs: 1, dead: [], panelNotDisplayedLeft: 2 })
+  withEndpoint(bridge.port)
+  let host
+  const losses = []
+  try {
+    host = await DesktopBridgeViewHost.discover()
+    assert.ok(host !== undefined)
+    host.onLost(reason => losses.push(reason))
+    const view = host.createView('session-a')
+    const answer = await view.sendCommand('Page.navigate', { url: 'https://example.com/' })
+    assert.equal(answer.echo, 'Page.navigate', 'the command reached the page that had just appeared')
+    const attempts = bridge.requests.filter(request => request.op === 'ensureSidebar').length
+    assert.equal(attempts, 3, 'two refusals were retried; the third landed — no more, no fewer')
+    assert.deepEqual(losses, [], 'a transient display state still never reports the carrier as lost')
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('a bridge from before the display-state code is recognised by its wording', async () => {
+  // The installed bridge on a machine that never reinstalled it answers the SAME refusal without a
+  // code. Reading only the code made that refusal a hard failure — the exact opposite of the
+  // behaviour the code was added for — so the wording is matched too.
+  const bridge = await startFakeBridge({ tabs: 1, dead: [], panelUncodedLeft: 1 })
+  withEndpoint(bridge.port)
+  let host
+  const losses = []
+  try {
+    host = await DesktopBridgeViewHost.discover()
+    assert.ok(host !== undefined)
+    host.onLost(reason => losses.push(reason))
+    const view = host.createView('session-a')
+    const answer = await view.sendCommand('Page.navigate', { url: 'https://example.com/' })
+    assert.equal(answer.echo, 'Page.navigate', 'the uncoded refusal was retried, not fatal')
+    const attempts = bridge.requests.filter(request => request.op === 'ensureSidebar').length
+    assert.equal(attempts, 2, 'exactly one retry was needed')
+    assert.deepEqual(losses, [])
   } finally {
     host?.dispose()
     await bridge.close()

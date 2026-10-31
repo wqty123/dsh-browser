@@ -792,6 +792,8 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
    */
   function installPanelService(ctx) {
     let sidebarRight = null
+    /** The shell's own navigation service: `openSession` is how it is asked to DISPLAY a conversation. */
+    let uiWorkspace = null
     // `inject` is how a client plugin waits for a service to appear. A host that does not offer it
     // — an older composition, or a harness that mounted this bundle for its settings panel alone —
     // must still get the panel, so the wait is skipped and the published API names the missing
@@ -804,7 +806,140 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
           if (sidebarRight === scope.sidebarRight) sidebarRight = null
         }, "dsh-builtin-browser: conversation panel binding")
       })
+      // A separate inject, deliberately: waiting for both services in one call would take the
+      // panel down on a host that has the sidebar but not the workspace service (an older
+      // composition), and the panel is the part that must keep working.
+      ctx.inject(["uiWorkspace"], (scope) => {
+        uiWorkspace = scope.uiWorkspace
+        scope.effect(() => () => {
+          if (uiWorkspace === scope.uiWorkspace) uiWorkspace = null
+        }, "dsh-builtin-browser: workspace binding")
+      })
     }
+    /**
+     * Ask the shell to DISPLAY the conversation a page was requested for.
+     *
+     * The shell renders the sidebar of the conversation it shows and no other, so a request from a
+     * background conversation can place a tab but never grow a webview. The old answer was "show
+     * that conversation and the page appears" — true, and a dependency on the human's timing.
+     * `openSession` is the shell's own navigation for exactly this: the same call its own session
+     * list makes, aimed at a session id, with no input event and no DOM touched.
+     *
+     * Only called when this conversation's panel DOM is absent, so it never fires for the
+     * conversation the human is already reading, and never as a side effect of a read.
+     *
+     * @param sessionId - the conversation the page belongs to.
+     * @param state - the panel read taken just before; `panel: true` means nothing to claim.
+     * @returns whether the shell was asked to switch.
+     */
+    /**
+     * The conversation the shell is displaying, as the shell itself reports it.
+     *
+     * `undefined`/`null` means "the shell would not say" — an older shell, or one whose surface was
+     * never minted. Both callers treat that as "not this conversation", which is the fail-safe
+     * direction: no navigation, no expand, nothing that could move a view it cannot identify.
+     * @returns the on-screen session id, or null.
+     */
+    function onScreenSession() {
+      try {
+        const screen = sidebarRight === null || typeof sidebarRight.screen !== "function" ? undefined : sidebarRight.screen()
+        return screen !== undefined && screen !== null && typeof screen.sessionId === "string" ? screen.sessionId : null
+      } catch (error) {
+        return null
+      }
+    }
+
+    function claimConversation(sessionId, state) {
+      if (state.panel === true) return false
+      if (uiWorkspace === null || typeof uiWorkspace.openSession !== "function") return false
+      // Already displayed? Then the shell needs no navigation: the panel simply has not been opened
+      // yet, and `revealPlacedPanel` opens it. Re-opening the conversation a human is reading would
+      // be a no-op at best and a view reset at worst.
+      if (onScreenSession() === sessionId) return false
+      try {
+        uiWorkspace.openSession(sessionId)
+        return true
+      } catch (error) {
+        return false
+      }
+    }
+
+    /**
+     * Make a page that has been PLACED actually appear: expand the column, focus its tab.
+     *
+     * A placed tab is not a shown page. The shell renders the body of the ACTIVE tab, and only
+     * while the column is expanded. A collapsed column keeps the strip — so the read side still
+     * reports `panel: true` — while no `<webview>` is ever created, and every guest read comes
+     * back empty. That is the state that used to sit here for 20 s and then get reported as an
+     * unusable panel: measured on the running shell as `panel: true`, `guestId: null` in the
+     * renderer and `sidebar: []` from the bridge, with no carrier-side step that could have
+     * fixed it, because nobody had ever asked the column to open.
+     *
+     * Both calls are layout commands on a conversation's own surface store — no input event, no
+     * key dispatch, no element click. Two guards keep them from touching a conversation the
+     * human is not reading:
+     *   - only when `screen()` names THIS conversation. `screen()` is the shell's own answer to
+     *     "which conversation is displayed", and `toggleExpanded` acts on exactly that one, so
+     *     without this check an expand could fold the column a human is reading. A conversation
+     *     that is displayed but was never opened (a fresh window has no right sidebar at all until
+     *     something asks for it) passes this check — that case is why the DOM alone is not enough;
+     *   - `focus` is scoped by the shell itself (a tab outside the mounted surface is ignored),
+     *     so passing it a tab id from another conversation's list cannot move that view.
+     *
+     * @param sessionId - the conversation whose page was just placed.
+     * @param state - what the panel read before the placement; a live guest means nothing to do.
+     * @returns what was asked for, so a caller can tell "expanded" from "already visible", and
+     *   `displayed` so it can tell "the shell is showing this conversation" from "it is not".
+     */
+    function revealPlacedPanel(sessionId, state) {
+      if (state.guestId !== null || sidebarRight === null) return {}
+      const done = {}
+      // Which conversation is the shell DISPLAYING? `screen()` answers it, and it is the question
+      // that decides whether an expand call is safe: `toggleExpanded()` acts on the on-screen
+      // session, so calling it for any other conversation would fold the column a human is reading.
+      //
+      // It also separates two states that the DOM alone cannot:
+      //   - this conversation is displayed but its column has never been opened (a fresh window
+      //     starts with no right sidebar at all) — expand, and the panel mounts;
+      //   - another conversation is displayed — nothing here may touch the column; the claim step
+      //     is what moves the shell, and the caller retries one render later.
+      let onScreen = null
+      try {
+        onScreen = onScreenSession()
+      } catch (error) {
+        onScreen = null
+      }
+      if (onScreen !== sessionId) {
+        done.displayed = false
+        return done
+      }
+      done.displayed = true
+      try {
+        if (typeof sidebarRight.isExpanded === "function" && typeof sidebarRight.toggleExpanded === "function") {
+          // `isExpanded()` is false both for "folded" and for "never opened". Both want the same
+          // thing here, and `screen()` above has already established that the column being toggled
+          // is THIS conversation's, so expanding cannot touch anybody else's.
+          if (sidebarRight.isExpanded() === false) {
+            sidebarRight.toggleExpanded()
+            done.expanded = true
+          }
+        }
+      } catch (error) {
+        done.expandError = String(error?.message ?? error)
+      }
+      try {
+        const tabs = typeof sidebarRight.tabsIn === "function" ? sidebarRight.tabsIn(sessionId) : []
+        const page = Array.isArray(tabs) ? tabs.find(entry => entry !== null && typeof entry === "object" && entry.kind === "browser") : undefined
+        if (page !== undefined && typeof sidebarRight.focus === "function") {
+          sidebarRight.focus(page.id)
+          done.focused = String(page.id)
+        }
+      } catch (error) {
+        done.focusError = String(error?.message ?? error)
+      }
+      return done
+    }
+
     const api = {
       /** @returns what happened: an existing guest, a newly opened tab, or a named refusal. */
       openPanel(sessionId, url) {
@@ -819,6 +954,13 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         if (state.guestId !== null) {
           return { ok: true, created: false, panel: true, guestId: state.guestId, url: state.url }
         }
+        // No panel DOM for this conversation means the shell is not DISPLAYING it, and no tab placed
+        // here can ever grow a webview: the shell renders one sidebar, for the conversation it shows.
+        // Asking the human to click over was the old answer, and it made a working carrier depend on
+        // their timing. Ask the shell instead — `openSession` is its own navigation, one call on its
+        // own workspace service, no input events — and report `switched` so the caller can retry one
+        // render later instead of reporting a dead carrier.
+        const switched = claimConversation(wanted, state)
         // A mounted panel is NOT required to place a tab.
         //
         // `openTabIn` acts on the conversation's own surface store, and the sidebar-right service
@@ -859,6 +1001,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
             reason: "this conversation's sidebar is not mounted, so a panel cannot be opened in it",
             panel: state.panel,
             guestId: null,
+            ...switched ? { switched: true } : {},
             found: {
               wanted: wanted,
               strips: strips.length,
@@ -867,7 +1010,19 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
             },
           }
         }
-        return { ok: true, created: placed > before, panel: state.panel, guestId: null, tabs: placed }
+        // Placing is not showing: ask the shell to expand the column and focus that tab, so the
+        // body (and with it the `<webview>`) actually gets created. Without this the caller polls
+        // a panel that can never answer, which is exactly what "produced no page" used to mean.
+        const revealed = revealPlacedPanel(wanted, state)
+        return {
+          ok: true,
+          created: placed > before,
+          panel: state.panel,
+          guestId: null,
+          tabs: placed,
+          ...switched ? { switched: true } : {},
+          ...revealed,
+        }
       },
       /** Read-only: this conversation's current guest, if it has one. */
       panelGuest(sessionId) {

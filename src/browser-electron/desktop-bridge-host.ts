@@ -51,10 +51,24 @@ export function bridgeEndpointPath(): string {
 const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
 
 /**
- * A failure worth showing as-is: the carrier is alive and this is a condition the user can change.
+ * How many times a display-state refusal is retried, and how long each retry waits.
  *
- * Thrown instead of a plain Error so callers can distinguish "wait for the conversation to be shown"
- * from "the browser broke", which is exactly the distinction issue #37 says was missing.
+ * The retry exists because the same call now asks the shell to SHOW the conversation (the client
+ * half's `openSession` step). React renders that on the next pass, so the refusal the first call
+ * sees is true-but-stale. 4 x 400 ms is ~1.6 s: long enough for a render on a busy conversation,
+ * short enough that a shell which genuinely cannot render a panel still fails inside one tool call
+ * instead of stalling for the bridge's own 20 s budget.
+ */
+const PANEL_DISPLAY_RETRIES = 4
+const PANEL_DISPLAY_RETRY_MS = 400
+
+/**
+ * A failure worth showing as-is: the carrier is alive and this is a condition the shell can change.
+ *
+ * Thrown instead of a plain Error so callers can distinguish "the panel did not render" from "the
+ * browser broke", which is exactly the distinction issue #37 says was missing. The plugin no longer
+ * waits for a human to show the conversation — the client half asks the shell to (`openSession`) and
+ * this host retries while it renders — so reaching here means the shell did not render it at all.
  */
 export class BrowserPanelNotDisplayedError extends Error {
   readonly code = PANEL_NOT_DISPLAYED
@@ -64,8 +78,9 @@ export class BrowserPanelNotDisplayedError extends Error {
    */
   constructor(detail: string) {
     super(
-      'dsh-builtin-browser: this conversation\'s sidebar page is not attached because the conversation '
-      + 'is not the one displayed. Show it and the page appears; nothing was lost. '
+      'dsh-builtin-browser: this conversation\'s sidebar page did not attach — the shell was asked to '
+      + 'show this conversation and its panel still did not render. Nothing was lost, and the page '
+      + 'appears as soon as the panel mounts. '
       + `(${detail})`,
     )
     this.name = 'BrowserPanelNotDisplayedError'
@@ -354,19 +369,40 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     // conversation's own panel by id through the renderer, rather than by pressing the shell's
     // shortcut or clicking its card, both of which the shell delivers to whatever it displays.
     const owner = entry?.owner ?? this.owner
-    const answer = await this.connection.call({
+    const ask = (): Promise<Record<string, unknown>> => this.connection.call({
       op: 'ensureSidebar',
       owner,
       ...url !== undefined && url !== '' ? { url } : {},
     }, 30_000)
+    let answer = await ask()
+    // A refusal is retried when it describes a DISPLAY state rather than a dead carrier, because the
+    // plugin's client half asks the shell to show this conversation inside the very call that
+    // produced it. Two shapes come back from that first round:
+    //   panel-not-displayed  - the conversation exists but is not the one on screen;
+    //   "is not mounted"     - its surface store was not minted when the tab was placed.
+    // Both are gone one render later. Measured, this is the whole difference between "the sidebar
+    // works once I click over to that conversation" and "it works" — the page is real either way,
+    // and failing the call while the shell is already switching away from it just reported a
+    // problem the plugin had already fixed.
+    const displayRefusal = (value: Record<string, unknown>): boolean =>
+      value.ok !== true
+      && (String(value.code ?? '') === PANEL_NOT_DISPLAYED
+        || String(value.error ?? '').includes('not mounted')
+        // Bridges installed before issue #37 send the same refusal with NO code — the installed copy
+        // on this machine is one of them (`panel-not-displayed` appears nowhere in it). Reading only
+        // the code therefore turned a retryable display state into a hard failure for exactly the
+        // users who had the old bridge, which is the majority until it is reinstalled. The wording
+        // is stable across both versions; the code is not.
+        || String(value.error ?? '').includes('can only attach'))
+    for (let attempt = 0; attempt < PANEL_DISPLAY_RETRIES && displayRefusal(answer); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, PANEL_DISPLAY_RETRY_MS))
+      answer = await ask()
+    }
     if (answer.ok !== true) {
-      // A bridge that answers but cannot produce a page is as usable as one that has exited ONLY when
-      // the panel can never work here. "The conversation is not displayed" is the opposite case: the
-      // panel is fine, the shell simply is not rendering it right now, and it will the moment the
-      // user shows that conversation (issue #37).
-      //
-      // So the code decides, not the wording:
-      //   panel-not-displayed -> a transient display state; no loss, no retry, nothing swapped.
+      // Reachable only after the retries above have run out, and the code still decides — not the
+      // wording:
+      //   panel-not-displayed -> the shell was asked to show the conversation (client half's
+      //                          `openSession`) and did not render it in ~1.6 s: no loss, no swap.
       //   produced no page    -> this shell cannot drive a panel at all (an iframe shell, issue #30);
       //                          fall back, because otherwise every call fails forever.
       const code = String(answer.code ?? '')

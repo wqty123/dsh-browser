@@ -52,7 +52,7 @@ test('a panel that produces no page returns the surface to the self-hosted brows
   // switched to one that cannot work, and the failure repeated on every call until DSH restarted.
   // `onLost` is the mechanism that already returns the surface; it simply was not reachable from
   // this failure.
-  const call = host.slice(host.indexOf('const answer = await this.connection.call({\n      op: \'ensureSidebar\''))
+  const call = host.slice(host.indexOf("op: 'ensureSidebar'"))
   const block = call.slice(0, call.indexOf('this.views.set'))
   assert.match(block, /detail\.includes\('produced no page'\)/,
     'the unproducible-page failure is recognised')
@@ -66,13 +66,20 @@ test('a panel that is merely not displayed is not treated as loss', () => {
   // Issue #37. The two failures used to be one string, and the plugin read both as a dead carrier:
   // switching to a self-hosted window whose page was blank, while the bridge's own message said the
   // page was fine and would attach as soon as the conversation was shown.
-  const call = host.slice(host.indexOf('const answer = await this.connection.call({\n      op: \'ensureSidebar\''))
+  const call = host.slice(host.indexOf("op: 'ensureSidebar'"))
   const block = call.slice(0, call.indexOf('this.views.set'))
   // The code decides, and it is checked BEFORE the text heuristic.
   const codeCheck = block.indexOf('code === PANEL_NOT_DISPLAYED')
   const textCheck = block.indexOf("detail.includes('produced no page')")
   assert.ok(codeCheck !== -1, 'the display state is recognised by its code')
   assert.ok(textCheck === -1 || codeCheck < textCheck, 'and it is decided before the text heuristic')
+  // A display refusal is retried while the shell renders the conversation it was asked to show, and
+  // the retry is bounded: an unbounded one would turn "this shell cannot render a panel" into a hang.
+  assert.match(block, /for \(let attempt = 0; attempt < PANEL_DISPLAY_RETRIES && displayRefusal\(answer\); attempt \+= 1\)/,
+    'the retry is bounded by a named constant, not a wall clock')
+  assert.match(host, /const PANEL_DISPLAY_RETRIES = \d+/, 'and that constant exists')
+  assert.match(host, /PANEL_DISPLAY_RETRY_MS \*\s*PANEL_DISPLAY_RETRIES|PANEL_DISPLAY_RETRIES[\s\S]{0,200}PANEL_DISPLAY_RETRY_MS/,
+    'with a wait, so a refusal is not re-sent in a tight loop')
   // It is thrown as its own error class, which the retry classifier refuses.
   assert.match(block, /throw new BrowserPanelNotDisplayedError\(detail\)/,
     'and surfaced as a state the user can change, not as a failure')

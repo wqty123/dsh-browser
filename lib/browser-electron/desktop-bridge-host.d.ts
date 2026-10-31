@@ -28,10 +28,12 @@ import type { CarrierPage, CarrierLossReason } from '../browser/types.js';
 /** Absolute path of the endpoint file the shell writes. */
 export declare function bridgeEndpointPath(): string;
 /**
- * A failure worth showing as-is: the carrier is alive and this is a condition the user can change.
+ * A failure worth showing as-is: the carrier is alive and this is a condition the shell can change.
  *
- * Thrown instead of a plain Error so callers can distinguish "wait for the conversation to be shown"
- * from "the browser broke", which is exactly the distinction issue #37 says was missing.
+ * Thrown instead of a plain Error so callers can distinguish "the panel did not render" from "the
+ * browser broke", which is exactly the distinction issue #37 says was missing. The plugin no longer
+ * waits for a human to show the conversation — the client half asks the shell to (`openSession`) and
+ * this host retries while it renders — so reaching here means the shell did not render it at all.
  */
 export declare class BrowserPanelNotDisplayedError extends Error {
     readonly code = "panel-not-displayed";
