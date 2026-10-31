@@ -22,8 +22,6 @@ import type {
   BrowserCheckRequest,
   BrowserClearRequest,
   BrowserClickRequest,
-  BrowserClickSequenceRequest,
-  BrowserClickSequenceResult,
   BrowserContentRequest,
   BrowserContentResult,
   BrowserElementTarget,
@@ -2040,75 +2038,6 @@ export class ElectronBrowserProvider implements BrowserProvider {
       throw new BrowserError(`browser: click failed: ${String(error)}`, 'BROWSER_CLICK_FAILED', { cause: error })
     }
     this.record(s, 'click', 'target' in request ? { target: request.target } : { x, y }, true)
-  }
-
-  /**
-   * Click many points in order, once.
-   *
-   * The same wire sequence as {@link click}, looped — only the round-trip count changes. Presenting
-   * happens ONCE: the display-surface barrier is per view, not per press, and paying it for every
-   * point is what made an 86-cell board expensive.
-   *
-   * Stops at the first point that fails and reports where: a run that pressed through a page which
-   * had navigated or lost its surface would fill the wrong cells and still answer success.
-   * @param session - the session to click in.
-   * @param request - the points and the interval between them.
-   * @param signal - cancellation between points.
-   * @returns how many points landed, and where it stopped if it did not finish.
-   */
-  async clickSequence(
-    session: BrowserSessionId,
-    request: BrowserClickSequenceRequest,
-    signal?: AbortSignal,
-  ): Promise<BrowserClickSequenceResult> {
-    const s = this.session(session)
-    const points = Array.isArray(request.points) ? request.points : []
-    if (points.length === 0) return { clicked: 0 }
-    if (this.settingsSource !== undefined && this.settingsSource().vision.strategy === 'nonVisual') {
-      throw new BrowserError(
-        'browser: the configured non-visual strategy refuses coordinate clicks — pass a semantic target instead.',
-        'BROWSER_NON_VISUAL_COORDINATES',
-      )
-    }
-    // One barrier for the whole run: cheap, and it is the view that needs a surface, not each press.
-    const handle = await this.present(s, signal)
-    const timeoutMs = 30_000
-    // 40 ms is above one frame at 30 fps, which is what keeps the page from reading two presses as a
-    // double click. Faster runs were measured dropping presses outright.
-    const gap = typeof request.intervalMs === 'number' && request.intervalMs >= 0 ? request.intervalMs : 40
-    const send = (params: Record<string, unknown>, label: string): Promise<unknown> =>
-      withTimeout(
-        handle.sendCommand('Input.dispatchMouseEvent', params),
-        timeoutMs,
-        signal,
-        `browser: click sequence ${label} timed out after ${timeoutMs}ms`,
-      )
-    let clicked = 0
-    for (const [index, point] of points.entries()) {
-      signal?.throwIfAborted()
-      const x = Number(point?.x)
-      const y = Number(point?.y)
-      if (!Number.isFinite(x) || !Number.isFinite(y)) {
-        return { clicked, failedAt: index, error: `point ${index} has no finite x/y` }
-      }
-      try {
-        // The move is load-bearing: Chromium routes a synthesized press to the CURRENT hover target,
-        // and a view that has never received a mouse event has none — the first press would go nowhere
-        // while CDP still answered success.
-        await send({ type: 'mouseMoved', x, y, buttons: 0 } satisfies CdpMouseParams, 'move')
-        await send({ type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 } satisfies CdpMouseParams, 'press')
-        await send({ type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 } satisfies CdpMouseParams, 'release')
-        clicked += 1
-      } catch (error) {
-        // Best-effort release so a failed press cannot leave the button stuck down.
-        void handle
-          .sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 })
-          .catch(() => {})
-        return { clicked, failedAt: index, error: String(error instanceof Error ? error.message : error) }
-      }
-      if (index < points.length - 1 && gap > 0) await new Promise(resolve => setTimeout(resolve, gap))
-    }
-    return { clicked }
   }
 
   /**

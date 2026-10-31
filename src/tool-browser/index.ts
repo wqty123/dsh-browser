@@ -864,55 +864,6 @@ export function apply(ctx: Context, config: Config = {}): void {
   }))
 
   registerSafely(defineTool({
-    name: 'dsh_browser_click_sequence',
-    description: 'Click many points in order, in one call. Use this instead of repeated dsh_browser_click when a page needs a run of coordinate clicks — a canvas board, a map, a drawing surface. Each point is clicked with the same real input sequence the single click uses; between points the call waits intervalMs (default 40 ms), which is what stops a page from reading two presses as a double click. Stops at the first point that fails and says where, so a run that half-landed is reported rather than looking complete.',
-    parameters: {
-      points: {
-        type: 'array',
-        required: true,
-        description: 'Points to click, in order, in viewport CSS pixels — the same space dsh_browser_screenshot reports.',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            x: { type: 'number', required: true, description: 'Viewport x in CSS px.' },
-            y: { type: 'number', required: true, description: 'Viewport y in CSS px.' },
-          },
-        },
-      },
-      intervalMs: { type: 'number', description: 'Milliseconds between points (default 40).' },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          clicked: { type: 'number', required: true, description: 'How many points landed.' },
-          failedAt: { type: 'number', description: 'Index of the point that failed, when one did.' },
-          error: { type: 'string', description: 'Why that point failed.' },
-        },
-      },
-      render: (_args, value) => [{
-        type: 'text',
-        text: value.failedAt === undefined
-          ? `Clicked ${String(value.clicked)} point(s).`
-          : `Clicked ${String(value.clicked)} point(s), then stopped at index ${String(value.failedAt)}: ${String(value.error ?? 'unknown')}`,
-      }],
-    },
-    timeoutMs,
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      assertAllowed(state, 'dsh_browser_click_sequence', taskKey(exec))
-      const browser = ctx.get('browser')
-      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
-      const points = Array.isArray(args.points) ? args.points : []
-      const intervalMs = typeof args.intervalMs === 'number' ? args.intervalMs : undefined
-      return browser.clickSequence(session, { points, ...intervalMs === undefined ? {} : { intervalMs } })
-    },
-  }))
-
-  registerSafely(defineTool({
     name: 'dsh_browser_type',
     description: 'Type text into the focused element of the shared browser, or into a located element (pass target {by: css|text|xpath, value, index?} to focus it first). Text is inserted at the focus via CDP Input.insertText. For setting whole field values (and React-controlled inputs) prefer dsh_browser_set_value; use dsh_browser_key for Enter/Tab/arrows.',
     parameters: {

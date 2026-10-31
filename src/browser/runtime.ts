@@ -15,8 +15,6 @@ import type {
   BrowserCheckRequest,
   BrowserClearRequest,
   BrowserClickRequest,
-  BrowserClickSequenceRequest,
-  BrowserClickSequenceResult,
   BrowserContentRequest,
   BrowserContentResult,
   BrowserDownloadRequest,
@@ -65,8 +63,6 @@ export type {
   BrowserCheckRequest,
   BrowserClearRequest,
   BrowserClickRequest,
-  BrowserClickSequenceRequest,
-  BrowserClickSequenceResult,
   BrowserContentFormat,
   BrowserElementTarget,
   BrowserGetValueRequest,
@@ -277,10 +273,6 @@ export class BrowserRuntime extends Service {
     return this.resolveProvider().click(session, request, signal)
   }
 
-  /** Click several points in order through the selected provider. */
-  async clickSequence(session: BrowserSessionId, request: BrowserClickSequenceRequest, signal?: AbortSignal): Promise<BrowserClickSequenceResult> {
-    return this.resolveProvider().clickSequence(session, request, signal)
-  }
   /** Type into the focused element (or a located one) through the selected provider. */
   async type(session: BrowserSessionId, request: BrowserTypeRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void> {
     return this.resolveProvider().type(session, request, signal)
