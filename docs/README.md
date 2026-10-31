@@ -6,7 +6,7 @@
 | --- | --- |
 | 了解插件为什么存在、与无头方案的区别 | [为什么做共享真实浏览器](why-browser.md) |
 | 安装、配置、日常使用与常见问题 | [用户指南](user-guide.md) |
-| 全部 34 个工具的参数、输出与示例 | [工具参考](tool-reference.md) |
+| 全部 35 个工具的参数、输出与示例 | [工具参考](tool-reference.md) |
 | 了解 seam / provider / 工具三层与自托管实现 | [架构说明](architecture.md) |
 | 知道哪些事**做不到**、以及为什么 | [已知限制](limitations.md) |
 | 构建、测试、复验宿主兼容性 | [开发](development.md) |

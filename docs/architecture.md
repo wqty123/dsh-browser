@@ -37,7 +37,7 @@ agent (dsh_browser_* 工具)
 
 ### 工具层(`src/tool-browser/`)
 
-34 个 `dsh_browser_*` 工具,按**调用方任务**(`exec.agent.id`)维护独立浏览器会话:
+35 个 `dsh_browser_*` 工具,按**调用方任务**(`exec.agent.id`)维护独立浏览器会话:
 
 - 会话缓存 `sessionsByTask`:同一任务复用同一会话,并发首开去重;
 - `dsh_browser_reset_session` 关闭本任务会话并遗忘映射(即使 close 抛错也清除,下次调用重建);

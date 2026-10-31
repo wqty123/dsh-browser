@@ -1,6 +1,6 @@
 # 工具参考
 
-全部 34 个 `dsh_browser_*` 工具。守卫列:✅ 表示该动作受 `dsh_browser_restrict` 白名单约束;**「– 豁免」表示无论白名单怎么写都不拦截**(豁免集合为 `READ_ONLY_TOOLS`,`src/tool-browser/index.ts` 导出:**只观察的工具** —— `snapshot`/`a11y`/`content`/`scrape`/`screenshot`/`get_value`/`wait`/`challenge`/`list_tabs`/`session`/`history`/`visited` —— 加上 **解除限制 / 从坏状态恢复的工具** `restrict`/`reset_session`/`reset`;`restrict` 在其中,否则限制到空的任务再也解不开);**「–」表示该工具只观察、不做动作**,故没有可拦的东西。两者之外的工具都受白名单约束 —— 例如 `dsh_browser_close_tab`、`dsh_browser_auth` 都不属于豁免集合(`dsh_browser_auth` 的 `restore` 会向任意域写 cookie,是动作,不是观察)。
+全部 35 个 `dsh_browser_*` 工具。守卫列:✅ 表示该动作受 `dsh_browser_restrict` 白名单约束;**「– 豁免」表示无论白名单怎么写都不拦截**(豁免集合为 `READ_ONLY_TOOLS`,`src/tool-browser/index.ts` 导出:**只观察的工具** —— `snapshot`/`a11y`/`content`/`scrape`/`screenshot`/`get_value`/`wait`/`challenge`/`list_tabs`/`session`/`history`/`visited` —— 加上 **解除限制 / 从坏状态恢复的工具** `restrict`/`reset_session`/`reset`;`restrict` 在其中,否则限制到空的任务再也解不开);**「–」表示该工具只观察、不做动作**,故没有可拦的东西。两者之外的工具都受白名单约束 —— 例如 `dsh_browser_close_tab`、`dsh_browser_auth` 都不属于豁免集合(`dsh_browser_auth` 的 `restore` 会向任意域写 cookie,是动作,不是观察)。
 
 ## 页面与导航
 
@@ -19,6 +19,7 @@
 | --- | --- | --- | --- | --- |
 | `dsh_browser_execute` | `script`(必填), `args?` | `{ ok, value? / exception? }` | ✅ | 在页面执行 JS;脚本以 `return` 开头或作为表达式;`args` 以 `arguments[0..n]` 传入。**返回值上限 50 000 字符**,超出时结果里写明"截断于 50 000 / 实际 N 字符"(要完整内容请让表达式返回更小的值)。受设置「Agent 能做什么 → 允许在页面里执行脚本」门控,关闭后一律被拒(`BROWSER_EXECUTE_DISABLED`),且没有任何工具能把它打开 |
 | `dsh_browser_click` | `target?`(css/text/xpath), `x?`, `y?`(target 与坐标二选一) | `{ clicked }` | ✅ | 语义目标点击:按 `target` 定位、滚动到视口中央再点中心;或视口坐标点击(配合截图做视觉定位) |
+| `dsh_browser_click_sequence` | `points`(必填,`{x,y}[]`), `intervalMs?`(默认 40) | `{ clicked, failedAt?, error? }` | ✅ | 一次调用打一串**视口坐标**点击:只 `present()` 一次,每点走 `mouseMoved`/`mousePressed`/`mouseReleased`;点间默认 40 ms(低于此值页面会把两次按下读成双击或丢弃)。**首点失败即停**并回报 `failedAt`。用于 canvas 页面——它们不采信脚本派发的 `MouseEvent`/`PointerEvent`/`element.click()`,只认 `isTrusted` 的真实输入(实测:sudoku.com 一盘 84 点一次打完) |
 | `dsh_browser_type` | `text`(必填), `target?` | `{ typed }` | ✅ | 输入文本;传 `target` 先聚焦该元素(CDP `Input.insertText`) |
 | `dsh_browser_key` | `key`(必填,枚举) | `{ pressed }` | ✅ | 按命名按键:Enter/Tab/Escape/Backspace/Delete/方向键/Home/End/PageUp/PageDown/Space |
 | `dsh_browser_scroll` | `deltaX?`, `deltaY?`, `selector?`, `toTop?`, `toBottom?` | `{ scrolled }` | ✅ | 滚动页面:像素增量 / 选择器定位 / 顶部底部 |
