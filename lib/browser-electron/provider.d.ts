@@ -472,6 +472,18 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     open(label?: string): Promise<BrowserSessionId>;
     /** Open a URL in the active tab (default) or a new tab. */
     openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void>;
+    /**
+     * Bind the carrier page that already shows this URL, if there is one.
+     *
+     * Compare the part of a URL that says WHICH page it is: scheme, host, path and query. A hash is a
+     * position inside a document, and a trailing slash is spelling, so neither makes a different page.
+     * @param s - the session to bind the page into.
+     * @param url - the URL being opened.
+     * @returns whether an existing page was taken over.
+     */
+    private adoptMatchingPage;
+    /** The parts of a URL that decide identity, or undefined when it cannot be parsed. */
+    private comparableUrl;
     /** List the session's tabs with their titles. */
     listTabs(session: BrowserSessionId): Promise<readonly BrowserTab[]>;
     /** Switch to a tab by id, making its view visible. */
