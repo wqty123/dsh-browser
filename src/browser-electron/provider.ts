@@ -611,7 +611,15 @@ const SNAPSHOT_LABEL_MAX = 120
 
 /** Named-key table for `key()`: CDP key/code names + Windows virtual key codes. */
 const KEY_SPECS: Readonly<Record<string, { readonly key: string; readonly code: string; readonly vk: number; readonly text?: string }>> = {
-  Enter: { key: 'Enter', code: 'Enter', vk: 13 },
+  // `text` is what makes a key produce CHARACTER INPUT rather than only a key event, and form
+  // submission depends on the character: pressing Enter in a text field submits the form because
+  // the browser processes a carriage return, not because a key went down. Without `text` the event
+  // still reaches the page, a `keydown` listener still fires, and nothing happens — reported as
+  // issue #36, where `requestSubmit()` worked and this did not.
+  //
+  // The same omission is why Space used to pass only its key event; that one was already fixed and
+  // is the reason the table has a `text` column at all.
+  Enter: { key: 'Enter', code: 'Enter', vk: 13, text: '\r' },
   Tab: { key: 'Tab', code: 'Tab', vk: 9 },
   Escape: { key: 'Escape', code: 'Escape', vk: 27 },
   Backspace: { key: 'Backspace', code: 'Backspace', vk: 8 },

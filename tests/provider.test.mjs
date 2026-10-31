@@ -264,9 +264,13 @@ test('key Space carries CDP text so a focused input receives the character', asy
   assert.equal(host.events.keyDown, 1)
   assert.equal(host.events.keyUp, 1)
   assert.equal(host.events.keyDownParams.text, ' ', 'Space keyDown must carry text for input insertion')
-  // Enter has no printable text; the keyDown must not carry a stray text.
+  // Enter DOES carry text, for the same reason Space does: form submission depends on the
+  // character, not on the key event. Measured in issue #36 — `key: Enter` reported pressed: true and
+  // the page did not submit, while `requestSubmit()` on the same form worked at once. The assertion
+  // that used to sit here ("Enter has no printable text") encoded the bug as if it were the spec.
   await p.key(sid, { key: 'Enter' })
-  assert.equal(host.events.keyDownParams.text, undefined)
+  assert.equal(host.events.keyDownParams.text, '\r',
+    'Enter keyDown must carry a carriage return, or a form does not submit')
   await p.close(sid)
 })
 

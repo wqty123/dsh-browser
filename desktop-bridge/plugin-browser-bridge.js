@@ -586,10 +586,16 @@ async function handle(request) {  const op = String(request?.op ?? '')
   if (op === 'closeSidebarBrowser') {
     // Release the sidebar's browser pages by closing the tabs that host them.
     //
-    // This is the desktop equivalent of "close the browser window": the guests are
-    // destroyed, so that agent's session ends and its next use starts a fresh page —
-    // while cookies and history live in the partition and on disk, and therefore
-    // survive (requirements §3).
+    // This is the desktop equivalent of "close the browser window": the guests are destroyed, so
+    // that agent's session ends and its next use starts a fresh page. History survives — it is this
+    // plugin's own file on disk.
+    //
+    // Cookies do NOT survive on the shells measured so far, and this comment used to claim they did
+    // (reported as issue #36). The shell allocates the sidebar's partition as
+    // `dsh-sidebar-browser-<uuid>` with no `persist:` prefix, i.e. an in-memory session, so anything
+    // logged in inside the sidebar is logged out again at the next DSH start. That is the shell's
+    // choice, not something this bridge can change; a carrier whose cookies do persist is the
+    // installed Chrome/Edge one, which keeps its own profile.
     //
     // `titles` narrows the release to specific pages. It matters as soon as more
     // than one session is running: each one owns its own tab (requirements §4), and

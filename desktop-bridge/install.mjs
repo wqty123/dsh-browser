@@ -58,10 +58,16 @@
  *
  * USAGE
  *   node desktop-bridge/install.mjs [path-to-DeepSeek-Harness-install]
- * Default path: %LOCALAPPDATA%\Programs\DeepSeek Harness
+ * Default path: probed under %LOCALAPPDATA%\Programs (see findDefaultInstall)
  * Pass --revert to restore the pre-bridge state instead.
+ *
+ * Pass --restart to have THIS process close DSH, install, and start it again. That is the supported
+ * way to install while the shell is running: the archive cannot be moved while the shell holds it,
+ * and nothing started from outside survives the exit far enough to install afterwards (issue #36).
+ * --restart asks for confirmation on a console; add --yes for an unattended run.
  */
 import { copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 
 const DEFAULT_INSTALL = findDefaultInstall()
@@ -111,8 +117,121 @@ function withoutOurSnippet(text) {
   return text.slice(0, at) + text.slice(at + SNIPPET.length)
 }
 
+/**
+ * Every process whose image is the desktop shell.
+ *
+ * Matched by executable name because that is what the installed product uses, and because a
+ * process-id based approach would miss the children Electron spawns for the renderer and GPU — any
+ * of which holds the archive. The install root's own path is checked where a command line is
+ * readable, so a second installation of the same product is not closed by mistake.
+ * @param root - the install directory whose processes count as this shell.
+ * @returns the matching process ids and names.
+ */
+function shellProcesses(root) {
+  const text = runCapture('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    'Get-CimInstance Win32_Process -Filter "Name=\'DeepSeek Harness.exe\'" | '
+    + 'Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress',
+  ])
+  if (text === undefined || text.trim() === '') return []
+  let parsed
+  try { parsed = JSON.parse(text) } catch { return [] }
+  const rows = Array.isArray(parsed) ? parsed : [parsed]
+  return rows
+    .filter(row => typeof row?.ProcessId === 'number')
+    .filter(row => typeof row.ExecutablePath !== 'string'
+      || row.ExecutablePath.toLowerCase().startsWith(root.toLowerCase()))
+    .map(row => row.ProcessId)
+}
+
+/**
+ * Run a command and return its stdout, or undefined when it could not run.
+ * @param command - the executable.
+ * @param argv - its arguments.
+ * @returns stdout text, or undefined.
+ */
+function runCapture(command, argv) {
+  try {
+    return execFileSync(command, argv, { encoding: 'utf8', stdio: 'pipe', timeout: 30_000 })
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Close the desktop shell and wait until nothing holds the archive.
+ *
+ * Asks first and forces only if the polite request is ignored: a forced kill can lose work in
+ * progress, and the user was told the shell would be closed, not that it would be killed. The wait
+ * is bounded — a process that refuses to die must not hang the installer forever.
+ * @param root - the install directory whose processes to close.
+ * @param graceMs - how long to wait after the polite request before forcing.
+ * @returns whether nothing is left running.
+ */
+async function stopShell(root, graceMs) {
+  const before = shellProcesses(root)
+  if (before.length === 0) return true
+  console.log(`  closing DSH Desktop (${before.length} process(es))…`)
+  // No /F: this is a normal window close, so the shell can flush and prompt.
+  runCapture('taskkill.exe', ['/PID', ...before.map(String), '/T'])
+  const deadline = Date.now() + graceMs
+  while (Date.now() < deadline) {
+    if (shellProcesses(root).length === 0) return true
+    await new Promise(resolve => setTimeout(resolve, 250))
+  }
+  const left = shellProcesses(root)
+  if (left.length > 0) {
+    console.log(`  ${left.length} process(es) still running after ${String(graceMs)} ms; forcing`)
+    runCapture('taskkill.exe', ['/IM', 'DeepSeek Harness.exe', '/F', '/T'])
+    const forcedBy = Date.now() + 15_000
+    while (Date.now() < forcedBy) {
+      if (shellProcesses(root).length === 0) return true
+      await new Promise(resolve => setTimeout(resolve, 250))
+    }
+  }
+  return shellProcesses(root).length === 0
+}
+
+/**
+ * Start the desktop shell again, detached from this process.
+ *
+ * Detached on purpose: the installer exits immediately afterwards, and a child that dies with its
+ * parent would take the shell with it — the same trap the wait-for-exit daemons fell into.
+ * @param root - the install directory.
+ * @returns whether the executable was spawned.
+ */
+function startShell(root) {
+  const exe = join(root, 'DeepSeek Harness.exe')
+  if (!existsSync(exe)) {
+    console.error(`could not start DSH Desktop: ${exe} does not exist; start it yourself.`)
+    return false
+  }
+  try {
+    const child = spawn(exe, [], { detached: true, stdio: 'ignore', cwd: root })
+    child.unref()
+    console.log(`  started ${exe}`)
+    return true
+  } catch (error) {
+    console.error(`could not start DSH Desktop: ${String(error)}; start it yourself.`)
+    return false
+  }
+}
+
 const args = process.argv.slice(2)
 const revert = args.includes('--revert')
+/**
+ * Close DSH, install, then start it again — all in THIS process.
+ *
+ * Reported as issue #36: moving `app.asar` aside fails with EBUSY while the shell is running, and
+ * every "wait for the user to close it" arrangement loses the waiter. Two arrangements were measured
+ * on Windows and both died at the moment the shell exited: a hidden PowerShell started through WMI
+ * vanished with the process tree, and a scheduled task reported `LastTaskResult = 0xC000013A`
+ * (STATUS_CONTROL_C_EXIT). The lesson is that nothing may straddle the exit — so this process closes
+ * the shell itself, does the work, and starts it again.
+ */
+const restart = args.includes('--restart')
+/** Skip the interactive confirmation; required for an unattended run. */
+const assumeYes = args.includes('--yes') || args.includes('-y')
 const installRoot = args.find(arg => !arg.startsWith('--')) ?? DEFAULT_INSTALL
 
 const resourcesDir = join(installRoot, 'resources')
@@ -316,6 +435,37 @@ function installCliCompatibility() {
   console.log(`  cli runtime resolution: ${patchHostCli()}`)
 }
 
+// `--restart` closes the shell BEFORE anything else, because the archive cannot be moved while the
+// shell holds it (EBUSY), and because there is no safe way to wait across the exit from outside —
+// both arrangements measured in issue #36 died at that moment. Doing it here keeps the whole
+// sequence inside one front-facing process.
+let shellStopped = false
+if (restart && !revert) {
+  if (!assumeYes) {
+    console.log('')
+    console.log('--restart will CLOSE DSH Desktop, install the bridge, and start it again.')
+    console.log('Any unsaved work in a conversation is lost. Re-run with --yes to skip this notice.')
+    console.log('')
+    try {
+      const answer = readFileSync(0, 'utf8').trim().toLowerCase()
+      if (answer !== '' && answer !== 'y' && answer !== 'yes') {
+        console.error('cancelled; nothing was changed.')
+        process.exit(1)
+      }
+    } catch {
+      // No stdin (a service, a detached shell): refuse rather than close a window nobody agreed to.
+      console.error('--restart needs confirmation; pass --yes when there is no console to ask.')
+      process.exit(1)
+    }
+  }
+  shellStopped = await stopShell(installRoot, 20_000)
+  if (!shellStopped) {
+    console.error('DSH Desktop did not exit, so the archive cannot be replaced.')
+    console.error('Close it yourself and run this again without --restart.')
+    process.exit(1)
+  }
+}
+
 // The archive wins whenever it exists, so ITS presence — not the absence of the
 // directory — decides the layout. After a desktop update the archive is back
 // (a new build) while an older extraction is still lying around, and keying off
@@ -480,4 +630,12 @@ console.log(`installed bridge into ${appDir}`)
 console.log(`  module: ${bridgeTarget}`)
 console.log(`  patch:  ${mainPath} (+${SNIPPET.split('\n').length} lines)`)
 installCliCompatibility()
-console.log('restart DSH Desktop to activate it.')
+if (restart && shellStopped) {
+  // Started detached and unref'd: this process exits on the next line, and a child that died with
+  // its parent would leave the user with nothing running — the trap the wait-for-exit daemons hit.
+  if (startShell(installRoot)) {
+    console.log('DSH Desktop was restarted; the bridge is active.')
+  }
+} else {
+  console.log('restart DSH Desktop to activate it.')
+}
