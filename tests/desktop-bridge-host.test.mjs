@@ -11,7 +11,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
+import { BrowserPanelNotDisplayedError, DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
 
 /** A fake shell bridge: records requests, answers with scripted state. */
 async function startFakeBridge(state = { tabs: 1, dead: [] }) {
@@ -53,6 +53,21 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
             // The real op answers with the page THIS conversation's panel holds, and that page
             // changes when the human closes its tab. Returning a fixed id made the recovery path
             // untestable: the host would be handed the id it had just proven dead.
+            //
+            // `panelNotDisplayed` reproduces issue #37: the panel exists, the shell is showing a
+            // different conversation, so no webview has attached. The real bridge reports that with
+            // a code, and the plugin must treat it as a display state rather than a dead carrier.
+            if (state.panelNotDisplayed === true) {
+              return {
+                ok: false,
+                code: 'panel-not-displayed',
+                error: 'a panel was placed in this conversation\'s sidebar, but its page can only '
+                  + 'attach while the conversation is the one displayed — show it and the page appears',
+              }
+            }
+            if (state.panelUnusable === true) {
+              return { ok: false, error: 'the sidebar produced no page for this conversation' }
+            }
             let id = 1
             while (state.dead.includes(id) && id < 50) id += 1
             return { ok: true, created: state.tabs === 0, id, prepared: 'OPENED_AND_FOCUSED', via: 'panel' }
@@ -295,6 +310,60 @@ test('carrier page listing and closing carry the requesting conversation identit
     assert.equal(close.id, 2)
     bridge.state.closeCount = 0
     await assert.rejects(host.closePage('2', 'session-b'), /did not close|could not close/)
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+// Issue #37: a sidebar panel that is merely not on screen is a DISPLAY STATE, not a lost carrier.
+//
+// The report: switch to another conversation, call a browser tool, and the plugin reported the
+// carrier lost, swapped to a self-hosted window, and the page that had been open was blank in it.
+// The bridge's own message said the opposite — the page attaches as soon as the conversation is
+// shown — but the plugin only matched on text, and that text shared a pattern with real loss.
+test('a panel that is merely not displayed does not report the carrier as lost', async () => {
+  const bridge = await startFakeBridge({ tabs: 1, dead: [], panelNotDisplayed: true })
+  withEndpoint(bridge.port)
+  let host
+  const losses = []
+  try {
+    host = await DesktopBridgeViewHost.discover()
+    assert.ok(host !== undefined, 'discovery succeeds: the shell is alive and answering')
+    host.onLost(reason => losses.push(reason))
+    const view = host.createView('session-a')
+    // A command is how a tool reaches ensureSidebar, so this is the reported path.
+    await assert.rejects(
+      view.sendCommand('Page.navigate', { url: 'https://example.com/' }),
+      error => {
+        assert.ok(error instanceof BrowserPanelNotDisplayedError,
+          `expected a display-state error, got ${error?.name}: ${error?.message}`)
+        assert.match(error.message, /nothing was lost/i,
+          'and it must say so, because the old message read like a failure')
+        return true
+      },
+    )
+    assert.deepEqual(losses, [], 'a display state must never trigger the carrier-lost listener')
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('a panel this shell can never drive still falls back', async () => {
+  // The other half of the distinction: an iframe shell (issue #30) really is unusable, and refusing
+  // to fall back there would make every call fail forever.
+  const bridge = await startFakeBridge({ tabs: 1, dead: [], panelUnusable: true })
+  withEndpoint(bridge.port)
+  let host
+  const losses = []
+  try {
+    host = await DesktopBridgeViewHost.discover()
+    assert.ok(host !== undefined)
+    host.onLost(reason => losses.push(reason))
+    const view = host.createView('session-a')
+    await assert.rejects(view.sendCommand('Page.navigate', { url: 'https://example.com/' }))
+    assert.deepEqual(losses, ['panel-unusable'], 'an undrivable panel does fall back')
   } finally {
     host?.dispose()
     await bridge.close()

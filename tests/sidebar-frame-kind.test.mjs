@@ -54,10 +54,31 @@ test('a panel that produces no page returns the surface to the self-hosted brows
   // this failure.
   const call = host.slice(host.indexOf('const answer = await this.connection.call({\n      op: \'ensureSidebar\''))
   const block = call.slice(0, call.indexOf('this.views.set'))
-  assert.match(block, /String\(answer\.error\)\.includes\('produced no page'\)/,
+  assert.match(block, /detail\.includes\('produced no page'\)/,
     'the unproducible-page failure is recognised')
   // `panel-unusable`, not a bare reportLost(): the shell is alive and answered this very request, so
   // the fallback must not tell the user their desktop shell exited. That is what it did before this
   // reason existed, and a reporter read it as their shell having crashed.
   assert.match(block, /this\.reportLost\('panel-unusable'\)/, 'and treated as an unusable PANEL, not an exited shell')
+})
+
+test('a panel that is merely not displayed is not treated as loss', () => {
+  // Issue #37. The two failures used to be one string, and the plugin read both as a dead carrier:
+  // switching to a self-hosted window whose page was blank, while the bridge's own message said the
+  // page was fine and would attach as soon as the conversation was shown.
+  const call = host.slice(host.indexOf('const answer = await this.connection.call({\n      op: \'ensureSidebar\''))
+  const block = call.slice(0, call.indexOf('this.views.set'))
+  // The code decides, and it is checked BEFORE the text heuristic.
+  const codeCheck = block.indexOf('code === PANEL_NOT_DISPLAYED')
+  const textCheck = block.indexOf("detail.includes('produced no page')")
+  assert.ok(codeCheck !== -1, 'the display state is recognised by its code')
+  assert.ok(textCheck === -1 || codeCheck < textCheck, 'and it is decided before the text heuristic')
+  // It is thrown as its own error class, which the retry classifier refuses.
+  assert.match(block, /throw new BrowserPanelNotDisplayedError\(detail\)/,
+    'and surfaced as a state the user can change, not as a failure')
+  assert.match(host, /if \(error instanceof BrowserPanelNotDisplayedError\) return false/,
+    'which the retry classifier refuses to treat as a vanished guest')
+  // Nothing in that branch reports a loss.
+  const branch = block.slice(codeCheck, block.indexOf("if (detail.includes('produced no page'))"))
+  assert.doesNotMatch(branch, /reportLost/, 'and nothing in it reports the carrier as lost')
 })

@@ -28,6 +28,19 @@ import type { CarrierPage, CarrierLossReason } from '../browser/types.js';
 /** Absolute path of the endpoint file the shell writes. */
 export declare function bridgeEndpointPath(): string;
 /**
+ * A failure worth showing as-is: the carrier is alive and this is a condition the user can change.
+ *
+ * Thrown instead of a plain Error so callers can distinguish "wait for the conversation to be shown"
+ * from "the browser broke", which is exactly the distinction issue #37 says was missing.
+ */
+export declare class BrowserPanelNotDisplayedError extends Error {
+    readonly code = "panel-not-displayed";
+    /**
+     * @param detail - the bridge's own explanation, appended so the message says why.
+     */
+    constructor(detail: string);
+}
+/**
  * The desktop sidebar, presented as a browser view host.
  *
  * One sidebar exists per shell window, so every view this host hands out refers

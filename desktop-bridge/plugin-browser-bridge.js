@@ -29,6 +29,30 @@ import { join } from 'node:path'
 import { app, webContents } from 'electron'
 
 /**
+ * The conversation's sidebar panel exists but the shell is not displaying that conversation, so no
+ * webview has attached yet. A TRANSIENT display state, not a lost carrier (issue #37).
+ *
+ * Carried across the socket so the plugin can tell it apart from "this panel can never work": the
+ * two used to share one `sidebar unavailable (...)` string, and the plugin treated both as a dead
+ * carrier — switching to a self-hosted window and losing the open page, when showing the
+ * conversation would have brought the page back.
+ */
+const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
+
+/**
+ * An Error carrying a stable code, so the code survives the socket as a field rather than as text a
+ * caller has to pattern-match.
+ * @param {string} code - the stable identifier.
+ * @param {string} message - the human-readable explanation.
+ * @returns {Error} the error, with `code` set.
+ */
+function codedError(code, message) {
+  const error = new Error(message)
+  error.code = code
+  return error
+}
+
+/**
  * Absolute path of the endpoint file the plugin reads.
  *
  * The fallback has to match the plugin's own (`process.env.DSH_HOME ??
@@ -500,7 +524,13 @@ async function handle(request) {  const op = String(request?.op ?? '')
     // would turn a true statement into a timeout, and the page is genuinely there: it appears the
     // moment the conversation is shown.
     if (first.panel === false) {
-      throw new Error(
+      // Reported as issue #37. This is NOT a lost carrier: the tab exists in this conversation's own
+      // surface store, the conversation is simply not the one on screen, and the page appears the
+      // moment it is. A machine-readable code is what keeps the plugin from concluding the carrier
+      // died — a conclusion that swapped the surface to a separate window and took the open page with
+      // it, because the new window starts blank.
+      throw codedError(
+        PANEL_NOT_DISPLAYED,
         'a panel was placed in this conversation\'s sidebar, but its page can only attach while the '
         + 'conversation is the one displayed — show it and the page appears',
       )
@@ -807,7 +837,15 @@ export function start() {
           // arrives. Only two of this bridge's nine reply paths carried the field, so most
           // operations permanently degraded the connection they used.
           .then(answer => socket.write(JSON.stringify({ ...answer, bridgeRequestId: request.bridgeRequestId }) + '\n'))
-          .catch(error => socket.write(JSON.stringify({ ok: false, error: String(error?.message ?? error), bridgeRequestId: request.bridgeRequestId }) + '\n'))
+          .catch(error => socket.write(JSON.stringify({
+            ok: false,
+            error: String(error?.message ?? error),
+            // The code travels as a field, not as text: a caller must not have to recognize an
+            // English sentence to know whether the carrier died or the conversation is just not on
+            // screen (issue #37).
+            ...error?.code === undefined ? {} : { code: String(error.code) },
+            bridgeRequestId: request.bridgeRequestId,
+          }) + '\n'))
       }
       // Authentication may share a TCP chunk with the first real (larger) command. Apply the
       // unauthenticated cap to that frame, not to bytes belonging to an authenticated successor.
