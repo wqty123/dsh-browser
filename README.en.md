@@ -41,8 +41,11 @@ When the desktop shell provides a controllable `<webview>` and the bridge is ins
 
 Driving that panel also needs a bridge, installed into **the desktop app's own install directory** rather than the profile:
 
+**Since 0.5.0 this is one step.** The script closes DSH itself — installing while it runs fails with EBUSY on the archive, and a process that waits for the exit is carried away with it:
+
 ```sh
-node desktop-bridge/install.mjs "<DSH Desktop install directory>"
+desktop-bridge/install-and-start.cmd          # Windows, double-click or run
+node desktop-bridge/install.mjs "<dir>" --restart   # any platform
 ```
 
 > Run this from the updated plugin directory after closing the desktop app and backing up its `resources` directory and browser data. **The bridge is optional**: without it, the plugin uses a standalone window. **Reinstall the bridge with the new script after plugin or desktop shell upgrades**, then restart the desktop app. See [carrier limitations](docs/limitations.md) (Chinese).
@@ -99,6 +102,7 @@ The full record — per round, with the cause and the evidence for each fix — 
 
 | Version | Date | Theme |
 | --- | --- | --- |
+| **0.5.0** | 2026-10-31 | **Remote viewing** (#34) with passive capture; one-step desktop bridge install/repair (#36); a sidebar panel that is merely off-screen is no longer judged a lost carrier (#37); canvas pages and image-only links become visible; CDP sessions reconnect |
 | **0.4.16 (local release candidate)** | 2026-10-31 | Security and stability: concurrent page ownership, downloads/screenshots that refuse overwrite, bridge and settings safeguards, carrier switching recovery, desktop rc.5 sidebar support; Electron `^44.10.0` and binary preparation during installation |
 | **0.4.9**–**0.4.15** | 2026-10-15–19 | Sidebar capability detection and fallback, host contract alignment, headless Chrome/Edge and startup hand-off fixes; see CHANGELOG |
 | **0.4.8** | 2026-10-14 | **Tool namespace**: 34 tools move to `dsh_browser_*`; one taken name can no longer cost the whole toolset |
