@@ -102,6 +102,7 @@ The full record — per round, with the cause and the evidence for each fix — 
 
 | Version | Date | Theme |
 | --- | --- | --- |
+| **0.5.1** | 2026-10-31 | Adopt the page the browser already shows: `switch_tab` and `open` both land on it instead of opening a second one; canvas detection no longer requires an empty element list; a blank page is judged by its own URL |
 | **0.5.0** | 2026-10-31 | **Remote viewing** (#34) with passive capture; one-step desktop bridge install/repair (#36); a sidebar panel that is merely off-screen is no longer judged a lost carrier (#37); canvas pages and image-only links become visible; CDP sessions reconnect |
 | **0.4.16 (local release candidate)** | 2026-10-31 | Security and stability: concurrent page ownership, downloads/screenshots that refuse overwrite, bridge and settings safeguards, carrier switching recovery, desktop rc.5 sidebar support; Electron `^44.10.0` and binary preparation during installation |
 | **0.4.9**–**0.4.15** | 2026-10-15–19 | Sidebar capability detection and fallback, host contract alignment, headless Chrome/Edge and startup hand-off fixes; see CHANGELOG |
