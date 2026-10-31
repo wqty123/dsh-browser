@@ -102,6 +102,7 @@ The full record — per round, with the cause and the evidence for each fix — 
 
 | Version | Date | Theme |
 | --- | --- | --- |
+| **0.5.2** | 2026-11-01 | A sidebar page no longer needs a human to open the column or switch to that conversation first: the column is opened when it was never opened, and the shell is asked to display a conversation requested from the background, with a bounded retry. Adds `dsh_browser_click_sequence` (batch coordinate clicks) and recognises the pre-#37 bridge refusal that carries no code |
 | **0.5.1** | 2026-10-31 | Adopt the page the browser already shows: `switch_tab` and `open` both land on it instead of opening a second one; canvas detection no longer requires an empty element list; a blank page is judged by its own URL |
 | **0.5.0** | 2026-10-31 | **Remote viewing** (#34) with passive capture; one-step desktop bridge install/repair (#36); a sidebar panel that is merely off-screen is no longer judged a lost carrier (#37); canvas pages and image-only links become visible; CDP sessions reconnect |
 | **0.4.16 (local release candidate)** | 2026-10-31 | Security and stability: concurrent page ownership, downloads/screenshots that refuse overwrite, bridge and settings safeguards, carrier switching recovery, desktop rc.5 sidebar support; Electron `^44.10.0` and binary preparation during installation |

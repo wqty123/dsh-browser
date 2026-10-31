@@ -2,31 +2,35 @@
 
 本文件记录各轮功能开发与问题修复(由仓库外独立文档迁入,随仓库管理)。
 
-## 未发布（2026-11-01）
+## 0.5.2（2026-11-01）
 
-### 侧栏载体不再等一个永远不会出现的页面
+### 侧栏页面不再需要人先把侧栏打开、或先切到那个会话
 
-`browser.channel = "sidebar"` 在桌面上可能永久降级到自带窗口,原因不是桥坏了,而是一个布局事实:**外壳只渲染「展开状态下的激活标签」的 body**。折叠的侧栏仍保留 tab strip,所以读侧一直报 `panel: true`,而承载页面的 `<webview>` 从未被创建 —— 于是 `guestId` 永远为 `null`,等满 20 秒后报"面板不可用",再把载体换成自带窗口(用户看到的是"浏览器开在了另一个窗口里")。
+`browser.channel = "sidebar"` 在桌面上曾有两种稳定复现的失败，两种都以"用户去点一下"收场。现在都不需要了。
 
-- 客户端 `openPanel` 放置标签后,新增"让页面出现"这一步:`isExpanded()` 为 false 时调 `toggleExpanded()`,再调 `focus(tabId)` 把刚放的标签设为激活。两者都是外壳自己的布局命令,不派发按键、不点元素。
-- 两道防越界:只有本会话自己的面板 DOM 存在(`state.panel === true`)时才动展开 —— `toggleExpanded()` 作用于**屏幕上那个会话**,否则会把用户正在读的会话折叠掉;`focus()` 由外壳自身按 mounted surface 校验,背景会话的 tab id 无法移动视图。
-- 旧外壳没有 `isExpanded`/`focus` 时退化为"只放置",不抛错。
-- 这不是靠等:等待永远解决不了没人请求过展开的栏。实测依据是桥侧读到的 `panel: true` / `guestId: null` / `sidebar: []` 三件事实,配合 `dsh-client-ui-sidebar-right` 的 `isExpanded`/`toggleExpanded`/`focus` 三个已存在的公开方法。
+**根因一：外壳只渲染「展开状态下、激活标签」的 body。** 折叠（或从未打开）的列仍保留 tab strip，所以读侧一直报 `panel: true`，而承载页面的 `<webview>` 从未被创建：`guestId` 恒为 `null`，等满 20 秒后报"面板不可用"，再把载体换成自带窗口——用户看到的是"浏览器开在了另一个窗口里"。
 
-测试 417 → 421(新增 4 条:折叠栏被展开并聚焦、已展开的栏不被折叠、无面板 DOM 的会话不动屏幕上的栏、旧外壳无展开 API 时仍能放置),`tsc` 干净。
+- 客户端 `openPanel` 放置标签后新增"让页面出现"这一步：`isExpanded()` 为 false 时 `toggleExpanded()`，再 `focus()` 把刚放的标签设为激活。两者都是外壳自己的布局命令，不派发按键、不点元素。
+- 旧外壳缺 `isExpanded`/`focus` 时退化为"只放置"，不抛错。
 
-### 会话不在前台时不再等用户切过去
+**根因二：判"该不该动列"不能用 DOM。** "本会话在前台、右侧栏从未打开"和"别的会话在前台"都没有面板 DOM，动作却相反：前者要展开，后者绝不能碰。改判据为外壳自己的 `screen()`（当前显示的会话 id）——这也修掉了一个真实现象：**刚启动的外壳右侧栏根本没被打开过**，旧判据把这种前台状态当成"不在前台"，于是刚重启的机器上修复不可达。
 
-外壳只渲染"当前显示的那个会话"的侧栏。所以当一个**不在前台**的会话请求开页时,标签能放进它的 surface store,却永远长不出 `<webview>` —— 旧行为是抛 `panel-not-displayed` 并把决定权交回用户("切过去它就会出现")。这等于让一个能用的载体依赖人的时机。
+**根因三：不在前台的会话。** 标签能放进它的 surface store，却永远长不出 webview。客户端现在调外壳自己的 `uiWorkspace.openSession(sessionId)` 请求显示该会话（与会话列表的跳转同一条路），并在裁决里回报 `switched`。
 
-- 客户端 `openPanel` 在该会话**没有面板 DOM** 时,先调外壳自己的 `uiWorkspace.openSession(sessionId)` 请求显示这个会话(与外壳会话列表的跳转是同一条路,不派发输入、不点元素),并在裁决里回报 `switched: true`。已有面板 DOM 时**绝不调用** —— 不会把用户正在读的会话切走。
-- host 侧把"未显示"当成**可重试的显示状态**:`panel-not-displayed` 与 `"not mounted"` 两种拒绝按 400 ms × 4 次(≈1.6 s)重试,因为 React 在下一趟渲染里就把它变成可用。若本来就不可能渲染(iframe 外壳 / `produced no page`),行为不变:仍然降级,不会被重试掩盖。
-- 重试耗尽后的错误文本改为"外壳已被请求显示该会话,面板仍未渲染",不再让用户去点。
-- `uiWorkspace` 与 `sidebarRight` 用两个独立 `inject`:老组合缺 workspace 服务时,面板本身不受影响。
-- 判"该不该动列"改用外壳自己的 `screen()`(当前显示的会话 id),不再看"本会话有没有面板 DOM"。这两种状态 DOM 分不开,而它们要的动作相反:**刚启动的外壳右侧栏根本没被打开过**(会话在前台、没有面板 DOM)应当展开;**别的会话在前台**(没有面板 DOM)绝不能动。真实故障就是第一种:修好之后仍然失败,因为旧判据把"前台但从未打开"当成了"不在前台"。
-- host 的重试判据补上**无语义的旧 bridge 措辞**(`can only attach`):本机 `resources\app\lib\plugin-browser-bridge.js` 是 issue #37 之前的版本(42,256 B,全文没有 `panel-not-displayed`),它发同一条拒绝但不带 code。只按 code 归类,恰好让"没重装过 bridge"的用户吃满失败。
+- host 侧把"未显示"当作**可重试的显示状态**：400 ms × 4 次（≈1.6 s），因为 React 在下一趟渲染里就把它变成可用；耗尽后才报错，文案是"外壳已被请求显示该会话、面板仍未渲染"。
+- 重试判据同时认**旧 bridge 的措辞**（`can only attach`，无 code）。本机实测：`resources\app\lib\plugin-browser-bridge.js` 曾是 issue #37 之前的版本（42,256 B，全文没有 `panel-not-displayed`），只按 code 归类会让"没重装过 bridge"的机器吃满失败。重装 bridge 后两者一致，但**不重装也能工作**。
+- `uiWorkspace` 与 `sidebarRight` 用两个独立 `inject`：老组合缺 workspace 服务时，面板本身不受影响。
+- 不可能渲染的情况（iframe 外壳 / `produced no page`）行为不变：仍然降级，不被重试掩盖。
 
-测试 421 → 425(新增:后台会话会请求外壳显示它、已挂载会话绝不被切走、缺 workspace 服务时仍能放置、宿主对显示类拒绝重试到成功),`tsc` 干净。
+**实测（桌面 rc.5，两次重启各验一发）**：① 全新窗口首开 `weibo.com` → 侧栏出现 webview（`frame: webview`，无独立 electron 窗口）；② 切到另一个会话后开 `example.com` → 侧栏出现新 webview，shell 窗口标题回到该会话，工具调用不报错。
+
+### 新增 `dsh_browser_click_sequence`：批量坐标点击
+
+- `provider.clickSequence()`：只 `present()` 一次；每点走 `mouseMoved`/`mousePressed`/`mouseReleased`；间隔默认 40 ms（低于此值页面会把两次按下读成双击或直接丢弃）；首点失败即停并返回 `failedAt`。
+- 为什么要它：canvas 页面只认 `isTrusted` 的真实输入，页面里的 `MouseEvent`/`PointerEvent`/`element.click()` 全部无效；原来每格两次工具调用，一盘 86 次。
+- **实测**：sudoku.com 一盘（38 给定 / 43 空，求解器唯一解校验）用 2 点探针 + 84 点一次批量完成，全部命中并通关（连胜计数 `0`→`1`，弹出通关页）。
+
+测试 417 → 427（新增 10 条，覆盖展开/聚焦、已展开不折叠、后台会话请求显示、缺 workspace 服务、宿主重试到成功、旧 bridge 无 code 拒绝），`tsc` 干净。
 
 ## 0.4.16（本地发布候选，2026-10-31）
 
