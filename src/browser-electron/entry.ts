@@ -29,7 +29,7 @@ import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralPro
 import { MissingSystemBrowserHost } from './missing-system-browser.js'
 import { SettingsStore } from './settings-store.js'
 import { sameOrigin } from './settings-route.js'
-import { handlePreviewFrame, PREVIEW_ROUTE } from './preview-route.js'
+import { handlePreviewFrame, handlePreviewSessions, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.js'
 
 export {
   ELECTRON_BROWSER_PROVIDER_ID,
@@ -458,6 +458,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           path: PREVIEW_ROUTE,
           handler: (request, response) => handlePreviewFrame(request, response, settings, browser),
         }, 'dsh-builtin-browser: live view frame'))
+        // The list the panel needs before it can build a frame URL at all: session ids only.
+        host.effect(() => host.webServer.register({
+          kind: 'exact',
+          path: PREVIEW_SESSIONS_ROUTE,
+          handler: (request, response) => handlePreviewSessions(request, response, settings, browser),
+        }, 'dsh-builtin-browser: live view sessions'))
       })
     } catch {
       // No web server on this surface: watching is simply unavailable, and nothing else changes.
@@ -519,6 +525,7 @@ export function adoptLegacyProfileRoot(
 interface PreviewBrowser {
   exists(session: string): boolean
   capturePassive(session: string, signal?: AbortSignal): Promise<{ readonly dataUrl: string }>
+  watchableSessions?(): readonly string[]
 }
 
 /** The host web-server surface this plugin uses, described structurally. */

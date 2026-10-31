@@ -146,6 +146,14 @@ export declare class BrowserRuntime extends Service {
      * @param session - the session id to test.
      */
     exists(session: BrowserSessionId): boolean;
+    /**
+     * The sessions a viewer may watch, through the selected provider.
+     *
+     * Empty when the provider cannot preview at all: a viewer then has nothing to offer, which is the
+     * honest answer rather than an error.
+     * @returns the live session ids.
+     */
+    watchableSessions(): readonly BrowserSessionId[];
     /** Replay one recorded operation by sequence number through the provider. */
     replay(session: BrowserSessionId, seq: number): Promise<void>;
     /** Download a URL to a local file through the provider. */

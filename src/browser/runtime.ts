@@ -390,6 +390,19 @@ export class BrowserRuntime extends Service {
     return provider.exists === undefined ? true : provider.exists(session)
   }
 
+  /**
+   * The sessions a viewer may watch, through the selected provider.
+   *
+   * Empty when the provider cannot preview at all: a viewer then has nothing to offer, which is the
+   * honest answer rather than an error.
+   * @returns the live session ids.
+   */
+  watchableSessions(): readonly BrowserSessionId[] {
+    const provider = this.resolveProvider()
+    if (typeof provider.capturePassive !== 'function') return []
+    return provider.watchableSessions?.() ?? []
+  }
+
   /** Replay one recorded operation by sequence number through the provider. */
   async replay(session: BrowserSessionId, seq: number): Promise<void> {
     return this.resolveProvider().replay(session, seq)

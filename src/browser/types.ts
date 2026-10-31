@@ -647,6 +647,13 @@ export interface BrowserProvider {
    * host's screen.
    */
   capturePassive?(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserPreviewFrame>
+  /**
+   * The sessions a viewer may watch. Only meaningful alongside {@link capturePassive}.
+   *
+   * Exists because the provider names its sessions and the browser page cannot know one; served as
+   * ids only, so the panel can address a session without being told what is in it.
+   */
+  watchableSessions?(): readonly BrowserSessionId[]
   /** Download a URL to a local file. Honor `signal` for cancellation. */
   download(session: BrowserSessionId, request: BrowserDownloadRequest, signal?: AbortSignal): Promise<{ readonly path: string }>
   /** Export the session's cookies (login state). */

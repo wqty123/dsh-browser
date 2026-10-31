@@ -19,6 +19,16 @@ import { sameOrigin } from './settings-route.js'
 /** Where the frame endpoint lives. The viewer must use exactly this path, same origin. */
 export const PREVIEW_ROUTE = '/dsh-builtin-browser/browser-view/frame'
 
+/**
+ * Where the viewer asks which sessions it may watch.
+ *
+ * The provider names its sessions (`browser:<uuid>`) and only it knows them; the browser page has no
+ * way to guess one. Without this the viewer could not build a frame URL at all, and inventing an id
+ * is exactly what the design forbids. So the list is served, and it contains nothing but ids of
+ * sessions that currently have a page — no URLs, no titles, no target handles.
+ */
+export const PREVIEW_SESSIONS_ROUTE = '/dsh-builtin-browser/browser-view/sessions'
+
 /** What the route needs from the settings document. */
 interface PreviewSettings {
   get(): { readonly remoteView: { readonly enabled: boolean } }
@@ -28,6 +38,43 @@ interface PreviewSettings {
 interface PreviewBrowser {
   exists(session: string): boolean
   capturePassive(session: string, signal?: AbortSignal): Promise<{ readonly dataUrl: string }>
+  /** Sessions that currently hold a page. Optional: a service without it reports none. */
+  watchableSessions?(): readonly string[]
+}
+
+/**
+ * List the sessions a viewer may watch.
+ *
+ * Ids only. The whole point of this endpoint is to give the page something it cannot guess; adding a
+ * URL or title here would leak the very content the frame endpoint is careful not to describe in its
+ * refusals.
+ * @param request - the incoming request.
+ * @param response - the response to write.
+ * @param settings - the settings document, for the share switch.
+ * @param browser - the browser service.
+ */
+export async function handlePreviewSessions(
+  request: IncomingMessage,
+  response: ServerResponse,
+  settings: PreviewSettings,
+  browser: PreviewBrowser,
+): Promise<void> {
+  if (request.method !== 'GET') {
+    replyJson(response, 405, { error: 'method-not-allowed' })
+    return
+  }
+  if (!sameOrigin(request)) {
+    replyJson(response, 403, { error: 'not-same-origin' })
+    return
+  }
+  if (settings.get().remoteView.enabled !== true) {
+    // An empty list rather than a refusal: the panel asks this before it knows whether sharing is
+    // on, and "nothing to watch" is the honest answer to give a client that is not allowed to watch.
+    replyJson(response, 200, { enabled: false, sessions: [] })
+    return
+  }
+  const sessions = browser.watchableSessions?.() ?? []
+  replyJson(response, 200, { enabled: true, sessions: [...sessions] })
 }
 
 /** Write one JSON body with no caching and no sniffing. */

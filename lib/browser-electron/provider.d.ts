@@ -807,6 +807,16 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
      */
     exists(session: BrowserSessionId): boolean;
     /**
+     * The sessions a viewer may watch, which is exactly the sessions that exist.
+     *
+     * Served so the browser page can build a frame URL without guessing: the provider names its
+     * sessions, and an id invented by a client is refused at the route. Ids only — no URL, no title,
+     * no target handle — because the point is to let the panel address a session, not to describe
+     * what is in it.
+     * @returns the live session ids.
+     */
+    watchableSessions(): readonly BrowserSessionId[];
+    /**
      * The human closed a browser window: the session that window showed is over.
      * Ending it here is what makes the next call a clean start rather than a
      * resurrection of an invisible window. Browsing history and login state live

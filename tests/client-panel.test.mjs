@@ -40,12 +40,55 @@ let activeFetch = async () => ({ ok: false, status: 500, json: async () => ({}) 
  * failure then surfaces as a missing method rather than as "no page here".
  */
 function makeDocument(overrides = {}) {
+  /**
+   * A minimal element: enough for code that BUILDS a tree rather than parsing one.
+   *
+   * The live-view panel creates its nodes and keeps references, so it needs attributes, children,
+   * text and listeners — not markup parsing or query lookups. Returning `{}` made every one of those
+   * throw, which surfaced as "setAttribute is not a function" rather than as anything to do with the
+   * panel's behaviour.
+   */
+  const element = (tag = 'div') => {
+    const node = {
+      tagName: String(tag).toUpperCase(),
+      className: '',
+      textContent: '',
+      hidden: false,
+      children: [],
+      attributes: new Map(),
+      listeners: new Map(),
+      setAttribute(name, value) { node.attributes.set(String(name), String(value)) },
+      getAttribute(name) { return node.attributes.get(String(name)) ?? null },
+      removeAttribute(name) { node.attributes.delete(String(name)) },
+      appendChild(child) { node.children.push(child); return child },
+      addEventListener(type, handler) {
+        const list = node.listeners.get(type) ?? []
+        list.push(handler)
+        node.listeners.set(type, list)
+      },
+      removeEventListener(type, handler) {
+        const list = node.listeners.get(type) ?? []
+        node.listeners.set(type, list.filter(entry => entry !== handler))
+      },
+      /** Fire a listener the way a real event would, so a test can drive the panel. */
+      dispatch(type, event = {}) {
+        for (const handler of node.listeners.get(type) ?? []) handler({ type, ...event })
+      },
+      remove() {},
+      querySelector() { return null },
+      querySelectorAll() { return [] },
+    }
+    return node
+  }
   return {
-    body: {},
+    body: element('body'),
+    documentElement: element('html'),
     head: { appendChild: () => {} },
     getElementById: () => null,
-    createElement: () => ({}),
+    createElement: tag => element(tag),
     querySelectorAll: () => [],
+    addEventListener() {},
+    visibilityState: 'visible',
     ...overrides,
   }
 }
@@ -74,6 +117,11 @@ function bundleFactory() {
     document: {
       get body() { return activeDocument.body },
       get head() { return activeDocument.head },
+      // Forwarded rather than captured, like the rest: the live-view panel listens for
+      // visibilitychange and reads `visibilityState`, and a test swaps the document between cases.
+      get visibilityState() { return activeDocument.visibilityState ?? 'visible' },
+      addEventListener: (type, handler) => activeDocument.addEventListener?.(type, handler),
+      removeEventListener: (type, handler) => activeDocument.removeEventListener?.(type, handler),
       getElementById: (id) => activeDocument.getElementById(id),
       createElement: (tag) => activeDocument.createElement(tag),
       querySelectorAll: (selector) => activeDocument.querySelectorAll(selector),
@@ -334,7 +382,10 @@ function documentWith(...strips) {
  * all of them.
  */
 function makeShellTree({ own, other }) {
-  const body = {}
+  // `appendChild` accepts and ignores: the live-view panel mounts itself on `document.body`, and
+  // this fixture's body is a hand-built shape that only answers sidebar queries. Accepting the
+  // append keeps the bundle's mount step from failing without adding a node to the shell tree.
+  const body = { appendChild: child => child }
   const panelOf = (sessionId, guestIds) => {
     const views = guestIds.map(id => ({
       getWebContentsId: () => id,
@@ -576,6 +627,16 @@ function rc5Tree() {
       for (const child of children) child.parentElement = this
     }
     getAttribute(name) { return this.attributes[name] ?? null }
+    /**
+     * Accept a child WITHOUT recording it in `children`.
+     *
+     * The live-view panel mounts itself on `document.body`. This fixture's `children` is the
+     * shell-shaped tree that `querySelectorAll` walks, so recording the panel there would feed a
+     * non-Node into `matches()` and change what every sidebar lookup sees. A real DOM accepts the
+     * append and the panel is simply part of the page; here the append is accepted and ignored,
+     * which keeps the fixture describing the shell and nothing else.
+     */
+    appendChild(child) { return child }
     matches(selector) {
       return selector.split(',').some(raw => {
         const item = raw.trim()

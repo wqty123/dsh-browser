@@ -15,6 +15,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 /** Where the frame endpoint lives. The viewer must use exactly this path, same origin. */
 export declare const PREVIEW_ROUTE = "/dsh-builtin-browser/browser-view/frame";
+/**
+ * Where the viewer asks which sessions it may watch.
+ *
+ * The provider names its sessions (`browser:<uuid>`) and only it knows them; the browser page has no
+ * way to guess one. Without this the viewer could not build a frame URL at all, and inventing an id
+ * is exactly what the design forbids. So the list is served, and it contains nothing but ids of
+ * sessions that currently have a page — no URLs, no titles, no target handles.
+ */
+export declare const PREVIEW_SESSIONS_ROUTE = "/dsh-builtin-browser/browser-view/sessions";
 /** What the route needs from the settings document. */
 interface PreviewSettings {
     get(): {
@@ -29,7 +38,21 @@ interface PreviewBrowser {
     capturePassive(session: string, signal?: AbortSignal): Promise<{
         readonly dataUrl: string;
     }>;
+    /** Sessions that currently hold a page. Optional: a service without it reports none. */
+    watchableSessions?(): readonly string[];
 }
+/**
+ * List the sessions a viewer may watch.
+ *
+ * Ids only. The whole point of this endpoint is to give the page something it cannot guess; adding a
+ * URL or title here would leak the very content the frame endpoint is careful not to describe in its
+ * refusals.
+ * @param request - the incoming request.
+ * @param response - the response to write.
+ * @param settings - the settings document, for the share switch.
+ * @param browser - the browser service.
+ */
+export declare function handlePreviewSessions(request: IncomingMessage, response: ServerResponse, settings: PreviewSettings, browser: PreviewBrowser): Promise<void>;
 /**
  * Serve one frame, or say precisely why not.
  *

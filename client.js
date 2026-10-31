@@ -29,6 +29,17 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 
   const zh = {
     nav: "浏览器",
+    "watch.open": "观看浏览器",
+    "watch.title": "实时画面",
+    "watch.readOnly": "只读,不转发点击与输入",
+    "watch.stop": "停止",
+    "watch.live": "直播",
+    "watch.paused": "已暂停",
+    "watch.stopped": "已停止",
+    "watch.connecting": "连接中",
+    "watch.disconnected": "连接中断",
+    "watch.disabled": "主机未开启远程观看",
+    "watch.noPage": "该任务尚未打开浏览器",
     title: "浏览器(Browser Use)",
     lead: "多数设置立即生效。保留 cookies 与无头模式仅适用于本机 Chrome / Edge,修改后需重新选择载体或重启 DSH。",
     loading: "读取设置…",
@@ -77,6 +88,17 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 
   const en = {
     nav: "Browser",
+    "watch.open": "Watch browser",
+    "watch.title": "Live view",
+    "watch.readOnly": "Read-only; clicks and typing are not forwarded",
+    "watch.stop": "Stop",
+    "watch.live": "Live",
+    "watch.paused": "Paused",
+    "watch.stopped": "Stopped",
+    "watch.connecting": "Connecting",
+    "watch.disconnected": "Disconnected",
+    "watch.disabled": "Remote viewing is off on the host",
+    "watch.noPage": "This task has not opened a browser",
     title: "Browser (Browser Use)",
     lead: "Most settings apply immediately. Cookie persistence and headless mode apply only to installed Chrome / Edge; reselect the carrier or restart DSH after changing them.",
     loading: "Loading settings…",
@@ -228,6 +250,44 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.18));
 }
 .dsh-bb-dd-opt[aria-selected="true"] { font-weight: 600; }
+
+/* Live-view panel. Fixed layer rather than a slot: the host has no stable slot for an extra
+   surface over the conversation, and a layer works in every layout including a phone. */
+.dsh-bw-watch { position: fixed; right: 16px; bottom: 16px; z-index: 2147483000; font-family: inherit; }
+.dsh-bw-watch-open {
+  display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.45)); border-radius: 999px;
+  padding: 7px 13px; font-size: 12px; color: inherit;
+  background: var(--dsw-alias-interactive-bg, rgba(128,128,128,.12));
+}
+.dsh-bw-watch-open:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.2)); }
+.dsh-bw-watch-dot { width: 7px; height: 7px; border-radius: 50%; background: #d9534f; }
+.dsh-bw-watch-panel {
+  position: absolute; right: 0; bottom: 40px; width: min(560px, calc(100vw - 32px));
+  border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.35)); border-radius: 10px;
+  background: var(--dsw-alias-bg-elevated, #1b1b1f); color: inherit; overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35);
+}
+.dsh-bw-watch-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px; }
+.dsh-bw-watch-title { font-weight: 600; }
+.dsh-bw-watch-state { opacity: .7; margin-left: auto; }
+.dsh-bw-watch-close {
+  border: 0; background: transparent; color: inherit; cursor: pointer;
+  font-size: 16px; line-height: 1; padding: 0 2px; opacity: .7;
+}
+.dsh-bw-watch-stage { background: #000; min-height: 120px; display: flex; align-items: center; justify-content: center; }
+.dsh-bw-watch-img { display: block; max-width: 100%; height: auto; }
+.dsh-bw-watch-note { margin: 0; padding: 24px 14px; font-size: 12px; opacity: .75; text-align: center; }
+.dsh-bw-watch-foot {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  font-size: 11px; border-top: 1px solid var(--dsw-alias-border, rgba(128,128,128,.25));
+}
+.dsh-bw-watch-readonly { opacity: .6; }
+.dsh-bw-watch-stop {
+  margin-left: auto; cursor: pointer; font-size: 11px; padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.45)); border-radius: 6px;
+  background: transparent; color: inherit;
+}
 `
 
   /** Install the stylesheet once, however many times the panel is mounted. */
@@ -853,11 +913,229 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     }, "dsh-builtin-browser: conversation panel service")
   }
 
+  /**
+   * The live-view panel: one frame at a time, for an operator who is not sitting at this machine.
+   *
+   * A plain floating layer rather than a slot registration, deliberately. The host's layout has no
+   * stable slot for "an extra surface over the conversation", and inventing one would tie this
+   * panel to a layout that changes; a fixed layer works in every layout including a phone. It is
+   * also entirely inert until the host turns `remoteView.enabled` on, which the sessions probe
+   * reports.
+   *
+   * Pulls one frame per request and waits for it to paint before asking for the next, so a slow
+   * link shows fewer frames instead of queueing them. Nothing here retries in a tight loop: a
+   * refusal or a 503 moves the panel to a paused state, and it resumes on the next user action.
+   * @param ctx - the plugin context, for the disposal hook.
+   */
+  function installWatchPanel(ctx) {
+    if (typeof document === "undefined") return
+    const SESSIONS = "/dsh-builtin-browser/browser-view/sessions"
+    const FRAME = "/dsh-builtin-browser/browser-view/frame"
+    const MIN_INTERVAL_MS = 500
+
+    // Built element by element and referenced directly, never through innerHTML + querySelector.
+    // Two reasons: the host's test sandbox provides a minimal `createElement`, and re-parsing markup
+    // to find elements this code just made is work without a purpose.
+    const make = (tag, className, text) => {
+      const node = document.createElement(tag)
+      if (className !== undefined) node.className = className
+      if (text !== undefined) node.textContent = text
+      return node
+    }
+
+    const layer = make("div", "dsh-bw-watch")
+    layer.setAttribute("data-dsh-bw-watch", "")
+
+    const openButton = make("button", "dsh-bw-watch-open")
+    openButton.setAttribute("type", "button")
+    const dot = make("span", "dsh-bw-watch-dot")
+    const openLabel = make("span", "dsh-bw-watch-label")
+    openButton.appendChild(dot)
+    openButton.appendChild(openLabel)
+
+    const panel = make("section", "dsh-bw-watch-panel")
+    panel.hidden = true
+
+    const head = make("header", "dsh-bw-watch-head")
+    const title = make("span", "dsh-bw-watch-title")
+    const state = make("span", "dsh-bw-watch-state")
+    const closeButton = make("button", "dsh-bw-watch-close", "×")
+    closeButton.setAttribute("type", "button")
+    head.appendChild(title)
+    head.appendChild(state)
+    head.appendChild(closeButton)
+
+    const stage = make("div", "dsh-bw-watch-stage")
+    const img = make("img", "dsh-bw-watch-img")
+    img.hidden = true
+    const note = make("p", "dsh-bw-watch-note")
+    stage.appendChild(img)
+    stage.appendChild(note)
+
+    const foot = make("footer", "dsh-bw-watch-foot")
+    const readonlyLabel = make("span", "dsh-bw-watch-readonly")
+    const stopButton = make("button", "dsh-bw-watch-stop")
+    stopButton.setAttribute("type", "button")
+    foot.appendChild(readonlyLabel)
+    foot.appendChild(stopButton)
+
+    panel.appendChild(head)
+    panel.appendChild(stage)
+    panel.appendChild(foot)
+    layer.appendChild(openButton)
+    layer.appendChild(panel)
+    document.body.appendChild(layer)
+
+    /** Localized text, falling back to the key so a missing entry is visible rather than blank. */
+    const say = key => {
+      try { return translate(key) } catch { return key }
+    }
+    openLabel.textContent = say("watch.open")
+    title.textContent = say("watch.title")
+    readonlyLabel.textContent = say("watch.readOnly")
+    stopButton.textContent = say("watch.stop")
+    openButton.title = say("watch.open")
+
+    /** One running view: a session, its frames, and whether it should keep pulling. */
+    const view = { session: undefined, timer: undefined, running: false, lastAt: 0, objectUrl: undefined }
+
+    const setState = text => { state.textContent = text }
+    const showNote = text => {
+      note.textContent = text
+      note.hidden = false
+      img.hidden = true
+    }
+    /** Release the previous frame. A viewer that keeps every frame is a memory leak in a phone browser. */
+    const dropFrame = () => {
+      if (view.objectUrl !== undefined) {
+        URL.revokeObjectURL(view.objectUrl)
+        view.objectUrl = undefined
+      }
+    }
+    const stop = () => {
+      view.running = false
+      if (view.timer !== undefined) { clearTimeout(view.timer); view.timer = undefined }
+      dropFrame()
+      img.removeAttribute("src")
+      img.hidden = true
+      setState(say("watch.stopped"))
+      showNote(say("watch.stopped"))
+      panel.hidden = true
+    }
+
+    /** Ask which sessions exist; returns whether watching is enabled at all. */
+    const probe = async () => {
+      try {
+        const response = await fetch(SESSIONS, { headers: { accept: "application/json" } })
+        if (!response.ok) return { enabled: false, sessions: [] }
+        const data = await response.json()
+        return { enabled: data?.enabled === true, sessions: Array.isArray(data?.sessions) ? data.sessions : [] }
+      } catch {
+        return { enabled: false, sessions: [] }
+      }
+    }
+
+    /**
+     * Pull frames until stopped. One request in flight at a time, and the next one is scheduled only
+     * after the current image has painted — that is what makes a slow link degrade into fewer
+     * frames rather than a growing queue.
+     */
+    const pump = async () => {
+      if (!view.running) return
+      if (document.visibilityState === "hidden") {
+        // The design's rule: a hidden panel stops pulling immediately. Resuming is the user's
+        // action, not a timer's.
+        setState(say("watch.paused"))
+        showNote(say("watch.paused"))
+        view.timer = setTimeout(pump, MIN_INTERVAL_MS * 4)
+        return
+      }
+      const waited = Date.now() - view.lastAt
+      if (waited < MIN_INTERVAL_MS) {
+        view.timer = setTimeout(pump, MIN_INTERVAL_MS - waited)
+        return
+      }
+      view.lastAt = Date.now()
+      let nextDelay = MIN_INTERVAL_MS
+      try {
+        const url = `${FRAME}?session=${encodeURIComponent(String(view.session))}`
+        const response = await fetch(url, { headers: { accept: "image/jpeg" } })
+        if (!view.running) return
+        if (!response.ok) {
+          const body = await response.json().catch(() => undefined)
+          setState(say("watch.paused"))
+          showNote(body?.error === "remote-view-disabled"
+            ? say("watch.disabled")
+            : body?.error === "no-such-session"
+              ? say("watch.noPage")
+              : say("watch.paused"))
+          // Slower polling while paused: a paused view must not turn into a hot loop.
+          nextDelay = MIN_INTERVAL_MS * 4
+        } else {
+          const blob = await response.blob()
+          if (!view.running) return
+          const painted = new Promise(resolve => {
+            img.onload = () => resolve()
+            img.onerror = () => resolve()
+          })
+          dropFrame()
+          view.objectUrl = URL.createObjectURL(blob)
+          img.src = view.objectUrl
+          img.hidden = false
+          note.hidden = true
+          await painted
+          if (!view.running) return
+          setState(say("watch.live"))
+        }
+      } catch {
+        if (!view.running) return
+        setState(say("watch.disconnected"))
+        showNote(say("watch.disconnected"))
+        nextDelay = MIN_INTERVAL_MS * 4
+      }
+      if (view.running) view.timer = setTimeout(pump, nextDelay)
+    }
+
+    const start = async session => {
+      view.session = session
+      view.running = true
+      view.lastAt = 0
+      panel.hidden = false
+      setState(say("watch.connecting"))
+      showNote(say("watch.connecting"))
+      await pump()
+    }
+
+    openButton.addEventListener("click", () => {
+      void (async () => {
+        const found = await probe()
+        if (!found.enabled) { showNote(say("watch.disabled")); panel.hidden = false; return }
+        if (found.sessions.length === 0) { showNote(say("watch.noPage")); panel.hidden = false; return }
+        await start(found.sessions[0])
+      })()
+    })
+    closeButton.addEventListener("click", stop)
+    stopButton.addEventListener("click", stop)
+    // A panel hidden by a closed button must not keep pulling frames.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden" && view.running) {
+        if (view.timer !== undefined) { clearTimeout(view.timer); view.timer = undefined }
+        view.timer = setTimeout(pump, MIN_INTERVAL_MS)
+      }
+    })
+
+    ctx.effect(() => () => {
+      stop()
+      layer.remove()
+    }, "dsh-builtin-browser: live view panel")
+  }
+
   function apply(ctx) {
     // Before anything renders: the rows need a hover state, and inline styles cannot express
     // one. Idempotent, so a re-apply does not stack copies.
     installStyles()
     installPanelService(ctx)
+    installWatchPanel(ctx)
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-builtin-browser: dictionaries")
     const t = ctx.locale.bind(NS)
     translate = t
