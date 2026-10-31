@@ -1397,6 +1397,36 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /**
+   * Take over a page the browser already has, so a person's own tab becomes one this plugin drives.
+   *
+   * Reported as a defect: opening a window by hand, navigating it, and then asking a tool to read it
+   * produced a SECOND page, because the only tab the provider knew about was one it created itself.
+   * The page the human was looking at was listed by `dsh_browser_list_tabs` (under `page:`) and
+   * could be closed, but not read or driven — the opposite of what "the page you are looking at"
+   * means.
+   *
+   * Attaching is all it takes: a CDP session is not exclusive, so the browser's own tab becomes a
+   * target this plugin has a session on. The page is not moved, reloaded or focused, and its
+   * existing session (logins, scroll position, form state) is untouched.
+   * @param targetId - the carrier's page id, which for this carrier IS the CDP target id.
+   * @returns a handle for that page, in the same shape {@link createView} returns.
+   */
+  async adoptPage(targetId: string): Promise<ElectronViewHandle> {
+    const handle = this.createView()
+    const client = await this.ensureClient()
+    const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
+    const sessionId = attached?.sessionId
+    if (typeof sessionId !== 'string') {
+      throw new Error(`dsh-builtin-browser: could not attach to the existing page ${targetId}`)
+    }
+    // Point the view `createView` just made at the page that already exists, instead of the one it
+    // would otherwise build on first use.
+    this.sessions.set(sessionId, targetId)
+    this.views.set(handle.id, { session: sessionId, client })
+    return handle
+  }
+
+  /**
    * Take an unclaimed blank page, if the browser has one to spare.
    *
    * "Unclaimed" is what matters: a blank page the plugin is already driving belongs to a view, and

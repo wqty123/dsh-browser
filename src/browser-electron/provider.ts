@@ -180,6 +180,20 @@ export interface ElectronBrowserViewHost {
    */
   listPages?(owner?: string): Promise<readonly CarrierPage[]>
   /**
+   * Optional: take over one page reported by {@link listPages}, so it becomes a page this provider
+   * drives rather than one it can only see.
+   *
+   * Reported as a defect: opening a window by hand, navigating it, and then asking a tool to read it
+   * produced a SECOND page — the human's own tab was listed (under `page:`) and closable, but not
+   * readable, which is the opposite of "the page you are looking at". A carrier that cannot do this
+   * must leave it undefined rather than pretend: a switch that reported success and then read
+   * nothing is the failure this removes.
+   * @param viewId - the view to bind the page to.
+   * @param id - the carrier's own page id, as {@link listPages} reported it.
+   * @returns a handle for that page, usable for commands like any other view's.
+   */
+  adoptPage?(id: string): Promise<ElectronViewHandle>
+  /**
    * Optional: close one page reported by {@link listPages}.
    *
    * The pair exists because listing a page the caller cannot close is worse than not listing it:
@@ -853,11 +867,30 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /** Switch to a tab by id, making its view visible. */
-  switchTab(session: BrowserSessionId, tabId: string): Promise<void> {
+  async switchTab(session: BrowserSessionId, tabId: string): Promise<void> {
+    const s = this.session(session)
+    // A page the carrier owns. Before this, switching to one threw "not open in this session" —
+    // while `dsh_browser_list_tabs` was happily listing it, so the two tools disagreed and the
+    // page the human was looking at could not be reached (reported as a defect).
+    if (tabId.startsWith('page:')) {
+      const id = tabId.slice('page:'.length)
+      if (this.host.adoptPage === undefined) {
+        throw new BrowserError(
+          'browser: this carrier cannot hand over a page it opened itself, so that page cannot be driven. '
+          + 'Open the URL through dsh_browser_open instead — that creates a page this plugin owns.',
+          'BROWSER_TAB_NOT_FOUND',
+        )
+      }
+      const handle = await this.host.adoptPage(id)
+      const tab: Tab = { id: tabId, handle, url: '' }
+      s.tabs.push(tab)
+      s.activeIndex = s.tabs.length - 1
+      this.showActive(s)
+      return
+    }
     const found = this.locateTab(session, tabId)
     found.s.activeIndex = found.index
     this.showActive(found.s)
-    return Promise.resolve()
   }
 
   /** Close one tab; closing the active tab activates the next. */
@@ -1425,10 +1458,18 @@ export class ElectronBrowserProvider implements BrowserProvider {
         })
       }
       const challenge = ${CHALLENGE_DETECT_EXPRESSION}
-      // A page can hold its whole UI in a canvas, where no element exists to collect. Detect that
-      // so the caller learns "use screenshot" instead of "this page is empty".
+      // The page's own URL is the authority on whether there is a document. The tracked tab.url is
+      // a bookkeeping copy that can lag behind a navigation the browser performed itself, and a
+      // stale copy made this check miss on a real about:blank tab.
+      const blankPage = out.length === 0 && (url === '' || url === 'about:blank')
+      // Independent of the element list: a page can mix DOM controls with a canvas that holds the
+      // part the caller actually needs. Measured on sudoku.com — 60 links were collected and the
+      // board, drawn on a canvas, was invisible in the same result.
+      //
+      // The thresholds keep a decorative canvas from claiming a page: at least 80x80 per canvas and
+      // 10% of the viewport in total. Anything smaller is reported by nothing, which is right.
       let canvas
-      if (out.length === 0) {
+      if (blankPage !== true) {
         let area = 0
         let count = 0
         for (const c of document.querySelectorAll('canvas')) {
@@ -1446,11 +1487,20 @@ export class ElectronBrowserProvider implements BrowserProvider {
         elements: out,
         truncated: out.length >= cap,
         challenge,
+        ...blankPage === true
+          ? {
+            blank: true,
+            note: 'the page is about:blank — nothing has been opened in this browser, so there is nothing to read or drive',
+          }
+          : {},
         ...canvas === true
           ? {
             canvas: true,
-            note: 'this page draws its interface on a canvas, so there are no DOM elements to drive. '
-              + 'Use dsh_browser_screenshot to see it, and coordinates with dsh_browser_click to act on it.',
+            note: out.length === 0
+              ? 'this page draws its interface on a canvas, so there is no DOM content for a snapshot. '
+                + 'Use dsh_browser_screenshot to see it, and coordinates with dsh_browser_click to act on it.'
+              : 'part of this page is drawn on a canvas, which no element list can describe. The elements '
+                + 'below are real; anything inside the canvas is only visible in dsh_browser_screenshot.',
           }
           : {},
       }

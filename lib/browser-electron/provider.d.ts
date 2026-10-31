@@ -81,6 +81,20 @@ export interface ElectronBrowserViewHost {
      */
     listPages?(owner?: string): Promise<readonly CarrierPage[]>;
     /**
+     * Optional: take over one page reported by {@link listPages}, so it becomes a page this provider
+     * drives rather than one it can only see.
+     *
+     * Reported as a defect: opening a window by hand, navigating it, and then asking a tool to read it
+     * produced a SECOND page — the human's own tab was listed (under `page:`) and closable, but not
+     * readable, which is the opposite of "the page you are looking at". A carrier that cannot do this
+     * must leave it undefined rather than pretend: a switch that reported success and then read
+     * nothing is the failure this removes.
+     * @param viewId - the view to bind the page to.
+     * @param id - the carrier's own page id, as {@link listPages} reported it.
+     * @returns a handle for that page, usable for commands like any other view's.
+     */
+    adoptPage?(id: string): Promise<ElectronViewHandle>;
+    /**
      * Optional: close one page reported by {@link listPages}.
      *
      * The pair exists because listing a page the caller cannot close is worse than not listing it:

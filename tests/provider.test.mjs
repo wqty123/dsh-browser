@@ -799,7 +799,7 @@ test('a page drawn on a canvas reports itself as a canvas, not as empty', async 
   await p.close(sid)
 })
 
-test('the canvas detector only fires for a canvas that covers the viewport', () => {
+test('the canvas detector fires on area alone, not on an empty element list', () => {
   const source = readFileSync(new URL('../src/browser-electron/provider.ts', import.meta.url), 'utf8')
   const at = source.indexOf('let canvas')
   assert.ok(at !== -1, 'the detector exists')
@@ -808,8 +808,14 @@ test('the canvas detector only fires for a canvas that covers the viewport', () 
   // decorative 200x150 canvas in a footer would claim the whole page is undrivable.
   assert.match(block, /r\.width < 80 \|\| r\.height < 80/, 'small canvases are ignored')
   assert.match(block, /area \/ view >= 0\.1/, 'and only a large one counts')
-  assert.match(block, /out\.length === 0/, 'it is only consulted when nothing else was found')
-  assert.match(block, /dsh_browser_screenshot/, 'and the note names the tool to use instead')
+  // The note lives in the return value, past the block above, so it is checked on the whole file.
+  assert.ok(source.includes('dsh_browser_screenshot'), 'and the note names the tool to use instead')
+  // NOT gated on an empty element list any more: sudoku.com collects 60 links AND draws the board
+  // on a canvas, so requiring an empty list meant saying nothing about the part that mattered.
+  const guard = block.slice(0, block.indexOf('let area'))
+  assert.doesNotMatch(guard, /out\.length === 0/,
+    'the detector must not require an empty element list')
+  assert.match(guard, /blankPage !== true/, 'a blank page is still handled by the blank branch')
 })
 
 // Measured on the same page: after a tab switch every command failed with "Session with given id
