@@ -24,6 +24,15 @@ export declare const PREVIEW_ROUTE = "/dsh-builtin-browser/browser-view/frame";
  * sessions that currently have a page — no URLs, no titles, no target handles.
  */
 export declare const PREVIEW_SESSIONS_ROUTE = "/dsh-builtin-browser/browser-view/sessions";
+/**
+ * Where the settings panel asks whether the desktop bridge is installed.
+ *
+ * Reported as issue #36: a missing bridge was only a log warning, so a user on `channel: sidebar`
+ * saw "another window opened again" with nothing connecting that to "the bridge is not installed".
+ * The reading is taken from the install tree on disk, so it is true even when the plugin has just
+ * started and remembers nothing.
+ */
+export declare const BRIDGE_STATUS_ROUTE = "/dsh-builtin-browser/bridge-status";
 /** What the route needs from the settings document. */
 interface PreviewSettings {
     get(): {
@@ -66,4 +75,15 @@ export declare function handlePreviewSessions(request: IncomingMessage, response
  * @param browser - the browser service, for passive capture.
  */
 export declare function handlePreviewFrame(request: IncomingMessage, response: ServerResponse, settings: PreviewSettings, browser: PreviewBrowser): Promise<void>;
+/**
+ * Report whether the desktop bridge is installed, for the settings panel.
+ *
+ * Read-only and same-origin like the rest: it names a directory and a state, nothing that could be
+ * used to reach anything else. The command it returns is for a human to run — executing it here
+ * would let a page decide to close the desktop shell.
+ * @param request - the incoming request.
+ * @param response - the response to write.
+ * @param localAppData - the base directory to probe; injected so a test can point at a fixture.
+ */
+export declare function handleBridgeStatus(request: IncomingMessage, response: ServerResponse, localAppData?: string): Promise<void>;
 export {};

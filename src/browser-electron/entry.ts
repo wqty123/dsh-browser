@@ -29,7 +29,7 @@ import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralPro
 import { MissingSystemBrowserHost } from './missing-system-browser.js'
 import { SettingsStore } from './settings-store.js'
 import { sameOrigin } from './settings-route.js'
-import { handlePreviewFrame, handlePreviewSessions, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.js'
+import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.js'
 
 export {
   ELECTRON_BROWSER_PROVIDER_ID,
@@ -463,15 +463,41 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           kind: 'exact',
           path: PREVIEW_SESSIONS_ROUTE,
           handler: (request, response) => handlePreviewSessions(request, response, settings, browser),
-        }, 'dsh-builtin-browser: live view sessions'))
-      })
+        }, 'dsh-builtin-browser: live view sessions'))      })
     } catch {
       // No web server on this surface: watching is simply unavailable, and nothing else changes.
     }
   }
 
+  /**
+   * Expose the bridge's install state on the host's web server, for the settings panel.
+   *
+   * Separate from the live-view routes because it needs no browser service: it reads the install
+   * tree, which is on disk and independent of any carrier. A surface without a web server skips it,
+   * exactly like the other two.
+   * @param ctx - the plugin context.
+   */
+  function installBridgeStatusRoute(ctx: Context): void {
+    const injectStatus = (ctx as unknown as {
+      inject?: (deps: readonly string[], callback: (host: WebServerHost) => void) => void
+    }).inject
+    if (typeof injectStatus !== 'function') return
+    try {
+      injectStatus(['webServer'], (host) => {
+        host.effect(() => host.webServer.register({
+          kind: 'exact',
+          path: BRIDGE_STATUS_ROUTE,
+          handler: (request, response) => handleBridgeStatus(request, response),
+        }, 'dsh-builtin-browser: bridge status'))
+      })
+    } catch {
+      // No web server: the panel is unreachable, and the installer stays the interface.
+    }
+  }
+
   installSettingsRoute(ctx, settings, () => { chooseCarrier() })
   installPreviewRoute(ctx, settings)
+  installBridgeStatusRoute(ctx)
 }
 
 /** Route the settings panel reads and writes. */

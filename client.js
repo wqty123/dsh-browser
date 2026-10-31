@@ -40,6 +40,8 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "watch.disconnected": "连接中断",
     "watch.disabled": "主机未开启远程观看",
     "watch.noPage": "该任务尚未打开浏览器",
+    "watch.bridgeStale": "桌面端升级后 bridge 已失效,请重跑安装:",
+    "watch.bridgeMissing": "桌面 bridge 未安装,侧栏载体不可用。安装命令:",
     title: "浏览器(Browser Use)",
     lead: "多数设置立即生效。保留 cookies 与无头模式仅适用于本机 Chrome / Edge,修改后需重新选择载体或重启 DSH。",
     loading: "读取设置…",
@@ -99,6 +101,8 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "watch.disconnected": "Disconnected",
     "watch.disabled": "Remote viewing is off on the host",
     "watch.noPage": "This task has not opened a browser",
+    "watch.bridgeStale": "A desktop update invalidated the bridge; re-run:",
+    "watch.bridgeMissing": "The desktop bridge is not installed, so the sidebar carrier cannot work:",
     title: "Browser (Browser Use)",
     lead: "Most settings apply immediately. Cookie persistence and headless mode apply only to installed Chrome / Edge; reselect the carrier or restart DSH after changing them.",
     loading: "Loading settings…",
@@ -283,6 +287,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   font-size: 11px; border-top: 1px solid var(--dsw-alias-border, rgba(128,128,128,.25));
 }
 .dsh-bw-watch-readonly { opacity: .6; }
+.dsh-bw-watch-bridge { padding: 8px 10px; font-size: 11px; border-bottom: 1px solid var(--dsw-alias-border, rgba(128,128,128,.25)); background: rgba(217,83,79,.12); }
+.dsh-bw-watch-bridge-line { line-height: 1.5; }
+.dsh-bw-watch-bridge-cmd { display: block; margin-top: 5px; padding: 5px 7px; font-size: 11px; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,.28); border-radius: 5px; }
 .dsh-bw-watch-stop {
   margin-left: auto; cursor: pointer; font-size: 11px; padding: 4px 10px;
   border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.45)); border-radius: 6px;
@@ -1128,6 +1135,42 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       stop()
       layer.remove()
     }, "dsh-builtin-browser: live view panel")
+
+    /**
+     * Report the desktop bridge's install state next to the entry button.
+     *
+     * A missing bridge used to be a log line and nothing else, so a user on `channel: sidebar` saw
+     * "another window opened again" with no way to connect that to the actual cause (issue #36).
+     * The reading comes from the install tree, so it is true even before anything has been watched.
+     *
+     * The repair command is shown, never run: a page that could decide to close the desktop shell
+     * would be a worse problem than the one this line solves.
+     */
+    const showBridgeStatus = async () => {
+      let status
+      try {
+        const response = await fetch("/dsh-builtin-browser/bridge-status", { headers: { accept: "application/json" } })
+        if (!response.ok) return
+        const data = await response.json()
+        status = data?.bridge
+      } catch {
+        return
+      }
+      if (status === undefined) return
+      // Only the two states a user can act on: an installed bridge needs no notice, and a host
+      // without a desktop install has nothing to repair here.
+      if (status.state === "installed" || status.present !== true) return
+      const notice = make("div", "dsh-bw-watch-bridge")
+      const line = make("div", "dsh-bw-watch-bridge-line",
+        status.state === "stale" ? say("watch.bridgeStale") : say("watch.bridgeMissing"))
+      notice.appendChild(line)
+      if (typeof status.command === "string" && status.command !== "") {
+        const code = make("code", "dsh-bw-watch-bridge-cmd", status.command)
+        notice.appendChild(code)
+      }
+      panel.insertBefore(notice, panel.firstChild)
+    }
+    void showBridgeStatus()
   }
 
   function apply(ctx) {

@@ -15,6 +15,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { BrowserError } from '../browser/types.js'
 import { sameOrigin } from './settings-route.js'
+import { findDesktopInstall, readBridgeStatus } from './bridge-status.js'
 
 /** Where the frame endpoint lives. The viewer must use exactly this path, same origin. */
 export const PREVIEW_ROUTE = '/dsh-builtin-browser/browser-view/frame'
@@ -28,6 +29,17 @@ export const PREVIEW_ROUTE = '/dsh-builtin-browser/browser-view/frame'
  * sessions that currently have a page — no URLs, no titles, no target handles.
  */
 export const PREVIEW_SESSIONS_ROUTE = '/dsh-builtin-browser/browser-view/sessions'
+
+/**
+ * Where the settings panel asks whether the desktop bridge is installed.
+ *
+ * Reported as issue #36: a missing bridge was only a log warning, so a user on `channel: sidebar`
+ * saw "another window opened again" with nothing connecting that to "the bridge is not installed".
+ * The reading is taken from the install tree on disk, so it is true even when the plugin has just
+ * started and remembers nothing.
+ */
+export const BRIDGE_STATUS_ROUTE = '/dsh-builtin-browser/bridge-status'
+
 
 /** What the route needs from the settings document. */
 interface PreviewSettings {
@@ -172,4 +184,39 @@ export async function handlePreviewFrame(
       retryable: true,
     })
   }
+}
+
+/**
+ * Report whether the desktop bridge is installed, for the settings panel.
+ *
+ * Read-only and same-origin like the rest: it names a directory and a state, nothing that could be
+ * used to reach anything else. The command it returns is for a human to run — executing it here
+ * would let a page decide to close the desktop shell.
+ * @param request - the incoming request.
+ * @param response - the response to write.
+ * @param localAppData - the base directory to probe; injected so a test can point at a fixture.
+ */
+export async function handleBridgeStatus(
+  request: IncomingMessage,
+  response: ServerResponse,
+  localAppData?: string,
+): Promise<void> {
+  if (request.method !== 'GET') {
+    replyJson(response, 405, { error: 'method-not-allowed' })
+    return
+  }
+  if (!sameOrigin(request)) {
+    replyJson(response, 403, { error: 'not-same-origin' })
+    return
+  }
+  const installRoot = findDesktopInstall(localAppData)
+  const status = installRoot === undefined
+    ? {
+      state: 'missing' as const,
+      present: false,
+      archivePresent: false,
+      detail: 'no DSH Desktop install found under LOCALAPPDATA\\Programs',
+    }
+    : readBridgeStatus(installRoot)
+  replyJson(response, 200, { ok: true, bridge: status })
 }
