@@ -766,3 +766,66 @@ test('a blank page reports itself as blank instead of as a page with no elements
   assert.equal(real.blank, undefined, 'a real page carries no blank flag')
   await p.close(sid)
 })
+
+// Issue measured on 4399.com: 1608 anchors, every one of them <a href><img alt></a> with no text.
+// The snapshot returned zero elements for a page full of links, because every label came out empty.
+// The collector's own source is the readable evidence here: running it needs a real DOM.
+test('an image-only link takes its name from the image alt', () => {
+  const source = readFileSync(new URL('../src/browser-electron/provider.ts', import.meta.url), 'utf8')
+  const labelLine = source.slice(source.indexOf('const label = ('), source.indexOf('const label = (') + 700)
+  assert.match(labelLine, /imageAlt/,
+    'the label expression must consult the image alt')
+  assert.ok(source.includes("querySelector('img[alt]')?.getAttribute('alt')"),
+    'and read it from the anchor\'s own image')
+  // alt must be consulted before the generic fallbacks, or a link's empty textContent still wins.
+  const order = ['el.textContent', 'imageAlt', 'el.value']
+  const positions = order.map(token => labelLine.indexOf(token))
+  assert.ok(positions.every(p => p !== -1), 'all three appear')
+  assert.ok(positions[1] > positions[0] - 1 && positions[1] < positions[2],
+    'imageAlt sits between the text and the value fallbacks')
+})
+
+// Measured while solving a sudoku on sudoku.com: the board is a <canvas>, so 81 cells exist only as
+// pixels. The snapshot said "(no interactive elements found)", which describes a page that HAS
+// nothing — not one drawn on a canvas. That wording is what made a working page look broken.
+test('a page drawn on a canvas reports itself as a canvas, not as empty', async () => {
+  const host = makeHost()
+  const p = new ElectronBrowserProvider(host)
+  const sid = await p.open()
+  await p.navigate(sid, { url: 'https://example.com/' })
+  const fresh = await p.snapshot(sid)
+  // The fixture page has no canvas, so the flag must be absent — the detector must not fire blind.
+  assert.equal(fresh.canvas, undefined, 'a page without a canvas carries no canvas flag')
+  await p.close(sid)
+})
+
+test('the canvas detector only fires for a canvas that covers the viewport', () => {
+  const source = readFileSync(new URL('../src/browser-electron/provider.ts', import.meta.url), 'utf8')
+  const at = source.indexOf('let canvas')
+  assert.ok(at !== -1, 'the detector exists')
+  const block = source.slice(at, at + 900)
+  // Two guards: a minimum size per canvas, and a share of the viewport. Without the share a
+  // decorative 200x150 canvas in a footer would claim the whole page is undrivable.
+  assert.match(block, /r\.width < 80 \|\| r\.height < 80/, 'small canvases are ignored')
+  assert.match(block, /area \/ view >= 0\.1/, 'and only a large one counts')
+  assert.match(block, /out\.length === 0/, 'it is only consulted when nothing else was found')
+  assert.match(block, /dsh_browser_screenshot/, 'and the note names the tool to use instead')
+})
+
+// Measured on the same page: after a tab switch every command failed with "Session with given id
+// not found" and nothing in the plugin ever recovered — open, refresh and execute all failed until
+// the browser was restarted. The session id is worthless after that, but the VIEW is fine.
+test('a stale CDP session is rebuilt once instead of failing forever', () => {
+  const source = readFileSync(new URL('../src/browser-electron/system-browser.ts', import.meta.url), 'utf8')
+  const at = source.indexOf('const sendWithAttach')
+  assert.ok(at !== -1, 'the recovery wrapper exists')
+  const block = source.slice(at, at + 1600)
+  assert.match(block, /Session with given id not found/, 'it recognises the stale-session error')
+  assert.match(block, /this\.views\.delete\(viewId\)/, 'it drops the dead attach')
+  assert.match(block, /this\.sessions\.delete\(target\)/, 'and its target mapping')
+  assert.match(block, /const rebuilt = await this\.ensureSession\(viewId\)/, 'then attaches again')
+  assert.match(block, /client\.send\(method, params, rebuilt\)/, 'and retries the command once')
+  // Exactly one retry: a second failure is not a stale id, and looping would hide it.
+  const retries = (block.match(/await client\.send\(method, params, rebuilt\)/g) ?? []).length
+  assert.equal(retries, 1, 'the retry happens exactly once')
+})

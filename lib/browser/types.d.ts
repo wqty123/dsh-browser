@@ -366,6 +366,13 @@ export interface BrowserSnapshotResult {
     readonly blank?: boolean;
     /** A sentence a caller can show instead of reporting an empty page as a successful read. */
     readonly note?: string;
+    /**
+     * True when the page draws its interface on a canvas, so no DOM element exists to collect.
+     *
+     * Distinct from `blank`: the page is fully rendered and interactive, just not as elements. A
+     * caller must switch to a screenshot and coordinate input rather than conclude the page is empty.
+     */
+    readonly canvas?: boolean;
 }
 /**
  * One node of the accessibility tree, with a stable reference number the

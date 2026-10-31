@@ -300,17 +300,21 @@ function formatSnapshot(snapshot: {
   challenge?: { blocked: boolean; kind?: string; reason?: string }
   blank?: boolean
   note?: string
+  canvas?: boolean
 }, options: { coords?: boolean } = {}): string {
   const showCoords = options.coords === true
   const lines = snapshot.elements.map(el => `[${el.ref}] ${el.kind}: ${el.label}${el.selector !== undefined && el.selector !== '' ? ` {${el.selector}}` : ''}${el.frame === true ? ' (iframe)' : ''}${showCoords ? ` (${el.x},${el.y})` : ''}`)
   const header = `URL: ${snapshot.url}${snapshot.title !== undefined ? `\nTitle: ${snapshot.title}` : ''}`
-  // A blank page and a page with nothing interactive are different facts, and the old wording
-  // reported both as "no interactive elements found" — a success value for a browser that has
-  // opened nothing (issue #37). Say which one this is, and say what to do about it.
+  // A blank page, a canvas page and a page with nothing interactive are three different facts, and
+  // the old wording reported all of them as "no interactive elements found" — which reads as a
+  // successful look. Each now says what it is and what to do next.
   const body = snapshot.blank === true
     ? `BLANK PAGE: ${snapshot.note ?? 'nothing has been opened in this browser'}. `
       + 'Do not drive this page — open a URL first (`dsh_browser_open`).'
-    : lines.length > 0 ? lines.join('\n') : '(no interactive elements found)'
+    : snapshot.canvas === true
+      ? `CANVAS PAGE: ${snapshot.note ?? 'this page draws its interface on a canvas'}. `
+        + 'A DOM snapshot cannot describe it; use `dsh_browser_screenshot` and coordinate clicks.'
+      : lines.length > 0 ? lines.join('\n') : '(no interactive elements found)'
   const tail = snapshot.truncated === true ? '\n(snapshot truncated)' : ''
   const banner = snapshot.challenge?.blocked === true
     ? `\n\nCHALLENGE: ${snapshot.challenge.reason ?? 'human-verification'}. Do NOT keep retrying — ask the human to complete it in the shared browser window, then re-snapshot.`

@@ -1146,9 +1146,38 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       const session = cachedView !== undefined && cachedView.client === client
         ? cachedView.session
         : await this.ensureSession(viewId)
+      /**
+       * Send one page command, rebuilding the attach once if the browser no longer knows the
+       * session.
+       *
+       * "Session with given id not found" means the session id is stale, and the causes differ:
+       * a replaced client (handled where the client is dropped), a target the browser destroyed,
+       * or a detach the page performed on itself. What they share is that the id is worthless and
+       * the VIEW is fine, so the right answer is one fresh attach — not an error to the caller and
+       * not a new page. Measured while solving a sudoku on a canvas page: after a tab switch every
+       * command failed with this text and nothing in the plugin ever recovered it.
+       *
+       * Retried exactly once: a failure that survives a fresh attach is not a stale id, and
+       * repeating it would turn an error into a loop.
+       */
+      const sendWithAttach = async (target: string): Promise<Record<string, unknown>> => {
+        try {
+          const result = await client.send(method, params, target)
+          return (result ?? {}) as Record<string, unknown>
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (!/Session with given id not found|No session with given id/i.test(message)) throw error
+          // Drop the dead attach so `ensureSession` builds a new one instead of returning the same id.
+          const stale = this.views.get(viewId)
+          if (stale !== undefined) this.views.delete(viewId)
+          this.sessions.delete(target)
+          const rebuilt = await this.ensureSession(viewId)
+          const retried = await client.send(method, params, rebuilt)
+          return (retried ?? {}) as Record<string, unknown>
+        }
+      }
       try {
-        const result = await client.send(method, params, session)
-        return (result ?? {}) as Record<string, unknown>
+        return await sendWithAttach(session)
         } catch (error) {
           // A CDP protocol error means the browser ANSWERED and refused this one command, so the
           // connection is healthy and must be kept. Deciding by the error TEXT misfires both
