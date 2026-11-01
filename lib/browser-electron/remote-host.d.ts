@@ -26,7 +26,7 @@
  * unauthenticated peer can neither read traffic nor drive a session.
  * @module dsh-browser/browser-electron/remote-host
  */
-import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle } from './provider.js';
+import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, PresentOptions } from './provider.js';
 /**
  * Locate a SPAWNABLE Electron binary — one that runs a script given as an
  * argument, i.e. a BARE electron, never a packaged app executable:
@@ -209,7 +209,7 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
     private onChildExit;
     createView(): ElectronViewHandle;
     private ensureView;
-    showView(handle: ElectronViewHandle, label?: string): void;
+    showView(handle: ElectronViewHandle, label?: string, options?: PresentOptions): void;
     /**
      * (Re)present a view and WAIT for the child to confirm it, so the provider
      * can dispatch CDP `Input.*` knowing the view has a display surface.
@@ -225,7 +225,7 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
      * in order: its reply is queued behind the showView and so only arrives once
      * the visibility change has been applied.
      */
-    presentView(handle: ElectronViewHandle, label?: string): Promise<void>;
+    presentView(handle: ElectronViewHandle, label?: string, options?: PresentOptions): Promise<void>;
     /** Route a view into its session's own window (one window per session). */
     groupView(handle: ElectronViewHandle, windowId: string, label?: string): void;
     /** Register the provider's handler for user-initiated toolbar actions. */

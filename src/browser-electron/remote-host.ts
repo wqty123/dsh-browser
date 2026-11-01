@@ -35,7 +35,7 @@ import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
-import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, ScreenshotOptions } from './provider.js'
+import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, PresentOptions, ScreenshotOptions } from './provider.js'
 import type { ExportedCookie } from '../browser/types.js'
 
 /** How long to wait for the child to signal readiness before failing. */
@@ -1196,13 +1196,19 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     return view
   }
 
-  showView(handle: ElectronViewHandle, label?: string): void {
+  showView(handle: ElectronViewHandle, label?: string, options?: PresentOptions): void {
     // Fire-and-forget by design (visibility is best-effort), but a rejected
     // promise must not become an unhandled rejection (crash on Node >= 15).
     // The label (session/task id) rides along so the child can show it in the
     // window title — a human can then tell which task's page is visible.
+    // `quiet` is only sent when it is on: the child's default is the documented
+    // "present and raise" behaviour, so an old child keeps working either way.
     void this.ready()
-      .then(() => this.client?.call('showView', { viewId: handle.id, ...label !== undefined ? { label } : {} }))
+      .then(() => this.client?.call('showView', {
+        viewId: handle.id,
+        ...label !== undefined ? { label } : {},
+        ...options?.quiet === true ? { quiet: true } : {},
+      }))
       .catch(() => { /* host unavailable */ })
   }
 
@@ -1221,7 +1227,7 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
    * in order: its reply is queued behind the showView and so only arrives once
    * the visibility change has been applied.
    */
-  async presentView(handle: ElectronViewHandle, label?: string): Promise<void> {
+  async presentView(handle: ElectronViewHandle, label?: string, options?: PresentOptions): Promise<void> {
     await this.ready()
     const client = this.client
     if (client === undefined) throw new HostGoneError('browser host unavailable')
@@ -1232,7 +1238,15 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
       await withTimeout(handle.ensureMaterialized(), PRESENT_TIMEOUT_MS, 'browser host did not materialize the view')
     }
     await withTimeout(
-      client.call('showView', { viewId: handle.id, ...label !== undefined ? { label } : {} }),
+      client.call('showView', {
+        viewId: handle.id,
+        ...label !== undefined ? { label } : {},
+        // `needSurface` tells the child this is the pre-input barrier: under quiet mode this
+        // is the only presentation allowed to un-minimize a window, because Chromium drops
+        // `Input.*` without a display surface. One line below in the child, and only read
+        // there when `quiet` is set.
+        ...options?.quiet === true ? { quiet: true, needSurface: true } : {},
+      }),
       PRESENT_TIMEOUT_MS,
       'browser host did not confirm the view presentation',
     )

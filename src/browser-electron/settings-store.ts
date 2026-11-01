@@ -48,6 +48,25 @@ export interface BrowserSettings {
     readonly closeWithSession: boolean
     /** Show the synthetic cursor/click feedback while the agent operates. */
     readonly virtualCursor: boolean
+    /**
+     * Quiet mode: drive the page without taking over the screen.
+     *
+     * Off (the default) keeps the contract this plugin is built on — human and agent share one
+     * window, so an operation raises it and the user can see what is being driven. On, the
+     * carrier never activates the application and never steals keyboard focus:
+     *   - screenshots of a minimized or hidden window go through CDP `Page.captureScreenshot`
+     *     instead of `capturePage()`, so grabbing an image stops being a reason to show a window;
+     *   - navigation and tab switching only change which view is visible INSIDE the window; a
+     *     minimized window stays minimized;
+     *   - synthesized input still needs a display surface (Chromium drops `Input.*` for a view
+     *     without one), so that one barrier may restore a minimized window — with
+     *     `showInactive()`, which shows it without becoming the key window, and without
+     *     `moveTop()`.
+     *
+     * Reported as issue #35: a minimized browser window was restored and focused by the next
+     * screenshot or click, pulling the user out of whatever they were typing in.
+     */
+    readonly quiet: boolean
   }
   /** Visual vs non-visual operation strategy. */
   readonly vision: {
@@ -111,7 +130,7 @@ export interface BrowserSettings {
 export const DEFAULT_SETTINGS: BrowserSettings = {
   history: { enabled: true, maxEntries: 5_000, maxAgeDays: 90 },
   cookies: { persist: true },
-  ui: { autoExpandOnce: true, closeWithSession: false, virtualCursor: true },
+  ui: { autoExpandOnce: true, closeWithSession: false, virtualCursor: true, quiet: false },
   vision: { strategy: 'auto' },
   // Bundled by default: it needs nothing installed, and on the desktop the carrier
   // is the sidebar anyway. Choosing a system browser is an explicit opt-in because
@@ -296,6 +315,10 @@ export function resolveSettings(raw: unknown, warn?: (message: string) => void):
       autoExpandOnce: bool(ui?.autoExpandOnce, DEFAULT_SETTINGS.ui.autoExpandOnce),
       closeWithSession: bool(ui?.closeWithSession, DEFAULT_SETTINGS.ui.closeWithSession),
       virtualCursor: bool(ui?.virtualCursor, DEFAULT_SETTINGS.ui.virtualCursor),
+      // Presentation preference, not a capability gate: a mistyped value keeps the documented
+      // default (off) instead of being read as "on", because quiet mode changes how every
+      // operation presents itself and should never be the accidental result of a bad edit.
+      quiet: bool(ui?.quiet, DEFAULT_SETTINGS.ui.quiet),
     },
     vision: { strategy: vision?.strategy === 'nonVisual' ? 'nonVisual' : DEFAULT_SETTINGS.vision.strategy },
     browser: {

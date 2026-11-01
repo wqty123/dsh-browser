@@ -76,6 +76,51 @@
 
 ---
 
+# 第五十三轮(2026-10-30,安静模式:Agent 操作不再还原窗口、不抢焦点)
+
+用户报告(issue #35):把浏览器窗口最小化后,agent 下一次截图或点击会把它重新弹出来并抢走键盘焦点 —— 正在别处打字的内容就丢了。要求不是改默认行为,而是**新增一个配置项「安静模式」**,由用户决定要不要"agent 在后台干活"。
+
+## 根因
+
+不是某一条路径忘了判断,而是两个既有设计假设:
+
+- **截图必须看得见**:自托管截图先 `show()` / `restore()` / `focus()` 再 `capturePage()`,因为 `capturePage` 对隐藏/最小化视图返回空图。CDP `Page.captureScreenshot` 本来就不需要显示表面,但它被放在 `capturePage` 失败后的兜底里,还带一轮 detach/restore 兄弟视图的重活;
+- **输入必须有表面**:Chromium 对没有显示表面的视图静默丢弃 `Input.*`,于是 `presentView()` 在每次点击/输入前把窗口 `show()` + `moveTop()`。这条屏障本身是对的,错的是它默认"呈现 = 接管屏幕"。
+
+## 改法
+
+新增 `ui.quiet`(默认 `false`),沿用既有设置文档与设置面板;不开启时行为与改动前完全一致(0.5.2 的默认路径不变)。打开后由 provider 把决定随每次 `showView` / `presentView` / `capture` 传给载体,`host-main` 按它分叉:
+
+| 路径 | `ui.quiet: false`(默认) | `ui.quiet: true` |
+| --- | --- | --- |
+| 截图 | `show()` / `restore()` / `focus()` → `capturePage` | 不碰窗口;`capturePage` 拿到空图时走 CDP 兜底 |
+| `showView` | `show()` + `moveTop()` | 导航/切标签:只换窗口内可见标签;输入屏障:最小化则 `restore()`、不可见则 `showInactive()`,不 `moveTop()` |
+| 工具栏/用户操作 | 不变 | 不变(本来就发生在该窗口内) |
+
+三个关键决定:
+
+1. **默认关闭**。共享同一个窗口是这个插件的立身之本,quiet 必须是用户显式选择;设置面板新增「安静模式」开关与说明。
+2. **输入仍然呈现,只是不抢焦点**。`showInactive()` 让窗口可见但不成为 key window,这是在不破坏 Chromium 输入前提下的最小让步 —— 文档里写明了"点击/输入仍可能让窗口出现"。
+3. **截图与导航彻底不动窗口**。用户抱怨最直接的是截图(纯观察却把窗口弹出来);导航同理,没有任何理由为此把最小化的窗口拉回来。两者都只做窗口内的标签切换,截图在 `capturePage` 空图后直接走 CDP 兜底,不再 restore。真正的输入屏障是唯一例外 —— 没有显示表面就没有输入。
+
+## 改动文件
+
+- `settings-store.ts`:`ui.quiet` 字段、默认值、解析(类型不对按默认关,不会因为一个手滑的 `"true"` 打开);
+- `provider.ts`:`isQuiet()` 实时读设置,`showView` / `presentView` / `capture` 携带 `quiet`;截图在 quiet 下不再调用 `showActive`;
+- `remote-host.ts`:RPC 透传(只在 true 时携带,旧子进程不受影响);
+- `host-main.ts`:抽出 `revealViewInWindow`(只换窗口内可见标签),`showViewInWindow(…, quiet, needSurface)` 按"是否需要表面"分叉,`capture` 跳过还原/聚焦;
+- `client.js`:设置页新增「安静模式」开关(中英文案);
+- `docs/limitations.md`:quiet 的边界(只作用自托管载体、输入仍需要可见表面);
+- `tests/quiet-mode.test.mjs`(新增)+ `tests/settings-store.test.mjs`:4 条断言开关贯通,2 条断言默认值与手滑值。
+
+## 验证
+
+rebase 到 0.5.2(5442a00)后 `tsc` 干净(完整 peer 依赖,0 error);全量 **419** 条,通过 **414**。5 条失败都是既有问题,与改动无关:4 条本机沙箱/权限检查(未修改的 HEAD 同样失败),1 条 `electron-install` 在 macOS 上把 `/var` 与 `/private/var` 当成不同路径(upstream/master 上同样失败)。
+
+**未验证**:真实 Electron 窗口上的最小化/焦点行为没有自动化覆盖。`host-main` 只能跑在 Electron 子进程里,现有测试套件从不启动它;`showInactive` 的行为(可见但不成为 key window)与 macOS/Windows 的窗口管理器相关,建议合入前在真机上各点一次。这一点会写进 PR。
+
+---
+
 # 第五十二轮(2026-10-19,两个启动缺陷:hand-off 只认一次、启动参数白送一个空标签)
 
 报告者在 Windows 11 + Chrome 156 上报了两个,并自己定位了位置。他先报在 0.4.7 上,**升到 0.4.14 复测后两个都仍在** —— 我核实确认。

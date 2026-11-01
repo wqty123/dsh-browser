@@ -144,8 +144,10 @@ export interface ElectronBrowserViewHost {
    * @param label - human-readable session/task label, when the provider knows
    * one; the host may surface it (e.g. in the window title) so a human can
    * tell which task's page is currently visible.
+   * @param options - presentation policy; `quiet` asks for a surface without taking
+   * over the screen (see {@link PresentOptions}).
    */
-  showView?(handle: ElectronViewHandle, label?: string): void
+  showView?(handle: ElectronViewHandle, label?: string, options?: PresentOptions): void
   /**
    * Optional: (re)present a view and WAIT until the host confirms it. Chromium
    * silently drops CDP-synthesized input (`Input.*`) for a view that has no
@@ -158,8 +160,9 @@ export interface ElectronBrowserViewHost {
    * assumed to present every view (headless/probe hosts).
    * @param handle - the handle to present.
    * @param label - human-readable session/task label, as in {@link showView}.
+   * @param options - presentation policy, as in {@link showView}.
    */
-  presentView?(handle: ElectronViewHandle, label?: string): Promise<void>
+  presentView?(handle: ElectronViewHandle, label?: string, options?: PresentOptions): Promise<void>
   /**
    * Optional: pages this carrier holds that the provider never created.
    *
@@ -610,12 +613,35 @@ export function toCdpCookie(cookie: ExportedCookie): Record<string, unknown> | u
   }
 }
 
+/**
+ * How the carrier should present a view before it is used.
+ *
+ * `quiet` is the resolved `ui.quiet` switch. It does not mean "invisible": Chromium drops
+ * synthesized `Input.*` for a view without a display surface, so input still needs one. It means
+ * the carrier must get that surface without taking the screen over — no application activation
+ * and no keyboard focus. Navigation and tab switching only reveal the view inside its window; the
+ * pre-input barrier may restore a minimized window (it needs the surface), but even then it shows
+ * it inactive instead of focusing or raising it. A host that cannot honour this (a headless probe,
+ * the desktop sidebar) simply ignores it.
+ */
+export interface PresentOptions {
+  readonly quiet?: boolean
+}
+
 /** Native capture options the self-hosted view handle understands. */
 export interface ScreenshotOptions {
   readonly format?: 'png' | 'jpeg'
   readonly quality?: number
   readonly maxWidth?: number
   readonly maxHeight?: number
+  /**
+   * Capture without presenting the window first (`ui.quiet`).
+   *
+   * The self-hosted host answers this by skipping its restore/show/focus step: a visible window
+   * still captures through `capturePage()`, and a minimized or hidden one falls through to the
+   * CDP path, which needs no display surface.
+   */
+  readonly quiet?: boolean
 }
 /** CDP method for runtime evaluation (the execute path). */
 export const CDP_RUNTIME_EVALUATE = 'Runtime.evaluate'
@@ -1198,7 +1224,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const timeoutMs = 10_000
     try {
       await withTimeout(
-        present(handle, s.label),
+        present(handle, s.label, { quiet: this.isQuiet() }),
         timeoutMs,
         signal,
         `browser: presenting the page view timed out after ${timeoutMs}ms`,
@@ -3263,14 +3289,18 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // can produce JPEG (CDP JPEG hangs on Electron 43).
     const capturable = handle
     if (request?.fullPage !== true && typeof capturable.capture === 'function') {
-      // Ensure the target view is the visible one before capturing.
-      this.showActive(s)
+      // Ensure the target view is the visible one before capturing — unless quiet mode is on.
+      // There, presenting the view is exactly what the user asked to avoid (it restores and
+      // raises the window); the host switches the visible tab inside the window and, if the
+      // window has no surface to capture, falls through to CDP.
+      if (!this.isQuiet()) this.showActive(s)
       const timeoutMs = 30_000
       const shot = await withTimeout(
         capturable.capture({
           ...format === 'jpeg' ? { format, quality: request?.quality } : {},
           ...request?.maxWidth !== undefined ? { maxWidth: request.maxWidth } : {},
           ...request?.maxHeight !== undefined ? { maxHeight: request.maxHeight } : {},
+          quiet: this.isQuiet(),
         }),
         timeoutMs,
         signal,
@@ -3745,6 +3775,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /**
+   * Whether the operator asked for quiet mode (`ui.quiet`).
+   *
+   * Read live on every call rather than captured at construction: the panel writes the document
+   * and the next operation is expected to honour it, without a restart.
+   * @returns true when the carrier must present views without taking the screen over.
+   */
+  private isQuiet(): boolean {
+    return this.settingsSource?.().ui.quiet === true
+  }
+
+  /**
    * Ask the host to show the active tab's view, carrying the session label.
    *
    * The two halves are sequential, not alternatives. `showView` makes the view the
@@ -3756,7 +3797,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * silently desynchronising the two and failing every screenshot.
    */
   private showActive(s: Session): void {
-    this.host.showView?.(this.activeTab(s).handle, s.label)
+    this.host.showView?.(this.activeTab(s).handle, s.label, { quiet: this.isQuiet() })
     const autoExpand = this.settingsSource === undefined || this.settingsSource().ui.autoExpandOnce
     if (autoExpand) return
     // Best effort: a carrier that owns no presentation (self-hosted) simply has none.

@@ -40,6 +40,25 @@ export interface BrowserSettings {
         readonly closeWithSession: boolean;
         /** Show the synthetic cursor/click feedback while the agent operates. */
         readonly virtualCursor: boolean;
+        /**
+         * Quiet mode: drive the page without taking over the screen.
+         *
+         * Off (the default) keeps the contract this plugin is built on — human and agent share one
+         * window, so an operation raises it and the user can see what is being driven. On, the
+         * carrier never activates the application and never steals keyboard focus:
+         *   - screenshots of a minimized or hidden window go through CDP `Page.captureScreenshot`
+         *     instead of `capturePage()`, so grabbing an image stops being a reason to show a window;
+         *   - navigation and tab switching only change which view is visible INSIDE the window; a
+         *     minimized window stays minimized;
+         *   - synthesized input still needs a display surface (Chromium drops `Input.*` for a view
+         *     without one), so that one barrier may restore a minimized window — with
+         *     `showInactive()`, which shows it without becoming the key window, and without
+         *     `moveTop()`.
+         *
+         * Reported as issue #35: a minimized browser window was restored and focused by the next
+         * screenshot or click, pulling the user out of whatever they were typing in.
+         */
+        readonly quiet: boolean;
     };
     /** Visual vs non-visual operation strategy. */
     readonly vision: {
