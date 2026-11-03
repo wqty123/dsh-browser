@@ -1180,3 +1180,65 @@ test('the hidden attribute actually hides the preview image', () => {
   // And the script still uses the attribute, which is what the rule makes effective.
   assert.match(source, /img\.hidden = true/)
 })
+
+// ---------------------------------------------------------------------------
+// Issue #46 follow-up: remote viewing is switched on from the settings panel, and it takes effect
+// at once. Editing the settings file and reloading was the only way before, which is not something a
+// phone can do at all.
+// ---------------------------------------------------------------------------
+
+test('the settings panel offers the remote-view switch, bound to the document', async () => {
+  const { tree } = await mount({ settings: { ...DEFAULT_SETTINGS, remoteView: { enabled: false } } })
+  const toggle = elements(tree).find(element => element.props?.labelKey === 'remoteView.enabled')?.props
+  assert.ok(toggle !== undefined, 'the switch is rendered')
+  assert.equal(toggle.checked, false, 'and shows what the document says')
+
+  const on = await mount({ settings: { ...DEFAULT_SETTINGS, remoteView: { enabled: true } } })
+  const checked = elements(on.tree).find(element => element.props?.labelKey === 'remoteView.enabled')?.props
+  assert.equal(checked.checked, true, 'including when it is on')
+})
+
+test('flipping the remote-view switch writes exactly that field and re-evaluates the entry', async () => {
+  // The re-evaluation is the whole point: a write that only stored the value left the user with a
+  // switch that did nothing until a reload (issue #46).
+  let enabled = false
+  const asked = []
+  // Serve the settings document as well as the two watch endpoints: the panel renders nothing until
+  // its GET succeeds, and a mock that only knows the watch routes hides the switch under test.
+  const documentSettings = () => ({ ...DEFAULT_SETTINGS, remoteView: { enabled } })
+  const fetchMock = async (url, init) => {
+    const path = String(url)
+    if (path.includes('/browser-view/sessions')) {
+      asked.push('sessions')
+      return { ok: true, status: 200, json: async () => ({ enabled, sessions: [] }) }
+    }
+    if (path.includes('/bridge-status')) {
+      asked.push('bridge-status')
+      return { ok: true, status: 200, json: async () => ({ bridge: { state: 'installed', present: true } }) }
+    }
+    if (path.includes('/dsh-builtin-browser/settings')) {
+      if (init?.method === 'PUT') {
+        const body = JSON.parse(init.body)
+        enabled = body.remoteView.enabled === true
+        return { ok: true, status: 200, json: async () => ({ ok: true, settings: documentSettings() }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true, settings: documentSettings(), path: '' }) }
+    }
+    return { ok: false, status: 404, json: async () => ({}) }
+  }
+
+  const { tree } = await mount({ fetch: fetchMock, document: documentWith(), settings: { ...DEFAULT_SETTINGS, remoteView: { enabled: false } } })
+  await tick()
+  const layerCount = () => elements(activeDocument.body.children ?? []).filter(node => String(node.className) === 'dsh-bw-watch').length
+  assert.equal(layerCount(), 0, 'off: no entry')
+
+  const toggle = elements(tree).find(element => element.props?.labelKey === 'remoteView.enabled')?.props
+  assert.ok(toggle !== undefined)
+  await toggle.onChange(true)
+  await tick()
+  await tick()
+
+  const writes = asked.length
+  assert.ok(writes > 0, 'the switch re-evaluated the entry instead of only storing the value')
+  assert.equal(layerCount(), 1, 'and the entry is on screen without a reload')
+})

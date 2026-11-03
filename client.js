@@ -26,6 +26,14 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   const NS = "settings.dsh-builtin-browser"
   const ROUTE = "/dsh-builtin-browser/settings"
   let translate = (key) => key
+  /**
+   * Re-evaluate the floating watch entry.
+   *
+   * Set by `installWatchPanel`, called by the settings writer after a `remoteView` change so the
+   * switch takes effect on the spot. A no-op until the panel is installed, and a no-op forever on a
+   * host without one.
+   */
+  let refreshWatchEntry = () => {}
 
   const zh = {
     nav: "浏览器",
@@ -88,6 +96,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "actions.allowDownload.hint": "dsh_browser_download 会把 URL 下载到 downloadDir 内(带登录态;仍需通过目录准入,不覆盖已有文件)。关闭后一律被拒(BROWSER_DOWNLOAD_DISABLED)。截图另存走的是同一套目录准入,不受此项影响。",
     "actions.allowCredentialWrite": "允许写入登录状态",
     "actions.allowCredentialWrite.hint": "dsh_browser_auth 的 restore 会向任意域写入 cookie。关闭后只能导出、不能导入(BROWSER_AUTH_WRITE_DISABLED);读取仍由上面「凭据」那一项控制。",
+    "remoteView.title": "远程观看",
+    "remoteView.enabled": "允许从其它设备观看这台机器的浏览器",
+    "remoteView.enabled.hint": "打开后,本机右下角出现一个只读画面入口:2 fps、JPEG、一帧一请求,不转发点击与键盘。改动**立刻生效**,不需要刷新页面。关闭时入口消失,相关端点也不返回图像。",
   }
 
   const en = {
@@ -151,9 +162,18 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "actions.allowDownload.hint": "dsh_browser_download fetches a URL into downloadDir (with login state; still subject to the directory admission gate, never overwriting an existing file). Off refuses it outright (BROWSER_DOWNLOAD_DISABLED). Saving a screenshot goes through the same directory gate and is not covered by this switch.",
     "actions.allowCredentialWrite": "Write login state",
     "actions.allowCredentialWrite.hint": "dsh_browser_auth's restore writes cookies to arbitrary domains. Off allows export but not import (BROWSER_AUTH_WRITE_DISABLED); reading stays under the Credentials switch above.",
+    "remoteView.title": "Remote viewing",
+    "remoteView.enabled": "Let other devices watch this machine's browser",
+    "remoteView.enabled.hint": "On, a read-only view appears in the bottom-right corner here: 2 fps, JPEG, one frame per request, and no forwarding of clicks or keys. The change applies **immediately** — no page reload needed. Off, the entry disappears and the endpoints return no image.",
   }
 
-  /** Read or patch the host-owned settings document. */
+  /**
+   * Read or patch the host-owned settings document.
+   *
+   * A patch that touches remote viewing re-evaluates the floating entry right away. Without that,
+   * turning the switch on wrote the file and did nothing anyone could see until the page was
+   * reloaded — unusable from a phone, and reported as such on #46.
+   */
   async function callSettings(patch) {
     const response = await fetch(ROUTE, patch === undefined
       ? { method: "GET", headers: { accept: "application/json" } }
@@ -165,6 +185,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     const data = await response.json().catch(() => undefined)
     if (data === undefined || data.ok !== true) {
       throw new Error((data && data.error) || `HTTP ${response.status}`)
+    }
+    if (patch !== undefined && patch !== null && typeof patch === "object" && patch.remoteView !== undefined) {
+      try { refreshWatchEntry() } catch { /* the entry is a convenience, not the setting */ }
     }
     return data
   }
@@ -652,6 +675,20 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
           checked: settings.credentials.allowRead,
           busy,
           onChange: value => patch({ credentials: { allowRead: value } }),
+        }),
+      ]),
+
+      // Reported on #46: turning remote viewing on had to be done by editing the settings file and
+      // reloading the page — and a phone has no keyboard shortcut to reload with. The switch belongs
+      // here, and flipping it applies immediately (see `callSettings`).
+      section("remoteView.title", [
+        h(Toggle, {
+          key: "remoteViewEnabled",
+          labelKey: "remoteView.enabled",
+          hintKey: "remoteView.enabled.hint",
+          checked: settings.remoteView.enabled,
+          busy,
+          onChange: value => patch({ remoteView: { enabled: value } }),
         }),
       ]),
 
@@ -1353,6 +1390,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     ctx.effect(() => () => {
       stop()
       unmount()
+      refreshWatchEntry = () => {}
     }, "dsh-builtin-browser: live view panel")
 
     /**
@@ -1403,12 +1441,18 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     const mountIfEnabled = async () => {
       const found = await probe()
       if (!found.enabled) {
+        // Turning the feature off must also stop what it started: a running stream outliving its own
+        // switch is the sort of state that looks like a ghost later.
+        stop()
         unmount()
         return
       }
       mount()
       await showBridgeStatus()
     }
+    // The settings switch calls this after writing `remoteView.enabled` (issue #46): no page reload,
+    // which is the difference between usable and useless on a phone.
+    refreshWatchEntry = () => { void mountIfEnabled() }
     void mountIfEnabled()
   }
 

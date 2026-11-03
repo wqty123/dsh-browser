@@ -91,7 +91,7 @@ Parameters, outputs and examples: [tool reference](docs/tool-reference.md).
 
 When DSH runs on a machine you are not sitting at, the browser is on that machine's screen. With `remoteView.enabled` turned on, the panel offers a **read-only** view: 2 fps, JPEG quality 70, scaled into 1280×720, one frame per request (slow links degrade instead of queueing), never written to disk, never entering the chat or model context. It does not forward clicks, keys or wheel events.
 
-While it is off there is **no floating entry and no diagnostic request**; once it is on, the entry appears on the **next page load** (the client reads the switch once at startup rather than polling).
+While it is off there is **no floating entry and no diagnostic request**; the "Remote viewing" switch in settings brings the entry up **immediately** — no page reload, and no keyboard shortcut (a phone has none).
 
 Three same-origin endpoints: `GET /dsh-builtin-browser/browser-view/sessions`, `GET …/browser-view/frame?session=…`, `GET /dsh-builtin-browser/bridge-status`.
 

@@ -11,9 +11,13 @@ const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 
 const ZH_START = source.indexOf('const zh = {')
 const EN_START = source.indexOf('const en = {')
-// The English table ends where the panel's own code begins. Slicing to the end of the file
-// instead pulled that code in, and its own `key: "…"` lines read as locale keys.
-const EN_END = source.indexOf('/** Read or patch the host-owned settings document.')
+// The English table ends where the panel's code begins. Slicing to the end of the file instead
+// pulled that code in, and its own `key: "…"` lines read as locale keys.
+//
+// Anchored on a function declaration rather than on a comment: the comment above it was rewritten
+// once and this extractor reported "both locale tables are absent", which is a confusing way to say
+// "the anchor moved".
+const EN_END = source.indexOf('async function callSettings')
 assert.ok(ZH_START !== -1 && EN_START !== -1 && EN_END !== -1 && EN_START > ZH_START, 'both locale tables are present')
 
 const zhBlock = source.slice(ZH_START, EN_START)
