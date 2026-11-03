@@ -18,6 +18,7 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { readDesktopIdentity } from './desktop-identity.js'
 
@@ -79,13 +80,39 @@ export interface BridgeStatus {
 }
 
 /**
+ * The installer script inside THIS plugin package.
+ *
+ * Reported as issue #40, fourth item: the panel told users to run
+ * `node desktop-bridge/install.mjs "<root>" --restart`, which assumes the reader is standing in a
+ * source checkout. Anyone who installed the plugin from npm or the market has no such relative path —
+ * the file lives inside the installed package, and there is nowhere sensible for them to run the
+ * command from. Resolving it from this module's own location is the difference between a hint and an
+ * instruction that works.
+ * @returns the absolute path, or undefined when the package layout is unexpected.
+ */
+function installerScriptPath(): string | undefined {
+  try {
+    // lib/browser-electron/bridge-status.js → <package>/desktop-bridge/install.mjs
+    const url = new URL('../../desktop-bridge/install.mjs', import.meta.url)
+    const path = fileURLToPath(url)
+    return safeExists(path) ? path : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * The command a user should run for this state, quoted so it survives a path with spaces.
  * @param installRoot - the install directory, or undefined when none was found.
  * @returns the command line, or undefined when there is nothing useful to suggest.
  */
 function repairCommand(installRoot: string | undefined): string | undefined {
   if (installRoot === undefined) return undefined
-  return `node desktop-bridge/install.mjs "${installRoot}" --restart`
+  const script = installerScriptPath()
+  // No absolute path means the package is laid out in a way this module cannot navigate; the bare
+  // relative form is still better than nothing, but it is the fallback, not the default.
+  const runner = script === undefined ? 'desktop-bridge/install.mjs' : `"${script}"`
+  return `node ${runner} "${installRoot}" --restart`
 }
 
 /**

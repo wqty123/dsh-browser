@@ -6,7 +6,7 @@
 // still in the unpacked tree, the shell loads the archive, and everything LOOKS installed.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -103,6 +103,9 @@ test('a directory that is not an install reports that, instead of throwing', () 
 })
 
 test('the repair command is offered, quoted, and never executed', () => {
+  // Issue #40, fourth item: the command used to be `node desktop-bridge/install.mjs …`, which is a
+  // path relative to a source checkout. Anyone who installed the plugin from npm has no such path,
+  // so the "hint" sent them to a file that does not exist. It must name THIS package's installer.
   const root = makeInstall({ patched: false })
   try {
     const status = readBridgeStatus(root)
@@ -110,6 +113,13 @@ test('the repair command is offered, quoted, and never executed', () => {
     assert.match(status.command, /install\.mjs/, 'it names the installer')
     assert.ok(status.command.includes(`"${root}"`), 'and quotes the path, which may contain spaces')
     assert.match(status.command, /--restart/, 'and asks for the close-install-restart flow')
+
+    const named = /node "([^"]+install\.mjs)"/.exec(status.command)
+    assert.ok(named !== null, 'the installer is quoted in full')
+    assert.equal(named[1].includes('..'), false, 'an absolute path, not one relative to the reader')
+    assert.equal(existsSync(named[1]), true,
+      'the file the command names exists on this machine — the whole point of the fix')
+    assert.match(named[1], /desktop-bridge[\\/]install\.mjs$/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
