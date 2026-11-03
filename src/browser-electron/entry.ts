@@ -15,6 +15,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import z from '@deepseek-ai/schemastery'
 import type { BrowserRuntime } from '../browser/runtime.js'
 import { ElectronBrowserProvider } from './provider.js'
+import { provisionElectronInBackground } from './electron-provision.js'
 import type { ElectronBrowserViewHost } from './provider.js'
 import type { CarrierLossReason } from '../browser/types.js'
 import { randomUUID } from 'node:crypto'
@@ -153,6 +154,17 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // different lifetimes (a spawned child vs. the shell's view), and pretending
   // otherwise would leave a stray window behind.
   const selfHosted = new RemoteElectronViewHost(defaultHostMainPath())
+  // The self-hosted carrier is the only one that needs Electron, and it is prepared HERE, lazily,
+  // rather than during package installation (issue #41: a `postinstall` download made a default
+  // pnpm 11 profile refuse the install outright, and a failed fetch failed the install too).
+  //
+  // Non-fatal by construction: this never rejects, never blocks a tool call, and its failure leaves
+  // the sidebar / Chrome / Edge carriers untouched. Only the two channels that can use the bundled
+  // runtime are worth the download; an explicit chrome/edge choice is not.
+  const wantedChannel = settings.get().browser.channel
+  if (wantedChannel === 'bundled' || wantedChannel === 'auto') {
+    void provisionElectronInBackground(message => ctx.logger?.info?.(`dsh-builtin-browser: ${message}`))
+  }
   let unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(selfHosted, providerConfig))
   let disposed = false
   let carrierChoice = 0

@@ -50,7 +50,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "tsc -p tsconfig.json && node --test \"tests/*.test.mjs\"",
-    "postinstall": "node scripts/install-electron.mjs",
     "prepack": "npm run build"
   },
   "keywords": [

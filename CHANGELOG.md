@@ -4,6 +4,29 @@
 
 ## 未发布（2026-11-03）
 
+### 安装不再依赖网络:去掉 `postinstall`(issue #41)
+
+插件市场的一次真实安装失败暴露了两个缺陷,根源是同一个:**下载被放在了安装里**。
+
+```
+[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: dsh-builtin-browser@0.5.2
+# 放行构建脚本之后:
+postinstall: Preparing Electron 44.10.1 … TypeError: fetch failed
+postinstall: Electron installation failed (exit 1) … [ELIFECYCLE] Command failed with exit code 1
+```
+
+- 默认 pnpm 11(`strict-dep-builds`)会拦下安装期脚本,**插件因此装不上**——而需要 Electron 的只是四种载体之一,桌面侧栏根本不需要。
+- 放行后,下载失败会把**整个安装**判死:一个网络抖动被报成"插件是坏的"。
+
+改动:
+
+- **`package.json` 去掉 `postinstall`**;`bin.dsh-browser-install-electron` 保留,随时可手工补。经本机 pnpm 11.7.0 实测:打包后 `pnpm add <tarball>` 退出 0,不再出现 `ERR_PNPM_IGNORED_BUILDS`(electron 44 的 package.json 自身已无 scripts,所以拦截名单里只有我们那一条)。
+- 新增 `electron-provision.ts`:**首次需要时才准备运行时**,且**永不失败安装、永不写死在请求路径上**——失败只返回状态并记一行日志,附上"侧栏 / Chrome / Edge 仍然可用"和重试命令。
+- 触发条件只对 `bundled` 与 `auto` 两种通道(显式选了 chrome/edge 就不必下载);每进程最多一次,两个并发调用共享同一次尝试;有 180s 上限,超时即放弃(它可能正与一次工具调用并行)。
+- 解析失败的错误文案改指 `npx --no dsh-browser-install-electron`,并说明运行时现在由插件自动准备。
+
+测试 +10(`tests/electron-provision.test.mjs`):包内**没有**任何安装期生命周期脚本、bin 与依赖仍在、已存在运行时不下载、`ELECTRON_SKIP_BINARY_DOWNLOAD` 生效、下载失败/抛错/超时都只返回状态(含 `fetch failed` 这条真实形态)、并发共享一次尝试。
+
 ### 安装器先验身份,再动手
 
 issue #40 的复核把这条排在第一位,因为后果最重:**形状不是身份**。旧判据是"有 `resources/app/lib/main.js` 或 `resources/app.asar`"——而这是每个 Electron 应用都有的形状。实测:一份自建样例(其 `package.json` 明写 `unrelated-meeting-app`)被认成 DSH Desktop,拿到一条指向它的安装命令;执行后它的入口文件被改、bridge 被复制进来。另一份样例在 archive 校验失败**之前**就被删掉了 `resources/app`。
