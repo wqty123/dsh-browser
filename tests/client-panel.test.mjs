@@ -1077,11 +1077,23 @@ function watchHostFetch({ enabled = false, bridge } = {}) {
 /** A locale host that resolves keys lazily, the way the real one does. */
 function lazyLocale() {
   const dictionaries = {}
+  let active = 'zh'
+  const listeners = new Set()
   return {
     dictionaries,
+    setLocale: id => {
+      active = id
+      for (const fn of listeners) fn()
+    },
     api: {
       register: (ns, dict) => { dictionaries[ns] = dict },
-      bind: ns => key => dictionaries[ns]?.zh?.[key] ?? key,
+      bind: ns => key => dictionaries[ns]?.[active]?.[key] ?? key,
+      // The real service exposes `subscribe` and fires it on every snapshot change (a switch, and
+      // late dictionary registration). A stub without it would have hidden the fix under test.
+      subscribe: fn => {
+        listeners.add(fn)
+        return () => listeners.delete(fn)
+      },
     },
   }
 }
@@ -1241,4 +1253,27 @@ test('flipping the remote-view switch writes exactly that field and re-evaluates
   const writes = asked.length
   assert.ok(writes > 0, 'the switch re-evaluated the entry instead of only storing the value')
   assert.equal(layerCount(), 1, 'and the entry is on screen without a reload')
+})
+
+// ---------------------------------------------------------------------------
+// A runtime language switch must reach text that is already on screen (Mzy123l's note on #40: the
+// locale service publishes on a switch but not on dictionary registration, so moving the registration
+// earlier fixes the first paint and nothing else).
+// ---------------------------------------------------------------------------
+
+test('switching language updates the labels that are already mounted', async () => {
+  const locale = lazyLocale()
+  const { fetchMock } = watchHostFetch({ enabled: true, bridge: { state: 'installed', present: true } })
+  await mount({ fetch: fetchMock, document: documentWith(), locale: locale.api })
+  await tick()
+
+  const byClass = name => elements(activeDocument.body.children ?? []).find(node => String(node.className) === name)
+  const ns = 'settings.dsh-builtin-browser'
+  assert.equal(byClass('dsh-bw-watch-title').textContent, locale.dictionaries[ns].zh['watch.title'],
+    'starts in the host language')
+
+  locale.setLocale('en')
+  assert.equal(byClass('dsh-bw-watch-title').textContent, locale.dictionaries[ns].en['watch.title'],
+    'and follows the switch without a reload')
+  assert.equal(byClass('dsh-bw-watch-label').textContent, locale.dictionaries[ns].en['watch.open'])
 })

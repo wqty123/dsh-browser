@@ -34,6 +34,13 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
    * host without one.
    */
   let refreshWatchEntry = () => {}
+  /**
+   * Re-apply the locale to the watch panel's static labels.
+   *
+   * Set by `installWatchPanel`, called from the locale subscription in `apply()`. Separate from
+   * {@link refreshWatchEntry} because a language switch must not re-probe or re-mount anything.
+   */
+  let refreshWatchLabels = () => {}
 
   const zh = {
     nav: "浏览器",
@@ -1224,16 +1231,22 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     // control and a permanent diagnostic call.
 
     /** Localized text, falling back to the key so a missing entry is visible rather than blank. */
+    // Localized text.
+    //
+    // The try/catch that used to sit here was dead code, as Mzy123l pointed out on #40: the locale
+    // service does not throw on a missing entry — it returns the key. So a miss shows the key, which
+    // is diagnostic, and an empty answer is the only case worth substituting.
     const say = key => {
-      try { return translate(key) } catch { return key }
+      const text = translate(key)
+      return typeof text === "string" && text !== "" ? text : key
     }
 
     /**
      * Apply the current locale to every static label.
      *
-     * Called at mount and again once the dictionaries are bound. The panel used to set these exactly
-     * once, inside `apply()`, *before* `locale.register` had run — so the shipped build showed
-     * `watch.title` as its title and the key was never replaced (issue #40).
+     * Called at mount, after a locale change, and again once the dictionaries are bound. The panel
+     * used to set these exactly once, inside `apply()`, *before* `locale.register` had run — so the
+     * shipped build showed `watch.title` as its title and the key was never replaced (issue #40).
      */
     const relabel = () => {
       openLabel.textContent = say("watch.open")
@@ -1243,6 +1256,10 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       openButton.title = say("watch.open")
     }
     relabel()
+    // A runtime language switch must reach labels that are already on screen. `subscribe` fires on
+    // every locale snapshot change — a switch, and also a late dictionary registration — which is
+    // exactly the set of moments these four strings can go stale.
+    refreshWatchLabels = () => { relabel() }
 
     let mounted = false
     /** Put the entry on the page. Idempotent, so a second enable cannot stack copies. */
@@ -1391,6 +1408,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       stop()
       unmount()
       refreshWatchEntry = () => {}
+      refreshWatchLabels = () => {}
     }, "dsh-builtin-browser: live view panel")
 
     /**
@@ -1468,6 +1486,18 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-builtin-browser: dictionaries")
     const t = ctx.locale.bind(NS)
     translate = t
+    // A language switch has to reach text that is already on screen. `subscribe` fires on every
+    // locale snapshot change (switch, and late dictionary registration); guarded, because a host
+    // without it must still get the panel — the labels then simply keep their first language.
+    if (typeof ctx.locale.subscribe === "function") {
+      ctx.effect(() => {
+        const off = ctx.locale.subscribe(() => {
+          translate = ctx.locale.bind(NS)
+          refreshWatchLabels()
+        })
+        return () => { if (typeof off === "function") off() }
+      }, "dsh-builtin-browser: locale changes")
+    }
     installWatchPanel(ctx)
     ctx.slots.inject("settings.section", () => ctx.slots.register({
       name: "settings.section",
