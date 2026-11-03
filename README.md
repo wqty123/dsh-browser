@@ -91,6 +91,8 @@ Web 端没有侧栏也没有 bridge:插件自托管一个独立窗口(标题 `ds
 
 从另一台设备用 DSH 时,浏览器在主机屏幕上。主机在设置里打开 `remoteView.enabled` 后,面板给出一个**只读**画面:2 fps、JPEG 质量 70、等比缩放到 1280×720 内、一帧一请求(慢网络自然降速)、不落盘、不进入聊天或模型上下文。不转发点击/键盘/滚轮。
 
+关闭时**不出现浮动入口、也不发任何诊断请求**;打开后入口在**下一次页面加载**时出现(客户端在启动时读一次这个开关,之后不再轮询)。
+
 三个端点,仅同源:`GET /dsh-builtin-browser/browser-view/sessions`、`GET …/browser-view/frame?session=…`、`GET /dsh-builtin-browser/bridge-status`。
 
 画面可能包含验证码、账户信息或登录后内容——打开前请确认这是你要看的页面。
