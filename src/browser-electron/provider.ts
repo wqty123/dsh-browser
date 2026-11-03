@@ -331,7 +331,7 @@ export interface ElectronViewHandle {
    * @param params - CDP command parameters.
    * @returns the CDP `result` object.
    */
-  sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>
+  sendCommand(method: string, params?: Record<string, unknown>, options?: CommandOptions): Promise<Record<string, unknown>>
   /**
    * Whether this view's CDP can encode JPEG and honour a quality setting.
    *
@@ -626,6 +626,24 @@ export function toCdpCookie(cookie: ExportedCookie): Record<string, unknown> | u
  */
 export interface PresentOptions {
   readonly quiet?: boolean
+}
+
+/**
+ * How a command should reach its page.
+ *
+ * Reported as issue #46: opening the live preview pushed the conversation's sidebar browser panel
+ * to the front — a read-only "look at it" action changing the reader's layout. The chain was
+ * `capturePassive` → `sendCommand('Page.captureScreenshot')` → the host's guest lookup → the bridge's
+ * `ensureSidebar` → a retry that asked the client half to `openSession`, which is exactly what a tool
+ * call is allowed to do and a preview is not.
+ *
+ * `present: false` says "this command must not make anything visible": use the page this
+ * conversation already has, and treat "not displayed" as a state to report rather than a condition
+ * to fix.
+ */
+export interface CommandOptions {
+  /** Present the view first (default), or only use a page that is already there. */
+  readonly present?: boolean
 }
 
 /** Native capture options the self-hosted view handle understands. */
@@ -3251,13 +3269,19 @@ export class ElectronBrowserProvider implements BrowserProvider {
     }
     // Real Chrome/Edge (and the sidebar): CDP. Viewport only — `captureBeyondViewport` would pull
     // the whole document, which is neither what a viewer shows nor bounded in size.
+    //
+    // `present: false` is load-bearing (issue #46): a preview is read-only, so it must not reach the
+    // carrier's present path, which for the sidebar asks the shell to display this conversation —
+    // the reported symptom was the sidebar browser panel jumping to the front when someone opened
+    // the preview. A page that is not displayed now reads as "unavailable", which the route already
+    // turns into the panel's paused state.
     const result = await withTimeout(
       handle.sendCommand(CDP_PAGE_CAPTURE_SCREENSHOT, {
         format: 'jpeg',
         quality: PREVIEW_QUALITY,
         fromSurface: true,
         captureBeyondViewport: false,
-      }),
+      }, { present: false }),
       timeoutMs,
       undefined,
       timeoutMessage,

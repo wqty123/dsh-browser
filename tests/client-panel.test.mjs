@@ -1139,3 +1139,44 @@ test('the panel paints with a token the shipped theme defines', () => {
     'that token does not exist in the theme this ships against, so its fallback was the only thing seen')
   assert.match(source, /var\(--dsw-alias-bg-layer-2/, 'the token the host uses for elevated surfaces')
 })
+
+// ---------------------------------------------------------------------------
+// Issue #46 second and third parts: the floating panel's geometry and the `hidden` attribute.
+//
+// Both are pure CSS and both were measured against the shipped bundle: the panel's opaque background
+// covered the button it hangs off by 6px (taking the only way out with it), and `img.hidden = true`
+// did nothing because an author `display: block` defeats the UA sheet's `[hidden]{display:none}`.
+// ---------------------------------------------------------------------------
+
+test('the panel sits above its button instead of on top of it', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const panel = /\.dsh-bw-watch-panel \{[^}]*\}/.exec(source)
+  assert.ok(panel !== null, 'the panel rule exists')
+  assert.match(panel[0], /bottom: calc\(100% \+ \d+px\)/,
+    'positioned against the button box, so the 6px overlap cannot come back with a font change')
+  assert.equal(/bottom: 40px/.test(panel[0]), false, 'the hard-coded 40px is gone')
+})
+
+test('the close control is visible, and the overlay stays under host dialogs', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const close = /\.dsh-bw-watch-close \{[^}]*\}/.exec(source)
+  assert.ok(close !== null)
+  assert.match(close[0], /border: 1px solid/, 'it has an edge: a 16px glyph at 70% opacity was invisible')
+  assert.match(close[0], /border-radius/, 'and reads as a control')
+  assert.equal(/opacity: \.7/.test(close[0]), false, 'no longer faded into the title')
+
+  const layer = /\.dsh-bw-watch \{[^}]*\}/.exec(source)
+  assert.ok(layer !== null)
+  const z = /z-index: (\d+)/.exec(layer[0])
+  assert.ok(z !== null, 'the layer states its stacking')
+  assert.ok(Number(z[1]) < 2147483000, 'and it is no longer above everything the host draws')
+  assert.ok(Number(z[1]) >= 100, 'while still above ordinary page content')
+})
+
+test('the hidden attribute actually hides the preview image', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /\.dsh-bw-watch-img\[hidden\] \{ display: none; \}/,
+    'an author display rule needs its own [hidden] rule to honour the attribute')
+  // And the script still uses the attribute, which is what the rule makes effective.
+  assert.match(source, /img\.hidden = true/)
+})

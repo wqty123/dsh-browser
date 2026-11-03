@@ -261,7 +261,12 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 
 /* Live-view panel. Fixed layer rather than a slot: the host has no stable slot for an extra
    surface over the conversation, and a layer works in every layout including a phone. */
-.dsh-bw-watch { position: fixed; right: 16px; bottom: 16px; z-index: 2147483000; font-family: inherit; }
+.dsh-bw-watch {
+  position: fixed; right: 16px; bottom: 16px; font-family: inherit;
+  /* Below a modal or popover rather than above everything: the old 2147483000 sat on top of the page,
+   * its inputs and any dialog the host opened (issue #46). A floating helper is a guest here. */
+  z-index: 1000;
+}
 .dsh-bw-watch-open {
   display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
   border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.45)); border-radius: 999px;
@@ -271,7 +276,12 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 .dsh-bw-watch-open:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.2)); }
 .dsh-bw-watch-dot { width: 7px; height: 7px; border-radius: 50%; background: #d9534f; }
 .dsh-bw-watch-panel {
-  position: absolute; right: 0; bottom: 40px; width: min(560px, calc(100vw - 32px));
+  position: absolute; right: 0; bottom: calc(100% + 8px); width: min(560px, calc(100vw - 32px));
+  /* The panel used to sit at 40px from the bottom while the button it hangs off occupied 16-46px
+   * from the bottom edge of its own box: the two overlapped by 6px and, because the panel's
+   * background is opaque, it covered the only way back out (issue #46). 100% is the button's own
+   * height, so the gap survives a font-size or padding change instead of being a second magic
+   * number. */
   border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.35)); border-radius: 10px;
   /* --dsw-alias-bg-elevated does not exist in the theme this ships against (measured on rc.5: 0
    * occurrences, while --dsw-alias-bg-layer-2 has 5). With a token that is never defined, the
@@ -284,11 +294,20 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 .dsh-bw-watch-title { font-weight: 600; }
 .dsh-bw-watch-state { opacity: .7; margin-left: auto; }
 .dsh-bw-watch-close {
-  border: 0; background: transparent; color: inherit; cursor: pointer;
-  font-size: 16px; line-height: 1; padding: 0 2px; opacity: .7;
+  /* A visible control, not a hinted one: the old close was a 16px glyph at 70% opacity with no border
+   * or background, in the same colour as the title — reported as 'no way out but a page refresh'
+   * (issue #46). */
+  border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.45)); border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg, rgba(128,128,128,.12));
+  color: inherit; cursor: pointer; font-size: 14px; line-height: 1; padding: 3px 7px;
 }
+.dsh-bw-watch-close:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.2)); }
 .dsh-bw-watch-stage { background: #000; min-height: 120px; display: flex; align-items: center; justify-content: center; }
 .dsh-bw-watch-img { display: block; max-width: 100%; height: auto; }
+/* The hidden ATTRIBUTE is styled by the UA sheet as [hidden]{display:none}, and an author rule
+ * defeats it whatever its specificity — so img.hidden = true in the script did nothing and the
+ * empty-state image kept taking space (issue #46). */
+.dsh-bw-watch-img[hidden] { display: none; }
 .dsh-bw-watch-note { margin: 0; padding: 24px 14px; font-size: 12px; opacity: .75; text-align: center; }
 .dsh-bw-watch-foot {
   display: flex; align-items: center; gap: 8px; padding: 7px 10px;

@@ -52,7 +52,9 @@ test('a panel that produces no page returns the surface to the self-hosted brows
   // switched to one that cannot work, and the failure repeated on every call until DSH restarted.
   // `onLost` is the mechanism that already returns the surface; it simply was not reachable from
   // this failure.
-  const call = host.slice(host.indexOf("op: 'ensureSidebar'"))
+  // Anchored on the PRESENTING lookup, not on the first mention of the op: a read-only lookup (the
+  // preview path, issue #46) is a separate branch above this one and must not be sliced in here.
+  const call = host.slice(host.indexOf('const ask = (): Promise'))
   const block = call.slice(0, call.indexOf('this.views.set'))
   assert.match(block, /detail\.includes\('produced no page'\)/,
     'the unproducible-page failure is recognised')
@@ -66,7 +68,9 @@ test('a panel that is merely not displayed is not treated as loss', () => {
   // Issue #37. The two failures used to be one string, and the plugin read both as a dead carrier:
   // switching to a self-hosted window whose page was blank, while the bridge's own message said the
   // page was fine and would attach as soon as the conversation was shown.
-  const call = host.slice(host.indexOf("op: 'ensureSidebar'"))
+  // Anchored on the PRESENTING lookup, not on the first mention of the op: a read-only lookup (the
+  // preview path, issue #46) is a separate branch above this one and must not be sliced in here.
+  const call = host.slice(host.indexOf('const ask = (): Promise'))
   const block = call.slice(0, call.indexOf('this.views.set'))
   // The code decides, and it is checked BEFORE the text heuristic.
   const codeCheck = block.indexOf('code === PANEL_NOT_DISPLAYED')

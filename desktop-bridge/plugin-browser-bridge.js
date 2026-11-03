@@ -507,6 +507,11 @@ async function handle(request) {  const op = String(request?.op ?? '')
     }
 
     // Already has a page: reuse it. This is the common case after the first open of a session.
+    //
+    // A read-only caller (the live preview, issue #46) does NOT come through here at all: it uses the
+    // `list` op instead, because this one can drive the shell — that is the difference between "show
+    // me the page" and "let me look at it", and keeping the preview off this path is what stops a
+    // read-only action from moving the reader's layout.
     const first = await ask(url !== '')
     if (first.guestId !== null) {
       claims.set(first.guestId, owner)

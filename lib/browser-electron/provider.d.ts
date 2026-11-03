@@ -246,7 +246,7 @@ export interface ElectronViewHandle {
      * @param params - CDP command parameters.
      * @returns the CDP `result` object.
      */
-    sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
+    sendCommand(method: string, params?: Record<string, unknown>, options?: CommandOptions): Promise<Record<string, unknown>>;
     /**
      * Whether this view's CDP can encode JPEG and honour a quality setting.
      *
@@ -435,6 +435,23 @@ export declare function toCdpCookie(cookie: ExportedCookie): Record<string, unkn
  */
 export interface PresentOptions {
     readonly quiet?: boolean;
+}
+/**
+ * How a command should reach its page.
+ *
+ * Reported as issue #46: opening the live preview pushed the conversation's sidebar browser panel
+ * to the front — a read-only "look at it" action changing the reader's layout. The chain was
+ * `capturePassive` → `sendCommand('Page.captureScreenshot')` → the host's guest lookup → the bridge's
+ * `ensureSidebar` → a retry that asked the client half to `openSession`, which is exactly what a tool
+ * call is allowed to do and a preview is not.
+ *
+ * `present: false` says "this command must not make anything visible": use the page this
+ * conversation already has, and treat "not displayed" as a state to report rather than a condition
+ * to fix.
+ */
+export interface CommandOptions {
+    /** Present the view first (default), or only use a page that is already there. */
+    readonly present?: boolean;
 }
 /** Native capture options the self-hosted view handle understands. */
 export interface ScreenshotOptions {

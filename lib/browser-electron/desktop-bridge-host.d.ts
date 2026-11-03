@@ -4,7 +4,7 @@
  *
  * WHY
  * The plugin runs inside the desktop's Node-mode host, where there is no Electron
- * API — which is why it self-hosts a whole browser today. The shell, however, can
+ * API 鈥?which is why it self-hosts a whole browser today. The shell, however, can
  * own views, and its sidebar already displays real web pages. This host borrows
  * that page over the shell's bridge (see apps/desktop/bridge/plugin-browser-bridge.js),
  * so the agent and the human end up on ONE page instead of two.
@@ -13,7 +13,7 @@
  * It implements the same `ElectronBrowserViewHost` seam the self-hosted host does,
  * so the provider, the tools, browsing history, the synthetic cursor and the
  * teardown rules are all unchanged: only the carrier differs. Everything is
- * lazily materialized — a fresh shell has no sidebar guest until something asks
+ * lazily materialized 鈥?a fresh shell has no sidebar guest until something asks
  * for a page, and the bridge creates one on demand.
  *
  * FALLBACK
@@ -32,8 +32,8 @@ export declare function bridgeEndpointPath(): string;
  *
  * Thrown instead of a plain Error so callers can distinguish "the panel did not render" from "the
  * browser broke", which is exactly the distinction issue #37 says was missing. The plugin no longer
- * waits for a human to show the conversation — the client half asks the shell to (`openSession`) and
- * this host retries while it renders — so reaching here means the shell did not render it at all.
+ * waits for a human to show the conversation 鈥?the client half asks the shell to (`openSession`) and
+ * this host retries while it renders 鈥?so reaching here means the shell did not render it at all.
  */
 export declare class BrowserPanelNotDisplayedError extends Error {
     readonly code = "panel-not-displayed";
@@ -47,7 +47,7 @@ export declare class BrowserPanelNotDisplayedError extends Error {
  *
  * One sidebar exists per shell window, so every view this host hands out refers
  * to the same guest: the provider keeps its tab bookkeeping, and the tabs simply
- * share the visible page. That is the intended behaviour for this carrier — the
+ * share the visible page. That is the intended behaviour for this carrier 鈥?the
  * point is a single page both parties can see.
  */
 export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
@@ -56,7 +56,7 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * One entry per view this host handed out: the conversation it serves, and the guest backing it.
      *
      * The conversation belongs to the ENTRY, not to this host. A single plugin process serves every
-     * conversation — DSH runs them all through one host instance — so an owner held on the host
+     * conversation 鈥?DSH runs them all through one host instance 鈥?so an owner held on the host
      * would be one conversation's id applied to all of them, and a page could still land in
      * another's sidebar however carefully the bridge checked it.
      */
@@ -66,7 +66,7 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      *
      * Every DSH session is its own plugin process, and the sidebar is one surface they all share.
      * A session can only see its own `views` map, so before the bridge kept a ledger it adopted
-     * whichever tab it found — including one another session had opened, which is how a URL from
+     * whichever tab it found 鈥?including one another session had opened, which is how a URL from
      * one session appeared in another's sidebar. The id is per process, so two sessions never
      * collide and one session's tabs are never handed to another; it is deliberately not the DSH
      * session id, which this layer has no access to and does not need.
@@ -74,17 +74,17 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * The whole ledger rests on that premise, so it was measured rather than assumed: with two
      * sessions running, the desktop had TWO host processes (plus one main, two renderers and a
      * gpu/utility pair). If sessions ever shared a process, every owner check in the bridge would
-     * compare equal and the bleed would return in a new shape — so a change to how DSH spawns
+     * compare equal and the bleed would return in a new shape 鈥?so a change to how DSH spawns
      * sessions invalidates this file, not just this comment.
      *
      * It is now the CONVERSATION id rather than an invented uuid, read from the plugin's ctx by the
      * same path DSH's own desktop host uses. That matters because the shell keeps one sidebar per
      * conversation and writes its session id onto each sidebar container (on the React fiber,
-     * measured on the running app) — so the bridge can only answer "is this sidebar mine" if it has
+     * measured on the running app) 鈥?so the bridge can only answer "is this sidebar mine" if it has
      * a comparable id. With an invented uuid it never could, which is how a command came to be typed
      * into another conversation's address bar.
      *
-     * Falls back to a random uuid when the host cannot supply one — an older DSH, or a non-desktop
+     * Falls back to a random uuid when the host cannot supply one 鈥?an older DSH, or a non-desktop
      * composition. That is no worse than before: the bridge then knows only "this process", and it
      * refuses to operate on a sidebar it cannot prove is its own.
      */
@@ -94,8 +94,8 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * conversation each belongs to.
      *
      * The provider destroys its view handles before it asks for a release, so the mapping is dropped
-     * by then — keeping the guest ids here is what lets us close only our own tabs when several
-     * conversations are running (requirements §4: each session gets its own page). The owner rides
+     * by then 鈥?keeping the guest ids here is what lets us close only our own tabs when several
+     * conversations are running (requirements 搂4: each session gets its own page). The owner rides
      * along for the same reason it does in {@link views}: a release names one conversation.
      */
     private readonly orphaned;
@@ -107,7 +107,7 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * handler is stored anyway so the interface contract holds (a caller may register
      * one and must not be surprised) and so a future bridge operation can deliver it
      * without changing the provider. Consequently no user-action event is emitted while
-     * the desktop sidebar is the carrier — by design, not by omission.
+     * the desktop sidebar is the carrier 鈥?by design, not by omission.
      */
     private userActionHandler;
     /** Told when the shell behind this bridge exits; see `onLost`. */
@@ -151,8 +151,8 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * Every page this conversation's sidebar panel currently holds.
      *
      * The shell owns page creation inside the panel: a link the user or the agent clicks may open a
-     * new page, and nothing tells the provider. Those pages are real — they are what the human sees
-     * — but without this the tab model reports only the ones the provider created, so the rest are
+     * new page, and nothing tells the provider. Those pages are real 鈥?they are what the human sees
+     * 鈥?but without this the tab model reports only the ones the provider created, so the rest are
      * invisible to `dsh_browser_list_tabs` and unclosable through `dsh_browser_close_tab`.
      *
      * The bridge's `list` already answers with the sidebar guests, which is the same information, so
@@ -163,14 +163,14 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * Every sidebar page this conversation holds that THIS HOST did not open.
      *
      * The shell owns page creation inside the panel: a link the user or the agent clicks may open a
-     * new page, and nothing tells the provider. Those pages are real — they are what the human sees
-     * — but without this the tab model reports only the ones the provider created, so the rest are
+     * new page, and nothing tells the provider. Those pages are real 鈥?they are what the human sees
+     * 鈥?but without this the tab model reports only the ones the provider created, so the rest are
      * invisible to `dsh_browser_list_tabs` and unclosable through `dsh_browser_close_tab`.
      *
      * Pages this host opened are EXCLUDED here rather than deduplicated by the caller, because the
      * caller cannot do it: the provider knows a tab by its own id and the carrier knows a page by the
      * guest id, and the two never match. The first version returned everything and relied on the
-     * caller to filter, which reported the same page twice — the mapping that makes the match
+     * caller to filter, which reported the same page twice 鈥?the mapping that makes the match
      * possible exists only here.
      * @returns the panel's pages that are not ours, or an empty list when the bridge cannot answer.
      */
@@ -178,7 +178,7 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     /**
      * Close one sidebar page by the id {@link listPages} reported.
      *
-     * The bridge closes sidebar pages by TITLE, and only the ones the caller owns — that is what
+     * The bridge closes sidebar pages by TITLE, and only the ones the caller owns 鈥?that is what
      * stopped one conversation's teardown from destroying another's page. So the title is looked up
      * through the same listing, and a page that no longer appears is treated as already gone rather
      * than as an error: the caller asked for it to be closed, and it is.
@@ -188,8 +188,8 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     /**
      * The guest backing a view, materialized on first use.
      *
-     * The conversation that called owns exactly one sidebar page on this carrier — a human and the
-     * agent look at the same page — so every view resolves to that conversation's own guest, and the
+     * The conversation that called owns exactly one sidebar page on this carrier 鈥?a human and the
+     * agent look at the same page 鈥?so every view resolves to that conversation's own guest, and the
      * page does not multiply behind the provider's own tab bookkeeping.
      *
      * A cached guest is used as-is: probing it first cost a round-trip on every command, so liveness
@@ -210,8 +210,8 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * This used to be empty, on the reasoning that the sidebar is already on screen so there is
      * nothing to show. That confused "the sidebar is visible" with "this page is the one being
      * looked at": opening a page left it behind whatever the human had in front, which is issue
-     * #23. The other two carriers both do this — the self-hosted window re-adds the view and the
-     * system browser calls `Page.bringToFront` — so this carrier was the odd one out.
+     * #23. The other two carriers both do this 鈥?the self-hosted window re-adds the view and the
+     * system browser calls `Page.bringToFront` 鈥?so this carrier was the odd one out.
      *
      * Best-effort by design: the tab strip belongs to the shell's renderer, and failing to raise
      * it must not fail the navigation that has already happened.
@@ -220,11 +220,11 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     showView(handle: ElectronViewHandle): void;
     onUserAction(handler: (action: BrowserUserAction) => void): void;
     /**
-     * Release the sidebar's browser pages (requirements §3, `ui.closeWithSession`).
+     * Release the sidebar's browser pages (requirements 搂3, `ui.closeWithSession`).
      *
      * Destroying our own view handles is not enough on this carrier: the sidebar
      * belongs to the shell and would happily keep the page (and its renderer) alive.
-     * Closing the tabs is what actually ends the page — and only the page: cookies
+     * Closing the tabs is what actually ends the page 鈥?and only the page: cookies
      * live in the partition, history on disk, so both survive.
      * @param owner - the conversation whose pages to close. Omit to close every conversation's,
      *   which is only correct from a teardown that is itself global.
