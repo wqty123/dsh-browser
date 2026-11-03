@@ -112,6 +112,7 @@ Full detail, round by round, with the reasoning and evidence behind each fix: [C
 
 | Version | Date | Theme |
 | --- | --- | --- |
+| **0.5.3** | 2026-11-03 | **Installation no longer needs the network**: the `postinstall` is gone and the Electron runtime is prepared the first time it is actually needed, never failing an install (fixes the market install failures in #41/#42); the installer proves the app's identity before touching anything and validates before deleting (#40); the live-view entry mounts on demand, with its labels translated and a theme token that exists |
 | **0.5.2** | 2026-11-01 | A sidebar page no longer waits for a human: the column is opened when it was never opened, and the shell is asked to display a conversation requested from the background, with a bounded retry. Adds `click_sequence`. Recognises the pre-#37 bridge refusal that carries no code |
 | **0.5.1** | 2026-10-31 | Adopt the page the browser already shows: `switch_tab` and `open` land on it; canvas detection no longer requires an empty element list; a blank page is judged by its own URL |
 | Earlier | — | See [CHANGELOG.md](CHANGELOG.md) (`0.5.0` was tagged but never published to npm) |
