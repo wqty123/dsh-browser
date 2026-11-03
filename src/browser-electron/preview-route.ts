@@ -14,6 +14,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { BrowserError } from '../browser/types.js'
+import { replyJson } from './json-reply.js'
 import { sameOrigin } from './settings-route.js'
 import { findDesktopInstall, readBridgeStatus } from './bridge-status.js'
 
@@ -89,18 +90,6 @@ export async function handlePreviewSessions(
   replyJson(response, 200, { enabled: true, sessions: [...sessions] })
 }
 
-/** Write one JSON body with no caching and no sniffing. */
-function replyJson(response: ServerResponse, status: number, body: unknown): void {
-  const text = JSON.stringify(body)
-  response.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'content-length': Buffer.byteLength(text),
-    'cache-control': 'no-store, private',
-    'x-content-type-options': 'nosniff',
-    'cross-origin-resource-policy': 'same-origin',
-  })
-  response.end(text)
-}
 
 /**
  * Serve one frame, or say precisely why not.

@@ -45,6 +45,48 @@ export interface ProvisionResult {
   readonly detail: string
 }
 
+/**
+ * The state a settings panel shows, which is one state wider than {@link ProvisionResult}.
+ *
+ * `idle` and `preparing` are the two a log line never needs and a user always does: "nothing has
+ * been asked for yet" and "a ~100 MB download is running right now" are the states in which a first
+ * browser call is slow, and until this existed neither was visible anywhere in the product — the
+ * only trace was a log line the panel cannot read.
+ */
+export interface ProvisionSnapshot {
+  /** `idle` and `preparing` are provisional; the rest are terminal for this attempt. */
+  readonly state: 'idle' | 'preparing' | 'present' | 'ready' | 'skipped' | 'failed'
+  /** One line, already user-facing: never a stack trace. */
+  readonly detail: string
+  /** When the state last changed, ISO. */
+  readonly at: string
+}
+
+const IDLE: ProvisionSnapshot = {
+  state: 'idle',
+  detail: 'the runtime has not been asked for yet',
+  at: new Date(0).toISOString(),
+}
+
+let latest: ProvisionSnapshot = IDLE
+
+/**
+ * The current provisioning state, for a readiness report.
+ *
+ * Deliberately a snapshot rather than a promise: a panel polling this must be able to answer in one
+ * synchronous read, without awaiting (and thereby echoing) the download it is reporting on.
+ * @returns the last state written, or the idle state before anything ran.
+ */
+export function provisionSnapshot(): ProvisionSnapshot {
+  return latest
+}
+
+/** Replace the reported state. Internal: every terminal result is recorded here. */
+function record(result: ProvisionResult): ProvisionResult {
+  latest = { state: result.status, detail: result.detail, at: new Date().toISOString() }
+  return result
+}
+
 /** Everything this module touches from the outside, so a test can drive it without Electron. */
 export interface ProvisionDeps {
   /** Whether a spawnable binary already exists. */
@@ -140,11 +182,16 @@ export function defaultDeps(log: (message: string) => void = () => {}): Provisio
  * @returns what happened. Never throws.
  */
 export async function ensureElectronRuntime(deps: ProvisionDeps = defaultDeps()): Promise<ProvisionResult> {
-  if (deps.hasBinary()) return { status: 'present', detail: 'an Electron runtime is already available' }
-  if (deps.skip()) return { status: 'skipped', detail: 'ELECTRON_SKIP_BINARY_DOWNLOAD is set' }
+  if (deps.hasBinary()) return record({ status: 'present', detail: 'an Electron runtime is already available' })
+  if (deps.skip()) return record({ status: 'skipped', detail: 'ELECTRON_SKIP_BINARY_DOWNLOAD is set' })
   const script = deps.installerScript()
   if (script === undefined) {
-    return { status: 'failed', detail: 'the installed electron package has no install.js; reinstall the plugin in this profile' }
+    return record({ status: 'failed', detail: 'the installed electron package has no install.js; reinstall the plugin in this profile' })
+  }
+  latest = {
+    state: 'preparing',
+    detail: `downloading Electron ${electronVersion()} (one time, about a minute)`,
+    at: new Date().toISOString(),
   }
   deps.log(`preparing Electron ${electronVersion()} in the background (a missing runtime needs a download)`)
   // The bound has to be a REFERENCED timer, and it has to be cleared when the race finishes.
@@ -165,37 +212,53 @@ export async function ensureElectronRuntime(deps: ProvisionDeps = defaultDeps())
   try {
     outcome = await Promise.race([deps.run(script), timeout])
   } catch (error) {
-    return { status: 'failed', detail: `the download failed: ${String(error)}` }
+    return record({ status: 'failed', detail: `the download failed: ${String(error)}` })
   } finally {
     if (timer !== undefined) clearTimeout(timer)
   }
   if (outcome.code !== 0) {
-    return {
+    return record({
       status: 'failed',
       detail: `Electron provisioning did not finish (${outcome.detail ?? `exit ${String(outcome.code)}`}); `
-        + 'the browser still works through a sidebar, Chrome or Edge, and `npx --no dsh-browser-install-electron` retries it',
-    }
+        + 'the browser still works through a sidebar, Chrome or Edge; retry from Settings → Browser → '
+        + 'Readiness ("Prepare the bundled browser"), or run `npx --no dsh-browser-install-electron`',
+    })
   }
-  return { status: 'ready', detail: 'the Electron runtime is ready' }
+  return record({ status: 'ready', detail: 'the Electron runtime is ready' })
 }
 
 /** One attempt per process, shared by every caller. */
 let attempt: Promise<ProvisionResult> | undefined
+/** Whether {@link attempt} has settled, which is what makes a retry possible. */
+let settled = false
 
 /**
  * Start (or join) the single background attempt.
  *
  * Returns immediately with the shared promise, so a caller that does not care can ignore it and one
  * that does can await it — the returned promise never rejects.
+ *
+ * `force` is the second half of the settings panel's retry button. Without it the memoised attempt
+ * made a failed download permanent for the life of the process: the panel could offer a button, the
+ * button could call this, and the answer would be the failure it was trying to replace. An attempt
+ * still IN FLIGHT is always joined, never restarted — two downloads into one directory is the one
+ * outcome worth refusing.
  * @param log - where the outcome goes.
  * @param deps - the effects; defaulted to this process's, overridable so a test can drive it.
+ * @param options - `force` discards a settled attempt so a new one may start.
  * @returns the shared attempt.
  */
 export function provisionElectronInBackground(
   log: (message: string) => void,
   deps: ProvisionDeps = defaultDeps(log),
+  options: { readonly force?: boolean } = {},
 ): Promise<ProvisionResult> {
+  if (options.force === true && settled) {
+    attempt = undefined
+    settled = false
+  }
   attempt ??= ensureElectronRuntime(deps).then(result => {
+    settled = true
     log(`electron runtime: ${result.status} — ${result.detail}`)
     return result
   })
@@ -205,4 +268,6 @@ export function provisionElectronInBackground(
 /** Forget the attempt. Tests only: a real process provisions at most once. */
 export function resetProvisionStateForTest(): void {
   attempt = undefined
+  settled = false
+  latest = IDLE
 }

@@ -172,6 +172,14 @@ function makeHost(settings) {
         dirty = true
       }]
     },
+    // `useRef` is the fourth hook the bundle destructures. A mock without it failed as
+    // "useRef is not a function" inside whichever component happened to call it first, which reads
+    // like a defect in the panel rather than a gap in this harness.
+    useRef: (initial) => {
+      const entry = slotFor('ref')
+      if (!('current' in entry)) entry.current = initial
+      return entry
+    },
     // Cached by deps, and that is load-bearing: `useEffect(() => load(), [load])` runs ONCE in
     // React because `useCallback(…, [])` hands back the same reference while its deps hold. A
     // mock returning a fresh closure each pass made the panel fetch its settings once per
@@ -274,6 +282,12 @@ async function mount(options = {}) {
   exports.apply(ctx)
   assert.ok(registration !== undefined, 'apply() registered a settings section')
   assert.equal(registration.spec.name, 'settings.section')
+
+  // `render: false` stops after apply. A test that renders a component of its own must use the SAME
+  // host: the bundle's `react` object is captured from the host it was loaded with, so a second host
+  // records no hooks at all — and the failure looks like "the effect never ran" rather than like a
+  // harness mix-up.
+  if (options.render === false) return { tree: undefined, host, exports, registration, panel: activeSandbox.__dshBuiltinBrowser }
 
   // A test that supplies its own fetch keeps it: the watch panel's probe resolves across the render
   // loop, so clobbering the hook mid-test would hide the very requests the test is about.
@@ -1276,4 +1290,194 @@ test('switching language updates the labels that are already mounted', async () 
   assert.equal(byClass('dsh-bw-watch-title').textContent, locale.dictionaries[ns].en['watch.title'],
     'and follows the switch without a reload')
   assert.equal(byClass('dsh-bw-watch-label').textContent, locale.dictionaries[ns].en['watch.open'])
+})
+
+// ---------------------------------------------------------------------------
+// Readiness (0.5.6): the section that answers "can I use the browser right now".
+//
+// The state itself is unit-tested on the host side; what these check is what a USER gets: the three
+// facts and the badge, the retry button exactly where it can do something, and — the case that
+// matters after every update — a host too old to serve the route leaving the section out instead of
+// showing an HTTP error at someone who has not restarted yet.
+// ---------------------------------------------------------------------------
+
+/** A fetch that answers by path: the settings document, and the two readiness endpoints. */
+function readinessFetch({ runtime, status = 200, calls = [] } = {}) {
+  return async (url, init = {}) => {
+    const path = String(url)
+    calls.push({ url: path, method: init.method ?? 'GET' })
+    if (path.includes('/runtime-status')) return { ok: status === 200, status, json: async () => ({ ok: true, runtime }) }
+    if (path.includes('/runtime-provision')) return { ok: true, status: 200, json: async () => ({ ok: true, runtime }) }
+    return { ok: true, status: 200, json: async () => ({ ok: true, settings: DEFAULT_SETTINGS, path: '/tmp/settings.json' }) }
+  }
+}
+
+/** The section, taken from the module the bundle exports (see the seam comment in client.js). */
+function readinessComponent(exports) {
+  const component = exports.__readinessSection
+  assert.equal(typeof component, 'function', 'the readiness section is exported for this harness')
+  return component
+}
+
+/** Every string in a rendered element tree. */
+function textOf(node, found = []) {
+  if (Array.isArray(node)) {
+    for (const child of node) textOf(child, found)
+    return found
+  }
+  if (node === null || node === undefined || typeof node === 'boolean') return found
+  if (typeof node === 'string' || typeof node === 'number') {
+    found.push(String(node))
+    return found
+  }
+  if (typeof node === 'object') textOf(node.children, found)
+  return found
+}
+
+const failedRuntime = {
+  channel: 'bundled',
+  carrier: 'bundled',
+  readiness: 'blocked',
+  electron: { state: 'failed', detail: 'the download failed: fetch failed', at: '2026-11-03T15:00:00.000Z' },
+  bridge: {
+    present: false,
+    state: 'absent',
+    detail: 'no DSH Desktop install was found on this machine',
+    running: false,
+    runningDetail: 'no desktop shell has published a bridge endpoint',
+  },
+  canProvision: true,
+}
+
+test('readiness shows the carrier, the runtime and the bridge, with the reason a runtime failed', async () => {
+  const fetchMock = readinessFetch({ runtime: failedRuntime })
+  const mounted = await mount({ fetch: fetchMock, render: false })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+  const text = textOf(tree).join(' | ')
+  for (const expected of [
+    'readiness.state.blocked',
+    'readiness.carrier.bundled',
+    'readiness.electron.failed',
+    'readiness.bridge.absent',
+  ]) {
+    assert.match(text, new RegExp(expected.replace(/\./g, '\\.')), `the section names "${expected}"`)
+  }
+  assert.match(text, /fetch failed/, 'and carries the reason the host reported')
+})
+
+test('the prepare button appears exactly where it can do something', async () => {
+  const fetchMock = readinessFetch({ runtime: failedRuntime })
+  const mounted = await mount({ fetch: fetchMock, render: false })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+  const buttons = elements(tree).filter(node => node.type === 'button')
+  const labels = buttons.map(button => textOf(button).join(''))
+  assert.ok(labels.includes('readiness.prepare'), 'a failed preparation offers the retry')
+  assert.ok(labels.includes('readiness.recheck'), 'and a plain re-read')
+
+})
+
+test('while a download runs there is no second one on offer', async () => {
+  // The shared attempt exists so two downloads never write into the same directory: the button must
+  // be gone in this state, and the control that stays says what is happening instead of looking idle.
+  //
+  // Its own mount, deliberately: the bundle captures its hooks from the host it was loaded with, so
+  // rendering one instance's component on another instance's host runs no effects at all — which
+  // reads as "the section never loaded" rather than as a harness mix-up.
+  const preparing = { ...failedRuntime, readiness: 'blocked', canProvision: false, electron: { ...failedRuntime.electron, state: 'preparing' } }
+  const fetchMock = readinessFetch({ runtime: preparing })
+  const mounted = await mount({ fetch: fetchMock, render: false })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+  const labels = elements(tree).filter(node => node.type === 'button').map(button => textOf(button).join(''))
+  assert.equal(labels.includes('readiness.prepare'), false, 'no second download on offer')
+  assert.ok(labels.includes('readiness.preparing'), 'and the control says what is happening')
+})
+
+test('pressing prepare posts to the provisioning route', async () => {
+  const calls = []
+  const fetchMock = readinessFetch({ runtime: failedRuntime, calls })
+  const mounted = await mount({ fetch: fetchMock, render: false })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+  const prepare = elements(tree).find(node => node.type === 'button' && textOf(node).join('') === 'readiness.prepare')
+  assert.ok(prepare !== undefined, 'the button is there to press')
+  await prepare.props.onClick()
+  await tick()
+  const posts = calls.filter(call => call.method === 'POST')
+  assert.equal(posts.length, 1, 'exactly one request')
+  assert.match(posts[0].url, /\/dsh-builtin-browser\/runtime-provision$/, 'to the route that starts the download')
+})
+
+test('a host without the route hides the section instead of reporting HTTP 404', async () => {
+  // The skew every update produces: the client bundle is read at request time, the host's code is
+  // whatever started with the process. Showing "could not read readiness: HTTP 404" would report the
+  // user's missing restart as a fault in their settings.
+  const fetchMock = readinessFetch({ runtime: failedRuntime, status: 404 })
+  const mounted = await mount({ fetch: fetchMock, render: false })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+  assert.equal(tree, null, 'nothing is rendered at all')
+  const text = textOf(tree).join(' ')
+  assert.equal(/HTTP 404|readiness\.failed/.test(text), false, 'no error text either')
+})
+test('a language switch reaches the readiness labels that are already on screen', async () => {
+  // `translate` is a module-level binding that `apply()` re-binds on every locale snapshot, but React
+  // has no idea that happened: before `useLocaleVersion`, every label kept the language it was first
+  // rendered in. The watch panel's version of this bug is covered above (its DOM is rewritten by
+  // hand); this is the React section, which needs the subscription to re-render instead.
+  const locale = lazyLocale()
+  const fetchMock = readinessFetch({ runtime: failedRuntime })
+  const mounted = await mount({ fetch: fetchMock, render: false, locale: locale.api })
+  const zh = textOf(await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)).join(' | ')
+  assert.match(zh, /内置 Electron/, 'starts in the host language')
+
+  locale.setLocale('en')
+  const en = textOf(await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)).join(' | ')
+  assert.match(en, /Bundled Electron/, 'and follows the switch without a reload')
+  assert.equal(/内置 Electron/.test(en), false, 'with no label left in the old language')
+})
+test('an installed bridge with no running shell says so instead of showing a repair command', async () => {
+  // The gap between "installed" and "running" is the state users hit most (the desktop app is
+  // closed). The row must not read a plain "Installed", and the sentence under it must explain the
+  // process rather than offer an installer command for something that is already installed.
+  const closedDesktop = {
+    channel: 'sidebar',
+    carrier: 'sidebar',
+    readiness: 'blocked',
+    electron: { state: 'present', detail: 'an Electron runtime is already available', at: '2026-11-03T15:00:00.000Z' },
+    bridge: {
+      present: true,
+      state: 'installed',
+      detail: 'the shell loads the patched tree and the bridge is in it',
+      running: false,
+      runningDetail: 'the shell that published the endpoint (pid 4242) is not running',
+      command: 'node ".../desktop-bridge/install.mjs" "C:/DSH Desktop" --restart',
+    },
+    canProvision: false,
+  }
+  const fetchMock = readinessFetch({ runtime: closedDesktop })
+  const mounted = await mount({ fetch: fetchMock, render: false })
+  const text = textOf(await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)).join(' | ')
+  assert.match(text, /readiness\.bridge\.installedNotRunning/, 'the row names the real state')
+  assert.match(text, /pid 4242/, 'and the sentence names the process that is missing')
+  assert.equal(/install\.mjs/.test(text), false, 'nothing to repair, so no repair command')
+})
+test('an installed bridge that IS running says so, rather than a bare "installed"', async () => {
+  const running = {
+    channel: 'sidebar',
+    carrier: 'sidebar',
+    readiness: 'ready',
+    electron: { state: 'present', detail: 'an Electron runtime is already available', at: '2026-11-03T15:00:00.000Z' },
+    bridge: {
+      present: true,
+      state: 'installed',
+      detail: 'the shell loads the patched tree and the bridge is in it',
+      running: true,
+      runningDetail: 'a desktop shell is running and answering on its published endpoint',
+    },
+    canProvision: false,
+  }
+  const fetchMock = readinessFetch({ runtime: running })
+  const mounted = await mount({ fetch: fetchMock, render: false })
+  const text = textOf(await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)).join(' | ')
+  assert.match(text, /readiness\.bridge\.installedRunning/, 'the row distinguishes running from merely installed')
+  assert.equal(/readiness\.bridge\.installedNotRunning/.test(text), false, 'and does not claim the opposite')
+  assert.match(text, /readiness\.state\.ready/, 'with the overall verdict agreeing')
 })

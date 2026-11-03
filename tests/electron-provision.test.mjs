@@ -18,6 +18,7 @@ import {
   defaultDeps,
   ensureElectronRuntime,
   provisionElectronInBackground,
+  provisionSnapshot,
   resetProvisionStateForTest,
 } from '../lib/browser-electron/electron-provision.js'
 
@@ -159,4 +160,67 @@ test('the real defaults are offline until something asks', () => {
   const deps = defaultDeps(() => {})
   assert.equal(typeof deps.hasBinary, 'function')
   assert.equal(PROVISION_TIMEOUT_MS >= 60_000, true, 'a real download gets a real budget')
+})
+
+// ---------------------------------------------------------------------------
+// The readiness state machine the settings panel renders (0.5.6).
+//
+// "Nothing has been asked for" and "a download is running right now" are the two states a log line
+// never needed and a user always does: they are exactly when a first browser call is slow or fails,
+// and neither was visible anywhere in the product before this.
+// ---------------------------------------------------------------------------
+
+test('before anything is asked for, the state is idle and says so', () => {
+  resetProvisionStateForTest()
+  const snapshot = provisionSnapshot()
+  assert.equal(snapshot.state, 'idle')
+  assert.match(snapshot.detail, /not been asked/)
+})
+
+test('a download in flight is visible before it finishes', async () => {
+  resetProvisionStateForTest()
+  // A `run` that never settles: the point is what the STATE says while it hangs.
+  const { deps } = fakeDeps({ run: () => new Promise(() => {}), timeoutMs: 30 })
+  const attempt = ensureElectronRuntime(deps)
+  // The state is written before the installer is awaited, so it is readable without a timer.
+  assert.equal(provisionSnapshot().state, 'preparing')
+  assert.match(provisionSnapshot().detail, /downloading Electron/)
+  const result = await attempt
+  assert.equal(result.status, 'failed', 'and it still settles, on the bound')
+  assert.equal(provisionSnapshot().state, 'failed')
+})
+
+test('a settled failure can be retried, and an attempt in flight cannot', async () => {
+  // Without `force`, the memoised attempt made a failed download permanent for the life of the
+  // process: the panel could offer a retry button whose call returned the failure it was replacing.
+  resetProvisionStateForTest()
+  let runs = 0
+  const deps = () => fakeDeps({ run: async () => { runs += 1; return { code: runs === 1 ? 1 : 0 } } }).deps
+  const first = await provisionElectronInBackground(() => {}, deps())
+  assert.equal(first.status, 'failed')
+
+  const forced = await provisionElectronInBackground(() => {}, deps(), { force: true })
+  assert.equal(forced.status, 'ready', 'a forced retry runs the installer again')
+  assert.equal(runs, 2, 'exactly once more')
+
+  // And a forced call while one is running joins it rather than starting a second download into the
+  // same directory.
+  resetProvisionStateForTest()
+  let started = 0
+  const slow = () => fakeDeps({ run: async () => { started += 1; return { code: 0 } } }).deps
+  const a = provisionElectronInBackground(() => {}, slow())
+  const b = provisionElectronInBackground(() => {}, slow(), { force: true })
+  assert.equal(a, b, 'the in-flight attempt is shared')
+  await Promise.all([a, b])
+  assert.equal(started, 1)
+  resetProvisionStateForTest()
+})
+
+test('a failure names the panel, not only the command line', async () => {
+  // The old message told a GUI user to run `npx` in a terminal. It still says that, and now also
+  // names the button that does the same thing without one.
+  const { deps } = fakeDeps({ run: async () => ({ code: 1, detail: 'TypeError: fetch failed' }) })
+  const result = await ensureElectronRuntime(deps)
+  assert.match(result.detail, /Readiness/, 'the panel path is named')
+  assert.match(result.detail, /dsh-browser-install-electron/, 'and the terminal path stays available')
 })

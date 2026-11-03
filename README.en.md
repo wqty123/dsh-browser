@@ -27,7 +27,7 @@ Updating an installed plugin takes two steps (since DSH 0.2.1-alpha.2 a second `
 
 ```sh
 dsh plugin --profile <profile> remove dsh-builtin-browser
-dsh plugin --profile <profile> add dsh-builtin-browser@0.5.2
+dsh plugin --profile <profile> add dsh-builtin-browser@0.5.6
 ```
 
 ### Desktop
@@ -53,7 +53,7 @@ dsh plugin --profile web add dsh-builtin-browser
 
 The web surface has no sidebar and no bridge: the plugin hosts its own window (titled `dsh-browser`) with an address bar, back/forward/reload and a tab strip — usable as an ordinary browser.
 
-> The Electron binary is normally prepared by the install script. A host using `strict-dep-builds` needs the build script approved first; otherwise run `npx --no dsh-browser-install-electron` inside the profile directory. See the [user guide](docs/user-guide.md).
+> **Nothing has to be prepared by hand.** Since 0.5.3 the package carries no install-time script: the Electron runtime is fetched the first time it is actually needed, and a failed fetch only affects the bundled carrier — the desktop sidebar and an installed Chrome / Edge keep working. Since 0.5.6 the settings page opens with a **Readiness** section that says which carrier is in use, whether the runtime is ready / downloading / failed (with the reason), and what state the desktop bridge is in; when preparation failed, the **Prepare the bundled browser** button there retries it — no terminal needed. `npx --no dsh-browser-install-electron` (inside the profile directory) is for pre-provisioning an offline image or CI. See the [user guide](docs/user-guide.md).
 
 ### Then
 
@@ -120,7 +120,9 @@ Full detail, round by round, with the reasoning and evidence behind each fix: [C
 
 | Version | Date | Theme |
 | --- | --- | --- |
-| **0.5.5** | 2026-11-03 | Same content as 0.5.4 (the 0.5.4 version number is held by a staged record on npm's side). **The preview is read-only**: a frame no longer goes through `ensureSidebar` (older bridges pressed keys and typed into the address bar) but through `list`, so the sidebar panel is no longer pulled to the front; overlay geometry, close control, stacking and `img[hidden]` fixed (#46); **remote viewing is a settings switch that applies immediately** (a phone has no shortcut); the bridge repair command names the copy inside the installed package (#40, fourth item) |
+| **0.5.6** | 2026-11-03 | **"It works once you install it", made visible and repairable**: a **Readiness** section at the top of the settings page (current carrier / bundled runtime / desktop bridge, judged per carrier, with **installed kept separate from running** — a closed desktop app is the most common broken state); when preparation failed, a **Prepare the bundled browser** button that can actually retry (the memoised attempt used to make one failure final); new `runtime-status` (read) and `runtime-provision` (admitted as a write, answers immediately, the panel polls); the settings page follows a runtime language switch; the `description` and 38 mojibake characters in the desktop bridge repaired |
+| **0.5.5** | 2026-11-03 | **The preview is read-only**: a frame no longer goes through `ensureSidebar` (older bridges pressed keys and typed into the address bar) but through `list`, so the sidebar panel is no longer pulled to the front; overlay geometry, close control, stacking and `img[hidden]` fixed (#46); **remote viewing is a settings switch that applies immediately** (a phone has no shortcut); the bridge repair command names the copy inside the installed package (#40, fourth item). Same content as 0.5.4 |
+| **0.5.4** | 2026-11-03 | A second publication of the same content as 0.5.5 (published to npm; no GitHub release was cut for it) |
 | **0.5.3** | 2026-11-03 | **Installation no longer needs the network**: the `postinstall` is gone and the Electron runtime is prepared the first time it is actually needed, never failing an install (fixes the market install failures in #41/#42); the installer proves the app's identity before touching anything and validates before deleting (#40); the live-view entry mounts on demand, with its labels translated and a theme token that exists |
 | **0.5.2** | 2026-11-01 | A sidebar page no longer waits for a human: the column is opened when it was never opened, and the shell is asked to display a conversation requested from the background, with a bounded retry. Adds `click_sequence`. Recognises the pre-#37 bridge refusal that carries no code |
 | **0.5.1** | 2026-10-31 | Adopt the page the browser already shows: `switch_tab` and `open` land on it; canvas detection no longer requires an empty element list; a blank page is judged by its own URL |

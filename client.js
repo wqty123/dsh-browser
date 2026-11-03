@@ -106,6 +106,40 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "remoteView.title": "远程观看",
     "remoteView.enabled": "允许从其它设备观看这台机器的浏览器",
     "remoteView.enabled.hint": "打开后,本机右下角出现一个只读画面入口:2 fps、JPEG、一帧一请求,不转发点击与键盘。改动**立刻生效**,不需要刷新页面。关闭时入口消失,相关端点也不返回图像。",
+    "readiness.title": "就绪状态",
+    "readiness.lead": "「装好就能用」的自检:内置浏览器首次使用前要在后台下载一次运行时,桌面侧栏需要装进桌面端的 bridge,本机 Chrome / Edge 需要已经安装。",
+    "readiness.loading": "检测中…",
+    "readiness.failed": "读取就绪状态失败:",
+    "readiness.channel": "当前载体",
+    "readiness.electron": "内置浏览器运行时",
+    "readiness.bridge": "桌面侧栏 bridge",
+    "readiness.recheck": "重新检测",
+    "readiness.prepare": "准备内置浏览器",
+    "readiness.preparing": "正在准备…",
+    "readiness.fix": "修复命令(在终端里跑一次):",
+    "readiness.carrier.sidebar": "桌面侧栏",
+    "readiness.carrier.bundled": "内置 Electron",
+    "readiness.carrier.system": "本机 Chrome / Edge",
+    "readiness.carrier.auto": "自动",
+    "readiness.state.ready": "可用",
+    "readiness.state.blocked": "尚不可用",
+    "readiness.state.unknown": "需实际启动才能确定",
+    "readiness.electron.present": "已就绪(本机已有运行时)",
+    "readiness.electron.ready": "已就绪(刚准备完成)",
+    "readiness.electron.preparing": "正在下载运行时(首次,约 1–3 分钟)",
+    "readiness.electron.idle": "尚未开始准备",
+    "readiness.electron.skipped": "已跳过(设置了 ELECTRON_SKIP_BINARY_DOWNLOAD)",
+    "readiness.electron.failed": "准备失败",
+    "readiness.bridge.installed": "已安装",
+    "readiness.bridge.installedRunning": "已安装(桌面端正在运行)",
+    "readiness.bridge.installedNotRunning": "已安装,但桌面端没在运行",
+    "readiness.bridge.missing": "未安装",
+    "readiness.bridge.stale": "已失效(桌面端升级后需重装)",
+    "readiness.bridge.absent": "本机没有桌面端",
+    "readiness.hint.sidebar": "侧栏载体把页面放进 DSH 窗口右侧,人机同页;它需要桌面端的 bridge,而且只渲染**当前显示**的那个会话。",
+    "readiness.hint.bundled": "内置浏览器随插件提供,无需安装;运行时在首次使用前自动下载,期间可以先改用桌面侧栏或本机 Chrome / Edge。",
+    "readiness.hint.system": "选了本机浏览器:插件用它自己的独立 profile 启动,不需要额外准备。",
+    "readiness.hint.auto": "自动:内置运行时与桌面侧栏任一可用即可工作。",
   }
 
   const en = {
@@ -172,6 +206,40 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "remoteView.title": "Remote viewing",
     "remoteView.enabled": "Let other devices watch this machine's browser",
     "remoteView.enabled.hint": "On, a read-only view appears in the bottom-right corner here: 2 fps, JPEG, one frame per request, and no forwarding of clicks or keys. The change applies **immediately** — no page reload needed. Off, the entry disappears and the endpoints return no image.",
+    "readiness.title": "Readiness",
+    "readiness.lead": "The \"it works once you install it\" check: the bundled browser downloads its runtime in the background before its first use, the sidebar needs the bridge installed into the desktop app, and an installed Chrome / Edge has to be installed.",
+    "readiness.loading": "Checking…",
+    "readiness.failed": "Could not read readiness:",
+    "readiness.channel": "Carrier",
+    "readiness.electron": "Bundled browser runtime",
+    "readiness.bridge": "Desktop sidebar bridge",
+    "readiness.recheck": "Check again",
+    "readiness.prepare": "Prepare the bundled browser",
+    "readiness.preparing": "Preparing…",
+    "readiness.fix": "Repair command (run it once in a terminal):",
+    "readiness.carrier.sidebar": "Desktop sidebar",
+    "readiness.carrier.bundled": "Bundled Electron",
+    "readiness.carrier.system": "Installed Chrome / Edge",
+    "readiness.carrier.auto": "Automatic",
+    "readiness.state.ready": "Ready",
+    "readiness.state.blocked": "Not ready yet",
+    "readiness.state.unknown": "Only a real launch can tell",
+    "readiness.electron.present": "Ready (a runtime is already on this machine)",
+    "readiness.electron.ready": "Ready (just prepared)",
+    "readiness.electron.preparing": "Downloading the runtime (first time, about 1–3 minutes)",
+    "readiness.electron.idle": "Not prepared yet",
+    "readiness.electron.skipped": "Skipped (ELECTRON_SKIP_BINARY_DOWNLOAD is set)",
+    "readiness.electron.failed": "Preparation failed",
+    "readiness.bridge.installed": "Installed",
+    "readiness.bridge.installedRunning": "Installed (the desktop app is running)",
+    "readiness.bridge.installedNotRunning": "Installed, but the desktop app is not running",
+    "readiness.bridge.missing": "Not installed",
+    "readiness.bridge.stale": "Stale (a desktop update needs a reinstall)",
+    "readiness.bridge.absent": "No desktop install on this machine",
+    "readiness.hint.sidebar": "The sidebar carrier puts the page in the right pane of the DSH window, one page for both parties; it needs the desktop's bridge, and it renders only the conversation being **displayed**.",
+    "readiness.hint.bundled": "The bundled browser ships with the plugin and needs nothing installed; its runtime is downloaded before first use — meanwhile the desktop sidebar or an installed Chrome / Edge works.",
+    "readiness.hint.system": "An installed browser was chosen: the plugin launches it with its own separate profile, so there is nothing to prepare.",
+    "readiness.hint.auto": "Automatic: whichever of the bundled runtime and the desktop sidebar works first.",
   }
 
   /**
@@ -377,6 +445,18 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     error: { color: "#e5534b" },
     pathLine: { opacity: 0.6, wordBreak: "break-all", lineHeight: 1.5 },
     button: { padding: "3px 10px", borderRadius: "6px", border: "1px solid rgba(128,128,128,.4)", background: "transparent", color: "inherit", cursor: "pointer" },
+    // Readiness: one headline state, three one-line facts, and at most two buttons. The colours are
+    // the only place this panel states an opinion, which is why they carry no text of their own —
+    // the label next to them is always a locale string.
+    badge: { display: "inline-block", padding: "1px 8px", marginRight: "8px", borderRadius: "10px", fontSize: "11px", lineHeight: 1.6, border: "1px solid transparent" },
+    badgeOk: { color: "#2f9e44", borderColor: "rgba(47,158,68,.5)", background: "rgba(47,158,68,.12)" },
+    badgeWarn: { color: "#e5534b", borderColor: "rgba(229,83,75,.5)", background: "rgba(229,83,75,.12)" },
+    badgeUnknown: { color: "#a0a0a8", borderColor: "rgba(160,160,168,.5)", background: "rgba(160,160,168,.12)" },
+    kv: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 12px", margin: "8px 0 0", fontSize: "12px" },
+    kvKey: { opacity: 0.68 },
+    kvVal: { lineHeight: 1.5 },
+    mono: { fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace", fontSize: "11px", whiteSpace: "pre-wrap", wordBreak: "break-all", background: "rgba(0,0,0,.22)", borderRadius: "5px", padding: "4px 6px", marginTop: "4px" },
+    buttons: { display: "flex", gap: "8px", alignItems: "center", marginTop: "10px", flexWrap: "wrap" },
   }
 
   /**
@@ -491,8 +571,175 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     ])
   }
 
+  /**
+   * Re-render this component when the interface language changes at run time.
+   *
+   * `translate` is a module-level binding that `apply()` re-binds on every locale snapshot, but
+   * React has no idea that happened: every label rendered so far keeps the language it was rendered
+   * in, which is exactly the defect the watch panel hit (#40) and the one commit `666cbff` fixed for
+   * that panel's DOM. The settings section is rendered by React, so it needs the notification rather
+   * than a text pass.
+   */
+  let localeVersion = 0
+  const localeWatchers = new Set()
+  function useLocaleVersion() {
+    const [, setVersion] = useState(localeVersion)
+    useEffect(() => {
+      const update = () => setVersion(localeVersion)
+      localeWatchers.add(update)
+      return () => { localeWatchers.delete(update) }
+    }, [])
+  }
+
+  /**
+   * Readiness: can the browser serve a call right now, and what is missing if not.
+   *
+   * This is the "it works once you install it" promise, made visible. The bundled runtime downloads
+   * on first need (issue #41 moved the download out of `postinstall`), so on a fresh install the
+   * honest answer for the first minute is "a download is running" — a state that used to exist only
+   * in a log line. Everything shown here comes from `GET /runtime-status`; the button starts the
+   * same one background attempt the plugin makes on its own, which is why pressing it is never
+   * harmful and never starts a second download.
+   */
+  function Readiness() {
+    useLocaleVersion()
+    const t = translate
+    const [runtime, setRuntime] = useState(null)
+    const [error, setError] = useState("")
+    const [unsupported, setUnsupported] = useState(false)
+    const [busy, setBusy] = useState(false)
+    const alive = useRef(true)
+
+    const read = useCallback(async () => {
+      try {
+        const response = await fetch("/dsh-builtin-browser/runtime-status", { headers: { accept: "application/json" } })
+        // A host that predates this route answers 404, and that is a version skew rather than a
+        // fault: after an update the client bundle is read at request time while the host's code is
+        // what started with the process. Rendering "could not read readiness: HTTP 404" at a user who
+        // simply has not restarted yet would be reporting the skew as their problem — so the section
+        // stays out of the way, exactly like a document with no `actions` section.
+        if (response.status === 404) {
+          if (alive.current) { setUnsupported(true); setRuntime(null); setError("") }
+          return null
+        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const data = await response.json()
+        if (!alive.current) return null
+        setUnsupported(false)
+        setRuntime(data && data.runtime ? data.runtime : null)
+        setError("")
+        return data && data.runtime ? data.runtime : null
+      } catch (failure) {
+        if (!alive.current) return null
+        setError(String(failure && failure.message ? failure.message : failure))
+        return null
+      }
+    }, [])
+
+    useEffect(() => {
+      alive.current = true
+      void read()
+      return () => { alive.current = false }
+    }, [read])
+
+    // Poll only while a download is running: that is the one state that changes on its own, and a
+    // poll in any other state would be a background request per panel per two seconds forever.
+    const preparing = runtime !== null && runtime.electron.state === "preparing"
+    useEffect(() => {
+      if (!preparing) return undefined
+      const timer = setTimeout(() => { void read() }, 2000)
+      return () => clearTimeout(timer)
+    }, [preparing, runtime, read])
+
+    const prepare = async () => {
+      setBusy(true)
+      setError("")
+      try {
+        const response = await fetch("/dsh-builtin-browser/runtime-provision", {
+          method: "POST",
+          headers: { accept: "application/json" },
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error((data && data.error) || `HTTP ${response.status}`)
+        if (alive.current && data && data.runtime) setRuntime(data.runtime)
+      } catch (failure) {
+        if (alive.current) setError(String(failure && failure.message ? failure.message : failure))
+      } finally {
+        if (alive.current) setBusy(false)
+        void read()
+      }
+    }
+
+    if (unsupported) return null
+    if (runtime === null) {
+      return h("div", { style: styles.wrap }, [
+        h("p", { key: "l", style: styles.lead }, error === "" ? t("readiness.loading") : `${t("readiness.failed")} ${error}`),
+      ])
+    }
+
+    const tone = runtime.readiness === "ready" ? styles.badgeOk
+      : runtime.readiness === "blocked" ? styles.badgeWarn : styles.badgeUnknown
+    const row = (key, label, value) => [
+      h("span", { key: `${key}-k`, style: styles.kvKey }, label),
+      h("span", { key: `${key}-v`, style: styles.kvVal }, value),
+    ]
+    // "Installed" and "running" are different facts, and the gap between them is the most common
+    // broken state there is (the desktop app is simply closed). The row says which one it means —
+    // and when the host does not report the running half at all, it says the plain truth rather
+    // than inferring "not running" from an absent field.
+    const bridgeLabel = runtime.bridge.state !== "installed"
+      ? t(`readiness.bridge.${runtime.bridge.state}`)
+      : runtime.bridge.running === true
+        ? t("readiness.bridge.installedRunning")
+        : runtime.bridge.running === false
+          ? t("readiness.bridge.installedNotRunning")
+          : t("readiness.bridge.installed")
+
+    return h("div", { style: styles.wrap }, [
+      h("p", { key: "head", style: styles.lead }, [
+        h("span", { key: "b", style: { ...styles.badge, ...tone } }, t(`readiness.state.${runtime.readiness}`)),
+        h("span", { key: "s" }, ` ${t(`readiness.hint.${runtime.carrier}`)}`),
+      ]),
+      h("div", { key: "kv", style: styles.kv }, [
+        ...row("carrier", t("readiness.channel"), t(`readiness.carrier.${runtime.carrier}`)),
+        ...row("electron", t("readiness.electron"), t(`readiness.electron.${runtime.electron.state}`)),
+        ...row("bridge", t("readiness.bridge"), bridgeLabel),
+      ]),
+      // The provisioning module's own words: shown only where they add something a state label
+      // cannot carry (what failed, and why), never as a permanent second copy of the state.
+      runtime.electron.state === "failed" || runtime.electron.state === "skipped"
+        ? h("p", { key: "edetail", style: styles.hint }, runtime.electron.detail)
+        : null,
+      // Same rule for the shell: an installed bridge that is not running needs the sentence that says
+      // so ("pid 1234 is not running"), not a repair command, because there is nothing to repair.
+      runtime.bridge.state === "installed" && runtime.bridge.running !== true
+        ? h("p", { key: "bdetail", style: styles.hint }, runtime.bridge.runningDetail ?? runtime.bridge.detail)
+        : null,
+      runtime.bridge.command !== undefined && runtime.bridge.state !== "installed"
+        ? h("div", { key: "cmd" }, [
+          h("p", { key: "l", style: styles.hint }, t("readiness.fix")),
+          h("code", { key: "c", style: styles.mono }, runtime.bridge.command),
+        ])
+        : null,
+      h("div", { key: "btns", style: styles.buttons }, [
+        h("button", {
+          key: "recheck",
+          type: "button",
+          style: styles.button,
+          disabled: busy,
+          onClick: () => { void read() },
+        }, preparing ? t("readiness.preparing") : t("readiness.recheck")),
+        runtime.canProvision
+          ? h("button", { key: "prepare", type: "button", style: styles.button, disabled: busy, onClick: () => { void prepare() } }, t("readiness.prepare"))
+          : null,
+        error !== "" ? h("span", { key: "e", style: styles.error }, `${t("readiness.failed")} ${error}`) : null,
+      ]),
+    ])
+  }
+
   /** The settings page section. */
   function SettingsRoot() {
+    useLocaleVersion()
     const t = translate
     const [rawSettings, setSettings] = useState(null)
     const [meta, setMeta] = useState({ path: "" })
@@ -545,6 +792,13 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 
     return h("div", { style: styles.wrap }, [
       h("p", { key: "lead", style: styles.lead }, t("lead")),
+
+      // First, because it answers the question a fresh install raises before any switch matters:
+      // can this thing open a page right now, and if not, what is it waiting for.
+      section("readiness.title", [
+        h("p", { key: "lead", style: styles.hint }, t("readiness.lead")),
+        h(Readiness, { key: "r" }),
+      ]),
 
       section("history.title", [
         h(Toggle, {
@@ -1493,12 +1747,24 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       ctx.effect(() => {
         const off = ctx.locale.subscribe(() => {
           translate = ctx.locale.bind(NS)
+          // Two audiences, one notification: the vanilla watch panel rewrites its own text, and the
+          // React settings section re-renders (see `useLocaleVersion`). Bumping the counter here is
+          // what makes `t()` inside a mounted component return the new language at all.
+          localeVersion += 1
+          for (const update of localeWatchers) update()
           refreshWatchLabels()
         })
         return () => { if (typeof off === "function") off() }
       }, "dsh-builtin-browser: locale changes")
     }
     installWatchPanel(ctx)
+    // Test seam. The readiness section is composed by the settings component, so a harness that
+    // renders that component can see the element but never run it — and running it is what proves a
+    // user reads a state label rather than `readiness.electron.failed`. Exported on the module rather
+    // than published on `globalThis` (where the product's own `__dshBuiltinBrowser` lives, for the
+    // shell's benefit): nothing in the product reads this name, and a page-level global would be a
+    // side effect of shipping a test.
+    exports.__readinessSection = Readiness
     ctx.slots.inject("settings.section", () => ctx.slots.register({
       name: "settings.section",
       id: "dsh-builtin-browser",

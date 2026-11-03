@@ -15,7 +15,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import z from '@deepseek-ai/schemastery'
 import type { BrowserRuntime } from '../browser/runtime.js'
 import { ElectronBrowserProvider } from './provider.js'
-import { provisionElectronInBackground } from './electron-provision.js'
+import { provisionElectronInBackground, provisionSnapshot, hasElectronRuntime } from './electron-provision.js'
 import type { ElectronBrowserViewHost } from './provider.js'
 import type { CarrierLossReason } from '../browser/types.js'
 import { randomUUID } from 'node:crypto'
@@ -31,6 +31,10 @@ import { MissingSystemBrowserHost } from './missing-system-browser.js'
 import { SettingsStore, settingsPath } from './settings-store.js'
 import { sameOrigin } from './settings-route.js'
 import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.js'
+import { findDesktopInstall, readBridgeStatus } from './bridge-status.js'
+import { readBridgeEndpoint } from './bridge-endpoint.js'
+import { readRuntimeStatus } from './runtime-status.js'
+import { handleRuntimeProvision, handleRuntimeStatus, RUNTIME_PROVISION_ROUTE, RUNTIME_STATUS_ROUTE } from './runtime-route.js'
 
 export {
   ELECTRON_BROWSER_PROVIDER_ID,
@@ -510,6 +514,67 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   installSettingsRoute(ctx, settings, () => { chooseCarrier() })
 
   /**
+   * Expose readiness — "can the browser serve a call right now" — for the settings panel.
+   *
+   * The panel had switches for every behaviour and no answer to the one question a new install
+   * raises: the bundled runtime is downloaded on first need (issue #41 moved it out of `postinstall`
+   * for good reasons), so for the first minute of a fresh install the honest state is "preparing",
+   * and until this route existed that state was a log line no panel could read. Both readings are
+   * cheap and side-effect free: a path probe for the runtime, an install-tree inspection for the
+   * bridge — the same two the launch path and the bridge-status route already use.
+   *
+   * Skipped, like its siblings, on a surface with no web server: a CLI has no panel to show it to.
+   * @param ctx - the plugin context.
+   * @param settings - the settings document, for the channel being honoured.
+   */
+  function installRuntimeStatusRoute(ctx: Context, settings: SettingsStore): void {
+    const injectRuntime = (ctx as unknown as {
+      inject?: (deps: readonly string[], callback: (host: WebServerHost) => void) => void
+    }).inject
+    if (typeof injectRuntime !== 'function') return
+    const deps = {
+      report: () => readRuntimeStatus({
+        channel: () => settings.get().browser.channel,
+        hasBinary: hasElectronRuntime,
+        provision: provisionSnapshot,
+        bridge: () => {
+          const root = findDesktopInstall()
+          return root === undefined ? undefined : readBridgeStatus(root)
+        },
+        // Installed is not running: the install tree survives a reboot, the endpoint does not. Both
+        // readings are cheap and side-effect free — a file read and a signal-0 pid check.
+        endpoint: () => readBridgeEndpoint(),
+      }),
+      // `force` is what makes the panel's retry button mean anything: without it the answer would be
+      // the settled failure the user is trying to replace. An attempt still running is joined.
+      provision: () => {
+        void provisionElectronInBackground(
+          message => ctx.logger?.info?.(`dsh-builtin-browser: ${message}`),
+          undefined,
+          { force: true },
+        )
+        return provisionSnapshot()
+      },
+    }
+    try {
+      injectRuntime(['webServer'], (host) => {
+        host.effect(() => host.webServer.register({
+          kind: 'exact',
+          path: RUNTIME_STATUS_ROUTE,
+          handler: (request, response) => handleRuntimeStatus(request, response, deps),
+        }, 'dsh-builtin-browser: runtime status'))
+        host.effect(() => host.webServer.register({
+          kind: 'exact',
+          path: RUNTIME_PROVISION_ROUTE,
+          handler: (request, response) => handleRuntimeProvision(request, response, deps),
+        }, 'dsh-builtin-browser: runtime provision'))
+      })
+    } catch {
+      // No web server: the panel is unreachable, and the readiness report has no reader.
+    }
+  }
+
+  /**
    * Re-run the carrier choice when the settings FILE changes on disk.
    *
    * The route above covers a write through the panel. It does not cover a person editing
@@ -545,6 +610,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   watchSettingsFile()
   installPreviewRoute(ctx, settings)
   installBridgeStatusRoute(ctx)
+  installRuntimeStatusRoute(ctx, settings)
 }
 
 /** Route the settings panel reads and writes. */

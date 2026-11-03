@@ -50,6 +50,16 @@ node scripts/verify-host-compat.mjs
 
 它用某个 profile 里**真实安装**的 `@deepseek-ai/*` 包组装一个宿主,加载本插件的编译产物、经宿主自己的 `defineTool` 注册工具、再用一个假 provider 真调两个工具(`dsh_browser_session` / `dsh_browser_a11y`)。默认读 `$DSH_HOME/profiles` 下的 profile,可用 `DSH_PROFILE` / `DSH_HOME` 指定。
 
+### 复验设置页的两个新端点(0.5.6)
+
+```sh
+node scripts/verify-runtime-status.mjs        # 与上面同一个 profile 解析规则
+```
+
+单元测试覆盖了处理器与判定逻辑,但覆盖不到**接线**:`ctx.inject(['webServer'])` 里注册的两个路径、以及把设置文档与安装树读进报告的 deps。路由没有注册与路由返回空,看起来是一样的 —— 这个探针用真实宿主包组装 cordis context、注册一个记录式 `webServer`、把插件注册的处理器挂到真实 loopback HTTP 上再发请求,断言四件事:两个路径都注册了、`GET` 返回可渲染的报告、无浏览器头的 `POST` 被 403 拒绝、面板式请求能拿到 `provision` 状态。它在**临时 `DSH_HOME`** 里跑,并固定 `ELECTRON_SKIP_BINARY_DOWNLOAD`,所以不会碰用户的设置文件,也不会触发 100 MB 下载。
+
+`node scripts/consumer-install-check.mjs <tgz> <空目录>` 则是安装侧的那一条:默认 pnpm 下装 tarball,**无 `Ignored build scripts`**、`scripts` 恰好是 `build,prepack,test`、就绪端点所在的两个 `lib/` 文件在装出来的树里。
+
 ## 关于 DSH 版本范围
 
 插件在 **`engines.dsh`** 里声明 `>=0.1.1-rc.2 <0.3.0`。

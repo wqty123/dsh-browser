@@ -6,6 +6,14 @@ export interface BridgeEndpoint {
     readonly updatedAt?: string;
 }
 /**
+ * The same window, for the readiness report.
+ *
+ * Exported rather than re-stated: "the shell is gone" must mean one thing in this plugin. A second
+ * copy of the number would drift, and the drift would show up as a panel that says ready while every
+ * call times out — the exact failure this constant exists to prevent.
+ */
+export declare const ENDPOINT_STALE_AFTER_MS = 60000;
+/**
  * A reusable connection to the bridge.
  *
  * Requests may be in flight CONCURRENTLY, so answers are correlated by id rather than by
