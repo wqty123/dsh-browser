@@ -12,7 +12,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
+      # v4 of this action still declares a Node 20 runtime, which the runner now forces onto Node 24
+      # and reports as a deprecation warning on every run (issue-level noise, not a failure). v6 is
+      # the current major and takes the same `version` input.
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
       # CI resolves exactly the graph checked into pnpm-lock.yaml.
