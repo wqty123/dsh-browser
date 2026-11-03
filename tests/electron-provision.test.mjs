@@ -10,6 +10,7 @@
 // install or hold a tool call open.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 
 import {
@@ -121,6 +122,36 @@ test('concurrent callers share one attempt', async () => {
   assert.equal(b.status, 'ready')
   assert.equal(calls.run, 1, 'one download for both callers')
   resetProvisionStateForTest()
+})
+
+test('the bound settles even when nothing else holds the event loop', async () => {
+  // This is the shape CI caught and a normal in-process test does not: one pending download and no
+  // other handles. The first implementation unref'd the timeout so it would not "keep the process
+  // alive"; with nothing else on the loop that timer never fired, the promise never settled, and node
+  // reported `Promise resolution is still pending but the event loop has already resolved`.
+  const moduleUrl = new URL('../lib/browser-electron/electron-provision.js', import.meta.url).href
+  const script = `
+    import { ensureElectronRuntime } from ${JSON.stringify(moduleUrl)}
+    const result = await ensureElectronRuntime({
+      hasBinary: () => false,
+      installerScript: () => 'C:/fake/install.js',
+      run: () => new Promise(() => {}),
+      log: () => {},
+      skip: () => false,
+      timeoutMs: 50,
+    })
+    console.log(JSON.stringify(result))
+  `
+  const started = Date.now()
+  const { stdout, status } = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    timeout: 20_000,
+  })
+  assert.equal(status, 0, `the child exited cleanly: ${stdout}`)
+  const parsed = JSON.parse(stdout.trim().split('\n').at(-1))
+  assert.equal(parsed.status, 'failed', 'the bound fired and reported a status')
+  assert.match(parsed.detail, /gave up/)
+  assert.ok(Date.now() - started < 15_000, 'and it did so promptly')
 })
 
 test('the real defaults are offline until something asks', () => {

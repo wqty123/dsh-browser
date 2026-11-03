@@ -28,6 +28,12 @@
 
 测试 +7(4 条预览只读:标记为非呈现、工具调用仍呈现、只发 `list` 不发 `ensureSidebar`、无页时抛显示状态;**3 条 CSS**:面板在按钮之上、关闭键可见且层级受控、`[hidden]` 规则存在),`tsc` 干净。
 
+### 顺带:CI 抓到的超时定时器缺陷(0.5.3 引入)
+
+`electron-provision` 的 `Promise.race` 超时定时器被 `unref()` 了——意思是"不要为了一个下载挂住进程"。方向错了:当事件循环上没有别的句柄时,这个定时器**永远不会触发**,于是"永不返回的下载"既不超时也不返回,等待它的调用方永远等下去(实测:node 直接以 `Detected unsettled top-level await` 退出,exit 13)。
+
+CI 在 0.5.3 tag 上抓到了它(`Promise resolution is still pending but the event loop has already resolved`,并连带取消了其后 3 条用例)。修法:定时器保持被引用,并在 `Promise.race` 结束后 `clearTimeout`,这样成功时也不会留下 180 秒的句柄。新增一条**子进程**回归用例:单一下载 + 没有其他句柄,断言进程在预算内退出且返回 `failed`——这正是本地进程内测试跑不出来、CI 才暴露的形态。
+
 **注意**:预览这一条不依赖桥重装;但桥本身若仍是 issue #37 之前的版本,`bridge-status` 会报 `stale`,重装仍建议(它还有别的修复)。
 
 ## 0.5.3（2026-11-03）
