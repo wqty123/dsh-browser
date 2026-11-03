@@ -13,6 +13,7 @@ import { Readable } from 'node:stream'
 
 import { findDesktopInstall, readBridgeStatus } from '../lib/browser-electron/bridge-status.js'
 import { handleBridgeStatus, BRIDGE_STATUS_ROUTE } from '../lib/browser-electron/preview-route.js'
+import { writeAsar } from './fake-asar.mjs'
 
 const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sidebar'
 
@@ -23,8 +24,22 @@ function makeInstall({ archive = false, patched = false, backup = false } = {}) 
   mkdirSync(lib, { recursive: true })
   const body = `${patched ? `${MARKER} pages.\n` : ''}const app = {};\n\nexport {};\n`
   writeFileSync(join(lib, 'main.js'), body)
+  // Identity (issue #40): the status reader verifies the app's own name before it reports anything,
+  // so a fixture without a manifest is not a DSH install any more.
+  writeFileSync(join(root, 'resources', 'app', 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh-desktop',
+    version: '0.2.1-rc.5',
+    main: 'lib/main.js',
+  }))
   if (backup) writeFileSync(join(lib, 'main.js.before-bridge'), 'const app = {};\n\nexport {};\n')
-  if (archive) writeFileSync(join(root, 'resources', 'app.asar'), 'not really an archive')
+  if (archive) {
+    // A real archive, because identity is read from it when it exists — that is the whole point of
+    // the "stale" state: the shell loads the archive and the patched tree beside it is inert.
+    writeAsar(join(root, 'resources', 'app.asar'), {
+      'package.json': JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.1-rc.5', main: 'lib/main.js' }),
+      'lib/main.js': 'const app = {};\n\nexport {};\n',
+    })
+  }
   return root
 }
 
@@ -100,7 +115,10 @@ test('the repair command is offered, quoted, and never executed', () => {
   }
 })
 
-test('the install is found by shape, under either product name', () => {
+test('the install is found by identity, under either product name', () => {
+  // Issue #40 changed what discovery may accept: the shape alone used to be enough, and every
+  // Electron app has the shape. What the user names the directory still must not matter — the app's
+  // own manifest does.
   const base = mkdtempSync(join(tmpdir(), 'dsh-lad-status-'))
   try {
     const roots = {
@@ -108,14 +126,24 @@ test('the install is found by shape, under either product name', () => {
       'DeepSeek Harness': join(base, 'Programs', 'DeepSeek Harness'),
       'Some Other Name': join(base, 'Programs', 'Some Other Name'),
     }
+    const manifest = JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.1-rc.5', main: 'lib/main.js' })
     for (const [name, root] of Object.entries(roots)) {
       mkdirSync(join(root, 'resources', 'app', 'lib'), { recursive: true })
       writeFileSync(join(root, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
+      writeFileSync(join(root, 'resources', 'app', 'package.json'), manifest)
       assert.equal(findDesktopInstall(base), root, `${name} is found`)
       // Remove it again so the next candidate is the one that matches.
       rmSync(root, { recursive: true, force: true })
     }
     assert.equal(findDesktopInstall(base), undefined, 'and nothing matches when nothing is there')
+
+    // The half that used to be wrong: the right shape with the wrong name is NOT an install.
+    const impostor = join(base, 'Programs', 'DSH Desktop')
+    mkdirSync(join(impostor, 'resources', 'app', 'lib'), { recursive: true })
+    writeFileSync(join(impostor, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
+    writeFileSync(join(impostor, 'resources', 'app', 'package.json'),
+      JSON.stringify({ name: 'unrelated-meeting-app', main: 'lib/main.js' }))
+    assert.equal(findDesktopInstall(base), undefined, 'an Electron app is not DSH Desktop')
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
@@ -146,6 +174,8 @@ test('the endpoint answers with the reading, same-origin only', async () => {
     const root = join(base, 'Programs', 'DSH Desktop')
     mkdirSync(join(root, 'resources', 'app', 'lib'), { recursive: true })
     writeFileSync(join(root, 'resources', 'app', 'lib', 'main.js'), `${MARKER} pages.\nconst app = {};\n\nexport {};\n`)
+    writeFileSync(join(root, 'resources', 'app', 'package.json'),
+      JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.1-rc.5', main: 'lib/main.js' }))
 
     const ok = response()
     await handleBridgeStatus(request(), ok, base)

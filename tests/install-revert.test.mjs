@@ -33,6 +33,13 @@ function makeInstall() {
     '',
   ].join('\n')
   writeFileSync(join(root, 'resources', 'app', 'lib', 'main.js'), body)
+  // Identity (issue #40): a shape is not an identity. The installer refuses a tree whose manifest
+  // does not name DSH Desktop, so every fixture that expects it to act has to carry one.
+  writeFileSync(join(root, 'resources', 'app', 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh-desktop',
+    version: '0.2.1-rc.5',
+    main: 'lib/main.js',
+  }))
   return { root, body }
 }
 
@@ -100,15 +107,18 @@ test('the "safe to delete resources/app" note only appears where an archive exis
   }
 })
 
-test('the default install is found by shape, not by a fixed product name', () => {
+test('the default install is found by identity, not by a fixed product name', () => {
   // The product directory is `DeepSeek Harness` on some builds and `DSH Desktop` on others, so a
-  // hardcoded name makes the documented bare command fail. Both are probed here, and a differently
-  // named directory is found too — the shape is what identifies an install.
+  // hardcoded name makes the documented bare command fail. What identifies the install is the app's
+  // own manifest (issue #40), not its folder name: a differently named directory is found when the
+  // manifest says DSH Desktop, and ignored when it does not.
   const fake = mkdtempSync(join(tmpdir(), 'dsh-localappdata-'))
   const programs = join(fake, 'Programs')
   const named = join(programs, 'Some Other Name')
   mkdirSync(join(named, 'resources', 'app', 'lib'), { recursive: true })
   writeFileSync(join(named, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
+  writeFileSync(join(named, 'resources', 'app', 'package.json'),
+    JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.1-rc.5', main: 'lib/main.js' }))
   try {
     const result = execFileSync(process.execPath, [script], {
       encoding: 'utf8',
@@ -119,6 +129,30 @@ test('the default install is found by shape, not by a fixed product name', () =>
   } catch (error) {
     // A non-zero exit is the failure this test exists to catch; report what the script said.
     assert.fail(`the bare command must find the install: ${String(error.stdout ?? error.message)}`)
+  } finally {
+    rmSync(fake, { recursive: true, force: true })
+  }
+})
+
+test('the default install probe refuses a directory whose manifest is another app', () => {
+  // The same probe, with the shape but somebody else's name: the documented bare command must not
+  // pick it up and try to patch it.
+  const fake = mkdtempSync(join(tmpdir(), 'dsh-localappdata-'))
+  const named = join(fake, 'Programs', 'DeepSeek Harness')
+  mkdirSync(join(named, 'resources', 'app', 'lib'), { recursive: true })
+  writeFileSync(join(named, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
+  writeFileSync(join(named, 'resources', 'app', 'package.json'),
+    JSON.stringify({ name: 'unrelated-meeting-app', main: 'lib/main.js' }))
+  try {
+    try {
+      execFileSync(process.execPath, [script], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, LOCALAPPDATA: fake } })
+      assert.fail('the installer must not act on another application')
+    } catch (error) {
+      assert.notEqual(error.status, 0, 'it exits non-zero')
+      assert.match(`${error.stdout ?? ''}${error.stderr ?? ''}`, /refusing to touch|DSH Desktop install/)
+      assert.equal(readFileSync(join(named, 'resources', 'app', 'lib', 'main.js'), 'utf8'),
+        'const app = {};\n\nexport {};\n', 'and the file is untouched')
+    }
   } finally {
     rmSync(fake, { recursive: true, force: true })
   }

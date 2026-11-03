@@ -61,6 +61,16 @@ function makeDocument(overrides = {}) {
       getAttribute(name) { return node.attributes.get(String(name)) ?? null },
       removeAttribute(name) { node.attributes.delete(String(name)) },
       appendChild(child) { node.children.push(child); return child },
+      // The live-view panel puts its bridge notice above the header. A fake without this made the
+      // failure look like "the entry is broken" rather than "the fixture is incomplete".
+      insertBefore(child, before) {
+        const at = node.children.indexOf(before)
+        if (at === -1) node.children.unshift(child)
+        else node.children.splice(at, 0, child)
+        return child
+      },
+      removeChild(child) { const at = node.children.indexOf(child); if (at !== -1) node.children.splice(at, 1); return child },
+      parentNode: undefined,
       addEventListener(type, handler) {
         const list = node.listeners.get(type) ?? []
         list.push(handler)
@@ -200,8 +210,8 @@ function makeHost(settings) {
 }
 
 /** Render the registered component until a render stops changing state. */
-async function renderPanel(Component, host) {
-  activeFetch = host.fetchMock
+async function renderPanel(Component, host, fetchOverride) {
+  activeFetch = fetchOverride ?? host.fetchMock
   let tree
   for (let pass = 0; pass < 5; pass += 1) {
     host.reset()
@@ -229,13 +239,14 @@ function elements(node, found = []) {
 async function mount(options = {}) {
   const settings = options.settings ?? DEFAULT_SETTINGS
   if (options.document !== undefined) activeDocument = options.document
+  if (options.fetch !== undefined) activeFetch = options.fetch
   const host = makeHost(settings)
   const exports = bundleFactory()(host.requireFn)
 
   let registration
   const ctx = {
     effect: (fn) => { fn() },
-    locale: { register: () => {}, bind: () => (key) => key },
+    locale: options.locale ?? { register: () => {}, bind: () => (key) => key },
     slots: {
       inject: (_name, fn) => fn(),
       register: (spec, Component) => { registration = { spec, Component } },
@@ -264,7 +275,9 @@ async function mount(options = {}) {
   assert.ok(registration !== undefined, 'apply() registered a settings section')
   assert.equal(registration.spec.name, 'settings.section')
 
-  const tree = await renderPanel(registration.Component, host)
+  // A test that supplies its own fetch keeps it: the watch panel's probe resolves across the render
+  // loop, so clobbering the hook mid-test would hide the very requests the test is about.
+  const tree = await renderPanel(registration.Component, host, options.fetch)
   return { tree, host, exports, registration, panel: activeSandbox.__dshBuiltinBrowser }
 }
 
@@ -1034,4 +1047,95 @@ test('a host without the workspace service still places the tab and reports no s
   const verdict = panel.openPanel('session-a', 'https://example.com/')
   assert.equal(verdict.switched, undefined, 'nothing was switched, and nothing claims it was')
   assert.equal(state.placementCalls.length, 1, 'the placement path still ran')
+})
+
+// ---------------------------------------------------------------------------
+// Issue #40 third part: the live-view entry, its labels, and the token it paints with.
+//
+// Three things were reported and reproduced against the shipped bundle, all of them visible with no
+// remote watching configured at all: the entry button was mounted on every page anyway, mounting it
+// fired a bridge-status request, and the panel's static title stayed `watch.title` because the labels
+// were written before the dictionaries were bound.
+// ---------------------------------------------------------------------------
+
+/** Serve the two endpoints the watch panel talks to, and record which were asked for. */
+function watchHostFetch({ enabled = false, bridge } = {}) {
+  const asked = []
+  const fetchMock = async url => {
+    asked.push(String(url))
+    if (String(url).includes('/browser-view/sessions')) {
+      return { ok: true, status: 200, json: async () => ({ enabled, sessions: enabled ? [] : [] }) }
+    }
+    if (String(url).includes('/bridge-status')) {
+      return { ok: true, status: 200, json: async () => ({ bridge }) }
+    }
+    return { ok: false, status: 404, json: async () => ({}) }
+  }
+  return { asked, fetchMock }
+}
+
+/** A locale host that resolves keys lazily, the way the real one does. */
+function lazyLocale() {
+  const dictionaries = {}
+  return {
+    dictionaries,
+    api: {
+      register: (ns, dict) => { dictionaries[ns] = dict },
+      bind: ns => key => dictionaries[ns]?.zh?.[key] ?? key,
+    },
+  }
+}
+
+const tick = () => new Promise(resolve => setTimeout(resolve, 5))
+
+test('a disabled remote view mounts no entry and never asks about the bridge', async () => {
+  const { asked, fetchMock } = watchHostFetch({ enabled: false })
+  const document = documentWith()
+  await mount({ fetch: fetchMock, document })
+  await tick()
+
+  const layers = elements(activeDocument.body.children ?? [])
+    .filter(node => String(node.className) === 'dsh-bw-watch')
+  assert.equal(layers.length, 0, 'no entry was appended: a feature nobody enabled shows nothing')
+  assert.equal(asked.some(url => url.includes('/bridge-status')), false,
+    'and no diagnostic request is made for it')
+})
+
+test('an enabled remote view mounts the entry and then asks about the bridge', async () => {
+  const { asked, fetchMock } = watchHostFetch({
+    enabled: true,
+    bridge: { state: 'stale', present: true, command: 'node desktop-bridge/install.mjs "<root>" --restart' },
+  })
+  await mount({ fetch: fetchMock, document: documentWith() })
+  await tick()
+
+  const layers = elements(activeDocument.body.children ?? [])
+    .filter(node => String(node.className) === 'dsh-bw-watch')
+  assert.equal(layers.length, 1, 'exactly one entry, and only because watching is on')
+  assert.equal(asked.some(url => url.includes('/bridge-status')), true,
+    'the diagnostic belongs to the enabled feature')
+})
+
+test('the panel labels are translated, not left as keys', async () => {
+  const locale = lazyLocale()
+  const { fetchMock } = watchHostFetch({ enabled: true, bridge: { state: 'installed', present: true } })
+  await mount({ fetch: fetchMock, document: documentWith(), locale: locale.api })
+  await tick()
+
+  const nodes = elements(activeDocument.body.children ?? [])
+  const title = nodes.find(node => String(node.className) === 'dsh-bw-watch-title')
+  const open = nodes.find(node => String(node.className) === 'dsh-bw-watch-label')
+  assert.ok(title !== undefined, 'the panel title exists')
+  assert.equal(title.textContent, locale.dictionaries['settings.dsh-builtin-browser'].zh['watch.title'],
+    'the title is the translated string, not the key')
+  assert.notEqual(title.textContent, 'watch.title', 'the reported symptom must not be back')
+  assert.ok(open !== undefined && open.textContent !== 'watch.open', 'the entry label is translated too')
+})
+
+test('the panel paints with a token the shipped theme defines', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  // The *usage* must be gone; the name may still appear in the comment that explains why.
+  assert.equal(source.includes('var(--dsw-alias-bg-elevated'), false,
+    'that token does not exist in the theme this ships against, so its fallback was the only thing seen')
+  assert.match(source, /var\(--dsw-alias-bg-layer-2/, 'the token the host uses for elevated surfaces')
 })

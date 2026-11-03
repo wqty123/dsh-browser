@@ -273,7 +273,11 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 .dsh-bw-watch-panel {
   position: absolute; right: 0; bottom: 40px; width: min(560px, calc(100vw - 32px));
   border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.35)); border-radius: 10px;
-  background: var(--dsw-alias-bg-elevated, #1b1b1f); color: inherit; overflow: hidden;
+  /* --dsw-alias-bg-elevated does not exist in the theme this ships against (measured on rc.5: 0
+   * occurrences, while --dsw-alias-bg-layer-2 has 5). With a token that is never defined, the
+   * fallback is what everyone sees — a dark card in a light theme. bg-layer-2 is the token the
+   * host's own elevated rows use. */
+  background: var(--dsw-alias-bg-layer-2, #1b1b1f); color: inherit; overflow: hidden;
   box-shadow: 0 10px 30px rgba(0,0,0,.35);
 }
 .dsh-bw-watch-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px; }
@@ -1158,17 +1162,46 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     panel.appendChild(foot)
     layer.appendChild(openButton)
     layer.appendChild(panel)
-    document.body.appendChild(layer)
+    // Deliberately NOT appended here. The entry is mounted only when the host reports that watching
+    // is on — reported as issue #40: with the feature off, the button still sat on every page and
+    // the bridge-status request fired at startup, so a setting nobody turned on produced a permanent
+    // control and a permanent diagnostic call.
 
     /** Localized text, falling back to the key so a missing entry is visible rather than blank. */
     const say = key => {
       try { return translate(key) } catch { return key }
     }
-    openLabel.textContent = say("watch.open")
-    title.textContent = say("watch.title")
-    readonlyLabel.textContent = say("watch.readOnly")
-    stopButton.textContent = say("watch.stop")
-    openButton.title = say("watch.open")
+
+    /**
+     * Apply the current locale to every static label.
+     *
+     * Called at mount and again once the dictionaries are bound. The panel used to set these exactly
+     * once, inside `apply()`, *before* `locale.register` had run — so the shipped build showed
+     * `watch.title` as its title and the key was never replaced (issue #40).
+     */
+    const relabel = () => {
+      openLabel.textContent = say("watch.open")
+      title.textContent = say("watch.title")
+      readonlyLabel.textContent = say("watch.readOnly")
+      stopButton.textContent = say("watch.stop")
+      openButton.title = say("watch.open")
+    }
+    relabel()
+
+    let mounted = false
+    /** Put the entry on the page. Idempotent, so a second enable cannot stack copies. */
+    const mount = () => {
+      if (mounted) return
+      mounted = true
+      document.body.appendChild(layer)
+      relabel()
+    }
+    /** Take it off again — the host turned the feature off after it had been on. */
+    const unmount = () => {
+      if (!mounted) return
+      mounted = false
+      layer.remove()
+    }
 
     /** One running view: a session, its frames, and whether it should keep pulling. */
     const view = { session: undefined, timer: undefined, running: false, lastAt: 0, objectUrl: undefined }
@@ -1300,7 +1333,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 
     ctx.effect(() => () => {
       stop()
-      layer.remove()
+      unmount()
     }, "dsh-builtin-browser: live view panel")
 
     /**
@@ -1337,7 +1370,27 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       }
       panel.insertBefore(notice, panel.firstChild)
     }
-    void showBridgeStatus()
+
+    /**
+     * Mount the entry only if the host says viewing is enabled, and only then ask about the bridge.
+     *
+     * Both halves are the point of the ordering: the probe answers "is this feature on", and the
+     * bridge-status request is a diagnostic for a feature that is on. Issuing it for a feature that
+     * is off is what the review called a default entry manufacturing a call (issue #40).
+     *
+     * A host that does not serve the sessions endpoint answers `enabled: false`, so the fallback is
+     * "no entry" rather than "an entry that cannot work".
+     */
+    const mountIfEnabled = async () => {
+      const found = await probe()
+      if (!found.enabled) {
+        unmount()
+        return
+      }
+      mount()
+      await showBridgeStatus()
+    }
+    void mountIfEnabled()
   }
 
   function apply(ctx) {
@@ -1345,10 +1398,14 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     // one. Idempotent, so a re-apply does not stack copies.
     installStyles()
     installPanelService(ctx)
-    installWatchPanel(ctx)
+    // Dictionaries and the bound `t` come BEFORE anything that sets text from them. The watch panel
+    // used to be installed first, so its static labels were written while `translate` still returned
+    // the key and were never rewritten — the panel shipped with `watch.title` as its title
+    // (issue #40).
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-builtin-browser: dictionaries")
     const t = ctx.locale.bind(NS)
     translate = t
+    installWatchPanel(ctx)
     ctx.slots.inject("settings.section", () => ctx.slots.register({
       name: "settings.section",
       id: "dsh-builtin-browser",

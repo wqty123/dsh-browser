@@ -1,9 +1,11 @@
 /**
  * Find the desktop install to report on.
  *
- * The same shape probe the installer uses, repeated here because the two run in different processes
- * and neither can import the other: the product directory is `DeepSeek Harness` on some builds and
- * `DSH Desktop` on others, and the shape that identifies an install is stable across both.
+ * Reported as issue #40: this used to probe for a *generic* Electron layout and return the first
+ * directory that had one. Any Electron app has that layout, so a stranger's app was reported as
+ * "DSH Desktop, bridge missing" — together with a ready-to-run installer command aimed at it. The
+ * probe now verifies the same identity the installer does (see `desktop-identity.js`), so the
+ * answer is about DSH Desktop and nothing else.
  * @param localAppData - the base directory; defaults to the environment's.
  * @returns the install directory, or undefined when nothing matches.
  */

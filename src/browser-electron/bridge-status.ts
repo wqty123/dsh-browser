@@ -19,29 +19,32 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { readDesktopIdentity } from './desktop-identity.js'
+
 /**
  * Find the desktop install to report on.
  *
- * The same shape probe the installer uses, repeated here because the two run in different processes
- * and neither can import the other: the product directory is `DeepSeek Harness` on some builds and
- * `DSH Desktop` on others, and the shape that identifies an install is stable across both.
+ * Reported as issue #40: this used to probe for a *generic* Electron layout and return the first
+ * directory that had one. Any Electron app has that layout, so a stranger's app was reported as
+ * "DSH Desktop, bridge missing" — together with a ready-to-run installer command aimed at it. The
+ * probe now verifies the same identity the installer does (see `desktop-identity.js`), so the
+ * answer is about DSH Desktop and nothing else.
  * @param localAppData - the base directory; defaults to the environment's.
  * @returns the install directory, or undefined when nothing matches.
  */
 export function findDesktopInstall(localAppData = process.env.LOCALAPPDATA ?? ''): string | undefined {
   if (localAppData === '') return undefined
   const programs = join(localAppData, 'Programs')
-  const looksInstalled = (candidate: string): boolean => existsSync(join(candidate, 'resources', 'app', 'lib', 'main.js'))
-    || existsSync(join(candidate, 'resources', 'app.asar'))
+  const isDesktop = (candidate: string): boolean => readDesktopIdentity(candidate).ok
   for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
     const candidate = join(programs, named)
-    if (looksInstalled(candidate)) return candidate
+    if (isDesktop(candidate)) return candidate
   }
   try {
     for (const entry of readdirSync(programs, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
       const candidate = join(programs, entry.name)
-      if (looksInstalled(candidate)) return candidate
+      if (isDesktop(candidate)) return candidate
     }
   } catch {
     // No Programs directory: nothing to report on, which is a state rather than an error.
@@ -100,16 +103,32 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
   const archivePath = join(resources, 'app.asar')
   const backupPath = `${mainPath}.before-bridge`
 
+  // Identity first, and before any other reading. Two reasons, both measured in issue #40: a
+  // stranger's app must not be reported as DSH Desktop, and this status also carries a *command* —
+  // pointing that command at a directory whose identity was never verified is how the installer got
+  // aimed at an application that merely looked like Electron.
+  const identity = readDesktopIdentity(installRoot)
+  if (!identity.ok) {
+    return {
+      state: 'missing',
+      present: false,
+      installRoot,
+      archivePresent: safeExists(archivePath),
+      detail: `not a DSH Desktop install: ${identity.reason}`,
+    }
+  }
+
   const archivePresent = safeExists(archivePath)
   const mainPresent = safeExists(mainPath)
   if (!mainPresent && !archivePresent) {
+    // Unreachable once identity has passed (identity requires the loaded main entry), kept as the
+    // fail-closed branch for a tree that changed between the two reads.
     return {
       state: 'missing',
       present: false,
       installRoot,
       archivePresent,
-      command: repairCommand(installRoot),
-    detail: 'not a DSH Desktop install: no resources/app/lib/main.js and no resources/app.asar',
+      detail: 'not a DSH Desktop install: no resources/app/lib/main.js and no resources/app.asar',
     }
   }
   let backupAt

@@ -66,7 +66,7 @@
  * and nothing started from outside survives the exit far enough to install afterwards (issue #36).
  * --restart asks for confirmation on a console; add --yes for an unattended run.
  */
-import { copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 
@@ -435,6 +435,215 @@ function installCliCompatibility() {
   console.log(`  cli runtime resolution: ${patchHostCli()}`)
 }
 
+// ---------------------------------------------------------------------------
+// Identity — before anything is stopped, deleted, extracted, renamed or written.
+//
+// Reported as issue #40. The check used to be "resources/app/lib/main.js or resources/app.asar
+// exists", which is the shape of EVERY Electron app. Measured: a throwaway app whose package.json
+// said `unrelated-meeting-app` was accepted, had its entry file rewritten and the bridge copied in;
+// and a second sample lost its `resources/app` directory to the packed-layout rebuild before the
+// archive was found to be invalid.
+//
+// The rule now lives in `desktop-identity.json`, shared with the plugin's status reader, and the
+// order is the point: identity first, then the archive is VALIDATED, and only then may this script
+// close the app or delete a tree.
+// ---------------------------------------------------------------------------
+
+/**
+ * The identity rule (accepted package names and the main entry), from the JSON next to this file.
+ * @returns the rule, or undefined after printing why it cannot be trusted.
+ */
+function readIdentityRule() {
+  try {
+    const raw = JSON.parse(readFileSync(new URL('./desktop-identity.json', import.meta.url), 'utf8'))
+    const names = raw.packageNames
+    const mainEntry = raw.mainEntry
+    if (!Array.isArray(names) || names.length === 0 || names.some(name => typeof name !== 'string')
+      || typeof mainEntry !== 'string' || mainEntry === '') {
+      console.error('desktop-identity.json is malformed: expected packageNames[] and mainEntry')
+      return undefined
+    }
+    return { packageNames: names, mainEntry }
+  } catch (error) {
+    console.error(`desktop-identity.json could not be read: ${String(error)}`)
+    return undefined
+  }
+}
+
+/**
+ * Read one file out of an asar archive without extracting anything.
+ *
+ * Identity has to come from the archive when one exists: Electron loads it in preference to the
+ * sibling directory, and a desktop update leaves that older extraction behind, so verifying the
+ * directory would verify bytes nobody runs.
+ * @param archive - the archive path.
+ * @param entryPath - slash-separated path inside the archive.
+ * @returns the bytes, or undefined when the entry is missing or unreadable.
+ */
+function readAsarEntry(archive, entryPath) {
+  let fd
+  try {
+    const parsed = readAsarHeader(archive)
+    fd = parsed.fd
+    let node
+    let files = parsed.header.files
+    for (const part of entryPath.split('/')) {
+      if (files === undefined) return undefined
+      node = files[part]
+      if (node === undefined) return undefined
+      files = node.files
+    }
+    if (node.files !== undefined || node.unpacked === true) return undefined
+    const size = Number(node.size)
+    const offset = Number(node.offset)
+    if (!Number.isFinite(size) || !Number.isFinite(offset) || size < 0) return undefined
+    const buffer = Buffer.alloc(size)
+    const read = readSync(fd, buffer, 0, size, parsed.contentBase + offset)
+    return read === size ? buffer : undefined
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd) } catch { /* already closed */ }
+    }
+  }
+}
+
+/**
+ * Validate the archive the shell will actually load: it must parse, carry a DSH Desktop manifest and
+ * the declared main entry, and every `unpacked` entry must exist beside it with the size the header
+ * claims. Read-only.
+ * @param archive - the archive path.
+ * @returns `{ ok: true }`, or `{ ok: false, reason }`.
+ */
+function validateArchive(archive) {
+  let parsed
+  try {
+    parsed = readAsarHeader(archive)
+  } catch (error) {
+    return { ok: false, reason: `the archive header cannot be read: ${String(error)}` }
+  }
+  const { fd, header, contentBase } = parsed
+  try {
+    const fileSize = statSync(archive).size
+    const problems = []
+    const walk = (node, prefix) => {
+      for (const [name, entry] of Object.entries(node.files ?? {})) {
+        const relativePath = prefix === '' ? name : `${prefix}/${name}`
+        if (entry.files !== undefined) {
+          walk(entry, relativePath)
+          continue
+        }
+        const size = Number(entry.size)
+        if (!Number.isFinite(size) || size < 0) {
+          problems.push(`${relativePath}: implausible size ${String(entry.size)}`)
+          continue
+        }
+        if (entry.unpacked === true) {
+          const source = join(`${archive}.unpacked`, ...relativePath.split('/'))
+          if (!existsSync(source)) {
+            problems.push(`${relativePath}: listed as unpacked but ${source} is missing`)
+            continue
+          }
+          if (statSync(source).size !== size) problems.push(`${relativePath}: unpacked size does not match the header`)
+          continue
+        }
+        const offset = Number(entry.offset)
+        if (!Number.isFinite(offset) || contentBase + offset + size > fileSize) {
+          problems.push(`${relativePath}: content lies outside the archive`)
+        }
+      }
+    }
+    walk(header, '')
+    if (problems.length > 0) {
+      return { ok: false, reason: `the archive is not usable: ${problems.slice(0, 5).join('; ')}` }
+    }
+    const rule = readIdentityRule()
+    if (rule === undefined) return { ok: false, reason: 'the identity rule is unavailable' }
+    let node
+    let files = header.files
+    for (const part of rule.mainEntry.split('/')) {
+      if (files === undefined) { node = undefined; break }
+      node = files[part]
+      files = node?.files
+    }
+    if (node === undefined) return { ok: false, reason: `the archive has no ${rule.mainEntry}` }
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, reason: `the archive cannot be validated: ${String(error)}` }
+  } finally {
+    try { closeSync(fd) } catch { /* already closed */ }
+  }
+}
+
+/**
+ * Whether a directory is a DSH Desktop install, by the shared identity rule.
+ *
+ * Every uncertainty refuses: this answer gates stopping the app, deleting a tree and writing files.
+ * @param root - the install directory to verify.
+ * @returns `{ ok: true, layout, packageName, version }`, or `{ ok: false, reason }`.
+ */
+function verifyDesktopIdentity(root) {
+  const rule = readIdentityRule()
+  if (rule === undefined) return { ok: false, reason: 'the identity rule is unavailable' }
+  const resources = join(root, 'resources')
+  const archive = join(resources, 'app.asar')
+  const appDir = join(resources, 'app')
+  const archivePresent = existsSync(archive)
+  const layout = archivePresent ? 'packed' : 'unpacked'
+
+  let manifestText
+  if (archivePresent) {
+    const bytes = readAsarEntry(archive, 'package.json')
+    if (bytes === undefined) {
+      return { ok: false, reason: `${archive} exists but its package.json cannot be read` }
+    }
+    manifestText = bytes.toString('utf8')
+  } else {
+    const manifestPath = join(appDir, 'package.json')
+    if (!existsSync(manifestPath)) {
+      return { ok: false, reason: `neither ${manifestPath} nor ${archive} exists` }
+    }
+    manifestText = readFileSync(manifestPath, 'utf8')
+  }
+
+  let manifest
+  try {
+    manifest = JSON.parse(manifestText)
+  } catch {
+    return { ok: false, reason: 'the package manifest is not valid JSON' }
+  }
+  const name = typeof manifest.name === 'string' ? manifest.name : ''
+  if (!rule.packageNames.includes(name)) {
+    return {
+      ok: false,
+      reason: `the app calls itself ${name === '' ? '(no name)' : JSON.stringify(name)}, which is not one of `
+        + `${rule.packageNames.join(' / ')} — a generic Electron layout is not proof of identity`,
+    }
+  }
+  const mainPresent = archivePresent
+    ? readAsarEntry(archive, rule.mainEntry) !== undefined
+    : existsSync(join(appDir, ...rule.mainEntry.split('/')))
+  if (!mainPresent) {
+    return { ok: false, reason: `${rule.mainEntry} is not present under ${archivePresent ? archive : appDir}` }
+  }
+  return {
+    ok: true,
+    layout,
+    packageName: name,
+    version: typeof manifest.version === 'string' ? manifest.version : undefined,
+  }
+}
+
+const identity = verifyDesktopIdentity(installRoot)
+if (!identity.ok) {
+  console.error(`refusing to touch ${installRoot}`)
+  console.error(`  ${identity.reason}`)
+  console.error('Pass the installation directory of DSH Desktop as the first argument.')
+  console.error('Nothing was stopped, deleted, extracted or written.')
+  process.exit(1)
+}
+
 // `--restart` closes the shell BEFORE anything else, because the archive cannot be moved while the
 // shell holds it (EBUSY), and because there is no safe way to wait across the exit from outside —
 // both arrangements measured in issue #36 died at that moment. Doing it here keeps the whole
@@ -569,6 +778,16 @@ if (revert) {
 }
 
 if (packedLayout) {
+  // Validate BEFORE the tree is deleted. Reported as issue #40: with an invalid archive and an
+  // existing extraction, this script removed `resources/app` and only then discovered the archive
+  // was unusable — leaving the app directory gone for no gain. The check is read-only and cheap
+  // (header walk plus a stat per unpacked entry), so it belongs on this side of the deletion.
+  const checked = validateArchive(asarPath)
+  if (!checked.ok) {
+    console.error(`refusing to rebuild from an archive that cannot be verified: ${checked.reason}`)
+    console.error('Nothing was deleted; the archive and the existing directory are untouched.')
+    process.exit(1)
+  }
   const stale = existsSync(appDir)
   const started = Date.now()
   console.log(stale

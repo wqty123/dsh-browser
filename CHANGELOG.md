@@ -2,6 +2,39 @@
 
 本文件记录各轮功能开发与问题修复(由仓库外独立文档迁入,随仓库管理)。
 
+## 未发布（2026-11-03）
+
+### 安装器先验身份,再动手
+
+issue #40 的复核把这条排在第一位,因为后果最重:**形状不是身份**。旧判据是"有 `resources/app/lib/main.js` 或 `resources/app.asar`"——而这是每个 Electron 应用都有的形状。实测:一份自建样例(其 `package.json` 明写 `unrelated-meeting-app`)被认成 DSH Desktop,拿到一条指向它的安装命令;执行后它的入口文件被改、bridge 被复制进来。另一份样例在 archive 校验失败**之前**就被删掉了 `resources/app`。
+
+- 身份规则收敛成一份数据 `desktop-bridge/desktop-identity.json`(接受的包名 + 主入口),**安装器与 `bridge-status` 同读这一份**;测试断言两边没有第二份硬编码的名字表,且 `FALLBACK_RULE` 与 JSON 逐字段相等。
+- 判据换成应用**自己的 `package.json`**:`name` 必须是 `@deepseek-ai/dsh-desktop`(`dsh-desktop`),且声明的 `lib/main.js` 必须存在。泛型 Electron 布局不再算证据。
+- **archive 存在时只读 archive**。Electron 优先加载 `app.asar`,桌面更新又会把旧解包目录留在原地,所以身份与主入口都从 archive 的 package.json / header 里读;旁边的目录不参与判断。
+- **顺序**:身份校验放在任何停止、删除、解包、重命名、备份、写入之前——包括 `--restart` 关程序之前。拒绝时的输出明说"未停止、未删除、未解包、未写入"。
+- **校验先于删除**:packed 布局先用只读方式验证 archive(header 可解析、主入口存在、每个 `unpacked` 条目存在且大小与 header 一致、内容偏移在文件内),通过后才允许 `rmSync(resources/app)`。archive 不可用时不删任何东西。
+- `readBridgeStatus` 对非 DSH 目标返回 `present: false` 且**不再附带安装命令**;`findDesktopInstall` 也按同一规则发现(bridge 诊断请求与"让它跑安装器"不再指向一个没验过身份的应用)。
+
+测试:+11 条(`tests/desktop-identity.test.mjs`),含"另一款 Electron 应用被拒且安装器**字节零改动**""身份检查位置早于 `stopShell`/`rmSync`/写入""packed 布局下 foreign 包名被拒、archive 与目录都未被触碰""不可用 archive 不解包目录"。原先把形状当证据的两条测试(`found by shape` / `default install is found by shape`)按新规则改写,并新增"目录名对但清单是别人"的负例。
+
+### 观看入口按需挂载
+
+- `remoteView` 关闭时**不挂载入口、不发 `bridge-status` 请求**。原来入口在每次 `apply()` 都无条件 `appendChild`,并在启动时立刻请求桥状态:一个没人打开的功能因此常驻一个按钮、常驻一次诊断调用。
+- 探针(`/browser-view/sessions`)回答 `enabled: false` 或不可用时,`unmount()`;开启时才挂载,挂载后才问桥状态。
+- 面板静态标签(标题、只读说明、停止、入口文案)改在挂载时**重新取一次**文案。
+
+### 翻译时序
+
+- `apply()` 里把字典注册与 `ctx.locale.bind` 提到 `installWatchPanel` **之前**;面板再在挂载时 `relabel()`。此前标签在 `apply()` 里只写一次、且写在 `locale.register` 之前,发布的包里标题一直是字面量 `watch.title`。测试用"懒解析"的 locale 桩断言标题是译文而非 key。
+
+### 配色
+
+- 面板改用 `--dsw-alias-bg-layer-2`。原用的 `--dsw-alias-bg-elevated` 在 rc.5 主题里**0 次出现**(`bg-layer-2` 5 次),所以看到的永远是写死的深色 fallback,浅色主题下就是一张黑卡。
+
+测试 432 → 443(新增 11 条身份守卫 + 4 条入口/翻译/令牌),`tsc` 干净。
+
+**未做**:复核第 5、6 条里"桥诊断只在真的用侧栏时才提示"与"由用户主动唤起观看面板"是产品决定,本轮不改;按当前原则(默认安静、按需展示)入口已经不常驻,再进一步需要先定交互。
+
 ## 0.5.2（2026-11-01）
 
 ### 侧栏页面不再需要人先把侧栏打开、或先切到那个会话
