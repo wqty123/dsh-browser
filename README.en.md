@@ -97,6 +97,12 @@ Three same-origin endpoints: `GET /dsh-builtin-browser/browser-view/sessions`, `
 
 The frames can contain CAPTCHAs, account details or logged-in content — confirm it is the page you mean to watch.
 
+## Related projects
+
+**[yeuxuan/dsh-builtin-browser](https://github.com/yeuxuan/dsh-builtin-browser)** — a community **sidebar-only derivative** of this project at 0.4.14 (MIT, LICENSE and attribution kept). It keeps only the desktop shell's right-sidebar `<webview>` carrier and drops the self-hosted Electron child, the installed Chrome/Edge carriers and the iframe path; element snapshots carry refs, actions target `target.by: "ref"` with a hit test before clicking, every CDP command has a timeout, and popups, HTTP auth and downloads surface in a status bar above the page.
+
+If your setup is **only the desktop sidebar** and you do not want the carrier fallbacks, it is smaller and more focused than this project. It is third-party and independently maintained — send its bugs and changes to that repository, not here.
+
 ## Documentation
 
 | To learn | Read |
@@ -114,6 +120,7 @@ Full detail, round by round, with the reasoning and evidence behind each fix: [C
 
 | Version | Date | Theme |
 | --- | --- | --- |
+| **0.5.4** | 2026-11-03 | **The preview is read-only**: a frame no longer goes through `ensureSidebar` (older bridges pressed keys and typed into the address bar) but through `list`, so the sidebar panel is no longer pulled to the front; overlay geometry, close control, stacking and `img[hidden]` fixed (#46); **remote viewing is a settings switch that applies immediately** (a phone has no shortcut); the bridge repair command names the copy inside the installed package (#40, fourth item) |
 | **0.5.3** | 2026-11-03 | **Installation no longer needs the network**: the `postinstall` is gone and the Electron runtime is prepared the first time it is actually needed, never failing an install (fixes the market install failures in #41/#42); the installer proves the app's identity before touching anything and validates before deleting (#40); the live-view entry mounts on demand, with its labels translated and a theme token that exists |
 | **0.5.2** | 2026-11-01 | A sidebar page no longer waits for a human: the column is opened when it was never opened, and the shell is asked to display a conversation requested from the background, with a bounded retry. Adds `click_sequence`. Recognises the pre-#37 bridge refusal that carries no code |
 | **0.5.1** | 2026-10-31 | Adopt the page the browser already shows: `switch_tab` and `open` land on it; canvas detection no longer requires an empty element list; a blank page is judged by its own URL |
