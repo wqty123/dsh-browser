@@ -12,25 +12,18 @@
 
 让 DSH 在内置浏览器、桌面侧栏或本机 Chrome、Edge 中打开网页、读取内容、填写表单和下载文件。每个任务有自己的标签页和操作记录。使用可见窗口或桌面侧栏时，你可以接手 Agent 正在操作的页面。
 
-本页功能清单对应 **0.5.7**。[更新记录](CHANGELOG.md)
+本页功能清单对应 **0.5.7**（适配 DSH 0.2.2-alpha.3：插件路由走宿主会话鉴权）。[更新记录](CHANGELOG.md)
 
 ## 安装
 
-插件在两端各装一份，**互不连带**：更新其中一端不会更新另一端。
-
-| | 桌面端（DeepSeek Harness 桌面应用） | Web 端（`dsh web`） |
-| --- | --- | --- |
-| 插件配置 | `desktop` | `web`（或你实际使用的 profile） |
-| 可用于的载体 | 内置浏览器、DSH 侧栏、本机 Chrome / Edge | 内置浏览器、本机 Chrome / Edge |
-| 侧栏桥 | 需要，装在桌面端的安装目录里 | 不需要，Web 端没有侧栏 |
-| 更新之后 | 重启桌面端；**桌面端升级过还要重装一次桥** | 重启 `dsh web` 即可 |
+桌面端和 Web 端使用各自的插件配置。按你使用的端执行对应命令。
 
 ~~~sh
-dsh plugin --profile desktop add dsh-builtin-browser   # 桌面端
-dsh plugin --profile web add dsh-builtin-browser       # Web 端
+dsh plugin --profile desktop add dsh-builtin-browser
+dsh plugin --profile web add dsh-builtin-browser
 ~~~
 
-已装过时先移除再安装：`dsh plugin --profile <profile> remove dsh-builtin-browser`（DSH 0.2.1-alpha.2 起，对已安装的包直接再装会失败）。
+两端各装一份，更新其中一端不会更新另一端。更新时，先在对应配置下执行 `dsh plugin --profile <profile> remove dsh-builtin-browser`，再执行该端的安装命令。将 `<profile>` 替换为 `desktop` 或 `web`。
 
 安装后，可以在 DSH 会话里试用下面的任务。
 

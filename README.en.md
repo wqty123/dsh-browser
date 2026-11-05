@@ -12,25 +12,18 @@
 
 Use DSH to open pages, read content, fill forms, and download files in the bundled browser, the desktop sidebar, or a local installation of Chrome or Edge. Each task has its own tabs and action history. In a visible window or the desktop sidebar, you can take over the page the agent is using.
 
-This feature list matches **0.5.7**. [Changelog](CHANGELOG.md)
+This feature list matches **0.5.7** (compatible with DSH 0.2.2-alpha.3: plugin routes go through the host session auth). [Changelog](CHANGELOG.md)
 
 ## Install
 
-The plugin is installed once per end, and the two are **independent**: updating one does not update the other.
-
-| | Desktop (the DeepSeek Harness app) | Web (`dsh web`) |
-| --- | --- | --- |
-| Plugin profile | `desktop` | `web` (or whichever profile you use) |
-| Carriers available | Bundled browser, DSH sidebar, local Chrome / Edge | Bundled browser, local Chrome / Edge |
-| Sidebar bridge | Required, installed into the desktop app's directory | Not needed — there is no sidebar in the web shell |
-| After an update | Restart the desktop app; **if the desktop app itself was updated, reinstall the bridge** | Restart `dsh web` |
+Desktop and Web use separate plugin profiles. Run the command for the profile you use.
 
 ~~~sh
-dsh plugin --profile desktop add dsh-builtin-browser   # desktop
-dsh plugin --profile web add dsh-builtin-browser       # web
+dsh plugin --profile desktop add dsh-builtin-browser
+dsh plugin --profile web add dsh-builtin-browser
 ~~~
 
-If it is already installed, remove it first: `dsh plugin --profile <profile> remove dsh-builtin-browser` (since DSH 0.2.1-alpha.2, installing over an installed package fails).
+Each end is installed once and updating one does not update the other. To update, run `dsh plugin --profile <profile> remove dsh-builtin-browser`, then run the install command for the same profile. Replace `<profile>` with `desktop` or `web`.
 
 After installation, try this task in DSH.
 
