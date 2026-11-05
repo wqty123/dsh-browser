@@ -68,6 +68,23 @@
  */
 import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
+
+/**
+ * The filesystem used for the ARCHIVE itself.
+ *
+ * Electron patches `fs` so that a `*.asar` path answers from the archive's virtual tree; opening the
+ * archive to read its header then fails with ENOENT (measured when the panel's button ran this file
+ * from the desktop shell). `original-fs` is Electron's untouched module, and plain node needs no
+ * substitute because nothing there is patched.
+ */
+const archiveFs = (() => {
+  try {
+    return createRequire(import.meta.url)('original-fs')
+  } catch {
+    return { openSync, readSync }
+  }
+})()
 import { dirname, join, resolve } from 'node:path'
 
 const DEFAULT_INSTALL = findDefaultInstall()
@@ -354,12 +371,12 @@ app.whenReady().then(async () => {
  * @returns the parsed header tree plus the offset where file content starts.
  */
 function readAsarHeader(file) {
-  const fd = openSync(file, 'r')
+  const fd = archiveFs.openSync(file, 'r')
   const sizeBuf = Buffer.alloc(8)
-  readSync(fd, sizeBuf, 0, 8, 0)
+  archiveFs.readSync(fd, sizeBuf, 0, 8, 0)
   const headerSize = sizeBuf.readUInt32LE(4)
   const headerBuf = Buffer.alloc(headerSize)
-  readSync(fd, headerBuf, 0, headerSize, 8)
+  archiveFs.readSync(fd, headerBuf, 0, headerSize, 8)
   const jsonLength = headerBuf.readUInt32LE(4)
   const header = JSON.parse(headerBuf.toString('utf8', 8, 8 + jsonLength))
   return { fd, header, contentBase: 8 + headerSize }
@@ -395,7 +412,7 @@ function extractAsar(asar, outDir) {
         unpackedFiles += 1
       } else {
         const buffer = Buffer.alloc(entry.size)
-        readSync(fd, buffer, 0, entry.size, contentBase + Number(entry.offset))
+        archiveFs.readSync(fd, buffer, 0, entry.size, contentBase + Number(entry.offset))
         writeFileSync(target, buffer)
       }
       const actual = statSync(target).size
@@ -545,7 +562,7 @@ function readAsarEntry(archive, entryPath) {
     const offset = Number(node.offset)
     if (!Number.isFinite(size) || !Number.isFinite(offset) || size < 0) return undefined
     const buffer = Buffer.alloc(size)
-    const read = readSync(fd, buffer, 0, size, parsed.contentBase + offset)
+    const read = archiveFs.readSync(fd, buffer, 0, size, parsed.contentBase + offset)
     return read === size ? buffer : undefined
   } catch {
     return undefined
@@ -666,7 +683,7 @@ function verifyDesktopIdentity(root) {
         const fd = openSync(archive, 'r')
         const size = 8 * 1024 * 1024
         const buf = Buffer.alloc(size)
-        const read = readSync(fd, buf, 0, size, 0)
+        const read = archiveFs.readSync(fd, buf, 0, size, 0)
         closeSync(fd)
         probe = buf.subarray(0, read).toString('latin1')
       } catch { probe = '' }

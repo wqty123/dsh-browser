@@ -35,6 +35,7 @@ import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_S
 import { findDesktopInstall, readBridgeStatus } from './bridge-status.js'
 import { readBridgeEndpoint } from './bridge-endpoint.js'
 import { runBridgeAction } from './bridge-install.js'
+import { AUTO_INSTALL_COOLDOWN_MS, autoInstallDecision, autoInstallMarkerPath, readAutoInstallMarker, writeAutoInstallMarker } from './bridge-auto.js'
 import { replyJson } from './json-reply.js'
 import { readRuntimeStatus } from './runtime-status.js'
 import { handleRuntimeProvision, handleRuntimeStatus, RUNTIME_PROVISION_ROUTE, RUNTIME_STATUS_ROUTE } from './runtime-route.js'
@@ -572,6 +573,47 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   }
 
   installSettingsRoute(ctx, settings, () => { chooseCarrier() })
+
+  // Install the desktop bridge without being asked, once per desktop build.
+  //
+  // "Install the plugin and the browser works" is the promise, and the bridge was the one step left to
+  // the person. It cannot be installed while the shell runs (Electron holds app.asar) and the
+  // installer's --restart closes and reopens the app, so this is silent, recorded BEFORE it starts, and
+  // limited to one attempt per build: a failed install must not turn every launch into a restart.
+  {
+    const installRoot = findDesktopInstall()
+    const markerPath = join(dirname(settings.path()), 'bridge-auto-install.json')
+    const decision = autoInstallDecision({
+      installRoot,
+      enabled: settings.get().bridge.autoInstall !== false,
+      status: installRoot === undefined
+        ? { state: 'missing', present: false, archivePresent: false, detail: '' }
+        : readBridgeStatus(installRoot),
+      marker: readAutoInstallMarker(markerPath),
+      cooldownMs: AUTO_INSTALL_COOLDOWN_MS,
+      now: Date.now(),
+    })
+    if (!decision.run) {
+      ctx.logger?.debug?.(`dsh-builtin-browser: bridge auto-install skipped: ${decision.why}`)
+    } else {
+      const build = (installRoot === undefined ? undefined : readBridgeStatus(installRoot).version) ?? 'unknown'
+      writeAutoInstallMarker(markerPath, { build, attemptedAt: new Date().toISOString(), outcome: 'started' })
+      ctx.logger?.info?.(`dsh-builtin-browser: installing the desktop bridge (${decision.why}); the desktop app restarts itself`)
+      void runBridgeAction('install', installRoot as string)
+        .then(result => {
+          writeAutoInstallMarker(markerPath, {
+            build,
+            attemptedAt: new Date().toISOString(),
+            outcome: result.ok ? 'installed' : `failed (exit ${String(result.code)}): ${result.output.slice(0, 200)}`,
+          })
+          if (!result.ok) ctx.logger?.warn?.(`dsh-builtin-browser: automatic bridge install failed: ${result.output}`)
+        })
+        .catch((error: unknown) => {
+          writeAutoInstallMarker(markerPath, { build, attemptedAt: new Date().toISOString(), outcome: `failed: ${String(error).slice(0, 200)}` })
+          ctx.logger?.warn?.(`dsh-builtin-browser: automatic bridge install failed: ${String(error)}`)
+        })
+    }
+  }
 
   /**
    * Expose readiness — "can the browser serve a call right now" — for the settings panel.

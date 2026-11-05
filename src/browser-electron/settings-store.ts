@@ -131,6 +131,18 @@ export interface BrowserSettings {
    * what it was before this existed. The user owns the field, can point it at any MCP tool that
    * takes a path (Feishu drive, Baidu Netdisk), and can empty it again at any time.
    */
+  /**
+   * Desktop bridge handled without asking.
+   *
+   * The bridge lives in the desktop app's own install directory and cannot be installed while the app
+   * runs, so "automatic" means the installer closes and reopens the app once. On by default, because
+   * the plugin's promise is that installing it is the whole setup; the record in
+   * `bridge-auto-install.json` keeps it to one attempt per desktop build so a failure cannot loop.
+   */
+  readonly bridge: {
+    /** Install or repair the desktop bridge automatically, once per desktop build. */
+    readonly autoInstall: boolean
+  }
   readonly delivery: {
     /** MCP tool that receives the saved file. Empty = save locally and stop there. */
     readonly tool: string
@@ -157,6 +169,7 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   // Off unless the host turns it on. A frame can show a CAPTCHA, an account name, or logged-in
   // content, so watching is an explicit decision rather than something a remote client can arrange.
   remoteView: { enabled: false },
+  bridge: { autoInstall: true },
   actions: { allowExecute: true, allowDownload: true, allowCredentialWrite: true },
   // Local by default: the file lands in downloadDir and nothing leaves the machine until the user
   // names a tool here. {file_path} is the argument name both Feishu's and Netdisk's upload tools use.
@@ -377,6 +390,11 @@ export function resolveSettings(raw: unknown, warn?: (message: string) => void):
     // Fail-closed, and stated separately from `gate`'s fallback so the intent is visible: an
     // unreadable or absent section means nobody watches. Unlike the other switches, whose defaults
     // are "on", this one has no safe default other than off.
+    bridge: {
+      autoInstall: section(source, 'bridge') === undefined
+        ? DEFAULT_SETTINGS.bridge.autoInstall
+        : gate((section(source, 'bridge') as { autoInstall?: unknown }).autoInstall, DEFAULT_SETTINGS.bridge.autoInstall),
+    },
     remoteView: {
       enabled: remoteView === undefined
         ? false

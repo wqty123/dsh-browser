@@ -123,6 +123,18 @@ export interface BrowserSettings {
      * what it was before this existed. The user owns the field, can point it at any MCP tool that
      * takes a path (Feishu drive, Baidu Netdisk), and can empty it again at any time.
      */
+    /**
+     * Desktop bridge handled without asking.
+     *
+     * The bridge lives in the desktop app's own install directory and cannot be installed while the app
+     * runs, so "automatic" means the installer closes and reopens the app once. On by default, because
+     * the plugin's promise is that installing it is the whole setup; the record in
+     * `bridge-auto-install.json` keeps it to one attempt per desktop build so a failure cannot loop.
+     */
+    readonly bridge: {
+        /** Install or repair the desktop bridge automatically, once per desktop build. */
+        readonly autoInstall: boolean;
+    };
     readonly delivery: {
         /** MCP tool that receives the saved file. Empty = save locally and stop there. */
         readonly tool: string;

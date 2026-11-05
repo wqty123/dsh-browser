@@ -305,13 +305,34 @@ test('the bundle loads and registers the settings section', async () => {
   assert.equal(registration.spec.locale, 'settings.dsh-builtin-browser')
 })
 
-test('Chrome exposes profile controls while the bundled browser does not', async () => {
-  const bundled = await mount()
-  assert.equal(elements(bundled.tree).some(node => node.props?.labelKey === 'browser.profile'), false)
-  const chrome = await mount({ settings: { ...DEFAULT_SETTINGS, browser: { channel: 'chrome', headless: 'headless' } } })
-  const controls = elements(chrome.tree)
-  assert.equal(controls.find(node => node.props?.labelKey === 'browser.profile').props.checked, DEFAULT_SETTINGS.cookies.persist)
-  assert.equal(controls.find(node => node.props?.label === 'browser.headless').props.value, 'headless')
+test('explicit and automatic system browsers expose profile and window controls', async () => {
+  for (const channel of ['chrome', 'edge', 'auto']) {
+    const mounted = await mount({ settings: { ...DEFAULT_SETTINGS, browser: { channel, headless: 'headless' } } })
+    const controls = elements(mounted.tree)
+    assert.equal(controls.find(node => node.props?.labelKey === 'browser.profile')?.props.checked, DEFAULT_SETTINGS.cookies.persist, `${channel}: sign-in persistence remains configurable`)
+    assert.equal(controls.find(node => node.props?.label === 'browser.headless')?.props.value, 'headless', `${channel}: window mode remains configurable`)
+  }
+  for (const channel of ['bundled', 'sidebar']) {
+    const mounted = await mount({ settings: { ...DEFAULT_SETTINGS, browser: { channel, headless: 'headless' } } })
+    assert.equal(elements(mounted.tree).some(node => node.props?.labelKey === 'browser.profile' || node.props?.label === 'browser.headless'), false, `${channel}: carrier-owned profile and window controls are omitted`)
+  }
+})
+
+test('automatic browser profile and window changes save their existing settings fields', async () => {
+  const settings = { ...DEFAULT_SETTINGS, browser: { channel: 'auto', headless: 'auto' } }
+  for (const [name, find, value, expected] of [
+    ['profile', node => node.props?.labelKey === 'browser.profile', false, { cookies: { persist: false } }],
+    ['window mode', node => node.props?.label === 'browser.headless', 'headless', { browser: { headless: 'headless' } }],
+  ]) {
+    const mounted = await mount({ settings })
+    const control = elements(mounted.tree).find(find)
+    assert.ok(control, `${name} is reachable for automatic browser selection`)
+    control.props.onChange(value)
+    await tick()
+    const writes = mounted.host.calls.filter(call => call.init?.method === 'PUT')
+    assert.equal(writes.length, 1)
+    assert.deepEqual(JSON.parse(writes[0].init.body), expected)
+  }
 })
 
 test('delivery validates drafts before saving all fields in one patch', async () => {
@@ -1620,3 +1641,147 @@ test('an installed bridge that IS running says so, rather than a bare "installed
   assert.equal(/readiness\.bridge\.installedNotRunning/.test(text), false, 'and does not claim the opposite')
   assert.match(text, /readiness\.state\.ready/, 'with the overall verdict agreeing')
 })
+
+function bridgeRuntime(state, present = true) {
+  return {
+    ...failedRuntime,
+    channel: 'sidebar',
+    carrier: 'sidebar',
+    bridge: { ...failedRuntime.bridge, present, state },
+  }
+}
+
+function bridgeButton(tree, label) {
+  return elements(tree).find(node => node.type === 'button' && textOf(node).join('') === label)
+}
+
+for (const [state, label] of [
+  ['missing', 'readiness.bridge.install'],
+  ['stale', 'readiness.bridge.repair'],
+  ['installed', 'readiness.bridge.reinstall'],
+]) {
+  test(`bridge ${state} offers its action outside folded diagnostics`, async () => {
+    const calls = []
+    const fetchMock = readinessFetch({ runtime: bridgeRuntime(state), calls })
+    const mounted = await mount({ fetch: fetchMock, render: false })
+    const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+    const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
+    const diagnostics = elements(tree).find(node => node.type === 'details' && node.props.key === 'diagnostics')
+    assert.ok(controls, 'bridge management remains visible without opening diagnostics')
+    assert.ok(bridgeButton(controls, label), 'the action matches the actual bridge state')
+    assert.equal(bridgeButton(diagnostics, label), undefined, 'the primary action is not buried in diagnostics')
+    assert.ok(textOf(controls).includes('readiness.bridge.restartHint'), 'the automatic restart is stated beside the action')
+    assert.equal(calls.filter(call => call.method === 'POST').length, 0, 'viewing settings starts no installation')
+  })
+}
+
+test('bridge management requires a detected desktop installation', async () => {
+  for (const runtime of [bridgeRuntime('absent', false), bridgeRuntime('missing', false), bridgeRuntime('absent', true)]) {
+    const fetchMock = readinessFetch({ runtime })
+    const mounted = await mount({ fetch: fetchMock, render: false })
+    const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+    assert.equal(elements(tree).some(node => node.props.key === 'bridge-controls'), false)
+    assert.equal(bridgeButton(tree, 'readiness.bridge.uninstall'), undefined)
+  }
+})
+
+for (const [action, state, label, success] of [
+  ['install', 'missing', 'readiness.bridge.install', 'readiness.bridge.installedDone'],
+  ['uninstall', 'installed', 'readiness.bridge.uninstall', 'readiness.bridge.uninstalledDone'],
+]) {
+  test(`bridge ${action} posts the selected action and refreshes its state`, async () => {
+    const calls = []
+    let runtime = bridgeRuntime(state)
+    const fetchMock = async (url, init = {}) => {
+      const path = String(url)
+      calls.push({ path, init })
+      if (path.endsWith('/bridge-action')) {
+        runtime = bridgeRuntime(action === 'install' ? 'installed' : 'missing')
+        return { ok: true, status: 200, json: async () => ({ ok: true, code: 0 }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true, runtime }) }
+    }
+    const mounted = await mount({ fetch: fetchMock, render: false })
+    const Component = readinessComponent(mounted.exports)
+    const tree = await renderPanel(Component, mounted.host, fetchMock)
+    const button = bridgeButton(tree, label)
+    assert.ok(button, 'the selected action is available')
+    if (action === 'uninstall') {
+      const diagnostics = elements(tree).find(node => node.type === 'details' && node.props.key === 'diagnostics')
+      assert.equal(bridgeButton(diagnostics, label), button, 'removal stays in diagnostics')
+    }
+    const task = button.props.onClick()
+    assert.equal(typeof task?.then, 'function', 'callers can await installation and state refresh')
+    await task
+    const finished = await renderPanel(Component, mounted.host, fetchMock)
+    const posts = calls.filter(call => call.init.method === 'POST')
+    assert.equal(posts.length, 1)
+    assert.equal(posts[0].path, '/dsh-builtin-browser/bridge-action')
+    assert.deepEqual(JSON.parse(posts[0].init.body), { action })
+    assert.equal(new Headers(posts[0].init.headers).get('content-type'), 'application/json')
+    assert.equal(calls.filter(call => call.path.endsWith('/runtime-status')).length, 2, 'completion re-reads actual status')
+    assert.ok(elements(finished).some(node => node.props.role === 'status' && textOf(node).includes(success)), 'completion is announced')
+    assert.ok(bridgeButton(finished, action === 'install' ? 'readiness.bridge.reinstall' : 'readiness.bridge.install'), 'the next action follows the refreshed state')
+  })
+}
+
+test('an in-flight bridge action disables controls and ignores duplicate clicks from the same render', async () => {
+  const calls = []
+  let complete
+  const response = new Promise(resolve => { complete = resolve })
+  const fetchMock = async (url, init = {}) => {
+    const path = String(url)
+    calls.push({ path, init })
+    if (path.endsWith('/bridge-action')) return await response
+    return { ok: true, status: 200, json: async () => ({ ok: true, runtime: bridgeRuntime('installed') }) }
+  }
+  const mounted = await mount({ fetch: fetchMock, render: false })
+  const Component = readinessComponent(mounted.exports)
+  const tree = await renderPanel(Component, mounted.host, fetchMock)
+  const install = bridgeButton(tree, 'readiness.bridge.reinstall')
+  assert.ok(install)
+  const task = install.props.onClick()
+  try {
+    await install.props.onClick()
+    const pending = await renderPanel(Component, mounted.host, fetchMock)
+    assert.equal(calls.filter(call => call.init.method === 'POST').length, 1, 'a stale click handler cannot submit twice')
+    const buttons = elements(pending).filter(node => node.type === 'button')
+    assert.ok(buttons.length >= 4, 'install, remove, recheck and runtime preparation are present')
+    assert.ok(buttons.every(node => node.props.disabled === true), 'all concurrent actions are disabled')
+    assert.ok(elements(pending).some(node => node.props.role === 'status' && textOf(node).includes('readiness.bridge.working')))
+  } finally {
+    complete({ ok: true, status: 200, json: async () => ({ ok: true, code: 0 }) })
+    await task
+  }
+  const finished = await renderPanel(Component, mounted.host, fetchMock)
+  assert.equal(bridgeButton(finished, 'readiness.bridge.reinstall').props.disabled, false, 'controls recover when the action settles')
+})
+
+for (const [name, response, reason] of [
+  ['installer failure returned with HTTP 200', { ok: true, status: 200, data: { ok: false, code: 1, output: 'EBUSY: desktop archive is locked' } }, 'EBUSY: desktop archive is locked'],
+  ['HTTP rejection', { ok: false, status: 409, data: { ok: false, error: 'bridge-action-in-progress' } }, 'bridge-action-in-progress'],
+  ['connection failure', null, 'connection interrupted'],
+]) {
+  test(`bridge action reports ${name} and enables retry`, async () => {
+    let reads = 0
+    const fetchMock = async (url) => {
+      if (String(url).endsWith('/bridge-action')) {
+        if (response === null) throw new Error(reason)
+        return { ...response, json: async () => response.data }
+      }
+      if (String(url).endsWith('/runtime-status')) reads += 1
+      return { ok: true, status: 200, json: async () => ({ ok: true, runtime: bridgeRuntime('missing') }) }
+    }
+    const mounted = await mount({ fetch: fetchMock, render: false })
+    const Component = readinessComponent(mounted.exports)
+    const tree = await renderPanel(Component, mounted.host, fetchMock)
+    const install = bridgeButton(tree, 'readiness.bridge.install')
+    assert.ok(install)
+    await install.props.onClick()
+    const failed = await renderPanel(Component, mounted.host, fetchMock)
+    assert.ok(elements(failed).some(node => node.props.role === 'alert' && textOf(node).join(' ').includes(reason)), 'the actual failure reaches the user')
+    assert.equal(elements(failed).some(node => node.props.key === 'bridge-result'), false, 'a failed action never appears successful')
+    assert.equal(bridgeButton(failed, 'readiness.bridge.install').props.disabled, false)
+    assert.equal(reads, 2, 'failure also refreshes status')
+  })
+}

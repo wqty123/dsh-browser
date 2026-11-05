@@ -67,6 +67,13 @@ export interface BridgeStatus {
   readonly state: 'installed' | 'missing' | 'stale'
   /** Whether the install directory looks like a DSH Desktop install at all. */
   readonly present: boolean
+  /**
+   * The desktop build this reading belongs to, when the identity check could name one.
+   *
+   * The automatic install runs once per build: a desktop update is exactly when the bridge has to be
+   * installed again, so the guard needs to tell the two apart.
+   */
+  readonly version?: string
   /** The directory that was inspected, when one was found. */
   readonly installRoot?: string
   /** Whether `resources/app.asar` exists — the archive the shell actually loads. */
@@ -225,6 +232,7 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
     present: true,
     installRoot,
     archivePresent,
+    version: 'version' in identity && typeof identity.version === 'string' ? identity.version : 'unknown',
     ...backupAt === undefined ? {} : { backupAt },
     command: repairCommand(installRoot),
     detail: 'the shell loads the patched tree and the bridge is in it',

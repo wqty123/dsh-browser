@@ -62,6 +62,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "settings.saving": "正在保存…",
     "settings.details": "配置文件",
     "browser.profile": "保留登录状态",
+    "browser.profile.hint": "重启 DSH 后生效",
     "browser.headless": "窗口模式",
     "browser.headless.hint": "重启 DSH 后生效",
     "browser.headless.auto": "自动检测显示环境",
@@ -80,9 +81,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "ui.virtualCursor": "显示 Agent 光标",
     "ui.quiet": "安静模式",
     "ui.quiet.hint": "保留当前窗口和标签。新启动的 Chrome / Edge 在后台运行。",
-    "vision.strategy": "页面定位",
-    "vision.auto": "自动",
-    "vision.nonVisual": "仅按页面结构",
+    "vision.strategy": "坐标点击与拖拽",
+    "vision.auto": "允许",
+    "vision.nonVisual": "禁止",
     "credentials.allowRead": "允许 Agent 读取 cookies / 导出登录状态",
     "browser.channel": "默认浏览器",
     "browser.sidebar": "DSH 侧栏",
@@ -127,6 +128,15 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.bridge.missing": "未安装",
     "readiness.bridge.stale": "已失效(桌面端升级后需重装)",
     "readiness.bridge.absent": "本机没有桌面端",
+    "readiness.bridge.install": "安装桥接",
+    "readiness.bridge.repair": "修复桥接",
+    "readiness.bridge.reinstall": "重新安装桥接",
+    "readiness.bridge.uninstall": "卸载桥接",
+    "readiness.bridge.working": "正在处理桥接…",
+    "readiness.bridge.restartHint": "点击后自动完成安装并重启 DSH 桌面端。",
+    "readiness.bridge.installedDone": "桥接安装完成",
+    "readiness.bridge.uninstalledDone": "桥接已卸载",
+    "readiness.bridge.actionFailed": "桥接操作失败:",
     "delivery.title": "交付",
     "delivery.tool": "接手下载的工具(MCP 工具名,留空=只存本地)",
     "delivery.args": "参数模板(JSON)",
@@ -157,6 +167,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "settings.saving": "Saving…",
     "settings.details": "Configuration file",
     "browser.profile": "Keep sign-ins",
+    "browser.profile.hint": "Requires restarting DSH",
     "browser.headless": "Window mode",
     "browser.headless.hint": "Requires restarting DSH",
     "browser.headless.auto": "Detect display automatically",
@@ -175,9 +186,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "ui.virtualCursor": "Show agent cursor",
     "ui.quiet": "Quiet mode",
     "ui.quiet.hint": "Keeps your current window and tab. New Chrome / Edge instances run in the background.",
-    "vision.strategy": "Page targeting",
-    "vision.auto": "Automatic",
-    "vision.nonVisual": "Page structure only",
+    "vision.strategy": "Coordinate clicks and drags",
+    "vision.auto": "Allowed",
+    "vision.nonVisual": "Blocked",
     "credentials.allowRead": "Allow the agent to read cookies / export login state",
     "browser.channel": "Default browser",
     "browser.sidebar": "DSH sidebar",
@@ -222,6 +233,15 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.bridge.missing": "Not installed",
     "readiness.bridge.stale": "Stale (a desktop update needs a reinstall)",
     "readiness.bridge.absent": "No desktop install on this machine",
+    "readiness.bridge.install": "Install bridge",
+    "readiness.bridge.repair": "Repair bridge",
+    "readiness.bridge.reinstall": "Reinstall bridge",
+    "readiness.bridge.uninstall": "Uninstall bridge",
+    "readiness.bridge.working": "Updating bridge…",
+    "readiness.bridge.restartHint": "Installs the bridge and restarts DSH Desktop automatically.",
+    "readiness.bridge.installedDone": "Bridge installed",
+    "readiness.bridge.uninstalledDone": "Bridge uninstalled",
+    "readiness.bridge.actionFailed": "Bridge action failed:",
     "delivery.title": "Delivery",
     "delivery.tool": "Tool that takes the download (MCP tool name; empty = local only)",
     "delivery.args": "Argument template (JSON)",
@@ -677,6 +697,10 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     const [error, setError] = useState("")
     const [unsupported, setUnsupported] = useState(false)
     const [busy, setBusy] = useState(false)
+    const [bridgeBusy, setBridgeBusy] = useState(null)
+    const [bridgeResult, setBridgeResult] = useState(null)
+    const [bridgeError, setBridgeError] = useState("")
+    const bridgePending = useRef(false)
     const alive = useRef(true)
 
     const read = useCallback(async () => {
@@ -739,6 +763,30 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       }
     }
 
+    const bridgeAction = async action => {
+      if (bridgePending.current || busy) return
+      bridgePending.current = true
+      setBridgeBusy(action)
+      setBridgeResult(null)
+      setBridgeError("")
+      try {
+        const response = await fetch("/dsh-builtin-browser/bridge-action", {
+          method: "POST",
+          headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({ action }),
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok || data.ok !== true) throw new Error(data.error || data.output || `HTTP ${response.status}`)
+        if (alive.current) setBridgeResult(action)
+      } catch (failure) {
+        if (alive.current) setBridgeError(String(failure && failure.message ? failure.message : failure))
+      } finally {
+        bridgePending.current = false
+        if (alive.current) setBridgeBusy(null)
+        await read()
+      }
+    }
+
     if (unsupported) return null
     if (runtime === null) {
       return h("div", { style: styles.wrap }, [
@@ -763,12 +811,25 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         : runtime.bridge.running === false
           ? t("readiness.bridge.installedNotRunning")
           : t("readiness.bridge.installed")
+    const controlsBusy = busy || bridgeBusy !== null
+    const canManageBridge = runtime.bridge.present === true && runtime.bridge.state !== "absent"
+    const installLabel = runtime.bridge.state === "installed" ? "readiness.bridge.reinstall"
+      : runtime.bridge.state === "stale" ? "readiness.bridge.repair" : "readiness.bridge.install"
 
     return h("div", { style: styles.group }, [
       h("div", { key: "head", className: "dsh-bb-row", style: styles.row }, [
         h("span", { key: "title" }, t("readiness.title")),
         h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, t(`readiness.state.${runtime.readiness}`)),
       ]),
+      canManageBridge ? h("div", { key: "bridge-controls" }, [
+        h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
+          h("span", { key: "title" }, t("readiness.bridge")),
+          h("button", { key: "install", type: "button", style: styles.button, disabled: controlsBusy || preparing, onClick: () => bridgeAction("install") }, t(installLabel)),
+        ]),
+        h("p", { key: "hint", role: bridgeBusy === null ? undefined : "status", style: styles.hint }, t(bridgeBusy === null ? "readiness.bridge.restartHint" : "readiness.bridge.working")),
+      ]) : null,
+      bridgeResult !== null ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t(bridgeResult === "uninstall" ? "readiness.bridge.uninstalledDone" : "readiness.bridge.installedDone")) : null,
+      bridgeError !== "" ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, `${t("readiness.bridge.actionFailed")} ${bridgeError}`) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
         h("summary", { key: "title", style: styles.hint }, t("readiness.details")),
         h("div", { key: "kv", style: styles.kv }, [
@@ -789,14 +850,18 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
           key: "recheck",
           type: "button",
           style: styles.button,
-          disabled: busy || preparing,
+          disabled: controlsBusy || preparing,
           onClick: () => { void read() },
         }, t("readiness.recheck")),
+        canManageBridge && runtime.bridge.state === "installed" ? h("button", {
+          key: "uninstall", type: "button", style: styles.button, disabled: controlsBusy || preparing,
+          onClick: () => bridgeAction("uninstall"),
+        }, t("readiness.bridge.uninstall")) : null,
       ]),
       runtime.canProvision || preparing
         ? h("div", { key: "buttons", style: styles.buttons }, [
           preparing ? h("span", { key: "progress", role: "status", style: styles.hint }, t("readiness.preparing")) : null,
-          runtime.canProvision ? h("button", { key: "prepare", type: "button", style: styles.button, disabled: busy, onClick: () => { void prepare() } }, t("readiness.prepare")) : null,
+          runtime.canProvision ? h("button", { key: "prepare", type: "button", style: styles.button, disabled: controlsBusy, onClick: () => { void prepare() } }, t("readiness.prepare")) : null,
         ]) : null,
       error !== "" ? h("p", { key: "error", role: "alert", style: styles.error }, t("readiness.failed") + " " + error) : null,
     ])
@@ -939,7 +1004,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       h("h3", { key: "title", style: styles.groupTitle }, t(titleKey)),
       ...children,
     ])
-    const systemBrowser = settings.browser.channel === "chrome" || settings.browser.channel === "edge"
+    const systemBrowser = ["chrome", "edge", "auto"].includes(settings.browser.channel)
 
     return h("div", { style: styles.wrap, className: "dsh-bb-settings" }, [
       selector("browser.channel", settings.browser.channel,
@@ -966,7 +1031,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
           { value: "auto", label: t("vision.auto") },
           { value: "nonVisual", label: t("vision.nonVisual") },
         ], strategy => patch({ vision: { strategy } })),
-        systemBrowser ? toggle("cookies", "persist", "browser.profile") : null,
+        systemBrowser ? toggle("cookies", "persist", "browser.profile", "browser.profile.hint") : null,
         systemBrowser ? selector("browser.headless", settings.browser.headless ?? "auto",
           options("browser.headless.", ["auto", "windowed", "headless"]),
           headless => patch({ browser: { headless } }), "browser.headless.hint") : null,
