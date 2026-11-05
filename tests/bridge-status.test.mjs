@@ -20,7 +20,7 @@ const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sideb
 /**
  * The registry lookup a fixture wants: none.
  *
- * Issue #44 added custom-install discovery, which reads the machine's uninstall registry. A test
+ * This change adds custom-install discovery, which reads the machine's uninstall registry. A test
  * that asserts "nothing matches" must not consult the machine it runs on — the developer's own DSH
  * may well be installed somewhere, and the assertion would then depend on whose computer ran it.
  */
@@ -238,7 +238,7 @@ test('no install at all is a state, not an error', async () => {
   }
 })
 
-// Issue #44: `%LOCALAPPDATA%\Programs` is where the Windows installer puts the app BY DEFAULT, not
+// Issue #40 follow-up: `%LOCALAPPDATA%\Programs` is where the Windows installer puts the app BY DEFAULT, not
 // where every install is. A tree moved to another drive is a good DSH Desktop that discovery used
 // to miss — and a miss is not cosmetic: the panel shows "no desktop on this machine" and the repair
 // command, the one thing that would fix a stale bridge, is never offered. Measured on an install at

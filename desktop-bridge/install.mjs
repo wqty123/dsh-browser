@@ -98,7 +98,7 @@ const DEFAULT_INSTALL = findDefaultInstall()
  *
  * `%LOCALAPPDATA%\Programs` is only where the Windows installer puts the app by DEFAULT. An install
  * moved to another drive is a good install this guess cannot see, and reporting it as absent stops
- * the panel's own repair button as well (issue #44, measured on an `E:\…` install). So the default
+ * the panel's own repair button as well (issue #40 follow-up, measured on an `E:\…` install). So the default
  * scan is followed by the two sources such an install leaves behind — `DSH_DESKTOP_APP` and the
  * uninstall entry's `InstallLocation` — and both are held to the same shape check.
  * @returns the install directory, or the historical default when nothing matches.

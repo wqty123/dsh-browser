@@ -4,7 +4,7 @@
 
 ## 未发布
 
-### 桥接探测不再只认 `%LOCALAPPDATA%\Programs`（#44）
+### 桥接探测不再只认 `%LOCALAPPDATA%\Programs`（#40 后续）
 
 `findDesktopInstall` 与安装器的默认路径探测都只看 `%LOCALAPPDATA%\Programs`，而那只是 Windows 安装器的**默认**落点。装在别的盘、或用自定义目录装的 DSH Desktop 同样是可用安装，却会被判成"本机没有桌面端"——面板显示 `present: false`，连修复桥接的命令也不再给出，而这正是最需要它的时刻。实测场景：安装位于 `E:\Applications\DeepSeek Harness`，`Programs` 下那个升级残留目录清掉之后即开始误报。
 
