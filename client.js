@@ -57,66 +57,57 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "watch.noPage": "该任务尚未打开浏览器",
     "watch.bridgeStale": "桌面端升级后 bridge 已失效,请重跑安装:",
     "watch.bridgeMissing": "桌面 bridge 未安装,侧栏载体不可用。安装命令:",
-    title: "浏览器(Browser Use)",
-    lead: "多数设置立即生效。保留 cookies 与无头模式仅适用于本机 Chrome / Edge,修改后需重新选择载体或重启 DSH。",
+    title: "浏览器",
+    "settings.advanced": "高级设置",
+    "settings.saving": "正在保存…",
+    "settings.details": "配置文件",
+    "browser.profile": "保留登录状态",
+    "browser.headless": "窗口模式",
+    "browser.headless.hint": "重启 DSH 后生效",
+    "browser.headless.auto": "自动检测显示环境",
+    "browser.headless.windowed": "显示窗口",
+    "browser.headless.headless": "无头运行",
+    "delivery.save": "保存交付设置",
+    "delivery.invalid": "检查工具名、参数模板和站点规则。参数必须是字符串值的 JSON 对象，站点规则每行填写一个 host=工具名。",
     loading: "读取设置…",
     failed: "读取设置失败:",
     retry: "重试",
     saved: "已保存",
-    path: "设置文件",
-    "history.title": "浏览历史",
     "history.enabled": "保留浏览历史",
-    "history.hint": "记录访问过的页面;关闭浏览器后仍可查询并重新打开,关闭此开关后不再记录新访问。",
-    "cookies.title": "登录状态",
-    "cookies.persist": "保留 cookies",
-    "cookies.hint": "仅控制本机 Chrome / Edge 的独立 profile:关闭后下次启动使用临时 profile;需重新选择载体或重启 DSH。内置 Electron 与桌面侧栏的登录态由各自载体保存。",
     "ui.title": "展示",
     "ui.autoExpandOnce": "侧栏自动展开(每轮一次)",
-    "ui.autoExpandOnce.hint": "Agent 首次操作时自动展开;你手动收起后,本轮不再打扰。",
     "ui.closeWithSession": "会话结束时关闭浏览器",
-    "ui.closeWithSession.hint": "关闭会释放浏览器进程;浏览历史与登录状态会保留。",
-    "ui.virtualCursor": "显示可视化鼠标",
-    "ui.virtualCursor.hint": "让 Agent 正在操作的位置可见(出现即代表它在接管该标签页)。",
+    "ui.virtualCursor": "显示 Agent 光标",
     "ui.quiet": "安静模式",
-    "ui.quiet.hint": "Agent 操作时不激活应用、不抢键盘焦点;导航与截图不还原最小化的窗口。真实点击/输入仍需要窗口可见,可能把最小化的窗口恢复,但不会成为前台窗口,也不会盖住你正在用的窗口。",
-    "vision.title": "视觉策略",
-    "vision.strategy": "默认策略",
-    "vision.auto": "Auto(坐标与语义都允许;适合能读图的模型)",
-    "vision.nonVisual": "纯非视觉(拒绝坐标点击,只用 DOM / 无障碍树定位)",
-    "vision.hint": "纯非视觉下,坐标点击会被明确拒绝并提示改用语义定位,避免靠猜坐标点错。两种策略下 DOM、无障碍树、文本提取与结构化抓取的能力完全一致 —— 不需要图像输入也能完整操作页面。",
-    "credentials.title": "凭据",
+    "ui.quiet.hint": "保留当前窗口和标签。新启动的 Chrome / Edge 在后台运行。",
+    "vision.strategy": "页面定位",
+    "vision.auto": "自动",
+    "vision.nonVisual": "仅按页面结构",
     "credentials.allowRead": "允许 Agent 读取 cookies / 导出登录状态",
-    "browser.title": "浏览器载体",
-    "browser.channel": "使用哪个浏览器",
-    "browser.sidebar": "侧栏浏览器(在 DSH 窗口右侧打开,不额外拉窗口)",
-  "browser.bundled": "内置 Electron(随插件提供,无需安装)",
+    "browser.channel": "默认浏览器",
+    "browser.sidebar": "DSH 侧栏",
+    "browser.bundled": "内置浏览器",
     "browser.chrome": "本机 Chrome",
     "browser.edge": "本机 Edge",
-    "browser.auto": "自动(优先 Chrome,其次 Edge)",
-    "browser.hint": "选本机浏览器时会以**独立 profile** 启动它:不会打开、占用或修改你日常的窗口、书签与登录状态,关闭也不会关掉你自己的浏览器;代价是它看不到你日常浏览器里已登录的站点,需要时请在那个窗口里登录一次(登录态会留在插件自己的 profile 里)。桌面端默认由官方侧栏承载页面,此选项优先于侧栏。",
-    "credentials.hint": "关闭后 dsh_browser_auth 的导出会被拒绝,报 BROWSER_AUTH_DISABLED —— 导出读的是整台机器共享的 cookie 罐(按当前页所属站点收敛)。它只管**读**:写入登录状态(restore)归下面「Agent 能做什么」里的写入开关。桌面端请注意:Agent 驱动的是侧栏里那一个页面(人机同页),因此它与该页面共用同一个 partition —— 这也正是它能读到登录态的原因,属于有意接受的沙箱边界变化;关闭本项即拒绝读取。",
-    "actions.title": "Agent 能做什么",
-    "actions.lead": "与 dsh_browser_restrict 不同:那一层是模型自己设的软护栏,它随时可以解除;这里的三项由你在设置里决定,模型手里的工具改不了它们。",
+    "browser.auto": "自动",
+    "actions.title": "Agent 权限",
     "actions.allowExecute": "允许在页面里执行脚本",
-    "actions.allowExecute.hint": "dsh_browser_execute 能在当前页面里运行任意 JavaScript —— 它的能力上限就是这个页面能做的事。关闭后该工具一律被拒(BROWSER_EXECUTE_DISABLED),模型手里的工具没有一个能改这项设置。但也别把它当成锁:设置文档由本机 HTTP 端点读写,同源页面可以写它 —— 这不是凭据系统。",
     "actions.allowDownload": "允许下载文件到磁盘",
-    "actions.allowDownload.hint": "dsh_browser_download 会把 URL 下载到 downloadDir 内(带登录态;仍需通过目录准入,不覆盖已有文件)。关闭后一律被拒(BROWSER_DOWNLOAD_DISABLED)。截图另存走的是同一套目录准入,不受此项影响。",
     "actions.allowCredentialWrite": "允许写入登录状态",
-    "actions.allowCredentialWrite.hint": "dsh_browser_auth 的 restore 会向任意域写入 cookie。关闭后只能导出、不能导入(BROWSER_AUTH_WRITE_DISABLED);读取仍由上面「凭据」那一项控制。",
-    "remoteView.title": "远程观看",
-    "remoteView.enabled": "允许从其它设备观看这台机器的浏览器",
-    "remoteView.enabled.hint": "打开后,本机右下角出现一个只读画面入口:2 fps、JPEG、一帧一请求,不转发点击与键盘。改动**立刻生效**,不需要刷新页面。关闭时入口消失,相关端点也不返回图像。",
+    "actions.allowCredentialWrite.hint": "可向任意域写入 cookies。",
+    "remoteView.enabled": "允许远程观看",
+    "remoteView.enabled.hint": "共享只读画面，可能包含敏感信息。",
     "readiness.title": "就绪状态",
-    "readiness.lead": "「装好就能用」的自检:内置浏览器首次使用前要在后台下载一次运行时,桌面侧栏需要装进桌面端的 bridge,本机 Chrome / Edge 需要已经安装。",
     "readiness.loading": "检测中…",
     "readiness.failed": "读取就绪状态失败:",
-    "readiness.channel": "当前载体",
+    "readiness.channel": "配置的载体",
+    "readiness.details": "诊断",
     "readiness.electron": "内置浏览器运行时",
     "readiness.bridge": "桌面侧栏 bridge",
     "readiness.recheck": "重新检测",
     "readiness.prepare": "准备内置浏览器",
     "readiness.preparing": "正在准备…",
-    "readiness.fix": "修复命令(在终端里跑一次):",
+    "readiness.fix": "修复命令",
     "readiness.carrier.sidebar": "桌面侧栏",
     "readiness.carrier.bundled": "内置 Electron",
     "readiness.carrier.system": "本机 Chrome / Edge",
@@ -124,9 +115,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.state.ready": "可用",
     "readiness.state.blocked": "尚不可用",
     "readiness.state.unknown": "需实际启动才能确定",
-    "readiness.electron.present": "已就绪(本机已有运行时)",
-    "readiness.electron.ready": "已就绪(刚准备完成)",
-    "readiness.electron.preparing": "正在下载运行时(首次,约 1–3 分钟)",
+    "readiness.electron.present": "已就绪",
+    "readiness.electron.ready": "已就绪",
+    "readiness.electron.preparing": "正在下载",
     "readiness.electron.idle": "尚未开始准备",
     "readiness.electron.skipped": "已跳过(设置了 ELECTRON_SKIP_BINARY_DOWNLOAD)",
     "readiness.electron.failed": "准备失败",
@@ -136,10 +127,14 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.bridge.missing": "未安装",
     "readiness.bridge.stale": "已失效(桌面端升级后需重装)",
     "readiness.bridge.absent": "本机没有桌面端",
-    "readiness.hint.sidebar": "侧栏载体把页面放进 DSH 窗口右侧,人机同页;它需要桌面端的 bridge,而且只渲染**当前显示**的那个会话。",
-    "readiness.hint.bundled": "内置浏览器随插件提供,无需安装;运行时在首次使用前自动下载,期间可以先改用桌面侧栏或本机 Chrome / Edge。",
-    "readiness.hint.system": "选了本机浏览器:插件用它自己的独立 profile 启动,不需要额外准备。",
-    "readiness.hint.auto": "自动:内置运行时与桌面侧栏任一可用即可工作。",
+    "delivery.title": "交付",
+    "delivery.tool": "接手下载的工具(MCP 工具名,留空=只存本地)",
+    "delivery.args": "参数模板(JSON)",
+    "delivery.args.hint": "占位 {path} {name} {size}。",
+    "delivery.onFail": "远程失败时",
+    "delivery.onFail.keep": "保留本地文件并报告两边结果",
+    "delivery.onFail.stop": "按失败处理",
+    "delivery.sites": "按站点覆盖(每行 host=工具名)",
   }
 
   const en = {
@@ -157,66 +152,57 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "watch.noPage": "This task has not opened a browser",
     "watch.bridgeStale": "A desktop update invalidated the bridge; re-run:",
     "watch.bridgeMissing": "The desktop bridge is not installed, so the sidebar carrier cannot work:",
-    title: "Browser (Browser Use)",
-    lead: "Most settings apply immediately. Cookie persistence and headless mode apply only to installed Chrome / Edge; reselect the carrier or restart DSH after changing them.",
+    title: "Browser",
+    "settings.advanced": "Advanced settings",
+    "settings.saving": "Saving…",
+    "settings.details": "Configuration file",
+    "browser.profile": "Keep sign-ins",
+    "browser.headless": "Window mode",
+    "browser.headless.hint": "Requires restarting DSH",
+    "browser.headless.auto": "Detect display automatically",
+    "browser.headless.windowed": "Show a window",
+    "browser.headless.headless": "Run headless",
+    "delivery.save": "Save delivery settings",
+    "delivery.invalid": "Check tool names, the argument template, and site rules. Use a JSON object with string values and one host=tool rule per line.",
     loading: "Loading settings…",
     failed: "Could not load settings:",
     retry: "Retry",
     saved: "Saved",
-    path: "Settings file",
-    "history.title": "Browsing history",
     "history.enabled": "Keep browsing history",
-    "history.hint": "Records visited pages so they can be found and reopened after the browser is closed; off means no new visits are recorded.",
-    "cookies.title": "Login state",
-    "cookies.persist": "Keep cookies",
-    "cookies.hint": "Controls only the separate Chrome / Edge profile: off uses a temporary profile on the next launch. Reselect the carrier or restart DSH. Bundled Electron and the desktop sidebar retain login state through their own carrier.",
     "ui.title": "Presentation",
     "ui.autoExpandOnce": "Auto-expand the side panel (once per task)",
-    "ui.autoExpandOnce.hint": "Expands when the agent first operates; after you collapse it, this task stays quiet.",
     "ui.closeWithSession": "Close the browser when the session ends",
-    "ui.closeWithSession.hint": "Closing releases the browser process; history and login state survive.",
-    "ui.virtualCursor": "Show the synthetic cursor",
-    "ui.virtualCursor.hint": "Makes the agent's operating position visible (its presence means the agent has taken over that tab).",
+    "ui.virtualCursor": "Show agent cursor",
     "ui.quiet": "Quiet mode",
-    "ui.quiet.hint": "The agent does not activate the app or steal keyboard focus; navigation and screenshots leave a minimized window minimized. Real clicks and typing still need a visible window, so they may restore it — but never raise it above your work or make it the front window.",
-    "vision.title": "Vision strategy",
-    "vision.strategy": "Default strategy",
-    "vision.auto": "Auto (coordinates and semantics both allowed; for models that read images)",
-    "vision.nonVisual": "Non-visual only (coordinate clicks refused; locate via DOM / a11y tree)",
-    "vision.hint": "Under non-visual, a coordinate click is refused outright and the error says to use a semantic target — so nothing is clicked on a guessed position. DOM lookup, the accessibility tree, text extraction and structured scraping behave identically in both strategies: the whole page stays operable without image input.",
-    "credentials.title": "Credentials",
+    "ui.quiet.hint": "Keeps your current window and tab. New Chrome / Edge instances run in the background.",
+    "vision.strategy": "Page targeting",
+    "vision.auto": "Automatic",
+    "vision.nonVisual": "Page structure only",
     "credentials.allowRead": "Allow the agent to read cookies / export login state",
-    "browser.title": "Browser",
-    "browser.channel": "Which browser to use",
-  "browser.sidebar": "Sidebar browser (opens in the DSH window right pane; no extra window)",
-  "browser.bundled": "Bundled Electron (ships with the plugin, nothing to install)",
+    "browser.channel": "Default browser",
+    "browser.sidebar": "DSH sidebar",
+    "browser.bundled": "Bundled browser",
     "browser.chrome": "Installed Chrome",
     "browser.edge": "Installed Edge",
-    "browser.auto": "Automatic (Chrome first, then Edge)",
-    "browser.hint": "Choosing an installed browser launches it with a **separate profile**: your everyday windows, bookmarks and logins are never opened, locked or modified, and closing the plugin never closes your browser. The trade-off is that it does not see sites you are already signed into there — sign in once in that window and the session stays in the plugin's own profile. On the desktop the shell's sidebar normally carries the page; this setting outranks it.",
-    "credentials.hint": "Off makes dsh_browser_auth refuse the export, reporting BROWSER_AUTH_DISABLED — an export reads the machine-wide shared cookie jar (narrowed to the current page's site). It governs READING only: writing login state (restore) answers to the write switch under \"What the agent may do\" below. On the desktop, note that the agent drives the sidebar's own page (one page for both parties), so it shares that page's partition — which is exactly why it can reach the login state. That is a deliberate sandbox-boundary change; this switch is how you refuse it.",
-    "actions.title": "What the agent may do",
-    "actions.lead": "Unlike dsh_browser_restrict, which is the model's own soft guardrail and can be lifted by the model at any time, these three are yours: the model's own tools cannot change them.",
+    "browser.auto": "Automatic",
+    "actions.title": "Agent permissions",
     "actions.allowExecute": "Run scripts in the page",
-    "actions.allowExecute.hint": "dsh_browser_execute runs arbitrary JavaScript in the active tab — its reach is everything that page can do. Off refuses the tool outright (BROWSER_EXECUTE_DISABLED), and no tool the model holds can change this setting. Do not read that as a lock, though: the document is served over a local HTTP endpoint and a same-origin page can write it. This is not a credential system.",
     "actions.allowDownload": "Download files to disk",
-    "actions.allowDownload.hint": "dsh_browser_download fetches a URL into downloadDir (with login state; still subject to the directory admission gate, never overwriting an existing file). Off refuses it outright (BROWSER_DOWNLOAD_DISABLED). Saving a screenshot goes through the same directory gate and is not covered by this switch.",
     "actions.allowCredentialWrite": "Write login state",
-    "actions.allowCredentialWrite.hint": "dsh_browser_auth's restore writes cookies to arbitrary domains. Off allows export but not import (BROWSER_AUTH_WRITE_DISABLED); reading stays under the Credentials switch above.",
-    "remoteView.title": "Remote viewing",
-    "remoteView.enabled": "Let other devices watch this machine's browser",
-    "remoteView.enabled.hint": "On, a read-only view appears in the bottom-right corner here: 2 fps, JPEG, one frame per request, and no forwarding of clicks or keys. The change applies **immediately** — no page reload needed. Off, the entry disappears and the endpoints return no image.",
+    "actions.allowCredentialWrite.hint": "Write cookies to any domain.",
+    "remoteView.enabled": "Allow remote viewing",
+    "remoteView.enabled.hint": "Shares a read-only view that may contain sensitive information.",
     "readiness.title": "Readiness",
-    "readiness.lead": "The \"it works once you install it\" check: the bundled browser downloads its runtime in the background before its first use, the sidebar needs the bridge installed into the desktop app, and an installed Chrome / Edge has to be installed.",
     "readiness.loading": "Checking…",
     "readiness.failed": "Could not read readiness:",
-    "readiness.channel": "Carrier",
+    "readiness.channel": "Configured carrier",
+    "readiness.details": "Diagnostics",
     "readiness.electron": "Bundled browser runtime",
     "readiness.bridge": "Desktop sidebar bridge",
     "readiness.recheck": "Check again",
     "readiness.prepare": "Prepare the bundled browser",
     "readiness.preparing": "Preparing…",
-    "readiness.fix": "Repair command (run it once in a terminal):",
+    "readiness.fix": "Repair command",
     "readiness.carrier.sidebar": "Desktop sidebar",
     "readiness.carrier.bundled": "Bundled Electron",
     "readiness.carrier.system": "Installed Chrome / Edge",
@@ -224,9 +210,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.state.ready": "Ready",
     "readiness.state.blocked": "Not ready yet",
     "readiness.state.unknown": "Only a real launch can tell",
-    "readiness.electron.present": "Ready (a runtime is already on this machine)",
-    "readiness.electron.ready": "Ready (just prepared)",
-    "readiness.electron.preparing": "Downloading the runtime (first time, about 1–3 minutes)",
+    "readiness.electron.present": "Ready",
+    "readiness.electron.ready": "Ready",
+    "readiness.electron.preparing": "Downloading",
     "readiness.electron.idle": "Not prepared yet",
     "readiness.electron.skipped": "Skipped (ELECTRON_SKIP_BINARY_DOWNLOAD is set)",
     "readiness.electron.failed": "Preparation failed",
@@ -236,10 +222,14 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.bridge.missing": "Not installed",
     "readiness.bridge.stale": "Stale (a desktop update needs a reinstall)",
     "readiness.bridge.absent": "No desktop install on this machine",
-    "readiness.hint.sidebar": "The sidebar carrier puts the page in the right pane of the DSH window, one page for both parties; it needs the desktop's bridge, and it renders only the conversation being **displayed**.",
-    "readiness.hint.bundled": "The bundled browser ships with the plugin and needs nothing installed; its runtime is downloaded before first use — meanwhile the desktop sidebar or an installed Chrome / Edge works.",
-    "readiness.hint.system": "An installed browser was chosen: the plugin launches it with its own separate profile, so there is nothing to prepare.",
-    "readiness.hint.auto": "Automatic: whichever of the bundled runtime and the desktop sidebar works first.",
+    "delivery.title": "Delivery",
+    "delivery.tool": "Tool that takes the download (MCP tool name; empty = local only)",
+    "delivery.args": "Argument template (JSON)",
+    "delivery.args.hint": "Placeholders: {path} {name} {size}.",
+    "delivery.onFail": "When the remote side fails",
+    "delivery.onFail.keep": "Keep the local file and report both outcomes",
+    "delivery.onFail.stop": "Treat it as a failure",
+    "delivery.sites": "Per-site override (one host=tool per line)",
   }
 
   /**
@@ -277,6 +267,78 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
    * under a third-party theme, and an unstyled row is worse than a slightly-off one.
    */
   const CSS = `
+.dsh-bb-settings .dsh-bb-row {
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: .5px solid var(--dsw-alias-border-l2, GrayText);
+  border-radius: 0;
+  background: transparent;
+}
+.dsh-bb-settings { font-size: 14px; line-height: 22px; }
+.dsh-bb-settings .dsh-bb-diagnostics { margin-top: 4px; }
+.dsh-bb-diagnostics code { display: block; }
+.dsh-bb-toggle { justify-content: space-between; cursor: pointer; }
+.dsh-bb-toggle:has(:disabled) { cursor: default; }
+.dsh-bb-switch {
+  appearance: none;
+  position: relative;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--dsw-alias-border-l3, GrayText);
+  color: var(--dsw-alias-switch-thumb, Canvas);
+  cursor: inherit;
+}
+.dsh-bb-switch::after {
+  content: "";
+  position: absolute;
+  inset: 2px auto auto 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  corner-shape: round;
+  background: currentColor;
+}
+.dsh-bb-switch:checked {
+  background: var(--dsw-alias-brand-primary, Highlight);
+  color: var(--dsw-alias-label-primary-foreground, HighlightText);
+}
+.dsh-bb-switch:checked::after { transform: translateX(16px); }
+.dsh-bb-switch:disabled { opacity: .6; }
+.dsh-bb-settings :is(button, input, textarea, select, summary):focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, Highlight);
+  outline-offset: 2px;
+}
+.dsh-bb-settings summary { cursor: pointer; padding: 5px 0; }
+.dsh-bb-settings .dsh-bb-dd { flex: 0 1 auto; margin: 0; }
+.dsh-bb-settings .dsh-bb-dd-btn {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--dsw-radius-md, 8px);
+  background: var(--dsw-alias-bg-module-platform, ButtonFace);
+}
+.dsh-bb-settings .dsh-bb-dd-list { left: auto; right: 0; }
+.dsh-bb-settings .dsh-bb-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid var(--dsw-alias-border, GrayText);
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-layer-1, Canvas);
+  color: var(--dsw-alias-label-primary, CanvasText);
+  font: inherit;
+}
+.dsh-bb-settings fieldset { min-inline-size: 0; }
+.dsh-bb-settings textarea { resize: vertical; }
 .dsh-bb-row {
   border-radius: 8px;
   padding: 7px 9px;
@@ -433,18 +495,17 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   }
 
   const styles = {
-    wrap: { display: "flex", flexDirection: "column", gap: "14px", padding: "4px 2px", fontSize: "13px" },
+    wrap: { display: "flex", flexDirection: "column", gap: "12px" },
     lead: { opacity: 0.75, lineHeight: 1.6, margin: 0 },
-    group: { border: "1px solid rgba(128,128,128,.28)", borderRadius: "8px", padding: "10px 12px" },
-    groupTitle: { margin: "0 0 8px", fontSize: "13px", fontWeight: 600 },
+    group: { minWidth: 0 },
+    groupTitle: { margin: "0 0 2px", fontSize: "14px", fontWeight: 600, color: "var(--dsw-alias-label-primary, inherit)" },
     row: { display: "flex", gap: "10px", alignItems: "flex-start" },
-    box: { marginTop: "2px" },
     label: { display: "flex", flexDirection: "column", gap: "2px", cursor: "pointer" },
-    hint: { opacity: 0.68, lineHeight: 1.5 },
+    hint: { color: "var(--dsw-alias-label-tertiary, inherit)", fontSize: "12px", lineHeight: 1.5 },
     status: { opacity: 0.7, minHeight: "18px" },
-    error: { color: "#e5534b" },
+    error: { color: "var(--dsw-alias-label-error, #c9342c)" },
     pathLine: { opacity: 0.6, wordBreak: "break-all", lineHeight: 1.5 },
-    button: { padding: "3px 10px", borderRadius: "6px", border: "1px solid rgba(128,128,128,.4)", background: "transparent", color: "inherit", cursor: "pointer" },
+    button: { minHeight: "32px", padding: "5px 12px", borderRadius: "8px", border: "1px solid var(--dsw-alias-border, rgba(128,128,128,.4))", background: "transparent", color: "inherit", font: "inherit", cursor: "pointer" },
     // Readiness: one headline state, three one-line facts, and at most two buttons. The colours are
     // the only place this panel states an opinion, which is why they carry no text of their own —
     // the label next to them is always a locale string.
@@ -455,7 +516,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     kv: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 12px", margin: "8px 0 0", fontSize: "12px" },
     kvKey: { opacity: 0.68 },
     kvVal: { lineHeight: 1.5 },
-    mono: { fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace", fontSize: "11px", whiteSpace: "pre-wrap", wordBreak: "break-all", background: "rgba(0,0,0,.22)", borderRadius: "5px", padding: "4px 6px", marginTop: "4px" },
+    mono: { fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace", fontSize: "11px", whiteSpace: "pre-wrap", wordBreak: "break-all", background: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,.22))", borderRadius: "5px", padding: "4px 6px", marginTop: "4px" },
     buttons: { display: "flex", gap: "8px", alignItems: "center", marginTop: "10px", flexWrap: "wrap" },
   }
 
@@ -525,14 +586,18 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         type: "button",
         ref: buttonRef,
         className: "dsh-bb-dd-btn",
+        "aria-label": props.label + ": " + (current?.label ?? ""),
         disabled: props.disabled,
         "aria-haspopup": "listbox",
         "aria-expanded": open ? "true" : "false",
+        onBlur: event => {
+          if (!rootRef.current?.contains(event.relatedTarget)) setOpen(false)
+        },
         onClick: () => { setOpen(o => !o); setActive(-1) },
         onKeyDown,
       }, [
         h("span", { key: "v" }, current === undefined ? "" : current.label),
-        h("span", { key: "c", className: "dsh-bb-dd-caret", "aria-hidden": "true" }, "\\u25be"),
+        h("span", { key: "c", className: "dsh-bb-dd-caret", "aria-hidden": "true" }, "\u25be"),
       ]),
       open ? h("div", {
         key: "l",
@@ -544,7 +609,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         type: "button",
         className: "dsh-bb-dd-opt",
         role: "option",
+        tabIndex: -1,
         "aria-selected": option.value === props.value ? "true" : "false",
+        onMouseDown: event => event.preventDefault(),
         "data-active": index === active ? "true" : "false",
         onMouseEnter: () => setActive(index),
         onClick: () => commit(index),
@@ -555,19 +622,21 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   /** One boolean switch bound to a settings path. */
   function Toggle(props) {
     const t = translate
-    return h("div", { style: styles.row, className: "dsh-bb-row" }, [
+    return h("label", { style: styles.row, className: "dsh-bb-row dsh-bb-toggle" }, [
+      h("span", { key: "l", style: styles.label }, [
+        h("span", { key: "t" }, t(props.labelKey)),
+        props.hintKey ? h("span", { key: "h", style: styles.hint }, t(props.hintKey)) : null,
+      ]),
       h("input", {
         key: "i",
         type: "checkbox",
-        style: styles.box,
+        className: "dsh-bb-switch",
+        role: "switch",
+        "aria-label": t(props.labelKey),
         checked: props.checked,
         disabled: props.busy,
         onChange: event => props.onChange(event.target.checked),
       }),
-      h("label", { key: "l", style: styles.label, onClick: () => props.onChange(!props.checked) }, [
-        h("span", { key: "t" }, t(props.labelKey)),
-        h("span", { key: "h", style: styles.hint }, t(props.hintKey)),
-      ]),
     ])
   }
 
@@ -601,7 +670,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
    * same one background attempt the plugin makes on its own, which is why pressing it is never
    * harmful and never starts a second download.
    */
-  function Readiness() {
+  function Readiness({ channel } = {}) {
     useLocaleVersion()
     const t = translate
     const [runtime, setRuntime] = useState(null)
@@ -640,7 +709,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       alive.current = true
       void read()
       return () => { alive.current = false }
-    }, [read])
+    }, [read, channel])
 
     // Poll only while a download is running: that is the one state that changes on its own, and a
     // poll in any other state would be a background request per panel per two seconds forever.
@@ -695,45 +764,95 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
           ? t("readiness.bridge.installedNotRunning")
           : t("readiness.bridge.installed")
 
-    return h("div", { style: styles.wrap }, [
-      h("p", { key: "head", style: styles.lead }, [
-        h("span", { key: "b", style: { ...styles.badge, ...tone } }, t(`readiness.state.${runtime.readiness}`)),
-        h("span", { key: "s" }, ` ${t(`readiness.hint.${runtime.carrier}`)}`),
+    return h("div", { style: styles.group }, [
+      h("div", { key: "head", className: "dsh-bb-row", style: styles.row }, [
+        h("span", { key: "title" }, t("readiness.title")),
+        h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, t(`readiness.state.${runtime.readiness}`)),
       ]),
-      h("div", { key: "kv", style: styles.kv }, [
-        ...row("carrier", t("readiness.channel"), t(`readiness.carrier.${runtime.carrier}`)),
-        ...row("electron", t("readiness.electron"), t(`readiness.electron.${runtime.electron.state}`)),
-        ...row("bridge", t("readiness.bridge"), bridgeLabel),
-      ]),
-      // The provisioning module's own words: shown only where they add something a state label
-      // cannot carry (what failed, and why), never as a permanent second copy of the state.
-      runtime.electron.state === "failed" || runtime.electron.state === "skipped"
-        ? h("p", { key: "edetail", style: styles.hint }, runtime.electron.detail)
-        : null,
-      // Same rule for the shell: an installed bridge that is not running needs the sentence that says
-      // so ("pid 1234 is not running"), not a repair command, because there is nothing to repair.
-      runtime.bridge.state === "installed" && runtime.bridge.running !== true
-        ? h("p", { key: "bdetail", style: styles.hint }, runtime.bridge.runningDetail ?? runtime.bridge.detail)
-        : null,
-      runtime.bridge.command !== undefined && runtime.bridge.state !== "installed"
-        ? h("div", { key: "cmd" }, [
-          h("p", { key: "l", style: styles.hint }, t("readiness.fix")),
-          h("code", { key: "c", style: styles.mono }, runtime.bridge.command),
-        ])
-        : null,
-      h("div", { key: "btns", style: styles.buttons }, [
+      h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
+        h("summary", { key: "title", style: styles.hint }, t("readiness.details")),
+        h("div", { key: "kv", style: styles.kv }, [
+          ...row("carrier", t("readiness.channel"), t(`readiness.carrier.${runtime.carrier}`)),
+          ...row("electron", t("readiness.electron"), t(`readiness.electron.${runtime.electron.state}`)),
+          ...row("bridge", t("readiness.bridge"), bridgeLabel),
+        ]),
+        runtime.electron.state === "failed" || runtime.electron.state === "skipped"
+          ? h("p", { key: "edetail", style: styles.hint }, runtime.electron.detail) : null,
+        runtime.bridge.state === "installed" && runtime.bridge.running === false
+          ? h("p", { key: "bdetail", style: styles.hint }, runtime.bridge.runningDetail ?? runtime.bridge.detail) : null,
+        runtime.bridge.command && runtime.bridge.state !== "installed"
+          ? h("p", { key: "command", style: styles.hint }, [
+            h("span", { key: "label" }, t("readiness.fix")),
+            h("code", { key: "value", style: styles.mono }, runtime.bridge.command),
+          ]) : null,
         h("button", {
           key: "recheck",
           type: "button",
           style: styles.button,
-          disabled: busy,
+          disabled: busy || preparing,
           onClick: () => { void read() },
-        }, preparing ? t("readiness.preparing") : t("readiness.recheck")),
-        runtime.canProvision
-          ? h("button", { key: "prepare", type: "button", style: styles.button, disabled: busy, onClick: () => { void prepare() } }, t("readiness.prepare"))
-          : null,
-        error !== "" ? h("span", { key: "e", style: styles.error }, `${t("readiness.failed")} ${error}`) : null,
+        }, t("readiness.recheck")),
       ]),
+      runtime.canProvision || preparing
+        ? h("div", { key: "buttons", style: styles.buttons }, [
+          preparing ? h("span", { key: "progress", role: "status", style: styles.hint }, t("readiness.preparing")) : null,
+          runtime.canProvision ? h("button", { key: "prepare", type: "button", style: styles.button, disabled: busy, onClick: () => { void prepare() } }, t("readiness.prepare")) : null,
+        ]) : null,
+      error !== "" ? h("p", { key: "error", role: "alert", style: styles.error }, t("readiness.failed") + " " + error) : null,
+    ])
+  }
+
+  /** Save the delivery fields together so moving focus never writes a partial template. */
+  function DeliverySettings({ delivery, busy, onSave }) {
+    const t = translate
+    const [invalid, setInvalid] = useState(false)
+    const toolPattern = /^[A-Za-z0-9_.-]+$/
+    const submit = event => {
+      event.preventDefault()
+      const fields = event.currentTarget.elements
+      const tool = fields.namedItem("tool").value.trim()
+      const onFail = fields.namedItem("onFail").value
+      const rules = fields.namedItem("sites").value.split("\n").filter(line => line.trim() !== "")
+      const entries = rules.map(line => line.split("=").map(value => value.trim()))
+      let args
+      try {
+        args = JSON.parse(fields.namedItem("args").value)
+      } catch {
+        setInvalid(true)
+        return
+      }
+      if ((tool !== "" && !toolPattern.test(tool))
+        || args === null || typeof args !== "object" || Array.isArray(args)
+        || Object.values(args).some(value => typeof value !== "string")
+        || entries.some(entry => entry.length !== 2 || !/^[A-Za-z0-9.-]+$/.test(entry[0]) || !toolPattern.test(entry[1]))) {
+        setInvalid(true)
+        return
+      }
+      const sites = Object.fromEntries(entries.map(([host, name]) => [host.toLowerCase(), name]))
+      if (Object.keys(sites).length !== entries.length) {
+        setInvalid(true)
+        return
+      }
+      setInvalid(false)
+      onSave({ tool, args, onFail, sites })
+    }
+    const field = (name, control) => h("label", { key: name, style: styles.label }, [
+      h("span", { key: "label" }, t("delivery." + name)),
+      control,
+      name === "args" ? h("span", { key: "hint", style: styles.hint }, t("delivery.args.hint")) : null,
+    ])
+    return h("form", { onSubmit: submit }, [
+      h("fieldset", { key: "fields", disabled: busy, style: { border: 0, margin: 0, padding: 0, display: "grid", gap: "10px" } }, [
+        field("tool", h("input", { key: "control", name: "tool", className: "dsh-bb-input", defaultValue: delivery?.tool ?? "", placeholder: "lark_drive_upload" })),
+        field("args", h("textarea", { key: "control", name: "args", className: "dsh-bb-input", rows: 3, defaultValue: JSON.stringify(delivery?.args ?? { file_path: "{path}" }, null, 2) })),
+        field("onFail", h("select", { key: "control", name: "onFail", className: "dsh-bb-input", defaultValue: delivery?.onFail ?? "keep-local" }, [
+          h("option", { key: "keep", value: "keep-local" }, t("delivery.onFail.keep")),
+          h("option", { key: "stop", value: "stop" }, t("delivery.onFail.stop")),
+        ])),
+        field("sites", h("textarea", { key: "control", name: "sites", className: "dsh-bb-input", rows: 3, defaultValue: Object.entries(delivery?.sites ?? {}).map(([host, tool]) => host + "=" + tool).join("\n") })),
+        h("div", { key: "actions" }, h("button", { type: "submit", style: styles.button }, t("delivery.save"))),
+      ]),
+      invalid ? h("p", { key: "error", role: "alert", style: styles.error }, t("delivery.invalid")) : null,
     ])
   }
 
@@ -746,6 +865,8 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     const [error, setError] = useState("")
     const [busy, setBusy] = useState(false)
     const [saved, setSaved] = useState(false)
+    const saving = useRef(false)
+    const savedTimer = useRef(null)
 
     const load = useCallback(() => {
       setError("")
@@ -756,22 +877,31 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     }, [])
 
     useEffect(() => { load() }, [load])
+    useEffect(() => () => clearTimeout(savedTimer.current), [])
 
     const patch = useCallback(next => {
+      if (saving.current) return
+      saving.current = true
+      clearTimeout(savedTimer.current)
+      setSaved(false)
       setBusy(true)
       setError("")
       callSettings(next).then(data => {
         setSettings(data.settings)
         setSaved(true)
-        setTimeout(() => setSaved(false), 1200)
+        savedTimer.current = setTimeout(() => setSaved(false), 1800)
       }).catch(failure => setError(String(failure && failure.message ? failure.message : failure)))
-        .then(() => setBusy(false))
+        .finally(() => {
+          saving.current = false
+          setBusy(false)
+        })
     }, [])
 
     if (rawSettings === null) {
       return h("div", { style: styles.wrap }, [
-        h("p", { key: "l", style: styles.lead }, t("loading")),
+        error === "" ? h("p", { key: "l", role: "status", style: styles.lead }, t("loading")) : null,
         error !== "" ? h("p", { key: "e", style: styles.error }, `${t("failed")} ${error}`) : null,
+        error !== "" ? h("button", { key: "retry", type: "button", style: styles.button, onClick: load }, t("retry")) : null,
       ])
     }
 
@@ -785,181 +915,76 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       ? { ...rawSettings, actions: { allowExecute: true, allowDownload: true, allowCredentialWrite: true } }
       : rawSettings
 
-    const section = (titleKey, children) => h("div", { key: titleKey, style: styles.group }, [
-      h("p", { key: "t", style: styles.groupTitle }, t(titleKey)),
+    const toggle = (group, key, labelKey = group + "." + key, hintKey) => h(Toggle, {
+      key,
+      labelKey,
+      hintKey,
+      checked: settings[group]?.[key] ?? (group === "cookies" && key === "persist"),
+      busy,
+      onChange: value => patch({ [group]: { [key]: value } }),
+    })
+    const selector = (labelKey, value, options, onChange, hintKey) => h("div", {
+      key: labelKey,
+      className: "dsh-bb-row",
+      style: styles.row,
+    }, [
+      h("span", { key: "text", style: styles.label }, [
+        h("span", { key: "label" }, t(labelKey)),
+        hintKey ? h("span", { key: "hint", style: styles.hint }, t(hintKey)) : null,
+      ]),
+      h(Dropdown, { key: "select", label: t(labelKey), value, options, disabled: busy, onChange }),
+    ])
+    const options = (prefix, values) => values.map(value => ({ value, label: t(prefix + value) }))
+    const section = (titleKey, children) => h("section", { key: titleKey, style: styles.group }, [
+      h("h3", { key: "title", style: styles.groupTitle }, t(titleKey)),
       ...children,
     ])
+    const systemBrowser = settings.browser.channel === "chrome" || settings.browser.channel === "edge"
 
-    return h("div", { style: styles.wrap }, [
-      h("p", { key: "lead", style: styles.lead }, t("lead")),
-
-      // First, because it answers the question a fresh install raises before any switch matters:
-      // can this thing open a page right now, and if not, what is it waiting for.
-      section("readiness.title", [
-        h("p", { key: "lead", style: styles.hint }, t("readiness.lead")),
-        h(Readiness, { key: "r" }),
-      ]),
-
-      section("history.title", [
-        h(Toggle, {
-          key: "enabled",
-          labelKey: "history.enabled",
-          hintKey: "history.hint",
-          checked: settings.history.enabled,
-          busy,
-          onChange: value => patch({ history: { enabled: value } }),
-        }),
-      ]),
-
-      section("cookies.title", [
-        h(Toggle, {
-          key: "persist",
-          labelKey: "cookies.persist",
-          hintKey: "cookies.hint",
-          checked: settings.cookies.persist,
-          busy,
-          onChange: value => patch({ cookies: { persist: value } }),
-        }),
-      ]),
-
+    return h("div", { style: styles.wrap, className: "dsh-bb-settings" }, [
+      selector("browser.channel", settings.browser.channel,
+        options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"]),
+        channel => patch({ browser: { channel } })),
+      h(Readiness, { key: "readiness", channel: settings.browser.channel }),
       section("ui.title", [
-        h(Toggle, {
-          key: "autoExpandOnce",
-          labelKey: "ui.autoExpandOnce",
-          hintKey: "ui.autoExpandOnce.hint",
-          checked: settings.ui.autoExpandOnce,
-          busy,
-          onChange: value => patch({ ui: { autoExpandOnce: value } }),
-        }),
-        h(Toggle, {
-          key: "closeWithSession",
-          labelKey: "ui.closeWithSession",
-          hintKey: "ui.closeWithSession.hint",
-          checked: settings.ui.closeWithSession,
-          busy,
-          onChange: value => patch({ ui: { closeWithSession: value } }),
-        }),
-        h(Toggle, {
-          key: "virtualCursor",
-          labelKey: "ui.virtualCursor",
-          hintKey: "ui.virtualCursor.hint",
-          checked: settings.ui.virtualCursor,
-          busy,
-          onChange: value => patch({ ui: { virtualCursor: value } }),
-        }),
-        h(Toggle, {
-          key: "quiet",
-          labelKey: "ui.quiet",
-          hintKey: "ui.quiet.hint",
-          checked: settings.ui.quiet,
-          busy,
-          onChange: value => patch({ ui: { quiet: value } }),
-        }),
+        toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
+        toggle("ui", "autoExpandOnce"),
+        toggle("ui", "closeWithSession"),
+        toggle("ui", "virtualCursor"),
+        toggle("remoteView", "enabled", "remoteView.enabled", "remoteView.enabled.hint"),
       ]),
-
-      section("vision.title", [
-        h("div", { key: "row", style: styles.row, className: "dsh-bb-row" }, [
-          h("label", { key: "l", style: styles.label }, [
-            h("span", { key: "t" }, t("vision.strategy")),
-            h(Dropdown, {
-              key: "s",
-              label: t("vision.strategy"),
-              value: settings.vision.strategy,
-              disabled: busy,
-              onChange: value => patch({ vision: { strategy: value } }),
-              options: [
-                { value: "auto", label: t("vision.auto") },
-                { value: "nonVisual", label: t("vision.nonVisual") },
-              ],
-            }),
-            h("span", { key: "h", style: styles.hint }, t("vision.hint")),
-          ]),
-        ]),
-      ]),
-
-      section("browser.title", [
-        h("div", { key: "row", style: styles.row, className: "dsh-bb-row" }, [
-          h("label", { key: "l", style: styles.label }, [
-            h("span", { key: "t" }, t("browser.channel")),
-            h(Dropdown, {
-              key: "s",
-              label: t("browser.channel"),
-              value: settings.browser.channel,
-              disabled: busy,
-              onChange: value => patch({ browser: { channel: value } }),
-              options: [
-                { value: "sidebar", label: t("browser.sidebar") },
-                { value: "bundled", label: t("browser.bundled") },
-                { value: "auto", label: t("browser.auto") },
-                { value: "chrome", label: t("browser.chrome") },
-                { value: "edge", label: t("browser.edge") },
-              ],
-            }),
-            h("span", { key: "h", style: styles.hint }, t("browser.hint")),
-          ]),
-        ]),
-      ]),
-
       section("actions.title", [
-        h("p", { key: "lead", style: styles.hint }, t("actions.lead")),
-        h(Toggle, {
-          key: "allowExecute",
-          labelKey: "actions.allowExecute",
-          hintKey: "actions.allowExecute.hint",
-          checked: settings.actions.allowExecute,
-          busy,
-          onChange: value => patch({ actions: { allowExecute: value } }),
-        }),
-        h(Toggle, {
-          key: "allowDownload",
-          labelKey: "actions.allowDownload",
-          hintKey: "actions.allowDownload.hint",
-          checked: settings.actions.allowDownload,
-          busy,
-          onChange: value => patch({ actions: { allowDownload: value } }),
-        }),
-        h(Toggle, {
-          key: "allowCredentialWrite",
-          labelKey: "actions.allowCredentialWrite",
-          hintKey: "actions.allowCredentialWrite.hint",
-          checked: settings.actions.allowCredentialWrite,
-          busy,
-          onChange: value => patch({ actions: { allowCredentialWrite: value } }),
-        }),
+        toggle("actions", "allowExecute"),
+        toggle("actions", "allowDownload"),
+        toggle("credentials", "allowRead"),
+        toggle("actions", "allowCredentialWrite", "actions.allowCredentialWrite", "actions.allowCredentialWrite.hint"),
       ]),
-
-      section("credentials.title", [
-        h(Toggle, {
-          key: "allowRead",
-          labelKey: "credentials.allowRead",
-          hintKey: "credentials.hint",
-          checked: settings.credentials.allowRead,
-          busy,
-          onChange: value => patch({ credentials: { allowRead: value } }),
-        }),
+      h("details", { key: "advanced", style: styles.group }, [
+        h("summary", { key: "title", style: styles.groupTitle }, t("settings.advanced")),
+        toggle("history", "enabled"),
+        selector("vision.strategy", settings.vision.strategy, [
+          { value: "auto", label: t("vision.auto") },
+          { value: "nonVisual", label: t("vision.nonVisual") },
+        ], strategy => patch({ vision: { strategy } })),
+        systemBrowser ? toggle("cookies", "persist", "browser.profile") : null,
+        systemBrowser ? selector("browser.headless", settings.browser.headless ?? "auto",
+          options("browser.headless.", ["auto", "windowed", "headless"]),
+          headless => patch({ browser: { headless } }), "browser.headless.hint") : null,
+        settings.delivery ? section("delivery.title", [
+          h(DeliverySettings, {
+            key: JSON.stringify(settings.delivery),
+            delivery: settings.delivery,
+            busy,
+            onSave: delivery => patch({ delivery }),
+          }),
+        ]) : null,
+        meta.path !== "" ? h("p", { key: "path", style: styles.pathLine }, t("settings.details") + " · " + meta.path) : null,
       ]),
-
-      // Reported on #46: turning remote viewing on had to be done by editing the settings file and
-      // reloading the page — and a phone has no keyboard shortcut to reload with. The switch belongs
-      // here, and flipping it applies immediately (see `callSettings`).
-      section("remoteView.title", [
-        h(Toggle, {
-          key: "remoteViewEnabled",
-          labelKey: "remoteView.enabled",
-          hintKey: "remoteView.enabled.hint",
-          checked: settings.remoteView.enabled,
-          busy,
-          onChange: value => patch({ remoteView: { enabled: value } }),
-        }),
-      ]),
-
-      h("div", { key: "status", style: styles.status }, [
-        saved ? h("span", { key: "s" }, t("saved")) : null,
+      h("div", { key: "status", style: styles.status, role: "status" }, [
+        busy || saved ? h("span", { key: "s" }, t(busy ? "settings.saving" : "saved")) : null,
         error !== "" ? h("span", { key: "e", style: styles.error }, ` ${t("failed")} ${error} `) : null,
-        error !== "" ? h("button", { key: "r", style: styles.button, onClick: load }, t("retry")) : null,
+        error !== "" ? h("button", { key: "r", type: "button", style: styles.button, onClick: load }, t("retry")) : null,
       ]),
-
-      meta.path !== "" ? h("div", { key: "path", style: styles.pathLine }, `${t("path")}: ${meta.path}`) : null,
     ])
   }
 
@@ -1070,10 +1095,11 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   }
 
   /** Read this conversation's current guest, preferring the one actually drawn. */
-  function guestStateFor(sessionId) {
+  function guestStateFor(sessionId, tabId) {
     const roots = panelRootsFor(sessionId)
     if (roots === undefined ? tabStripFor(sessionId) === null : roots.length === 0) return { panel: false, guestId: null, url: "" }
-    const guests = guestsInPanel(sessionId)
+    const guests = guestsInPanel(sessionId).filter(view => tabId === undefined
+      || tabIdOfElement(view, new Set([tabId]), roots) === tabId)
     if (guests.length === 0) return { panel: true, guestId: null, url: "" }
     // A sidebar keeps every tab mounted (`keepMounted`), so a background tab's guest is
     // in the tree too. Prefer the one with a drawn box; fall back to the newest.
@@ -1125,6 +1151,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
    */
   function installPanelService(ctx) {
     let sidebarRight = null
+    const pendingTabs = new Map()
     /** The shell's own navigation service: `openSession` is how it is asked to DISPLAY a conversation. */
     let uiWorkspace = null
     // `inject` is how a client plugin waits for a service to appear. A host that does not offer it
@@ -1134,9 +1161,13 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     // with it, which is exactly the shape of regression this file has been bitten by before.
     if (typeof ctx.inject === "function") {
       ctx.inject(["sidebarRight"], (scope) => {
+        if (sidebarRight !== scope.sidebarRight) pendingTabs.clear()
         sidebarRight = scope.sidebarRight
         scope.effect(() => () => {
-          if (sidebarRight === scope.sidebarRight) sidebarRight = null
+          if (sidebarRight === scope.sidebarRight) {
+            sidebarRight = null
+            pendingTabs.clear()
+          }
         }, "dsh-builtin-browser: conversation panel binding")
       })
       // A separate inject, deliberately: waiting for both services in one call would take the
@@ -1224,7 +1255,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
      * @returns what was asked for, so a caller can tell "expanded" from "already visible", and
      *   `displayed` so it can tell "the shell is showing this conversation" from "it is not".
      */
-    function revealPlacedPanel(sessionId, state) {
+    function revealPlacedPanel(sessionId, state, tabId) {
       if (state.guestId !== null || sidebarRight === null) return {}
       const done = {}
       // Which conversation is the shell DISPLAYING? `screen()` answers it, and it is the question
@@ -1262,7 +1293,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       }
       try {
         const tabs = typeof sidebarRight.tabsIn === "function" ? sidebarRight.tabsIn(sessionId) : []
-        const page = Array.isArray(tabs) ? tabs.find(entry => entry !== null && typeof entry === "object" && entry.kind === "browser") : undefined
+        const page = Array.isArray(tabs) ? tabs.find(entry => entry !== null && typeof entry === "object" && entry.kind === "browser" && entry.id === tabId) : undefined
         if (page !== undefined && typeof sidebarRight.focus === "function") {
           sidebarRight.focus(page.id)
           done.focused = String(page.id)
@@ -1283,7 +1314,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         if (sidebarRight === null || typeof sidebarRight.openTabIn !== "function") {
           return { ok: false, reason: "the shell's sidebar service is not available", panel: false, guestId: null }
         }
-        const state = guestStateFor(wanted)
+        const address = url ? String(url) : ""
+        const pending = pendingTabs.get(wanted)
+        const state = guestStateFor(wanted, pending?.url === address && pending.scoped ? pending.id : undefined)
         if (state.guestId !== null) {
           return { ok: true, created: false, panel: true, guestId: state.guestId, url: state.url }
         }
@@ -1303,15 +1336,37 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         // (a public method) is what says whether it actually landed: `openTabIn` SILENTLY ignores a
         // conversation whose store was never minted, and a silent no-op must never be reported as
         // success.
-        let before = 0
-        try { before = sidebarRight.tabsIn(wanted).length } catch (error) { before = 0 }
-        try {
-          sidebarRight.openTabIn(wanted, "browser", url ? { params: { url: String(url) } } : {})
-        } catch (error) {
-          return { ok: false, reason: String((error && error.message) || error), panel: state.panel, guestId: null }
+        let beforeTabs = []
+        try { beforeTabs = Array.from(sidebarRight.tabsIn(wanted)) } catch {}
+        const before = beforeTabs.length
+        const beforeIds = new Set(beforeTabs.map(tab => tab.id))
+        const remembered = pending?.url === address
+          ? beforeTabs.find(tab => tab.kind === "browser" && tab.id === pending.id)
+          : undefined
+        if (remembered === undefined) {
+          try {
+            sidebarRight.openTabIn(wanted, "browser", address ? { params: { url: address } } : {})
+          } catch (error) {
+            return { ok: false, reason: String((error && error.message) || error), panel: state.panel, guestId: null }
+          }
         }
-        let placed = 0
-        try { placed = sidebarRight.tabsIn(wanted).length } catch (error) { placed = before }
+        let placedTabs = beforeTabs
+        try { placedTabs = Array.from(sidebarRight.tabsIn(wanted)) } catch {}
+        const placed = placedTabs.length
+        const browserTabs = placedTabs.filter(tab => tab !== null && typeof tab === "object" && tab.kind === "browser")
+        const added = browserTabs.filter(tab => !beforeIds.has(tab.id))
+        const matching = browserTabs.filter(tab => address !== "" && (tab.params?.url === address || tab.url === address))
+        // Multiple browser tabs use separate ids. Correlate this placement before revealing it.
+        // Older shells deduplicate the browser kind, so their sole browser is unambiguous.
+        const page = remembered
+          ?? (added.length === 1 ? added[0] : undefined)
+          ?? (matching.length === 1 ? matching[0] : undefined)
+          ?? (browserTabs.length === 1 ? browserTabs[0] : undefined)
+        const scoped = browserTabs.length > 1 || panelRootsFor(wanted) !== undefined
+        if (page !== undefined) pendingTabs.set(wanted, { id: page.id, url: address, scoped })
+        if (page === undefined && browserTabs.length > 1) {
+          return { ok: false, reason: "the shell did not identify which browser tab was placed", panel: state.panel, guestId: null }
+        }
         // `openTabIn` DEDUPLICATES, so "the count grew" is the wrong test for "is this
         // conversation's surface mounted".
         //
@@ -1346,20 +1401,24 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         // Placing is not showing: ask the shell to expand the column and focus that tab, so the
         // body (and with it the `<webview>`) actually gets created. Without this the caller polls
         // a panel that can never answer, which is exactly what "produced no page" used to mean.
-        const revealed = revealPlacedPanel(wanted, state)
+        const revealed = revealPlacedPanel(wanted, state, page?.id)
         return {
           ok: true,
           created: placed > before,
           panel: state.panel,
           guestId: null,
           tabs: placed,
+          ...page === undefined || !scoped ? {} : { tabId: String(page.id) },
           ...switched ? { switched: true } : {},
           ...revealed,
         }
       },
       /** Read-only: this conversation's current guest, if it has one. */
-      panelGuest(sessionId) {
-        return guestStateFor(typeof sessionId === "string" ? sessionId : "")
+      panelGuest(sessionId, tabId) {
+        return guestStateFor(
+          typeof sessionId === "string" ? sessionId : "",
+          typeof tabId === "string" && tabId !== "" ? tabId : undefined,
+        )
       },
       /** All guest ids verified inside this conversation, including shell-created popup tabs. */
       panelGuests(sessionId) {

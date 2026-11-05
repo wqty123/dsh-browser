@@ -38,7 +38,7 @@ export interface ProvisionDeps {
     /** The installed electron package's own installer script, or undefined when it is not there. */
     readonly installerScript: () => string | undefined;
     /** Runs the installer; resolves to an exit code, or rejects/returns null on failure. */
-    readonly run: (script: string) => Promise<{
+    readonly run: (script: string, signal?: AbortSignal) => Promise<{
         code: number | null;
         detail?: string;
     }>;

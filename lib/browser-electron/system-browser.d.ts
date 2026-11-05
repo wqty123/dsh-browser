@@ -85,6 +85,7 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * and why a display-less host needs headless at all (issue #32).
      */
     private readonly headlessMode;
+    private readonly isQuiet;
     /**
      * viewId -> the session that view rides, and the client that issued it.
      *
@@ -156,7 +157,7 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * Whether this launch should get a window. See {@link resolveLaunchMode} for how `auto` decides
      * and why a display-less host needs headless at all (issue #32).
      */
-    headlessMode?: HeadlessMode);
+    headlessMode?: HeadlessMode, isQuiet?: () => boolean);
     /** Which product this host would drive (for diagnostics). */
     get kind(): DetectedBrowser['kind'];
     /** Whether the browser has actually been started yet (diagnostics and tests). */
@@ -284,7 +285,9 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * two, and the order is honoured either way.
      * @param handle - the view to present.
      */
-    presentView(handle: ElectronViewHandle): Promise<void>;
+    presentView(handle: ElectronViewHandle, _label?: string, options?: {
+        readonly quiet?: boolean;
+    }): Promise<void>;
     /**
      * Best effort at bringing the browser's window forward.
      *

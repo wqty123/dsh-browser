@@ -412,7 +412,12 @@ function windowFor(windowId: string | undefined): HostWindow {
   const key = windowId === undefined || windowId === '' ? SHARED_WINDOW_ID : windowId
   const existing = windows.get(key)
   if (existing !== undefined) return existing
-  const w = new BrowserWindow({ width: 1400, height: 900, show: true, title: 'dsh-browser' })
+  // `show: false` on purpose: creating a window must not be a presentation decision. With `show: true`
+  // the window appeared and took the screen the moment the first tool call created it — before any
+  // `showView` message could carry `ui.quiet`, so quiet mode had no effect at all on this carrier
+  // (measured: the setting was on and the window still popped up). The first presentation decides:
+  // quiet shows it inactive, a normal call shows it normally.
+  const w = new BrowserWindow({ width: 1400, height: 900, show: false, title: 'dsh-browser' })
   w.on('closed', () => {
     const closing = windows.get(key)
     windows.delete(key)
@@ -616,30 +621,41 @@ function revealViewInWindow(win: HostWindow, viewId: string, label?: string): vo
  * @param label - session/task label, when known, for the window title.
  * @param quiet - `ui.quiet`: present without taking the screen over.
  * @param needSurface - quiet mode only: this presentation is the barrier before synthesized
- *   input, so the window has to be visible even if the user minimized it. A navigation or a tab
- *   switch does not need that and leaves a minimized window alone.
+ *   input, so a newly created window needs an invisible display surface. A minimized window
+ *   stays minimized because restoring it can activate it.
  */
 function showViewInWindow(win: HostWindow, viewId: string, label?: string, quiet = false, needSurface = false): void {
-  revealViewInWindow(win, viewId, label)
-  // Raise this session's window so the human sees the page being worked on
-  // (moveTop raises without stealing keyboard focus).
-  //
-  // Quiet mode (`ui.quiet`): the user asked not to be interrupted, so this must not
-  // activate the application, steal keyboard focus, or pull the window in front of the one
-  // they are using. Chromium drops `Input.*` for a view with no display surface, so the one
-  // case that still needs a visible window — the barrier before synthesized input — restores
-  // it with `showInactive()`, which shows it without becoming the key window, and never calls
-  // `moveTop()`. Everything else (navigation, tab switching, screenshots) leaves a minimized
-  // window minimized.
-  try {
-    if (quiet) {
-      if (!needSurface) return
-      if (win.window.isMinimized()) win.window.restore()
-      if (!win.window.isVisible()) win.window.showInactive()
-    } else {
-      if (!win.window.isVisible()) win.window.show()
-      win.window.moveTop()
+  if (quiet) {
+    if (win.window.isMinimized()) {
+      if (needSurface) throw new Error('quiet mode will not restore a minimized browser window; restore it manually to send input')
+      return
     }
+    if (win.window.isVisible() && win.window.getOpacity() > 0) {
+      if (win.visibleViewId !== viewId) {
+        if (needSurface) throw new Error('quiet mode will not replace a visible browser tab; select the target tab manually to send input')
+        return
+      }
+      revealViewInWindow(win, viewId, label)
+      return
+    }
+    revealViewInWindow(win, viewId, label)
+    if (!needSurface || win.window.isVisible()) return
+    win.window.setOpacity(0)
+    if (win.window.getOpacity() > 0) throw new Error('quiet mode could not create an invisible browser surface')
+    win.window.setSkipTaskbar(true)
+    win.window.setFocusable(false)
+    win.window.showInactive()
+    return
+  }
+  revealViewInWindow(win, viewId, label)
+  try {
+    if (win.window.getOpacity() === 0) {
+      win.window.setFocusable(true)
+      win.window.setOpacity(1)
+      win.window.setSkipTaskbar(false)
+    }
+    if (!win.window.isVisible()) win.window.show()
+    win.window.moveTop()
   } catch { /* closing */ }
 }
 
@@ -821,7 +837,10 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         // and `document.hasFocus()` inside the page even read true.
         const contents = entry.webContentsView.webContents
         const hadWebFocus = contents.isFocused()
-        contents.focus()
+        if (msg.quiet === true && win.window.getOpacity() > 0 && !hadWebFocus) {
+          throw new Error('quiet mode will not take keyboard focus from the visible browser; focus the target page manually')
+        }
+        if (msg.quiet !== true || !hadWebFocus) contents.focus()
         // Focus lands asynchronously, and a key dispatched in the same turn as
         // the request is still dropped, so hold the reply until the renderer can
         // take input. Only on the call where focus actually had to move.
@@ -859,7 +878,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
           // The active tab has to be the visible one INSIDE the window, or the capture may read
           // another tab. Keep that switch contentView-local: show/restore/focus are precisely
           // what quiet mode forbids.
-          revealViewInWindow(win, viewId)
+          if (!win.window.isVisible() || win.window.getOpacity() === 0) revealViewInWindow(win, viewId)
         } else {
           try {
             if (!win.window.isVisible()) win.window.show()

@@ -592,6 +592,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * and why a display-less host needs headless at all (issue #32).
      */
     private readonly headlessMode: HeadlessMode = 'auto',
+    private readonly isQuiet: () => boolean = () => false,
   ) {}
 
   /** Which product this host would drive (for diagnostics). */
@@ -765,7 +766,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // after launch (exit code 0)" that required killing seven processes by hand.
     const adopted = await this.adoptRunningBrowser('before launch')
     if (adopted !== undefined) return adopted
-    const launch = resolveLaunchMode(this.headlessMode)
+    const launch = resolveLaunchMode(this.isQuiet() ? 'headless' : this.headlessMode)
     const args = [
       '--remote-debugging-port=0',
       `--user-data-dir=${this.profileDir}`,
@@ -1093,6 +1094,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       const ours = new Set(this.sessions.values())
       return (listed?.targetInfos ?? [])
         .filter(entry => entry.type === 'page' && typeof entry.targetId === 'string')
+        .filter(entry => !/^edge:\/\/sync-confirmation-dialog(?:\/|$)/.test(entry.url ?? ''))
         .filter(entry => !ours.has(entry.targetId as string))
         .map(entry => ({
           id: entry.targetId as string,
@@ -1248,7 +1250,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * two, and the order is honoured either way.
    * @param handle - the view to present.
    */
-  async presentView(handle: ElectronViewHandle): Promise<void> {
+  async presentView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean }): Promise<void> {
+    if (options?.quiet === true || this.isQuiet()) return
     try {
       await handle.sendCommand('Page.bringToFront')
     } catch {
@@ -1456,7 +1459,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
 
   /** Create one page, refusing to go on without an id. */
   private async createTarget(client: CdpClient): Promise<string> {
-    const created = await client.send('Target.createTarget', { url: 'about:blank' }) as { targetId?: string }
+    const created = await client.send('Target.createTarget', {
+      url: 'about:blank',
+      ...this.isQuiet() ? { background: true } : {},
+    }) as { targetId?: string }
     const targetId = created?.targetId
     if (typeof targetId !== 'string') throw new Error('dsh-builtin-browser: the browser did not create a page')
     return targetId

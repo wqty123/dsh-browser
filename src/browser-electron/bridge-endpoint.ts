@@ -78,6 +78,13 @@ export function readBridgeEndpoint(
   let raw: { port?: unknown; token?: unknown; pid?: unknown; updatedAt?: unknown }
   try {
     raw = JSON.parse(readFileSync(path, 'utf8')) as typeof raw
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)
+      || !Number.isInteger(raw.port) || Number(raw.port) < 1 || Number(raw.port) > 65535
+      || typeof raw.token !== 'string' || raw.token.trim() === ''
+      || !Number.isSafeInteger(raw.pid) || Number(raw.pid) <= 0
+      || (raw.updatedAt !== undefined && (typeof raw.updatedAt !== 'string' || !Number.isFinite(Date.parse(raw.updatedAt))))) {
+      throw new Error('expected a port, a nonempty token, a positive pid and an optional timestamp')
+    }
   } catch (error) {
     return {
       present: true,

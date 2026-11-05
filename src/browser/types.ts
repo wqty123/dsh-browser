@@ -360,6 +360,22 @@ export interface BrowserExecuteRequest {
 }
 
 /**
+ * Fixed page operations implemented by the provider. Strings are serialized as data.
+ * Arbitrary JavaScript is handled only by BrowserExecuteRequest.
+ */
+export type BrowserPageOperationRequest =
+  | { readonly operation: 'install' }
+  | { readonly operation: 'probe'; readonly method: BrowserProbeMethod; readonly args?: readonly unknown[] }
+  | { readonly operation: 'text'; readonly text: string }
+  | { readonly operation: 'url' }
+  | { readonly operation: 'drag'; readonly from: { x: number; y: number }; readonly to: { x: number; y: number }; readonly steps: number }
+  | { readonly operation: 'upload'; readonly target: { by: 'css' | 'text' | 'xpath'; value: string }; readonly file: { name: string; mime: string; base64: string } }
+
+/** Provider-owned probe operations; JavaScript properties such as constructor are excluded. */
+export type BrowserProbeMethod = 'read' | 'clear' | 'settle' | 'find' | 'overlayAt' | 'summary'
+  | 'findText' | 'hoverAt' | 'setDialogPolicy' | 'dialogStatus' | 'networkCursor'
+
+/**
  * Result of an execute. Mirrors CDP `Runtime.evaluate` semantics: either a
  * value (by value, not by reference) or the exception thrown.
  */
@@ -632,6 +648,9 @@ export interface BrowserProvider {
   navigate(session: BrowserSessionId, request: BrowserNavigateRequest, signal?: AbortSignal): Promise<void>
   /** Execute JS in the active tab's page context. */
   execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult>
+
+  /** Execute one fixed browser operation without granting arbitrary page scripting. */
+  pageOperation?(session: BrowserSessionId, request: BrowserPageOperationRequest, signal?: AbortSignal): Promise<BrowserExecuteResult>
   /** Wait until the page is ready (and optional URL/selector match). Honor `signal` for cancellation. */
   waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult>
   /** Produce an AI-friendly snapshot of the active tab. */

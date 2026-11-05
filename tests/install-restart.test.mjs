@@ -11,6 +11,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { runInNewContext } from 'node:vm'
 
 const source = readFileSync(new URL('../desktop-bridge/install.mjs', import.meta.url), 'utf8')
 
@@ -30,22 +32,25 @@ test('the shell is closed BEFORE the archive is touched', () => {
   assert.ok(closeCall < packStep, 'closing must come first')
 })
 
-test('a revert never closes the shell', () => {
-  // --revert restores files, and closing a running DSH to do that would be a surprise the user did
-  // not ask for.
-  assert.match(source, /if \(restart && !revert\) \{/, 'the close is guarded by !revert')
+test('explicit restart also covers revert and idempotent install exits', () => {
+  assert.match(source, /if \(restart\) \{/, 'both actions honour an explicit restart')
+  assert.match(source, /process\.once\('exit'/, 'successful early returns also run the restart')
+  const archiveCheck = source.indexOf('const checked = validateArchive(asarPath)')
+  assert.ok(archiveCheck < source.indexOf('stopShell(installRoot'), 'archive checks precede shutdown')
 })
 
 test('closing asks politely first and forces only as a fallback', () => {
   // A forced kill can lose work. The user agreed to "close", not "kill".
   const stopAt = source.indexOf('async function stopShell')
   const stopBody = source.slice(stopAt, source.indexOf('function startShell'))
-  const polite = stopBody.indexOf("runCapture('taskkill.exe', ['/PID'")
-  const forced = stopBody.indexOf("runCapture('taskkill.exe', ['/IM'")
+  const polite = stopBody.indexOf("runCapture('taskkill.exe', before.flatMap")
+  const forced = stopBody.indexOf("runCapture('taskkill.exe', [...left.flatMap")
   assert.ok(polite !== -1, 'a per-process request without /F comes first')
   assert.ok(forced !== -1, 'and a forced kill exists as a fallback')
   assert.ok(polite < forced, 'polite before forced')
   assert.doesNotMatch(stopBody.slice(polite, polite + 80), /\/F/, 'the first request must not force')
+  assert.doesNotMatch(stopBody, /'\/IM'/, 'a second installation is never killed by image name')
+  assert.doesNotMatch(stopBody, /'\/T'/, 'a GUI process cannot kill unselected Node-mode descendants')
   // Both waits are bounded: a process that refuses to die must not hang the installer.
   assert.match(stopBody, /const deadline = Date\.now\(\) \+ graceMs/, 'the polite wait is bounded')
   assert.match(stopBody, /const forcedBy = Date\.now\(\) \+ 15_000/, 'and so is the forced one')
@@ -79,4 +84,81 @@ test('an install that could not stop the shell fails instead of half-installing'
   const failAt = source.indexOf('DSH Desktop did not exit')
   const nextPack = source.indexOf('const packedLayout = existsSync(asarPath)')
   assert.ok(failAt !== -1 && failAt < nextPack, 'and it happens before the pack step')
+})
+
+// Execute the actual selection function with process tables that would previously kill native
+// CLI/installer processes. The real process table and running desktop are never modified.
+function processSelection() {
+  const start = source.indexOf('function selectShellProcesses')
+  const end = source.indexOf('/**\n * Run a command and return its stdout', start)
+  return source.slice(start, end)
+}
+
+test('the selected GUI processes exclude native CLI, installer and other installations', () => {
+  const root = resolve('test-desktop')
+  const exe = resolve(root, 'DeepSeek Harness.exe')
+  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve })
+  const row = (pid, parent, commandLine, executablePath = exe) => ({
+    ProcessId: pid, ParentProcessId: parent, Name: 'DeepSeek Harness.exe', ExecutablePath: executablePath, CommandLine: commandLine,
+  })
+  const selected = select([
+    row(10, 1, '"' + exe + '"'),
+    row(11, 10, '"' + exe + '" --type=renderer'),
+    row(20, 1, '"' + exe + '" --expose-internals "resources/app.asar/cli.js"'),
+    row(21, 20, '"' + exe + '" "desktop-bridge/install.mjs" --restart'),
+    row(30, 1, '"' + exe + '" --eval "console.log(1)"'),
+    row(40, 1, '"other/DeepSeek Harness.exe"', resolve('other-desktop', 'DeepSeek Harness.exe')),
+  ], root, 21)
+  assert.deepEqual(Array.from(selected), [10, 11])
+})
+
+test('an installer beneath the GUI refuses before any GUI process can be closed', () => {
+  const root = resolve('test-desktop')
+  const exe = resolve(root, 'DeepSeek Harness.exe')
+  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve })
+  const rows = [
+    { ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness.exe', ExecutablePath: exe, CommandLine: '"' + exe + '"' },
+    { ProcessId: 20, ParentProcessId: 10, Name: 'DeepSeek Harness.exe', ExecutablePath: exe, CommandLine: '"' + exe + '" --expose-internals cli.js' },
+    { ProcessId: 21, ParentProcessId: 20, Name: 'DeepSeek Harness.exe', ExecutablePath: exe, CommandLine: '"' + exe + '" install.mjs --restart' },
+  ]
+  assert.throws(() => select(rows, root, 21), /separate terminal with Node.js/)
+})
+
+test('failed or malformed process enumeration never means the GUI is stopped', () => {
+  const root = resolve('test-desktop')
+  for (const output of [undefined, '', 'not json', 'null', '[]', '{}', '[null]']) {
+    const enumerate = runInNewContext(processSelection() + '; shellProcesses', {
+      resolve, process: { pid: 21 }, runCapture: () => output,
+    })
+    assert.throws(() => enumerate(root), /process|enumerate|parse|invalid/i)
+  }
+  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve })
+  assert.throws(() => select([
+    { ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness.exe', ExecutablePath: null, CommandLine: null },
+  ], root, 21), /could not identify/)
+})
+
+test('GUI restart clears Electron Node mode while retaining the remaining environment', () => {
+  const start = source.indexOf('function startShell')
+  const end = source.indexOf('\nconst args =', start)
+  let options
+  let detached = false
+  const environment = { ELECTRON_RUN_AS_NODE: '1', electron_run_as_node: '1', RETAINED_TEST_SETTING: 'retained' }
+  const startGui = runInNewContext(source.slice(start, end) + '; startShell', {
+    join: (...parts) => parts.join('/'),
+    existsSync: () => true,
+    process: { env: environment },
+    console: { log() {}, error() {} },
+    spawn: (_exe, _argv, config) => {
+      options = config
+      return { pid: 123, on() {}, unref() { detached = true } }
+    },
+  })
+  assert.equal(startGui('test-desktop'), true)
+  assert.equal(options.env.ELECTRON_RUN_AS_NODE, undefined)
+  assert.equal(options.env.electron_run_as_node, undefined)
+  assert.equal(options.env.RETAINED_TEST_SETTING, 'retained')
+  assert.equal(environment.ELECTRON_RUN_AS_NODE, '1', 'the parent host remains in its original mode')
+  assert.equal(options.detached, true)
+  assert.equal(detached, true)
 })

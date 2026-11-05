@@ -11,7 +11,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 import {
   PROVISION_TIMEOUT_MS,
@@ -160,6 +162,31 @@ test('the real defaults are offline until something asks', () => {
   const deps = defaultDeps(() => {})
   assert.equal(typeof deps.hasBinary, 'function')
   assert.equal(PROVISION_TIMEOUT_MS >= 60_000, true, 'a real download gets a real budget')
+})
+
+test('a timeout kills the real installer process before another can write', async () => {
+  resetProvisionStateForTest()
+  const folder = mkdtempSync(join(tmpdir(), 'dsh-provision-cancel-'))
+  const pidFile = join(folder, 'pid')
+  const installer = join(folder, 'slow.cjs')
+  writeFileSync(installer, `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`)
+  const deps = {
+    ...defaultDeps(),
+    hasBinary: () => false,
+    installerScript: () => installer,
+    skip: () => false,
+    timeoutMs: 1200,
+  }
+  const outcome = await provisionElectronInBackground(() => {}, deps)
+  assert.equal(outcome.status, 'failed')
+  assert.equal(existsSync(pidFile), true, 'the actual installer started')
+  const pid = Number(readFileSync(pidFile, 'utf8'))
+  for (let n = 0; n < 100; n += 1) {
+    try { process.kill(pid, 0) } catch { break }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.throws(() => process.kill(pid, 0), /ESRCH|no such process/i)
+  resetProvisionStateForTest()
 })
 
 // ---------------------------------------------------------------------------

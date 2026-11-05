@@ -15,9 +15,12 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { statSync } from 'node:fs'
+import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { pageOperationScript } from './page-probe.js'
+import { SettingsStore } from '../browser-electron/settings-store.js'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import type { BrowserSessionId } from '../browser/types.js'
+import type { BrowserSessionId, BrowserPageOperationRequest, BrowserProbeMethod } from '../browser/types.js'
 import {
   ELEMENT_ITEM_SCHEMA,
   NODE_ITEM_SCHEMA,
@@ -106,6 +109,13 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'dsh_browser_snapshot', 'dsh_browser_a11y', 'dsh_browser_content', 'dsh_browser_scrape',
   'dsh_browser_screenshot', 'dsh_browser_get_value', 'dsh_browser_wait', 'dsh_browser_challenge',
   'dsh_browser_list_tabs', 'dsh_browser_session', 'dsh_browser_history', 'dsh_browser_visited',
+  // Observation added in 0.5.7: console lines, network responses, an assertion, a self-check and the
+  // help index. All five only read (the probe's buffers belong to the page, not to the task), so an
+  // allow-list must not blind a task that restricted itself.
+  'dsh_browser_console', 'dsh_browser_network', 'dsh_browser_wait_for_response',
+  'dsh_browser_assert', 'dsh_browser_doctor', 'dsh_browser_help',
+  // Reading the page's own digest and searching its text: observation like the rest.
+  'dsh_browser_find', 'dsh_browser_state',
   // dsh_browser_auth reads cookies out of the browser: an observation, and one the
   // credentials switch gates on its own (see credentials.allowRead in the settings).
   // dsh_browser_auth is deliberately NOT here. It reads cookies on "flush" but WRITES them on
@@ -358,7 +368,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Tool guidance band is 100-199; 150 keeps clear of the common 110/120
     // tool sections so ordering does not depend on plugin load sequence.
     order: 150,
-    text: 'Use the dsh_browser_* tools to operate the built-in browser. Each task gets its own browser session AND its own window (with a real toolbar: address bar, back/forward/reload, tab strip) — the human can see it, use it like any browser, and take over at any time; your tabs and history are isolated from other tasks, so do not assume another task\'s navigation state is visible to you. Understand a page with dsh_browser_a11y (semantic roles/names/states — the best structure map) or dsh_browser_snapshot (numbered interactive elements), then drive it: dsh_browser_click/dsh_browser_type accept a target {by: css|text|xpath, value} for semantic locating, or coordinates from dsh_browser_screenshot for visual targeting. For form filling prefer dsh_browser_fill (batch) or dsh_browser_set_value/dsh_browser_check/dsh_browser_select/dsh_browser_clear (single control, target-based); verify with dsh_browser_get_value. Use dsh_browser_scrape for structured extraction from list pages instead of hand-written dsh_browser_execute. After navigating on slow sites, dsh_browser_wait for the page. Keep the human informed of what you are doing on the page. If a snapshot or dsh_browser_challenge reports a human-verification challenge (CAPTCHA), stop retrying and ask the human to complete it in the browser window, then re-check.',
+    text: 'Use the dsh_browser_* tools to operate the built-in browser. Each task gets its own browser session AND its own window (with a real toolbar: address bar, back/forward/reload, tab strip) — the human can see it, use it like any browser, and take over at any time; your tabs and history are isolated from other tasks, so do not assume another task\'s navigation state is visible to you. Understand a page with dsh_browser_a11y (semantic roles/names/states — the best structure map) or dsh_browser_snapshot (numbered interactive elements), then drive it: dsh_browser_click/dsh_browser_type accept a target {by: css|text|xpath, value} for semantic locating, or coordinates from dsh_browser_screenshot for visual targeting. For form filling prefer dsh_browser_fill (batch) or dsh_browser_set_value/dsh_browser_check/dsh_browser_select/dsh_browser_clear (single control, target-based); verify with dsh_browser_get_value. Use dsh_browser_scrape for structured extraction from list pages instead of hand-written dsh_browser_execute. After navigating on slow sites, dsh_browser_wait for the page. For a run of steps use dsh_browser_do (one call, stops at the first step that cannot proceed, waits settle by themselves), and use dsh_browser_assert to check a result instead of trusting a screenshot — dsh_browser_console/network explain what the page did when the screen does not. Keep the human informed of what you are doing on the page. If a snapshot or dsh_browser_challenge reports a human-verification challenge (CAPTCHA), stop retrying and ask the human to complete it in the browser window, then re-check.',
   })
 
   /**
@@ -373,6 +383,9 @@ export function apply(ctx: Context, config: Config = {}): void {
    * A name this plugin cannot have is worth a sentence in the log, not the toolset.
    * @param definition - the tool to register.
    */
+  // One store for this apply: it caches by mtime, so reading it per download is a stat, not a parse.
+  const settingsStore = new SettingsStore()
+
   const registerSafely = (definition: ReturnType<typeof defineTool>): void => {
     try {
       ctx.tools.register(definition)
@@ -1738,8 +1751,22 @@ export function apply(ctx: Context, config: Config = {}): void {
       savePath: { type: 'string', required: true, description: 'Absolute path of the file to write. Must resolve inside the configured downloadDir (default: the system Downloads folder, localized names such as ~/下载 included); an existing file is never overwritten.' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { path: { type: 'string', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: `Downloaded to ${value.path}.` }],
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          path: { type: 'string', required: true },
+          handoff: { type: 'object', additionalProperties: true },
+          remoteError: { type: 'string' },
+          remoteResult: { type: 'object', additionalProperties: true },
+        },
+      },
+      render: (_args, value) => {
+        const lines = [`Downloaded to ${value.path}.`]
+        if (value.handoff !== undefined) lines.push(`Handed to ${String((value.handoff as Record<string, unknown>).tool)}: ${String((value.handoff as Record<string, unknown>).result ?? 'ok')}`)
+        if (value.remoteError !== undefined) lines.push(`The local file is intact; the remote side did not take it: ${String(value.remoteError)}`)
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
     },
     timeoutMs,
     isConcurrencySafe: () => false,
@@ -1749,7 +1776,70 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const result = await browser.download(session, { url: args.url, savePath: args.savePath }, exec.signal)
-      return { path: result.path }
+      // Delivery is an attribute of the download: empty tool = the old behaviour, byte for byte.
+      const plan = deliveryPlan(args.url as string, result.path)
+      if (plan === undefined) return { path: result.path }
+      let remoteValue: JsonValue | undefined
+      try {
+        const tools = (ctx as unknown as { get?: (name: string) => {
+          execute?: (input: unknown) => Promise<unknown>
+          setExecutor?: unknown
+        } | undefined }).get?.('tools')
+        if (tools?.execute === undefined) throw new Error('the tools service is not available on this surface')
+        if (plan.tool === 'dsh_browser_download') throw new Error('the delivery tool must be a different tool from dsh_browser_download')
+        exec.signal.throwIfAborted()
+        const callId = 'handoff-' + globalThis.crypto.randomUUID()
+        // DSH's executor service accepts raw batches. Earlier runtimes accept one parsed call.
+        // Select the API before dispatch so a retry can never upload the same file twice.
+        const batched = typeof tools.setExecutor === 'function'
+        const answer = await tools.execute(batched ? {
+          calls: [{ type: 'tool-call', id: callId, name: plan.tool, arguments: JSON.stringify(plan.args) }],
+          agent: exec.agent,
+          toolSet: (exec as typeof exec & { readonly toolSet?: unknown }).toolSet,
+          signal: exec.signal,
+        } : {
+          callId,
+          rootCallId: exec.rootCallId,
+          parent: exec.token,
+          name: plan.tool,
+          arguments: plan.args,
+          agent: exec.agent,
+          signal: exec.signal,
+        })
+        let outcome = answer
+        let concluded = false
+        if (batched) {
+          const batch = answer as { results?: { callId?: string; result?: unknown }[]; additionalContexts?: unknown[]; concluded?: boolean } | null
+          if (!Array.isArray(batch?.results) || batch.results.length !== 1 || batch.results[0]?.callId !== callId) {
+            throw new Error('the delivery executor returned no matching tool result')
+          }
+          for (const context of batch.additionalContexts ?? []) {
+            exec.deferContext(context as Parameters<typeof exec.deferContext>[0])
+          }
+          concluded = batch.concluded === true
+          outcome = batch.results[0].result
+        }
+        const settled = outcome as { value?: JsonValue; additionalContexts?: unknown[]; concludesTurn?: boolean } | null
+        remoteValue = settled?.value
+        const summary = summariseToolResult(outcome)
+        if (!batched) {
+          for (const context of settled?.additionalContexts ?? []) {
+            exec.deferContext(context as Parameters<typeof exec.deferContext>[0])
+          }
+          concluded = settled?.concludesTurn === true
+        }
+        if (concluded) exec.concludeTurn()
+        return { path: result.path, handoff: { tool: plan.tool, result: summary, value: remoteValue ?? null } }
+      } catch (error) {
+        exec.signal.throwIfAborted()
+        const reason = error instanceof Error ? error.message : String(error)
+        if (plan.onFail === 'stop') throw new Error(`dsh_browser_download: saved to ${result.path} locally, but the handoff to "${plan.tool}" failed: ${reason}`)
+        return {
+          path: result.path,
+          remoteError: plan.tool + ': ' + reason,
+          ...remoteValue === undefined ? {} : { remoteResult: { tool: plan.tool, value: remoteValue } },
+        }
+      }
     },
   }))
 
@@ -1897,6 +1987,901 @@ export function apply(ctx: Context, config: Config = {}): void {
       return { restored }
     },
   }))
+
+  // ===========================================================================
+  // Observation, assertion and batch work (0.5.7).
+  //
+  // Five capabilities were missing against the other browser plugins in this market: what the
+  // console said, which responses arrived, what happened to a JavaScript dialog (an unanswered
+  // `confirm()` used to hang a whole call), a way to assert a result instead of eyeballing a
+  // screenshot, and a way to run several steps in one call. All of them come from one page-side
+  // probe installed through `execute`, so they work identically on the self-hosted window, a driven
+  // Chrome/Edge and the desktop sidebar — no host change, no bridge protocol version.
+  // ===========================================================================
+
+  /**
+   * What to do with a saved file, from the settings document.
+   *
+   * Read here rather than threaded through the provider on purpose: delivery is a property of how
+   * this deployment saves files, not of which browser carries the page, so every carrier gets it
+   * for free and no seam grows a method for it.
+   *
+   * @param url - the downloaded address, used to pick a per-site override by host.
+   * @param path - the absolute local path just written.
+   * @returns the plan, or undefined when nothing is configured (the old behaviour).
+   */
+  function deliveryPlan(url: string, path: string): { tool: string; args: Record<string, string>; onFail: 'keep-local' | 'stop' } | undefined {
+    let settings
+    try { settings = settingsStore.get() } catch { return undefined }
+    const delivery = settings.delivery
+    if (delivery === undefined) return undefined
+    let host = ''
+    try { host = new URL(url).hostname.toLowerCase() } catch { host = '' }
+    const override = host === '' ? undefined : (delivery.sites[host] ?? delivery.sites['*'])
+    const tool = override ?? delivery.tool
+    if (typeof tool !== 'string' || tool.trim() === '') return undefined
+    const name = path.split(/[\\/]/).pop() ?? path
+    const size = (() => { try { return String(statSync(path).size) } catch { return '' } })()
+    const args: Record<string, string> = {}
+    for (const [key, value] of Object.entries(delivery.args)) {
+      args[key] = String(value).split('{path}').join(path).split('{name}').join(name).split('{size}').join(size)
+    }
+    if (Object.keys(args).length === 0) args.file_path = path
+    return { tool: tool.trim(), args, onFail: delivery.onFail }
+  }
+
+  /** Check the canonical outcome before describing a completed delivery. */
+  function summariseToolResult(answer: unknown): string {
+    const outcome = answer as { isError?: boolean; value?: unknown; error?: { message?: string }; content?: { text?: string }[] } | null
+    if (outcome === null || typeof outcome !== 'object' || typeof outcome.isError !== 'boolean') {
+      throw new Error('the delivery executor returned an invalid tool result')
+    }
+    if (outcome.isError) {
+      throw new Error(outcome.error?.message || outcome.content?.map(block => block.text ?? '').join(' ') || 'the delivery tool failed')
+    }
+    if (!('value' in outcome)) throw new Error('the delivery executor returned an invalid tool result')
+    const failure = deliveryFailure(outcome.value)
+    if (failure !== undefined) throw new Error(failure)
+    const text = typeof outcome.value === 'string' ? outcome.value : JSON.stringify(outcome.value)
+    return text.length > 200 ? text.slice(0, 200) + '…' : text
+  }
+
+  /** Read explicit failure markers in common MCP structured or JSON text responses. */
+  function deliveryFailure(value: unknown): string | undefined {
+    const object = (candidate: unknown): Record<string, unknown> | undefined => {
+      if (typeof candidate === 'string') {
+        try { candidate = JSON.parse(candidate) } catch { return undefined }
+      }
+      return candidate !== null && typeof candidate === 'object' && !Array.isArray(candidate)
+        ? candidate as Record<string, unknown> : undefined
+    }
+    const response = object(value)
+    if (response === undefined) return undefined
+    const blocks = Array.isArray(response.content) ? response.content : []
+    const candidates = [
+      response,
+      object(response.structuredContent),
+      ...blocks.map(block => {
+        const content = object(block)
+        return content?.type === 'text' ? object(content.text) : undefined
+      }),
+    ]
+    for (const candidate of candidates) {
+      if (candidate === undefined) continue
+      if (candidate.isError !== true && candidate.ok !== false && candidate.success !== false
+        && candidate.status !== 'error' && candidate.status !== 'failed') continue
+      const error = object(candidate.error)
+      const detail = [candidate.message, candidate.error, error?.message].find(item => typeof item === 'string' && item !== '')
+      return typeof detail === 'string' ? detail : 'the delivery tool reported a failed upload'
+    }
+    return undefined
+  }
+
+  /** Run a script in the page and return its value as text. */
+  async function pageValue(browser: NonNullable<Context['browser']>, session: BrowserSessionId, script: string, signal?: AbortSignal): Promise<string> {
+    const result = await browser.execute(session, { script }, signal)
+    if (!result.ok) throw new Error(`page script failed: ${result.exception}`)
+    const raw = result.value
+    return typeof raw === 'string' ? raw : JSON.stringify(raw ?? null)
+  }
+
+  /** Fixed operations keep their inputs as data and preserve arbitrary-script permissions. */
+  async function pageOperationValue(browser: NonNullable<Context['browser']>, session: BrowserSessionId, request: BrowserPageOperationRequest, signal?: AbortSignal): Promise<string> {
+    const result = typeof browser.pageOperation === 'function'
+      ? await browser.pageOperation(session, request, signal)
+      : await browser.execute(session, { script: pageOperationScript(request) }, signal)
+    if (!result.ok) throw new Error('page operation failed: ' + result.exception)
+    return typeof result.value === 'string' ? result.value : JSON.stringify(result.value ?? null)
+  }
+
+  /** Install the fixed probe and report page failures immediately. */
+  async function installProbe(browser: NonNullable<Context['browser']>, session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+    await pageOperationValue(browser, session, { operation: 'install' }, signal)
+  }
+
+  /** One probe call, parsed. Throws when the probe is absent or the call failed. */
+  async function probe<T = unknown>(
+    browser: NonNullable<Context['browser']>,
+    session: BrowserSessionId,
+    method: BrowserProbeMethod,
+    args: readonly unknown[] = [],
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const text = await pageOperationValue(browser, session, { operation: 'probe', method, args }, signal)
+    let parsed: unknown
+    try { parsed = JSON.parse(text) } catch { throw new Error(`page probe returned unreadable JSON: ${text.slice(0, 120)}`) }
+    if (parsed !== null && typeof parsed === 'object' && 'error' in (parsed as Record<string, unknown>)) {
+      throw new Error(`page probe: ${String((parsed as Record<string, unknown>).error)}`)
+    }
+    return parsed as T
+  }
+
+  /**
+   * A probe call that survives a navigation inside a batch.
+   *
+   * Submitting a form replaces the document, and the probe with it, so a later step in the same
+   * batch would fail with `probe-not-installed` — measured on the first real benchmark run. One
+   * reinstall and one retry is enough: a second failure is a real absence, not a stale context.
+   */
+  async function probeLive<T = unknown>(
+    browser: NonNullable<Context['browser']>,
+    session: BrowserSessionId,
+    method: BrowserProbeMethod,
+    args: readonly unknown[] = [],
+    signal?: AbortSignal,
+  ): Promise<T> {
+    try {
+      return await probe<T>(browser, session, method, args, signal)
+    } catch (error) {
+      if (!/probe-not-installed|probe-method-missing/.test(String(error))) throw error
+      await installProbe(browser, session, signal)
+      return await probe<T>(browser, session, method, args, signal)
+    }
+  }
+
+  /** Sleep. Long waits are capped by the caller, and the tool timeout still applies. */
+  async function pause(ms: number): Promise<void> {
+    await new Promise<void>(resolve => { setTimeout(resolve, ms) })
+  }
+
+  /** Poll until the callback returns something, or the budget runs out. */
+  async function poll<T>(check: () => Promise<T | undefined>, budgetMs: number): Promise<T | undefined> {
+    const deadline = Date.now() + budgetMs
+    for (;;) {
+      const value = await check()
+      if (value !== undefined) return value
+      if (Date.now() >= deadline) return undefined
+      await pause(200)
+    }
+  }
+
+  /**
+   * One flat probe row: what a page can hand back through JSON.
+   *
+   * Concrete rather than `Record<string, unknown>`, because the tool output schema is a JSON value
+   * and the compiler (rightly) refuses to promise that an `unknown` is one.
+   */
+  type ProbeRow = Record<string, string | number | boolean | null>
+
+  /**
+   * Run one `dsh_browser_check` specification against the page.
+   *
+   * Shared by the `check` tool and by the `{check: …}` step of `dsh_browser_do`, so a batch asserts
+   * exactly what a standalone call asserts.
+   */
+  async function runChecks(
+    browser: NonNullable<Context['browser']>,
+    session: BrowserSessionId,
+    spec: { readonly selector?: string; readonly text?: string; readonly url?: string; readonly js?: string },
+    signal?: AbortSignal,
+  ): Promise<{ pass: boolean; checks: Array<{ kind: string; expected: string; actual: string; pass: boolean }> }> {
+    const checks: Array<{ kind: string; expected: string; actual: string; pass: boolean }> = []
+    if (spec.selector !== undefined) {
+      const found = await probeLive<{ described?: string } | null>(browser, session, 'find', [{ css: spec.selector }], signal)
+      checks.push({ kind: 'selector', expected: spec.selector, actual: found === null ? 'not found' : String(found.described ?? 'found'), pass: found !== null })
+    }
+    if (spec.text !== undefined) {
+      const present = await pageOperationValue(browser, session, { operation: 'text', text: spec.text }, signal)
+      const ok = present === 'true'
+      checks.push({ kind: 'text', expected: spec.text, actual: ok ? 'present' : 'absent', pass: ok })
+    }
+    if (spec.url !== undefined) {
+      const href = await pageOperationValue(browser, session, { operation: 'url' }, signal).then(text => text.replace(/^"|"$/g, ''))
+      const ok = href.includes(spec.url)
+      checks.push({ kind: 'url', expected: spec.url, actual: href, pass: ok })
+    }
+    if (spec.js !== undefined) {
+      try {
+        const value = await pageValue(browser, session, `(() => { try { return JSON.stringify({ ok: !!(${spec.js}) }) } catch (error) { return JSON.stringify({ ok: false, error: String(error) }) } })()`, signal)
+        const parsed = JSON.parse(value) as { ok?: boolean; error?: string }
+        checks.push({ kind: 'js', expected: spec.js, actual: parsed.ok === true ? 'truthy' : (parsed.error ?? 'falsy'), pass: parsed.ok === true })
+      } catch (error) {
+        checks.push({ kind: 'js', expected: spec.js, actual: String(error), pass: false })
+      }
+    }
+    return { pass: checks.length > 0 && checks.every(check => check.pass), checks }
+  }
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_console',
+    description: 'Read what the page has logged (console.log/info/warn/error/debug), newest last, capped at 200 lines. Use it when the screen does not explain a failure: a red toast, a form that silently refuses, a page that "just does nothing". Set clear:true first when you only want what happens next. A page that logs objects shows their JSON.',
+    parameters: {
+      limit: { type: 'number', description: 'How many lines, newest last (default 20, max 100).' },
+      filter: { type: 'string', description: 'Only lines containing this text (case-insensitive).' },
+      clear: { type: 'boolean', description: 'Clear the buffer before reading.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { entries: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true } },
+      },
+      render: (_args, value) => {
+        const rows = value.entries as Array<{ level?: string; text?: string }>
+        if (rows.length === 0) return [{ type: 'text', text: 'No console lines yet (nothing logged since the page probe was installed).' }]
+        return [{ type: 'text', text: rows.map(row => `[${String(row.level)}] ${String(row.text)}`).join('\n') }]
+      },
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await installProbe(browser, session, exec.signal)
+      if (args.clear === true) await probe(browser, session, 'clear', ['console'], exec.signal)
+      const entries = await probe<ProbeRow[]>(browser, session, 'read', ['console', args.filter ?? '', args.limit ?? 20], exec.signal)
+      return { entries }
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_network',
+    description: 'List the responses the page has received, newest last: method, status, type and address, for fetch, XHR and resource-timing entries. Use it when a page fills itself from the network and the screen does not say why, or to confirm a submit actually reached the server. onlyFailures keeps status 0 (blocked/aborted) and 4xx/5xx. Resource-timing rows carry no status (the browser never exposed it to the page) and show status 0.',
+    parameters: {
+      limit: { type: 'number', description: 'How many rows, newest last (default 20, max 100).' },
+      filter: { type: 'string', description: 'Only rows whose address contains this text.' },
+      onlyFailures: { type: 'boolean', description: 'Only rows with status 0, or status >= 400.' },
+      clear: { type: 'boolean', description: 'Clear the buffer before reading.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { entries: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true } },
+      },
+      render: (_args, value) => {
+        const rows = value.entries as ProbeRow[]
+        if (rows.length === 0) return [{ type: 'text', text: 'No responses recorded yet.' }]
+        return [{ type: 'text', text: rows.map(row => `${String(row.method)} ${String(row.status)} ${String(row.kind)} ${String(row.ms)}ms ${String(row.url)}`).join('\n') }]
+      },
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await installProbe(browser, session, exec.signal)
+      if (args.clear === true) await probe(browser, session, 'clear', ['network'], exec.signal)
+      const rows = await probe<ProbeRow[]>(browser, session, 'read', ['network', args.filter ?? '', args.limit ?? 20], exec.signal)
+      const entries = args.onlyFailures === true
+        ? rows.filter(row => Number(row.status) === 0 || Number(row.status) >= 400)
+        : rows
+      return { entries }
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_dialog',
+    description: 'Report JavaScript dialogs (alert/confirm/prompt) the page raised, and choose how they are answered. Dialogs use the native browser UI by default. Setting policy "dismiss" answers alert/prompt with nothing and confirm with false, "accept" answers confirm with true and prompt with its current text. Policy "native" restores the original dialog functions. Reading preserves the current policy; changing it is an action. A dialog raised by the browser itself (beforeunload, HTTP auth) is not covered.',
+    parameters: {
+      policy: { type: 'string', enum: ['native', 'accept', 'dismiss'], description: 'Answer future dialogs this way.' },
+      limit: { type: 'number', description: 'How many recent dialogs to return (default 10).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          policy: { type: 'string', required: true },
+          dialogs: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true },
+        },
+      },
+      render: (_args, value) => {
+        const rows = value.dialogs as ProbeRow[]
+        const head = `Dialog policy: ${String(value.policy)} (${String(value.policy) === 'accept' ? 'confirm→true, prompt→its text' : 'confirm→false, prompt→null'}).`
+        if (rows.length === 0) return [{ type: 'text', text: `${head} No dialogs seen yet.` }]
+        return [{ type: 'text', text: [head, ...rows.map(row => `${String(row.kind)} "${String(row.message)}" → ${String(row.answered)}`)] .join('\n') }]
+      },
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false, // the policy is task-wide state
+    async execute(args, exec) {
+      assertAllowed(state, 'dsh_browser_dialog', taskKey(exec))
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await installProbe(browser, session, exec.signal)
+      const policy = args.policy === undefined
+        ? await probe<string>(browser, session, 'dialogStatus', [], exec.signal)
+        : await probe<string>(browser, session, 'setDialogPolicy', [args.policy], exec.signal)
+      const dialogs = await probe<ProbeRow[]>(browser, session, 'read', ['dialogs', '', args.limit ?? 10], exec.signal)
+      return { policy, dialogs }
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_wait_for_response',
+    description: 'Wait until a response whose address contains `urlContains` has arrived AFTER this call started: optional status (e.g. 200, or 4xx), bounded by timeoutMs. Use it instead of sleeping before a snapshot when a click submits a form or starts a fetch — it returns as soon as the server answered, and says what arrived when it did not. This is the "did the submit reach the server" question that a screenshot cannot answer.',
+    parameters: {
+      urlContains: { type: 'string', required: true, description: 'Substring of the request address.' },
+      status: { type: 'number', description: 'Require this exact status (a non-zero status is required to match).' },
+      timeoutMs: { type: 'number', description: 'How long to wait (default 15000, capped by the tool timeout).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          matched: { type: 'boolean', required: true },
+          reason: { type: 'string', required: true },
+          entry: { type: 'object', additionalProperties: true },
+        },
+      },
+      render: (_args, value) => {
+        const entry = value.entry as Record<string, unknown> | undefined
+        if (!value.matched) return [{ type: 'text', text: `No matching response: ${String(value.reason)}` }]
+        return [{ type: 'text', text: `Matched: ${String(entry?.method)} ${String(entry?.status)} ${String(entry?.url)} (${String(entry?.ms)}ms)` }]
+      },
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await installProbe(browser, session, exec.signal)
+      const cursor = await probe<{ startedAt: number; sequence: number }>(browser, session, 'networkCursor', [], exec.signal)
+      const budget = Math.min(args.timeoutMs ?? 15_000, maxWaitMs)
+      const found = await poll(async () => {
+        const current = await probe<{ startedAt: number; sequence: number }>(browser, session, 'networkCursor', [], exec.signal)
+        if (current.startedAt !== cursor.startedAt) throw new Error('the page changed while waiting for a response; start a new wait on the current page')
+        const rows = await probe<ProbeRow[]>(browser, session, 'read', ['network', args.urlContains, 100], exec.signal)
+        const fresh = rows.filter(row => Number(row.sequence) > cursor.sequence && Number(row.status) > 0)
+        const exact = args.status === undefined ? fresh : fresh.filter(row => Number(row.status) === args.status)
+        return exact.length > 0 ? exact[exact.length - 1] : undefined
+      }, budget)
+      if (found === undefined) {
+        const rows = await probe<ProbeRow[]>(browser, session, 'read', ['network', args.urlContains, 60], exec.signal)
+        const seen = rows.length === 0 ? 'nothing matched the address' : `${rows.length} older row(s) matched but none arrived after this call started`
+        return { matched: false, reason: `${seen} within ${Math.round(budget / 1000)}s` }
+      }
+      return { matched: true, reason: 'response arrived', entry: found }
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_assert',
+    description: 'Assert facts about the page in one call and get a pass/fail per assertion with the evidence: a CSS selector exists, the body text contains something, the URL contains something, or a JavaScript expression is truthy. Use it to verify a step actually worked — "clicked" and "the form accepted it" are different claims — and before retrying anything that might have already taken effect.',
+    parameters: {
+      selector: { type: 'string', description: 'CSS selector that must match an element.' },
+      text: { type: 'string', description: 'Text that must appear in the page body.' },
+      url: { type: 'string', description: 'Substring the URL must contain.' },
+      js: { type: 'string', description: 'Expression that must be truthy, e.g. document.querySelector("#ok") !== null.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          pass: { type: 'boolean', required: true },
+          checks: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true },
+        },
+      },
+      render: (_args, value) => {
+        const rows = value.checks as ProbeRow[]
+        const lines = rows.map(row => `${row.pass === true ? 'PASS' : 'FAIL'} ${String(row.kind)}: ${String(row.expected)} → ${String(row.actual)}`)
+        return [{ type: 'text', text: `${value.pass === true ? 'All checks passed.' : 'A check failed.'}\n${lines.join('\n')}` }]
+      },
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await installProbe(browser, session, exec.signal)
+      const spec = {
+        ...args.selector !== undefined ? { selector: args.selector } : {},
+        ...args.text !== undefined ? { text: args.text } : {},
+        ...args.url !== undefined ? { url: args.url } : {},
+        ...args.js !== undefined ? { js: args.js } : {},
+      }
+      if (Object.keys(spec).length === 0) throw new Error('dsh_browser_assert: give at least one of selector, text, url or js')
+      return await runChecks(browser, session, spec, exec.signal)
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_drag',
+    description: 'Drag from one viewport point to another using trusted browser pointer input. Coordinates are CSS pixels from the top-left of the current viewport. Use for sliders, sortable lists, HTML drag-and-drop and canvas drawing. Check the resulting control value or page state after the gesture.',
+    parameters: {
+      fromX: { type: 'number', required: true, description: 'Start x in viewport CSS pixels.' },
+      fromY: { type: 'number', required: true, description: 'Start y in viewport CSS pixels.' },
+      toX: { type: 'number', required: true, description: 'End x.' },
+      toY: { type: 'number', required: true, description: 'End y.' },
+      steps: { type: 'number', description: 'Intermediate moves (default 12, max 60); more steps make a slider follow the path.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          reason: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.ok === true ? 'Dragged.' : `Drag failed: ${String(value.reason)}` }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false, // a pointer gesture; exclusive within a task
+    async execute(args, exec) {
+      assertAllowed(state, 'dsh_browser_drag', taskKey(exec))
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const text = await pageOperationValue(browser, session, {
+        operation: 'drag',
+        from: { x: args.fromX, y: args.fromY },
+        to: { x: args.toX, y: args.toY },
+        steps: args.steps ?? 12,
+      }, exec.signal)
+      const parsed = JSON.parse(text) as { ok?: boolean; reason?: string; moved?: number }
+      return { ok: parsed.ok === true, reason: parsed.ok === true ? `moved ${String(parsed.moved)} steps` : String(parsed.reason ?? 'unknown') }
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_doctor',
+    description: 'Report the state of this task\'s browser: page URL, which tools the task restricted away, whether the page probe is installed, and what it has recorded (console lines, responses, dialogs, and how "settled" the page looks). Use it when something behaves oddly and the cause is not visible in the page — before guessing, or before telling the user the browser is broken.',
+    parameters: {},
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { report: { type: 'string', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: String(value.report) }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(_args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const task = taskKey(exec)
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await installProbe(browser, session, exec.signal)
+      const url = await pageOperationValue(browser, session, { operation: 'url' }, exec.signal).then(text => text.replace(/^"|"$/g, ''))
+      const settle = await probe<{ pending?: number; quietMs?: number; readyState?: string }>(browser, session, 'settle', [], exec.signal)
+      const consoleRows = await probe<unknown[]>(browser, session, 'read', ['console', '', 100], exec.signal)
+      const networkRows = await probe<unknown[]>(browser, session, 'read', ['network', '', 100], exec.signal)
+      const dialogRows = await probe<ProbeRow[]>(browser, session, 'read', ['dialogs', '', 5], exec.signal)
+      const restricted = state.restrictedByTask.get(task)
+      const lines = [
+        `session ${session}`,
+        `url ${url || '(unknown)'}`,
+        `page ${String(settle?.readyState ?? '?')}, ${String(settle?.pending ?? 0)} request(s) in flight, quiet for ${String(settle?.quietMs ?? 0)}ms`,
+        `probe installed (console ${consoleRows.length}/100, network ${networkRows.length}/100, dialogs ${dialogRows.length}/5)`,
+        restricted === undefined ? 'restricted: no (this task restricted nothing)' : `restricted: ${restricted.length === 0 ? 'everything' : restricted.join(', ')}`,
+        state.configRestrictedTo === undefined ? 'deployment allow-list: none' : `deployment allow-list: ${state.configRestrictedTo.join(', ')}`,
+      ]
+      return { report: lines.join('\n') }
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_help',
+    description: 'Look up how to use this browser: a short topic index (locate, wait, batch, dialogs, network, verify, recovery, limits) or one topic\'s text. Use it instead of guessing when a call failed for a reason the error message explains only briefly.',
+    parameters: {
+      topic: { type: 'string', description: 'One topic name; omit for the index.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: String(value.text) }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      const topics: Record<string, string> = {
+        locate: 'Prefer dsh_browser_a11y (roles, names, states) or dsh_browser_snapshot (numbered elements), then click with {target:{by:"text"|css|xpath, value}}. Elements carry a stable CSS selector, so a click re-resolves the element instead of trusting an index that a re-render invalidates.',
+        wait: 'dsh_browser_wait waits for load + an optional URL/selector. dsh_browser_wait_for_response waits for a server answer (that is the "did it submit" wait). dsh_browser_console/network then explain what the page did.',
+        batch: 'dsh_browser_do runs several steps in one call: open/tap/field/type/key/scroll/sleep_ms/wait_text/wait_gone/wait_url/wait_idle/eval/check. It stops at the first step that cannot proceed and reports which one; a tap whose target is covered by a cookie banner dismisses the banner first.',
+        dialogs: 'JavaScript dialogs are answered automatically (default: dismiss). dsh_browser_dialog reports them and can switch to "accept". A dialog from the browser itself (beforeunload, HTTP auth) is not covered — expect a stalled call there and reload.',
+        network: 'dsh_browser_network lists fetch/XHR/resource rows. Status 0 means the page never saw a status (aborted, blocked, or a resource-timing row). Only fetch/XHR rows carry a real status.',
+        verify: 'dsh_browser_assert asserts selector/text/url/js and returns evidence per assertion. Prefer it over reading a screenshot: "clicked" and "the form accepted it" are different claims, and a retry of an unverified submit can double it.',
+        recovery: 'dsh_browser_reset_session closes this task\'s browser session without touching others. dsh_browser_refresh reloads the page. If a carrier was lost, the page context is gone: re-read the page before continuing, and never re-submit something whose result you did not verify.',
+        limits: 'There is no CDP escape hatch and no network interception: the probe sees what the page sees. Downloads go through dsh_browser_download and a directory admission gate. Executing page JavaScript is a settings switch the model cannot lift.',
+        deliver: 'The browser saves a file and returns an absolute path; sending it to Feishu drive, Baidu Netdisk or any MCP-connected storage is a separate tool call with that path. Report where it sits locally AND what the upload tool answered, never just one. If the upload tool is missing or fails, keep the local file and say so — do not retry somewhere else silently.',
+      }
+      if (args.topic === undefined) {
+        return { text: `Topics: ${Object.keys(topics).join(', ')}\nAsk for one with topic=<name>.` }
+      }
+      const text = topics[args.topic]
+      if (text === undefined) throw new Error(`dsh_browser_help: unknown topic "${args.topic}" (${Object.keys(topics).join(', ')})`)
+      return { text }
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_do',
+    description: 'Run several steps in ONE call and report one compact result: "click search, type a query, press Enter, wait for results" is one call instead of five. Steps run in order and stop at the first that cannot proceed. Each step is an object with exactly one key: open {url} | tap {target} | field {target, text} | type {text} | key {key} | scroll {deltaY} | sleep_ms {ms} | wait_text {text} | wait_gone {text} | wait_url {url} | wait_idle {} | eval {script} | check {selector|text|url|js}. A tap whose target is covered by a cookie banner or modal dismisses it first. Waits know when the page has settled and return as soon as the condition holds.',
+    parameters: {
+      steps: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true, description: 'Steps, in order (max 40).' },
+      timeoutMs: { type: 'number', description: 'Budget for the whole batch (default 60000, capped by the tool timeout).' },
+      autoDismiss: { type: 'boolean', description: 'Clear a covering banner before a tap (default true).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          completed: { type: 'number', required: true },
+          total: { type: 'number', required: true },
+          ok: { type: 'boolean', required: true },
+          stoppedAt: { type: 'number' },
+          reason: { type: 'string' },
+          sideEffectMayHaveHappened: { type: 'boolean' },
+          log: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true },
+        },
+      },
+      render: (_args, value) => {
+        const rows = value.log as ProbeRow[]
+        const head = value.ok === true
+          ? `${String(value.completed)}/${String(value.total)} steps done.`
+          : `Stopped at step ${String(value.stoppedAt)} (${String(value.completed)}/${String(value.total)} done): ${String(value.reason)}`
+        const warning = value.ok === false && value.sideEffectMayHaveHappened === true
+          ? '\nA step that can change the page already ran: the site may have acted on it. Read the site\'s own record before retrying — do not repeat it on the assumption that it failed.'
+          : ''
+        return [{ type: 'text', text: [head + warning, ...rows.map(row => `  ${String(row.index)} ${String(row.kind)}: ${String(row.detail)}`)].join('\n') }]
+      },
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false, // drives the page; exclusive within a task
+    async execute(args, exec) {
+      assertAllowed(state, 'dsh_browser_do', taskKey(exec))
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const steps = Array.isArray(args.steps) ? args.steps as ProbeRow[] : []
+      if (steps.length === 0) throw new Error('dsh_browser_do: "steps" must be a non-empty array')
+      if (steps.length > 40) throw new Error('dsh_browser_do: at most 40 steps per call — split the work')
+      await installProbe(browser, session, exec.signal)
+      const autoDismiss = args.autoDismiss !== false
+      const budget = Math.min(args.timeoutMs ?? timeoutMs, maxWaitMs)
+      const deadline = Date.now() + budget
+      const log: Array<{ index: number; kind: string; detail: string }> = []
+      // Set once a step that can change server state has run. A failure after that point must not
+      // read like a failure before it: measured on the first real benchmark run, where a batch died
+      // after the form had already been submitted and the message said nothing about it.
+      let dispatched = false
+      const dispatchable = new Set(['tap', 'key', 'eval'])
+      const kinds = ['open', 'tap', 'field', 'type', 'key', 'scroll', 'sleep_ms', 'wait_text', 'wait_gone', 'wait_url', 'wait_idle', 'eval', 'check']
+
+      /** Resolve a target: a string is visible text; an object passes through. */
+      const asTarget = (value: unknown): { by: 'css' | 'text' | 'xpath'; value: string } | undefined => {
+        if (typeof value === 'string' && value !== '') return { by: 'text', value }
+        if (value !== null && typeof value === 'object') {
+          const raw = value as { by?: unknown; value?: unknown }
+          if (typeof raw.value === 'string' && raw.value !== '') {
+            const by = raw.by === 'css' || raw.by === 'xpath' || raw.by === 'text' ? raw.by : 'text'
+            return { by, value: raw.value }
+          }
+        }
+        return undefined
+      }
+
+      for (let index = 0; index < steps.length; index += 1) {
+        const step = steps[index] ?? {}
+        const keys = Object.keys(step).filter(key => kinds.includes(key))
+        if (keys.length !== 1) {
+          return { ok: false, completed: index, total: steps.length, stoppedAt: index + 1, reason: `step ${index + 1} must have exactly one of: ${kinds.join(', ')}`, log }
+        }
+        const kind = keys[0] as string
+        const value = step[kind]
+        if (Date.now() > deadline) {
+          return { ok: false, completed: index, total: steps.length, stoppedAt: index + 1, reason: `budget of ${Math.round(budget / 1000)}s exhausted`, log }
+        }
+        try {
+          let detail = 'ok'
+          if (kind === 'open') {
+            const url = typeof value === 'string' ? value : (value as { url?: unknown })?.url
+            if (typeof url !== 'string') throw new Error('open needs a URL string or {url}')
+            await browser.openUrl(session, { url }, exec.signal)
+            detail = url
+          } else if (kind === 'tap') {
+            const target = asTarget((value as { target?: unknown })?.target ?? value)
+            if (target === undefined) throw new Error('tap needs a target (text, or {by, value})')
+            if (autoDismiss) {
+              const rect = await probeLive<{ x?: number; y?: number; described?: string } | null>(browser, session, 'find', [{ [target.by]: target.value }], exec.signal)
+              if (rect && typeof rect.x === 'number' && typeof rect.y === 'number') {
+                const cover = await probeLive<{ covers?: string | null; dismiss?: { label?: string; x?: number; y?: number } | null }>(browser, session, 'overlayAt', [rect.x, rect.y], exec.signal)
+                if (cover?.dismiss && typeof cover.dismiss.x === 'number' && typeof cover.dismiss.y === 'number') {
+                  await browser.click(session, { x: cover.dismiss.x, y: cover.dismiss.y }, exec.signal)
+                  detail = `dismissed "${String(cover.dismiss.label)}" first`
+                  await pause(150)
+                } else if (cover?.covers !== null && cover?.covers !== undefined && cover.covers !== rect.described) {
+                  // Measured on the fixture's human gate: a hidden form left the tap hitting `<html>`,
+                  // the step reported "ok", and nothing was submitted. A click that cannot land is a
+                  // FAILURE, not a note — a silent no-op is the worst result this tool can return.
+                  throw new Error(`the target is not reachable: ${String(cover.covers)} is at that point, not ${String(rect.described)} (hidden, or covered by an overlay that cannot be dismissed)`)
+                }
+              }
+            }
+            await browser.click(session, { target }, exec.signal)
+          } else if (kind === 'field') {
+            const spec = value as { target?: unknown; text?: unknown }
+            const target = asTarget(spec?.target)
+            if (target === undefined || typeof spec?.text !== 'string') throw new Error('field needs {target, text}')
+            await browser.setValue(session, { target, value: spec.text }, exec.signal)
+            detail = `${target.value} ← ${spec.text.slice(0, 40)}`
+          } else if (kind === 'type') {
+            const text = typeof value === 'string' ? value : (value as { text?: unknown })?.text
+            if (typeof text !== 'string') throw new Error('type needs a text string or {text}')
+            await browser.type(session, { text }, exec.signal)
+            detail = text.slice(0, 40)
+          } else if (kind === 'key') {
+            const key = typeof value === 'string' ? value : (value as { key?: unknown })?.key
+            if (typeof key !== 'string') throw new Error('key needs a key name or {key}')
+            await browser.key(session, { key: key as never }, exec.signal)
+            detail = key
+          } else if (kind === 'scroll') {
+            const deltaY = typeof value === 'number' ? value : Number((value as { deltaY?: unknown })?.deltaY ?? Number.NaN)
+            if (!Number.isFinite(deltaY)) throw new Error('scroll needs a number or {deltaY}')
+            await browser.scroll(session, { deltaY }, exec.signal)
+            detail = String(deltaY)
+          } else if (kind === 'sleep_ms') {
+            const requestedMs = typeof value === 'number' ? value : (value as { ms?: unknown })?.ms
+            if (typeof requestedMs !== 'number' || !Number.isFinite(requestedMs) || requestedMs < 0) throw new Error('sleep_ms needs a non-negative number or {ms}')
+            const ms = Math.min(requestedMs, 10_000)
+            await pause(ms)
+            detail = `${ms}ms`
+          } else if (kind === 'wait_text' || kind === 'wait_gone') {
+            const want = typeof value === 'string' ? value : (value as { text?: unknown })?.text
+            if (typeof want !== 'string') throw new Error('wait_text/wait_gone need text or {text}')
+            const found = await poll(async () => {
+              const present = (await pageOperationValue(browser, session, { operation: 'text', text: want }, exec.signal)) === 'true'
+              return (kind === 'wait_text' ? present : !present) ? true : undefined
+            }, Math.max(1_000, Math.min(deadline - Date.now(), 30_000)))
+            if (found === undefined) throw new Error(`timed out waiting for "${want}" to be ${kind === 'wait_text' ? 'present' : 'gone'}`)
+            detail = want
+          } else if (kind === 'wait_url') {
+            const want = typeof value === 'string' ? value : (value as { url?: unknown })?.url
+            if (typeof want !== 'string') throw new Error('wait_url needs a URL fragment or {url}')
+            const budget = Math.max(1_000, Math.min(deadline - Date.now(), 30_000))
+            const hit = await poll(async () => {
+              const href = (await pageOperationValue(browser, session, { operation: 'url' }, exec.signal)).replace(/^"|"$/g, '')
+              return href.includes(want) ? href : undefined
+            }, budget)
+            if (hit === undefined) throw new Error(`timed out waiting for the URL to contain "${want}"`)
+            detail = hit
+          } else if (kind === 'wait_idle') {
+            const idle = await poll(async () => {
+              const settle = await probeLive<{ pending?: number; quietMs?: number; readyState?: string }>(browser, session, 'settle', [], exec.signal)
+              const quiet = Number(settle?.quietMs ?? 0)
+              return Number(settle?.pending ?? 0) === 0 && quiet >= 300 ? settle : undefined
+            }, Math.max(1_000, Math.min(deadline - Date.now(), 30_000)))
+            if (idle === undefined) throw new Error('timed out waiting for the page to go quiet')
+            detail = `quiet for ${String(idle.quietMs)}ms`
+          } else if (kind === 'eval') {
+            const script = typeof value === 'string' ? value : (value as { script?: unknown })?.script
+            if (typeof script !== 'string') throw new Error('eval needs a script string or {script}')
+            const text = await pageValue(browser, session, script, exec.signal)
+            detail = text.slice(0, 80)
+          } else if (kind === 'check') {
+            const result = await runChecks(browser, session, value as { selector?: string; text?: string; url?: string; js?: string }, exec.signal)
+            if (!result.pass) {
+              const failed = result.checks.filter(check => !check.pass).map(check => `${check.kind}: ${check.expected} → ${check.actual}`)
+              throw new Error(`check failed (${failed.join('; ')})`)
+            }
+            detail = `${result.checks.length} check(s) passed`
+          }
+          if (dispatchable.has(kind)) dispatched = true
+          log.push({ index: index + 1, kind, detail })
+        } catch (error) {
+          return {
+            ok: false,
+            completed: index,
+            total: steps.length,
+            stoppedAt: index + 1,
+            reason: error instanceof Error ? error.message : String(error),
+            sideEffectMayHaveHappened: dispatched,
+            log: [...log, { index: index + 1, kind, detail: `failed: ${error instanceof Error ? error.message : String(error)}` }],
+          }
+        }
+      }
+      return { ok: true, completed: steps.length, total: steps.length, log }
+    },
+  }))
+  registerSafely(defineTool({
+    name: 'dsh_browser_upload',
+    description: 'Put a local file into a file input on the page (attachment, avatar, import form). The path must be a file INSIDE the current workspace, and only the bytes of that one file are read. The file is rebuilt in the page as a File and attached through a DataTransfer, so a form that reads input.files and a drop handler both see it; the change event is fired for you. Oversized files are refused rather than truncated.',
+    parameters: {
+      target: { type: 'object', required: true, additionalProperties: true, description: 'The input: {by: "css"|"text"|"xpath", value} — a text target is resolved to the element at that point and then to a nested input[type=file].' },
+      path: { type: 'string', required: true, description: 'Absolute path of a file inside the workspace.' },
+      mime: { type: 'string', description: 'MIME type (default guessed from the extension, else application/octet-stream).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          name: { type: 'string' },
+          size: { type: 'number' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.ok === true ? `Attached ${String(value.name)} (${String(value.size)} bytes).` : `Upload failed: ${String(value.reason)}` }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      assertAllowed(state, 'dsh_browser_upload', taskKey(exec))
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const target = args.target as { by?: unknown; value?: unknown }
+      const by = target?.by === 'css' || target?.by === 'xpath' || target?.by === 'text' ? target.by : 'css'
+      if (typeof target?.value !== 'string' || target.value === '') throw new Error('dsh_browser_upload: target.value is required')
+      const { open, realpath, stat } = await import('node:fs/promises')
+      const { resolve, relative, isAbsolute, extname, basename, sep } = await import('node:path')
+      if (!isAbsolute(args.path)) throw new Error('dsh_browser_upload: path must be absolute')
+      const agent = agentOf(exec) as (ExecAgent & { session?: { header?: { cwd?: string } } }) | undefined
+      const directory = (agent?.ctx?.get?.('workingDirectory') ?? ctx.get('workingDirectory')) as {
+        ensure(agent: unknown, signal?: AbortSignal): Promise<string>
+      } | undefined
+      const workspacePath = directory && agent
+        ? await directory.ensure(agent, exec.signal)
+        : agent?.session?.header?.cwd ?? process.cwd()
+      if (!isAbsolute(workspacePath)) throw new Error('dsh_browser_upload: the task workspace must be absolute')
+      const workspace = await realpath(workspacePath)
+      const resolved = await realpath(resolve(args.path))
+      const offset = relative(workspace, resolved)
+      if (offset === '..' || offset.startsWith('..' + sep) || isAbsolute(offset)) {
+        throw new Error('dsh_browser_upload: refusing to read a file outside the task workspace')
+      }
+      const expected = await stat(resolved)
+      const LIMIT = 20 * 1024 * 1024
+      if (!expected.isFile()) throw new Error('dsh_browser_upload: path must name a regular file')
+      if (expected.size > LIMIT) throw new Error('dsh_browser_upload: file is over the 20 MB limit')
+      const file = await open(resolved, 'r')
+      let bytes: Buffer
+      try {
+        const opened = await file.stat()
+        if (opened.dev !== expected.dev || opened.ino !== expected.ino
+          || opened.size !== expected.size || !opened.isFile()
+          || await realpath(resolve(args.path)) !== resolved) {
+          throw new Error('dsh_browser_upload: file changed while opening; retry')
+        }
+        const chunks: Buffer[] = []
+        let length = 0
+        for await (const chunk of file.createReadStream({ autoClose: false, start: 0, end: LIMIT, signal: exec.signal })) {
+          length += chunk.length
+          if (length > LIMIT) throw new Error('dsh_browser_upload: file grew over the 20 MB limit')
+          chunks.push(chunk as Buffer)
+        }
+        const after = await file.stat()
+        if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || length !== opened.size
+          || await realpath(resolve(args.path)) !== resolved) {
+          throw new Error('dsh_browser_upload: file changed while reading; retry')
+        }
+        bytes = Buffer.concat(chunks, length)
+      } finally {
+        await file.close()
+      }
+      const guess: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.pdf': 'application/pdf', '.txt': 'text/plain', '.csv': 'text/csv', '.json': 'application/json', '.zip': 'application/zip' }
+      const mime = args.mime ?? guess[extname(resolved).toLowerCase()] ?? 'application/octet-stream'
+      await installProbe(browser, session, exec.signal)
+      const text = await pageOperationValue(browser, session, {
+        operation: 'upload',
+        target: { by, value: target.value },
+        file: { name: basename(resolved), mime, base64: bytes.toString('base64') },
+      }, exec.signal)
+      const parsed = JSON.parse(text) as { ok?: boolean; reason?: string; name?: string; size?: number }
+      return parsed.ok === true
+        ? { ok: true, name: String(parsed.name ?? ''), size: Number(parsed.size ?? 0) }
+        : { ok: false, reason: String(parsed.reason ?? 'unknown') }
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_hover',
+    description: 'Scroll an element into view and move the browser pointer to its centre. Supports CSS hover styles and JavaScript mouseover handlers. Use before reading or clicking a hover menu.',
+    parameters: {
+      target: { type: 'object', required: true, additionalProperties: true, description: 'The element: {by: "css"|"text"|"xpath", value}.' },
+      settleMs: { type: 'number', description: 'How long to let the menu appear before returning (default 150).' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { hovered: { type: 'boolean', required: true }, at: { type: 'object', additionalProperties: true } } },
+      render: (_args, value) => [{ type: 'text', text: value.hovered === true ? 'Pointer moved over the element.' : 'No element at that target.' }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      assertAllowed(state, 'dsh_browser_hover', taskKey(exec))
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const target = args.target as { by?: unknown; value?: unknown }
+      const by = target?.by === 'css' || target?.by === 'xpath' || target?.by === 'text' ? target.by : 'css'
+      if (typeof target?.value !== 'string' || target.value === '') throw new Error('dsh_browser_hover: target.value is required')
+      await installProbe(browser, session, exec.signal)
+      const where = await probe<{ x?: number; y?: number; described?: string } | null>(browser, session, 'find', [{ [by]: target.value }, true], exec.signal)
+      if (!where || typeof where.x !== 'number' || typeof where.y !== 'number') return { hovered: false, at: {} as ProbeRow }
+      const fired = await probe<boolean>(browser, session, 'hoverAt', [where.x, where.y], exec.signal)
+      await pause(Math.min(args.settleMs ?? 150, 2_000))
+      const at: ProbeRow = { x: where.x, y: where.y, described: String(where.described ?? '') }
+      return { hovered: fired === true, at }
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_find',
+    description: 'Find text on the page (the Ctrl+F equivalent) and get its position, so you can scroll to it or click near it without reading the whole page first. Returns up to 5 hits (all:true for up to 50), each with the surrounding snippet and the viewport point. Text inside shadow roots and iframes is not searched.',
+    parameters: {
+      text: { type: 'string', required: true, description: 'Text to look for (case-insensitive).' },
+      all: { type: 'boolean', description: 'Return up to 50 hits instead of 5.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { count: { type: 'number', required: true }, hits: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true } } },
+      render: (_args, value) => {
+        const hits = value.hits as ProbeRow[]
+        if (hits.length === 0) return [{ type: 'text', text: 'Not found on the page.' }]
+        return [{ type: 'text', text: [`${hits.length} hit(s):`, ...hits.map((hit, index) => `  ${index + 1}. ${String(hit.text)} @ ${String(hit.x)},${String(hit.y)}`)] .join('\n') }]
+      },
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await installProbe(browser, session, exec.signal)
+      const hits = await probe<ProbeRow[]>(browser, session, 'findText', [args.text, args.all === true], exec.signal)
+      return { count: hits.length, hits }
+    },
+  }))
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_state',
+    description: 'One compact answer to "what is on screen": URL, title, load state, requests still in flight and how long the page has been quiet, plus the counts of inputs/buttons/links, scroll position, current selection and the first 400 characters of visible text. Use it before a full snapshot when you only need to know where you are, and after an action to see whether the page moved at all.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { summary: { type: 'object', additionalProperties: true, required: true } },
+      },
+      render: (_args, value) => {
+        const row = value.summary as ProbeRow
+        return [{ type: 'text', text: [
+          `${String(row.url)}`,
+          `${String(row.title)}`,
+          `${String(row.readyState)}, ${String(row.pending)} in flight, quiet ${String(row.quietMs)}ms`,
+          `${String(row.inputs)} input(s), ${String(row.buttons)} button(s), ${String(row.links)} link(s), scroll ${String(row.scrollY)}`,
+          row.selection ? `selection: ${String(row.selection)}` : 'no selection',
+          String(row.text ?? ''),
+        ].join('\n') }]
+      },
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(_args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      await installProbe(browser, session, exec.signal)
+      const summary = await probe<ProbeRow>(browser, session, 'summary', [], exec.signal)
+      return { summary }
+    },
+  }))
 }
 
 /** Test hook: inspect and reset session mappings across every live plugin apply. */
@@ -1914,4 +2899,3 @@ export const internals = {
     for (const state of liveStates) state.sessionsByTask.delete(key)
   },
 }
-

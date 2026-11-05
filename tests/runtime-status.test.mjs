@@ -165,6 +165,13 @@ test('the state vocabulary the panel localizes matches what the host can emit', 
   assert.ok(carrier, 'and the carrier union')
 })
 
+test('a previously prepared runtime removed from disk can be prepared again', () => {
+  const result = report('bundled', { binary: false, provisioning: provision('ready') })
+  assert.equal(result.readiness, 'blocked')
+  assert.equal(result.electron.state, 'failed')
+  assert.equal(result.canProvision, true)
+})
+
 test('every state and carrier the report can name has a label in both languages', () => {
   const client = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   const zhBlock = client.slice(client.indexOf('const zh = {'), client.indexOf('const en = {'))
@@ -175,10 +182,7 @@ test('every state and carrier the report can name has a label in both languages'
   // Two rows beyond the install-tree states: the panel distinguishes an installed bridge that is
   // running from one whose desktop app is closed, in both directions.
   for (const state of ['installed', 'installedRunning', 'installedNotRunning', 'missing', 'stale', 'absent']) keys.push(`readiness.bridge.${state}`)
-  for (const carrier of ['sidebar', 'bundled', 'system', 'auto']) {
-    keys.push(`readiness.carrier.${carrier}`)
-    keys.push(`readiness.hint.${carrier}`)
-  }
+  for (const carrier of ['sidebar', 'bundled', 'system', 'auto']) keys.push(`readiness.carrier.${carrier}`)
   for (const readiness of ['ready', 'blocked', 'unknown']) keys.push(`readiness.state.${readiness}`)
   const missing = keys.filter(key => !has(zhBlock, key) || !has(enBlock, key))
   assert.deepEqual(missing, [], 'these would render as raw keys in the panel')

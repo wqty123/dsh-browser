@@ -63,7 +63,7 @@ test('the panel renders a real set of labels', () => {
   // assertion below vacuously true.
   const rendered = renderedKeys()
   assert.ok(rendered.size > 20, `the extractor finds the panel's labels (found ${rendered.size})`)
-  assert.ok(rendered.has('actions.allowExecute'), 'including the ones this change added')
+  assert.ok(rendered.has('settings.advanced'), 'including the advanced settings label')
 })
 
 test('every label the panel renders exists in both locales', () => {

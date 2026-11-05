@@ -38,6 +38,7 @@ import { app, webContents } from 'electron'
  * conversation would have brought the page back.
  */
 const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
+const PANEL_INITIALIZING = 'panel-initializing'
 
 /**
  * An Error carrying a stable code, so the code survives the socket as a field rather than as text a
@@ -265,7 +266,7 @@ async function sendCdp(id, method, params) {
  * @param url - address to load when a panel has to be opened; `null` to only READ.
  * @returns the renderer's verdict, normalized so a malformed answer is a named failure.
  */
-async function evaluatePanelService(shellId, sessionId, url) {
+async function evaluatePanelService(shellId, sessionId, url, tabId) {
   // `null` means read-only. This distinction is not cosmetic: `openPanel` CREATES a tab when the
   // conversation has none, so polling with it turned a 20-second wait into one empty tab every
   // 250ms — the "it opens a pile of blank pages at once" report. A wait must never be a write.
@@ -273,7 +274,7 @@ async function evaluatePanelService(shellId, sessionId, url) {
   const call = reading
     // `panelGuest` reports state, not success, so the read form supplies the verdict itself: a
     // conversation with no panel yet is a legitimate answer to "what do you have", not a failure.
-    ? `JSON.stringify({ ok: true, ...api.panelGuest(${JSON.stringify(String(sessionId))}) })`
+    ? `JSON.stringify({ ok: true, ...api.panelGuest(${JSON.stringify(String(sessionId))}, ${JSON.stringify(tabId ?? null)}) })`
     : `JSON.stringify(api.openPanel(${JSON.stringify(String(sessionId))}, ${JSON.stringify(String(url ?? ''))}))`
   const expression = `(() => {
     const api = globalThis.__dshBuiltinBrowser;
@@ -321,6 +322,7 @@ async function evaluatePanelService(shellId, sessionId, url) {
       panel: parsed?.panel === true,
       created: parsed?.created === true,
       guestId: typeof parsed?.guestId === 'number' && Number.isFinite(parsed.guestId) ? parsed.guestId : null,
+      ...typeof parsed?.tabId === 'string' ? { tabId: parsed.tabId } : {},
       url: typeof parsed?.url === 'string' ? parsed.url : '',
       // A refusal carries what the renderer found, so the reason is actionable rather than a guess.
       found: parsed?.found === undefined ? undefined : parsed.found,
@@ -492,10 +494,11 @@ async function handle(request) {  const op = String(request?.op ?? '')
       throw new Error('this host supplied no conversation id, so its own panel cannot be identified')
     }
 
+    let tabId
     const ask = async (withUrl) => {
       // `null` reads, a string places or navigates. Every round of the wait below uses the READ
       // form, because a wait must never create anything.
-      const answer = await evaluatePanelService(shell.id, owner, withUrl ? url : null)
+      const answer = await evaluatePanelService(shell.id, owner, withUrl ? url : null, tabId)
       if (answer.ok !== true) {
         // Carry the renderer's own findings into the failure: it is the side that can see why the
         // lookup missed, and a bare "not mounted" leaves the next reader guessing between a real
@@ -513,6 +516,7 @@ async function handle(request) {  const op = String(request?.op ?? '')
     // me the page" and "let me look at it", and keeping the preview off this path is what stops a
     // read-only action from moving the reader's layout.
     const first = await ask(url !== '')
+    tabId = first.tabId
     if (first.guestId !== null) {
       claims.set(first.guestId, owner)
       if (!guestShows(first.guestId, url)) {
@@ -555,7 +559,8 @@ async function handle(request) {  const op = String(request?.op ?? '')
       }
       return { ok: true, created: true, id: polled.guestId, via: 'panel', owner }
     }
-    throw new Error(
+    throw codedError(
+      PANEL_INITIALIZING,
       'this conversation\'s browser panel produced no page within its budget '
       + '(the shell placed no guest in this conversation\'s own sidebar)',
     )

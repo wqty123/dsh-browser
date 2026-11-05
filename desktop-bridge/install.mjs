@@ -68,7 +68,7 @@
  */
 import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawn } from 'node:child_process'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const DEFAULT_INSTALL = findDefaultInstall()
 /**
@@ -118,30 +118,63 @@ function withoutOurSnippet(text) {
 }
 
 /**
- * Every process whose image is the desktop shell.
- *
- * Matched by executable name because that is what the installed product uses, and because a
- * process-id based approach would miss the children Electron spawns for the renderer and GPU — any
- * of which holds the archive. The install root's own path is checked where a command line is
- * readable, so a second installation of the same product is not closed by mistake.
- * @param root - the install directory whose processes count as this shell.
- * @returns the matching process ids and names.
+ * Select only the GUI processes owned by this installation.
+ * Native DSH CLI processes share the same executable but run JavaScript in Node mode.
+ * @param rows - the process table, including parent ids for the installer's ancestry.
+ * @param root - verified Desktop installation directory.
+ * @param selfPid - the installer process.
+ * @returns GUI and Chromium helper process ids.
+ */
+function selectShellProcesses(rows, root, selfPid) {
+  const byPid = new Map(rows.map(row => [row.ProcessId, row]))
+  const ancestors = new Set()
+  let cursor = selfPid
+  while (typeof cursor === 'number' && cursor > 0 && !ancestors.has(cursor)) {
+    ancestors.add(cursor)
+    cursor = byPid.get(cursor)?.ParentProcessId
+  }
+  const expectedExe = resolve(root, 'DeepSeek Harness.exe').toLowerCase()
+  const selected = []
+  for (const row of rows) {
+    if (String(row.Name ?? '').toLowerCase() !== 'deepseek harness.exe') continue
+    if (typeof row.ExecutablePath !== 'string' || row.ExecutablePath === '') {
+      throw new Error('could not identify a running DeepSeek Harness process; refusing to close or patch the application')
+    }
+    if (resolve(row.ExecutablePath).toLowerCase() !== expectedExe) continue
+    if (!Number.isSafeInteger(row.ProcessId) || row.ProcessId <= 0 || typeof row.CommandLine !== 'string') {
+      throw new Error('the Desktop process table is incomplete; refusing to close or patch the application')
+    }
+    if (row.ProcessId === selfPid) continue
+    const nodeMode = /(?:^|\s)--expose-internals(?:\s|$)|\.[cm]?js(?:"|\s|$)|(?:^|\s)(?:--eval|--print|--input-type)(?:=|\s|$)|(?:^|\s)-(?:e|p)(?:\s|$)/i.test(row.CommandLine)
+    if (nodeMode) continue
+    if (ancestors.has(row.ProcessId)) {
+      throw new Error('the installer is a child of DSH Desktop; run this command from a separate terminal with Node.js')
+    }
+    selected.push(row.ProcessId)
+  }
+  return selected
+}
+
+/**
+ * Read the complete process table so ancestry is available before any process is closed.
+ * Enumeration failure refuses the install rather than treating the shell as stopped.
+ * @param root - verified Desktop installation directory.
+ * @returns GUI and Chromium helper process ids.
  */
 function shellProcesses(root) {
   const text = runCapture('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-Command',
-    'Get-CimInstance Win32_Process -Filter "Name=\'DeepSeek Harness.exe\'" | '
-    + 'Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress',
+    'Get-CimInstance Win32_Process -ErrorAction Stop | '
+    + 'Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress',
   ])
-  if (text === undefined || text.trim() === '') return []
+  if (text === undefined || text.trim() === '') throw new Error('could not enumerate Desktop processes')
   let parsed
-  try { parsed = JSON.parse(text) } catch { return [] }
+  try { parsed = JSON.parse(text) } catch { throw new Error('could not parse the Desktop process table') }
   const rows = Array.isArray(parsed) ? parsed : [parsed]
-  return rows
-    .filter(row => typeof row?.ProcessId === 'number')
-    .filter(row => typeof row.ExecutablePath !== 'string'
-      || row.ExecutablePath.toLowerCase().startsWith(root.toLowerCase()))
-    .map(row => row.ProcessId)
+  if (rows.length === 0 || rows.some(row => row === null || typeof row !== 'object'
+    || !Number.isSafeInteger(row.ProcessId) || !Number.isSafeInteger(row.ParentProcessId)
+    || typeof row.Name !== 'string')) throw new Error('the Desktop process table is invalid')
+  return selectShellProcesses(rows, root, process.pid)
 }
 
 /**
@@ -173,7 +206,7 @@ async function stopShell(root, graceMs) {
   if (before.length === 0) return true
   console.log(`  closing DSH Desktop (${before.length} process(es))…`)
   // No /F: this is a normal window close, so the shell can flush and prompt.
-  runCapture('taskkill.exe', ['/PID', ...before.map(String), '/T'])
+  runCapture('taskkill.exe', before.flatMap(pid => ['/PID', String(pid)]))
   const deadline = Date.now() + graceMs
   while (Date.now() < deadline) {
     if (shellProcesses(root).length === 0) return true
@@ -182,7 +215,7 @@ async function stopShell(root, graceMs) {
   const left = shellProcesses(root)
   if (left.length > 0) {
     console.log(`  ${left.length} process(es) still running after ${String(graceMs)} ms; forcing`)
-    runCapture('taskkill.exe', ['/IM', 'DeepSeek Harness.exe', '/F', '/T'])
+    runCapture('taskkill.exe', [...left.flatMap(pid => ['/PID', String(pid)]), '/F'])
     const forcedBy = Date.now() + 15_000
     while (Date.now() < forcedBy) {
       if (shellProcesses(root).length === 0) return true
@@ -207,7 +240,13 @@ function startShell(root) {
     return false
   }
   try {
-    const child = spawn(exe, [], { detached: true, stdio: 'ignore', cwd: root })
+    const env = { ...process.env }
+    for (const key of Object.keys(env)) {
+      if (key.toUpperCase() === 'ELECTRON_RUN_AS_NODE') delete env[key]
+    }
+    const child = spawn(exe, [], { detached: true, stdio: 'ignore', cwd: root, env })
+    child.on('error', error => { console.error('could not start DSH Desktop: ' + String(error)) })
+    if (child.pid === undefined) return false
     child.unref()
     console.log(`  started ${exe}`)
     return true
@@ -218,6 +257,14 @@ function startShell(root) {
 }
 
 const args = process.argv.slice(2)
+// Identity only, no side effects: the panel and a human both need a way to ask "would this work"
+// without closing the shell first.
+if (args.includes('--preflight')) {
+  const target = args.find(part => !part.startsWith('--')) || ''
+  const verdict = verifyDesktopIdentity(target)
+  console.log(JSON.stringify({ target, ...verdict }))
+  process.exit(verdict.ok ? 0 : 1)
+}
 const revert = args.includes('--revert')
 /**
  * Close DSH, install, then start it again — all in THIS process.
@@ -594,9 +641,40 @@ function verifyDesktopIdentity(root) {
 
   let manifestText
   if (archivePresent) {
-    const bytes = readAsarEntry(archive, 'package.json')
+    let bytes = readAsarEntry(archive, 'package.json')
     if (bytes === undefined) {
-      return { ok: false, reason: `${archive} exists but its package.json cannot be read` }
+      // Some builds ship package.json OUTSIDE the archive (marked `unpacked`): the real file is
+      // then beside it, and reading it there is the honest answer rather than "cannot be read".
+      try { bytes = readFileSync(join(resources, 'app.asar.unpacked', 'package.json')) } catch { bytes = undefined }
+    }
+    if (bytes === undefined) {
+      // Evidence that does not need to read the archive at all. Inside Electron, `fs` treats a
+      // `.asar` path as a virtual directory, so a raw read of it returns the wrong thing and finds
+      // nothing — measured when the panel's button ran this file under the desktop shell. The
+      // product's own executable beside the archive is proof enough that this is DSH Desktop.
+      const exeNames = ['DeepSeek Harness.exe', 'DSH Desktop.exe']
+      const exeFound = exeNames.find(name => existsSync(join(root, name)))
+      if (exeFound !== undefined) {
+        return { ok: true, layout: 'packed', packageName: String(rule.packageNames?.[0] ?? ''), version: 'unknown' }
+      }
+      // Last resort, for a plain node run: the archive header could not be parsed. The rule is a name,
+      // and a name that appears in the archive is evidence enough to proceed — the alternative is
+      // refusing an install that is obviously there.
+      const names = Array.isArray(rule.packageNames) ? rule.packageNames.map(String) : []
+      let probe = ''
+      try {
+        const fd = openSync(archive, 'r')
+        const size = 8 * 1024 * 1024
+        const buf = Buffer.alloc(size)
+        const read = readSync(fd, buf, 0, size, 0)
+        closeSync(fd)
+        probe = buf.subarray(0, read).toString('latin1')
+      } catch { probe = '' }
+      const found = names.find(name => name !== '' && probe.includes(name))
+      if (found === undefined) {
+        return { ok: false, reason: `${archive} could not be read and does not name ${names.join(' / ')}` }
+      }
+      return { ok: true, layout: 'packed', packageName: found, version: 'unknown' }
     }
     manifestText = bytes.toString('utf8')
   } else {
@@ -649,10 +727,17 @@ if (!identity.ok) {
 // both arrangements measured in issue #36 died at that moment. Doing it here keeps the whole
 // sequence inside one front-facing process.
 let shellStopped = false
-if (restart && !revert) {
+if (!revert && existsSync(asarPath)) {
+  const checked = validateArchive(asarPath)
+  if (!checked.ok) {
+    console.error(`refusing to rebuild from an archive that cannot be verified: ${checked.reason}`)
+    process.exit(1)
+  }
+}
+if (restart) {
   if (!assumeYes) {
     console.log('')
-    console.log('--restart will CLOSE DSH Desktop, install the bridge, and start it again.')
+    console.log(`--restart will close DSH Desktop, ${revert ? 'remove' : 'install'} the bridge, and start it again.`)
     console.log('Any unsaved work in a conversation is lost. Re-run with --yes to skip this notice.')
     console.log('')
     try {
@@ -667,13 +752,23 @@ if (restart && !revert) {
       process.exit(1)
     }
   }
-  shellStopped = await stopShell(installRoot, 20_000)
+  try {
+    shellStopped = await stopShell(installRoot, 20_000)
+  } catch (error) {
+    console.error('could not safely stop DSH Desktop: ' + String(error))
+    process.exit(1)
+  }
   if (!shellStopped) {
     console.error('DSH Desktop did not exit, so the archive cannot be replaced.')
     console.error('Close it yourself and run this again without --restart.')
     process.exit(1)
   }
 }
+process.once('exit', () => {
+  if (restart && shellStopped && startShell(installRoot)) {
+    console.log('DSH Desktop was restarted.')
+  }
+})
 
 // The archive wins whenever it exists, so ITS presence — not the absence of the
 // directory — decides the layout. After a desktop update the archive is back
@@ -849,12 +944,6 @@ console.log(`installed bridge into ${appDir}`)
 console.log(`  module: ${bridgeTarget}`)
 console.log(`  patch:  ${mainPath} (+${SNIPPET.split('\n').length} lines)`)
 installCliCompatibility()
-if (restart && shellStopped) {
-  // Started detached and unref'd: this process exits on the next line, and a child that died with
-  // its parent would leave the user with nothing running — the trap the wait-for-exit daemons hit.
-  if (startShell(installRoot)) {
-    console.log('DSH Desktop was restarted; the bridge is active.')
-  }
-} else {
+if (!restart) {
   console.log('restart DSH Desktop to activate it.')
 }

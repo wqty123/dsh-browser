@@ -8,137 +8,104 @@
 
 <p align="center"><sub>中文 · <a href="README.en.md">English</a></sub></p>
 
-<h3 align="center">为 DeepSeek Harness 打造的<b>共享真实浏览器</b>插件</h3>
+# DeepSeek Harness 浏览器插件
 
-<h4 align="center">agent 驱动一个真实、可见、可随时接管的浏览器——人与 agent 操作的是<b>同一个页面</b>。</h4>
+让 DSH 在内置浏览器、桌面侧栏或本机 Chrome、Edge 中打开网页、读取内容、填写表单和下载文件。每个任务有自己的标签页和操作记录。使用可见窗口或桌面侧栏时，你可以接手 Agent 正在操作的页面。
 
-## 这是什么
-
-- **真实浏览器,不是转播**:桌面端优先驱动官方侧栏;侧栏不可用时用插件自托管的窗口;也可以在设置里换成你本机的 **Chrome / Edge**。
-- **人机同页**:agent 看到和操作的,与你屏幕上是同一个页面,随时可以接手。
-- **装完即用**:`dsh_browser_*` 下 **35 个工具**——打开、读取、点击、填表、截图、下载、登录态,不需要额外配置。
-- **按任务隔离**:每个任务自己的标签与历史,互不串扰。
+本页功能清单以当前源码为准。新增工具、安静模式修复和新版设置面板属于 0.5.6 之后的待发布更新。[更新记录](CHANGELOG.md)
 
 ## 安装
 
-两端是两份独立安装,**更新一端不会带上另一端**。
+桌面端和 Web 端使用各自的插件配置。按你使用的端执行对应命令。
 
-更新已装版本要两步(DSH 0.2.1-alpha.2 起对已装包再 `add` 会报 `already-installed`):
-
-```sh
-dsh plugin --profile <profile> remove dsh-builtin-browser
-dsh plugin --profile <profile> add dsh-builtin-browser@0.5.6
-```
-
-### 桌面端
-
-```sh
+~~~sh
 dsh plugin --profile desktop add dsh-builtin-browser
-```
-
-要让插件驱动**官方侧栏**里那个浏览器面板,还需在桌面端**自己的安装目录**里装一条 bridge(可选;不装则用自托管窗口):
-
-```sh
-node desktop-bridge/install.mjs "<DSH Desktop 安装目录>" --restart
-# 或双击 desktop-bridge/install-and-start.cmd
-```
-
-不要在桌面端运行中手工安装:归档被占用,`rename` 会以 `EBUSY` 失败。桌面端升级后 bridge 会失效(`bridge-status` 报 `stale`),重跑同一条命令即可修复。
-
-### Web 端(`dsh web`)
-
-```sh
 dsh plugin --profile web add dsh-builtin-browser
-```
+~~~
 
-Web 端没有侧栏也没有 bridge:插件自托管一个独立窗口(标题 `dsh-browser`),自带地址栏、前进后退刷新与标签条,可以直接当浏览器用。
+更新时，先在对应配置下执行 `dsh plugin --profile <profile> remove dsh-builtin-browser`，再执行该端的安装命令。将 `<profile>` 替换为 `desktop` 或 `web`。
 
-> Electron 二进制通常由安装脚本准备。宿主使用 `strict-dep-builds` 时需先批准本插件的构建脚本;跳过了可在 profile 目录执行 `npx --no dsh-browser-install-electron` 手动准备。详见[用户指南](docs/user-guide.md)。
+安装后，可以在 DSH 会话里试用下面的任务。
 
-### 装好之后
+> 帮我打开 https://example.com，提取页面标题和主要内容。
 
-```
-帮我打开 https://example.com，把主要内容用中文总结一下。
-```
+DSH 会准备内置浏览器所需的 Electron。打开 **设置 → 浏览器** 查看进度，准备失败时点击 **准备内置浏览器** 重试。需要提前准备时，可在对应的插件配置目录执行 `npx --no dsh-browser-install-electron`。[用户指南](docs/user-guide.md)
 
-## 载体:自动选择,也可指定
+## 选择浏览器
 
-| 载体 | 何时使用 |
+| 选项 | 使用方式 |
 | --- | --- |
-| 桌面侧栏 | 外壳支持可驱动的 `<webview>` 且已装 bridge(默认优先) |
-| 自托管窗口 | 侧栏不可用或未装 bridge;Web 端总是这一种 |
-| 本机 Chrome / Edge | 设置里显式指定 |
+| 内置浏览器 | 在独立窗口中打开页面，提供地址栏、前进、后退、刷新和标签栏。 |
+| DSH 侧栏 | 在支持 Electron `webview` 的桌面端安装桥接组件后使用。 |
+| 本机 Chrome / Edge | 使用插件专用的浏览器配置启动本机 Chrome 或 Edge。 |
+| 自动 | 根据本机浏览器和桌面侧栏的可用情况选择。 |
 
-侧栏原本有两种"要人先动手"的情况——列没打开、会话不在前台。0.5.2 起都由插件自己处理:没有展开就展开,会话不在前台就请求外壳显示它。取舍与边界见[已知限制](docs/limitations.md)。
+使用 **DSH 侧栏** 时，在插件目录运行下面的命令。安装器校验 DSH 安装目录，安装桥接组件后重启桌面端。桌面端升级后，可展开 **设置 → 浏览器 → 诊断** 查看桥接状态，并用同一条命令修复。
 
-## 工具(`dsh_browser_*`,35 个)
+~~~sh
+node desktop-bridge/install.mjs "<DSH Desktop 安装目录>" --restart
+~~~
 
-| 组 | 工具 |
+## 浏览器设置
+
+- **就绪状态** 显示浏览器是否可用。展开 **诊断** 查看浏览器选项、内置运行时和桌面桥接状态。
+- **安静模式** 保留当前窗口和标签。新启动的 Chrome 和 Edge 在后台运行，最小化的内置浏览器保持最小化。使用桌面侧栏时，先手动打开目标页，再交给 DSH 操作。
+- **展示** 提供侧栏自动展开、随会话关闭浏览器、Agent 光标和远程观看开关。
+- **Agent 权限** 控制页面脚本、文件下载和登录状态的读写。
+- **高级设置** 提供浏览历史、页面定位方式，以及 Chrome 和 Edge 的登录状态保留和窗口模式。交付表单可以设置工具名、参数模板、失败处理和站点规则，校验后一次保存。
+
+在本机或隔离测试环境中打开 **允许远程观看**，通过 DSH 的观看入口查看会话的只读画面。画面以 JPEG 刷新，最高每秒 2 帧。
+
+## 下载交付
+
+在 **高级设置 → 交付** 中填入已接入 DSH 的上传工具名，并根据该工具的参数设置目标目录。自动交付使用 DSH 原生工具执行器，保留当前任务的工具权限。文件先保存到本地，再交给所选工具，结果中包含本地路径和上传工具的完整返回值。
+
+例如，百度网盘官方 stdio MCP 的上传工具使用下面的参数模板：
+
+```json
+{
+  "local_file_path": "{path}",
+  "remote_path": "/来自：mcp_server/DSH下载"
+}
+```
+
+`{path}` 会替换为已下载文件的完整路径。`remote_path` 是网盘目标文件夹。工具名采用 DSH 中实际注册的名称，格式为 `mcp__<serverName>__upload_file`。[百度网盘 MCP 参数](https://github.com/baidu-netdisk/mcp)
+
+飞书目标可配置具备文件上传能力的 MCP 工具，参数模板按该工具声明的字段填写。
+
+## 浏览器工具
+
+当前源码注册 48 个工具。表中列出 `dsh_browser_` 后面的名称。
+
+| 用途 | 工具 |
 | --- | --- |
 | 打开与导航 | `open` `back` `forward` `refresh` `list_tabs` `switch_tab` `close_tab` |
-| 读页面 | `snapshot` `a11y` `content` `scrape` `screenshot` `challenge` |
-| 操作 | `click` `click_sequence` `type` `key` `scroll` `execute` |
-| 表单 | `fill` `set_value` `clear` `check` `select` `get_value` |
-| 会话 | `session` `reset` `reset_session` `restrict` `auth` |
-| 记录 | `history` `visited` `replay` |
-| 其它 | `wait` `download` |
+| 读取页面 | `snapshot` `a11y` `content` `scrape` `screenshot` `challenge` |
+| 点击与输入 | `click` `click_sequence` `type` `key` `scroll` `drag` `hover` `execute` |
+| 填写表单 | `fill` `set_value` `clear` `check` `select` `get_value` |
+| 选择与保存文件 | `upload` `download` |
+| 执行步骤与核对结果 | `do` `assert` `wait` `wait_for_response` |
+| 查看页面状态 | `state` `find` `console` `network` `dialog` |
+| 管理会话 | `session` `reset` `reset_session` `restrict` `auth` |
+| 查看记录 | `history` `visited` `replay` |
+| 排查问题与查用法 | `doctor` `help` |
 
-参数、输出与示例见[工具参考](docs/tool-reference.md)。
+### 新增工具怎么用
 
-`click_sequence`(0.5.2 新增)一次调用打一串坐标点击,用于 canvas 页面:那些页面不采信脚本派发的 `MouseEvent`,只认真实输入。
-
-## 远程观看(默认关闭)
-
-从另一台设备用 DSH 时,浏览器在主机屏幕上。主机在设置里打开 `remoteView.enabled` 后,面板给出一个**只读**画面:2 fps、JPEG 质量 70、等比缩放到 1280×720 内、一帧一请求(慢网络自然降速)、不落盘、不进入聊天或模型上下文。不转发点击/键盘/滚轮。
-
-关闭时**不出现浮动入口、也不发任何诊断请求**;在设置页打开「远程观看」开关后,入口**立刻**出现——不需要刷新页面,也不需要快捷键(手机上没有)。
-
-三个端点,仅同源:`GET /dsh-builtin-browser/browser-view/sessions`、`GET …/browser-view/frame?session=…`、`GET /dsh-builtin-browser/bridge-status`。
-
-画面可能包含验证码、账户信息或登录后内容——打开前请确认这是你要看的页面。
-
-## 相关项目
-
-**[yeuxuan/dsh-builtin-browser](https://github.com/yeuxuan/dsh-builtin-browser)** —— 社区基于本项目 0.4.14(MIT,保留原 LICENSE 与署名)做的**侧栏专用衍生版**:只用桌面外壳右侧栏的 `<webview>` 载体,去掉自托管 Electron 子进程、本机 Chrome/Edge 与 iframe 载体;元素快照带编号、动作用 `target.by: "ref"` 定位并在点击前做命中测试;每条 CDP 命令带超时;弹窗、HTTP 认证、下载汇总到页面顶部状态栏。
-
-如果你的场景**只有桌面侧栏**、不需要多载体回退,它比本项目更小更专注。它是第三方项目,由作者独立维护——问题与改动请提到它的仓库,不要记在这里。
+- 用 `do` 按顺序打开网页、填表、点击和等待。执行失败时返回停止的步骤。用 `assert` 核对页面文本、元素、地址或脚本条件。
+- 用 `state` 查看地址、标题、加载状态和可见文本，用 `find` 找到文字及其位置。用 `console` 和 `network` 查看控制台消息与网络记录，用 `wait_for_response` 匹配指定地址的响应。
+- 用 `upload` 将本地文件填入网页的文件选择框，用 `hover` 展开悬停菜单，用 `drag` 操作滑块、排序列表、拖放区域和画布。悬停和拖拽通过浏览器输入通道发送。内置浏览器的 `download` 可使用当前会话的 Cookie 保存文件。
+- 用 `dialog` 查看页面脚本弹窗并设置应答方式，用 `doctor` 查看当前页面及工具状态，用 `help` 查询各类操作的用法。
 
 ## 文档
 
-| 想知道 | 去哪 |
-| --- | --- |
-| 安装、配置、日常使用、常见问题 | [用户指南](docs/user-guide.md) |
-| 35 个工具的参数、输出与示例 | [工具参考](docs/tool-reference.md) |
-| 为什么做成共享真实浏览器 | [为什么做共享真实浏览器](docs/why-browser.md) |
-| seam / provider / 工具三层与自托管实现 | [架构说明](docs/architecture.md) |
-| 哪些事做不到,以及为什么 | [已知限制](docs/limitations.md) |
-| 构建、测试、复验宿主兼容性 | [开发](docs/development.md) |
-| 全部文档的分工 | [文档索引](docs/README.md) |
+- [用户指南](docs/user-guide.md)
+- [工具参数与示例](docs/tool-reference.md)
+- [工具选择、页面定位与操作步骤](skills/dsh-builtin-browser/SKILL.md)
+- [架构说明](docs/architecture.md)
+- [兼容性与使用条件](docs/limitations.md)
+- [构建和测试](docs/development.md)
 
-## 更新记录
+本项目是基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 和 [Cordis](https://github.com/cordiverse/cordis) 的社区插件。感谢提交问题、复现步骤和补丁的贡献者。
 
-完整明细(按轮次,含每处修复的原因与证据)见 [CHANGELOG.md](CHANGELOG.md)。
-
-| 版本 | 日期 | 主题 |
-| --- | --- | --- |
-| **0.5.6** | 2026-11-03 | **「装好即可用」可见、可修**:设置页顶部新增**就绪状态**(当前载体 / 内置运行时 / 桌面桥,按载体给结论,且**已安装与在运行分开**——桌面端没开是最常见的坏状态),`failed` 时给「准备内置浏览器」按钮且**真能重试**(此前的记忆化尝试让失败一次就成了终局);新端点 `runtime-status`(读)与 `runtime-provision`(按写操作准入,立即返回,面板轮询);设置页文案跟随运行时切换语言;修掉 `description` 与桌面桥里 38 处 `閳?`/`鈥?` 乱码 |
-| **0.5.5** | 2026-11-03 | **预览是只读的**:取帧不再经 `ensureSidebar`(旧桥会按键+打字),只读 `list`,面板不再被顶到前台;浮标几何、关闭键、层级与 `img[hidden]` 修正(修 #46);**远程观看改为设置里的开关,点了立刻生效**(手机没有快捷键);bridge 修复命令指向包内真实路径(修 #40 第四项)。内容与 0.5.4 相同 |
-| **0.5.4** | 2026-11-03 | 与 0.5.5 同内容的另一份发布(npm 上可取到;本仓库没有为它建 release) |
-| **0.5.3** | 2026-11-03 | **安装不再依赖网络**:去掉 `postinstall`,Electron 运行时改为首次需要时才准备且永不失败安装(修 #41/#42 的市场安装失败);安装器先验应用身份再动手,校验先于删除(修 #40);观看入口按需挂载、翻译与主题令牌修正 |
-| **0.5.2** | 2026-11-01 | 侧栏页面不再需要人先动手:列没打开就展开,会话不在前台就请求外壳显示它并做有界重试;新增批量坐标点击 `click_sequence`;旧 bridge 的无 code 拒绝也按显示状态处理 |
-| **0.5.1** | 2026-10-31 | 接管浏览器自己打开的页面:`switch_tab` 与 `open` 落到你正在看的那一页;canvas 检测不再要求元素列表为空;空白页由页面自身 URL 判定 |
-| 更早 | — | 见 [CHANGELOG.md](CHANGELOG.md)(`0.5.0` 只打过 tag,未发布到 npm) |
-
-**工具名空间**:0.4.8 起全部工具在 `dsh_browser_*` 下(此前是无前缀的 `browser_*`,与另一个插件相撞,一次重名会让后注册者整套工具消失)。日志里出现 `could not register dsh_browser_xxx` 说明有别的插件占了同名工具——每个工具独立注册,碰撞只影响那一个。自定义提示词里若还写着 `browser_*`,改成 `dsh_browser_*`。
-
-## 感谢
-
-感谢 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 与 DeepSeek AI 团队——本插件的 seam、工具运行时与插件体系都构建在这个项目之上;感谢 [Cordis](https://github.com/cordiverse/cordis) 提供的插件化基础;以及所有带着完整复现与本地补丁来的报告者,这些修复因此不必靠猜。
-
-## 作者
-
-对插件有意见、或想聊别的插件,欢迎加微信:**`hui13866591135`**(申请时请注明)。
-
-## License
-
-[MIT License](LICENSE)。本项目是 DeepSeek Harness 的社区插件,并非 DeepSeek 官方产品。
+作者微信 **hui13866591135** · [MIT 许可](LICENSE)

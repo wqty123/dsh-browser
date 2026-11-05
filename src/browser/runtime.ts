@@ -7,6 +7,7 @@
  * @module dsh-browser/browser
  */
 
+import { pageOperationScript } from '../tool-browser/page-probe.js'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {
@@ -22,6 +23,7 @@ import type {
   BrowserDownloadRequest,
   BrowserElementTarget,
   BrowserExecuteRequest,
+  BrowserPageOperationRequest,
   BrowserExecuteResult,
   BrowserFillRequest,
   BrowserFillResult,
@@ -245,6 +247,15 @@ export class BrowserRuntime extends Service {
   /** Execute JS in the session's page context through the selected provider. */
   async execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
     return this.resolveProvider().execute(session, request, signal)
+  }
+
+  /** Execute one provider-owned page operation with validated operation names. */
+  async pageOperation(session: BrowserSessionId, request: BrowserPageOperationRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
+    const provider = this.resolveProvider()
+    // Legacy providers retain their execute permission checks.
+    return provider.pageOperation
+      ? provider.pageOperation(session, request, signal)
+      : provider.execute(session, { script: pageOperationScript(request) }, signal)
   }
 
   /** Wait until the session's page is ready (and optional URL/selector match). */

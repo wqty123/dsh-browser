@@ -33,6 +33,18 @@ test('the bundled choice never resolves to a system browser', () => {
   assert.equal(detectBrowser('bundled', everything), undefined)
 })
 
+test('the Edge account confirmation dialog is excluded from web tabs', async () => {
+  const host = new SystemBrowserViewHost({ kind: 'edge', path: process.execPath }, tmpdir())
+  host.ensureClient = async () => ({
+    send: async () => ({ targetInfos: [
+      { type: 'page', targetId: 'dialog', url: 'edge://sync-confirmation-dialog/' },
+      { type: 'page', targetId: 'web', url: 'https://example.com/' },
+    ] }),
+  })
+  assert.deepEqual((await host.listPages()).map(page => page.id), ['web'])
+  host.dispose()
+})
+
 test('an explicit choice resolves to that browser', () => {
   assert.equal(detectBrowser('chrome', everything)?.kind, 'chrome')
   assert.equal(detectBrowser('edge', everything)?.kind, 'edge')

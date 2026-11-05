@@ -116,6 +116,23 @@ export interface BrowserSettings {
         /** Write cookies — importing login state (`dsh_browser_auth` restore). */
         readonly allowCredentialWrite: boolean;
     };
+    /**
+     * Where a downloaded file goes after it lands on disk.
+     *
+     * An ATTRIBUTE of a download, not a new concept: an empty `tool` means the behaviour is exactly
+     * what it was before this existed. The user owns the field, can point it at any MCP tool that
+     * takes a path (Feishu drive, Baidu Netdisk), and can empty it again at any time.
+     */
+    readonly delivery: {
+        /** MCP tool that receives the saved file. Empty = save locally and stop there. */
+        readonly tool: string;
+        /** Flat argument template; {path}, {name} and {size} are substituted into string values. */
+        readonly args: Readonly<Record<string, string>>;
+        /** `keep-local` reports both outcomes; `stop` reports the handoff failure as the result. */
+        readonly onFail: 'keep-local' | 'stop';
+        /** Per-site override: page host → tool name. */
+        readonly sites: Readonly<Record<string, string>>;
+    };
 }
 /** Defaults for every switch: the documented out-of-the-box behaviour. */
 export declare const DEFAULT_SETTINGS: BrowserSettings;

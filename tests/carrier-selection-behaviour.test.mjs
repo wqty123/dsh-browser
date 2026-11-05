@@ -34,6 +34,17 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
   let current, handler
   const routes = new Map()
   const ctx = {
+    get(name) {
+      if (name === 'connection') return {
+        authorizeIndex(request, response) {
+          if (request.headers.cookie === 'dsh_test_session=authenticated') return true
+          response.writeHead(401)
+          response.end(JSON.stringify({ ok: false, error: 'unauthorized' }))
+          return false
+        },
+      }
+      return undefined
+    },
     browser: { registerBrowserProvider(provider) {
       current = provider.host
       registered.push(current)
@@ -66,7 +77,7 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
     async choose(nextChannel) {
       const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel } })])
       request.method = 'PUT'
-      request.headers = { host: 'localhost:3000', origin: 'http://localhost:3000' }
+      request.headers = { host: 'localhost:3000', origin: 'http://localhost:3000', cookie: 'dsh_test_session=authenticated' }
       let response
       await handler(request, { writeHead() {}, end(text) { response = JSON.parse(text) } })
       assert.equal(response.ok, true)

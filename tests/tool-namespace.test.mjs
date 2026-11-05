@@ -21,7 +21,7 @@ test('every registered tool is in the dsh_browser_ namespace, and nothing else i
   // and left the very name it was written to protect only half-checked.
   const names = [...source().matchAll(/name: '(dsh_browser_[a-z0-9_]+)'/g)].map(m => m[1])
 
-  assert.equal(names.length, 35, 'thirty-five tools')
+  assert.equal(names.length, 48, 'forty-eight tools (9 observation/batch tools, then upload, hover, find and state)')
   assert.equal(new Set(names).size, names.length, 'names are unique')
   assert.ok(names.includes('dsh_browser_open'))
   assert.ok(names.includes('dsh_browser_session'), 'including the one that used to collide')

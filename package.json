@@ -35,6 +35,7 @@
     "lib",
     "src",
     "docs",
+    "skills",
     "desktop-bridge",
     "client.js",
     "cordis.patch.yml",

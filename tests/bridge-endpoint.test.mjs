@@ -71,6 +71,13 @@ test('a stale-looking stamp inside the window is still alive', () => {
   assert.equal(state.alive, true, 'the window is 60 s; 30 s is a slow refresh, not a dead shell')
 })
 
+test('malformed endpoint values never claim a live bridge', () => {
+  for (const value of ['null', '{}', '[]', JSON.stringify({ ...aliveFor(), port: 70000 }),
+    JSON.stringify({ ...aliveFor(), token: '' }), JSON.stringify({ ...aliveFor(), updatedAt: 'invalid' })]) {
+    assert.equal(readBridgeEndpoint(endpoint(value)).alive, false, value)
+  }
+})
+
 test('a live stamp with a dead pid is not running', () => {
   // The stamp alone is forgeable by a tombstone; the pid is the second, independent signal. 0x7fffffe0
   // is inside the legal pid range and is not a process this machine will be running.

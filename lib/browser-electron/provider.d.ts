@@ -8,7 +8,7 @@
  */
 import { type VisitedPage } from './history-store.js';
 import type { BrowserSettings } from './settings-store.js';
-import type { BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserClickSequenceRequest, BrowserClickSequenceResult, BrowserContentRequest, BrowserContentResult, BrowserElementTarget, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, ExportedCookie } from '../browser/types.js';
+import type { BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserClickSequenceRequest, BrowserClickSequenceResult, BrowserContentRequest, BrowserContentResult, BrowserElementTarget, BrowserExecuteRequest, BrowserPageOperationRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, ExportedCookie } from '../browser/types.js';
 import type { CarrierPage, CarrierLossReason } from '../browser/types.js';
 /** Stable provider id registered with `ctx.browser`. */
 export declare const ELECTRON_BROWSER_PROVIDER_ID = "electron";
@@ -261,7 +261,7 @@ export interface ElectronViewHandle {
      * Optional: an adapter that cannot focus a view omits it, and the provider
      * then behaves exactly as before.
      */
-    focus?(): Promise<void>;
+    focus?(options?: PresentOptions): Promise<void>;
     /**
      * Save a URL straight to disk, when the backing view can do that itself.
      *
@@ -452,6 +452,8 @@ export interface PresentOptions {
 export interface CommandOptions {
     /** Present the view first (default), or only use a page that is already there. */
     readonly present?: boolean;
+    /** Only use a guest already attached to this handle, without sidebar initialization. */
+    readonly initialize?: boolean;
 }
 /** Native capture options the self-hosted view handle understands. */
 export interface ScreenshotOptions {
@@ -617,6 +619,11 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     private focusView;
     /** Execute JS in the active tab's page context. */
     execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult>;
+    /** Run a fixed browser operation; the request cannot contain a script. */
+    pageOperation(session: BrowserSessionId, request: BrowserPageOperationRequest, signal?: AbortSignal): Promise<BrowserExecuteResult>;
+    /** Send page pointer input through CDP while preserving presentation and cancellation policy. */
+    private dispatchPointer;
+    private evaluatePage;
     /**
      * Poll until the active tab's page is ready (and optional URL/selector
      * match), or the budget runs out. Returns a verdict instead of throwing on

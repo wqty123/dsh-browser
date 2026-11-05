@@ -775,8 +775,8 @@ class RemoteView implements ElectronViewHandle {
   }
 
   /** Give this view web focus in the child, so keyboard input reaches the page. */
-  focus(): Promise<void> {
-    return this.client.call<void>('focus', { viewId: this.id })
+  focus(options?: PresentOptions): Promise<void> {
+    return this.client.call<void>('focus', { viewId: this.id, ...options?.quiet ? { quiet: true } : {} })
   }
 
   /** Ask the child to download a URL to a local file (keeps cookies/login). */
@@ -1376,8 +1376,8 @@ class DeferredRemoteView implements ElectronViewHandle {
     return this.withRecovery(view => view.capture(opts))
   }
 
-  async focus(): Promise<void> {
-    return this.withRecovery(view => view.focus())
+  async focus(options?: PresentOptions): Promise<void> {
+    return this.withRecovery(view => view.focus(options))
   }
 
   async flushAuth(): Promise<ExportedCookie[]> {

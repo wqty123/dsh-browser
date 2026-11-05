@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 // Issue #40: what proves a directory is DSH Desktop, and what must happen before anything is touched.
 //
 // Reported: an app in a temp directory whose own package.json said `unrelated-meeting-app` was
@@ -20,7 +21,7 @@ import { FALLBACK_RULE, readAsarFile, readDesktopIdentity, readIdentityRule } fr
 import { findDesktopInstall, readBridgeStatus } from '../lib/browser-electron/bridge-status.js'
 import { MAIN_BODY, makePackedInstall, makeUnpackedInstall, writeAsar } from './fake-asar.mjs'
 
-const repo = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+const repo = fileURLToPath(new URL('..', import.meta.url))
 const script = join(repo, 'desktop-bridge', 'install.mjs')
 
 /** Run the installer and report its exit code and combined output. */

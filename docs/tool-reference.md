@@ -1,6 +1,25 @@
 # 工具参考
 
-全部 35 个 `dsh_browser_*` 工具。守卫列:✅ 表示该动作受 `dsh_browser_restrict` 白名单约束;**「– 豁免」表示无论白名单怎么写都不拦截**(豁免集合为 `READ_ONLY_TOOLS`,`src/tool-browser/index.ts` 导出:**只观察的工具** —— `snapshot`/`a11y`/`content`/`scrape`/`screenshot`/`get_value`/`wait`/`challenge`/`list_tabs`/`session`/`history`/`visited` —— 加上 **解除限制 / 从坏状态恢复的工具** `restrict`/`reset_session`/`reset`;`restrict` 在其中,否则限制到空的任务再也解不开);**「–」表示该工具只观察、不做动作**,故没有可拦的东西。两者之外的工具都受白名单约束 —— 例如 `dsh_browser_close_tab`、`dsh_browser_auth` 都不属于豁免集合(`dsh_browser_auth` 的 `restore` 会向任意域写 cookie,是动作,不是观察)。
+全部 48 个 `dsh_browser_*` 工具。守卫列:✅ 表示该动作受 `dsh_browser_restrict` 白名单约束;**「– 豁免」表示无论白名单怎么写都不拦截**(豁免集合为 `READ_ONLY_TOOLS`,`src/tool-browser/index.ts` 导出:**只观察的工具** —— `snapshot`/`a11y`/`content`/`scrape`/`screenshot`/`get_value`/`wait`/`challenge`/`list_tabs`/`session`/`history`/`visited` —— 加上 **解除限制 / 从坏状态恢复的工具** `restrict`/`reset_session`/`reset`;`restrict` 在其中,否则限制到空的任务再也解不开);**「–」表示该工具只观察、不做动作**,故没有可拦的东西。两者之外的工具都受白名单约束 —— 例如 `dsh_browser_close_tab`、`dsh_browser_auth` 都不属于豁免集合(`dsh_browser_auth` 的 `restore` 会向任意域写 cookie,是动作,不是观察)。
+
+## 批量、观测与断言（待发布）
+
+页面探针收集控制台、网络和页面脚本弹窗记录，拖拽与悬停通过浏览器的 CDP 输入通道执行。`fetch` 和 `XHR` 记录包含状态码，资源计时记录的状态码为 0。
+
+| 工具 | 参数 | 输出 | 守卫 | 说明 |
+| --- | --- | --- | --- | --- |
+| `dsh_browser_do` | `steps`(必填,最多 40), `timeoutMs?`, `autoDismiss?` | `{ ok, completed, total, stoppedAt?, reason?, log[] }` | ✅ | **一次调用跑一串步骤**,失败即停并指出第几步。步骤键(每步恰好一个):`open{url}` `tap{target}` `field{target,text}` `type{text}` `key{key}` `scroll{deltaY}` `sleep_ms{ms}` `wait_text{text}` `wait_gone{text}` `wait_url{url}` `wait_idle{}` `eval{script}` `check{selector|text|url|js}`。等待基于条件而不是睡眠;`tap` 的目标被 cookie 横幅/弹窗盖住时先把它关掉 |
+| `dsh_browser_console` | `limit?`(默认 20,上限 100), `filter?`, `clear?` | `{ entries[] }` | – 豁免 | 页面控制台最新若干行(含 level);先 `clear:true` 可只看之后发生的事 |
+| `dsh_browser_network` | `limit?`, `filter?`, `onlyFailures?`, `clear?` | `{ entries[] }` | – 豁免 | fetch/XHR/资源计时行:方法、状态、类型、地址、耗时;`onlyFailures` 保留 0 与 >=400 |
+| `dsh_browser_wait_for_response` | `urlContains`(必填), `status?`, `timeoutMs?` | `{ matched, reason, entry? }` | – 豁免 | 等**本次调用之后**到达的响应(可按状态过滤);回答"提交到底有没有到服务器",截图答不了这个 |
+| `dsh_browser_assert` | `selector?` `text?` `url?` `js?`(至少一个) | `{ pass, checks[] }` | – 豁免 | 一次断言多件事,逐条给证据;"点到了"和"表单接受了"是两回事,重试前应先断言 |
+| `dsh_browser_dialog` | `policy?`(native/accept/dismiss), `limit?` | `{ policy, dialogs[] }` | ✅ | 默认保留网页原生弹窗；显式选择 accept 或 dismiss 后记录并自动应答 alert/confirm/prompt，选择 native 恢复原生处理 |
+| `dsh_browser_drag` | `fromX` `fromY` `toX` `toY`(必填), `steps?` | `{ ok, reason }` | ✅ | 通过 CDP 按下鼠标、按住移动并释放，操作滑块、排序列表、HTML5 拖放和画布。坐标使用当前视口的 CSS 像素，操作后可用 `assert` 核对控件值、顺序或页面结果 |
+| `dsh_browser_hover` | `target`(必填), `settleMs?` | `{ hovered, at }` | ✅ | 将浏览器指针移到目标中心，触发 CSS 悬停样式及鼠标事件。目标支持 `{by, value}`，可按 css、text 或 xpath 定位 |
+| `dsh_browser_doctor` | – | `{ report }` | – 豁免 | 自检:URL、进行中的请求数、静默时长、探针已装、三类缓冲各多少条、本任务被限制掉哪些工具 |
+| `dsh_browser_help` | `topic?` | `{ text }` | – 豁免 | 主题索引(locate/wait/batch/dialogs/network/verify/recovery/limits)或单篇正文 |
+
+`tap` 的 `target` 与 `click` 相同:一个字符串按可见文本匹配,或 `{by, value}`(`css`/`text`/`xpath`)。
 
 ## 页面与导航
 

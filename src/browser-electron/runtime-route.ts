@@ -1,11 +1,9 @@
 /**
  * The readiness endpoints the settings panel reads.
  *
- * Two of them, because the two questions have different weights: reading the state is a `GET` any
- * same-origin document may make, and starting a download is a `POST` held to the stricter admission
- * rule in `settings-route.ts`. No credential system exists here — that module's own comment says
- * what the rule buys — but a request that STARTS a 100 MB download is on the wrong side of the same
- * line the settings write is on, so it is checked the way a write is.
+ * The host authenticates both routes with its signed browser-session cookie. The read returns
+ * readiness, while a POST starts runtime preparation and also passes the settings write-origin
+ * checks.
  *
  * Both answer with the whole report rather than a delta: the panel replaces what it shows with what
  * it is told, so a stale poll can never leave a wrong state on screen.

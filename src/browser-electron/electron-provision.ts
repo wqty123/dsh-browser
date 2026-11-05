@@ -94,7 +94,7 @@ export interface ProvisionDeps {
   /** The installed electron package's own installer script, or undefined when it is not there. */
   readonly installerScript: () => string | undefined
   /** Runs the installer; resolves to an exit code, or rejects/returns null on failure. */
-  readonly run: (script: string) => Promise<{ code: number | null; detail?: string }>
+  readonly run: (script: string, signal?: AbortSignal) => Promise<{ code: number | null; detail?: string }>
   /** Where the outcome goes. */
   readonly log: (message: string) => void
   /** Opt-out honoured exactly like the install script honours it. */
@@ -150,21 +150,35 @@ function electronVersion(): string {
   }
 }
 
+let runningInstaller: Promise<{ code: number | null; detail?: string }> | undefined
+
 /** The real dependencies: this process's spawn, fs and logger. */
 export function defaultDeps(log: (message: string) => void = () => {}): ProvisionDeps {
   return {
     hasBinary: hasElectronRuntime,
     installerScript: electronInstallerScript,
-    run: async script => {
-      const child = spawn(process.execPath, [script], {
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-        stdio: ['ignore', 'ignore', 'ignore'],
-        windowsHide: true,
+    run: (script, signal) => {
+      if (runningInstaller !== undefined) return runningInstaller
+      const run = new Promise<{ code: number | null; detail?: string }>(resolve => {
+        const child = spawn(process.execPath, [script], {
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+          stdio: ['ignore', 'ignore', 'ignore'],
+          windowsHide: true,
+        })
+        let failure: string | undefined
+        const abort = (): void => { child.kill('SIGKILL') }
+        signal?.addEventListener('abort', abort, { once: true })
+        if (signal?.aborted) abort()
+        child.once('error', error => { failure = String(error) })
+        child.once('close', code => {
+          signal?.removeEventListener('abort', abort)
+          resolve({ code, detail: failure })
+        })
       })
-      return await new Promise(resolve => {
-        child.once('error', error => resolve({ code: null, detail: String(error) }))
-        child.once('close', code => resolve({ code, detail: undefined }))
-      })
+      runningInstaller = run
+      const clear = (): void => { if (runningInstaller === run) runningInstaller = undefined }
+      void run.then(clear, clear)
+      return run
     },
     log,
     skip: () => typeof process.env.ELECTRON_SKIP_BINARY_DOWNLOAD === 'string'
@@ -202,15 +216,19 @@ export async function ensureElectronRuntime(deps: ProvisionDeps = defaultDeps())
   // this path failed with "Promise resolution is still pending but the event loop has already
   // resolved". Keep it referenced, and clear it so a success does not leave a 180 s handle behind.
   let timer: ReturnType<typeof setTimeout> | undefined
+  const controller = new AbortController()
   const timeout = new Promise<{ code: number | null; detail: string }>(resolve => {
     timer = setTimeout(
-      () => resolve({ code: null, detail: `gave up after ${Math.round(deps.timeoutMs / 1000)}s` }),
+      () => {
+        controller.abort()
+        resolve({ code: null, detail: `gave up after ${Math.round(deps.timeoutMs / 1000)}s` })
+      },
       deps.timeoutMs,
     )
   })
   let outcome: { code: number | null; detail?: string }
   try {
-    outcome = await Promise.race([deps.run(script), timeout])
+    outcome = await Promise.race([deps.run(script, controller.signal), timeout])
   } catch (error) {
     return record({ status: 'failed', detail: `the download failed: ${String(error)}` })
   } finally {

@@ -130,10 +130,12 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
   // on a live install, and the kind of contradiction a reader cannot resolve.
   const snapshot = deps.provision()
   const runnable = deps.hasBinary()
-  const state: ElectronReadiness['state'] = runnable ? 'present' : snapshot.state
+  const missingAfterReady = !runnable && (snapshot.state === 'present' || snapshot.state === 'ready')
+  const state: ElectronReadiness['state'] = runnable ? 'present' : missingAfterReady ? 'failed' : snapshot.state
   const electron: ElectronReadiness = {
     state,
-    detail: runnable ? 'an Electron runtime is already available' : snapshot.detail,
+    detail: runnable ? 'an Electron runtime is already available'
+      : missingAfterReady ? 'the previously prepared Electron runtime is missing; prepare it again' : snapshot.detail,
     at: runnable ? new Date().toISOString() : snapshot.at,
   }
 

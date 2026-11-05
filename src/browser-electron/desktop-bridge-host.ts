@@ -49,6 +49,7 @@ export function bridgeEndpointPath(): string {
  * blank — losing the page the user had open.
  */
 const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
+const PANEL_INITIALIZING = 'panel-initializing'
 
 /**
  * How many times a display-state refusal is retried, and how long each retry waits.
@@ -71,12 +72,12 @@ const PANEL_DISPLAY_RETRY_MS = 400
  * this host retries while it renders — so reaching here means the shell did not render it at all.
  */
 export class BrowserPanelNotDisplayedError extends Error {
-  readonly code = PANEL_NOT_DISPLAYED
+  readonly code: string
 
   /**
    * @param detail - the bridge's own explanation, appended so the message says why.
    */
-  constructor(detail: string) {
+  constructor(detail: string, code = PANEL_NOT_DISPLAYED) {
     super(
       'dsh-builtin-browser: this conversation\'s sidebar page did not attach — the shell was asked to '
       + 'show this conversation and its panel still did not render. Nothing was lost, and the page '
@@ -84,6 +85,7 @@ export class BrowserPanelNotDisplayedError extends Error {
       + `(${detail})`,
     )
     this.name = 'BrowserPanelNotDisplayedError'
+    this.code = code
   }
 }
 
@@ -177,7 +179,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   /**
    * @param endpoint - the shell's published bridge endpoint.
    */
-  private constructor(endpoint: BridgeEndpoint, sessionId?: string) {
+  private constructor(endpoint: BridgeEndpoint, sessionId?: string, private readonly isQuiet: () => boolean = () => false) {
     this.owner = sessionId !== undefined && sessionId !== String.fromCharCode(39,39) ? sessionId : randomUUID()
     // The transport reaches this only by concluding the shell stopped refreshing its endpoint, which
     // is `shell-exited`.
@@ -212,7 +214,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    * caller falls back to self-hosting, which always works.
    * @returns the host, or undefined when no bridge is available.
    */
-  static async discover(sessionId?: string): Promise<DesktopBridgeViewHost | undefined> {
+  static async discover(sessionId?: string, isQuiet?: () => boolean): Promise<DesktopBridgeViewHost | undefined> {
     let endpoint: BridgeEndpoint
     try {
       const raw = JSON.parse(readFileSync(bridgeEndpointPath(), 'utf8')) as Partial<BridgeEndpoint>
@@ -246,7 +248,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
           DesktopBridgeViewHost.refuseIframe = true
           return undefined
         }
-        return new DesktopBridgeViewHost(endpoint, sessionId)
+        return new DesktopBridgeViewHost(endpoint, sessionId, isQuiet)
       } finally {
         probe.close()
       }
@@ -356,6 +358,9 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     // command. A guest that has gone away is detected by the command itself failing,
     // and `createView`'s sendCommand then discards the cache and calls back in here.
     if (entry?.guest !== undefined) return entry.guest
+    if (options?.initialize === false) {
+      throw new BrowserPanelNotDisplayedError('this view has no attached guest yet', PANEL_INITIALIZING)
+    }
 
     // The conversation THIS VIEW serves — read from the view, never from the process.
     //
@@ -373,7 +378,8 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     // It asks the bridge what this conversation ALREADY has and never enters the retry loop below —     // that loop is what asks the shell to display the conversation, which is right for a tool call
     // and wrong for "let me look at it". A page that is not on screen therefore reports as a display
     // state, and the preview route turns that into the panel's paused state.
-    if (options?.present === false) {
+    const quiet = this.isQuiet()
+    if (options?.present === false || quiet) {
       // `list` and NOT `ensureSidebar`. This is deliberate and it is the whole fix: every version of
       // `ensureSidebar` can drive the shell — the current one asks the renderer to display the
       // conversation, and the pre-#37 one literally pressed the sidebar shortcut and typed into the
@@ -385,14 +391,17 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
         ? listed.sidebar.filter(page => page !== null && typeof page === 'object' && page.type === 'webview')
         : []
       const wanted = url !== undefined && url !== '' ? url : undefined
-      const match = wanted === undefined
-        ? pages[0]
-        : pages.find(page => typeof page.url === 'string' && (page.url === wanted || page.url.startsWith(wanted))) ?? pages[0]
+      const matchedUrl = pages.find(page => wanted !== undefined && page.url === wanted)
+      const match = quiet && wanted !== undefined
+        ? matchedUrl
+        : pages.find(page => wanted !== undefined && typeof page.url === 'string' && page.url.startsWith(wanted)) ?? pages[0]
       const id = match !== undefined ? Number(match.id) : Number.NaN
       if (!Number.isFinite(id) || id <= 0) {
         throw new BrowserPanelNotDisplayedError(
-          'the preview asked for this conversation\'s page without presenting it, and no page is attached '
-          + `(the shell holds ${pages.length})`,
+          quiet
+            ? 'quiet mode will not open a sidebar or switch conversations; open this URL in the sidebar yourself or select the bundled browser for background work'
+            : 'the preview asked for this conversation\'s page without presenting it, and no page is attached '
+              + `(the shell holds ${pages.length})`,
         )
       }
       this.views.set(viewId, { guest: id, owner })
@@ -432,12 +441,15 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       // wording:
       //   panel-not-displayed -> the shell was asked to show the conversation (client half's
       //                          `openSession`) and did not render it in ~1.6 s: no loss, no swap.
-      //   produced no page    -> this shell cannot drive a panel at all (an iframe shell, issue #30);
-      //                          fall back, because otherwise every call fails forever.
+      // A missing guest within a time budget is still initialization, including on old bridges
+      // that only returned text. It is not evidence that this shell uses an undrivable iframe.
       const code = String(answer.code ?? '')
       const detail = String(answer.error)
       if (code === PANEL_NOT_DISPLAYED) throw new BrowserPanelNotDisplayedError(detail)
-      if (detail.includes('produced no page')) this.reportLost('panel-unusable')
+      if (code === PANEL_INITIALIZING || (code === '' && detail.includes('produced no page'))) {
+        throw new BrowserPanelNotDisplayedError(detail, PANEL_INITIALIZING)
+      }
+      if (code === 'panel-unusable') this.reportLost('panel-unusable')
       throw new Error(`dsh-builtin-browser: sidebar unavailable (${detail})`)
     }
     const id = Number(answer.id)
@@ -514,7 +526,13 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    * it must not fail the navigation that has already happened.
    * @param handle - the view to bring forward.
    */
-  showView(handle: ElectronViewHandle): void {
+  showView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean }): void {
+    // Quiet mode (`ui.quiet`) means "do not take my screen". On this carrier showing a page means
+    // asking the shell to switch the displayed conversation — precisely the takeover the switch
+    // forbids. So honour it by asking for nothing: a page that is already displayed keeps working,
+    // and one that is not fails with the documented display-state error instead of moving the
+    // user's view. Measured before this: the setting was on and every call still switched.
+    if (options?.quiet === true) return
     // `owner` is required: the bridge refuses to bring forward a guest held by another session.
     // It comes from the view, not the process — with several conversations live, a process-wide
     // owner would raise the wrong conversation's tab.

@@ -124,6 +124,23 @@ export interface BrowserSettings {
     /** Write cookies — importing login state (`dsh_browser_auth` restore). */
     readonly allowCredentialWrite: boolean
   }
+  /**
+   * Where a downloaded file goes after it lands on disk.
+   *
+   * An ATTRIBUTE of a download, not a new concept: an empty `tool` means the behaviour is exactly
+   * what it was before this existed. The user owns the field, can point it at any MCP tool that
+   * takes a path (Feishu drive, Baidu Netdisk), and can empty it again at any time.
+   */
+  readonly delivery: {
+    /** MCP tool that receives the saved file. Empty = save locally and stop there. */
+    readonly tool: string
+    /** Flat argument template; {path}, {name} and {size} are substituted into string values. */
+    readonly args: Readonly<Record<string, string>>
+    /** `keep-local` reports both outcomes; `stop` reports the handoff failure as the result. */
+    readonly onFail: 'keep-local' | 'stop'
+    /** Per-site override: page host → tool name. */
+    readonly sites: Readonly<Record<string, string>>
+  }
 }
 
 /** Defaults for every switch: the documented out-of-the-box behaviour. */
@@ -141,6 +158,9 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   // content, so watching is an explicit decision rather than something a remote client can arrange.
   remoteView: { enabled: false },
   actions: { allowExecute: true, allowDownload: true, allowCredentialWrite: true },
+  // Local by default: the file lands in downloadDir and nothing leaves the machine until the user
+  // names a tool here. {file_path} is the argument name both Feishu's and Netdisk's upload tools use.
+  delivery: { tool: '', args: { file_path: '{path}' }, onFail: 'keep-local', sites: {} },
 }
 
 /**
@@ -299,6 +319,17 @@ export function resolveSettings(raw: unknown, warn?: (message: string) => void):
   const browser = section(source, 'browser')
   const actions = section(source, 'actions')
   const remoteView = section(source, 'remoteView')
+  // Read defensively: this section is hand-editable, and a bad value must fall back to "local only"
+  // rather than fail the whole document.
+  const deliverySection = (section(source, 'delivery') ?? {}) as { tool?: unknown; args?: unknown; onFail?: unknown; sites?: unknown }
+  const strings = (value: unknown, fallback: Record<string, string>): Record<string, string> => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return { ...fallback }
+    const out: Record<string, string> = {}
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof entry === 'string') out[key] = entry
+    }
+    return Object.keys(out).length === 0 ? { ...fallback } : out
+  }
   // A section that is present but unreadable refuses its gates rather than defaulting them
   // open. The rest of a broken section keeps its defaults: refusing history or presentation
   // would punish the user for a bad file without protecting anything.
@@ -350,6 +381,14 @@ export function resolveSettings(raw: unknown, warn?: (message: string) => void):
       enabled: remoteView === undefined
         ? false
         : gate((remoteView as { enabled?: unknown }).enabled, false),
+    },
+    delivery: {
+      tool: typeof deliverySection.tool === 'string' && /^[A-Za-z0-9_.-]+$/.test(deliverySection.tool)
+        ? deliverySection.tool
+        : '',
+      args: strings(deliverySection.args, DEFAULT_SETTINGS.delivery.args),
+      onFail: deliverySection.onFail === 'stop' ? 'stop' : 'keep-local',
+      sites: strings(deliverySection.sites, {}),
     },
   }
 }

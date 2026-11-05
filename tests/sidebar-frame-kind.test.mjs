@@ -47,7 +47,7 @@ test('an iframe panel is refused, and the other answers are not', () => {
     'and it does')
 })
 
-test('a panel that produces no page returns the surface to the self-hosted browser', () => {
+test('a panel requires explicit unusable evidence before carrier fallback', () => {
   // This is the half that makes the report's "worse than not installing it" true: the carrier was
   // switched to one that cannot work, and the failure repeated on every call until DSH restarted.
   // `onLost` is the mechanism that already returns the surface; it simply was not reachable from
@@ -61,7 +61,9 @@ test('a panel that produces no page returns the surface to the self-hosted brows
   // `panel-unusable`, not a bare reportLost(): the shell is alive and answered this very request, so
   // the fallback must not tell the user their desktop shell exited. That is what it did before this
   // reason existed, and a reporter read it as their shell having crashed.
-  assert.match(block, /this\.reportLost\('panel-unusable'\)/, 'and treated as an unusable PANEL, not an exited shell')
+  assert.match(block, /if \(code === 'panel-unusable'\) this\.reportLost\('panel-unusable'\)/, 'only explicit unusable evidence reports loss')
+  assert.match(block, /code === PANEL_INITIALIZING \|\| \(code === '' && detail\.includes\('produced no page'\)\)[\s\S]{0,130}throw new BrowserPanelNotDisplayedError\(detail, PANEL_INITIALIZING\)/,
+    'an initialization timeout remains recoverable')
 })
 
 test('a panel that is merely not displayed is not treated as loss', () => {
@@ -90,6 +92,6 @@ test('a panel that is merely not displayed is not treated as loss', () => {
   assert.match(host, /if \(error instanceof BrowserPanelNotDisplayedError\) return false/,
     'which the retry classifier refuses to treat as a vanished guest')
   // Nothing in that branch reports a loss.
-  const branch = block.slice(codeCheck, block.indexOf("if (detail.includes('produced no page'))"))
+  const branch = block.slice(codeCheck, block.indexOf("if (code === 'panel-unusable')"))
   assert.doesNotMatch(branch, /reportLost/, 'and nothing in it reports the carrier as lost')
 })

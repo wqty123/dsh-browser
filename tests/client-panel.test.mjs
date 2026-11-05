@@ -305,15 +305,50 @@ test('the bundle loads and registers the settings section', async () => {
   assert.equal(registration.spec.locale, 'settings.dsh-builtin-browser')
 })
 
+test('Chrome exposes profile controls while the bundled browser does not', async () => {
+  const bundled = await mount()
+  assert.equal(elements(bundled.tree).some(node => node.props?.labelKey === 'browser.profile'), false)
+  const chrome = await mount({ settings: { ...DEFAULT_SETTINGS, browser: { channel: 'chrome', headless: 'headless' } } })
+  const controls = elements(chrome.tree)
+  assert.equal(controls.find(node => node.props?.labelKey === 'browser.profile').props.checked, DEFAULT_SETTINGS.cookies.persist)
+  assert.equal(controls.find(node => node.props?.label === 'browser.headless').props.value, 'headless')
+})
+
+test('delivery validates drafts before saving all fields in one patch', async () => {
+  const { host, registration } = await mount({ render: false })
+  const form = await renderPanel(() => {
+    const tree = registration.Component()
+    const editor = elements(tree).find(node => node.type?.name === 'DeliverySettings')
+    return editor?.type(editor.props)
+  }, host)
+  const values = { tool: 'upload_file', args: '{"file":"{path}","size":1}', onFail: 'stop', sites: 'Example.com=upload_site' }
+  const event = { preventDefault() {}, currentTarget: { elements: { namedItem: name => ({ value: values[name] }) } } }
+  form.props.onSubmit(event)
+  assert.equal(host.calls.filter(call => call.init?.method === 'PUT').length, 0)
+  values.args = '{"file":"{path}"}'
+  form.props.onSubmit(event)
+  const [write] = host.calls.filter(call => call.init?.method === 'PUT')
+  assert.deepEqual(JSON.parse(write.init.body), {
+    delivery: { tool: 'upload_file', args: { file: '{path}' }, onFail: 'stop', sites: { 'example.com': 'upload_site' } },
+  })
+})
+
 test('the panel asks for the settings document and renders its sections', async () => {
   const { tree, host } = await mount()
   const reads = host.calls.filter(call => (call.init?.method ?? 'GET') === 'GET')
   assert.equal(reads.length, 1, 'it loaded the settings exactly once')
   assert.equal(reads[0].url, ROUTE)
   const keys = elements(tree).map(element => element.props.labelKey ?? element.props.titleKey ?? element.props.key).filter(Boolean)
-  for (const section of ['history.title', 'cookies.title', 'ui.title', 'vision.title', 'browser.title', 'actions.title', 'credentials.title']) {
-    assert.ok(keys.includes(section), `the panel renders the "${section}" section`)
+  for (const key of ['browser.channel', 'ui.title', 'actions.title', 'remoteView.enabled']) {
+    assert.ok(keys.includes(key), `the panel renders "${key}"`)
   }
+  const advanced = elements(tree).find(node => node.type === 'details' && node.props.key === 'advanced')
+  assert.ok(advanced)
+  assert.equal(advanced.props.open, undefined)
+  const advancedKeys = elements(advanced).map(node => node.props.labelKey ?? node.props.key)
+  assert.ok(advancedKeys.includes('history.enabled'))
+  assert.ok(advancedKeys.includes('vision.strategy'))
+  assert.ok(advancedKeys.includes('delivery.title'))
 })
 
 test('the three action switches render, bound to the settings that back them', async () => {
@@ -953,6 +988,110 @@ test('an already expanded column is focused but never folded', async () => {
   assert.deepEqual(state.focusCalls, ['tab:browser'])
 })
 
+test('a newly placed browser tab is focused by id and reused while its guest attaches', async () => {
+  const held = [{ id: 'old-blank', kind: 'browser' }]
+  const focused = []
+  let opened = 0
+  const { panel } = await mount({
+    document: documentWith(makeStrip('session-a')),
+    sidebarRight: {
+      screen: () => ({ sessionId: 'session-a' }),
+      tabsIn: () => held,
+      openTabIn: (_session, kind) => {
+        opened += 1
+        held.push({ id: 'requested-page', kind })
+      },
+      focus: id => focused.push(id),
+    },
+  })
+  const first = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(first.tabId, 'requested-page')
+  assert.equal(first.focused, 'requested-page')
+  const second = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(second.created, false)
+  assert.equal(second.tabId, 'requested-page')
+  assert.equal(opened, 1, 'a second initialization read does not create another browser tab')
+  assert.deepEqual(focused, ['requested-page', 'requested-page'])
+})
+
+test('deduplicated browser tabs match the requested URL rather than list order', async () => {
+  const focused = []
+  const held = [
+    { id: 'first-blank', kind: 'browser', params: { url: '' } },
+    { id: 'target', kind: 'browser', params: { url: 'https://example.com/' } },
+    { id: 'last-unrelated', kind: 'browser', params: { url: 'https://other.example/' } },
+  ]
+  const { panel } = await mount({
+    document: documentWith(makeStrip('session-a')),
+    sidebarRight: {
+      screen: () => ({ sessionId: 'session-a' }),
+      tabsIn: () => held,
+      openTabIn() {},
+      focus: id => focused.push(id),
+    },
+  })
+  const result = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(result.tabId, 'target')
+  assert.deepEqual(focused, ['target'])
+})
+
+test('ambiguous browser tabs are left to the shell instead of guessing the first or last', async () => {
+  const focused = []
+  const { panel } = await mount({
+    document: documentWith(makeStrip('session-a')),
+    sidebarRight: {
+      screen: () => ({ sessionId: 'session-a' }),
+      tabsIn: () => [{ id: 'first', kind: 'browser' }, { id: 'last', kind: 'browser' }],
+      openTabIn() {},
+      focus: id => focused.push(id),
+    },
+  })
+  const result = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(result.ok, false)
+  assert.match(result.reason, /which browser tab/)
+  assert.equal(result.focused, undefined)
+  assert.equal(result.tabId, undefined)
+  assert.deepEqual(focused, [])
+})
+
+test('panel guest polling with an intended tab id cannot return another browser tab', async () => {
+  const fixture = rc5Tree()
+  const { panel } = await mount({ document: fixture.document })
+  assert.equal(panel.panelGuest('session-a', 'tab2').guestId, 12)
+  assert.equal(panel.panelGuest('session-a', 'not-attached').guestId, null)
+  assert.equal(panel.panelGuest('session-b', 'tab2').guestId, null)
+  assert.equal(panel.panelGuest('session-a').guestId, 11, 'the legacy read still follows the drawn page')
+})
+
+test('a late guest on the old blank tab cannot satisfy a pending target placement', async () => {
+  const fixture = rc5Tree()
+  const [oldView, targetView] = fixture.ownPanel.querySelectorAll('webview')
+  oldView.getWebContentsId = () => 0
+  targetView.getWebContentsId = () => 0
+  const held = [{ id: 'tab1', kind: 'browser' }]
+  const focused = []
+  let opened = 0
+  const { panel } = await mount({
+    document: fixture.document,
+    sidebarRight: {
+      screen: () => ({ sessionId: 'session-a' }),
+      tabsIn: () => held,
+      openTabIn: () => { opened += 1; held.push({ id: 'tab2', kind: 'browser' }) },
+      focus: id => focused.push(id),
+    },
+  })
+  assert.equal(panel.openPanel('session-a', 'https://example.com/').tabId, 'tab2')
+  oldView.getWebContentsId = () => 11
+  const retry = panel.openPanel('session-a', 'https://example.com/')
+  assert.equal(retry.guestId, null)
+  assert.equal(retry.tabId, 'tab2')
+  assert.equal(opened, 1)
+  assert.deepEqual(focused, ['tab2', 'tab2'])
+  assert.equal(panel.panelGuest('session-a', 'tab2').guestId, null)
+  targetView.getWebContentsId = () => 12
+  assert.equal(panel.panelGuest('session-a', 'tab2').guestId, 12)
+})
+
 test('a conversation the shell is not showing never moves the column a human is reading', async () => {
   // `toggleExpanded` acts on the ON-SCREEN session, so a request from a background conversation that
   // called it would fold the panel of the conversation the human IS reading. `screen()` is what
@@ -1389,7 +1528,7 @@ test('while a download runs there is no second one on offer', async () => {
   const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
   const labels = elements(tree).filter(node => node.type === 'button').map(button => textOf(button).join(''))
   assert.equal(labels.includes('readiness.prepare'), false, 'no second download on offer')
-  assert.ok(labels.includes('readiness.preparing'), 'and the control says what is happening')
+  assert.ok(textOf(tree).includes('readiness.preparing'), 'and the panel says what is happening')
 })
 
 test('pressing prepare posts to the provisioning route', async () => {

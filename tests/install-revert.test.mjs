@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 // desktop-bridge/install.mjs, from #31.
 //
 // The reported defect is not visible in a unit test of the decision logic: what has to hold is that
@@ -17,7 +18,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const repo = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+const repo = fileURLToPath(new URL('..', import.meta.url))
 const script = join(repo, 'desktop-bridge', 'install.mjs')
 
 /** A minimal but structurally valid desktop install. */

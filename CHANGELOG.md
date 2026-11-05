@@ -2,6 +2,82 @@
 
 本文件记录各轮功能开发与问题修复(由仓库外独立文档迁入,随仓库管理)。
 
+## 未发布 · 0.5.6 之后的工具补充（2026-11-05）
+
+### 侧栏首次导航与延迟初始化（#47）
+
+- 导航前的文档探测只读取当前 handle 已附着的 guest，首次导航直接使用带 URL 的初始化预算。
+- guest 在预算内尚未出现时返回 `panel-initializing`，保留连接、会话和原始错误；guest 稍后出现后可重试。旧 bridge 的 `produced no page` 回复也按此方式处理。
+- 创建浏览器标签后记录对应的标签 ID，展开、选中和后续 guest 轮询均定位到该标签。等待期间复用同一标签。
+- 显式 `panel-unusable` 继续触发载体切换。
+
+验证包含真实 Electron、真实 webview 与最小侧栏服务的隔离对照：原版 0.5.6 复现 `bridge closed`，修复版在 guest 延迟 5.5 秒附着后完成导航，guest 延迟 22 秒时仍可在首次预算耗尽后重试恢复。完整自动检查 578 项，577 通过、1 项因环境跳过。
+
+> 主题：**把工具面补齐**。读完 DSH 市场里 174 个 browser 类插件的代码后（`dsh-browser/04-`），缺的不是驱动能力，是**批量、观测、断言**这三类"用起来省"的工具。
+
+### 九个新工具，全部建立在一个页面探针上
+
+探针用 `execute` 注入页面（幂等、按版本覆盖），因此**三种载体行为一致**：自托管窗口、驱动中的 Chrome/Edge、桌面侧栏。没有改宿主、没有改桥协议——走 CDP 事件捕获要同时改三个载体和桥，而探针当天就能在所有载体上工作。
+
+| 新工具 | 解决什么 |
+| --- | --- |
+| `dsh_browser_do` | 一次调用跑一串步骤（open/tap/field/type/key/scroll/sleep_ms/wait_text/wait_gone/wait_url/wait_idle/eval/check），失败即停并指出第几步；等待基于条件；`tap` 被 cookie 横幅盖住时先关掉它 |
+| `dsh_browser_console` | 页面控制台最新若干行（按 level、可过滤、可清空） |
+| `dsh_browser_network` | fetch/XHR/资源计时行：方法、状态、地址、耗时；`onlyFailures` |
+| `dsh_browser_wait_for_response` | 等**本次调用之后**到达的响应——"提交到底有没有到服务器"，截图答不了 |
+| `dsh_browser_assert` | 一次断言 selector/text/url/js，逐条给证据 |
+| `dsh_browser_dialog` | alert/confirm/prompt 记录 + 自动应答（默认 dismiss），`confirm()` 不再冻住一次调用 |
+| `dsh_browser_drag` | 视口内拖拽（pointer+mouse 合成事件） |
+| `dsh_browser_doctor` | 自检：URL、在飞请求、静默时长、探针状态、本任务被限制掉哪些工具 |
+| `dsh_browser_help` | 主题索引（locate/wait/batch/dialogs/network/verify/recovery/limits） |
+
+命名踩到一次真实碰撞：断言工具最初叫 `dsh_browser_check`，与**表单勾选**的 `dsh_browser_check` 重名——宿主拒绝重复名，那条注册被静默跳过。改名 `dsh_browser_assert`，并把全部新名字补进 `restrict-policy` 的注册清单。
+
+### 边界写清楚
+
+- 探针看到的是**页面能看到的东西**：fetch/XHR 有状态码，资源计时行没有（记 0）；浏览器自己的弹窗（`beforeunload`、HTTP 认证、权限提示）不在覆盖范围
+- `drag` 是页面内合成手势，只认 `isTrusted` 的 canvas 页面仍用 `click_sequence` 的坐标点击
+- `do` 的 `eval` 步骤仍然过 `execute` 的设置门控（模型打不开）
+
+### 测试
+
+`tests/page-probe.test.mjs`（10 条，真跑探针）：二次安装保留缓冲、fetch 状态与拒绝透传、弹窗按策略应答、settle/clear、find 命中与未命中、overlayAt 的"挡路者 + 关闭键"、无探针时返回错误、拖拽事件顺序。全量 510 → 520，`tsc` 干净。
+
+### 桥：从"给你一条命令"改成"面板里一个按钮"
+
+原来面板只把修复命令印出来，让用户自己去终端跑。这一步会**关闭并重启桌面端**，手工跑半个（cwd 不对、node 不对、路径带空格引号掉了）就会把外壳留在更难诊断的状态。
+
+- 新端点 `POST /dsh-builtin-browser/bridge-action`（`{action:"install"|"uninstall"}`），**按写操作准入**（`sameOrigin(request, true)`）：它会停掉外壳，不该和读取同一把尺子
+- 新模块 `bridge-install.ts`：只负责拼 `install.mjs <root> [--revert] --restart --yes` 并回收退出码，所有打补丁/备份/身份校验仍然在安装器里，和人工跑的是**同一个文件**
+- 就绪区按钮：`安装 / 修复桥`、`卸载桥`（已安装时出现），处理中提示"桌面端会自动关闭再打开"，完成后重读状态
+- 失败不吞：退出码与输出尾部一起回给面板，并附上可复现的完整命令行
+
+真机验证（未触发安装，避免关掉桌面端）：无浏览器头 POST → **403**；非法 action → **400** `action must be "install" or "uninstall"`；坏 JSON → **400** 带解析原因。测试 `tests/bridge-install.test.mjs` **6/6**：两种 argv、成功/失败/起不来的映射、超长输出只留尾部。
+
+### 交付：下载之后交给 MCP 工具（设置里由人决定）
+
+下载先落本地，再由用户在设置里指定的 MCP 工具接手（飞书 `lark_drive_upload`、百度网盘自己的上传工具）。**留空 = 与之前逐字相同**，行为零漂移。
+
+- 设置文档新增 `delivery`：`tool`（工具名，空=只存本地）、`args`（`{path}`/`{name}`/`{size}` 模板）、`onFail`（`keep-local` / `stop`）、`sites`（按 host 覆盖）
+- 面板新增「交付」一节：工具名、参数模板、失败策略、站点覆盖，中英文案随语言切换
+- 失败语义写死：远程失败时**本地路径与远程错误同时报**；`stop` 则整体报错并写明"已存到哪"；工具名写错不会静默降级
+- 工具名走 `/^[A-Za-z0-9_.-]+$/` 校验，`args`/`sites` 只收字符串映射——手改配置写坏不会把整份文档顶掉
+
+测试 `tests/delivery.test.mjs`（5 条）：留空零漂移、填了就交且两边都报、远程失败保留本地并说明、`stop` 报错带本地路径、站点覆盖优先于默认。全量 **520 → 525**。
+
+### 再补四个工具 + 一个 skill 层
+
+| 新工具 | 说明 |
+| --- | --- |
+| `dsh_browser_upload` | 把**工作区内**的本地文件塞进 `input[type=file]`：Node 侧读字节 → base64 → 页面里重建 `File` + `DataTransfer` → 触发 input/change。20 MB 上限，超限直接拒（不截断）；工作区外的路径一律拒绝 |
+| `dsh_browser_hover` | 悬停让菜单/tooltip 出现（JS 驱动的菜单会开；纯 CSS `:hover` 需要真实指针） |
+| `dsh_browser_find` | 页内查找（Ctrl+F 等价），返回片段与视口坐标 |
+| `dsh_browser_state` | 一次调用回答"现在屏幕上是什么"：URL/标题/加载态/在飞请求/静默时长/输入框·按钮·链接数量/滚动/选区/前 400 字 |
+
+**skill 层**：`skills/dsh-builtin-browser/SKILL.md` + `references/{locate,batch,verify,recover}.md`——对标 BrowserSkill 那类"只带文档也值钱"的形态，把"什么时候用哪个工具、失败怎么退"写进按需加载的 skill，而不是只放在给人看的 docs 里。`package.json` 的 `files` 已带上 `skills`。
+
+`pdf` **没有做**：它需要 `Page.printToPDF` → 经过 provider 和三种载体，还要接上保存路径准入；工具层绕不过去。留作下一批的第一件。
+
 ## 0.5.6（2026-11-03）
 
 > 主题:**"装好即可用"变得可见、可修**。0.5.3 把 Electron 运行时下载从安装里搬到了首次需要时,这是对的(否则默认 pnpm 的 profile 直接装不上);代价是**新装后的头一分钟里,第一个浏览器调用可能撞上仍在进行的下载而失败,而这件事在界面上没有任何痕迹**——只有一行日志。这个版本把"现在能不能用"变成一个可读的状态,并给了唯一的那个修复按钮。

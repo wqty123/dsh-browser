@@ -36,11 +36,11 @@ export declare function bridgeEndpointPath(): string;
  * this host retries while it renders — so reaching here means the shell did not render it at all.
  */
 export declare class BrowserPanelNotDisplayedError extends Error {
-    readonly code = "panel-not-displayed";
+    readonly code: string;
     /**
      * @param detail - the bridge's own explanation, appended so the message says why.
      */
-    constructor(detail: string);
+    constructor(detail: string, code?: string);
 }
 /**
  * The desktop sidebar, presented as a browser view host.
@@ -51,6 +51,7 @@ export declare class BrowserPanelNotDisplayedError extends Error {
  * point is a single page both parties can see.
  */
 export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
+    private readonly isQuiet;
     private readonly connection;
     /**
      * One entry per view this host handed out: the conversation it serves, and the guest backing it.
@@ -134,7 +135,7 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * caller falls back to self-hosting, which always works.
      * @returns the host, or undefined when no bridge is available.
      */
-    static discover(sessionId?: string): Promise<DesktopBridgeViewHost | undefined>;
+    static discover(sessionId?: string, isQuiet?: () => boolean): Promise<DesktopBridgeViewHost | undefined>;
     /**
      * Whether the last discovery refused a bridge because its sidebar panel is an iframe.
      *
@@ -217,7 +218,9 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      * it must not fail the navigation that has already happened.
      * @param handle - the view to bring forward.
      */
-    showView(handle: ElectronViewHandle): void;
+    showView(handle: ElectronViewHandle, _label?: string, options?: {
+        readonly quiet?: boolean;
+    }): void;
     onUserAction(handler: (action: BrowserUserAction) => void): void;
     /**
      * Release the sidebar's browser pages (requirements 搂3, `ui.closeWithSession`).

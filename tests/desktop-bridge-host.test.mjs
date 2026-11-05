@@ -88,7 +88,7 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
               }
             }
             if (state.panelUnusable === true) {
-              return { ok: false, error: 'the sidebar produced no page for this conversation' }
+              return { ok: false, code: 'panel-unusable', error: state.panelUnusableDetail ?? 'the sidebar has no drivable webview capability' }
             }
             let id = 1
             while (state.dead.includes(id) && id < 50) id += 1
@@ -317,6 +317,50 @@ test('showView sends the materialized numeric guest instead of the UUID view id'
   }
 })
 
+test('quiet mode asks the sidebar for nothing, because showing it means switching the conversation', async () => {
+  // The reported symptom: `ui.quiet` was on and every call still pulled the shell over. On this
+  // carrier "show the page" IS "switch to that conversation", so the only faithful reading of the
+  // switch is to ask for nothing and let an undisplayed page fail with the documented display-state
+  // error instead of moving the user's view.
+  const bridge = await startFakeBridge({ tabs: 1, dead: [] })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a')
+    const view = host.createView('session-a')
+    await view.sendCommand('Runtime.evaluate', { expression: '1' })
+    host.showView(view, 'quiet', { quiet: true })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(bridge.requests.some(request => request.op === 'showTab'), false, 'no showTab was sent')
+    // And without the switch the same call still presents the page, so the quiet path is the only
+    // one that changed.
+    host.showView(view, 'loud')
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(bridge.requests.some(request => request.op === 'showTab'), true, 'a normal call still shows it')
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('quiet first navigation never opens or switches the sidebar', async () => {
+  const bridge = await startFakeBridge({ tabs: 1, dead: [] })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a', () => true)
+    const view = host.createView('session-b')
+    await assert.rejects(view.sendCommand('Page.navigate', { url: 'https://unopened.example/' }), /quiet mode/)
+    assert.equal(bridge.requests.some(request => request.op === 'ensureSidebar'), false)
+    assert.equal(bridge.requests.some(request => request.op === 'cdp'), false, 'an unrelated open page is left alone')
+    await view.sendCommand('Page.navigate', { url: 'https://page1.example/' })
+    assert.equal(bridge.requests.some(request => request.op === 'cdp' && request.id === 1), true)
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
 test('carrier page listing and closing carry the requesting conversation identity', async () => {
   const bridge = await startFakeBridge({ tabs: 2, dead: [] })
   withEndpoint(bridge.port)
@@ -386,6 +430,32 @@ test('a panel this shell can never drive still falls back', async () => {
     const view = host.createView('session-a')
     await assert.rejects(view.sendCommand('Page.navigate', { url: 'https://example.com/' }))
     assert.deepEqual(losses, ['panel-unusable'], 'an undrivable panel does fall back')
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('explicit unusable evidence takes precedence over legacy no-page wording', async () => {
+  const bridge = await startFakeBridge({
+    tabs: 1,
+    dead: [],
+    panelUnusable: true,
+    panelUnusableDetail: 'the sidebar produced no page because this shell has no drivable webview capability',
+  })
+  withEndpoint(bridge.port)
+  let host
+  const losses = []
+  try {
+    host = await DesktopBridgeViewHost.discover()
+    assert.ok(host !== undefined)
+    host.onLost(reason => losses.push(reason))
+    const view = host.createView('session-a')
+    await assert.rejects(
+      view.sendCommand('Page.navigate', { url: 'https://example.com/' }),
+      error => !(error instanceof BrowserPanelNotDisplayedError),
+    )
+    assert.deepEqual(losses, ['panel-unusable'])
   } finally {
     host?.dispose()
     await bridge.close()

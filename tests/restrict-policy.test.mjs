@@ -12,15 +12,19 @@ import { READ_ONLY_TOOLS } from '../lib/tool-browser/index.js'
 
 /** Every browser tool this plugin registers. */
 const REGISTERED = [
-  'dsh_browser_a11y', 'dsh_browser_auth', 'dsh_browser_back', 'dsh_browser_challenge',
+  'dsh_browser_a11y', 'dsh_browser_assert', 'dsh_browser_auth', 'dsh_browser_back', 'dsh_browser_challenge',
   'dsh_browser_check', 'dsh_browser_clear', 'dsh_browser_click', 'dsh_browser_close_tab',
-  'dsh_browser_content', 'dsh_browser_download', 'dsh_browser_execute', 'dsh_browser_fill',
-  'dsh_browser_forward', 'dsh_browser_get_value', 'dsh_browser_history', 'dsh_browser_key',
-  'dsh_browser_list_tabs', 'dsh_browser_open', 'dsh_browser_refresh', 'dsh_browser_replay',
-  'dsh_browser_reset', 'dsh_browser_reset_session', 'dsh_browser_restrict', 'dsh_browser_scrape',
-  'dsh_browser_screenshot', 'dsh_browser_scroll', 'dsh_browser_select', 'dsh_browser_session',
-  'dsh_browser_set_value', 'dsh_browser_snapshot', 'dsh_browser_switch_tab', 'dsh_browser_type',
-  'dsh_browser_visited', 'dsh_browser_wait',
+  'dsh_browser_console', 'dsh_browser_content', 'dsh_browser_dialog', 'dsh_browser_do',
+  'dsh_browser_doctor', 'dsh_browser_download', 'dsh_browser_drag', 'dsh_browser_execute',
+  'dsh_browser_fill', 'dsh_browser_find', 'dsh_browser_forward', 'dsh_browser_get_value',
+  'dsh_browser_help', 'dsh_browser_hover',
+  'dsh_browser_history', 'dsh_browser_key', 'dsh_browser_list_tabs', 'dsh_browser_network',
+  'dsh_browser_open', 'dsh_browser_refresh', 'dsh_browser_replay', 'dsh_browser_reset',
+  'dsh_browser_reset_session', 'dsh_browser_restrict', 'dsh_browser_scrape', 'dsh_browser_screenshot',
+  'dsh_browser_scroll', 'dsh_browser_select', 'dsh_browser_session', 'dsh_browser_set_value',
+  'dsh_browser_snapshot', 'dsh_browser_state', 'dsh_browser_switch_tab', 'dsh_browser_type',
+  'dsh_browser_upload', 'dsh_browser_visited',
+  'dsh_browser_wait', 'dsh_browser_wait_for_response',
 ]
 
 test('the read-only set contains only tools that exist', () => {

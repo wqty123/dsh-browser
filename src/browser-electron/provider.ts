@@ -7,6 +7,7 @@
  * @module dsh-browser/browser-electron
  */
 
+import { pageOperationScript } from '../tool-browser/page-probe.js'
 import { randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { writeFileNoReplace } from './file-write.js'
@@ -28,6 +29,7 @@ import type {
   BrowserContentResult,
   BrowserElementTarget,
   BrowserExecuteRequest,
+  BrowserPageOperationRequest,
   BrowserExecuteResult,
   BrowserFillRequest,
   BrowserFillResult,
@@ -346,7 +348,7 @@ export interface ElectronViewHandle {
    * Optional: an adapter that cannot focus a view omits it, and the provider
    * then behaves exactly as before.
    */
-  focus?(): Promise<void>
+  focus?(options?: PresentOptions): Promise<void>
   /**
    * Save a URL straight to disk, when the backing view can do that itself.
    *
@@ -644,6 +646,8 @@ export interface PresentOptions {
 export interface CommandOptions {
   /** Present the view first (default), or only use a page that is already there. */
   readonly present?: boolean
+  /** Only use a guest already attached to this handle, without sidebar initialization. */
+  readonly initialize?: boolean
 }
 
 /** Native capture options the self-hosted view handle understands. */
@@ -1165,7 +1169,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   private async documentProbe(handle: ElectronViewHandle): Promise<{ stamp: string; readyState: string } | null> {
     try {
       const result = await withTimeout(
-        handleSendEvaluate(handle, 'String(performance.timeOrigin) + "|" + document.readyState'),
+        handleSendEvaluate(handle, 'String(performance.timeOrigin) + "|" + document.readyState', undefined, { present: false, initialize: false }),
         3_000,
         undefined,
         'browser: document probe timed out',
@@ -1311,13 +1315,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
    */
   private async focusView(handle: ElectronViewHandle): Promise<void> {
     if (handle.focus === undefined) return
+    const quiet = this.isQuiet()
     try {
       // Bounded, unlike the rest of this call: the child RPC has no timeout of its own,
       // and this runs before typing, so an unresponsive child would hang dsh_browser_key for
       // good. A timeout is caught below exactly like any other focus failure, so the
       // best-effort contract is unchanged.
-      await withTimeout(handle.focus(), 5_000, undefined, 'browser: focusing the view timed out')
-    } catch {
+      await withTimeout(handle.focus(quiet ? { quiet } : undefined), 5_000, undefined, 'browser: focusing the view timed out')
+    } catch (error) {
+      if (quiet) throw error
       // Best-effort: a view that refuses focus must not fail the caller's key
       // press; the dispatch below reports a real channel failure itself.
     }
@@ -1326,6 +1332,81 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Execute JS in the active tab's page context. */
   async execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
     this.assertActionAllowed('execute')
+    return this.evaluatePage(session, request, signal)
+  }
+
+  /** Run a fixed browser operation; the request cannot contain a script. */
+  async pageOperation(session: BrowserSessionId, request: BrowserPageOperationRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
+    const script = pageOperationScript(request)
+    if (request.operation === 'drag') {
+      return this.dispatchPointer(session, request.from, request.to, request.steps, signal)
+    }
+    if (request.operation === 'probe' && request.method === 'hoverAt') {
+      const point = { x: Number(request.args?.[0]), y: Number(request.args?.[1]) }
+      return this.dispatchPointer(session, point, undefined, 1, signal)
+    }
+    return this.evaluatePage(session, { script }, signal)
+  }
+
+  /** Send page pointer input through CDP while preserving presentation and cancellation policy. */
+  private async dispatchPointer(
+    session: BrowserSessionId,
+    from: { readonly x: number; readonly y: number },
+    to: { readonly x: number; readonly y: number } | undefined,
+    steps: number,
+    signal?: AbortSignal,
+  ): Promise<BrowserExecuteResult> {
+    const coordinates = [from.x, from.y, ...to === undefined ? [] : [to.x, to.y]]
+    if (coordinates.some(value => !Number.isFinite(value) || value < 0)) {
+      throw new BrowserError('browser: pointer coordinates must be finite nonnegative viewport pixels', 'BROWSER_POINTER_INVALID')
+    }
+    if (to !== undefined && this.settingsSource?.().vision.strategy === 'nonVisual') {
+      throw new BrowserError('browser: coordinate dragging requires the visual strategy', 'BROWSER_NON_VISUAL_COORDINATES')
+    }
+    const s = this.session(session)
+    const handle = await this.present(s, signal)
+    const viewport = await withTimeout(
+      handleSendEvaluate(handle, '({width:innerWidth,height:innerHeight})'),
+      5_000, signal, 'browser: pointer viewport check timed out',
+    )
+    if (!viewport.ok) throw new BrowserError('browser: could not read the pointer viewport', 'BROWSER_POINTER_INVALID')
+    const size = viewport.value as { width: number; height: number }
+    if (from.x >= size.width || from.y >= size.height || (to !== undefined && (to.x >= size.width || to.y >= size.height))) {
+      return { ok: true, value: JSON.stringify(to === undefined ? false : { ok: false, reason: 'drag points must be inside the current viewport' }) }
+    }
+    const send = async (params: CdpMouseParams): Promise<void> => {
+      signal?.throwIfAborted()
+      this.assertSameView(session, handle, this.activeTab(s).handle)
+      await withTimeout(handle.sendCommand('Input.dispatchMouseEvent', { ...params }), 5_000, signal, 'browser: pointer input timed out')
+    }
+    await send({ type: 'mouseMoved', x: from.x, y: from.y, buttons: 0 })
+    if (to === undefined) return { ok: true, value: 'true' }
+    let at = from
+    let held = true
+    try {
+      await send({ type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1 })
+      const count = Math.max(1, Math.min(Math.trunc(steps) || 12, 60))
+      for (let step = 1; step <= count; step += 1) {
+        const next = { x: from.x + (to.x - from.x) * step / count, y: from.y + (to.y - from.y) * step / count }
+        await send({ type: 'mouseMoved', ...next, button: 'left', buttons: 1 })
+        at = next
+      }
+      // Native HTML drag targets need a final drag-over before releasing at the destination.
+      await send({ type: 'mouseMoved', ...to, button: 'left', buttons: 1 })
+      await send({ type: 'mouseReleased', ...to, button: 'left', buttons: 0, clickCount: 1 })
+      held = false
+      return { ok: true, value: JSON.stringify({ ok: true, moved: count, at: to }) }
+    } finally {
+      if (held) {
+        await withTimeout(
+          handle.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', buttons: 0, clickCount: 1 }),
+          1_000, undefined, 'browser: pointer release timed out',
+        ).catch(() => {})
+      }
+    }
+  }
+
+  private async evaluatePage(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
     const s = this.session(session)
     const { handle } = this.activeTab(s)
     signal?.throwIfAborted()
@@ -3821,7 +3902,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * silently desynchronising the two and failing every screenshot.
    */
   private showActive(s: Session): void {
-    this.host.showView?.(this.activeTab(s).handle, s.label, { quiet: this.isQuiet() })
+    const quiet = this.isQuiet()
+    this.host.showView?.(this.activeTab(s).handle, s.label, { quiet })
+    if (quiet) return
     const autoExpand = this.settingsSource === undefined || this.settingsSource().ui.autoExpandOnce
     if (autoExpand) return
     // Best effort: a carrier that owns no presentation (self-hosted) simply has none.
@@ -3989,13 +4072,14 @@ async function handleSendEvaluate(
   handle: ElectronViewHandle,
   expression: string,
   signal?: AbortSignal,
+  options?: CommandOptions,
 ): Promise<BrowserExecuteResult> {
   signal?.throwIfAborted()
   const result = await handle.sendCommand(CDP_RUNTIME_EVALUATE, {
     expression,
     returnByValue: true,
     awaitPromise: true,
-  } satisfies CdpEvaluateParams)
+  } satisfies CdpEvaluateParams, options)
   if (result.exceptionDetails !== undefined) {
     const detail = result.exceptionDetails as { text?: string; exception?: { description?: string } }
     return { ok: false, exception: detail.exception?.description ?? detail.text ?? 'unknown exception' }
