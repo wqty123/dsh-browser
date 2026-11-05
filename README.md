@@ -12,18 +12,25 @@
 
 让 DSH 在内置浏览器、桌面侧栏或本机 Chrome、Edge 中打开网页、读取内容、填写表单和下载文件。每个任务有自己的标签页和操作记录。使用可见窗口或桌面侧栏时，你可以接手 Agent 正在操作的页面。
 
-本页功能清单对应 **0.5.7**（适配 DSH 0.2.2-alpha.3：插件路由走宿主会话鉴权）。[更新记录](CHANGELOG.md)
+本页功能清单对应 **0.5.7**。[更新记录](CHANGELOG.md)
 
 ## 安装
 
-桌面端和 Web 端使用各自的插件配置。按你使用的端执行对应命令。
+插件在两端各装一份，**互不连带**：更新其中一端不会更新另一端。
+
+| | 桌面端（DeepSeek Harness 桌面应用） | Web 端（`dsh web`） |
+| --- | --- | --- |
+| 插件配置 | `desktop` | `web`（或你实际使用的 profile） |
+| 可用于的载体 | 内置浏览器、DSH 侧栏、本机 Chrome / Edge | 内置浏览器、本机 Chrome / Edge |
+| 侧栏桥 | 需要，装在桌面端的安装目录里 | 不需要，Web 端没有侧栏 |
+| 更新之后 | 重启桌面端；**桌面端升级过还要重装一次桥** | 重启 `dsh web` 即可 |
 
 ~~~sh
-dsh plugin --profile desktop add dsh-builtin-browser
-dsh plugin --profile web add dsh-builtin-browser
+dsh plugin --profile desktop add dsh-builtin-browser   # 桌面端
+dsh plugin --profile web add dsh-builtin-browser       # Web 端
 ~~~
 
-更新时，先在对应配置下执行 `dsh plugin --profile <profile> remove dsh-builtin-browser`，再执行该端的安装命令。将 `<profile>` 替换为 `desktop` 或 `web`。
+已装过时先移除再安装：`dsh plugin --profile <profile> remove dsh-builtin-browser`（DSH 0.2.1-alpha.2 起，对已安装的包直接再装会失败）。
 
 安装后，可以在 DSH 会话里试用下面的任务。
 
@@ -89,13 +96,6 @@ node desktop-bridge/install.mjs "<DSH Desktop 安装目录>" --restart
 | 管理会话 | `session` `reset` `reset_session` `restrict` `auth` |
 | 查看记录 | `history` `visited` `replay` |
 | 排查问题与查用法 | `doctor` `help` |
-
-### 新增工具怎么用
-
-- 用 `do` 按顺序打开网页、填表、点击和等待。执行失败时返回停止的步骤。用 `assert` 核对页面文本、元素、地址或脚本条件。
-- 用 `state` 查看地址、标题、加载状态和可见文本，用 `find` 找到文字及其位置。用 `console` 和 `network` 查看控制台消息与网络记录，用 `wait_for_response` 匹配指定地址的响应。
-- 用 `upload` 将本地文件填入网页的文件选择框，用 `hover` 展开悬停菜单，用 `drag` 操作滑块、排序列表、拖放区域和画布。悬停和拖拽通过浏览器输入通道发送。内置浏览器的 `download` 可使用当前会话的 Cookie 保存文件。
-- 用 `dialog` 查看页面脚本弹窗并设置应答方式，用 `doctor` 查看当前页面及工具状态，用 `help` 查询各类操作的用法。
 
 ## 文档
 

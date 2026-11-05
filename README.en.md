@@ -12,18 +12,25 @@
 
 Use DSH to open pages, read content, fill forms, and download files in the bundled browser, the desktop sidebar, or a local installation of Chrome or Edge. Each task has its own tabs and action history. In a visible window or the desktop sidebar, you can take over the page the agent is using.
 
-This feature list matches **0.5.7** (compatible with DSH 0.2.2-alpha.3: plugin routes go through the host session auth). [Changelog](CHANGELOG.md)
+This feature list matches **0.5.7**. [Changelog](CHANGELOG.md)
 
 ## Install
 
-Desktop and Web use separate plugin profiles. Run the command for the profile you use.
+The plugin is installed once per end, and the two are **independent**: updating one does not update the other.
+
+| | Desktop (the DeepSeek Harness app) | Web (`dsh web`) |
+| --- | --- | --- |
+| Plugin profile | `desktop` | `web` (or whichever profile you use) |
+| Carriers available | Bundled browser, DSH sidebar, local Chrome / Edge | Bundled browser, local Chrome / Edge |
+| Sidebar bridge | Required, installed into the desktop app's directory | Not needed — there is no sidebar in the web shell |
+| After an update | Restart the desktop app; **if the desktop app itself was updated, reinstall the bridge** | Restart `dsh web` |
 
 ~~~sh
-dsh plugin --profile desktop add dsh-builtin-browser
-dsh plugin --profile web add dsh-builtin-browser
+dsh plugin --profile desktop add dsh-builtin-browser   # desktop
+dsh plugin --profile web add dsh-builtin-browser       # web
 ~~~
 
-To update, run `dsh plugin --profile <profile> remove dsh-builtin-browser`, then run the install command for the same profile. Replace `<profile>` with `desktop` or `web`.
+If it is already installed, remove it first: `dsh plugin --profile <profile> remove dsh-builtin-browser` (since DSH 0.2.1-alpha.2, installing over an installed package fails).
 
 After installation, try this task in DSH.
 
@@ -89,13 +96,6 @@ The current source registers 48 tools. The table lists their names after the `ds
 | Manage sessions | `session` `reset` `reset_session` `restrict` `auth` |
 | Review records | `history` `visited` `replay` |
 | Diagnose issues and find help | `doctor` `help` |
-
-### Use the new tools
-
-- Use `do` to open a page, fill fields, click, and wait in one call. It reports the step where execution stopped on failure. Use `assert` to verify page text, elements, the URL, or a script condition.
-- Use `state` to read the URL, title, load state, and visible text, and `find` to locate text. Use `console` and `network` to inspect messages and requests, and `wait_for_response` to match a response by URL.
-- Use `upload` to fill a file input, `hover` to open hover menus, and `drag` to operate sliders, sortable lists, drop targets, and canvases. Hover and drag use the browser's input channel. The bundled browser can use the current session's cookies to save a file with `download`.
-- Use `dialog` to inspect page-script dialogs and select how to answer them, `doctor` for the current page and tool status, and `help` for usage by topic.
 
 ## Documentation
 
