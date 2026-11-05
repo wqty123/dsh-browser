@@ -14,22 +14,50 @@ Use DSH to open pages, read content, fill forms, and download files in the bundl
 
 This feature list matches **0.5.7** (compatible with DSH 0.2.2-alpha.3: plugin routes go through the host session auth). [Changelog](CHANGELOG.md)
 
-## Install
+## Quick start
 
-Desktop and Web use separate plugin profiles. Run the command for the profile you use.
+**First, which side are you on** — these are two separate installs; updating one does not update the other, and they host the browser differently.
 
-~~~sh
+> **Updating an installed plugin takes two steps** (since DSH 0.2.1-alpha.2, installing over an installed package fails outright with `already-installed`): run `dsh plugin --profile <profile> remove dsh-builtin-browser` first, then `add` the target version. See the [user guide](docs/user-guide.md) (Chinese).
+
+### DSH Desktop
+
+```sh
 dsh plugin --profile desktop add dsh-builtin-browser
+```
+
+When the desktop shell provides a controllable `<webview>` and the bridge is installed, the plugin drives the **official side panel**: the agent operates the very page you see. Otherwise it falls back to the plugin's own Electron window.
+
+Driving that panel also needs a bridge, installed into **the desktop app's own install directory** rather than the profile:
+
+**Since 0.5.0 this is one step.** The script closes DSH itself — installing while it runs fails with EBUSY on the archive, and a process that waits for the exit is carried away with it:
+
+```sh
+desktop-bridge/install-and-start.cmd          # Windows, double-click or run
+node desktop-bridge/install.mjs "<dir>" --restart   # any platform
+```
+
+> **The bridge is optional**: without it, the plugin uses a standalone window. **Reinstall the bridge with the new script after plugin or desktop shell upgrades** — a desktop update restores `app.asar`, the bridge goes stale, and `bridge-status` reports `stale`. The state is visible at the top of the panel. See [carrier limitations](docs/limitations.md) (Chinese).
+
+### Web (`dsh web`)
+
+```sh
 dsh plugin --profile web add dsh-builtin-browser
-~~~
+```
 
-Each end is installed once and updating one does not update the other. To update, run `dsh plugin --profile <profile> remove dsh-builtin-browser`, then run the install command for the same profile. Replace `<profile>` with `desktop` or `web`.
+There is **no side panel and no bridge** on the web side: the shared browser is **self-hosted** in a standalone window (titled `dsh-browser`) with a full toolbar (address bar, back/forward/reload, tab strip) you can use like any browser.
 
-After installation, try this task in DSH.
+> Since 0.5.3 nothing is downloaded at install time and there is no `postinstall`: the runtime is prepared in the background on first need. Progress and retry live in **Settings → Browser** (use **Prepare the bundled browser** after a failure). To prepare it ahead of time (offline images, CI), run `npx --no dsh-browser-install-electron` from that profile directory (network required). See the [setup guide](docs/user-guide.md#准备-electron-二进制) (Chinese).
 
-> Open https://example.com and extract the page title and main content.
+### Both sides
 
-DSH prepares the Electron runtime for the bundled browser. Open **Settings → Browser** to check progress and use **Prepare the bundled browser** to retry a failed setup. To prepare Electron ahead of time, run `npx --no dsh-browser-install-electron` from the plugin profile directory. [User guide](docs/user-guide.md)
+Once installation is complete, ask the agent:
+
+```
+Open https://example.com and summarise the main content for me.
+```
+
+The browser window appears with the first call, and you can operate in it yourself at any point. **Either side can be pointed at your own installed Chrome / Edge** in settings — that option behaves identically on both.
 
 ## Choose a browser
 
@@ -40,7 +68,7 @@ DSH prepares the Electron runtime for the bundled browser. Open **Settings → B
 | Local Chrome / Edge | Launches the installed browser with a dedicated plugin profile. |
 | Automatic | Chooses based on the available local browsers and desktop sidebar. |
 
-To use the **DSH sidebar**, run the following from the plugin directory. The installer verifies the DSH Desktop installation, installs the bridge, and restarts the desktop app. After a desktop update, check **Settings → Browser → Diagnostics** and use the same command to repair the bridge.
+To use the **DSH sidebar**, click **Install bridge** in the local **Settings → Browser → Readiness** section. Use **Repair bridge** after a desktop update or **Reinstall bridge** when it is already installed. The installer verifies the installation, installs the bridge, and restarts DSH Desktop automatically. You can also run this from the plugin directory:
 
 ~~~sh
 node desktop-bridge/install.mjs "<DSH Desktop install directory>" --restart

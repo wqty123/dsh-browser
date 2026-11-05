@@ -14,22 +14,53 @@
 
 本页功能清单对应 **0.5.7**（适配 DSH 0.2.2-alpha.3：插件路由走宿主会话鉴权）。[更新记录](CHANGELOG.md)
 
-## 安装
+## 快速开始
 
-桌面端和 Web 端使用各自的插件配置。按你使用的端执行对应命令。
+**先确认你在哪一端** —— 两端是两份独立安装,**更新其中一端不会带上另一端**,浏览器的承载方式也不同。
 
-~~~sh
+> **更新已安装的插件是两步**(DSH 0.2.1-alpha.2 起,对已装包再装会直接报 `already-installed`):先 `dsh plugin --profile <profile> remove dsh-builtin-browser`,再 `add` 目标版本。详见[用户指南](docs/user-guide.md#先移除再安装)。
+
+### DSH Desktop(桌面端)
+
+```sh
 dsh plugin --profile desktop add dsh-builtin-browser
+```
+
+桌面端在外壳支持可驱动的 `<webview>` 且已安装 bridge 时,驱动**官方侧栏**里那个浏览器面板,agent 操作的就是你在界面上看到的同一页面。侧栏不可驱动时自动使用插件自己的 Electron 窗口。
+
+要让插件驱动侧栏,还需要一条 bridge(它装在**桌面端自己的安装目录**里,不在 profile 中)。**0.5.0 起可以一步完成**:
+
+```sh
+# Windows:双击即用,或
+desktop-bridge/install-and-start.cmd
+
+# 任意平台:脚本自己关闭 DSH、安装、再启动
+node desktop-bridge/install.mjs "<DSH Desktop 安装目录>" --restart
+```
+
+`--restart` 由脚本自己关闭桌面端 —— 不要在运行中手工安装:归档被运行中的 Electron 占用,`rename` 会以 `EBUSY` 失败,而"等它退出再装"的守护进程会被一起带走(实测两种拉起方式都如此)。`--restart` 会提示确认,`--yes` 跳过。不带 `--restart` 时脚本仍要求你先关闭桌面端。
+
+> **bridge 是可选项**:不装时自动退回自托管,多出一个独立窗口。**插件或桌面外壳升级后,重跑同一条命令即可修复** —— 桌面端升级会恢复 `app.asar`,桥随之失效,此时 `bridge-status` 报 `stale`。设置在面板顶部可见。载体差异见[已知限制](docs/limitations.md)。
+
+### Web 端(`dsh web`)
+
+```sh
 dsh plugin --profile web add dsh-builtin-browser
-~~~
+```
 
-两端各装一份，更新其中一端不会更新另一端。更新时，先在对应配置下执行 `dsh plugin --profile <profile> remove dsh-builtin-browser`，再执行该端的安装命令。将 `<profile>` 替换为 `desktop` 或 `web`。
+Web 端**没有侧栏,也没有 bridge**:共享浏览器由插件**自托管**拉起一个独立窗口(标题 `dsh-browser`),自带完整工具栏(地址栏 / 后退前进刷新 / 标签条),你可以像用普通浏览器一样直接用它。
 
-安装后，可以在 DSH 会话里试用下面的任务。
+> 0.5.3 起安装期不下载 Electron、也不带 `postinstall`:运行时要**首次需要时**在后台准备。查看进度和重试都在 **设置 → 浏览器**:准备失败时点「准备内置浏览器」;要在安装阶段提前备好(离线部署 / CI),在该 profile 目录执行 `npx --no dsh-browser-install-electron`(需网络)。详见[用户指南](docs/user-guide.md#准备-electron-二进制)。
 
-> 帮我打开 https://example.com，提取页面标题和主要内容。
+### 两端通用
 
-DSH 会准备内置浏览器所需的 Electron。打开 **设置 → 浏览器** 查看进度，准备失败时点击 **准备内置浏览器** 重试。需要提前准备时，可在对应的插件配置目录执行 `npx --no dsh-browser-install-electron`。[用户指南](docs/user-guide.md)
+完成安装后,直接让 agent 用它:
+
+```
+帮我打开 https://example.com，把页面上的主要内容用中文总结一下。
+```
+
+浏览器窗口会随第一次调用出现;你可以随时在那个窗口里自己操作,agent 会接着往下走。**两端都可以在设置里改用你本机已安装的 Chrome / Edge**,那是行为完全一致的选项。
 
 ## 选择浏览器
 
@@ -40,7 +71,7 @@ DSH 会准备内置浏览器所需的 Electron。打开 **设置 → 浏览器**
 | 本机 Chrome / Edge | 使用插件专用的浏览器配置启动本机 Chrome 或 Edge。 |
 | 自动 | 根据本机浏览器和桌面侧栏的可用情况选择。 |
 
-使用 **DSH 侧栏** 时，在插件目录运行下面的命令。安装器校验 DSH 安装目录，安装桥接组件后重启桌面端。桌面端升级后，可展开 **设置 → 浏览器 → 诊断** 查看桥接状态，并用同一条命令修复。
+使用 **DSH 侧栏** 时，在本机 **设置 → 浏览器 → 就绪状态** 点击 **安装桥接**。桌面端升级后可点击 **修复桥接**，已安装时可点击 **重新安装桥接**。安装器自动校验安装目录、安装桥接组件并重启桌面端。也可在插件目录运行：
 
 ~~~sh
 node desktop-bridge/install.mjs "<DSH Desktop 安装目录>" --restart
