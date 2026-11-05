@@ -181,13 +181,16 @@ test('discovery skips a foreign app even when its product directory is named lik
     writeFileSync(join(impostor, 'resources', 'app', 'lib', 'main.js'), MAIN_BODY)
     writeFileSync(join(impostor, 'resources', 'app', 'package.json'), JSON.stringify({ name: 'unrelated-meeting-app' }))
 
-    assert.equal(findDesktopInstall(base), undefined, 'a name-bearing product directory is not proof')
+    // The registry lookup is closed for this test: discovery also consults the machine's uninstall
+    // entries for a custom install (issue #44), and this fixture is about what is under `base`.
+    const noRegistry = () => []
+    assert.equal(findDesktopInstall(base, noRegistry), undefined, 'a name-bearing product directory is not proof')
 
     const real = join(base, 'Programs', 'DSH Desktop')
     mkdirSync(join(real, 'resources', 'app', 'lib'), { recursive: true })
     writeFileSync(join(real, 'resources', 'app', 'lib', 'main.js'), MAIN_BODY)
     writeFileSync(join(real, 'resources', 'app', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-desktop' }))
-    assert.equal(findDesktopInstall(base), real, 'and the real one is still found')
+    assert.equal(findDesktopInstall(base, noRegistry), real, 'and the real one is still found')
   } finally {
     rmSync(base, { recursive: true, force: true })
   }

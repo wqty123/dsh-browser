@@ -17,6 +17,23 @@ import { writeAsar } from './fake-asar.mjs'
 
 const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sidebar'
 
+/**
+ * The registry lookup a fixture wants: none.
+ *
+ * Issue #44 added custom-install discovery, which reads the machine's uninstall registry. A test
+ * that asserts "nothing matches" must not consult the machine it runs on — the developer's own DSH
+ * may well be installed somewhere, and the assertion would then depend on whose computer ran it.
+ */
+const noRegistry = () => []
+
+/**
+ * The conventional locations a fixture wants: none.
+ *
+ * The macOS/Linux counterpart of `noRegistry`, and for the same reason: on those platforms the
+ * conventional list is a real source, so a test of "what is under `base`" must close it too.
+ */
+const noConventions = () => []
+
 /** An install tree with the pieces a given state needs. */
 function makeInstall({ archive = false, patched = false, backup = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'dsh-bridge-status-'))
@@ -141,11 +158,11 @@ test('the install is found by identity, under either product name', () => {
       mkdirSync(join(root, 'resources', 'app', 'lib'), { recursive: true })
       writeFileSync(join(root, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
       writeFileSync(join(root, 'resources', 'app', 'package.json'), manifest)
-      assert.equal(findDesktopInstall(base), root, `${name} is found`)
+      assert.equal(findDesktopInstall(base, noRegistry, noConventions), root, `${name} is found`)
       // Remove it again so the next candidate is the one that matches.
       rmSync(root, { recursive: true, force: true })
     }
-    assert.equal(findDesktopInstall(base), undefined, 'and nothing matches when nothing is there')
+    assert.equal(findDesktopInstall(base, noRegistry, noConventions), undefined, 'and nothing matches when nothing is there')
 
     // The half that used to be wrong: the right shape with the wrong name is NOT an install.
     const impostor = join(base, 'Programs', 'DSH Desktop')
@@ -153,7 +170,7 @@ test('the install is found by identity, under either product name', () => {
     writeFileSync(join(impostor, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
     writeFileSync(join(impostor, 'resources', 'app', 'package.json'),
       JSON.stringify({ name: 'unrelated-meeting-app', main: 'lib/main.js' }))
-    assert.equal(findDesktopInstall(base), undefined, 'an Electron app is not DSH Desktop')
+    assert.equal(findDesktopInstall(base, noRegistry, noConventions), undefined, 'an Electron app is not DSH Desktop')
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
@@ -188,18 +205,18 @@ test('the endpoint answers with the reading, same-origin only', async () => {
       JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.1-rc.5', main: 'lib/main.js' }))
 
     const ok = response()
-    await handleBridgeStatus(request(), ok, base)
+    await handleBridgeStatus(request(), ok, base, noRegistry, noConventions)
     assert.equal(ok.recorded.status, 200)
     const payload = JSON.parse(String(ok.recorded.body))
     assert.equal(payload.ok, true)
     assert.equal(payload.bridge.state, 'installed')
 
     const foreign = response()
-    await handleBridgeStatus(request('GET', 'https://evil.example'), foreign, base)
+    await handleBridgeStatus(request('GET', 'https://evil.example'), foreign, base, noRegistry, noConventions)
     assert.equal(foreign.recorded.status, 403, 'a foreign origin learns nothing')
 
     const wrongMethod = response()
-    await handleBridgeStatus(request('POST'), wrongMethod, base)
+    await handleBridgeStatus(request('POST'), wrongMethod, base, noRegistry, noConventions)
     assert.equal(wrongMethod.recorded.status, 405)
   } finally {
     rmSync(base, { recursive: true, force: true })
@@ -210,12 +227,206 @@ test('no install at all is a state, not an error', async () => {
   const base = mkdtempSync(join(tmpdir(), 'dsh-lad-empty-'))
   try {
     const res = response()
-    await handleBridgeStatus(request(), res, base)
+    await handleBridgeStatus(request(), res, base, noRegistry, noConventions)
     assert.equal(res.recorded.status, 200, 'the panel still gets an answer')
     const payload = JSON.parse(String(res.recorded.body))
     assert.equal(payload.bridge.state, 'missing')
     assert.equal(payload.bridge.present, false)
     assert.match(payload.bridge.detail, /no DSH Desktop install/)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+// Issue #44: `%LOCALAPPDATA%\Programs` is where the Windows installer puts the app BY DEFAULT, not
+// where every install is. A tree moved to another drive is a good DSH Desktop that discovery used
+// to miss — and a miss is not cosmetic: the panel shows "no desktop on this machine" and the repair
+// command, the one thing that would fix a stale bridge, is never offered. Measured on an install at
+// `E:\Applications\DeepSeek Harness` after a stale unpacked directory was cleaned out of `Programs`.
+
+/** Run a body with DSH_DESKTOP_APP set to `value`, restoring the previous answer afterwards. */
+function withDesktopApp(value, body) {
+  const previous = process.env.DSH_DESKTOP_APP
+  if (value === undefined) delete process.env.DSH_DESKTOP_APP
+  else process.env.DSH_DESKTOP_APP = value
+  try {
+    return body()
+  } finally {
+    if (previous === undefined) delete process.env.DSH_DESKTOP_APP
+    else process.env.DSH_DESKTOP_APP = previous
+  }
+}
+
+/** An install tree at an arbitrary path, with the manifest identity needs. */
+function makeInstallAt(root, { patched = true } = {}) {
+  mkdirSync(join(root, 'resources', 'app', 'lib'), { recursive: true })
+  const body = `${patched ? `${MARKER} pages.\n` : ''}const app = {};\n\nexport {};\n`
+  writeFileSync(join(root, 'resources', 'app', 'lib', 'main.js'), body)
+  writeFileSync(join(root, 'resources', 'app', 'package.json'),
+    JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.1-rc.5', main: 'lib/main.js' }))
+  return root
+}
+
+test('an install outside Programs is found through DSH_DESKTOP_APP', () => {
+  // The reported case: the app lives on another drive, so nothing under Programs matches. The
+  // person can say where it is, and the same identity rule decides whether to believe them.
+  const base = mkdtempSync(join(tmpdir(), 'dsh-lad-elsewhere-'))
+  try {
+    const elsewhere = makeInstallAt(join(base, 'Other Drive', 'DeepSeek Harness'))
+    mkdirSync(join(base, 'Programs'), { recursive: true })
+
+    assert.equal(findDesktopInstall(base, noRegistry, noConventions), undefined, 'nothing under Programs is still nothing')
+    assert.equal(withDesktopApp(elsewhere, () => findDesktopInstall(base, noRegistry, noConventions)), elsewhere,
+      'the declared directory is found')
+    assert.equal(withDesktopApp(elsewhere, () => readBridgeStatus(elsewhere).state), 'installed',
+      'and it reads as the install it is, so the panel shows a state instead of "no desktop"')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('DSH_DESKTOP_APP is held to the identity rule, like every other candidate', () => {
+  // Accepting the declared path on trust would reopen exactly what issue #40 closed: any Electron
+  // app, named by the user or by a stale environment, reported as DSH Desktop together with a
+  // ready-to-run installer command aimed at it.
+  const base = mkdtempSync(join(tmpdir(), 'dsh-lad-impostor-'))
+  try {
+    mkdirSync(join(base, 'Programs'), { recursive: true })
+    const impostor = join(base, 'Unrelated App')
+    mkdirSync(join(impostor, 'resources', 'app', 'lib'), { recursive: true })
+    writeFileSync(join(impostor, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
+    writeFileSync(join(impostor, 'resources', 'app', 'package.json'),
+      JSON.stringify({ name: 'unrelated-meeting-app', main: 'lib/main.js' }))
+
+    assert.equal(withDesktopApp(impostor, () => findDesktopInstall(base, noRegistry, noConventions)), undefined,
+      'a directory that is not DSH Desktop is refused even when declared')
+    assert.equal(withDesktopApp(join(base, 'does-not-exist'), () => findDesktopInstall(base, noRegistry, noConventions)), undefined,
+      'and a stale declaration is not an error')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('the default Programs install still wins over a declaration', () => {
+  // Order matters: the default location must stay authoritative, so a leftover environment
+  // variable on a machine that HAS a normal install cannot silently retarget the panel.
+  const base = mkdtempSync(join(tmpdir(), 'dsh-lad-precedence-'))
+  try {
+    const conventional = makeInstallAt(join(base, 'Programs', 'DeepSeek Harness'))
+    const elsewhere = makeInstallAt(join(base, 'Other Drive', 'DeepSeek Harness'))
+    assert.equal(withDesktopApp(elsewhere, () => findDesktopInstall(base, noRegistry, noConventions)), conventional,
+      'the default location wins')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('an install outside Programs is found through the uninstall registry', () => {
+  // The half a user does not have to do anything for. The Windows installer records the directory
+  // it installed into; reading it back is how a custom install is found with no configuration at
+  // all. This is the exact shape measured in the report: nothing under Programs, an install on E:.
+  const base = mkdtempSync(join(tmpdir(), 'dsh-lad-registry-'))
+  try {
+    const elsewhere = makeInstallAt(join(base, 'Other Drive', 'DeepSeek Harness'))
+    mkdirSync(join(base, 'Programs'), { recursive: true })
+    const registry = () => [elsewhere]
+    assert.equal(findDesktopInstall(base, registry, noConventions), elsewhere, 'the recorded location is found')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('a registry value that is not an install is ignored, and the others are still tried', () => {
+  // Registry values outlive the directories they name — an uninstall that left its key behind, a
+  // truncated write, a path from another machine restored from a backup. Each must be skipped
+  // rather than trusted, and one bad entry must not stop the search.
+  const base = mkdtempSync(join(tmpdir(), 'dsh-lad-stale-registry-'))
+  try {
+    const real = makeInstallAt(join(base, 'Other Drive', 'DeepSeek Harness'))
+    const notAnInstall = join(base, 'leftover')
+    mkdirSync(notAnInstall, { recursive: true })
+    const registry = () => [join(base, 'gone'), notAnInstall, real]
+    assert.equal(findDesktopInstall(base, registry, noConventions), real, 'the first candidate that IS an install wins')
+    assert.equal(findDesktopInstall(base, () => [join(base, 'gone'), notAnInstall], noConventions), undefined,
+      'and when none of them is one, the answer is still "nothing found"')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('a lookup that fails is a state, not a crash', () => {
+  // `reg.exe` is a best-effort source: a locked-down machine, a missing tool, a policy-restricted
+  // key. Discovery must still answer, and the answer is "no custom install found".
+  const base = mkdtempSync(join(tmpdir(), 'dsh-lad-registry-throws-'))
+  try {
+    mkdirSync(join(base, 'Programs'), { recursive: true })
+    const throwing = () => { throw new Error('reg.exe is not available') }
+    assert.equal(findDesktopInstall(base, throwing, noConventions), undefined, 'the failure does not escape')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+
+
+test('a macOS install is found inside the app bundle', () => {
+  // macOS has no registry and no Programs directory, so the convention IS the record. The part that
+  // matters is inside the bundle: <app>.app/Contents/Resources is what Electron reads app.asar
+  // from, which is why the candidate list names that directory and not the .app itself.
+  const base = mkdtempSync(join(tmpdir(), 'dsh-lad-macos-'))
+  try {
+    mkdirSync(join(base, 'Programs'), { recursive: true })
+    const bundle = join(base, 'Applications', 'DeepSeek Harness.app', 'Contents', 'Resources')
+    makeInstallAt(bundle)
+    const conventions = () => [bundle]
+    assert.equal(findDesktopInstall(base, noRegistry, conventions), bundle,
+      'the bundle resources directory is the install root')
+    assert.equal(readBridgeStatus(bundle).state, 'installed', 'and it reads as installed')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('a Linux install under /opt or ~/.local is found', () => {
+  // Linux has no single convention, so the candidate list covers the ways the app actually ships:
+  // a tarball in /opt, a distro package under /usr/lib, a per-user extract in ~/.local.
+  const base = mkdtempSync(join(tmpdir(), 'dsh-lad-linux-'))
+  try {
+    mkdirSync(join(base, 'Programs'), { recursive: true })
+    const opt = join(base, 'opt', 'DeepSeek Harness')
+    makeInstallAt(opt)
+    assert.equal(findDesktopInstall(base, noRegistry, () => [join(base, 'opt', 'DSH Desktop'), opt]), opt,
+      'the second conventional candidate is tried when the first is absent')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('a conventional location is held to the identity rule, like every other candidate', () => {
+  // Naming a path is a place to look, never an assumption that something is there. A bundle left
+  // behind by an uninstall, or an unrelated app in /opt, must not be reported as DSH Desktop.
+  const base = mkdtempSync(join(tmpdir(), 'dsh-lad-conventional-impostor-'))
+  try {
+    mkdirSync(join(base, 'Programs'), { recursive: true })
+    const impostor = join(base, 'opt', 'DeepSeek Harness')
+    mkdirSync(join(impostor, 'resources', 'app', 'lib'), { recursive: true })
+    writeFileSync(join(impostor, 'resources', 'app', 'lib', 'main.js'), 'const app = {};' + "\n\n" + 'export {};' + "\n")
+    writeFileSync(join(impostor, 'resources', 'app', 'package.json'),
+      JSON.stringify({ name: 'unrelated-meeting-app', main: 'lib/main.js' }))
+    assert.equal(findDesktopInstall(base, noRegistry, () => [impostor]), undefined,
+      'an unrelated app in a conventional location is still not DSH Desktop')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('a failing conventional lookup is a state, not a crash', () => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-lad-conventional-throws-'))
+  try {
+    mkdirSync(join(base, 'Programs'), { recursive: true })
+    const throwing = () => { throw new Error('permission denied reading /Applications') }
+    assert.equal(findDesktopInstall(base, noRegistry, throwing), undefined,
+      'discovery still answers when walking a conventional location fails')
   } finally {
     rmSync(base, { recursive: true, force: true })
   }

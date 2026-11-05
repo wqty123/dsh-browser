@@ -95,27 +95,126 @@ const DEFAULT_INSTALL = findDefaultInstall()
  * on others, and the README's bare `node desktop-bridge/install.mjs` therefore fails outright
  * when the guess is wrong. The shape that identifies an install — `resources/app/lib/main.js` or
  * `resources/app.asar` — is stable across both, so that is what is probed.
+ *
+ * `%LOCALAPPDATA%\Programs` is only where the Windows installer puts the app by DEFAULT. An install
+ * moved to another drive is a good install this guess cannot see, and reporting it as absent stops
+ * the panel's own repair button as well (issue #44, measured on an `E:\…` install). So the default
+ * scan is followed by the two sources such an install leaves behind — `DSH_DESKTOP_APP` and the
+ * uninstall entry's `InstallLocation` — and both are held to the same shape check.
  * @returns the install directory, or the historical default when nothing matches.
  */
 function findDefaultInstall() {
-  const programs = join(process.env.LOCALAPPDATA ?? '', 'Programs')
   const looksInstalled = candidate => existsSync(join(candidate, 'resources', 'app', 'lib', 'main.js'))
     || existsSync(join(candidate, 'resources', 'app.asar'))
-  for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
-    const candidate = join(programs, named)
-    if (looksInstalled(candidate)) return candidate
-  }
-  try {
-    for (const entry of readdirSync(programs, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
-      const candidate = join(programs, entry.name)
+  const programs = join(process.env.LOCALAPPDATA ?? '', 'Programs')
+  if ((process.env.LOCALAPPDATA ?? '') !== '') {
+    for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
+      const candidate = join(programs, named)
       if (looksInstalled(candidate)) return candidate
     }
-  } catch {
-    // No Programs directory, or it cannot be read: fall through so the error below names a
-    // concrete path instead of throwing before the check that explains what to pass.
+    try {
+      for (const entry of readdirSync(programs, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const candidate = join(programs, entry.name)
+        if (looksInstalled(candidate)) return candidate
+      }
+    } catch {
+      // No Programs directory, or it cannot be read: fall through so the error below names a
+      // concrete path instead of throwing before the check that explains what to pass.
+    }
+  }
+  // A custom install: the person pointing us at it, then what the installer recorded. Both are
+  // shape-checked like every other candidate, so a stale registry value is not followed.
+  const declared = process.env.DSH_DESKTOP_APP
+  if (typeof declared === 'string' && declared !== '' && looksInstalled(declared)) return declared
+  for (const location of registeredInstallLocations()) {
+    if (looksInstalled(location)) return location
+  }
+  // No registry and no `Programs` directory off Windows: the platform's own convention is the only
+  // record there is. Empty on Windows, where the sources above already cover it.
+  for (const candidate of conventionalInstallRoots()) {
+    if (looksInstalled(candidate)) return candidate
   }
   return join(programs, 'DeepSeek Harness')
+}
+
+/**
+ * The places a packaged app is conventionally installed on this platform.
+ *
+ * The counterpart of `registeredInstallLocations` for the platforms that have no registry to read.
+ * Every candidate is shape-checked by the caller, so naming a path here is a place to look, never an
+ * assumption that something is there. On macOS the useful directory is `Contents/Resources` inside
+ * the bundle, which is what Electron loads `app.asar` from; on Linux the listed directories are
+ * where the common packaging styles actually land the app.
+ * @param platform - injected so a test can ask for another platform's list.
+ * @returns candidate install roots, unverified.
+ */
+function conventionalInstallRoots(platform = process.platform) {
+  const home = process.env.HOME ?? ''
+  if (platform === 'darwin') {
+    const bundles = [
+      '/Applications/DeepSeek Harness.app',
+      '/Applications/DSH Desktop.app',
+      ...home === '' ? [] : [
+        join(home, 'Applications', 'DeepSeek Harness.app'),
+        join(home, 'Applications', 'DSH Desktop.app'),
+      ],
+    ]
+    return bundles.map(bundle => join(bundle, 'Contents', 'Resources'))
+  }
+  if (platform === 'linux') {
+    // Directory names only — never a package name. The accepted package names live in
+    // `desktop-identity.json` and nowhere else, and a test enforces that.
+    return [
+      '/opt/DeepSeek Harness',
+      '/opt/DSH Desktop',
+      '/usr/lib/DeepSeek Harness',
+      '/usr/lib/DSH Desktop',
+      ...home === '' ? [] : [
+        join(home, '.local', 'share', 'DeepSeek Harness'),
+        join(home, '.local', 'share', 'DSH Desktop'),
+      ],
+    ]
+  }
+  return []
+}
+
+/**
+ * The `InstallLocation` values the Windows uninstall registry lists for this app.
+ *
+ * Read through `reg.exe`: this script runs under plain `node` as well as inside Electron, and
+ * spawning the console tool is the one way that works in both. Every failure — not Windows, `reg`
+ * absent, no such key, unparsable output — means "no answer" rather than an error, because this is
+ * one discovery source among several and the caller falls back to the historical default anyway.
+ * @returns candidate directories, unverified; the caller applies the shape check.
+ */
+function registeredInstallLocations() {
+  if (process.platform !== 'win32') return []
+  const roots = [
+    'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  ]
+  const locations = []
+  for (const root of roots) {
+    let output = ''
+    try {
+      output = execFileSync('reg', ['query', root, '/s', '/f', 'DeepSeek Harness', '/t', 'REG_SZ'],
+        { encoding: 'utf8', stdio: 'pipe', timeout: 15_000, windowsHide: true })
+    } catch {
+      // A key that does not exist exits non-zero, and so does a missing `reg.exe`; both mean the
+      // same thing here.
+      continue
+    }
+    // Output is a flat list of `    ValueName    REG_SZ    Data` lines under `Key` headers. Only
+    // `InstallLocation` is consulted: `DisplayName` also mentions the product and would otherwise
+    // contribute a directory-shaped string that is not a directory.
+    for (const line of output.split(/\r?\n/)) {
+      const match = /^\s+InstallLocation\s+REG_SZ\s+(.+?)\s*$/.exec(line)
+      if (match !== null && match[1] !== '') locations.push(match[1])
+    }
+  }
+  return locations
 }
 
 /**

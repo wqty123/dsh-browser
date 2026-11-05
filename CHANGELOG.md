@@ -4,6 +4,14 @@
 
 ## 未发布
 
+### 桥接探测不再只认 `%LOCALAPPDATA%\Programs`（#44）
+
+`findDesktopInstall` 与安装器的默认路径探测都只看 `%LOCALAPPDATA%\Programs`，而那只是 Windows 安装器的**默认**落点。装在别的盘、或用自定义目录装的 DSH Desktop 同样是可用安装，却会被判成"本机没有桌面端"——面板显示 `present: false`，连修复桥接的命令也不再给出，而这正是最需要它的时刻。实测场景：安装位于 `E:\Applications\DeepSeek Harness`，`Programs` 下那个升级残留目录清掉之后即开始误报。
+
+探测顺序改为：默认位置 → `DSH_DESKTOP_APP`（`tools/install-web-plugin.mjs` 早已支持的约定）→ 卸载登记表里的 `InstallLocation` → 本平台约定位置（macOS 的 `*.app/Contents/Resources`，Linux 的 `/opt`、`/usr/lib`、`~/.local/share`）。**每一处候选都仍要通过原有身份核验**，所以放宽的只是"去哪找"，不是"什么算安装"；默认位置仍优先，避免一个残留环境变量在正常安装的机器上改掉面板指向。
+
+注册表与约定位置都通过可注入参数暴露，用于测试隔离：否则"什么都没找到"这种断言会随运行机器上是否装了 DSH 而漂移。
+
 ### 恢复设置面板的桥接管理入口
 
 - 就绪状态下方显示安装、修复或重新安装桥接按钮，已安装时在诊断中提供卸载入口。

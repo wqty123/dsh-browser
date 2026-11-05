@@ -184,11 +184,15 @@ export async function handlePreviewFrame(
  * @param request - the incoming request.
  * @param response - the response to write.
  * @param localAppData - the base directory to probe; injected so a test can point at a fixture.
+ * @param registry - where custom installs are looked up; injected for the same reason.
+ * @param conventions - the platform's conventional install locations; injected for the same reason.
  */
 export async function handleBridgeStatus(
   request: IncomingMessage,
   response: ServerResponse,
   localAppData?: string,
+  registry?: () => readonly string[],
+  conventions?: () => readonly string[],
 ): Promise<void> {
   if (request.method !== 'GET') {
     replyJson(response, 405, { error: 'method-not-allowed' })
@@ -198,13 +202,15 @@ export async function handleBridgeStatus(
     replyJson(response, 403, { error: 'not-same-origin' })
     return
   }
-  const installRoot = findDesktopInstall(localAppData)
+  const installRoot = findDesktopInstall(localAppData, registry, conventions)
   const status = installRoot === undefined
     ? {
       state: 'missing' as const,
       present: false,
       archivePresent: false,
-      detail: 'no DSH Desktop install found under LOCALAPPDATA\\Programs',
+      detail: 'no DSH Desktop install found: not under LOCALAPPDATA\\Programs, not at DSH_DESKTOP_APP, '
+        + 'not at the directory the uninstall entry records, and not at this platform\'s usual install '
+        + 'locations. Set DSH_DESKTOP_APP to point at it.',
     }
     : readBridgeStatus(installRoot)
   replyJson(response, 200, { ok: true, bridge: status })
