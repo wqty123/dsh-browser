@@ -82,7 +82,7 @@ const archiveFs = (() => {
   try {
     return createRequire(import.meta.url)('original-fs')
   } catch {
-    return { openSync, readSync }
+    return { openSync, readSync, statSync, readFileSync, closeSync }
   }
 })()
 import { dirname, join, resolve } from 'node:path'
@@ -589,7 +589,10 @@ function validateArchive(archive) {
   }
   const { fd, header, contentBase } = parsed
   try {
-    const fileSize = statSync(archive).size
+    // Statistics go through the same unpatched module: under Electron the patched statSync answers for
+  // the archive's virtual tree, and its "size" is not the archive's byte length — that mismatch made
+  // every real entry look like it pointed past the end of the file.
+  const fileSize = archiveFs.statSync(archive).size
     const problems = []
     const walk = (node, prefix) => {
       for (const [name, entry] of Object.entries(node.files ?? {})) {
