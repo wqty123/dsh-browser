@@ -80,7 +80,21 @@ class StubWebServer extends cordis.Service {
 }
 
 const root = new cordis.Context()
+
+/** The host's authentication service: this probe checks our handlers, not the host's cookie. */
+class StubConnection extends cordis.Service {
+  constructor(ctx) {
+    super(ctx, 'connection')
+    this.calls = 0
+  }
+  authorizeIndex() {
+    this.calls += 1
+    return true
+  }
+}
+
 new StubWebServer(root)
+new StubConnection(root)
 
 const seam = await import(new URL('lib/browser/runtime.js', REPO).href)
 new seam.default(root)
