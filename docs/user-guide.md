@@ -44,6 +44,16 @@ dsh plugin --profile web add <本仓库路径>
 
 差别是实打实的:安装状态写在磁盘上,重启也不会变;能应答的是**此刻在跑的那个进程**,它发布的端点(端口 + pid + 每 15 秒一次的刷新)才是活的证据。只按磁盘判,面板会在桌面端早已关掉时说"可用"。
 
+**0.5.7 起,桥可以直接在面板里装卸**:「已失效 / 未安装」时那一行旁边有「安装 / 修复桥」,已安装时有「卸载桥」。按钮跑的就是包里的 `desktop-bridge/install.mjs`(带 `--restart --yes`,它会关掉并重开桌面端),所以手工跑和点按钮是同一套逻辑。
+
+想先确认"能不能装"而不关应用,跑一次只读预检:
+
+```sh
+node node_modules/dsh-builtin-browser/desktop-bridge/install.mjs "<DSH Desktop 安装目录>" --preflight
+```
+
+它只验身份、不写任何东西,输出 `{"ok":true,"layout":"packed","packageName":"@deepseek-ai/dsh-desktop","version":"…"}`。桌面端升级会把 `resources/app` 重新打包成 `app.asar`,这时预检仍然通过(归档内的 `package.json`、`app.asar.unpacked/package.json`、或产品自身的 exe 都算证据);预检被拒时,面板和命令行给出的是同一条原因。
+
 **DSH rc.5 使用 pnpm 11.7 的 `strict-dep-builds`。** 本插件不再声明 `postinstall`,所以正常安装不会出现构建脚本审批提示;若仍有别的包需要审批,请在宿主原生插件管理器中审阅。插件不会自行改写 `allowBuilds`。
 
 需要在安装阶段就把运行时准备好(离线部署、CI 镜像),或要手工重试下载时,进入**安装本插件的 profile 目录**(通常为 `$DSH_HOME/profiles/web` 或 `$DSH_HOME/profiles/desktop`),运行本插件已经安装的本地命令:
