@@ -202,12 +202,15 @@ export async function ensureElectronRuntime(deps: ProvisionDeps = defaultDeps())
   if (script === undefined) {
     return record({ status: 'failed', detail: 'the installed electron package has no install.js; reinstall the plugin in this profile' })
   }
+  // Resolve the installed Electron version once: each call re-runs createRequire,
+  // require.resolve and a synchronous package.json read + parse.
+  const version = electronVersion()
   latest = {
     state: 'preparing',
-    detail: `downloading Electron ${electronVersion()} (one time, about a minute)`,
+    detail: `downloading Electron ${version} (one time, about a minute)`,
     at: new Date().toISOString(),
   }
-  deps.log(`preparing Electron ${electronVersion()} in the background (a missing runtime needs a download)`)
+  deps.log(`preparing Electron ${version} in the background (a missing runtime needs a download)`)
   // The bound has to be a REFERENCED timer, and it has to be cleared when the race finishes.
   //
   // A first version unref'd it — "do not keep the process alive for a download" — which is exactly

@@ -1427,8 +1427,12 @@ function appendHostLog(text: string): void {
         // history of a crash loop gets silently swallowed.
         writeFileSync(file, `${hostStamp()} log rotated: previous content exceeded ${String(HOST_LOG_MAX_BYTES)} bytes and was discarded\n`)
       }
-    } catch { /* first write, or unreadable: just append */ }
-    mkdirSync(dir, { recursive: true })
+    } catch {
+      // No readable file yet: the log directory may not exist. When statSync
+      // succeeded the file exists, so its directory does too and creating it
+      // again was a redundant syscall on every child stdout/stderr line.
+      mkdirSync(dir, { recursive: true })
+    }
     appendFileSync(file, text)
   } catch { /* diagnostics are best-effort only */ }
 }
