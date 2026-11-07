@@ -63,8 +63,8 @@ export function manifestFor(name, version = '0.2.1-rc.5') {
  * @param options - package `name` and whether to include the shell entry.
  * @returns the install root.
  */
-export function makeUnpackedInstall({ name = '@deepseek-ai/dsh-desktop', withMain = true, manifest = true } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-install-'))
+export function makeUnpackedInstall({ name = '@deepseek-ai/dsh-desktop', withMain = true, manifest = true, fixtureRoot = tmpdir() } = {}) {
+  const root = mkdtempSync(join(fixtureRoot, 'dsh-install-'))
   const lib = join(root, 'resources', 'app', 'lib')
   mkdirSync(lib, { recursive: true })
   if (withMain) writeFileSync(join(lib, 'main.js'), MAIN_BODY)
@@ -78,8 +78,8 @@ export function makeUnpackedInstall({ name = '@deepseek-ai/dsh-desktop', withMai
  * @param options - package `name` put inside the archive, and whether to include the shell entry.
  * @returns the install root.
  */
-export function makePackedInstall({ name = '@deepseek-ai/dsh-desktop', withMain = true } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-install-packed-'))
+export function makePackedInstall({ name = '@deepseek-ai/dsh-desktop', withMain = true, fixtureRoot = tmpdir() } = {}) {
+  const root = mkdtempSync(join(fixtureRoot, 'dsh-install-packed-'))
   const files = { 'package.json': manifestFor(name) }
   if (withMain) files['lib/main.js'] = MAIN_BODY
   writeAsar(join(root, 'resources', 'app.asar'), files)

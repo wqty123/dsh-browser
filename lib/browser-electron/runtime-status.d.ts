@@ -14,25 +14,30 @@
  * the settings panel renders it, and a test drives it without touching Electron, a desktop install
  * or the file system.
  *
- * Everything here is a cheap read by construction. `hasBinary` resolves a path (the same probe a
- * launch uses, so the answer can never disagree with a launch), and the bridge reading is the same
- * install-tree inspection the bridge-status route already serves. Nothing spawns anything.
+ * Everything here is a cheap environment check. The launch path's own binary probes resolve the
+ * bundled runtime and installed system browsers; bridge readers inspect the installation and its
+ * published endpoint. Available files establish availability, while browser calls establish whether
+ * a particular page can be driven. Nothing spawns anything.
  * @module dsh-browser/browser-electron/runtime-status
  */
 import type { BridgeStatus } from './bridge-status.js';
 import type { BridgeEndpointState } from './bridge-endpoint.js';
 import type { ProvisionSnapshot } from './electron-provision.js';
-import type { BrowserChannel } from './system-browser.js';
+import { type BrowserChannel, type DetectedBrowser } from './system-browser.js';
 /** The part of the carrier the channel names, in the terms the panel has to explain. */
 export type CarrierKind = 'sidebar' | 'bundled' | 'system' | 'auto';
-/**
- * Whether the readiness question has an answer at all.
- *
- * `unknown` is not a defect: an explicit Chrome / Edge choice is only falsifiable by launching one,
- * and launching a browser to answer a status question is exactly what this report must not do. The
- * panel says so in words instead of guessing a colour.
- */
-export type Readiness = 'ready' | 'blocked' | 'unknown';
+/** Whether the chosen carrier's required files or running bridge are available. */
+export type Readiness = 'ready' | 'blocked';
+/** The system-browser discovery result, obtained without launching an executable. */
+export interface SystemBrowserReadiness {
+    /** False for channels that use the sidebar or bundled runtime directly. */
+    readonly checked: boolean;
+    readonly present: boolean;
+    readonly kind?: DetectedBrowser['kind'];
+    readonly path?: string;
+    /** What was found or which configured product is missing. */
+    readonly detail: string;
+}
 /** The Electron runtime's state, as the panel needs it. */
 export interface ElectronReadiness {
     /** `present` — a launch would find a binary; `preparing` — a download is running now; and so on. */
@@ -70,8 +75,13 @@ export interface RuntimeStatusReport {
     readonly channel: BrowserChannel;
     /** What that channel resolves to, in panel terms. */
     readonly carrier: CarrierKind;
-    /** Whether the browser this channel names can serve a call right now. */
+    /** The concrete carrier selected by the same discovery priority as the browser provider. */
+    readonly resolvedCarrier: Exclude<CarrierKind, 'auto'>;
+    /** Whether the carrier's environment requirements are available. */
     readonly readiness: Readiness;
+    readonly systemBrowser: SystemBrowserReadiness;
+    /** The system executable selected for the resolved carrier, when applicable. */
+    readonly executable?: string;
     readonly electron: ElectronReadiness;
     readonly bridge: BridgeReadiness;
     /** Whether "Prepare the bundled browser" is worth offering (it is not while one is running). */
@@ -89,6 +99,10 @@ export interface RuntimeStatusDeps {
     readonly bridge: () => BridgeStatus | undefined;
     /** The endpoint the shell publishes while it runs; undefined when nothing published one. */
     readonly endpoint: () => BridgeEndpointState | undefined;
+    /** The launch path's filesystem-only browser discovery; defaults to the production reader. */
+    readonly detectBrowser?: (channel: BrowserChannel) => DetectedBrowser | undefined;
+    /** The provider's current carrier, including a fallback selected after sidebar loss. */
+    readonly selectedCarrier?: () => Exclude<CarrierKind, 'auto'> | undefined;
 }
 /**
  * Assemble the report.

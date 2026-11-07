@@ -14,27 +14,33 @@
  * the settings panel renders it, and a test drives it without touching Electron, a desktop install
  * or the file system.
  *
- * Everything here is a cheap read by construction. `hasBinary` resolves a path (the same probe a
- * launch uses, so the answer can never disagree with a launch), and the bridge reading is the same
- * install-tree inspection the bridge-status route already serves. Nothing spawns anything.
+ * Everything here is a cheap environment check. The launch path's own binary probes resolve the
+ * bundled runtime and installed system browsers; bridge readers inspect the installation and its
+ * published endpoint. Available files establish availability, while browser calls establish whether
+ * a particular page can be driven. Nothing spawns anything.
  * @module dsh-browser/browser-electron/runtime-status
  */
 import type { BridgeStatus } from './bridge-status.js'
 import type { BridgeEndpointState } from './bridge-endpoint.js'
 import type { ProvisionSnapshot } from './electron-provision.js'
-import type { BrowserChannel } from './system-browser.js'
+import { detectBrowser, type BrowserChannel, type DetectedBrowser } from './system-browser.js'
 
 /** The part of the carrier the channel names, in the terms the panel has to explain. */
 export type CarrierKind = 'sidebar' | 'bundled' | 'system' | 'auto'
 
-/**
- * Whether the readiness question has an answer at all.
- *
- * `unknown` is not a defect: an explicit Chrome / Edge choice is only falsifiable by launching one,
- * and launching a browser to answer a status question is exactly what this report must not do. The
- * panel says so in words instead of guessing a colour.
- */
-export type Readiness = 'ready' | 'blocked' | 'unknown'
+/** Whether the chosen carrier's required files or running bridge are available. */
+export type Readiness = 'ready' | 'blocked'
+
+/** The system-browser discovery result, obtained without launching an executable. */
+export interface SystemBrowserReadiness {
+  /** False for channels that use the sidebar or bundled runtime directly. */
+  readonly checked: boolean
+  readonly present: boolean
+  readonly kind?: DetectedBrowser['kind']
+  readonly path?: string
+  /** What was found or which configured product is missing. */
+  readonly detail: string
+}
 
 /** The Electron runtime's state, as the panel needs it. */
 export interface ElectronReadiness {
@@ -75,8 +81,13 @@ export interface RuntimeStatusReport {
   readonly channel: BrowserChannel
   /** What that channel resolves to, in panel terms. */
   readonly carrier: CarrierKind
-  /** Whether the browser this channel names can serve a call right now. */
+  /** The concrete carrier selected by the same discovery priority as the browser provider. */
+  readonly resolvedCarrier: Exclude<CarrierKind, 'auto'>
+  /** Whether the carrier's environment requirements are available. */
   readonly readiness: Readiness
+  readonly systemBrowser: SystemBrowserReadiness
+  /** The system executable selected for the resolved carrier, when applicable. */
+  readonly executable?: string
   readonly electron: ElectronReadiness
   readonly bridge: BridgeReadiness
   /** Whether "Prepare the bundled browser" is worth offering (it is not while one is running). */
@@ -95,6 +106,10 @@ export interface RuntimeStatusDeps {
   readonly bridge: () => BridgeStatus | undefined
   /** The endpoint the shell publishes while it runs; undefined when nothing published one. */
   readonly endpoint: () => BridgeEndpointState | undefined
+  /** The launch path's filesystem-only browser discovery; defaults to the production reader. */
+  readonly detectBrowser?: (channel: BrowserChannel) => DetectedBrowser | undefined
+  /** The provider's current carrier, including a fallback selected after sidebar loss. */
+  readonly selectedCarrier?: () => Exclude<CarrierKind, 'auto'> | undefined
 }
 
 /** Which carrier a channel names. */
@@ -162,23 +177,43 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
   // shell actually running. Either one alone is the false green this report exists to prevent.
   const sidebarReady = bridge.state === 'installed' && bridge.running
 
+  const checkSystemBrowser = carrier === 'system' || carrier === 'auto'
+  const detected = checkSystemBrowser ? (deps.detectBrowser ?? detectBrowser)(channel) : undefined
+  const systemBrowser: SystemBrowserReadiness = {
+    checked: checkSystemBrowser,
+    present: detected !== undefined,
+    ...detected === undefined ? {} : { kind: detected.kind, path: detected.path },
+    detail: detected !== undefined ? `${detected.kind} is available at ${detected.path}`
+      : !checkSystemBrowser ? `the ${carrier} channel uses its own carrier`
+        : channel === 'auto' ? 'no Chrome, Edge or Brave installation was found'
+          : `the selected ${channel} installation was not found`,
+  }
+
   let readiness: Readiness
+  let resolvedCarrier: RuntimeStatusReport['resolvedCarrier']
   if (carrier === 'sidebar') {
+    resolvedCarrier = 'sidebar'
     readiness = sidebarReady ? 'ready' : 'blocked'
   } else if (carrier === 'bundled') {
+    resolvedCarrier = 'bundled'
     readiness = electronReady(state) ? 'ready' : 'blocked'
   } else if (carrier === 'auto') {
-    // `auto` is satisfied by either carrier, so a working sidebar covers a missing runtime. An
-    // explicit Chrome / Edge install would satisfy it too, but proving that means launching one.
-    readiness = electronReady(state) || sidebarReady ? 'ready' : 'unknown'
+    // Discovery may adopt a live desktop bridge after initially choosing a system browser. Match
+    // that priority here, then use the bundled runtime when no system browser was found.
+    resolvedCarrier = deps.selectedCarrier?.() ?? (sidebarReady ? 'sidebar' : detected !== undefined ? 'system' : 'bundled')
+    readiness = (resolvedCarrier === 'sidebar' ? sidebarReady : resolvedCarrier === 'system' ? detected !== undefined : electronReady(state)) ? 'ready' : 'blocked'
   } else {
-    readiness = 'unknown'
+    resolvedCarrier = 'system'
+    readiness = detected !== undefined ? 'ready' : 'blocked'
   }
 
   return {
     channel,
     carrier,
+    resolvedCarrier,
     readiness,
+    systemBrowser,
+    ...resolvedCarrier === 'system' && detected !== undefined ? { executable: detected.path } : {},
     electron,
     bridge,
     // Offering the button while a download runs would be a second download, which is the one thing

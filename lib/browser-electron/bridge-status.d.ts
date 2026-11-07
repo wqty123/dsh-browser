@@ -14,7 +14,7 @@ export declare function findDesktopInstall(localAppData?: string): string | unde
 export interface BridgeStatus {
     /** `installed`, `missing` or `stale`; see the module comment for what each means. */
     readonly state: 'installed' | 'missing' | 'stale';
-    /** Whether the install directory looks like a DSH Desktop install at all. */
+    /** Whether the loaded application passed DSH Desktop identity verification. */
     readonly present: boolean;
     /**
      * The desktop build this reading belongs to, when the identity check could name one.
@@ -34,8 +34,8 @@ export interface BridgeStatus {
     /**
      * The command that installs or repairs the bridge.
      *
-     * Shown rather than run. Executing it from a web request would mean a page can decide to close the
-     * desktop shell, and no amount of same-origin checking makes that a good idea; the user runs it.
+     * The panel can show this command for manual use. Its install button calls the same packaged
+     * installer through the separately authenticated local bridge-action route.
      */
     readonly command?: string;
 }

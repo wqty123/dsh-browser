@@ -47,7 +47,25 @@ async function connect(wsUrl) {
   }
 }
 
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+// No hard-coded browser path: this script ships in the package, and "C:/Program Files/..." is only
+// right on one machine. DSH_BROWSER_CHROME_PATH wins; otherwise the usual Windows locations are probed
+// and the script says so instead of failing to spawn a missing binary.
+const CHROME = (() => {
+  const override = process.env.DSH_BROWSER_CHROME_PATH
+  if (override !== undefined && override !== '') return override
+  const roots = [process.env['PROGRAMFILES'], process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA]
+    .filter(root => typeof root === 'string' && root !== '')
+  const candidates = roots.flatMap(root => [
+    join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+  ])
+  const found = candidates.find(candidate => existsSync(candidate))
+  if (found === undefined) {
+    console.error('verify-preview-route: no Chrome or Edge found; set DSH_BROWSER_CHROME_PATH to a Chromium binary')
+    process.exit(2)
+  }
+  return found
+})()
 const profile = mkdtempSync(join(tmpdir(), 'dsh-e2e-preview-'))
 const portFile = join(profile, 'DevToolsActivePort')
 const child = spawn(CHROME, [

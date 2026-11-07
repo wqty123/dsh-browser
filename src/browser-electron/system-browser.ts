@@ -151,8 +151,8 @@ const PATH_NAMES: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.Platform
 const INSTALL_LOCATIONS: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.Platform, string[]>>> = {
   chrome: {
     win32: [
-      String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`,
-      String.raw`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+      String.raw`%ProgramFiles%\Google\Chrome\Application\chrome.exe`,
+      String.raw`%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe`,
       // Where a per-user install lands, which is what Chrome's own installer chooses when it
       // cannot (or should not) write to Program Files. Missing this meant the plugin reported
       // "no browser found" on machines that plainly had one.
@@ -173,8 +173,8 @@ const INSTALL_LOCATIONS: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.P
   },
   edge: {
     win32: [
-      String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
-      String.raw`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+      String.raw`%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe`,
+      String.raw`%ProgramFiles%\Microsoft\Edge\Application\msedge.exe`,
       String.raw`%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe`,
     ],
     darwin: ['/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'],
@@ -186,8 +186,8 @@ const INSTALL_LOCATIONS: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.P
   },
   brave: {
     win32: [
-      String.raw`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
-      String.raw`C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe`,
+      String.raw`%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe`,
+      String.raw`%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe`,
       String.raw`%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe`,
     ],
     darwin: ['/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'],

@@ -77,6 +77,15 @@ test('a carrier without the hook is unaffected', async () => {
   assert.ok(host.calls.destroyView > 0, 'views are still released')
 })
 
+test('explicit navigation remains presented when automatic sidebar expansion is disabled', async () => {
+  const { p, host } = withUi({ autoExpandOnce: false, quiet: false })
+  const sid = await p.open()
+  host.calls.collapse = 0
+  await p.openUrl(sid, { url: 'https://example.com' })
+  assert.equal(host.calls.collapse, 0, 'an explicit open must leave its target sidebar expanded')
+  await p.close(sid)
+})
+
 // The autoExpandOnce half of §3 is asserted in desktop-bridge-host.test.mjs, at
 // the layer that actually owns folding the sidebar: the provider's part is only
 // "call the hook, or do not", and every trigger for it runs through private paths

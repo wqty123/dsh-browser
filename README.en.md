@@ -28,14 +28,15 @@ dsh plugin --profile desktop add dsh-builtin-browser
 
 When the desktop shell provides a controllable `<webview>` and the bridge is installed, the plugin drives the **official side panel**: the agent operates the very page you see. Otherwise it falls back to the plugin's own Electron window.
 
-Driving that panel also needs a bridge, installed into **the desktop app's own install directory** rather than the profile:
+The sidebar bridge is installed into **the desktop app's own install directory**. On Windows Desktop, open **Settings → Browser** and select **Install and restart**. The action exits Desktop normally, installs the bridge, reopens Desktop, and verifies the new bridge connection. DSH retains its own confirmation for running tasks.
 
-**Since 0.5.0 this is one step.** The script closes DSH itself — installing while it runs fails with EBUSY on the archive, and a process that waits for the exit is carried away with it:
+For terminal installation, save your task and exit DSH Desktop completely, including its tray process, then run this from the plugin directory:
 
 ```sh
-desktop-bridge/install-and-start.cmd          # Windows, double-click or run
-node desktop-bridge/install.mjs "<dir>" --restart   # any platform
+node desktop-bridge/install.mjs "<DSH Desktop install directory>"
 ```
+
+Start DSH Desktop after installation. On Windows, `desktop-bridge/install-and-start.cmd` installs and starts the app after Desktop has exited. The settings action uses an independent maintenance process; the installer verifies the closed target, its identity, and backups before writing files.
 
 > **The bridge is optional**: without it, the plugin uses a standalone window. **Reinstall the bridge with the new script after plugin or desktop shell upgrades** — a desktop update restores `app.asar`, the bridge goes stale, and `bridge-status` reports `stale`. The state is visible at the top of the panel. See [carrier limitations](docs/limitations.md) (Chinese).
 
@@ -64,29 +65,33 @@ The browser window appears with the first call, and you can operate in it yourse
 | Option | How it works |
 | --- | --- |
 | Bundled browser | Opens pages in a separate window with an address bar, navigation controls, and tabs. |
-| DSH sidebar | Drives the sidebar on DSH Desktop builds that expose an Electron `webview`, with the bridge installed. |
+| DSH sidebar | With the bridge installed on a Desktop build that exposes Electron `webview`, opening a URL expands the target conversation's sidebar browser. Lost connections reconnect to the selected sidebar. |
 | Local Chrome / Edge | Launches the installed browser with a dedicated plugin profile. |
 | Automatic | Chooses based on the available local browsers and desktop sidebar. |
 
-To use the **DSH sidebar**, click **Install bridge** in the local **Settings → Browser → Readiness** section. Use **Repair bridge** after a desktop update or **Reinstall bridge** when it is already installed. The installer verifies the installation, installs the bridge, and restarts DSH Desktop automatically. You can also run this from the plugin directory:
+Windows Desktop **Settings → Browser** provides installation, repair, and reinstallation with automatic restart. **Diagnostics** includes uninstall and restart, plus an external-terminal command. Progress and results survive the restart, and successful installation requires a verified connection to the new process. For terminal maintenance, exit Desktop normally and run this from the plugin directory:
 
 ~~~sh
-node desktop-bridge/install.mjs "<DSH Desktop install directory>" --restart
+node desktop-bridge/install.mjs "<DSH Desktop install directory>"
 ~~~
+
+Preparation feedback appears immediately. While Desktop is closed, a separate progress window shows installation, startup, connection checks, and elapsed time, then closes after completion. The window stays in the background; closing it leaves maintenance running.
 
 ## Browser settings
 
-- **Readiness** reports browser availability. Expand **Diagnostics** to see the browser selection, bundled runtime, and desktop bridge status.
-- **Quiet mode** keeps your current window and tab in place. New Chrome and Edge instances run in the background, and minimized bundled browser windows stay minimized. For the desktop sidebar, open the target page by hand before handing it to DSH.
+- **Environment check** reports detected Chrome / Edge, the bundled runtime, and sidebar bridge availability. Automatic mode identifies the selected carrier; **Diagnostics** includes the executable path.
+- **Quiet mode** preserves the operating system's foreground window and pointer position. New browser windows appear in the background, and minimized bundled browser windows stay minimized. With DSH sidebar selected, opening a URL reveals the target conversation's sidebar page; explicit tab switching selects the corresponding native tab.
 - **Presentation** controls sidebar expansion, closing the browser with the session, the agent cursor, and remote viewing.
 - **Agent permissions** controls page scripts, downloads, and reading or writing sign-in state.
-- **Advanced settings** covers browsing history, page targeting, and sign-in persistence and window mode for Chrome and Edge. The delivery form validates and saves the tool name, argument template, failure policy, and per-site rules together.
+- **Advanced settings** covers browsing history, permission for coordinate clicks and drags, and sign-in persistence and window mode for Chrome, Edge, and Automatic mode. The delivery form validates and saves the tool name, argument template, failure policy, and per-site rules together.
 
 On the local machine or in an isolated test environment, turn on **Allow remote viewing** and open the DSH viewer for a read-only view of the browser session. The viewer refreshes JPEG frames up to twice per second.
 
 ## Download delivery
 
 In **Advanced settings → Delivery**, enter an upload tool registered in DSH and configure its destination arguments. Automatic delivery uses the DSH native tool executor and retains the current task's tool permissions. The result includes the local download path and the upload tool's complete return value.
+
+DSH sidebar downloads use the target page's authenticated browser session, stream to a temporary file, and commit the completed file while preserving existing destinations.
 
 The official Baidu Netdisk stdio MCP upload tool accepts this argument template:
 

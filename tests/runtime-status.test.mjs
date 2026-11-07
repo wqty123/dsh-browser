@@ -8,7 +8,9 @@
 // nothing works.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { readRuntimeStatus } from '../lib/browser-electron/runtime-status.js'
 
@@ -48,6 +50,8 @@ function report(channel, {
   provisioning = provision('idle'),
   bridgeReader = noDesktop,
   endpointReader = noShell,
+  browserReader = () => undefined,
+  selectedCarrier,
 } = {}) {
   return readRuntimeStatus({
     channel: () => channel,
@@ -55,8 +59,25 @@ function report(channel, {
     provision: () => provisioning,
     bridge: bridgeReader,
     endpoint: endpointReader,
+    detectBrowser: browserReader,
+    selectedCarrier,
   })
 }
+
+test('automatic status follows an adopted fallback instead of rediscovering the rejected sidebar', () => {
+  const status = report('auto', { binary: true, bridgeReader: bridge('installed'), endpointReader: shellRunning,
+    selectedCarrier: () => 'bundled', browserReader: () => ({ kind: 'chrome', path: 'fixture-chrome' }) })
+  assert.equal(status.resolvedCarrier, 'bundled')
+  assert.equal(status.readiness, 'ready')
+  assert.equal(status.executable, undefined)
+})
+
+test('a selected automatic carrier with missing requirements remains blocked even if alternatives exist', () => {
+  const status = report('auto', { bridgeReader: bridge('installed'), endpointReader: shellRunning,
+    selectedCarrier: () => 'bundled', browserReader: () => ({ kind: 'chrome', path: 'fixture-chrome' }) })
+  assert.equal(status.resolvedCarrier, 'bundled')
+  assert.equal(status.readiness, 'blocked')
+})
 
 test('the bundled carrier with a runtime on disk is ready, and offers no button', () => {
   const status = report('bundled', { binary: true })
@@ -121,25 +142,125 @@ test('a stale bridge keeps its repair command', () => {
   assert.equal(status.bridge.command, command, 'shown to be run by a human, never run by the plugin')
 })
 
-test('automatic is satisfied by either carrier, but only by a RUNNING one', () => {
-  const viaBridge = report('auto', { bridgeReader: bridge('installed'), endpointReader: shellRunning })
+test('automatic resolves a running installed bridge before an available system browser or runtime', () => {
+  const viaBridge = report('auto', {
+    bridgeReader: bridge('installed'), endpointReader: shellRunning,
+    binary: true, browserReader: () => ({ kind: 'chrome', path: 'C:/browser/chrome.exe' }),
+  })
   assert.equal(viaBridge.readiness, 'ready')
+  assert.equal(viaBridge.carrier, 'auto', 'the configured choice stays visible')
+  assert.equal(viaBridge.resolvedCarrier, 'sidebar')
+  assert.equal(viaBridge.systemBrowser.present, true, 'discovery facts remain available to diagnostics')
+  assert.equal(viaBridge.executable, undefined, 'the system executable is not the resolved carrier')
   const viaRuntime = report('auto', { binary: true })
   assert.equal(viaRuntime.readiness, 'ready')
+  assert.equal(viaRuntime.resolvedCarrier, 'bundled')
   const installedButClosed = report('auto', { bridgeReader: bridge('installed') })
-  assert.equal(installedButClosed.readiness, 'unknown', 'a closed desktop is not a working carrier')
+  assert.equal(installedButClosed.readiness, 'blocked', 'a closed desktop is not a working carrier')
+  assert.equal(installedButClosed.resolvedCarrier, 'bundled')
 })
 
-test('automatic with neither says it cannot tell rather than showing red', () => {
+test('automatic without a live bridge, system browser or runtime reports what is missing', () => {
   const status = report('auto', { provisioning: provision('failed') })
-  assert.equal(status.readiness, 'unknown', 'an installed Chrome/Edge could still satisfy it, and this must not launch one to find out')
+  assert.equal(status.readiness, 'blocked')
+  assert.equal(status.resolvedCarrier, 'bundled')
+  assert.deepEqual(status.systemBrowser, {
+    checked: true, present: false, detail: 'no Chrome, Edge or Brave installation was found',
+  })
 })
 
-test('an explicit Chrome/Edge choice is never guessed at', () => {
-  const status = report('chrome', { provisioning: provision('failed') })
-  assert.equal(status.carrier, 'system')
-  assert.equal(status.readiness, 'unknown')
-  assert.equal(status.canProvision, true, 'the bundled runtime is still offerable as a way out')
+for (const kind of ['chrome', 'edge']) {
+  test(`an explicit ${kind} choice reports the detected executable without requiring Electron`, () => {
+    const path = `C:/installed browser/${kind}.exe`
+    const status = report(kind, {
+      provisioning: provision('failed'),
+      browserReader: channel => {
+        assert.equal(channel, kind, 'the configured choice reaches the launch path detector')
+        return { kind, path }
+      },
+    })
+    assert.equal(status.carrier, 'system')
+    assert.equal(status.resolvedCarrier, 'system')
+    assert.equal(status.readiness, 'ready')
+    assert.equal(status.executable, path)
+    assert.deepEqual(status.systemBrowser, {
+      checked: true, present: true, kind, path, detail: `${kind} is available at ${path}`,
+    })
+  })
+
+  test(`an explicit missing ${kind} stays blocked even when the runtime and bridge are available`, () => {
+    const status = report(kind, {
+      binary: true, bridgeReader: bridge('installed'), endpointReader: shellRunning,
+    })
+    assert.equal(status.readiness, 'blocked')
+    assert.equal(status.resolvedCarrier, 'system')
+    assert.equal(status.systemBrowser.checked, true)
+    assert.equal(status.systemBrowser.present, false)
+    assert.equal(status.executable, undefined)
+    assert.match(status.systemBrowser.detail, new RegExp(`selected ${kind} installation was not found`))
+  })
+}
+
+test('automatic prefers an installed system browser to the runtime and works without the runtime', () => {
+  for (const binary of [false, true]) {
+    const status = report('auto', {
+      binary,
+      bridgeReader: bridge('installed'),
+      browserReader: channel => {
+        assert.equal(channel, 'auto')
+        return { kind: 'edge', path: 'C:/installed Edge/msedge.exe' }
+      },
+    })
+    assert.equal(status.readiness, 'ready')
+    assert.equal(status.resolvedCarrier, 'system')
+    assert.equal(status.systemBrowser.kind, 'edge')
+    assert.equal(status.executable, 'C:/installed Edge/msedge.exe')
+  }
+})
+
+test('automatic does not adopt an uninstalled bridge even if its published endpoint is alive', () => {
+  const status = report('auto', {
+    bridgeReader: bridge('stale'), endpointReader: shellRunning,
+    browserReader: () => ({ kind: 'brave', path: 'C:/Brave/brave.exe' }),
+  })
+  assert.equal(status.readiness, 'ready')
+  assert.equal(status.resolvedCarrier, 'system')
+  assert.equal(status.systemBrowser.kind, 'brave')
+})
+
+test('sidebar and bundled choices do not scan unrelated system browsers', () => {
+  for (const channel of ['sidebar', 'bundled']) {
+    const status = report(channel, {
+      browserReader: () => { throw new Error('system detection must not run for this channel') },
+    })
+    assert.equal(status.systemBrowser.checked, false)
+    assert.equal(status.systemBrowser.present, false)
+    assert.equal(status.resolvedCarrier, channel)
+  }
+})
+
+test('the default reader detects a real file through the launch path detector without executing it', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-runtime-status-'))
+  const path = join(directory, 'browser with spaces & %.exe')
+  const previous = process.env.DSH_BROWSER_CHROME_PATH
+  try {
+    writeFileSync(path, 'this fixture is not an executable')
+    process.env.DSH_BROWSER_CHROME_PATH = path
+    const status = readRuntimeStatus({
+      channel: () => 'chrome',
+      hasBinary: () => false,
+      provision: () => provision('idle'),
+      bridge: noDesktop,
+      endpoint: noShell,
+    })
+    assert.equal(status.readiness, 'ready')
+    assert.equal(status.executable, path)
+    assert.equal(readFileSync(path, 'utf8'), 'this fixture is not an executable')
+  } finally {
+    if (previous === undefined) delete process.env.DSH_BROWSER_CHROME_PATH
+    else process.env.DSH_BROWSER_CHROME_PATH = previous
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('a runtime installed by hand after a failure is reported ready without a restart', () => {
@@ -159,7 +280,7 @@ test('the state vocabulary the panel localizes matches what the host can emit', 
   const provisionSource = readFileSync(new URL('../src/browser-electron/electron-provision.ts', import.meta.url), 'utf8')
   const snapshot = /state: 'idle' \| 'preparing' \| 'present' \| 'ready' \| 'skipped' \| 'failed'/.test(provisionSource)
   assert.ok(snapshot, 'the provisioning state union is the one this test enumerates')
-  const readiness = /export type Readiness = 'ready' \| 'blocked' \| 'unknown'/.test(source)
+  const readiness = /export type Readiness = 'ready' \| 'blocked'/.test(source)
   assert.ok(readiness, 'and so is the readiness union')
   const carrier = /export type CarrierKind = 'sidebar' \| 'bundled' \| 'system' \| 'auto'/.test(source)
   assert.ok(carrier, 'and the carrier union')
@@ -183,7 +304,7 @@ test('every state and carrier the report can name has a label in both languages'
   // running from one whose desktop app is closed, in both directions.
   for (const state of ['installed', 'installedRunning', 'installedNotRunning', 'missing', 'stale', 'absent']) keys.push(`readiness.bridge.${state}`)
   for (const carrier of ['sidebar', 'bundled', 'system', 'auto']) keys.push(`readiness.carrier.${carrier}`)
-  for (const readiness of ['ready', 'blocked', 'unknown']) keys.push(`readiness.state.${readiness}`)
+  for (const readiness of ['ready', 'blocked']) keys.push(`readiness.state.${readiness}`)
   const missing = keys.filter(key => !has(zhBlock, key) || !has(enBlock, key))
   assert.deepEqual(missing, [], 'these would render as raw keys in the panel')
 })

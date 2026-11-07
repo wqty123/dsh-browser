@@ -1,15 +1,14 @@
 @echo off
-REM Install (or repair) the desktop bridge and restart DSH Desktop, in one step.
+REM Install (or repair) the bridge after DSH Desktop has exited, then start Desktop.
 REM
-REM Reported as issue #36: installing by hand meant closing DSH first, because the archive cannot be
-REM moved while the shell holds it, and every "wait for the exit" arrangement lost its waiter. This
-REM runs the installer with --restart, which closes the shell itself, installs, and starts it again.
+REM Exit DSH Desktop normally before running this file from an external terminal.
+REM A running target is refused; this launcher does not close or terminate it.
 REM
 REM No arguments needed: the installer probes for the install directory. Pass one to override it.
 REM   install-and-start.cmd "C:\path\to\DSH Desktop"
 REM   install-and-start.cmd "C:\path\to\DSH Desktop" --yes
 REM
-REM --yes skips the confirmation prompt; without it the installer asks before closing DSH.
+REM Legacy --yes is accepted for command-line compatibility; it does not permit closing Desktop.
 
 setlocal
 set "HERE=%~dp0"

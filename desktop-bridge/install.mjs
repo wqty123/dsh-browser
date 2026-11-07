@@ -61,33 +61,76 @@
  * Default path: probed under %LOCALAPPDATA%\Programs (see findDefaultInstall)
  * Pass --revert to restore the pre-bridge state instead.
  *
- * Pass --restart to have THIS process close DSH, install, and start it again. That is the supported
- * way to install while the shell is running: the archive cannot be moved while the shell holds it,
- * and nothing started from outside survives the exit far enough to install afterwards (issue #36).
- * --restart asks for confirmation on a console; add --yes for an unattended run.
+ * Exit DSH Desktop normally before maintenance. --restart is an external-terminal opt-in to
+ * start the already-closed app after maintenance; it never closes a running application.
  */
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import * as nodeFs from 'node:fs'
 import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 
 /**
- * The filesystem used for the ARCHIVE itself.
+ * The filesystem used for every installer operation.
  *
  * Electron patches `fs` so that a `*.asar` path answers from the archive's virtual tree; opening the
  * archive to read its header then fails with ENOENT (measured when the panel's button ran this file
- * from the desktop shell). `original-fs` is Electron's untouched module, and plain node needs no
- * substitute because nothing there is patched.
+ * from the desktop shell). Even a patched existsSync(app.asar) creates Electron's archive cache
+ * and keeps a Windows handle open until process exit. A raw rename cannot release that cache.
+ * Use the same untouched module for discovery, validation, extraction and rename, so no earlier
+ * probe can lock the file this process later moves. Plain Node uses its ordinary filesystem.
  */
 const archiveFs = (() => {
   try {
     return createRequire(import.meta.url)('original-fs')
   } catch {
-    return { openSync, readSync, statSync, readFileSync, closeSync }
+    return nodeFs
   }
 })()
-import { dirname, join, resolve } from 'node:path'
+const { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync,
+  readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } = archiveFs
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
-const DEFAULT_INSTALL = findDefaultInstall()
+function isWithin(root, path) {
+  const part = relative(root, path)
+  return part !== '' && part !== '..' && !part.startsWith('..\\') && !part.startsWith('../') && !isAbsolute(part)
+}
+
+/** Tests may inspect or modify only an explicitly marked, canonical sandbox. */
+function testBoundary() {
+  if (process.env.DSH_BROWSER_TEST !== '1' && process.env.NODE_TEST_CONTEXT === undefined) return undefined
+  const configured = process.env.DSH_BRIDGE_TEST_ROOT
+  if (!configured || !isAbsolute(configured) || lstatSync(configured).isSymbolicLink()) {
+    throw new Error('installer test isolation requires an absolute, non-linked DSH_BRIDGE_TEST_ROOT')
+  }
+  const root = realpathSync(configured)
+  const marker = join(root, '.dsh-bridge-test-root')
+  if (!lstatSync(marker).isFile() || lstatSync(marker).isSymbolicLink()
+    || readFileSync(marker, 'utf8') !== 'dsh-browser-installer-test-root-v1\n') {
+    throw new Error('installer test isolation marker is missing or invalid')
+  }
+  return root
+}
+
+function assertTestTarget(root, path) {
+  if (root === undefined) return
+  if (!isWithin(root, resolve(path)) || !isWithin(root, realpathSync(path))) {
+    throw new Error('installer test target must stay strictly inside DSH_BRIDGE_TEST_ROOT')
+  }
+  const inspect = directory => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) throw new Error('installer test targets cannot contain linked files or directories')
+      if (entry.isDirectory()) inspect(join(directory, entry.name))
+    }
+  }
+  inspect(path)
+  for (const key of ['DSH_BRIDGE_ACTION_RESULT_FILE', 'DSH_BRIDGE_ACTION_LOG_FILE']) {
+    const output = process.env[key]
+    if (output !== undefined && (!isWithin(root, resolve(output))
+      || !isWithin(root, realpathSync(dirname(output)))
+      || (existsSync(output) && !isWithin(root, realpathSync(output))))) {
+      throw new Error('installer test result and log files must stay inside DSH_BRIDGE_TEST_ROOT')
+    }
+  }
+}
 /**
  * The desktop install to patch when none is given on the command line.
  *
@@ -97,25 +140,51 @@ const DEFAULT_INSTALL = findDefaultInstall()
  * `resources/app.asar` — is stable across both, so that is what is probed.
  * @returns the install directory, or the historical default when nothing matches.
  */
-function findDefaultInstall() {
-  const programs = join(process.env.LOCALAPPDATA ?? '', 'Programs')
-  const looksInstalled = candidate => existsSync(join(candidate, 'resources', 'app', 'lib', 'main.js'))
-    || existsSync(join(candidate, 'resources', 'app.asar'))
-  for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
-    const candidate = join(programs, named)
-    if (looksInstalled(candidate)) return candidate
+function findDefaultInstall(testRoot) {
+  const permitted = candidate => {
+    if (testRoot === undefined) return true
+    if (!isWithin(testRoot, resolve(candidate))) return false
+    try { return isWithin(testRoot, realpathSync(candidate)) } catch { return false }
   }
-  try {
-    for (const entry of readdirSync(programs, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
-      const candidate = join(programs, entry.name)
+  const looksInstalled = candidate => permitted(candidate) && (existsSync(join(candidate, 'resources', 'app', 'lib', 'main.js'))
+    || existsSync(join(candidate, 'resources', 'app.asar')))
+  const probe = (base) => {
+    if (!permitted(base)) return undefined
+    for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
+      const candidate = join(base, named)
       if (looksInstalled(candidate)) return candidate
     }
-  } catch {
-    // No Programs directory, or it cannot be read: fall through so the error below names a
-    // concrete path instead of throwing before the check that explains what to pass.
+    try {
+      for (const entry of readdirSync(base, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const candidate = join(base, entry.name)
+        if (looksInstalled(candidate)) return candidate
+      }
+    } catch {
+      // A root that does not exist is a state, not an error.
+    }
+    return undefined
   }
-  return join(programs, 'DeepSeek Harness')
+  // Same roots the panel probes: an explicit DSH_DESKTOP_PATH, then the places people actually install
+  // to. An install on another drive used to be invisible to both the panel and this default.
+  const explicit = process.env.DSH_DESKTOP_PATH
+  if (explicit !== undefined && explicit !== '') {
+    if (looksInstalled(explicit)) return explicit
+    const below = probe(explicit)
+    if (below !== undefined) return below
+  }
+  const localAppData = process.env.LOCALAPPDATA ?? ''
+  const roots = [
+    ...(localAppData === '' ? [] : [join(localAppData, 'Programs')]),
+    process.env['ProgramFiles'], process.env['ProgramFiles(x86)'], process.env.APPDATA, process.env.ProgramData,
+  ].filter(base => typeof base === 'string' && base !== '')
+  for (const base of roots) {
+    const found = probe(base)
+    if (found !== undefined) return found
+  }
+  return testRoot === undefined
+    ? join(localAppData === '' ? '.' : join(localAppData, 'Programs'), 'DeepSeek Harness')
+    : join(testRoot, 'no-test-desktop-found')
 }
 
 /**
@@ -165,7 +234,9 @@ function selectShellProcesses(rows, root, selfPid) {
     const nodeMode = /(?:^|\s)--expose-internals(?:\s|$)|\.[cm]?js(?:"|\s|$)|(?:^|\s)(?:--eval|--print|--input-type)(?:=|\s|$)|(?:^|\s)-(?:e|p)(?:\s|$)/i.test(row.CommandLine)
     if (nodeMode) continue
     if (ancestors.has(row.ProcessId)) {
-      throw new Error('the installer is a child of DSH Desktop; run this command from a separate terminal with Node.js')
+      const error = new Error('the installer is a child of DSH Desktop; run this command from a separate terminal with Node.js')
+      error.code = 'DSH_CHILD_OF_SHELL'
+      throw error
     }
     selected.push(row.ProcessId)
   }
@@ -181,7 +252,8 @@ function selectShellProcesses(rows, root, selfPid) {
 function shellProcesses(root) {
   const text = runCapture('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-Command',
-    'Get-CimInstance Win32_Process -ErrorAction Stop | '
+    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
+    + 'Get-CimInstance Win32_Process -ErrorAction Stop | '
     + 'Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress',
   ])
   if (text === undefined || text.trim() === '') throw new Error('could not enumerate Desktop processes')
@@ -202,44 +274,10 @@ function shellProcesses(root) {
  */
 function runCapture(command, argv) {
   try {
-    return execFileSync(command, argv, { encoding: 'utf8', stdio: 'pipe', timeout: 30_000 })
+    return execFileSync(command, argv, { encoding: 'utf8', stdio: 'pipe', windowsHide: true, timeout: 30_000 })
   } catch {
     return undefined
   }
-}
-
-/**
- * Close the desktop shell and wait until nothing holds the archive.
- *
- * Asks first and forces only if the polite request is ignored: a forced kill can lose work in
- * progress, and the user was told the shell would be closed, not that it would be killed. The wait
- * is bounded — a process that refuses to die must not hang the installer forever.
- * @param root - the install directory whose processes to close.
- * @param graceMs - how long to wait after the polite request before forcing.
- * @returns whether nothing is left running.
- */
-async function stopShell(root, graceMs) {
-  const before = shellProcesses(root)
-  if (before.length === 0) return true
-  console.log(`  closing DSH Desktop (${before.length} process(es))…`)
-  // No /F: this is a normal window close, so the shell can flush and prompt.
-  runCapture('taskkill.exe', before.flatMap(pid => ['/PID', String(pid)]))
-  const deadline = Date.now() + graceMs
-  while (Date.now() < deadline) {
-    if (shellProcesses(root).length === 0) return true
-    await new Promise(resolve => setTimeout(resolve, 250))
-  }
-  const left = shellProcesses(root)
-  if (left.length > 0) {
-    console.log(`  ${left.length} process(es) still running after ${String(graceMs)} ms; forcing`)
-    runCapture('taskkill.exe', [...left.flatMap(pid => ['/PID', String(pid)]), '/F'])
-    const forcedBy = Date.now() + 15_000
-    while (Date.now() < forcedBy) {
-      if (shellProcesses(root).length === 0) return true
-      await new Promise(resolve => setTimeout(resolve, 250))
-    }
-  }
-  return shellProcesses(root).length === 0
 }
 
 /**
@@ -250,20 +288,26 @@ async function stopShell(root, graceMs) {
  * @param root - the install directory.
  * @returns whether the executable was spawned.
  */
+let lastStartedPid
 function startShell(root) {
   const exe = join(root, 'DeepSeek Harness.exe')
   if (!existsSync(exe)) {
     console.error(`could not start DSH Desktop: ${exe} does not exist; start it yourself.`)
     return false
   }
+  if (process.env.DSH_BROWSER_TEST === '1' || process.env.NODE_TEST_CONTEXT !== undefined) {
+    console.error('test mode forbids launching DSH Desktop')
+    return false
+  }
   try {
     const env = { ...process.env }
     for (const key of Object.keys(env)) {
-      if (key.toUpperCase() === 'ELECTRON_RUN_AS_NODE') delete env[key]
+      if (key.toUpperCase() === 'ELECTRON_RUN_AS_NODE' || key.toUpperCase().startsWith('DSH_BRIDGE_')) delete env[key]
     }
     const child = spawn(exe, [], { detached: true, stdio: 'ignore', cwd: root, env })
     child.on('error', error => { console.error('could not start DSH Desktop: ' + String(error)) })
     if (child.pid === undefined) return false
+    lastStartedPid = child.pid
     child.unref()
     console.log(`  started ${exe}`)
     return true
@@ -274,29 +318,26 @@ function startShell(root) {
 }
 
 const args = process.argv.slice(2)
+let installRoot
+try {
+  const boundary = testBoundary()
+  installRoot = args.find(arg => !arg.startsWith('--')) ?? findDefaultInstall(boundary)
+  assertTestTarget(boundary, installRoot)
+} catch (error) {
+  console.error('bridge installer test isolation refused the operation: ' + String(error))
+  process.exit(1)
+}
 // Identity only, no side effects: the panel and a human both need a way to ask "would this work"
 // without closing the shell first.
 if (args.includes('--preflight')) {
-  const target = args.find(part => !part.startsWith('--')) || ''
+  const target = installRoot
   const verdict = verifyDesktopIdentity(target)
   console.log(JSON.stringify({ target, ...verdict }))
   process.exit(verdict.ok ? 0 : 1)
 }
 const revert = args.includes('--revert')
-/**
- * Close DSH, install, then start it again — all in THIS process.
- *
- * Reported as issue #36: moving `app.asar` aside fails with EBUSY while the shell is running, and
- * every "wait for the user to close it" arrangement loses the waiter. Two arrangements were measured
- * on Windows and both died at the moment the shell exited: a hidden PowerShell started through WMI
- * vanished with the process tree, and a scheduled task reported `LastTaskResult = 0xC000013A`
- * (STATUS_CONTROL_C_EXIT). The lesson is that nothing may straddle the exit — so this process closes
- * the shell itself, does the work, and starts it again.
- */
+/** Start after maintenance only when the target was already closed; never close a running shell. */
 const restart = args.includes('--restart')
-/** Skip the interactive confirmation; required for an unattended run. */
-const assumeYes = args.includes('--yes') || args.includes('-y')
-const installRoot = args.find(arg => !arg.startsWith('--')) ?? DEFAULT_INSTALL
 
 const resourcesDir = join(installRoot, 'resources')
 const appDir = join(resourcesDir, 'app')
@@ -322,6 +363,50 @@ const hostCliPath = join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-des
 const hostCliBackup = `${hostCliPath}.before-bridge`
 const CLI_SHIM_MARKER = 'dsh-builtin-browser: resolve the app directory'
 const HOST_CLI_MARKER = 'dsh-builtin-browser: recognize an unpacked `app` directory'
+
+let targetWasClosed = false
+const resultFile = process.env.DSH_BRIDGE_ACTION_RESULT_FILE
+const installErrors = []
+if (resultFile !== undefined) {
+  const originalError = console.error
+  console.error = (...values) => {
+    installErrors.push(values.map(String).join(' '))
+    if (installErrors.length > 12) installErrors.shift()
+    originalError(...values)
+  }
+}
+
+// Report maintenance only after its file operations complete. Starting the app is an external
+// command-line opt-in and cannot happen after a running-target or ancestry refusal.
+process.once('exit', code => {
+  let restarted = false
+  if (restart && targetWasClosed && code === 0) {
+    restarted = startShell(installRoot)
+    if (restarted) console.log('DSH Desktop was restarted.')
+  }
+  const finalCode = code === 0 && (!restart || restarted) ? 0 : code || 1
+  process.exitCode = finalCode
+  if (resultFile !== undefined) {
+    const result = {
+      ok: finalCode === 0, code: finalCode, action: revert ? 'uninstall' : 'install', restarted,
+      ...lastStartedPid === undefined ? {} : { pid: lastStartedPid },
+      ...installErrors.length === 0 ? {} : { error: installErrors.join('\n').slice(-2400) },
+      completedAt: new Date().toISOString(),
+    }
+    try {
+      const temporary = `${resultFile}.${process.pid}.tmp`
+      writeFileSync(temporary, JSON.stringify(result))
+      renameSync(temporary, resultFile)
+    } catch (error) {
+      originalResultError(error)
+    }
+  }
+})
+
+function originalResultError(error) {
+  console.error('could not record the bridge installer result: ' + String(error))
+  process.exitCode = 1
+}
 
 /** The exact block appended to main.js. Keep it recognisable: idempotence and
  *  reverting both key off this marker. */
@@ -372,14 +457,21 @@ app.whenReady().then(async () => {
  */
 function readAsarHeader(file) {
   const fd = archiveFs.openSync(file, 'r')
-  const sizeBuf = Buffer.alloc(8)
-  archiveFs.readSync(fd, sizeBuf, 0, 8, 0)
-  const headerSize = sizeBuf.readUInt32LE(4)
-  const headerBuf = Buffer.alloc(headerSize)
-  archiveFs.readSync(fd, headerBuf, 0, headerSize, 8)
-  const jsonLength = headerBuf.readUInt32LE(4)
-  const header = JSON.parse(headerBuf.toString('utf8', 8, 8 + jsonLength))
-  return { fd, header, contentBase: 8 + headerSize }
+  try {
+    const sizeBuf = Buffer.alloc(8)
+    if (archiveFs.readSync(fd, sizeBuf, 0, 8, 0) !== 8) throw new Error('the archive header is truncated')
+    const headerSize = sizeBuf.readUInt32LE(4)
+    if (headerSize < 8 || headerSize > 64 * 1024 * 1024) throw new Error('the archive header size is invalid')
+    const headerBuf = Buffer.alloc(headerSize)
+    if (archiveFs.readSync(fd, headerBuf, 0, headerSize, 8) !== headerSize) throw new Error('the archive header is truncated')
+    const jsonLength = headerBuf.readUInt32LE(4)
+    if (jsonLength <= 0 || jsonLength > headerSize - 8) throw new Error('the archive JSON length is invalid')
+    const header = JSON.parse(headerBuf.toString('utf8', 8, 8 + jsonLength))
+    return { fd, header, contentBase: 8 + headerSize }
+  } catch (error) {
+    archiveFs.closeSync(fd)
+    throw error
+  }
 }
 
 /**
@@ -421,9 +513,11 @@ function extractAsar(asar, outDir) {
       bytes += actual
     }
   }
-  mkdirSync(outDir, { recursive: true })
-  walk(header, '')
-  return { files, bytes, unpackedFiles }
+  try {
+    mkdirSync(outDir, { recursive: true })
+    walk(header, '')
+    return { files, bytes, unpackedFiles }
+  } finally { archiveFs.closeSync(fd) }
 }
 
 /**
@@ -589,10 +683,8 @@ function validateArchive(archive) {
   }
   const { fd, header, contentBase } = parsed
   try {
-    // Statistics go through the same unpatched module: under Electron the patched statSync answers for
-  // the archive's virtual tree, and its "size" is not the archive's byte length — that mismatch made
-  // every real entry look like it pointed past the end of the file.
-  const fileSize = archiveFs.statSync(archive).size
+    // Statistics go through the same unpatched module as the raw archive reads.
+    const fileSize = archiveFs.statSync(archive).size
     const problems = []
     const walk = (node, prefix) => {
       for (const [name, entry] of Object.entries(node.files ?? {})) {
@@ -668,33 +760,7 @@ function verifyDesktopIdentity(root) {
       try { bytes = readFileSync(join(resources, 'app.asar.unpacked', 'package.json')) } catch { bytes = undefined }
     }
     if (bytes === undefined) {
-      // Evidence that does not need to read the archive at all. Inside Electron, `fs` treats a
-      // `.asar` path as a virtual directory, so a raw read of it returns the wrong thing and finds
-      // nothing — measured when the panel's button ran this file under the desktop shell. The
-      // product's own executable beside the archive is proof enough that this is DSH Desktop.
-      const exeNames = ['DeepSeek Harness.exe', 'DSH Desktop.exe']
-      const exeFound = exeNames.find(name => existsSync(join(root, name)))
-      if (exeFound !== undefined) {
-        return { ok: true, layout: 'packed', packageName: String(rule.packageNames?.[0] ?? ''), version: 'unknown' }
-      }
-      // Last resort, for a plain node run: the archive header could not be parsed. The rule is a name,
-      // and a name that appears in the archive is evidence enough to proceed — the alternative is
-      // refusing an install that is obviously there.
-      const names = Array.isArray(rule.packageNames) ? rule.packageNames.map(String) : []
-      let probe = ''
-      try {
-        const fd = openSync(archive, 'r')
-        const size = 8 * 1024 * 1024
-        const buf = Buffer.alloc(size)
-        const read = archiveFs.readSync(fd, buf, 0, size, 0)
-        closeSync(fd)
-        probe = buf.subarray(0, read).toString('latin1')
-      } catch { probe = '' }
-      const found = names.find(name => name !== '' && probe.includes(name))
-      if (found === undefined) {
-        return { ok: false, reason: `${archive} could not be read and does not name ${names.join(' / ')}` }
-      }
-      return { ok: true, layout: 'packed', packageName: found, version: 'unknown' }
+      return { ok: false, reason: `${archive}: the package manifest could not be read; executable names and archive text are not proof of DSH identity` }
     }
     manifestText = bytes.toString('utf8')
   } else {
@@ -742,11 +808,18 @@ if (!identity.ok) {
   process.exit(1)
 }
 
-// `--restart` closes the shell BEFORE anything else, because the archive cannot be moved while the
-// shell holds it (EBUSY), and because there is no safe way to wait across the exit from outside —
-// both arrangements measured in issue #36 died at that moment. Doing it here keeps the whole
-// sequence inside one front-facing process.
-let shellStopped = false
+// Refuse before any write whenever the target is running. A window close can mean "hide to tray",
+// so maintenance cannot infer consent to terminate the host or its tools.
+try {
+  if (shellProcesses(installRoot).length !== 0) {
+    console.error('DSH Desktop is running. Exit it normally, then run bridge maintenance from an external terminal.')
+    process.exit(1)
+  }
+  targetWasClosed = true
+} catch (error) {
+  console.error('bridge maintenance refused: ' + String(error))
+  process.exit(1)
+}
 if (!revert && existsSync(asarPath)) {
   const checked = validateArchive(asarPath)
   if (!checked.ok) {
@@ -754,42 +827,6 @@ if (!revert && existsSync(asarPath)) {
     process.exit(1)
   }
 }
-if (restart) {
-  if (!assumeYes) {
-    console.log('')
-    console.log(`--restart will close DSH Desktop, ${revert ? 'remove' : 'install'} the bridge, and start it again.`)
-    console.log('Any unsaved work in a conversation is lost. Re-run with --yes to skip this notice.')
-    console.log('')
-    try {
-      const answer = readFileSync(0, 'utf8').trim().toLowerCase()
-      if (answer !== '' && answer !== 'y' && answer !== 'yes') {
-        console.error('cancelled; nothing was changed.')
-        process.exit(1)
-      }
-    } catch {
-      // No stdin (a service, a detached shell): refuse rather than close a window nobody agreed to.
-      console.error('--restart needs confirmation; pass --yes when there is no console to ask.')
-      process.exit(1)
-    }
-  }
-  try {
-    shellStopped = await stopShell(installRoot, 20_000)
-  } catch (error) {
-    console.error('could not safely stop DSH Desktop: ' + String(error))
-    process.exit(1)
-  }
-  if (!shellStopped) {
-    console.error('DSH Desktop did not exit, so the archive cannot be replaced.')
-    console.error('Close it yourself and run this again without --restart.')
-    process.exit(1)
-  }
-}
-process.once('exit', () => {
-  if (restart && shellStopped && startShell(installRoot)) {
-    console.log('DSH Desktop was restarted.')
-  }
-})
-
 // The archive wins whenever it exists, so ITS presence — not the absence of the
 // directory — decides the layout. After a desktop update the archive is back
 // (a new build) while an older extraction is still lying around, and keying off
@@ -916,7 +953,7 @@ if (packedLayout) {
     // installation working.
     rmSync(appDir, { recursive: true, force: true })
   }
-  console.log(`extracting into ${appDir} — this writes ~355 MB and can take a minute (measured: 8-55s)...`)
+  console.log(`extracting into ${appDir} — large desktop packages can take several minutes...`)
   const result = extractAsar(asarPath, appDir)
   const megabytes = (result.bytes / 1024 / 1024).toFixed(1)
   const seconds = ((Date.now() - started) / 1000).toFixed(1)
@@ -931,7 +968,7 @@ if (packedLayout) {
     console.log(`  Electron now loads ${appDir}; the archive is untouched, so the asar integrity fuse cannot trip`)
   } catch (error) {
     console.error(`could not move app.asar aside: ${String(error)}`)
-    console.error('close DSH Desktop completely and run this again.')
+    console.error('the original archive is still active and unchanged; the extracted files were not activated. Check the process holding the archive before retrying.')
     process.exit(1)
   }
 }

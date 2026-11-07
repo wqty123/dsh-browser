@@ -17,6 +17,7 @@ import { BrowserPanelNotDisplayedError, DesktopBridgeViewHost } from '../lib/bro
 async function startFakeBridge(state = { tabs: 1, dead: [] }) {
   const requests = []
   const sockets = new Set()
+  const views = new Map()
   const server = createServer(socket => {
     sockets.add(socket)
     socket.on('close', () => sockets.delete(socket))
@@ -47,7 +48,7 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
               if (state.dead.includes(i)) continue
               sidebar.push({ id: i, type: 'webview', url: `https://page${i}.example/`, title: `Page ${i}`, destroyed: false })
             }
-            return { ok: true, guests: sidebar, sidebar }
+            return { ok: true, guests: sidebar, sidebar, ...state.protocol === undefined ? {} : { protocol: state.protocol } }
           }
           if (request.op === 'ensureSidebar') {
             // The real op answers with the page THIS conversation's panel holds, and that page
@@ -90,6 +91,17 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
             if (state.panelUnusable === true) {
               return { ok: false, code: 'panel-unusable', error: state.panelUnusableDetail ?? 'the sidebar has no drivable webview capability' }
             }
+            if (state.protocol >= 3) {
+              const key = JSON.stringify([request.owner, request.viewId])
+              let id = views.get(key)
+              if (id === undefined || state.dead.includes(id)) {
+                id = 1
+                while (state.dead.includes(id) || [...views.values()].includes(id)) id += 1
+                views.set(key, id)
+                state.tabs = Math.max(state.tabs, id)
+              }
+              return { ok: true, id, via: 'panel' }
+            }
             let id = 1
             while (state.dead.includes(id) && id < 50) id += 1
             return { ok: true, created: state.tabs === 0, id, prepared: 'OPENED_AND_FOCUSED', via: 'panel' }
@@ -115,7 +127,10 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
           if (request.op === 'collapseSidebar') return { ok: true, result: 'COLLAPSED' }
           return { ok: false, error: `unknown op ${String(request.op)}` }
         })()
-        socket.write(JSON.stringify(answer) + '\n')
+        const respond = () => socket.write(JSON.stringify(answer) + '\n')
+        if (request.op === 'ensureSidebar' && state.holdEnsure === true) {
+          ;(state.heldReplies ??= []).push(respond)
+        } else respond()
       }
     })
     socket.on('error', () => {})
@@ -176,11 +191,9 @@ test('commands are forwarded to the sidebar guest', async () => {
   }
 })
 
-test('every view of one conversation drives that conversation\'s one page', async () => {
-  // This carrier exists so a human and the agent look at the SAME page, and the shell keeps one
-  // browser page per conversation. Two views are therefore two handles on one guest: the provider
-  // keeps its own tab bookkeeping, and the page does not multiply behind it. Keeping a page per
-  // view is what the self-hosted carrier does, and it is what this one deliberately does not.
+test('legacy bridges retain their shared page for non-navigating handles', async () => {
+  // Protocol 2 cannot distinguish native tabs. Existing non-navigating handles stay usable while
+  // a second URL navigation must request an updated bridge rather than overwrite their page.
   const bridge = await startFakeBridge({ tabs: 1, dead: [] })
   withEndpoint(bridge.port)
   try {
@@ -197,6 +210,98 @@ test('every view of one conversation drives that conversation\'s one page', asyn
       'the strip is never grown to satisfy a second view: there is no second page to grow it for')
   } finally {
     bridge.close()
+  }
+})
+
+test('protocol 3 gives each logical view an independent guest and keeps it when URLs change', async () => {
+  const bridge = await startFakeBridge({ tabs: 0, dead: [], protocol: 3 })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a', () => true)
+    const first = host.createView('session-a')
+    const second = host.createView('session-a')
+    const firstResult = await first.sendCommand('Page.navigate', { url: 'https://same.example/' })
+    const secondResult = await second.sendCommand('Page.navigate', { url: 'https://same.example/' })
+    assert.notEqual(firstResult.guest, secondResult.guest, 'same URLs still mean separate native pages')
+    const returned = await first.sendCommand('Page.navigate', { url: 'https://changed-first.example/' })
+    assert.equal(returned.guest, firstResult.guest)
+    const initializations = bridge.requests.filter(request => request.op === 'ensureSidebar')
+    assert.deepEqual(initializations.map(request => request.viewId), [first.id, second.id, first.id])
+    assert.deepEqual(initializations.map(request => request.owner), ['session-a', 'session-a', 'session-a'])
+    assert.equal(initializations[0].guestId, undefined)
+    assert.equal(initializations[1].guestId, undefined)
+    assert.equal(initializations[2].guestId, firstResult.guest, 'cached guest identity accompanies a later reveal')
+    assert.equal(bridge.requests.some(request => request.op === 'ensureTabs'), false)
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('legacy bridges refuse a second URL navigation before it can replace the first native page', async () => {
+  const bridge = await startFakeBridge({ tabs: 1, dead: [] })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a')
+    const first = host.createView('session-a')
+    await first.sendCommand('Page.navigate', { url: 'https://first.example/' })
+    const second = host.createView('session-a')
+    const before = bridge.requests.length
+    await assert.rejects(second.sendCommand('Page.navigate', { url: 'https://second.example/' }), /bridge needs an update/)
+    assert.equal(bridge.requests.length, before, 'neither ensureSidebar nor CDP can touch the first page')
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('protocol 3 passive preview never assigns another live page to an unopened logical view', async () => {
+  const bridge = await startFakeBridge({ tabs: 1, dead: [], protocol: 3 })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a', () => true)
+    const view = host.createView('session-a')
+    const before = bridge.requests.length
+    await assert.rejects(view.sendCommand('Page.captureScreenshot', {}, { present: false }), BrowserPanelNotDisplayedError)
+    assert.equal(bridge.requests.length, before, 'an uninitialized view has no verified native identity to preview')
+    const result = await view.sendCommand('Page.navigate', { url: 'https://requested.example/' })
+    const ensured = bridge.requests.find(request => request.op === 'ensureSidebar')
+    assert.equal(ensured.guestId, undefined, 'the failed preview did not poison the view cache')
+    assert.equal(result.guest, 1)
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('destroying a view while initialization is pending prevents the late reply from restoring or driving it', async () => {
+  const bridge = await startFakeBridge({ tabs: 0, dead: [], protocol: 3, holdEnsure: true })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a')
+    const view = host.createView('session-a')
+    const navigation = view.sendCommand('Page.navigate', { url: 'https://pending.example/' })
+    const rejected = assert.rejects(navigation, /view was released/)
+    const deadline = Date.now() + 1_000
+    while ((bridge.state.heldReplies?.length ?? 0) === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    assert.equal(bridge.state.heldReplies?.length, 1, 'the initialization reached the bridge and is awaiting its reply')
+    host.destroyView(view)
+    bridge.state.heldReplies[0]()
+    await rejected
+    assert.equal(bridge.requests.some(request => request.op === 'cdp'), false, 'the released view never navigates the late guest')
+    const before = bridge.requests.length
+    host.showView(view, 'released', { quiet: true })
+    await assert.rejects(view.sendCommand('Runtime.evaluate', { expression: 'document.title' }), /view was released/)
+    assert.equal(bridge.requests.length, before, 'neither presentation nor later commands restore the released mapping')
+  } finally {
+    host?.dispose()
+    await bridge.close()
   }
 })
 
@@ -317,11 +422,7 @@ test('showView sends the materialized numeric guest instead of the UUID view id'
   }
 })
 
-test('quiet mode asks the sidebar for nothing, because showing it means switching the conversation', async () => {
-  // The reported symptom: `ui.quiet` was on and every call still pulled the shell over. On this
-  // carrier "show the page" IS "switch to that conversation", so the only faithful reading of the
-  // switch is to ask for nothing and let an undisplayed page fail with the documented display-state
-  // error instead of moving the user's view.
+test('quiet presentation leaves the visible tab alone until selection is explicitly requested', async () => {
   const bridge = await startFakeBridge({ tabs: 1, dead: [] })
   withEndpoint(bridge.port)
   let host
@@ -331,30 +432,82 @@ test('quiet mode asks the sidebar for nothing, because showing it means switchin
     await view.sendCommand('Runtime.evaluate', { expression: '1' })
     host.showView(view, 'quiet', { quiet: true })
     await new Promise(resolve => setTimeout(resolve, 30))
-    assert.equal(bridge.requests.some(request => request.op === 'showTab'), false, 'no showTab was sent')
-    // And without the switch the same call still presents the page, so the quiet path is the only
-    // one that changed.
-    host.showView(view, 'loud')
+    assert.equal(bridge.requests.some(request => request.op === 'showTab'), false, 'ordinary quiet reads and input never select a tab')
+    host.showView(view, 'selected', { quiet: true, select: true })
     await new Promise(resolve => setTimeout(resolve, 30))
-    assert.equal(bridge.requests.some(request => request.op === 'showTab'), true, 'a normal call still shows it')
+    const selected = bridge.requests.filter(request => request.op === 'showTab')
+    assert.equal(selected.length, 1, 'quiet mode still shows an explicitly requested sidebar tab')
+    assert.equal(selected[0].viewId, 1, 'the bridge receives its numeric native guest')
+    assert.equal(selected[0].logicalViewId, view.id)
+    assert.equal(selected[0].owner, 'session-a')
   } finally {
     host?.dispose()
     await bridge.close()
   }
 })
 
-test('quiet first navigation never opens or switches the sidebar', async () => {
-  const bridge = await startFakeBridge({ tabs: 1, dead: [] })
+test('quiet first navigation opens the selected sidebar and sends the URL to the requesting conversation', async () => {
+  const bridge = await startFakeBridge({ tabs: 0, dead: [] })
+  withEndpoint(bridge.port)
+  let host
+  const losses = []
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a', () => true)
+    host.onLost(reason => losses.push(reason))
+    const view = host.createView('session-b')
+    const result = await view.sendCommand('Page.navigate', { url: 'https://unopened.example/' })
+    assert.equal(result.echo, 'Page.navigate')
+    const initialized = bridge.requests.filter(request => request.op === 'ensureSidebar')
+    assert.equal(initialized.length, 1)
+    assert.equal(initialized[0].owner, 'session-b')
+    assert.equal(initialized[0].url, 'https://unopened.example/')
+    const navigation = bridge.requests.find(request => request.op === 'cdp' && request.method === 'Page.navigate')
+    assert.equal(navigation.id, 1)
+    assert.equal(navigation.params.url, 'https://unopened.example/')
+    await view.sendCommand('Runtime.evaluate', { expression: 'document.title' })
+    assert.equal(bridge.requests.filter(request => request.op === 'ensureSidebar').length, 1, 'the attached page is reused')
+    assert.deepEqual(losses, [], 'quiet initialization is not carrier loss')
+    assert.equal(bridge.requests.some(request => request.op === 'ensureTabs'), false)
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('quiet passive preview of an unopened sidebar still never initializes or navigates', async () => {
+  const bridge = await startFakeBridge({ tabs: 0, dead: [] })
   withEndpoint(bridge.port)
   let host
   try {
-    host = await DesktopBridgeViewHost.discover('session-a', () => true)
-    const view = host.createView('session-b')
-    await assert.rejects(view.sendCommand('Page.navigate', { url: 'https://unopened.example/' }), /quiet mode/)
+    host = await DesktopBridgeViewHost.discover('session-preview', () => true)
+    const view = host.createView('session-preview')
+    await assert.rejects(view.sendCommand('Page.captureScreenshot', {}, { present: false }), BrowserPanelNotDisplayedError)
     assert.equal(bridge.requests.some(request => request.op === 'ensureSidebar'), false)
-    assert.equal(bridge.requests.some(request => request.op === 'cdp'), false, 'an unrelated open page is left alone')
-    await view.sendCommand('Page.navigate', { url: 'https://page1.example/' })
-    assert.equal(bridge.requests.some(request => request.op === 'cdp' && request.id === 1), true)
+    assert.equal(bridge.requests.some(request => request.op === 'cdp'), false)
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
+test('quiet document probes cannot launch an initialization that outlives a later URL navigation', async () => {
+  const bridge = await startFakeBridge({ tabs: 0, dead: [] })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-probe', () => true)
+    const view = host.createView('session-probe')
+    const before = bridge.requests.length
+    await assert.rejects(view.sendCommand('Runtime.evaluate', { expression: 'performance.timeOrigin' }, { initialize: false }), error => {
+      assert.ok(error instanceof BrowserPanelNotDisplayedError)
+      assert.equal(error.code, 'panel-initializing')
+      return true
+    })
+    assert.equal(bridge.requests.length, before, 'the passive probe sends no bridge request at all')
+    await view.sendCommand('Page.navigate', { url: 'https://first-navigation.example/' })
+    const requests = bridge.requests.filter(request => request.op === 'ensureSidebar')
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].url, 'https://first-navigation.example/')
   } finally {
     host?.dispose()
     await bridge.close()

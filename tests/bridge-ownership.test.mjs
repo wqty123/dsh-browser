@@ -156,8 +156,17 @@ test('showTab refuses a guest another session holds', async () => {
   claims.set(2, 'sessionA')
   await assert.rejects(
     () => handle({ op: 'showTab', viewId: 2, owner: 'sessionB' }),
-    /another session/,
+    /not held by this conversation/,
   )
+})
+
+test('download refuses a guest another session holds before starting a transfer', async () => {
+  const a = new FakeContents(2, 'webview', 'https://a.example/')
+  a.session = { fetch() { assert.fail('must not transfer another conversation\'s page') } }
+  world.contents = [shell, a]
+  claims.clear()
+  claims.set(2, 'sessionA')
+  await assert.rejects(() => handle({ op: 'download', id: 2, owner: 'sessionB', url: 'https://a.example/file', savePath: '/downloads/file' }), /not held by this conversation/)
 })
 
 test('closeSidebarBrowser never considers another session’s guest', async () => {
@@ -202,12 +211,34 @@ test('a waiting call keeps asking about its own conversation, and nothing else',
   }
 })
 
+test('cdp refuses a guest held by another conversation', async () => {
+  const theirs = new FakeContents(9, 'webview', 'https://theirs.example/')
+  world.contents = [shell, theirs]
+  claims.clear()
+  claims.set(9, 'session-aaa')
+  await assert.rejects(
+    () => handle({ op: 'cdp', id: 9, method: 'Runtime.evaluate', params: { expression: '1' }, owner: 'session-bbb' }),
+    /not held by this conversation/,
+  )
+})
+
+test('cdp still drives the guest its own conversation holds', async () => {
+  const mine = new FakeContents(9, 'webview', 'https://mine.example/')
+  world.contents = [shell, mine]
+  claims.clear()
+  claims.set(9, 'session-aaa')
+  const answer = await handle({ op: 'cdp', id: 9, method: 'Runtime.evaluate', params: { expression: '1' }, owner: 'session-aaa' })
+  assert.equal(answer.ok, true)
+})
+
 test('the shell shortcut is simulated nowhere in the file', () => {
   // Ctrl+T is the shell's binding for browser.new, and the shell delivers it to whatever it is
   // displaying. That property is why it could not be the mechanism — and why a page asked for
   // from one conversation landed in another. Assert no branch reaches for it any more.
   const source = readFileSync(BRIDGE, 'utf8')
   assert.ok(!/request\.newTab === true/.test(source), 'no branch keys off newTab any more')
-  assert.ok(!/Input\.dispatchKeyEvent/.test(source), 'and no key event is dispatched anywhere')
+  const opening = source.slice(source.indexOf("if (op === 'ensureSidebar')"), source.indexOf("if (op === 'showTab')"))
+  assert.ok(!/Input\.dispatchKeyEvent|sendInputEvent/.test(opening), 'sidebar initialization never simulates a shell shortcut')
+  assert.ok(!/shell\.sendInputEvent/.test(source), 'native keyboard delivery never targets the shell')
   assert.ok(!/shellPrepareSidebar/.test(source), 'the launcher-card clicker is removed')
 })

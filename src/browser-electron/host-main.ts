@@ -500,7 +500,9 @@ function wireFocusRouting(win: HostWindow, view: WebContentsView, focusKey: stri
   view.webContents.on('input-event', (_event, input) => {
     if (input.type !== 'mouseDown') return
     win.lastFocusedViewId = focusKey
-    try { view.webContents.focus() } catch { /* destroyed */ }
+    if (win.window.isFocused()) {
+      try { view.webContents.focus() } catch { /* destroyed */ }
+    }
   })
 }
 
@@ -620,31 +622,24 @@ function revealViewInWindow(win: HostWindow, viewId: string, label?: string): vo
  * @param viewId - the view to present.
  * @param label - session/task label, when known, for the window title.
  * @param quiet - `ui.quiet`: present without taking the screen over.
- * @param needSurface - quiet mode only: this presentation is the barrier before synthesized
- *   input, so a newly created window needs an invisible display surface. A minimized window
- *   stays minimized because restoring it can activate it.
+ * @param needSurface - pre-input barrier flag retained by the RPC protocol. Quiet presentation
+ *   opens a new visible window without activation and preserves an existing foreground page.
  */
 function showViewInWindow(win: HostWindow, viewId: string, label?: string, quiet = false, needSurface = false): void {
   if (quiet) {
-    if (win.window.isMinimized()) {
-      if (needSurface) throw new Error('quiet mode will not restore a minimized browser window; restore it manually to send input')
-      return
-    }
-    if (win.window.isVisible() && win.window.getOpacity() > 0) {
-      if (win.visibleViewId !== viewId) {
-        if (needSurface) throw new Error('quiet mode will not replace a visible browser tab; select the target tab manually to send input')
-        return
-      }
-      revealViewInWindow(win, viewId, label)
-      return
-    }
+    if (win.window.isMinimized()) return
+    // Preserve the page the operator is actively reading. Other views remain addressable by
+    // their own CDP session, without switching the foreground window's selected page.
+    if (win.window.isFocused() && win.visibleViewId !== viewId) return
     revealViewInWindow(win, viewId, label)
-    if (!needSurface || win.window.isVisible()) return
-    win.window.setOpacity(0)
-    if (win.window.getOpacity() > 0) throw new Error('quiet mode could not create an invisible browser surface')
-    win.window.setSkipTaskbar(true)
-    win.window.setFocusable(false)
-    win.window.showInactive()
+    // Quiet means a normal usable window without activation, including on the first open.
+    // An invisible surface made the browser look broken even after navigation succeeded.
+    if (win.window.getOpacity() === 0) {
+      win.window.setOpacity(1)
+      win.window.setSkipTaskbar(false)
+      win.window.setFocusable(true)
+    }
+    if (!win.window.isVisible()) win.window.showInactive()
     return
   }
   revealViewInWindow(win, viewId, label)
@@ -837,10 +832,9 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
         // and `document.hasFocus()` inside the page even read true.
         const contents = entry.webContentsView.webContents
         const hadWebFocus = contents.isFocused()
-        if (msg.quiet === true && win.window.getOpacity() > 0 && !hadWebFocus) {
-          throw new Error('quiet mode will not take keyboard focus from the visible browser; focus the target page manually')
-        }
-        if (msg.quiet !== true || !hadWebFocus) contents.focus()
+        // Electron webContents.focus() can activate its BrowserWindow. CDP input uses the
+        // target page's DOM focus and does not require that operating-system activation.
+        if (msg.quiet !== true) contents.focus()
         // Focus lands asynchronously, and a key dispatched in the same turn as
         // the request is still dropped, so hold the reply until the renderer can
         // take input. Only on the call where focus actually had to move.

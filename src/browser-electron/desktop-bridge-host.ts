@@ -179,7 +179,8 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   /**
    * @param endpoint - the shell's published bridge endpoint.
    */
-  private constructor(endpoint: BridgeEndpoint, sessionId?: string, private readonly isQuiet: () => boolean = () => false) {
+  private constructor(endpoint: BridgeEndpoint, sessionId?: string, private readonly isQuiet: () => boolean = () => false,
+    private readonly protocol = 2) {
     this.owner = sessionId !== undefined && sessionId !== String.fromCharCode(39,39) ? sessionId : randomUUID()
     // The transport reaches this only by concluding the shell stopped refreshing its endpoint, which
     // is `shell-exited`.
@@ -248,7 +249,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
           DesktopBridgeViewHost.refuseIframe = true
           return undefined
         }
-        return new DesktopBridgeViewHost(endpoint, sessionId, isQuiet)
+        return new DesktopBridgeViewHost(endpoint, sessionId, isQuiet, Number(answer.protocol ?? 2))
       } finally {
         probe.close()
       }
@@ -354,10 +355,16 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
 
   private async guestFor(viewId: string, url?: string, options?: CommandOptions): Promise<number> {
     const entry = this.views.get(viewId)
+    if (entry === undefined) throw new Error('dsh-builtin-browser: sidebar view was released')
+    const stillOwned = (): void => {
+      if (this.views.get(viewId) !== entry) throw new Error('dsh-builtin-browser: sidebar view was released')
+    }
     // No liveness check here: verifying the cached guest cost a round-trip on every
     // command. A guest that has gone away is detected by the command itself failing,
     // and `createView`'s sendCommand then discards the cache and calls back in here.
-    if (entry?.guest !== undefined) return entry.guest
+    // Explicit navigation also reopens a folded panel. Cached guests are sufficient for reads
+    // and input, but not for the user's request to open an address in this conversation's sidebar.
+    if (entry?.guest !== undefined && url === undefined) return entry.guest
     if (options?.initialize === false) {
       throw new BrowserPanelNotDisplayedError('this view has no attached guest yet', PANEL_INITIALIZING)
     }
@@ -374,12 +381,19 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     // conversation's own panel by id through the renderer, rather than by pressing the shell's
     // shortcut or clicking its card, both of which the shell delivers to whatever it displays.
     const owner = entry?.owner ?? this.owner
+    if (url !== undefined && this.protocol < 3
+      && [...this.views.entries()].some(([id, view]) => id !== viewId && view.owner === owner && view.guest !== undefined)) {
+      throw new Error('dsh-builtin-browser: this desktop bridge needs an update for separate sidebar tabs; use Repair and restart in Browser settings')
+    }
     // A command that must not present anything (issue #46: the live preview) takes a read-only path.
     // It asks the bridge what this conversation ALREADY has and never enters the retry loop below —     // that loop is what asks the shell to display the conversation, which is right for a tool call
     // and wrong for "let me look at it". A page that is not on screen therefore reports as a display
     // state, and the preview route turns that into the panel's paused state.
-    const quiet = this.isQuiet()
-    if (options?.present === false || quiet) {
+    if (options?.present === false) {
+      // A logical view without a binding cannot borrow a neighbouring tab for a preview.
+      if (this.protocol >= 3) {
+        throw new BrowserPanelNotDisplayedError('this view has no attached guest yet', PANEL_INITIALIZING)
+      }
       // `list` and NOT `ensureSidebar`. This is deliberate and it is the whole fix: every version of
       // `ensureSidebar` can drive the shell — the current one asks the renderer to display the
       // conversation, and the pre-#37 one literally pressed the sidebar shortcut and typed into the
@@ -391,25 +405,24 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
         ? listed.sidebar.filter(page => page !== null && typeof page === 'object' && page.type === 'webview')
         : []
       const wanted = url !== undefined && url !== '' ? url : undefined
-      const matchedUrl = pages.find(page => wanted !== undefined && page.url === wanted)
-      const match = quiet && wanted !== undefined
-        ? matchedUrl
-        : pages.find(page => wanted !== undefined && typeof page.url === 'string' && page.url.startsWith(wanted)) ?? pages[0]
+      const samePage = (url: string, wanted: string): boolean => url === wanted || url.startsWith(`${wanted}?`) || url.startsWith(`${wanted}#`)
+      const match = pages.find(page => wanted !== undefined && typeof page.url === 'string' && samePage(page.url, wanted)) ?? pages[0]
       const id = match !== undefined ? Number(match.id) : Number.NaN
       if (!Number.isFinite(id) || id <= 0) {
         throw new BrowserPanelNotDisplayedError(
-          quiet
-            ? 'quiet mode will not open a sidebar or switch conversations; open this URL in the sidebar yourself or select the bundled browser for background work'
-            : 'the preview asked for this conversation\'s page without presenting it, and no page is attached '
-              + `(the shell holds ${pages.length})`,
+          'the preview asked for this conversation\'s page without presenting it, and no page is attached '
+            + `(the shell holds ${pages.length})`,
         )
       }
-      this.views.set(viewId, { guest: id, owner })
+      stillOwned()
+      entry.guest = id
       return id
     }
     const ask = (): Promise<Record<string, unknown>> => this.connection.call({
       op: 'ensureSidebar',
       owner,
+      viewId,
+      ...entry?.guest === undefined ? {} : { guestId: entry.guest },
       ...url !== undefined && url !== '' ? { url } : {},
     }, 30_000)
     let answer = await ask()
@@ -434,8 +447,10 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
         || String(value.error ?? '').includes('can only attach'))
     for (let attempt = 0; attempt < PANEL_DISPLAY_RETRIES && displayRefusal(answer); attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, PANEL_DISPLAY_RETRY_MS))
+      stillOwned()
       answer = await ask()
     }
+    stillOwned()
     if (answer.ok !== true) {
       // Reachable only after the retries above have run out, and the code still decides — not the
       // wording:
@@ -444,7 +459,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       // A missing guest within a time budget is still initialization, including on old bridges
       // that only returned text. It is not evidence that this shell uses an undrivable iframe.
       const code = String(answer.code ?? '')
-      const detail = String(answer.error)
+      const detail = String(answer.error ?? answer.code ?? 'unknown sidebar failure')
       if (code === PANEL_NOT_DISPLAYED) throw new BrowserPanelNotDisplayedError(detail)
       if (code === PANEL_INITIALIZING || (code === '' && detail.includes('produced no page'))) {
         throw new BrowserPanelNotDisplayedError(detail, PANEL_INITIALIZING)
@@ -456,7 +471,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     if (!Number.isFinite(id) || id <= 0) {
       throw new Error('dsh-builtin-browser: the sidebar reported no browser page for this conversation')
     }
-    this.views.set(viewId, { guest: id, owner })
+    entry.guest = id
     return id
   }
 
@@ -470,13 +485,21 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     const navigateUrl = (method: string, params?: Record<string, unknown>): string | undefined =>
       method === 'Page.navigate' ? String((params as { url?: unknown })?.url ?? '') : undefined
     const run = async (guest: number, method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> => {
-      const answer = await this.connection.call({ op: 'cdp', id: guest, method, params })
+      const owner = this.views.get(viewId)?.owner ?? this.owner
+      const answer = await this.connection.call({ op: 'cdp', id: guest, method, params, owner })
       if (answer.ok !== true) throw new Error(`dsh-builtin-browser: sidebar command failed: ${String(answer.error)}`)
       // The bridge forwards whatever CDP answered; the seam expects an object.
       return (answer.result ?? {}) as Record<string, unknown>
     }
     return {
       id: viewId,
+      download: async (url: string, savePath: string) => {
+        if (this.protocol < 3) throw new Error('dsh-builtin-browser: repair and restart the desktop bridge for sidebar downloads')
+        const guest = await this.guestFor(viewId)
+        const owner = this.views.get(viewId)?.owner ?? this.owner
+        const answer = await this.connection.call({ op: 'download', id: guest, owner, url, savePath }, 60_000)
+        if (answer.ok !== true) throw new Error(`dsh-builtin-browser: sidebar download failed: ${String(answer.error)}`)
+      },
       sendCommand: async (method: string, params?: Record<string, unknown>, options?: CommandOptions) => {
         // No liveness probe up front. Checking first cost a whole round-trip on
         // every command; instead the command runs and its failure is what triggers
@@ -526,13 +549,10 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    * it must not fail the navigation that has already happened.
    * @param handle - the view to bring forward.
    */
-  showView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean }): void {
-    // Quiet mode (`ui.quiet`) means "do not take my screen". On this carrier showing a page means
-    // asking the shell to switch the displayed conversation — precisely the takeover the switch
-    // forbids. So honour it by asking for nothing: a page that is already displayed keeps working,
-    // and one that is not fails with the documented display-state error instead of moving the
-    // user's view. Measured before this: the setting was on and every call still switched.
-    if (options?.quiet === true) return
+  showView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean }): void {
+    // Selecting a sidebar tab only changes the task's pane. The bridge never activates the
+    // desktop window, so explicit tab selection works in quiet mode as well.
+    if (options?.quiet === true && options.select !== true) return
     // `owner` is required: the bridge refuses to bring forward a guest held by another session.
     // It comes from the view, not the process — with several conversations live, a process-wide
     // owner would raise the wrong conversation's tab.
@@ -541,7 +561,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     // showActive also runs before a view has navigated; do not materialize a blank page just to
     // present it. Once materialized, only the shell's numeric guest id can name its tab.
     if (guest === undefined) return
-    void this.connection.call({ op: 'showTab', viewId: guest, owner }, 5_000).catch(() => undefined)
+    void this.connection.call({ op: 'showTab', viewId: guest, logicalViewId: handle.id, owner }, 5_000).catch(() => undefined)
   }
 
 
@@ -619,7 +639,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    */
   async collapse(): Promise<void> {
     try {
-      await this.connection.call({ op: 'collapseSidebar' }, 10_000)
+      await this.connection.call({ op: 'collapseSidebar', owner: this.owner }, 10_000)
     } catch {
       // Presentation only; failing to fold is never worth an error.
     }

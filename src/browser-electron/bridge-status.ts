@@ -8,19 +8,25 @@
  *
  * The states are the three that actually occur:
  *
- * - `installed` — the shell's main.js carries our marker and the archive is still moved aside.
+ * - `installed` — the loaded main.js carries our marker and its bridge matches this plugin.
  * - `missing` — no marker. Either never installed, or the shell was upgraded (which restores
  *   `app.asar` and replaces `lib/main.js`) and the bridge went with it.
- * - `stale` — the marker is present but `app.asar` is back. That is the signature of a desktop
- *   update that restored the archive without removing our patch: the shell loads the archive, so the
- *   patch inside the unpacked tree has no effect. This is the case that looks installed and is not.
+ * - `stale` — the archive is back, or the deployed bridge module is missing or outdated.
  * @module dsh-browser/browser-electron/bridge-status
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 
 import { readDesktopIdentity } from './desktop-identity.js'
+
+// A normal Electron existsSync(app.asar) caches the archive and keeps it locked on Windows.
+// Status inspection must leave maintenance free to rename it after Desktop exits.
+const rawExistsSync: typeof existsSync = (() => {
+  try { return (createRequire(import.meta.url)('original-fs') as typeof import('node:fs')).existsSync }
+  catch { return existsSync }
+})()
 
 /**
  * Find the desktop install to report on.
@@ -33,27 +39,44 @@ import { readDesktopIdentity } from './desktop-identity.js'
  * @param localAppData - the base directory; defaults to the environment's.
  * @returns the install directory, or undefined when nothing matches.
  */
-export function findDesktopInstall(localAppData = process.env.LOCALAPPDATA ?? ''): string | undefined {
-  if (localAppData === '') return undefined
-  const programs = join(localAppData, 'Programs')
-  // An archive-only layout is still a DSH Desktop install: a desktop update repacks `resources/app`
-  // into `resources/app.asar`, and the identity rule (which reads the unpacked main entry) then has
-  // nothing to read. Treating that as "no desktop here" hid the repair command exactly when it was
-  // needed most — measured on this machine after an update.
-  const isDesktop = (candidate: string): boolean =>
-    readDesktopIdentity(candidate).ok || safeExists(join(candidate, 'resources', 'app.asar'))
-  for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
-    const candidate = join(programs, named)
-    if (isDesktop(candidate)) return candidate
+export function findDesktopInstall(localAppData?: string): string | undefined {
+  // Not every install lives in %LOCALAPPDATA%\\Programs: people put the app on another drive, under
+  // Program Files, or in their own folder. DSH_DESKTOP_PATH names one explicitly, and the usual roots
+  // are all probed. A test or a caller that passes a base directory gets exactly that base, so the
+  // behaviour stays pinnable.
+  const isDesktop = (candidate: string): boolean => readDesktopIdentity(candidate).ok
+  const explicit = process.env.DSH_DESKTOP_PATH
+  if (explicit !== undefined && explicit !== '') {
+    const named = explicit
+    if (isDesktop(named)) return named
+    // A parent directory is a reasonable thing to point at too: look one level down.
+    try {
+      for (const entry of readdirSync(named, { withFileTypes: true })) {
+        if (entry.isDirectory() && isDesktop(join(named, entry.name))) return join(named, entry.name)
+      }
+    } catch {
+      // Not a directory: fall through to the usual roots.
+    }
   }
-  try {
-    for (const entry of readdirSync(programs, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
-      const candidate = join(programs, entry.name)
+  const roots = localAppData === undefined
+    ? [process.env.LOCALAPPDATA ?? '', process.env['ProgramFiles'] ?? '', process.env['ProgramFiles(x86)'] ?? '', process.env.APPDATA ?? '', process.env.ProgramData ?? '']
+      .filter(base => base !== '')
+      .map(base => (base === process.env.LOCALAPPDATA ? join(base, 'Programs') : base))
+    : [join(localAppData, 'Programs')]
+  for (const base of roots) {
+    for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
+      const candidate = join(base, named)
       if (isDesktop(candidate)) return candidate
     }
-  } catch {
-    // No Programs directory: nothing to report on, which is a state rather than an error.
+    try {
+      for (const entry of readdirSync(base, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const candidate = join(base, entry.name)
+        if (isDesktop(candidate)) return candidate
+      }
+    } catch {
+      // A root that does not exist is a state, not an error.
+    }
   }
   return undefined
 }
@@ -65,7 +88,7 @@ const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sideb
 export interface BridgeStatus {
   /** `installed`, `missing` or `stale`; see the module comment for what each means. */
   readonly state: 'installed' | 'missing' | 'stale'
-  /** Whether the install directory looks like a DSH Desktop install at all. */
+  /** Whether the loaded application passed DSH Desktop identity verification. */
   readonly present: boolean
   /**
    * The desktop build this reading belongs to, when the identity check could name one.
@@ -85,8 +108,8 @@ export interface BridgeStatus {
   /**
    * The command that installs or repairs the bridge.
    *
-   * Shown rather than run. Executing it from a web request would mean a page can decide to close the
-   * desktop shell, and no amount of same-origin checking makes that a good idea; the user runs it.
+   * The panel can show this command for manual use. Its install button calls the same packaged
+   * installer through the separately authenticated local bridge-action route.
    */
   readonly command?: string
 }
@@ -124,7 +147,7 @@ function repairCommand(installRoot: string | undefined): string | undefined {
   // No absolute path means the package is laid out in a way this module cannot navigate; the bare
   // relative form is still better than nothing, but it is the fallback, not the default.
   const runner = script === undefined ? 'desktop-bridge/install.mjs' : `"${script}"`
-  return `node ${runner} "${installRoot}" --restart`
+  return `node ${runner} "${installRoot}"`
 }
 
 /**
@@ -148,31 +171,17 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
   // aimed at an application that merely looked like Electron.
   const identity = readDesktopIdentity(installRoot)
   if (!identity.ok) {
-    // The identity rule reads the unpacked main entry. When the archive is what exists, the tree it
-    // wants is gone — the signature of a desktop update that restored app.asar and took the bridge
-    // with it. Reporting `absent` there was wrong twice over: the desktop is installed, and the
-    // user needs the repair command.
-    if (safeExists(archivePath)) {
-      return {
-        state: 'stale',
-        present: true,
-        installRoot,
-        archivePresent: true,
-        command: repairCommand(installRoot),
-        detail: 'the desktop is packed (resources/app.asar) and the unpacked tree the bridge lives in '
-          + 'is gone — most likely a desktop update restored the archive: re-run the installer to repair',
-      }
-    }
     return {
       state: 'missing',
       present: false,
       installRoot,
-      archivePresent: false,
+      archivePresent: safeExists(archivePath),
       detail: `not a DSH Desktop install: ${identity.reason}`,
     }
   }
 
   const archivePresent = safeExists(archivePath)
+  const version = identity.version ?? 'unknown'
   const mainPresent = safeExists(mainPath)
   if (!mainPresent && !archivePresent) {
     // Unreachable once identity has passed (identity requires the loaded main entry), kept as the
@@ -182,6 +191,7 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
       present: false,
       installRoot,
       archivePresent,
+      version,
       detail: 'not a DSH Desktop install: no resources/app/lib/main.js and no resources/app.asar',
     }
   }
@@ -199,9 +209,10 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
       present: true,
       installRoot,
       archivePresent,
+      version,
       ...backupAt === undefined ? {} : { backupAt },
       command: repairCommand(installRoot),
-    detail: 'packed layout with no bridge in the loaded tree: the bridge is not installed',
+      detail: 'packed layout with no bridge in the loaded tree: the bridge is not installed',
     }
   }
   if (archivePresent) {
@@ -210,9 +221,10 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
       present: true,
       installRoot,
       archivePresent,
+      version,
       ...backupAt === undefined ? {} : { backupAt },
       command: repairCommand(installRoot),
-    detail: 'the archive is back alongside the patched tree, so the shell loads the archive: '
+      detail: 'the archive is back alongside the patched tree, so the shell loads the archive: '
         + 'a desktop update restored it. Re-run the installer to repair.',
     }
   }
@@ -222,26 +234,36 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
       present: true,
       installRoot,
       archivePresent,
+      version,
       ...backupAt === undefined ? {} : { backupAt },
       command: repairCommand(installRoot),
-    detail: 'unpacked layout without the bridge patch: the bridge is not installed',
+      detail: 'unpacked layout without the bridge patch: the bridge is not installed',
     }
   }
+  const bridgePath = join(appDir, 'lib', 'plugin-browser-bridge.js')
+  let bridgeDetail: string | undefined
+  try {
+    const deployed = readFileSync(bridgePath)
+    const shipped = readFileSync(new URL('../../desktop-bridge/plugin-browser-bridge.js', import.meta.url))
+    if (!deployed.equals(shipped)) bridgeDetail = 'the deployed bridge module differs from this plugin version; reinstall the bridge to refresh it'
+  } catch {
+    bridgeDetail = 'the bridge module is missing or cannot be verified; reinstall the bridge to restore it'
+  }
   return {
-    state: 'installed',
+    state: bridgeDetail === undefined ? 'installed' : 'stale',
     present: true,
     installRoot,
     archivePresent,
-    version: 'version' in identity && typeof identity.version === 'string' ? identity.version : 'unknown',
+    version,
     ...backupAt === undefined ? {} : { backupAt },
     command: repairCommand(installRoot),
-    detail: 'the shell loads the patched tree and the bridge is in it',
+    detail: bridgeDetail ?? 'the shell loads the patched tree and its bridge module matches this plugin version',
   }
 }
 
 /** Whether a path exists, treating any error as absence. */
 function safeExists(path: string): boolean {
-  try { return existsSync(path) } catch { return false }
+  try { return rawExistsSync(path) } catch { return false }
 }
 
 /** Whether a file contains a string, treating any error as absence. */

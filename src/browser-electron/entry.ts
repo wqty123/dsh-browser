@@ -25,6 +25,7 @@ import { dirname, join } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.js'
 import { DesktopBridgeViewHost } from './desktop-bridge-host.js'
+import { SidebarOnlyHost } from './sidebar-only-host.js'
 import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.js'
 import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralProfiles } from './ephemeral-profile.js'
 import { MissingSystemBrowserHost } from './missing-system-browser.js'
@@ -35,8 +36,12 @@ import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_S
 import { findDesktopInstall, readBridgeStatus } from './bridge-status.js'
 import { readBridgeEndpoint } from './bridge-endpoint.js'
 import { runBridgeAction } from './bridge-install.js'
-import { AUTO_INSTALL_COOLDOWN_MS, autoInstallDecision, autoInstallMarkerPath, readAutoInstallMarker, writeAutoInstallMarker } from './bridge-auto.js'
+import { prepareBridgeMaintenance } from './bridge-maintenance.js'
+import { commitAutomaticMaintenance, readAutomaticMaintenance, startAutomaticMaintenance } from './automatic-maintenance.js'
+import { AUTOMATIC_MAINTENANCE_ROUTE, createAutomaticMaintenanceHandler } from './maintenance-route.js'
+import { runWithManualBridgePreference } from './bridge-auto.js'
 import { replyJson } from './json-reply.js'
+import { readTextBody } from './http-body.js'
 import { readRuntimeStatus } from './runtime-status.js'
 import { handleRuntimeProvision, handleRuntimeStatus, RUNTIME_PROVISION_ROUTE, RUNTIME_STATUS_ROUTE } from './runtime-route.js'
 
@@ -156,11 +161,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     return
   }
 
-  // Otherwise start self-hosted — a working browser from the first call, on every
-  // surface — and upgrade to the desktop sidebar if this machine has one. The
-  // upgrade is deliberately a swap of the whole provider: the two carriers own
-  // different lifetimes (a spawned child vs. the shell's view), and pretending
-  // otherwise would leave a stray window behind.
+  // Explicit sidebar selection stays on the desktop's carrier, including while its bridge
+  // reconnects. Other choices can use the independently hosted browser when appropriate.
   const selfHosted = new RemoteElectronViewHost(defaultHostMainPath())
   // The self-hosted carrier is the only one that needs Electron, and it is prepared HERE, lazily,
   // rather than during package installation (issue #41: a `postinstall` download made a default
@@ -173,12 +175,22 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   if (wantedChannel === 'bundled' || wantedChannel === 'auto') {
     void provisionElectronInBackground(message => ctx.logger?.info?.(`dsh-builtin-browser: ${message}`))
   }
-  let unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(selfHosted, providerConfig))
+  const requiredSidebar = (): SidebarOnlyHost => new SidebarOnlyHost(async () => {
+    for (const pause of [0, 1_000, 3_000, 8_000]) {
+      if (pause > 0) await wait(pause)
+      const sidebar = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
+      if (sidebar !== undefined) return sidebar
+      if (DesktopBridgeViewHost.refusedIframePanel()) break
+    }
+    throw new Error('dsh-builtin-browser: the selected DSH sidebar is not connected. Check or repair the desktop bridge in Browser settings, then retry the same operation.')
+  })
+  const initialHost = wantedChannel === 'sidebar' ? requiredSidebar() : selfHosted
+  let unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(initialHost, providerConfig))
   let disposed = false
   let carrierChoice = 0
   let discovery: AbortController | undefined
   /** The carrier an `adopt` installed, so a later choice can release it. */
-  let adoptedCarrier: ElectronBrowserViewHost | undefined
+  let adoptedCarrier: ElectronBrowserViewHost | undefined = initialHost === selfHosted ? undefined : initialHost
 
   ctx.effect(() => () => {
     disposed = true
@@ -208,12 +220,15 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     // A replaced carrier may finish an outstanding request after the new choice is installed.
     if (disposed || adoptedCarrier !== adopted) return
     try {
-      const restored = new RemoteElectronViewHost(defaultHostMainPath())
+      const sidebarSelected = settings.get().browser.channel === 'sidebar'
+      const restored = sidebarSelected ? requiredSidebar() : new RemoteElectronViewHost(defaultHostMainPath())
       unregister()
       unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(restored, providerConfig))
       adoptedCarrier = restored
       ctx.logger?.warn?.(
-        reason === 'shell-exited'
+        sidebarSelected
+          ? 'dsh-builtin-browser: the selected DSH sidebar connection was lost; the next operation will reconnect to the sidebar.'
+          : reason === 'shell-exited'
           ? 'dsh-builtin-browser: the desktop shell backed the sidebar browser and has exited, so the '
             + 'browser this plugin hosts itself takes over. Pages from the sidebar are gone with it; '
             + 'open the page again.'
@@ -268,7 +283,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // A borrowed carrier can lose the process behind it, and this is the only notification that
       // will ever arrive. Registering AFTER the swap succeeded means a listener can never fire
       // against a provider that was never installed.
-      host.onLost?.(reason => { restoreSelfHosted(host, reason) })
+      if (!(host instanceof SidebarOnlyHost)) host.onLost?.(reason => { restoreSelfHosted(host, reason) })
       // Released AFTER the replacement is installed, so the surface is never without a provider.
       if (previous !== undefined && previous !== host) {
         try { previous.dispose?.() } catch { /* the replacement is already serving */ }
@@ -286,7 +301,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // exit code 1: a failed upgrade, which should only ever cost a warning, took the whole
       // session down instead. Observed 2026-10-05 (crash-…-host.log, phase: running).
       try {
-        const fallback = new RemoteElectronViewHost(defaultHostMainPath())
+        const fallback = settings.get().browser.channel === 'sidebar' ? requiredSidebar() : new RemoteElectronViewHost(defaultHostMainPath())
         unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(fallback, providerConfig))
         adoptedCarrier = fallback
         if (previous !== undefined && previous !== host) {
@@ -333,7 +348,11 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // and a user who picked a browser that is not installed would never see the explanation
   // written for exactly that case, because the sidebar would quietly replace it.
   const explicitChoice: boolean = channel !== 'bundled' && channel !== 'auto' && channel !== 'sidebar'
-  if (channel !== 'bundled' && channel !== 'sidebar') {
+  if (channel === 'sidebar') {
+    if (!(adoptedCarrier instanceof SidebarOnlyHost)) adopt(requiredSidebar(), 'using only the selected DSH sidebar', choice)
+    return
+  }
+  if (channel !== 'bundled') {
     const detected = detectBrowser(channel)
     if (detected === undefined) {
       // `auto` promises to take whatever is available, so falling back is what it
@@ -389,9 +408,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // An explicit choice was already adopted above; discovering the sidebar here would
   // replace it, which is exactly what this guard prevents.
   //
-  // `sidebar` is explicit too, but it names the sidebar, so it is the one explicit choice that
-  // must FALL THROUGH to the discovery below instead of returning here.
-  if (explicitChoice && channel !== 'sidebar') return
+  // Explicit sidebar selection was handled above by its reconnectable sidebar-only host.
+  if (explicitChoice) return
 
   // The shell may not be up yet. `dsh web` starts before — or entirely without — the desktop app
   // that hosts the bridge, and a one-shot discovery meant a bridge that appeared a second later
@@ -434,17 +452,6 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         + 'enables `webviewTag` would provide a drivable panel.',
       )
       return
-    }
-    // The user explicitly asked for the sidebar, so silence would leave them with a setting
-    // that did nothing and no way to tell why. This is reachable on `dsh web`, and on a desktop
-    // whose shell never published a bridge endpoint. An automatic attempt stays quiet (the
-    // self-hosted window is a fine outcome); an explicit request does not.
-    if (channel === 'sidebar') {
-      ctx.logger?.warn?.(
-        'dsh-builtin-browser: the sidebar browser was requested but no desktop bridge was found — '
-        + 'this DSH has no desktop shell, or its bridge never started. Falling back to the bundled '
-        + 'browser; set browser.channel to another value to silence this.',
-      )
     }
   })()
   }
@@ -502,24 +509,24 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   let bridgeActionRunning = false
 
   /**
-   * Install, repair or remove the bridge, from a button.
-   *
-   * The panel used to print a command. This step closes and reopens the desktop app, so a
-   * half-finished manual run leaves the shell in a state the user then has to diagnose — the
-   * packaged installer already handles the whole sequence unattended, and this hands it the one
-   * decision that is not its own: which action the user pressed.
-   * @param request - the incoming request (POST, JSON body `{action}`).
+   * Prepare external maintenance while Desktop remains open, or execute file maintenance from
+   * an independent local host after Desktop has exited.
+   * @param request - the incoming request (POST, JSON body `{action, prepare?}`).
    * @param response - the response to write.
    */
   async function handleBridgeAction(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (request.method !== 'POST') { replyJson(response, 405, { error: 'method-not-allowed' }); return }
-    // A write: it stops the shell. Same admission as a settings write, not the read rule.
+    // Both creating a local launcher and changing installation files require write admission.
     if (!sameOrigin(request, true)) { replyJson(response, 403, { error: 'not-same-origin' }); return }
     if (!isDirectLoopback(request)) { replyJson(response, 403, { error: 'local-request-required' }); return }
     let action: unknown
+    let preparationOnly = false
     try {
       const body = await readBody(request)
-      action = (JSON.parse(body === '' ? '{}' : body) as { action?: unknown }).action
+      const input = JSON.parse(body === '' ? '{}' : body) as { action?: unknown; prepare?: unknown }
+      action = input.action
+      if (input.prepare !== undefined && typeof input.prepare !== 'boolean') throw new Error('prepare must be a boolean')
+      preparationOnly = input.prepare === true
     } catch (error) {
       replyJson(response, 400, { ok: false, error: `unreadable body: ${String(error)}` })
       return
@@ -538,10 +545,26 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       replyJson(response, 409, { ok: false, error: 'bridge-action-in-progress' })
       return
     }
+    const active = readAutomaticMaintenance()
+    if (!preparationOnly && active !== undefined && !['completed', 'failed', 'cancelled'].includes(active.phase)) {
+      replyJson(response, 409, { ok: false, error: 'an automatic bridge maintenance job is in progress' })
+      return
+    }
     bridgeActionRunning = true
     try {
-      const result = await runBridgeAction(action, root)
-      replyJson(response, 200, { ok: result.ok, action, code: result.code, output: result.output, command: result.command })
+      if (preparationOnly) {
+        const result = await prepareBridgeMaintenance(action, root)
+        replyJson(response, 200, { ...result, action })
+        return
+      }
+      const result = await runWithManualBridgePreference(action, patch => settings.update(patch), () => runBridgeAction(action, root))
+      replyJson(response, 200, { ...result, action })
+    } catch (error) {
+      if (preparationOnly) {
+        replyJson(response, 500, { ok: false, error: `could not prepare bridge maintenance: ${String(error)}` })
+        return
+      }
+      replyJson(response, 500, { ok: false, error: String(error instanceof Error ? error.message : error) })
     } finally {
       bridgeActionRunning = false
     }
@@ -554,13 +577,29 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     if (typeof injectStatus !== 'function') return
     try {
       injectStatus(['webServer'], (host) => {
+        const automaticMaintenance = createAutomaticMaintenanceHandler({
+          supported: () => process.platform === 'win32',
+          busy: () => bridgeActionRunning,
+          read: () => readAutomaticMaintenance(),
+          commit: async id => { await commitAutomaticMaintenance(id) },
+          start: async (action, options) => {
+            const root = findDesktopInstall()
+            if (root === undefined) throw new Error('no verified DSH Desktop installation was found')
+            return await runWithManualBridgePreference(action, patch => settings.update(patch),
+              async () => await startAutomaticMaintenance(action, root, options))
+          },
+        })
+        host.effect(() => host.webServer.register({
+          kind: 'exact', path: AUTOMATIC_MAINTENANCE_ROUTE,
+          handler: authenticated(ctx, automaticMaintenance),
+        }, 'dsh-builtin-browser: explicit automatic bridge maintenance'))
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: BRIDGE_STATUS_ROUTE,
           handler: authenticated(ctx, (request, response) => handleBridgeStatus(request, response)),
         }, 'dsh-builtin-browser: bridge status'))
-        // The same information, one action later: install/repair or remove the bridge without the
-        // user opening a terminal. Admitted as a write, because it closes and restarts the shell.
+        // The panel prepares a launcher without changing the running Desktop. Direct local
+        // maintenance remains available once Desktop has exited.
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: BRIDGE_ACTION_ROUTE,
@@ -574,46 +613,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
 
   installSettingsRoute(ctx, settings, () => { chooseCarrier() })
 
-  // Install the desktop bridge without being asked, once per desktop build.
-  //
-  // "Install the plugin and the browser works" is the promise, and the bridge was the one step left to
-  // the person. It cannot be installed while the shell runs (Electron holds app.asar) and the
-  // installer's --restart closes and reopens the app, so this is silent, recorded BEFORE it starts, and
-  // limited to one attempt per build: a failed install must not turn every launch into a restart.
-  {
-    const installRoot = findDesktopInstall()
-    const markerPath = join(dirname(settings.path()), 'bridge-auto-install.json')
-    const decision = autoInstallDecision({
-      installRoot,
-      enabled: settings.get().bridge.autoInstall !== false,
-      status: installRoot === undefined
-        ? { state: 'missing', present: false, archivePresent: false, detail: '' }
-        : readBridgeStatus(installRoot),
-      marker: readAutoInstallMarker(markerPath),
-      cooldownMs: AUTO_INSTALL_COOLDOWN_MS,
-      now: Date.now(),
-    })
-    if (!decision.run) {
-      ctx.logger?.debug?.(`dsh-builtin-browser: bridge auto-install skipped: ${decision.why}`)
-    } else {
-      const build = (installRoot === undefined ? undefined : readBridgeStatus(installRoot).version) ?? 'unknown'
-      writeAutoInstallMarker(markerPath, { build, attemptedAt: new Date().toISOString(), outcome: 'started' })
-      ctx.logger?.info?.(`dsh-builtin-browser: installing the desktop bridge (${decision.why}); the desktop app restarts itself`)
-      void runBridgeAction('install', installRoot as string)
-        .then(result => {
-          writeAutoInstallMarker(markerPath, {
-            build,
-            attemptedAt: new Date().toISOString(),
-            outcome: result.ok ? 'installed' : `failed (exit ${String(result.code)}): ${result.output.slice(0, 200)}`,
-          })
-          if (!result.ok) ctx.logger?.warn?.(`dsh-builtin-browser: automatic bridge install failed: ${result.output}`)
-        })
-        .catch((error: unknown) => {
-          writeAutoInstallMarker(markerPath, { build, attemptedAt: new Date().toISOString(), outcome: `failed: ${String(error).slice(0, 200)}` })
-          ctx.logger?.warn?.(`dsh-builtin-browser: automatic bridge install failed: ${String(error)}`)
-        })
-    }
-  }
+  // Bridge maintenance is explicit and requires DSH Desktop to be closed. Loading a provider
+  // never starts an installer, including with an older settings file's bridge.autoInstall=true.
 
   /**
    * Expose readiness — "can the browser serve a call right now" — for the settings panel.
@@ -637,6 +638,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     const deps = {
       report: () => readRuntimeStatus({
         channel: () => settings.get().browser.channel,
+        selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
+          : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
         hasBinary: hasElectronRuntime,
         provision: provisionSnapshot,
         bridge: () => {
@@ -704,7 +707,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       lastChannel = channel
       ctx.logger?.info?.(`dsh-builtin-browser: settings changed on disk, re-choosing the carrier for channel "${channel}"`)
       chooseCarrier()
-    }, 2_000)
+    }, 5_000)
     // Unref-ed so a poll never holds the process open.
     timer.unref?.()
     ctx.effect(() => () => { clearInterval(timer) }, "dsh-builtin-browser: settings file watch")
@@ -886,17 +889,5 @@ async function handleSettingsRequest(
  * @returns the body text.
  */
 function readBody(request: IncomingMessage, limit = 64 * 1024): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    let text = ''
-    request.setEncoding('utf8')
-    request.on('data', chunk => {
-      text += String(chunk)
-      if (text.length > limit) {
-        request.destroy()
-        reject(new Error('settings patch too large'))
-      }
-    })
-    request.on('end', () => resolve(text))
-    request.on('error', reject)
-  })
+  return readTextBody(request, limit)
 }

@@ -48,7 +48,9 @@ test('nothing in the bridge clicks or types into the shell any more', () => {
   // shell DISPLAYS, so each was a route into somebody else's sidebar. That path is gone; the ops
   // that still drive the sidebar do it by calling the shell's own operation.
   assert.ok(!/card\.click\(\)/.test(bridge), 'the launcher card is never clicked')
-  assert.ok(!/Input\.dispatchKeyEvent/.test(bridge), 'and no key event is ever dispatched')
+  const opening = bridge.slice(bridge.indexOf("if (op === 'ensureSidebar')"), bridge.indexOf("if (op === 'showTab')"))
+  assert.ok(!/Input\.dispatchKeyEvent|sendInputEvent/.test(opening), 'sidebar opening never types a shell shortcut')
+  assert.ok(!/shell\.sendInputEvent/.test(bridge), 'guest keyboard input never targets the desktop shell')
 })
 
 test('no CDP reply is stringified before its value is read', () => {

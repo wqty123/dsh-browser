@@ -66,6 +66,14 @@ test('a missing file resolves to the documented defaults', () => {
   assert.equal(store.get().ui.autoExpandOnce, true, 'auto-expand is once-per-task by default')
   assert.equal(store.get().ui.closeWithSession, false, 'closing the interface is not the default end of a session')
   assert.equal(store.get().ui.quiet, false, 'quiet mode is opt-in: the default shares the window with the human')
+  assert.equal(store.get().bridge.autoInstall, false, 'bridge maintenance is explicit by default')
+})
+
+test('bridge automatic-install compatibility defaults remain off', () => {
+  for (const raw of [undefined, {}, { bridge: {} }, { bridge: { autoInstall: 'true' } }]) {
+    assert.equal(resolveSettings(raw).bridge.autoInstall, false)
+  }
+  assert.equal(resolveSettings({ bridge: { autoInstall: true } }).bridge.autoInstall, true, 'historical preference remains readable without activating runtime installation')
 })
 
 test('quiet mode is opt-in, and a mistyped value cannot turn it on', () => {

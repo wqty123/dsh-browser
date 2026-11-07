@@ -50,7 +50,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node --test \"tests/*.test.mjs\"",
+    "test": "node scripts/run-tests.mjs",
     "prepack": "npm run build"
   },
   "keywords": [

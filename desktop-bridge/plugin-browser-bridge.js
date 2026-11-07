@@ -23,9 +23,10 @@
  */
 import { createServer } from 'node:net'
 import { randomBytes } from 'node:crypto'
-import { writeFileSync, mkdirSync } from 'node:fs'
+import { writeFileSync, mkdirSync, constants } from 'node:fs'
+import { open, mkdir, unlink, link, copyFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname, isAbsolute } from 'node:path'
 import { app, webContents } from 'electron'
 
 /**
@@ -97,7 +98,7 @@ const claims = new Map()
  * acceptance script compares this against the file's mtime and says so before testing anything.
  */
 const LOADED_AT = new Date().toISOString()
-const PROTOCOL = 2
+const PROTOCOL = 3
 
 /**
  * The DOM root of THIS conversation's sidebar, as JavaScript to embed in a page script.
@@ -207,6 +208,20 @@ function pruneClaims() {
   for (const id of [...claims.keys()]) if (!live.has(id)) claims.delete(id)
 }
 
+/** The single ownership gate for every op that drives a guest: the ledger is the only proof. */
+async function assertGuestOwner(id, owner) {
+  pruneClaims()
+  if (claims.get(id) === owner) return
+  // A bridge restart, or a host that cached a guest id before the ledger existed, can leave a
+  // legitimate guest unclaimed. Ask the renderer once on this cold path and re-register it.
+  const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+  if (shell !== undefined && /^session-/.test(owner)) {
+    const ids = await panelGuestIds(shell, owner).catch(() => [])
+    if (ids.includes(id)) { claims.set(id, owner); return }
+  }
+  throw new Error(`guest ${id} is not held by this conversation`)
+}
+
 function guestById(id) {
   for (const contents of webContents.getAllWebContents()) {
     if (contents.id === id) return contents
@@ -241,12 +256,100 @@ async function sendCdp(id, method, params) {
   const next = previous.then(async () => {
     const current = guestById(id)
     if (current === undefined || current.isDestroyed()) throw new Error(`guest ${id} is not available`)
+    // Chromium's CDP keyboard handler can redirect a webview command to the embedder's
+    // focused guest. Send text and keys to this exact guest instead, preserving OS focus.
+    if (current.getType() === 'webview') {
+      if (method === 'Input.insertText') {
+        if (typeof params?.text !== 'string') throw new Error('Input.insertText requires text')
+        await current.insertText(params.text)
+        return {}
+      }
+      if (method === 'Input.dispatchKeyEvent') {
+        const event = nativeKeyEvent(params)
+        current.sendInputEvent(event)
+        if (params.type === 'keyDown' && typeof params.text === 'string' && params.text !== '') {
+          current.sendInputEvent({ ...event, type: 'char', keyCode: params.text })
+        }
+        return {}
+      }
+    }
     if (!current.debugger.isAttached()) current.debugger.attach('1.3')
     return await current.debugger.sendCommand(method, params ?? {})
   })
   // Keep the chain alive on failure so one bad command does not wedge the guest.
   queues.set(id, next.catch(() => undefined))
   return await next
+}
+
+/** Convert CDP key data for Electron's per-webContents input channel. */
+function nativeKeyEvent(params) {
+  const type = params?.type
+  if (!['keyDown', 'rawKeyDown', 'keyUp', 'char'].includes(type)) throw new Error('unsupported keyboard event type')
+  const aliases = { ArrowLeft: 'Left', ArrowRight: 'Right', ArrowUp: 'Up', ArrowDown: 'Down', ' ': 'Space' }
+  const key = type === 'char' ? params.text : params.key
+  if (typeof key !== 'string' || key === '') throw new Error('keyboard event requires a key')
+  const mask = Number(params.modifiers ?? 0)
+  const modifiers = []
+  for (const [bit, name] of [[1, 'alt'], [2, 'control'], [4, 'meta'], [8, 'shift']]) {
+    if ((mask & bit) !== 0) modifiers.push(name)
+  }
+  if (params.isKeypad === true || params.location === 3) modifiers.push('isKeypad')
+  if (params.autoRepeat === true) modifiers.push('isAutoRepeat')
+  return { type: type === 'rawKeyDown' ? 'keyDown' : type, keyCode: type === 'char' ? key : aliases[key] ?? key, modifiers }
+}
+
+/** Download with this guest's authenticated session, streaming directly into an exclusive file. */
+async function downloadGuest(guest, url, savePath) {
+  let scheme
+  try { scheme = new URL(String(url)).protocol } catch { scheme = undefined }
+  if (typeof url !== 'string' || !['http:', 'https:'].includes(scheme)) {
+    throw new Error('download requires an HTTP(S) URL')
+  }
+  if (typeof savePath !== 'string' || !isAbsolute(savePath)) throw new Error('download requires an absolute savePath')
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 55_000)
+  let file
+  let reader
+  let temporary
+  const limit = 256 * 1024 * 1024
+  try {
+    const response = await guest.session.fetch(url, { credentials: 'include', signal: controller.signal })
+    if (!response.ok) throw new Error('download HTTP ' + response.status)
+    if (Number(response.headers.get('content-length') ?? 0) > limit) throw new Error('download too large (limit ' + limit + ' bytes)')
+    await mkdir(dirname(savePath), { recursive: true })
+    temporary = join(dirname(savePath), '.dsh-download-' + randomBytes(16).toString('hex') + '.part')
+    file = await open(temporary, 'wx', 0o600)
+    reader = response.body?.getReader()
+    let total = 0
+    if (reader !== undefined) {
+      for (;;) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        total += chunk.value.byteLength
+        if (total > limit) throw new Error('download too large (limit ' + limit + ' bytes)')
+        for (let offset = 0; offset < chunk.value.byteLength;) {
+          const { bytesWritten } = await file.write(chunk.value, offset, chunk.value.byteLength - offset)
+          if (bytesWritten === 0) throw new Error('download file write made no progress')
+          offset += bytesWritten
+        }
+      }
+    }
+    await file.close()
+    file = undefined
+    controller.signal.throwIfAborted()
+    try {
+      await link(temporary, savePath)
+    } catch (error) {
+      if (!['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV', 'ENOSYS'].includes(error?.code)) throw error
+      await copyFile(temporary, savePath, constants.COPYFILE_EXCL)
+    }
+  } finally {
+    controller.abort()
+    await file?.close().catch(() => {})
+    await reader?.cancel().catch(() => {})
+    if (temporary !== undefined) await unlink(temporary).catch(() => {})
+    clearTimeout(timer)
+  }
 }
 
 /**
@@ -266,20 +369,27 @@ async function sendCdp(id, method, params) {
  * @param url - address to load when a panel has to be opened; `null` to only READ.
  * @returns the renderer's verdict, normalized so a malformed answer is a named failure.
  */
-async function evaluatePanelService(shellId, sessionId, url, tabId) {
+async function evaluatePanelService(shellId, sessionId, url, tabId, viewId, guestId) {
   // `null` means read-only. This distinction is not cosmetic: `openPanel` CREATES a tab when the
   // conversation has none, so polling with it turned a 20-second wait into one empty tab every
   // 250ms — the "it opens a pile of blank pages at once" report. A wait must never be a write.
   const reading = url === null
+  const target = JSON.stringify({
+    ...typeof viewId === 'string' && viewId !== '' ? { viewId } : {},
+    ...Number.isSafeInteger(guestId) && guestId > 0 ? { guestId } : {},
+  })
   const call = reading
     // `panelGuest` reports state, not success, so the read form supplies the verdict itself: a
     // conversation with no panel yet is a legitimate answer to "what do you have", not a failure.
-    ? `JSON.stringify({ ok: true, ...api.panelGuest(${JSON.stringify(String(sessionId))}, ${JSON.stringify(tabId ?? null)}) })`
-    : `JSON.stringify(api.openPanel(${JSON.stringify(String(sessionId))}, ${JSON.stringify(String(url ?? ''))}))`
+    ? `JSON.stringify({ ok: true, ...api.panelGuest(${JSON.stringify(String(sessionId))}, ${JSON.stringify(tabId ?? null)}, ${target}) })`
+    : `JSON.stringify(api.openPanel(${JSON.stringify(String(sessionId))}, ${JSON.stringify(String(url ?? ''))}, ${target}))`
   const expression = `(() => {
     const api = globalThis.__dshBuiltinBrowser;
     if (api === undefined || api === null || typeof api.openPanel !== 'function') {
       return JSON.stringify({ ok: false, reason: 'the plugin client half is not loaded in this window' });
+    }
+    if (${typeof viewId === 'string' && viewId !== ''} && Number(api.panelProtocol || 0) < 3) {
+      return JSON.stringify({ ok: false, reason: 'the browser plugin client needs to reload for separate sidebar tabs; reopen DSH Desktop and retry' });
     }
     try {
       return ${call};
@@ -321,6 +431,7 @@ async function evaluatePanelService(shellId, sessionId, url, tabId) {
       reason: parsed?.reason === undefined ? undefined : String(parsed.reason),
       panel: parsed?.panel === true,
       created: parsed?.created === true,
+      ...typeof parsed?.displayed === 'boolean' ? { displayed: parsed.displayed } : {},
       guestId: typeof parsed?.guestId === 'number' && Number.isFinite(parsed.guestId) ? parsed.guestId : null,
       ...typeof parsed?.tabId === 'string' ? { tabId: parsed.tabId } : {},
       url: typeof parsed?.url === 'string' ? parsed.url : '',
@@ -339,7 +450,8 @@ function guestShows(id, url) {
   if (guest === undefined) return false
   try {
     const current = guest.getURL()
-    return current !== '' && (current === url || current.startsWith(url))
+    // A raw prefix match mistakes https://example.com.evil/ for https://example.com.
+    return current === url || current.startsWith(`${url}?`) || current.startsWith(`${url}#`)
   } catch (error) {
     return false
   }
@@ -430,6 +542,7 @@ async function handle(request) {  const op = String(request?.op ?? '')
       || (claims.get(g.id) === owner && (!/^session-/.test(owner) || panelIds.includes(g.id))))
     return {
       ok: true,
+      protocol: PROTOCOL,
       guests: mineOrFree,
       sidebar: mineOrFree.filter(g => g.type === 'webview'),
       frame: await sidebarFrameKind(shell?.id),
@@ -466,9 +579,19 @@ async function handle(request) {  const op = String(request?.op ?? '')
   }
   if (op === 'cdp') {
     const id = Number(request.id)
-    if (!Number.isFinite(id)) throw new Error('cdp requires a numeric id')
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('cdp requires a positive numeric guest id')
+    await assertGuestOwner(id, owner)
     const result = await sendCdp(id, String(request.method ?? ''), request.params)
     return { ok: true, result, bridgeRequestId: request.bridgeRequestId }
+  }
+  if (op === 'download') {
+    const id = Number(request.id)
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('download requires a positive numeric guest id')
+    await assertGuestOwner(id, owner)
+    const guest = guestById(id)
+    if (guest === undefined || guest.isDestroyed() || guest.getType() !== 'webview') throw new Error('download guest is not available')
+    await downloadGuest(guest, request.url, request.savePath)
+    return { ok: true, path: request.savePath }
   }
   if (op === 'ensureSidebar') {
     // This conversation's OWN panel, opened through the shell's own navigation — never by
@@ -498,7 +621,8 @@ async function handle(request) {  const op = String(request?.op ?? '')
     const ask = async (withUrl) => {
       // `null` reads, a string places or navigates. Every round of the wait below uses the READ
       // form, because a wait must never create anything.
-      const answer = await evaluatePanelService(shell.id, owner, withUrl ? url : null, tabId)
+      const answer = await evaluatePanelService(shell.id, owner, withUrl ? url : null, tabId,
+        typeof request.viewId === 'string' ? request.viewId : undefined, request.guestId)
       if (answer.ok !== true) {
         // Carry the renderer's own findings into the failure: it is the side that can see why the
         // lookup missed, and a bare "not mounted" leaves the next reader guessing between a real
@@ -515,8 +639,11 @@ async function handle(request) {  const op = String(request?.op ?? '')
     // `list` op instead, because this one can drive the shell — that is the difference between "show
     // me the page" and "let me look at it", and keeping the preview off this path is what stops a
     // read-only action from moving the reader's layout.
-    const first = await ask(url !== '')
+    const first = await ask(true)
     tabId = first.tabId
+    if (first.displayed === false) {
+      throw codedError(PANEL_NOT_DISPLAYED, 'the requested conversation is still being displayed; its sidebar will attach after rendering')
+    }
     if (first.guestId !== null) {
       claims.set(first.guestId, owner)
       if (!guestShows(first.guestId, url)) {
@@ -582,13 +709,17 @@ async function handle(request) {  const op = String(request?.op ?? '')
     if (guest === undefined) throw new Error(`showTab: no guest with id ${viewId}`)
     // Only a guest this caller holds may be brought forward. Without the check, one session could
     // switch the sidebar to another session's page — moving the human's view out from under it.
-    pruneClaims()
-    if (claims.has(viewId) && claims.get(viewId) !== owner) {
-      throw new Error(`showTab: guest ${viewId} belongs to another session`)
-    }
-    claims.set(viewId, owner)
+    await assertGuestOwner(Number(viewId), owner)
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
+    // Bind by the exact native guest rather than its title: several tabs can have the same title.
+    if (typeof request.logicalViewId === 'string' && request.logicalViewId !== '') {
+      const shown = await evaluatePanelService(shell.id, owner, '', undefined, request.logicalViewId, viewId)
+      if (shown.ok !== true || shown.guestId !== viewId) {
+        throw new Error('could not select the requested sidebar tab: ' + String(shown.reason ?? 'the requested guest is not displayed yet'))
+      }
+      return { ok: true, verdict: 'SELECTED' }
+    }
     const wantTitle = String(guest.getTitle() ?? '').trim()
     const clicked = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
       expression: `(() => {
@@ -689,6 +820,8 @@ async function handle(request) {  const op = String(request?.op ?? '')
     return { ok: true, closed: Number(clicked?.result?.value ?? 0) }
   }
   if (op === 'collapseSidebar') {
+    // An unscoped owner falls back to sendCdp(shell window), whose debugger attachment hangs.
+    if (!/^session-/.test(owner)) throw new Error('collapseSidebar requires a conversation id')
     // Fold the sidebar away so the agent works without occupying the screen. The
     // guest keeps running — collapsing is presentation, exactly as §3 asks.
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
@@ -802,7 +935,7 @@ export function start() {
     authenticationDeadline.unref?.()
     socket.on('close', () => clearTimeout(authenticationDeadline))
     socket.on('data', chunk => {
-      if (Buffer.byteLength(buffer, 'utf8') + Buffer.byteLength(chunk, 'utf8') > 128 * 1024 * 1024) {
+      if (Buffer.byteLength(buffer, 'utf8') + Buffer.byteLength(chunk, 'utf8') > 32 * 1024 * 1024) {
         socket.destroy()
         return
       }
@@ -810,7 +943,7 @@ export function start() {
       let newline = buffer.indexOf('\n')
       while (newline !== -1) {
         const line = buffer.slice(0, newline).trim()
-        if (Buffer.byteLength(line, 'utf8') > (authed ? 128 * 1024 * 1024 : 64 * 1024)) {
+        if (Buffer.byteLength(line, 'utf8') > (authed ? 32 * 1024 * 1024 : 64 * 1024)) {
           socket.destroy()
           return
         }
@@ -859,7 +992,7 @@ export function start() {
       }
       // Authentication may share a TCP chunk with the first real (larger) command. Apply the
       // unauthenticated cap to that frame, not to bytes belonging to an authenticated successor.
-      if (Buffer.byteLength(buffer, 'utf8') > (authed ? 128 * 1024 * 1024 : 64 * 1024)) socket.destroy()
+      if (Buffer.byteLength(buffer, 'utf8') > (authed ? 32 * 1024 * 1024 : 64 * 1024)) socket.destroy()
     })
     socket.on('error', () => { /* client went away */ })
   })

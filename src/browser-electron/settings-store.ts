@@ -134,13 +134,12 @@ export interface BrowserSettings {
   /**
    * Desktop bridge handled without asking.
    *
-   * The bridge lives in the desktop app's own install directory and cannot be installed while the app
-   * runs, so "automatic" means the installer closes and reopens the app once. On by default, because
-   * the plugin's promise is that installing it is the whole setup; the record in
-   * `bridge-auto-install.json` keeps it to one attempt per desktop build so a failure cannot loop.
+   * Historical automatic-install preference retained when reading existing settings documents.
+   * Runtime automatic installation is disabled; bridge maintenance is an explicit action after
+   * DSH Desktop is closed, even when an older document contains autoInstall=true.
    */
   readonly bridge: {
-    /** Install or repair the desktop bridge automatically, once per desktop build. */
+    /** Legacy preference; it does not trigger installation at runtime. Default false. */
     readonly autoInstall: boolean
   }
   readonly delivery: {
@@ -169,7 +168,7 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   // Off unless the host turns it on. A frame can show a CAPTCHA, an account name, or logged-in
   // content, so watching is an explicit decision rather than something a remote client can arrange.
   remoteView: { enabled: false },
-  bridge: { autoInstall: true },
+  bridge: { autoInstall: false },
   actions: { allowExecute: true, allowDownload: true, allowCredentialWrite: true },
   // Local by default: the file lands in downloadDir and nothing leaves the machine until the user
   // names a tool here. {file_path} is the argument name both Feishu's and Netdisk's upload tools use.

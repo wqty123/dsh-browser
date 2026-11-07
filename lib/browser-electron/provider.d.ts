@@ -428,13 +428,14 @@ export declare function toCdpCookie(cookie: ExportedCookie): Record<string, unkn
  * `quiet` is the resolved `ui.quiet` switch. It does not mean "invisible": Chromium drops
  * synthesized `Input.*` for a view without a display surface, so input still needs one. It means
  * the carrier must get that surface without taking the screen over — no application activation
- * and no keyboard focus. Navigation and tab switching only reveal the view inside its window; the
- * pre-input barrier may restore a minimized window (it needs the surface), but even then it shows
- * it inactive instead of focusing or raising it. A host that cannot honour this (a headless probe,
- * the desktop sidebar) simply ignores it.
+ * and no operating-system keyboard focus. New windows open inactive; a minimized window and the
+ * foreground window's selected page remain under the operator's control. DOM focus and CDP input
+ * still target the task's page. Explicit sidebar navigation can select the task's pane.
  */
 export interface PresentOptions {
     readonly quiet?: boolean;
+    /** Explicit navigation or tab selection may change the task's sidebar tab without OS activation. */
+    readonly select?: boolean;
 }
 /**
  * How a command should reach its page.
@@ -763,9 +764,8 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     private admitSavePath;
     /**
      * Download an HTTP(S) URL with the session's cookies to a local file.
-     * Admission is the shared {@link admitSavePath} gate; only the self-hosted
-     * host implements it (the desktop shell's embedded views delegate downloads
-     * to the real browser UI). Both admitted paths and screenshots are confined
+     * Admission is the shared {@link admitSavePath} gate. The carrier downloads
+     * with its own authenticated browser session. Both admitted paths and screenshots are confined
      * to `downloadDir`, so a prompt-injected agent cannot write arbitrary
      * machine paths.
      * @param session - the session whose cookies are used.

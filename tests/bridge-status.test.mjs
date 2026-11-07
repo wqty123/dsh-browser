@@ -6,7 +6,7 @@
 // still in the unpacked tree, the shell loads the archive, and everything LOOKS installed.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -16,14 +16,16 @@ import { handleBridgeStatus, BRIDGE_STATUS_ROUTE } from '../lib/browser-electron
 import { writeAsar } from './fake-asar.mjs'
 
 const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sidebar'
+const shippedBridge = readFileSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url))
 
 /** An install tree with the pieces a given state needs. */
-function makeInstall({ archive = false, patched = false, backup = false } = {}) {
+function makeInstall({ archive = false, patched = false, backup = false, bridge = shippedBridge } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'dsh-bridge-status-'))
   const lib = join(root, 'resources', 'app', 'lib')
   mkdirSync(lib, { recursive: true })
   const body = `${patched ? `${MARKER} pages.\n` : ''}const app = {};\n\nexport {};\n`
   writeFileSync(join(lib, 'main.js'), body)
+  if (bridge !== null) writeFileSync(join(lib, 'plugin-browser-bridge.js'), bridge)
   // Identity (issue #40): the status reader verifies the app's own name before it reports anything,
   // so a fixture without a manifest is not a DSH install any more.
   writeFileSync(join(root, 'resources', 'app', 'package.json'), JSON.stringify({
@@ -56,6 +58,33 @@ test('a patched tree with no archive is installed', () => {
   }
 })
 
+test('a main patch without its deployed bridge module needs repair', () => {
+  const root = makeInstall({ patched: true, bridge: null })
+  try {
+    const status = readBridgeStatus(root)
+    assert.equal(status.state, 'stale')
+    assert.equal(status.present, true)
+    assert.match(status.detail, /bridge module.*missing|missing.*bridge module/i)
+    assert.equal(status.version, '0.2.1-rc.5')
+    assert.doesNotMatch(status.command, /--restart|--yes/, 'repair commands preserve a running host')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a deployed bridge from another plugin version needs repair', () => {
+  const root = makeInstall({ patched: true, bridge: 'export function start() {}\n' })
+  try {
+    const status = readBridgeStatus(root)
+    assert.equal(status.state, 'stale')
+    assert.equal(status.present, true)
+    assert.match(status.detail, /bridge module.*differs|outdated/i)
+    assert.equal(status.version, '0.2.1-rc.5')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('the state after a desktop update is stale, not installed', () => {
   // The archive is back AND our patch is still in the unpacked tree. The shell loads the archive, so
   // the patch has no effect — this is the case that looks fine and is not.
@@ -63,6 +92,7 @@ test('the state after a desktop update is stale, not installed', () => {
   try {
     const status = readBridgeStatus(root)
     assert.equal(status.state, 'stale')
+    assert.equal(status.version, '0.2.1-rc.5', 'an updated packed desktop retains its verified build')
     assert.match(status.detail, /update restored it/i)
     assert.equal(typeof status.backupAt, 'string', 'the backup time is reported so a user can date it')
   } finally {
@@ -112,7 +142,7 @@ test('the repair command is offered, quoted, and never executed', () => {
     assert.ok(typeof status.command === 'string' && status.command !== '', 'a command is offered')
     assert.match(status.command, /install\.mjs/, 'it names the installer')
     assert.ok(status.command.includes(`"${root}"`), 'and quotes the path, which may contain spaces')
-    assert.match(status.command, /--restart/, 'and asks for the close-install-restart flow')
+    assert.doesNotMatch(status.command, /--restart|--yes/, 'external maintenance does not request a host restart')
 
     const named = /node "([^"]+install\.mjs)"/.exec(status.command)
     assert.ok(named !== null, 'the installer is quoted in full')
@@ -184,6 +214,7 @@ test('the endpoint answers with the reading, same-origin only', async () => {
     const root = join(base, 'Programs', 'DSH Desktop')
     mkdirSync(join(root, 'resources', 'app', 'lib'), { recursive: true })
     writeFileSync(join(root, 'resources', 'app', 'lib', 'main.js'), `${MARKER} pages.\nconst app = {};\n\nexport {};\n`)
+    writeFileSync(join(root, 'resources', 'app', 'lib', 'plugin-browser-bridge.js'), shippedBridge)
     writeFileSync(join(root, 'resources', 'app', 'package.json'),
       JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.1-rc.5', main: 'lib/main.js' }))
 

@@ -11,8 +11,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import {
@@ -170,23 +170,57 @@ test('a timeout kills the real installer process before another can write', asyn
   const pidFile = join(folder, 'pid')
   const installer = join(folder, 'slow.cjs')
   writeFileSync(installer, `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`)
+  const runner = defaultDeps()
+  const cleanup = new AbortController()
+  let installerJob
   const deps = {
-    ...defaultDeps(),
+    ...runner,
+    run: (script, signal) => {
+      // The real provision signal still drives cancellation. A separate owned
+      // signal lets finally settle this exact job without targeting a bare PID.
+      installerJob = runner.run(script, signal === undefined ? cleanup.signal : AbortSignal.any([signal, cleanup.signal]))
+      return installerJob
+    },
     hasBinary: () => false,
     installerScript: () => installer,
     skip: () => false,
-    timeoutMs: 1200,
+    // Full-suite process/CIM load can make a cold Node start exceed a second. The
+    // process must be observed alive before this test claims its timeout killed it.
+    timeoutMs: 8000,
   }
-  const outcome = await provisionElectronInBackground(() => {}, deps)
-  assert.equal(outcome.status, 'failed')
-  assert.equal(existsSync(pidFile), true, 'the actual installer started')
-  const pid = Number(readFileSync(pidFile, 'utf8'))
-  for (let n = 0; n < 100; n += 1) {
-    try { process.kill(pid, 0) } catch { break }
-    await new Promise(resolve => setTimeout(resolve, 10))
+  const attempt = provisionElectronInBackground(() => {}, deps)
+  let pid
+  try {
+    const startupDeadline = Date.now() + 6000
+    while (Date.now() < startupDeadline) {
+      if (existsSync(pidFile)) {
+        const candidate = Number(readFileSync(pidFile, 'utf8'))
+        if (Number.isSafeInteger(candidate) && candidate > 0) { pid = candidate; break }
+      }
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    assert.ok(pid !== undefined, 'the actual installer initialized before its cancellation budget')
+    assert.doesNotThrow(() => process.kill(pid, 0), 'the fixture child is alive before the provision timeout')
+    const outcome = await attempt
+    assert.equal(outcome.status, 'failed')
+    assert.match(outcome.detail, /gave up/, 'the real provision deadline triggered cancellation')
+    for (let n = 0; n < 200; n += 1) {
+      try { process.kill(pid, 0) } catch { break }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.throws(() => process.kill(pid, 0), /ESRCH|no such process/i)
+  } finally {
+    // Retain and settle this exact fixture job even if readiness fails. The
+    // cancellation assertion above runs before this cleanup signal is aborted.
+    cleanup.abort()
+    await attempt
+    await installerJob
+    resetProvisionStateForTest()
+    const target = resolve(folder)
+    assert.equal(dirname(target).toLowerCase(), resolve(tmpdir()).toLowerCase())
+    assert.match(basename(target), /^dsh-provision-cancel-/)
+    rmSync(target, { recursive: true, force: true })
   }
-  assert.throws(() => process.kill(pid, 0), /ESRCH|no such process/i)
-  resetProvisionStateForTest()
 })
 
 // ---------------------------------------------------------------------------

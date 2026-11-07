@@ -25,5 +25,5 @@ jobs:
       # Keep package lifecycle scripts disabled. Electron 44 downloads its binary
       # lazily on first require; discovery must remain a pure filesystem probe.
       - run: pnpm install --frozen-lockfile --ignore-scripts
-      - run: pnpm run build
-      - run: node --test "tests/*.test.mjs"
+      # The test runner builds first and gives every test a marked, private installer boundary.
+      - run: npm test

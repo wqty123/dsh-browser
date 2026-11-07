@@ -11,19 +11,22 @@ import { fileURLToPath } from 'node:url'
 // These tests drive the real script over a real directory shape and compare bytes. A first version
 // of them was run against the pre-fix script from git and failed there, which is what makes them
 // evidence rather than a restatement of the implementation.
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { createInstallerSandbox } from './helpers/installer-sandbox.mjs'
+
+const sandbox = createInstallerSandbox()
+after(() => sandbox.close())
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
 const script = join(repo, 'desktop-bridge', 'install.mjs')
 
 /** A minimal but structurally valid desktop install. */
 function makeInstall() {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-install-'))
+  const root = sandbox.temp('dsh-install-')
   mkdirSync(join(root, 'resources', 'app', 'lib'), { recursive: true })
   const body = [
     '// a stand-in for the shell entry point',
@@ -46,7 +49,7 @@ function makeInstall() {
 
 const run = args => {
   try {
-    return { code: 0, out: execFileSync(process.execPath, [script, ...args], { encoding: 'utf8', stdio: 'pipe' }) }
+    return { code: 0, out: execFileSync(process.execPath, [script, ...args], { encoding: 'utf8', stdio: 'pipe', windowsHide: true, env: sandbox.env() }) }
   } catch (error) {
     return { code: error.status ?? 1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` }
   }
@@ -113,7 +116,7 @@ test('the default install is found by identity, not by a fixed product name', ()
   // hardcoded name makes the documented bare command fail. What identifies the install is the app's
   // own manifest (issue #40), not its folder name: a differently named directory is found when the
   // manifest says DSH Desktop, and ignored when it does not.
-  const fake = mkdtempSync(join(tmpdir(), 'dsh-localappdata-'))
+  const fake = sandbox.temp('dsh-localappdata-')
   const programs = join(fake, 'Programs')
   const named = join(programs, 'Some Other Name')
   mkdirSync(join(named, 'resources', 'app', 'lib'), { recursive: true })
@@ -124,7 +127,8 @@ test('the default install is found by identity, not by a fixed product name', ()
     const result = execFileSync(process.execPath, [script], {
       encoding: 'utf8',
       stdio: 'pipe',
-      env: { ...process.env, LOCALAPPDATA: fake },
+      windowsHide: true,
+      env: sandbox.env({ LOCALAPPDATA: fake }),
     })
     assert.match(result, /Some Other Name/, 'the probe found the install despite the directory name')
   } catch (error) {
@@ -138,7 +142,7 @@ test('the default install is found by identity, not by a fixed product name', ()
 test('the default install probe refuses a directory whose manifest is another app', () => {
   // The same probe, with the shape but somebody else's name: the documented bare command must not
   // pick it up and try to patch it.
-  const fake = mkdtempSync(join(tmpdir(), 'dsh-localappdata-'))
+  const fake = sandbox.temp('dsh-localappdata-')
   const named = join(fake, 'Programs', 'DeepSeek Harness')
   mkdirSync(join(named, 'resources', 'app', 'lib'), { recursive: true })
   writeFileSync(join(named, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
@@ -146,7 +150,7 @@ test('the default install probe refuses a directory whose manifest is another ap
     JSON.stringify({ name: 'unrelated-meeting-app', main: 'lib/main.js' }))
   try {
     try {
-      execFileSync(process.execPath, [script], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, LOCALAPPDATA: fake } })
+      execFileSync(process.execPath, [script], { encoding: 'utf8', stdio: 'pipe', windowsHide: true, env: sandbox.env({ LOCALAPPDATA: fake }) })
       assert.fail('the installer must not act on another application')
     } catch (error) {
       assert.notEqual(error.status, 0, 'it exits non-zero')

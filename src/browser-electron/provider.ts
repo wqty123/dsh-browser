@@ -621,13 +621,14 @@ export function toCdpCookie(cookie: ExportedCookie): Record<string, unknown> | u
  * `quiet` is the resolved `ui.quiet` switch. It does not mean "invisible": Chromium drops
  * synthesized `Input.*` for a view without a display surface, so input still needs one. It means
  * the carrier must get that surface without taking the screen over — no application activation
- * and no keyboard focus. Navigation and tab switching only reveal the view inside its window; the
- * pre-input barrier may restore a minimized window (it needs the surface), but even then it shows
- * it inactive instead of focusing or raising it. A host that cannot honour this (a headless probe,
- * the desktop sidebar) simply ignores it.
+ * and no operating-system keyboard focus. New windows open inactive; a minimized window and the
+ * foreground window's selected page remain under the operator's control. DOM focus and CDP input
+ * still target the task's page. Explicit sidebar navigation can select the task's pane.
  */
 export interface PresentOptions {
   readonly quiet?: boolean
+  /** Explicit navigation or tab selection may change the task's sidebar tab without OS activation. */
+  readonly select?: boolean
 }
 
 /**
@@ -910,7 +911,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       const tab: Tab = { id: `page:${match.id}`, handle, url: match.url }
       s.tabs.push(tab)
       s.activeIndex = s.tabs.length - 1
-      this.showActive(s)
+      this.showActive(s, true)
       return true
     } catch {
       // The page went away between listing and adopting: fall through to an ordinary navigation.
@@ -996,7 +997,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     }
     const found = this.locateTab(session, tabId)
     found.s.activeIndex = found.index
-    this.showActive(found.s)
+    this.showActive(found.s, true)
   }
 
   /** Close one tab; closing the active tab activates the next. */
@@ -1137,7 +1138,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       tab.url = url
       await this.settleDocument(handle, before, signal)
       this.recordVisit(s, handle)
-      this.showActive(s)
+      this.showActive(s, true)
     } catch (error) {
       if (!(error instanceof BrowserError && (error as { code?: string }).code === 'BROWSER_NAVIGATION_BLOCKED')) {
         this.record(s, 'navigate', { url }, false, { error: String(error) })
@@ -3139,9 +3140,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /**
    * Download an HTTP(S) URL with the session's cookies to a local file.
-   * Admission is the shared {@link admitSavePath} gate; only the self-hosted
-   * host implements it (the desktop shell's embedded views delegate downloads
-   * to the real browser UI). Both admitted paths and screenshots are confined
+   * Admission is the shared {@link admitSavePath} gate. The carrier downloads
+   * with its own authenticated browser session. Both admitted paths and screenshots are confined
    * to `downloadDir`, so a prompt-injected agent cannot write arbitrary
    * machine paths.
    * @param session - the session whose cookies are used.
@@ -3173,7 +3173,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const savePath = this.admitSavePath(request.savePath, 'download')
     const downloadable = handle
     if (typeof downloadable.download !== 'function') {
-      throw new BrowserError('browser: download is only available on the self-hosted browser', 'BROWSER_DOWNLOAD_UNSUPPORTED')
+      throw new BrowserError('browser: the selected carrier does not provide file downloads', 'BROWSER_DOWNLOAD_UNSUPPORTED')
     }
     // The child fetches and writes the file; a slow/hung network can block
     // it well past the tool budget, so bound it. NOTE: unlike CDP calls,
@@ -3901,10 +3901,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * method did nothing at all on carriers without `collapse` (the self-hosted one),
    * silently desynchronising the two and failing every screenshot.
    */
-  private showActive(s: Session): void {
+  private showActive(s: Session, select = false): void {
     const quiet = this.isQuiet()
-    this.host.showView?.(this.activeTab(s).handle, s.label, { quiet })
-    if (quiet) return
+    this.host.showView?.(this.activeTab(s).handle, s.label, { quiet, ...select ? { select: true } : {} })
+    if (quiet || select) return
     const autoExpand = this.settingsSource === undefined || this.settingsSource().ui.autoExpandOnce
     if (autoExpand) return
     // Best effort: a carrier that owns no presentation (self-hosted) simply has none.

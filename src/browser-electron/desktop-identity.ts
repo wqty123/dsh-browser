@@ -23,7 +23,15 @@
  * @module dsh-browser/browser-electron/desktop-identity
  */
 import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
+
+// Electron's patched fs opens an ASAR as a virtual directory. Identity needs the raw archive
+// header and file offsets, including when this reader runs in the Desktop's Node-mode worker.
+const archiveFs: Pick<typeof import('node:fs'), 'openSync' | 'readSync' | 'closeSync' | 'existsSync'> = (() => {
+  try { return createRequire(import.meta.url)('original-fs') as typeof import('node:fs') }
+  catch { return { openSync, readSync, closeSync, existsSync } }
+})()
 
 /** The identity rule, as data. */
 interface IdentityRule {
@@ -116,13 +124,13 @@ interface AsarEntry {
 function readAsarHeader(archive: string): { header: { files?: Record<string, AsarEntry> }; contentBase: number } | { error: string } {
   let fd: number | undefined
   try {
-    fd = openSync(archive, 'r')
+    fd = archiveFs.openSync(archive, 'r')
     const outer = Buffer.alloc(8)
-    if (readSync(fd, outer, 0, 8, 0) !== 8) return { error: 'the archive header is truncated' }
+    if (archiveFs.readSync(fd, outer, 0, 8, 0) !== 8) return { error: 'the archive header is truncated' }
     const headerSize = outer.readUInt32LE(4)
     if (headerSize < 8 || headerSize > 64 * 1024 * 1024) return { error: `implausible archive header size (${headerSize})` }
     const header = Buffer.alloc(headerSize)
-    if (readSync(fd, header, 0, headerSize, 8) !== headerSize) return { error: 'the archive header is truncated' }
+    if (archiveFs.readSync(fd, header, 0, headerSize, 8) !== headerSize) return { error: 'the archive header is truncated' }
     const jsonLength = header.readUInt32LE(4)
     if (jsonLength <= 0 || jsonLength > headerSize - 8) return { error: 'the archive header has an implausible JSON length' }
     return { header: JSON.parse(header.toString('utf8', 8, 8 + jsonLength)), contentBase: 8 + headerSize }
@@ -130,7 +138,7 @@ function readAsarHeader(archive: string): { header: { files?: Record<string, Asa
     return { error: `the archive header could not be read: ${String(error)}` }
   } finally {
     if (fd !== undefined) {
-      try { closeSync(fd) } catch { /* already closed */ }
+      try { archiveFs.closeSync(fd) } catch { /* already closed */ }
     }
   }
 }
@@ -167,15 +175,15 @@ export function readAsarFile(archive: string, path: string): Buffer | undefined 
   if (typeof entry.offset !== 'string' || typeof entry.size !== 'number' || entry.size < 0) return undefined
   let fd: number | undefined
   try {
-    fd = openSync(archive, 'r')
+    fd = archiveFs.openSync(archive, 'r')
     const buffer = Buffer.alloc(entry.size)
-    const read = readSync(fd, buffer, 0, entry.size, parsed.contentBase + Number(entry.offset))
+    const read = archiveFs.readSync(fd, buffer, 0, entry.size, parsed.contentBase + Number(entry.offset))
     return read === entry.size ? buffer : undefined
   } catch {
     return undefined
   } finally {
     if (fd !== undefined) {
-      try { closeSync(fd) } catch { /* already closed */ }
+      try { archiveFs.closeSync(fd) } catch { /* already closed */ }
     }
   }
 }
@@ -197,7 +205,7 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
 
   let archivePresent: boolean
   try {
-    archivePresent = existsSync(archive)
+    archivePresent = archiveFs.existsSync(archive)
   } catch {
     return { ok: false, reason: `cannot inspect ${archive}` }
   }

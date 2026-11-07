@@ -52,6 +52,7 @@ export declare class BrowserPanelNotDisplayedError extends Error {
  */
 export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     private readonly isQuiet;
+    private readonly protocol;
     private readonly connection;
     /**
      * One entry per view this host handed out: the conversation it serves, and the guest backing it.
@@ -220,6 +221,7 @@ export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
      */
     showView(handle: ElectronViewHandle, _label?: string, options?: {
         readonly quiet?: boolean;
+        readonly select?: boolean;
     }): void;
     onUserAction(handler: (action: BrowserUserAction) => void): void;
     /**

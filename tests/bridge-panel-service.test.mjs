@@ -282,6 +282,7 @@ test('the old path is gone from the file, not merely unreachable', () => {
   assert.ok(!/legacyEnsureSidebar/.test(source), 'the superseded op is removed, not renamed')
   assert.ok(!/shellPrepareSidebar/.test(source), 'the launcher-card clicker is removed')
   assert.ok(!/card\.click\(\)/.test(source), 'no launcher card is clicked anywhere')
-  assert.ok(!/Input\.dispatchKeyEvent/.test(source), 'and no shortcut is simulated anywhere')
+  const opening = source.slice(source.indexOf("if (op === 'ensureSidebar')"), source.indexOf("if (op === 'showTab')"))
+  assert.ok(!/Input\.dispatchKeyEvent|sendInputEvent/.test(opening), 'opening the sidebar uses its service rather than a shortcut')
   assert.ok(!/if \(op === 'ensureTabs'\)/.test(source), 'the counting-only tab op is removed too')
 })

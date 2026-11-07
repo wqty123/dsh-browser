@@ -26,6 +26,13 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   const NS = "settings.dsh-builtin-browser"
   const ROUTE = "/dsh-builtin-browser/settings"
   let translate = (key) => key
+  let currentLocale = "zh"
+  function updateCurrentLocale(locale) {
+    let active
+    try { active = locale.getSnapshot?.().active ?? locale.getLocale?.().active } catch { /* Older hosts may only expose bind. */ }
+    const language = typeof active === "string" ? active : typeof document === "undefined" ? "" : document.documentElement?.lang
+    currentLocale = typeof language === "string" && /^en(?:-|$)/i.test(language) ? "en" : "zh"
+  }
   /**
    * Re-evaluate the floating watch entry.
    *
@@ -98,24 +105,38 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "actions.allowCredentialWrite.hint": "可向任意域写入 cookies。",
     "remoteView.enabled": "允许远程观看",
     "remoteView.enabled.hint": "共享只读画面，可能包含敏感信息。",
-    "readiness.title": "就绪状态",
+    "readiness.title": "环境检查",
     "readiness.loading": "检测中…",
     "readiness.failed": "读取就绪状态失败:",
     "readiness.channel": "配置的载体",
+    "readiness.resolvedCarrier": "当前载体",
+    "readiness.system": "本机浏览器",
     "readiness.details": "诊断",
     "readiness.electron": "内置浏览器运行时",
     "readiness.bridge": "桌面侧栏 bridge",
     "readiness.recheck": "重新检测",
     "readiness.prepare": "准备内置浏览器",
     "readiness.preparing": "正在准备…",
-    "readiness.fix": "修复命令",
+    "readiness.fix": "外部终端命令",
     "readiness.carrier.sidebar": "桌面侧栏",
     "readiness.carrier.bundled": "内置 Electron",
     "readiness.carrier.system": "本机 Chrome / Edge",
     "readiness.carrier.auto": "自动",
     "readiness.state.ready": "可用",
     "readiness.state.blocked": "尚不可用",
-    "readiness.state.unknown": "需实际启动才能确定",
+    "readiness.status.checkPending": "等待环境检测",
+    "readiness.status.systemReady": "已找到 {browser}",
+    "readiness.status.systemMissing": "未找到 {browser}",
+    "readiness.status.bundledReady": "内置运行环境可用",
+    "readiness.status.bundledMissing": "内置运行环境待安装",
+    "readiness.status.bundledPreparing": "正在下载内置运行环境",
+    "readiness.status.bundledFailed": "内置运行环境准备失败",
+    "readiness.status.bridgeReady": "侧栏桥可用",
+    "readiness.status.bridgeMissing": "侧栏桥待安装",
+    "readiness.status.bridgeStale": "侧栏桥待修复",
+    "readiness.status.bridgeStopped": "等待桌面端启动",
+    "readiness.status.bridgeInstalled": "侧栏桥已安装",
+    "readiness.status.desktopMissing": "未检测到桌面端",
     "readiness.electron.present": "已就绪",
     "readiness.electron.ready": "已就绪",
     "readiness.electron.preparing": "正在下载",
@@ -128,15 +149,27 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.bridge.missing": "未安装",
     "readiness.bridge.stale": "已失效(桌面端升级后需重装)",
     "readiness.bridge.absent": "本机没有桌面端",
-    "readiness.bridge.install": "安装桥接",
-    "readiness.bridge.repair": "修复桥接",
-    "readiness.bridge.reinstall": "重新安装桥接",
-    "readiness.bridge.uninstall": "卸载桥接",
-    "readiness.bridge.working": "正在处理桥接…",
-    "readiness.bridge.restartHint": "点击后自动完成安装并重启 DSH 桌面端。",
+    "readiness.bridge.install": "安装并重启",
+    "readiness.bridge.repair": "修复并重启",
+    "readiness.bridge.reinstall": "重装并重启",
+    "readiness.bridge.uninstall": "卸载并重启",
+    "readiness.bridge.working": "正在准备维护…",
+    "readiness.bridge.inProgress": "维护进行中…",
+    "readiness.bridge.maintenanceHint": "点击后将正常退出并重启 DSH。",
+    "readiness.bridge.progressHint": "维护期间将显示独立进度，完成后自动启动 DSH。",
+    "readiness.bridge.localOnly": "请在本机 DSH 桌面的设置中操作。",
+    "readiness.bridge.unsupported": "请更新并重启 DSH 后重试。",
+    "readiness.bridge.phase.armed": "正在准备退出 DSH…",
+    "readiness.bridge.phase.closing": "正在正常退出 DSH…",
+    "readiness.bridge.phase.installing": "正在安装桥接…",
+    "readiness.bridge.phase.uninstalling": "正在卸载桥接…",
+    "readiness.bridge.phase.restarting": "正在重启 DSH…",
+    "readiness.bridge.phase.verifying": "正在确认桥接状态…",
+    "readiness.bridge.failed": "桥接维护失败，请查看诊断后重试。",
+    "readiness.bridge.cancelled": "桥接维护已取消，可重试。",
     "readiness.bridge.installedDone": "桥接安装完成",
     "readiness.bridge.uninstalledDone": "桥接已卸载",
-    "readiness.bridge.actionFailed": "桥接操作失败:",
+    "readiness.bridge.actionFailed": "桥接维护未能开始，请查看诊断后重试。",
     "delivery.title": "交付",
     "delivery.tool": "接手下载的工具(MCP 工具名,留空=只存本地)",
     "delivery.args": "参数模板(JSON)",
@@ -203,24 +236,38 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "actions.allowCredentialWrite.hint": "Write cookies to any domain.",
     "remoteView.enabled": "Allow remote viewing",
     "remoteView.enabled.hint": "Shares a read-only view that may contain sensitive information.",
-    "readiness.title": "Readiness",
+    "readiness.title": "Environment check",
     "readiness.loading": "Checking…",
     "readiness.failed": "Could not read readiness:",
     "readiness.channel": "Configured carrier",
+    "readiness.resolvedCarrier": "Current carrier",
+    "readiness.system": "Installed browser",
     "readiness.details": "Diagnostics",
     "readiness.electron": "Bundled browser runtime",
     "readiness.bridge": "Desktop sidebar bridge",
     "readiness.recheck": "Check again",
     "readiness.prepare": "Prepare the bundled browser",
     "readiness.preparing": "Preparing…",
-    "readiness.fix": "Repair command",
+    "readiness.fix": "External-terminal command",
     "readiness.carrier.sidebar": "Desktop sidebar",
     "readiness.carrier.bundled": "Bundled Electron",
     "readiness.carrier.system": "Installed Chrome / Edge",
     "readiness.carrier.auto": "Automatic",
     "readiness.state.ready": "Ready",
     "readiness.state.blocked": "Not ready yet",
-    "readiness.state.unknown": "Only a real launch can tell",
+    "readiness.status.checkPending": "Waiting for environment check",
+    "readiness.status.systemReady": "{browser} found",
+    "readiness.status.systemMissing": "{browser} not found",
+    "readiness.status.bundledReady": "Bundled runtime available",
+    "readiness.status.bundledMissing": "Bundled runtime needs installation",
+    "readiness.status.bundledPreparing": "Downloading bundled runtime",
+    "readiness.status.bundledFailed": "Bundled runtime preparation failed",
+    "readiness.status.bridgeReady": "Sidebar bridge available",
+    "readiness.status.bridgeMissing": "Sidebar bridge needs installation",
+    "readiness.status.bridgeStale": "Sidebar bridge needs repair",
+    "readiness.status.bridgeStopped": "Waiting for DSH Desktop to start",
+    "readiness.status.bridgeInstalled": "Sidebar bridge installed",
+    "readiness.status.desktopMissing": "DSH Desktop not found",
     "readiness.electron.present": "Ready",
     "readiness.electron.ready": "Ready",
     "readiness.electron.preparing": "Downloading",
@@ -233,15 +280,27 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.bridge.missing": "Not installed",
     "readiness.bridge.stale": "Stale (a desktop update needs a reinstall)",
     "readiness.bridge.absent": "No desktop install on this machine",
-    "readiness.bridge.install": "Install bridge",
-    "readiness.bridge.repair": "Repair bridge",
-    "readiness.bridge.reinstall": "Reinstall bridge",
-    "readiness.bridge.uninstall": "Uninstall bridge",
-    "readiness.bridge.working": "Updating bridge…",
-    "readiness.bridge.restartHint": "Installs the bridge and restarts DSH Desktop automatically.",
+    "readiness.bridge.install": "Install and restart",
+    "readiness.bridge.repair": "Repair and restart",
+    "readiness.bridge.reinstall": "Reinstall and restart",
+    "readiness.bridge.uninstall": "Uninstall and restart",
+    "readiness.bridge.working": "Preparing maintenance…",
+    "readiness.bridge.inProgress": "Maintenance in progress…",
+    "readiness.bridge.maintenanceHint": "DSH will exit normally and restart after you click.",
+    "readiness.bridge.progressHint": "A separate progress window will appear. DSH starts automatically when maintenance finishes.",
+    "readiness.bridge.localOnly": "Use settings in DSH Desktop on this computer.",
+    "readiness.bridge.unsupported": "Update and restart DSH, then try again.",
+    "readiness.bridge.phase.armed": "Preparing to exit DSH…",
+    "readiness.bridge.phase.closing": "Exiting DSH normally…",
+    "readiness.bridge.phase.installing": "Installing the bridge…",
+    "readiness.bridge.phase.uninstalling": "Uninstalling the bridge…",
+    "readiness.bridge.phase.restarting": "Restarting DSH…",
+    "readiness.bridge.phase.verifying": "Checking the bridge…",
+    "readiness.bridge.failed": "Bridge maintenance failed. Check diagnostics and try again.",
+    "readiness.bridge.cancelled": "Bridge maintenance was cancelled. You can try again.",
     "readiness.bridge.installedDone": "Bridge installed",
     "readiness.bridge.uninstalledDone": "Bridge uninstalled",
-    "readiness.bridge.actionFailed": "Bridge action failed:",
+    "readiness.bridge.actionFailed": "Bridge maintenance could not start. Check diagnostics and try again.",
     "delivery.title": "Delivery",
     "delivery.tool": "Tool that takes the download (MCP tool name; empty = local only)",
     "delivery.args": "Argument template (JSON)",
@@ -298,7 +357,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 }
 .dsh-bb-settings { font-size: 14px; line-height: 22px; }
 .dsh-bb-settings .dsh-bb-diagnostics { margin-top: 4px; }
-.dsh-bb-diagnostics code { display: block; }
+.dsh-bb-diagnostics code { display: block; max-height: 160px; overflow: auto; }
 .dsh-bb-toggle { justify-content: space-between; cursor: pointer; }
 .dsh-bb-toggle:has(:disabled) { cursor: default; }
 .dsh-bb-switch {
@@ -365,16 +424,12 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   color: var(--dsw-alias-label-primary, inherit);
   transition: background-color .12s ease;
 }
-/* No resting background: a permanent grey block behind every row reads as a set of buttons
-   rather than a list of settings. The highlight belongs to the pointer, not to the row. */
-.dsh-bb-row:hover {
+/* Only the switch rows act as a single control; status and selector rows are plain text. */
+.dsh-bb-toggle:hover:not(:has(:disabled)) {
   background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.15));
 }
-.dsh-bb-row:active {
+.dsh-bb-toggle:active:not(:has(:disabled)) {
   background: var(--dsw-alias-interactive-bg-active, rgba(128,128,128,.22));
-}
-.dsh-bb-row:focus-within {
-  border-color: var(--dsw-alias-border-l2, rgba(128,128,128,.4));
 }
 /* The dropdown is drawn here rather than by the OS.
    A native <select> paints its popup with system colours on Windows: the highlight overrides
@@ -385,6 +440,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 .dsh-bb-dd {
   position: relative;
   display: inline-block;
+  max-width: min(100%, calc(100vw - 32px));
   margin-top: 4px;
 }
 .dsh-bb-dd-btn {
@@ -405,14 +461,17 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.18));
 }
 .dsh-bb-dd-btn:disabled { opacity: .55; cursor: default; }
-.dsh-bb-dd-caret { opacity: .6; font-size: 10px; line-height: 1; }
+.dsh-bb-dd-btn > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-bb-dd-caret { flex-shrink: 0; opacity: .6; font-size: 10px; line-height: 1; }
 .dsh-bb-dd-list {
   position: absolute;
+  box-sizing: border-box;
   z-index: 20;
   top: calc(100% + 4px);
   left: 0;
+  width: max-content;
   min-width: 100%;
-  max-width: 340px;
+  max-width: min(340px, calc(100vw - 32px));
   padding: 4px;
   border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4));
   border-radius: 8px;
@@ -421,6 +480,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 }
 .dsh-bb-dd-opt {
   display: block;
+  box-sizing: border-box;
   width: 100%;
   padding: 6px 9px;
   border: none;
@@ -429,6 +489,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   color: var(--dsw-alias-label-primary, inherit);
   font: inherit;
   text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
 }
 /* The same ellipse the rows use, so the panel reads as one surface — and it is ours to draw,
@@ -698,9 +761,12 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     const [unsupported, setUnsupported] = useState(false)
     const [busy, setBusy] = useState(false)
     const [bridgeBusy, setBridgeBusy] = useState(null)
-    const [bridgeResult, setBridgeResult] = useState(null)
-    const [bridgeError, setBridgeError] = useState("")
+    const [bridgeJob, setBridgeJob] = useState(null)
+    const [bridgePollVersion, setBridgePollVersion] = useState(0)
+    const [bridgeError, setBridgeError] = useState(null)
     const bridgePending = useRef(false)
+    const bridgeSubmitting = useRef(false)
+    const bridgeJobId = useRef(null)
     const alive = useRef(true)
 
     const read = useCallback(async () => {
@@ -729,11 +795,35 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       }
     }, [])
 
+    const bridgeActivePhases = ["armed", "closing", "installing", "restarting", "verifying"]
+    const bridgeActive = bridgeJob !== null && bridgeActivePhases.includes(bridgeJob.phase)
+    const readBridgeJob = useCallback(async () => {
+      try {
+        const response = await fetch("/dsh-builtin-browser/bridge-maintenance", { headers: { accept: "application/json" } })
+        if (!response.ok) return
+        const data = await response.json()
+        if (!alive.current || bridgeSubmitting.current || data.ok !== true || data.protocol !== 1 || !data.job || typeof data.job.id !== "string") return
+        if (bridgePending.current && bridgeJobId.current !== null && bridgeJobId.current !== data.job.id) return
+        bridgeJobId.current = data.job.id
+        bridgePending.current = ["armed", "closing", "installing", "restarting", "verifying"].includes(data.job.phase)
+        setBridgeJob(data.job)
+        if (data.job.phase === "completed") void read()
+      } catch { /* The desktop is briefly offline while maintenance restarts it. Keep its job. */ }
+      finally { if (alive.current) setBridgePollVersion(version => version + 1) }
+    }, [read])
+
     useEffect(() => {
       alive.current = true
       void read()
+      void readBridgeJob()
       return () => { alive.current = false }
-    }, [read, channel])
+    }, [read, readBridgeJob, channel])
+
+    useEffect(() => {
+      if (!bridgeActive) return undefined
+      const timer = setTimeout(() => { void readBridgeJob() }, 1000)
+      return () => clearTimeout(timer)
+    }, [bridgeActive, bridgeJob, bridgePollVersion, readBridgeJob])
 
     // Poll only while a download is running: that is the one state that changes on its own, and a
     // poll in any other state would be a background request per panel per two seconds forever.
@@ -764,26 +854,46 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     }
 
     const bridgeAction = async action => {
-      if (bridgePending.current || busy) return
+      if (bridgePending.current || busy || bridgeActive) return
+      const desktopMenu = () => typeof document.querySelector === "function"
+        ? document.querySelector("[data-windows-menu]")?.shadowRoot?.querySelector("button") : null
+      if (typeof desktopMenu()?.click !== "function") {
+        setBridgeError({ key: "readiness.bridge.localOnly" })
+        return
+      }
       bridgePending.current = true
+      bridgeSubmitting.current = true
       setBridgeBusy(action)
-      setBridgeResult(null)
-      setBridgeError("")
+      setBridgeJob(null)
+      setBridgeError(null)
+      let accepted = false
       try {
-        const response = await fetch("/dsh-builtin-browser/bridge-action", {
+        const response = await fetch("/dsh-builtin-browser/bridge-maintenance", {
           method: "POST",
           headers: { accept: "application/json", "content-type": "application/json" },
-          body: JSON.stringify({ action }),
+          body: JSON.stringify({ action, locale: currentLocale }),
         })
         const data = await response.json().catch(() => ({}))
+        if (response.status === 404) {
+          if (alive.current) setBridgeError({ key: "readiness.bridge.unsupported" })
+          return
+        }
         if (!response.ok || data.ok !== true) throw new Error(data.error || data.output || `HTTP ${response.status}`)
-        if (alive.current) setBridgeResult(action)
+        if (data.protocol !== 1 || data.accepted !== true || typeof data.job?.id !== "string" || data.job.phase !== "armed" || data.job.action !== action) throw new Error("invalid bridge maintenance acknowledgement")
+        accepted = true
+        bridgeJobId.current = data.job.id
+        if (alive.current) setBridgeJob(data.job)
+        const menu = desktopMenu()
+        if (typeof menu?.click !== "function") throw new Error(t("readiness.bridge.localOnly"))
+        // The armed worker selects Exit in this official native menu. This opens that menu only
+        // after the new maintenance endpoint has acknowledged the handoff.
+        menu.click()
       } catch (failure) {
-        if (alive.current) setBridgeError(String(failure && failure.message ? failure.message : failure))
+        if (alive.current) setBridgeError({ key: "readiness.bridge.actionFailed", detail: String(failure && failure.message ? failure.message : failure) })
       } finally {
-        bridgePending.current = false
+        bridgeSubmitting.current = false
+        if (!accepted) bridgePending.current = false
         if (alive.current) setBridgeBusy(null)
-        await read()
       }
     }
 
@@ -811,37 +921,68 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         : runtime.bridge.running === false
           ? t("readiness.bridge.installedNotRunning")
           : t("readiness.bridge.installed")
-    const controlsBusy = busy || bridgeBusy !== null
+    const resolvedCarrier = runtime.resolvedCarrier ?? (runtime.carrier === "auto"
+      ? runtime.bridge.state === "installed" && runtime.bridge.running === true ? "sidebar"
+        : runtime.systemBrowser?.present === true ? "system" : "bundled"
+      : runtime.carrier)
+    const systemName = ({ chrome: "Chrome", edge: "Edge", brave: "Brave" })[runtime.systemBrowser?.kind ?? runtime.channel] ?? t("readiness.system")
+    const systemLabel = runtime.systemBrowser?.checked === true
+      ? t(runtime.systemBrowser.present ? "readiness.status.systemReady" : "readiness.status.systemMissing").replace("{browser}", systemName)
+      : t("readiness.status.checkPending")
+    const stateLabel = resolvedCarrier === "system" ? systemLabel
+      : resolvedCarrier === "sidebar"
+        ? t(runtime.bridge.state === "installed"
+          ? runtime.bridge.running === true ? "readiness.status.bridgeReady"
+            : runtime.bridge.running === false ? "readiness.status.bridgeStopped" : "readiness.status.bridgeInstalled"
+          : runtime.bridge.state === "stale" ? "readiness.status.bridgeStale"
+            : runtime.bridge.state === "missing" ? "readiness.status.bridgeMissing" : "readiness.status.desktopMissing")
+        : t(runtime.electron.state === "present" || runtime.electron.state === "ready" ? "readiness.status.bundledReady"
+          : runtime.electron.state === "preparing" ? "readiness.status.bundledPreparing"
+            : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
+    const controlsBusy = busy || bridgeBusy !== null || bridgeActive
     const canManageBridge = runtime.bridge.present === true && runtime.bridge.state !== "absent"
     const installLabel = runtime.bridge.state === "installed" ? "readiness.bridge.reinstall"
       : runtime.bridge.state === "stale" ? "readiness.bridge.repair" : "readiness.bridge.install"
+    const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
+    const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
+    const bridgeJobError = typeof bridgeJob?.error === "string" ? bridgeJob.error : ""
+    const bridgeJobOutput = typeof bridgeJob?.output === "string" ? bridgeJob.output : ""
+    const bridgeJobDiagnostic = bridgeJobOutput !== "" && bridgeJobError.includes(bridgeJobOutput)
+      ? bridgeJobError : [bridgeJobError, bridgeJobOutput].filter(Boolean).join("\n")
 
     return h("div", { style: styles.group }, [
       h("div", { key: "head", className: "dsh-bb-row", style: styles.row }, [
         h("span", { key: "title" }, t("readiness.title")),
-        h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, t(`readiness.state.${runtime.readiness}`)),
+        h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, stateLabel),
       ]),
       canManageBridge ? h("div", { key: "bridge-controls" }, [
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
-          h("button", { key: "install", type: "button", style: styles.button, disabled: controlsBusy || preparing, onClick: () => bridgeAction("install") }, t(installLabel)),
+          h("button", { key: "install", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: () => bridgeAction("install") }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.inProgress" : installLabel)),
         ]),
-        h("p", { key: "hint", role: bridgeBusy === null ? undefined : "status", style: styles.hint }, t(bridgeBusy === null ? "readiness.bridge.restartHint" : "readiness.bridge.working")),
+        h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
       ]) : null,
-      bridgeResult !== null ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t(bridgeResult === "uninstall" ? "readiness.bridge.uninstalledDone" : "readiness.bridge.installedDone")) : null,
-      bridgeError !== "" ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, `${t("readiness.bridge.actionFailed")} ${bridgeError}`) : null,
+      bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase === "installing" && bridgeJob.action === "uninstall" ? "uninstalling" : bridgeJob.phase}`)) : null,
+      bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t(bridgeJob.action === "uninstall" ? "readiness.bridge.uninstalledDone" : "readiness.bridge.installedDone")) : null,
+      bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
+      bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
         h("summary", { key: "title", style: styles.hint }, t("readiness.details")),
         h("div", { key: "kv", style: styles.kv }, [
           ...row("carrier", t("readiness.channel"), t(`readiness.carrier.${runtime.carrier}`)),
+          runtime.resolvedCarrier ? row("resolved-carrier", t("readiness.resolvedCarrier"), t(`readiness.carrier.${runtime.resolvedCarrier}`)) : null,
+          runtime.systemBrowser?.checked === true ? row("system", t("readiness.system"), systemLabel) : null,
           ...row("electron", t("readiness.electron"), t(`readiness.electron.${runtime.electron.state}`)),
           ...row("bridge", t("readiness.bridge"), bridgeLabel),
         ]),
+        runtime.systemBrowser?.path ? h("code", { key: "system-path", style: styles.mono }, runtime.systemBrowser.path) : null,
+        bridgeError?.detail ? h("code", { key: "bridge-error-detail", style: styles.mono }, bridgeError.detail) : null,
+        bridgeJobDiagnostic !== "" ? h("code", { key: "bridge-job-detail", style: styles.mono }, bridgeJobDiagnostic) : null,
         runtime.electron.state === "failed" || runtime.electron.state === "skipped"
           ? h("p", { key: "edetail", style: styles.hint }, runtime.electron.detail) : null,
         runtime.bridge.state === "installed" && runtime.bridge.running === false
           ? h("p", { key: "bdetail", style: styles.hint }, runtime.bridge.runningDetail ?? runtime.bridge.detail) : null,
-        runtime.bridge.command && runtime.bridge.state !== "installed"
+        runtime.bridge.command
           ? h("p", { key: "command", style: styles.hint }, [
             h("span", { key: "label" }, t("readiness.fix")),
             h("code", { key: "value", style: styles.mono }, runtime.bridge.command),
@@ -854,9 +995,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
           onClick: () => { void read() },
         }, t("readiness.recheck")),
         canManageBridge && runtime.bridge.state === "installed" ? h("button", {
-          key: "uninstall", type: "button", style: styles.button, disabled: controlsBusy || preparing,
+          key: "uninstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined,
           onClick: () => bridgeAction("uninstall"),
-        }, t("readiness.bridge.uninstall")) : null,
+        }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.inProgress" : "readiness.bridge.uninstall")) : null,
       ]),
       runtime.canProvision || preparing
         ? h("div", { key: "buttons", style: styles.buttons }, [
@@ -1246,27 +1387,10 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       })
     }
     /**
-     * Ask the shell to DISPLAY the conversation a page was requested for.
-     *
-     * The shell renders the sidebar of the conversation it shows and no other, so a request from a
-     * background conversation can place a tab but never grow a webview. The old answer was "show
-     * that conversation and the page appears" — true, and a dependency on the human's timing.
-     * `openSession` is the shell's own navigation for exactly this: the same call its own session
-     * list makes, aimed at a session id, with no input event and no DOM touched.
-     *
-     * Only called when this conversation's panel DOM is absent, so it never fires for the
-     * conversation the human is already reading, and never as a side effect of a read.
-     *
-     * @param sessionId - the conversation the page belongs to.
-     * @param state - the panel read taken just before; `panel: true` means nothing to claim.
-     * @returns whether the shell was asked to switch.
-     */
-    /**
      * The conversation the shell is displaying, as the shell itself reports it.
      *
      * `undefined`/`null` means "the shell would not say" — an older shell, or one whose surface was
-     * never minted. Both callers treat that as "not this conversation", which is the fail-safe
-     * direction: no navigation, no expand, nothing that could move a view it cannot identify.
+     * never minted. Expansion requires a known owner, because it acts on the displayed surface.
      * @returns the on-screen session id, or null.
      */
     function onScreenSession() {
@@ -1278,8 +1402,8 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       }
     }
 
-    function claimConversation(sessionId, state) {
-      if (state.panel === true) return false
+    /** Display the owner of an explicit open request, including an already mounted hidden guest. */
+    function claimConversation(sessionId) {
       if (uiWorkspace === null || typeof uiWorkspace.openSession !== "function") return false
       // Already displayed? Then the shell needs no navigation: the panel simply has not been opened
       // yet, and `revealPlacedPanel` opens it. Re-opening the conversation a human is reading would
@@ -1316,12 +1440,12 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
      *     so passing it a tab id from another conversation's list cannot move that view.
      *
      * @param sessionId - the conversation whose page was just placed.
-     * @param state - what the panel read before the placement; a live guest means nothing to do.
+     * A live guest may remain mounted while its column is folded, so it still needs this step.
      * @returns what was asked for, so a caller can tell "expanded" from "already visible", and
      *   `displayed` so it can tell "the shell is showing this conversation" from "it is not".
      */
-    function revealPlacedPanel(sessionId, state, tabId) {
-      if (state.guestId !== null || sidebarRight === null) return {}
+    function revealPlacedPanel(sessionId, tabId) {
+      if (sidebarRight === null) return {}
       const done = {}
       // Which conversation is the shell DISPLAYING? `screen()` answers it, and it is the question
       // that decides whether an expand call is safe: `toggleExpanded()` acts on the on-screen
@@ -1369,9 +1493,97 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       return done
     }
 
+    function viewKey(sessionId, viewId) {
+      return JSON.stringify([sessionId, viewId])
+    }
+
+    /** Bind each logical view to one native tab; URLs can change without changing that identity. */
+    function openViewPanel(sessionId, address, viewId, guestId) {
+      const key = viewKey(sessionId, viewId)
+      const switched = claimConversation(sessionId)
+      let tabs
+      try { tabs = Array.from(sidebarRight.tabsIn(sessionId)) }
+      catch { return { ok: false, reason: "the shell cannot list this conversation's tabs", panel: false, guestId: null, ...switched ? { switched: true } : {} } }
+      const browsers = tabs.filter(tab => tab !== null && typeof tab === "object" && tab.kind === "browser" && typeof tab.id === "string")
+      const allowed = new Set(browsers.map(tab => tab.id))
+      const roots = panelRootsFor(sessionId)
+      const owned = new Set(Array.from(pendingTabs.entries())
+        .filter(([otherKey, binding]) => otherKey !== key && binding.sessionId === sessionId)
+        .map(([, binding]) => binding.id))
+      let binding = pendingTabs.get(key)
+      if (binding !== undefined && !allowed.has(binding.id)) {
+        // A missing store while the conversation mounts is temporary. Keep its identity until the
+        // store is readable again; a nonempty store proves that the original tab actually closed.
+        if (tabs.length === 0 && onScreenSession() !== sessionId) {
+          return { ok: false, reason: "this conversation's sidebar is not mounted", panel: false, guestId: null, ...switched ? { switched: true } : {} }
+        }
+        pendingTabs.delete(key)
+        binding = undefined
+      }
+      const guests = guestsInPanel(sessionId)
+      const hasCachedGuest = Number.isInteger(guestId) && guestId > 0
+      if (binding === undefined && hasCachedGuest) {
+        const cached = guests.find(view => view.getWebContentsId() === guestId)
+        if (cached !== undefined) {
+          const id = tabIdOfElement(cached, allowed, roots)
+          if (id === null || owned.has(id)) {
+            return { ok: false, reason: "the requested guest cannot be assigned to this browser view", panel: true, guestId: null }
+          }
+          binding = { sessionId, id, url: address, scoped: true }
+        }
+      }
+      if (binding === undefined && !hasCachedGuest) {
+        // Adopt only an unclaimed guest whose native tab can be proved. Multiple visible guests
+        // are ambiguous (split panes); creating a tab is safer than choosing by list order.
+        const candidates = guests.map(view => ({ view, id: tabIdOfElement(view, allowed, roots) }))
+          .filter(candidate => candidate.id !== null && !owned.has(candidate.id))
+        const drawn = candidates.filter(({ view }) => {
+          const rect = view.getBoundingClientRect()
+          return rect.width > 0 && rect.height > 0
+        })
+        const candidate = drawn.length === 1 ? drawn[0] : candidates.length === 1 ? candidates[0] : undefined
+        if (candidate !== undefined) binding = { sessionId, id: candidate.id, url: address, scoped: true }
+      }
+      let created = false
+      if (binding === undefined) {
+        const before = new Set(tabs.map(tab => tab.id))
+        try { sidebarRight.openTabIn(sessionId, "browser", address ? { params: { url: address } } : {}) }
+        catch (error) { return { ok: false, reason: String(error?.message ?? error), panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0, guestId: null } }
+        let placed
+        try { placed = Array.from(sidebarRight.tabsIn(sessionId)) }
+        catch { placed = [] }
+        const added = placed.filter(tab => tab !== null && typeof tab === "object" && tab.kind === "browser"
+          && typeof tab.id === "string" && !before.has(tab.id) && !owned.has(tab.id))
+        if (added.length !== 1) {
+          return {
+            ok: false,
+            reason: placed.length === 0 ? "this conversation's sidebar is not mounted" : "the shell did not identify a new browser tab for this view",
+            panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0,
+            guestId: null,
+            ...switched ? { switched: true } : {},
+          }
+        }
+        binding = { sessionId, id: added[0].id, url: address, scoped: true }
+        created = true
+      }
+      pendingTabs.set(key, binding)
+      const state = guestStateFor(sessionId, binding.id)
+      return {
+        ok: true,
+        created,
+        panel: state.panel,
+        guestId: state.guestId,
+        url: state.url,
+        tabId: binding.id,
+        ...switched ? { switched: true } : {},
+        ...revealPlacedPanel(sessionId, binding.id),
+      }
+    }
+
     const api = {
+      panelProtocol: 3,
       /** @returns what happened: an existing guest, a newly opened tab, or a named refusal. */
-      openPanel(sessionId, url) {
+      openPanel(sessionId, url, options) {
         const wanted = typeof sessionId === "string" ? sessionId : ""
         if (!/^session-/.test(wanted)) {
           return { ok: false, reason: "not a conversation id: " + JSON.stringify(sessionId), panel: false, guestId: null }
@@ -1380,10 +1592,25 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
           return { ok: false, reason: "the shell's sidebar service is not available", panel: false, guestId: null }
         }
         const address = url ? String(url) : ""
+        if (typeof options?.viewId === "string" && options.viewId !== "") {
+          return openViewPanel(wanted, address, options.viewId, options.guestId)
+        }
         const pending = pendingTabs.get(wanted)
         const state = guestStateFor(wanted, pending?.url === address && pending.scoped ? pending.id : undefined)
+        // Explicit opening also reveals a guest kept mounted in a collapsed or hidden sidebar.
+        // Passive panelGuest/panelGuests reads never call either presentation helper.
+        const switched = claimConversation(wanted)
         if (state.guestId !== null) {
-          return { ok: true, created: false, panel: true, guestId: state.guestId, url: state.url }
+          const revealed = revealPlacedPanel(wanted, pending?.url === address ? pending.id : undefined)
+          return {
+            ok: true,
+            created: false,
+            panel: true,
+            guestId: state.guestId,
+            url: state.url,
+            ...switched ? { switched: true } : {},
+            ...revealed,
+          }
         }
         // No panel DOM for this conversation means the shell is not DISPLAYING it, and no tab placed
         // here can ever grow a webview: the shell renders one sidebar, for the conversation it shows.
@@ -1391,7 +1618,6 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         // their timing. Ask the shell instead — `openSession` is its own navigation, one call on its
         // own workspace service, no input events — and report `switched` so the caller can retry one
         // render later instead of reporting a dead carrier.
-        const switched = claimConversation(wanted, state)
         // A mounted panel is NOT required to place a tab.
         //
         // `openTabIn` acts on the conversation's own surface store, and the sidebar-right service
@@ -1466,7 +1692,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         // Placing is not showing: ask the shell to expand the column and focus that tab, so the
         // body (and with it the `<webview>`) actually gets created. Without this the caller polls
         // a panel that can never answer, which is exactly what "produced no page" used to mean.
-        const revealed = revealPlacedPanel(wanted, state, page?.id)
+        const revealed = revealPlacedPanel(wanted, page?.id)
         return {
           ok: true,
           created: placed > before,
@@ -1479,7 +1705,16 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         }
       },
       /** Read-only: this conversation's current guest, if it has one. */
-      panelGuest(sessionId, tabId) {
+      panelGuest(sessionId, tabId, options) {
+        if (typeof options?.viewId === "string" && options.viewId !== "") {
+          const bound = pendingTabs.get(viewKey(sessionId, options.viewId))
+          const intended = typeof tabId === "string" && tabId !== "" ? tabId : bound?.id
+          if (intended === undefined || (bound !== undefined && bound.id !== intended)) {
+            const roots = panelRootsFor(sessionId)
+            return { panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0, guestId: null, url: "" }
+          }
+          return guestStateFor(sessionId, intended)
+        }
         return guestStateFor(
           typeof sessionId === "string" ? sessionId : "",
           typeof tabId === "string" && tabId !== "" ? tabId : undefined,
@@ -1864,6 +2099,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-builtin-browser: dictionaries")
     const t = ctx.locale.bind(NS)
     translate = t
+    updateCurrentLocale(ctx.locale)
     // A language switch has to reach text that is already on screen. `subscribe` fires on every
     // locale snapshot change (switch, and late dictionary registration); guarded, because a host
     // without it must still get the panel — the labels then simply keep their first language.
@@ -1871,6 +2107,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       ctx.effect(() => {
         const off = ctx.locale.subscribe(() => {
           translate = ctx.locale.bind(NS)
+          updateCurrentLocale(ctx.locale)
           // Two audiences, one notification: the vanilla watch panel rewrites its own text, and the
           // React settings section re-renders (see `useLocaleVersion`). Bumping the counter here is
           // what makes `t()` inside a mounted component return the new language at all.

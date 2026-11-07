@@ -368,7 +368,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Tool guidance band is 100-199; 150 keeps clear of the common 110/120
     // tool sections so ordering does not depend on plugin load sequence.
     order: 150,
-    text: 'Use the dsh_browser_* tools to operate the built-in browser. Each task gets its own browser session AND its own window (with a real toolbar: address bar, back/forward/reload, tab strip) — the human can see it, use it like any browser, and take over at any time; your tabs and history are isolated from other tasks, so do not assume another task\'s navigation state is visible to you. Understand a page with dsh_browser_a11y (semantic roles/names/states — the best structure map) or dsh_browser_snapshot (numbered interactive elements), then drive it: dsh_browser_click/dsh_browser_type accept a target {by: css|text|xpath, value} for semantic locating, or coordinates from dsh_browser_screenshot for visual targeting. For form filling prefer dsh_browser_fill (batch) or dsh_browser_set_value/dsh_browser_check/dsh_browser_select/dsh_browser_clear (single control, target-based); verify with dsh_browser_get_value. Use dsh_browser_scrape for structured extraction from list pages instead of hand-written dsh_browser_execute. After navigating on slow sites, dsh_browser_wait for the page. For a run of steps use dsh_browser_do (one call, stops at the first step that cannot proceed, waits settle by themselves), and use dsh_browser_assert to check a result instead of trusting a screenshot — dsh_browser_console/network explain what the page did when the screen does not. Keep the human informed of what you are doing on the page. If a snapshot or dsh_browser_challenge reports a human-verification challenge (CAPTCHA), stop retrying and ask the human to complete it in the browser window, then re-check.',
+    text: 'Use dsh_browser_* tools to operate the built-in browser. Each task has its own session and window (real toolbar): the human can watch and take over, and other tasks\' pages are not visible to you. Map a page with dsh_browser_a11y (semantic roles/names/states) or dsh_browser_snapshot (numbered elements), then drive it: dsh_browser_click/dsh_browser_type take a target {by: css|text|xpath, value}, or coordinates from dsh_browser_screenshot. Prefer dsh_browser_fill (batch) or dsh_browser_set_value/check/select/clear for forms; verify with dsh_browser_get_value. Use dsh_browser_scrape (not hand-written dsh_browser_execute) for list pages; dsh_browser_wait after slow navigation. Use dsh_browser_do for a run of steps, dsh_browser_assert to check results, and dsh_browser_console/network when the screen is unclear. Say what you are doing on the page. On a CAPTCHA (dsh_browser_challenge), stop retrying and ask the human to solve it in the browser window, then re-check.',
   })
 
   /**
@@ -574,8 +574,9 @@ export function apply(ctx: Context, config: Config = {}): void {
           return `${indent}[${n.ref}] ${n.role} "${n.name}"${valuePart}${coordsPart}${statePart}${selectorPart}${n.frame === true ? ' (iframe)' : ''}`
         })
         const header = `URL: ${value.url}${value.title !== undefined ? `\nTitle: ${value.title}` : ''}`
-        const hint = showCoords ? '' : '\n(no coords; pass coords: true)'
-        return [{ type: 'text', text: `${header}\n\n${lines.length > 0 ? lines.join('\n') : '(no accessible interactive nodes)'}${value.truncated === true ? '\n(truncated)' : ''}${hint}` }]
+        // The "coords: true" hint used to be appended to EVERY a11y result. It already lives in
+        // the parameter description, so repeating it in each model turn was pure token cost.
+        return [{ type: 'text', text: `${header}\n\n${lines.length > 0 ? lines.join('\n') : '(no accessible interactive nodes)'}${value.truncated === true ? '\n(truncated)' : ''}` }]
       },
     },
     timeoutMs,

@@ -1,91 +1,101 @@
-// `install.mjs --restart`: close DSH, install, start it again — in one process (issue #36).
-//
-// The reported failures are why this shape and not another: the archive cannot be moved while the
-// shell runs (EBUSY), and nothing launched from outside survives the exit long enough to install
-// afterwards. A hidden PowerShell started through WMI vanished with the process tree; a scheduled
-// task reported LastTaskResult 0xC000013A (STATUS_CONTROL_C_EXIT). So the installer must do the
-// closing itself, and must start the shell detached so it does not die with the installer.
-//
-// These tests read the script rather than run it: the behaviours worth pinning down are ordering and
-// intent, and actually stopping a live shell in a test would be destructive.
+// Maintenance refuses a running target and never terminates its host.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { resolve, join, dirname, basename } from 'node:path'
+import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
+const script = fileURLToPath(new URL('../desktop-bridge/install.mjs', import.meta.url))
+const source = readFileSync(script, 'utf8')
 
-const source = readFileSync(new URL('../desktop-bridge/install.mjs', import.meta.url), 'utf8')
-
-test('the flags exist and are parsed from the command line', () => {
-  assert.match(source, /const restart = args\.includes\('--restart'\)/, '--restart is parsed')
-  assert.match(source, /const assumeYes = args\.includes\('--yes'\) \|\| args\.includes\('-y'\)/,
-    '--yes is parsed, with -y as a short form')
+test('maintenance has no host termination or installer handoff path', () => {
+  assert.doesNotMatch(source, /taskkill|stopShell|DSH_CHILD_OF_SHELL'\s*&&|--detached|DSH_BRIDGE_HANDOFF_PARENT/)
+  const guard = source.indexOf('if (shellProcesses(installRoot).length !== 0)')
+  const mutations = source.indexOf('const packedLayout = existsSync(asarPath)')
+  assert.ok(guard > 0 && guard < mutations)
 })
 
-test('the shell is closed BEFORE the archive is touched', () => {
-  // The whole point: EBUSY happens at rename, so closing has to precede the pack step. Comparing
-  // source offsets proves the ordering without running anything.
-  const closeCall = source.indexOf('stopShell(installRoot')
-  const packStep = source.indexOf('const packedLayout = existsSync(asarPath)')
-  assert.ok(closeCall !== -1, 'the installer calls stopShell')
-  assert.ok(packStep !== -1, 'and still computes the layout')
-  assert.ok(closeCall < packStep, 'closing must come first')
+test('the process query is hidden and fails closed', () => {
+  const start = source.indexOf('function runCapture(')
+  const end = source.indexOf('\n/**', start)
+  let options
+  const capture = runInNewContext(source.slice(start, end) + '; runCapture', {
+    execFileSync(_command, _args, actual) { options = actual; throw Error('unavailable') },
+  })
+  assert.equal(capture('powershell.exe', []), undefined)
+  assert.equal(options.windowsHide, true)
+  assert.equal(options.encoding, 'utf8')
 })
 
-test('explicit restart also covers revert and idempotent install exits', () => {
-  assert.match(source, /if \(restart\) \{/, 'both actions honour an explicit restart')
-  assert.match(source, /process\.once\('exit'/, 'successful early returns also run the restart')
-  const archiveCheck = source.indexOf('const checked = validateArchive(asarPath)')
-  assert.ok(archiveCheck < source.indexOf('stopShell(installRoot'), 'archive checks precede shutdown')
+test('test mode never launches a Desktop executable', () => {
+  const start = source.indexOf('function startShell')
+  const end = source.indexOf('\nconst args =', start)
+  let spawns = 0
+  const launch = runInNewContext(source.slice(start, end) + '; startShell', {
+    join: (...parts) => parts.join('/'), existsSync: () => true,
+    process: { env: { DSH_BROWSER_TEST: '1' } }, console: { error() {}, log() {} },
+    spawn() { spawns++; throw Error('must not spawn') },
+  })
+  assert.equal(launch('fake-desktop'), false)
+  assert.equal(spawns, 0)
 })
 
-test('closing asks politely first and forces only as a fallback', () => {
-  // A forced kill can lose work. The user agreed to "close", not "kill".
-  const stopAt = source.indexOf('async function stopShell')
-  const stopBody = source.slice(stopAt, source.indexOf('function startShell'))
-  const polite = stopBody.indexOf("runCapture('taskkill.exe', before.flatMap")
-  const forced = stopBody.indexOf("runCapture('taskkill.exe', [...left.flatMap")
-  assert.ok(polite !== -1, 'a per-process request without /F comes first')
-  assert.ok(forced !== -1, 'and a forced kill exists as a fallback')
-  assert.ok(polite < forced, 'polite before forced')
-  assert.doesNotMatch(stopBody.slice(polite, polite + 80), /\/F/, 'the first request must not force')
-  assert.doesNotMatch(stopBody, /'\/IM'/, 'a second installation is never killed by image name')
-  assert.doesNotMatch(stopBody, /'\/T'/, 'a GUI process cannot kill unselected Node-mode descendants')
-  // Both waits are bounded: a process that refuses to die must not hang the installer.
-  assert.match(stopBody, /const deadline = Date\.now\(\) \+ graceMs/, 'the polite wait is bounded')
-  assert.match(stopBody, /const forcedBy = Date\.now\(\) \+ 15_000/, 'and so is the forced one')
-})
+function isolatedInstall() {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-installer-safety-'))
+  writeFileSync(join(root, '.dsh-bridge-test-root'), 'dsh-browser-installer-test-root-v1\n')
+  const target = join(root, 'desktop'), main = join(target, 'resources', 'app', 'lib', 'main.js')
+  mkdirSync(dirname(main), { recursive: true })
+  writeFileSync(join(target, 'resources', 'app', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.2-test', main: 'lib/main.js' }))
+  const original = 'const app = {};\nexport {};\n'
+  writeFileSync(main, original)
+  return { root, target, main, original, close() {
+    assert.equal(dirname(resolve(root)).toLowerCase(), resolve(tmpdir()).toLowerCase())
+    assert.ok(basename(root).startsWith('dsh-installer-safety-'))
+    rmSync(root, { recursive: true, force: true })
+  } }
+}
 
-test('the shell is started detached, so it outlives the installer', () => {
-  const startAt = source.indexOf('function startShell')
-  const body = source.slice(startAt, startAt + 900)
-  assert.match(body, /detached: true/, 'detached from this process')
-  assert.match(body, /stdio: 'ignore'/, 'with no inherited streams')
-  assert.match(body, /child\.unref\(\)/, 'and unref-ed so the installer can exit')
-  // The trap this avoids: a child of a dying parent dies too, which is exactly how the
-  // wait-for-exit daemons lost the shell.
-  assert.match(source, /startShell\(installRoot\)/, 'and the install path actually calls it')
-})
+for (const ancestor of [false, true]) {
+  test(`a real installer invocation refuses ${ancestor ? 'GUI ancestry' : 'a running Desktop'} without modifying files`, () => {
+    const check = isolatedInstall()
+    try {
+      const preload = join(check.root, 'process-fixture.cjs')
+      writeFileSync(preload, `const cp=require('node:child_process');const exe=${JSON.stringify(join(check.target, 'DeepSeek Harness.exe'))};
+cp.execFileSync=(command)=>{if(command!=='powershell.exe')throw Error('unexpected process invocation');return JSON.stringify([
+{ProcessId:${ancestor ? 'process.ppid' : '987654'},ParentProcessId:1,Name:'DeepSeek Harness.exe',ExecutablePath:exe,CommandLine:JSON.stringify(exe)},
+{ProcessId:process.pid,ParentProcessId:${ancestor ? 'process.ppid' : '1'},Name:'node.exe',ExecutablePath:process.execPath,CommandLine:'node install.mjs'}])};
+require('node:module').syncBuiltinESMExports();`)
+      const result = spawnSync(process.execPath, ['--require', preload, script, check.target, '--restart', '--yes', '--detached'], {
+        encoding: 'utf8', windowsHide: true, timeout: 10_000,
+        env: { ...process.env, DSH_BROWSER_TEST: '1', DSH_BRIDGE_TEST_ROOT: check.root },
+      })
+      assert.equal(result.status, 1)
+      assert.match(result.stderr, ancestor ? /child of DSH Desktop/ : /DSH Desktop is running/)
+      assert.equal(readFileSync(check.main, 'utf8'), check.original)
+      assert.equal(existsSync(check.main + '.before-bridge'), false)
+      assert.equal(existsSync(join(dirname(check.main), 'plugin-browser-bridge.js')), false)
+    } finally { check.close() }
+  })
+}
 
-test('an unattended run without --yes refuses instead of closing a window', () => {
-  // Closing a user's shell because a service happened to run the installer would be worse than
-  // failing; the check makes that impossible rather than merely unlikely.
-  assert.match(source, /--restart needs confirmation; pass --yes when there is no console to ask\./,
-    'the refusal is explicit')
-  const confirmAt = source.indexOf('if (!assumeYes)')
-  const confirmBody = source.slice(confirmAt, confirmAt + 900)
-  assert.match(confirmBody, /answer !== 'y' && answer !== 'yes'/, 'only an explicit yes proceeds')
+test('closed-target maintenance completes with an explicit no-restart result', () => {
+  const check = isolatedInstall()
+  try {
+    const preload = join(check.root, 'closed-fixture.cjs'), resultFile = join(check.target, 'result.json')
+    writeFileSync(preload, "require('node:child_process').execFileSync=()=>JSON.stringify([{ProcessId:process.pid,ParentProcessId:1,Name:'node.exe'}]);require('node:module').syncBuiltinESMExports();")
+    const result = spawnSync(process.execPath, ['--require', preload, script, check.target], {
+      encoding: 'utf8', windowsHide: true, timeout: 10_000,
+      env: { ...process.env, DSH_BROWSER_TEST: '1', DSH_BRIDGE_TEST_ROOT: check.root, DSH_BRIDGE_ACTION_RESULT_FILE: resultFile },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const reported = JSON.parse(readFileSync(resultFile, 'utf8'))
+    assert.equal(reported.ok, true)
+    assert.equal(reported.restarted, false)
+    assert.equal(reported.pid, undefined)
+  } finally { check.close() }
 })
-
-test('an install that could not stop the shell fails instead of half-installing', () => {
-  assert.match(source, /DSH Desktop did not exit, so the archive cannot be replaced\./,
-    'the message names the actual cause')
-  // Guarded by an exit, so the pack step is never reached with the shell still holding the archive.
-  const failAt = source.indexOf('DSH Desktop did not exit')
-  const nextPack = source.indexOf('const packedLayout = existsSync(asarPath)')
-  assert.ok(failAt !== -1 && failAt < nextPack, 'and it happens before the pack step')
-})
-
 // Execute the actual selection function with process tables that would previously kill native
 // CLI/installer processes. The real process table and running desktop are never modified.
 function processSelection() {
@@ -138,12 +148,31 @@ test('failed or malformed process enumeration never means the GUI is stopped', (
   ], root, 21), /could not identify/)
 })
 
+test('the process query declares UTF-8 before matching Unicode installation paths', () => {
+  const root = resolve('桌面安装目录')
+  const exe = resolve(root, 'DeepSeek Harness.exe')
+  let query
+  const enumerate = runInNewContext(processSelection() + '; shellProcesses', {
+    resolve, process: { pid: 999 },
+    runCapture: (command, args) => {
+      assert.equal(command, 'powershell.exe')
+      query = args.at(-1)
+      return JSON.stringify([{ ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness.exe', ExecutablePath: exe, CommandLine: '"' + exe + '"' }])
+    },
+  })
+  assert.deepEqual(Array.from(enumerate(root)), [10])
+  assert.match(query, /^\[Console\]::OutputEncoding\s*=\s*\[System\.Text\.UTF8Encoding\]::new\(\$false\);/,
+    'a GUI-launched Windows PowerShell otherwise emits CP936 bytes that UTF-8 decoding corrupts')
+})
+
 test('GUI restart clears Electron Node mode while retaining the remaining environment', () => {
   const start = source.indexOf('function startShell')
   const end = source.indexOf('\nconst args =', start)
   let options
   let detached = false
-  const environment = { ELECTRON_RUN_AS_NODE: '1', electron_run_as_node: '1', RETAINED_TEST_SETTING: 'retained' }
+  const environment = { ELECTRON_RUN_AS_NODE: '1', electron_run_as_node: '1', RETAINED_TEST_SETTING: 'retained',
+    DSH_BRIDGE_DETACHED: '1', DSH_BRIDGE_HANDOFF_PARENT: '21',
+    DSH_BRIDGE_ACTION_RESULT_FILE: 'private-result.json', DSH_BRIDGE_ACTION_LOG_FILE: 'private-log.txt' }
   const startGui = runInNewContext(source.slice(start, end) + '; startShell', {
     join: (...parts) => parts.join('/'),
     existsSync: () => true,
@@ -158,6 +187,7 @@ test('GUI restart clears Electron Node mode while retaining the remaining enviro
   assert.equal(options.env.ELECTRON_RUN_AS_NODE, undefined)
   assert.equal(options.env.electron_run_as_node, undefined)
   assert.equal(options.env.RETAINED_TEST_SETTING, 'retained')
+  assert.equal(Object.keys(options.env).some(key => key.startsWith('DSH_BRIDGE_')), false, 'installer handoff state cannot poison the next reinstall')
   assert.equal(environment.ELECTRON_RUN_AS_NODE, '1', 'the parent host remains in its original mode')
   assert.equal(options.detached, true)
   assert.equal(detached, true)
