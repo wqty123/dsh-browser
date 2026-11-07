@@ -264,15 +264,20 @@ function hostElectronViaProcessTree(): string | undefined {
   return undefined
 }
 
+/** One scalar property of a Windows process, read through CIM. */
+function cimQuery(pid: number, property: 'ExecutablePath' | 'ParentProcessId'): string {
+  const out = execFileSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").${property}`,
+  ], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
+  return out.trim().split(/\r?\n/)[0] ?? ''
+}
+
 /** The executable path of a running process, or undefined when unknown. */
 function processExecutable(pid: number): string | undefined {
   try {
     if (process.platform === 'win32') {
-      const out = execFileSync('powershell.exe', [
-        '-NoProfile', '-NonInteractive', '-Command',
-        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ExecutablePath`,
-      ], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
-      const line = out.trim().split(/\r?\n/)[0] ?? ''
+      const line = cimQuery(pid, 'ExecutablePath')
       return line.length > 0 ? line : undefined
     }
     const exe = readlinkSync(`/proc/${pid}/exe`)
@@ -286,11 +291,7 @@ function processExecutable(pid: number): string | undefined {
 function processParent(pid: number): number | undefined {
   try {
     if (process.platform === 'win32') {
-      const out = execFileSync('powershell.exe', [
-        '-NoProfile', '-NonInteractive', '-Command',
-        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ParentProcessId`,
-      ], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
-      const n = Number(out.trim().split(/\r?\n/)[0])
+      const n = Number(cimQuery(pid, 'ParentProcessId'))
       return Number.isInteger(n) && n > 1 ? n : undefined
     }
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')

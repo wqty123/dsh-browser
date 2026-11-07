@@ -41,8 +41,8 @@ import { prepareBridgeMaintenance } from './bridge-maintenance.js'
 import { commitAutomaticMaintenance, readAutomaticMaintenance, startAutomaticMaintenance } from './automatic-maintenance.js'
 import { AUTOMATIC_MAINTENANCE_ROUTE, createAutomaticMaintenanceHandler } from './maintenance-route.js'
 import { runWithManualBridgePreference } from './bridge-auto.js'
-import { replyJson } from './json-reply.js'
-import { readTextBody } from './http-body.js'
+import { replyJson, writeJsonText } from './json-reply.js'
+import { readJsonBody, readTextBody } from './http-body.js'
 import { readRuntimeStatus } from './runtime-status.js'
 import { handleRuntimeProvision, handleRuntimeStatus, RUNTIME_PROVISION_ROUTE, RUNTIME_STATUS_ROUTE } from './runtime-route.js'
 
@@ -523,8 +523,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     let action: unknown
     let preparationOnly = false
     try {
-      const body = await readBody(request)
-      const input = JSON.parse(body === '' ? '{}' : body) as { action?: unknown; prepare?: unknown }
+      const input = await readJsonBody<{ action?: unknown; prepare?: unknown }>(request)
       action = input.action
       if (input.prepare !== undefined && typeof input.prepare !== 'boolean') throw new Error('prepare must be a boolean')
       preparationOnly = input.prepare === true
@@ -841,11 +840,10 @@ async function handleSettingsRequest(
   onChannelChange?: () => void,
 ): Promise<void> {
   const json = (status: number, body: unknown): void => {
-    response.writeHead(status, {
+    writeJsonText(response, status, JSON.stringify(body), {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
     })
-    response.end(JSON.stringify(body))
   }
   const method = request.method ?? 'GET'
   if (!sameOrigin(request, method !== 'GET')) {
@@ -862,8 +860,8 @@ async function handleSettingsRequest(
     return
   }
   try {
-    const body = await readBody(request)
-    const patch: unknown = body.trim() === '' ? {} : JSON.parse(body)
+    const text = await readTextBody(request)
+    const patch: unknown = text.trim() === '' ? {} : JSON.parse(text)
     const before = settings.get().browser.channel
     const updated = settings.update(patch)
     // A changed `browser.channel` is a request to switch carriers, not just a value to store. The
@@ -882,13 +880,3 @@ async function handleSettingsRequest(
   }
 }
 
-/**
- * Read a request body with a hard cap (the settings patch is tiny, and an
- * unbounded read would let any same-origin caller exhaust memory).
- * @param request - the incoming request.
- * @param limit - maximum accepted characters.
- * @returns the body text.
- */
-function readBody(request: IncomingMessage, limit = 64 * 1024): Promise<string> {
-  return readTextBody(request, limit)
-}
