@@ -17,8 +17,8 @@ const systemBrowser = readFileSync(new URL('../src/browser-electron/system-brows
 const settingsStore = readFileSync(new URL('../src/browser-electron/settings-store.ts', import.meta.url), 'utf8')
 
 /** A child-process stub the launcher returns; the host only reads exit codes off it. */
-function fakeChild() {
-  return { exitCode: null, signalCode: null, kill() {}, once() {}, on() {} }
+function fakeChild(exited = false) {
+  return { exitCode: exited ? 1 : null, signalCode: null, kill() {}, once() {}, on() {} }
 }
 
 /**
@@ -28,7 +28,7 @@ function fakeChild() {
  * which is what these tests are about. A fake browser supplies the CDP side for the cases that need
  * a connected session.
  */
-async function capturedArgs(headlessMode) {
+async function capturedArgs(headlessMode, quiet = false, exited = false) {
   const { SystemBrowserViewHost } = await import('../lib/browser-electron/system-browser.js')
   const seen = []
   const host = new SystemBrowserViewHost(
@@ -36,8 +36,9 @@ async function capturedArgs(headlessMode) {
     'D:/dsh-workspace/_scratch/headless-probe',
     [],
     undefined,
-    (_path, args) => { seen.push(args); return fakeChild() },
+    (_path, args) => { seen.push(args); return fakeChild(exited) },
     headlessMode,
+    () => quiet,
   )
   try {
     await host.createView().sendCommand('Runtime.evaluate', { expression: '1' })
@@ -83,6 +84,28 @@ test('a windowed launch is untouched', async () => {
   assert.ok(!args.includes('--headless=new'), `no headless flag when a window is wanted: ${JSON.stringify(args)}`)
   assert.ok(!args.includes('--disable-gpu'), 'and no headless-only switches')
   assert.ok(args.some(a => a.startsWith('--remote-debugging-port=')), 'still a drivable browser')
+})
+
+// `ui.quiet` describes how the agent presents its work (no activation, no raising, background
+// targets), not whether the human may see a browser. Mapping quiet onto headless made an explicit
+// `headless: windowed`/`headed` invisible on Chrome/Edge — reproduced with a real Edge, where
+// navigation and screenshots worked but no window appeared, so the human could not take over a
+// login or a challenge. The setting is the single source of truth, in both directions.
+test('quiet mode does not take away a window the headless setting asked for', async () => {
+  for (const mode of ['windowed', 'auto']) {
+    // `exited` makes the stub child report an immediate exit, so start() stops at once
+    // instead of waiting out its 30s discovery deadline; the captured args are the evidence.
+    const args = await capturedArgs(mode, true, true)
+    assert.ok(!args.includes('--headless=new'),
+      `quiet + ${mode} must still get a window: ${JSON.stringify(args)}`)
+    assert.ok(!args.includes('--disable-gpu'), `quiet + ${mode} needs no headless-only switches`)
+  }
+})
+
+test('quiet mode does not override an explicitly headless setting either', async () => {
+  const args = await capturedArgs('headless', true, true)
+  assert.ok(args.includes('--headless=new'),
+    `an explicit headless setting still wins while quiet: ${JSON.stringify(args)}`)
 })
 
 test('--no-sandbox is conditional and announced, never silent', () => {
