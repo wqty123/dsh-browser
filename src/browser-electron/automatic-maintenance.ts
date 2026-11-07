@@ -35,6 +35,11 @@ const quitPath = fileURLToPath(new URL('../../desktop-bridge/request-desktop-qui
 const progressPath = fileURLToPath(new URL('../../desktop-bridge/maintenance-progress.ps1', import.meta.url))
 const delay = async (ms: number): Promise<void> => await new Promise(resolve => setTimeout(resolve, ms))
 
+/** A swallowed maintenance write still deserves one line of diagnostics; it never changes the answer. */
+function reportMaintenanceFailure(label: string, error: unknown): void {
+  console.error(`[dsh-browser maintenance] ${label}: ${String(error)}`)
+}
+
 function homePath(): string { return resolve(dshHome()) }
 function basePath(home = homePath()): string { return join(home, 'dsh-builtin-browser-host', 'maintenance') }
 function inside(base: string, path: string): boolean {
@@ -150,7 +155,8 @@ export async function startMaintenanceProgressNotification(
     result = { started: false, at: new Date().toISOString(), error: String(error) }
   }
   if (directory !== undefined) {
-    await atomicJson(join(directory, 'progress-notification.json'), { ...result, jobId: options.jobId }).catch(() => {})
+    await atomicJson(join(directory, 'progress-notification.json'), { ...result, jobId: options.jobId })
+      .catch(error => reportMaintenanceFailure('cannot write the progress notification', error))
   }
   return result
 }
@@ -185,7 +191,10 @@ async function clearStaleLock(lockPath: string, home: string): Promise<boolean> 
       }
     }
     return false
-  } catch { return false }
+  } catch (error) {
+    reportMaintenanceFailure('cannot inspect a stale maintenance lock', error)
+    return false
+  }
 }
 
 async function releaseLock(plan: AutomaticPlan): Promise<void> {
@@ -265,7 +274,7 @@ export async function startAutomaticMaintenance(action: BridgeAction, root: stri
   try { lock = await open(lockPath, 'wx', 0o600) }
   catch {
     if (!(await clearStaleLock(lockPath, home))) throw new Error('bridge maintenance is already in progress')
-    await unlink(lockPath).catch(() => {})
+    await unlink(lockPath).catch(error => reportMaintenanceFailure('cannot remove a stale maintenance lock', error))
     lock = await open(lockPath, 'wx', 0o600)
   }
   let plan: AutomaticPlan | undefined
@@ -296,13 +305,15 @@ export async function startAutomaticMaintenance(action: BridgeAction, root: stri
     }
     throw new Error('the independent maintenance worker did not become ready')
   } catch (error) {
-    await lock.close().catch(() => {})
+    await lock.close().catch(error => reportMaintenanceFailure('cannot close the maintenance lock', error))
     if (plan !== undefined) {
-      await atomicJson(join(plan.directory, 'cancel.json'), { at: new Date().toISOString() }).catch(() => {})
+      await atomicJson(join(plan.directory, 'cancel.json'), { at: new Date().toISOString() })
+        .catch(error => reportMaintenanceFailure('cannot stage the maintenance cancellation', error))
       await atomicJson(join(plan.directory, 'state.json'), { id: plan.id, action, phase: 'failed', ok: false, restarted: false,
-        at: new Date().toISOString(), startedAt: plan.createdAt, error: String(error) }).catch(() => {})
+        at: new Date().toISOString(), startedAt: plan.createdAt, error: String(error) })
+        .catch(writeError => reportMaintenanceFailure('cannot record the failed maintenance state', writeError))
       await releaseLock(plan)
-    } else { await unlink(lockPath).catch(() => {}) }
+    } else { await unlink(lockPath).catch(error => reportMaintenanceFailure('cannot remove the unused maintenance lock', error)) }
     throw error
   }
 }
@@ -392,7 +403,8 @@ async function runWorker(path: string): Promise<void> {
       },
     })
   } catch (error) {
-    await publish({ phase: 'cancelled', action: plan.action, at: new Date().toISOString(), ok: false, restarted: false, error: String(error) }).catch(() => {})
+    await publish({ phase: 'cancelled', action: plan.action, at: new Date().toISOString(), ok: false, restarted: false, error: String(error) })
+      .catch(writeError => reportMaintenanceFailure('cannot publish the cancelled maintenance state', writeError))
   } finally { await releaseLock(plan) }
 }
 

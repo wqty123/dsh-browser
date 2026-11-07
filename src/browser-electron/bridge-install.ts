@@ -205,7 +205,11 @@ export async function runBridgeAction(
   let installerOutput = ''
   const recordedOutput = async (): Promise<string> => {
     if (logFile === undefined) return ''
-    try { return (await readFile(logFile, 'utf8')).slice(-20_000) } catch { return '' }
+    try { return (await readFile(logFile, 'utf8')).slice(-20_000) }
+    catch (error) {
+      console.error(`[dsh-browser] cannot read the installer log: ${String(error)}`)
+      return ''
+    }
   }
   try {
     // Ask the installer to check identity FIRST, without touching anything. It is the same preflight

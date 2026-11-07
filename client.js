@@ -1073,16 +1073,22 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     const [saved, setSaved] = useState(false)
     const saving = useRef(false)
     const savedTimer = useRef(null)
+    const alive = useRef(true)
 
     const load = useCallback(() => {
       setError("")
       callSettings().then(data => {
+        if (!alive.current) return
         setSettings(data.settings)
         setMeta({ path: data.path || "" })
-      }).catch(failure => setError(String(failure && failure.message ? failure.message : failure)))
+      }).catch(failure => { if (alive.current) setError(String(failure && failure.message ? failure.message : failure)) })
     }, [])
 
-    useEffect(() => { load() }, [load])
+    useEffect(() => {
+      alive.current = true
+      load()
+      return () => { alive.current = false }
+    }, [load])
     useEffect(() => () => clearTimeout(savedTimer.current), [])
 
     const patch = useCallback(next => {
@@ -1093,13 +1099,14 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       setBusy(true)
       setError("")
       callSettings(next).then(data => {
+        if (!alive.current) return
         setSettings(data.settings)
         setSaved(true)
         savedTimer.current = setTimeout(() => setSaved(false), 1800)
-      }).catch(failure => setError(String(failure && failure.message ? failure.message : failure)))
+      }).catch(failure => { if (alive.current) setError(String(failure && failure.message ? failure.message : failure)) })
         .finally(() => {
           saving.current = false
-          setBusy(false)
+          if (alive.current) setBusy(false)
         })
     }, [])
 
