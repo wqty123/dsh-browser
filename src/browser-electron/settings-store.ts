@@ -9,7 +9,7 @@
  * @module dsh-browser/browser-electron/settings-store
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { dshHome } from './paths.js'
 import type { BrowserChannel } from './system-browser.js'

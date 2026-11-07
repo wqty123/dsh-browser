@@ -3280,15 +3280,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (dropped > 0) {
       process.stderr.write(`[dsh-browser] restoreAuth: dropped ${dropped} of ${mapped.length} cookie(s) with no usable domain; the rest were still restored\n`)
     }
-    const result = await withTimeout(
+    await withTimeout(
       handle.sendCommand('Storage.setCookies', { cookies: convertible }),
       timeoutMs,
       undefined,
       `browser: auth restore timed out after ${timeoutMs}ms`,
     )
-    // Storage.setCookies returns nothing, so the count comes from what was actually
-    // sent. Reading result.cookies here was always undefined, which rendered as
-    // "Restored 0 cookies." while the write had succeeded.
+    // Storage.setCookies returns nothing, so the count comes from what was actually sent.
+    // An earlier version read result.cookies here; it was always undefined and rendered as
+    // "Restored 0 cookies." even though the write had succeeded.
     const restored = convertible.length
     this.record(s, 'restoreAuth', { count: cookies.length, dropped }, true, { result: `${restored} cookies (CDP)${dropped > 0 ? `; ${dropped} dropped` : ''}` })
     return restored

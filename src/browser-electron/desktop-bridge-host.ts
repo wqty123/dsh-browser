@@ -175,7 +175,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   /**
    * @param endpoint - the shell's published bridge endpoint.
    */
-  private constructor(endpoint: BridgeEndpoint, sessionId?: string, private readonly isQuiet: () => boolean = () => false,
+  private constructor(endpoint: BridgeEndpoint, sessionId?: string, private readonly _isQuiet: () => boolean = () => false,
     private readonly protocol = 2) {
     this.owner = sessionId !== undefined && sessionId !== String.fromCharCode(39,39) ? sessionId : randomUUID()
     // The transport reaches this only by concluding the shell stopped refreshing its endpoint, which

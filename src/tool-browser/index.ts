@@ -433,7 +433,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // dsh_browser_open is an overview of what just loaded, not a locator: it has no
       // `coords` parameter, so coordinates stay off here (dsh_browser_snapshot owns
       // that switch for callers that actually target pixels).
-      render: (args, value) => [{ type: 'text', text: formatSnapshot(value, {}) }],
+      render: (_args, value) => [{ type: 'text', text: formatSnapshot(value, {}) }],
     },
     timeoutMs,
     isConcurrencySafe: () => false, // opens tabs / navigates; exclusive within a task

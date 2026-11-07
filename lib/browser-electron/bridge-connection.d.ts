@@ -39,8 +39,6 @@ export declare class BridgeConnection {
     /** Ids of the requests sent on the current socket, oldest first. */
     private readonly queue;
     private nextId;
-    /** True once any reply arrived without an id: this bridge does not echo request ids. */
-    private idLessBridge;
     /** True once this connection may only have one request in flight at a time. */
     private serialisable;
     /** True once the shell behind this connection has been reported gone. */

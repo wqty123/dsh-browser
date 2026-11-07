@@ -615,10 +615,10 @@ function revealViewInWindow(win: HostWindow, viewId: string, label?: string): vo
  * @param viewId - the view to present.
  * @param label - session/task label, when known, for the window title.
  * @param quiet - `ui.quiet`: present without taking the screen over.
- * @param needSurface - pre-input barrier flag retained by the RPC protocol. Quiet presentation
+ * @param _needSurface - pre-input barrier flag retained by the RPC protocol. Quiet presentation
  *   opens a new visible window without activation and preserves an existing foreground page.
  */
-function showViewInWindow(win: HostWindow, viewId: string, label?: string, quiet = false, needSurface = false): void {
+function showViewInWindow(win: HostWindow, viewId: string, label?: string, quiet = false, _needSurface = false): void {
   if (quiet) {
     if (win.window.isMinimized()) return
     // Preserve the page the operator is actively reading. Other views remain addressable by

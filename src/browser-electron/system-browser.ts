@@ -546,14 +546,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    */
   private clientSuspect = false
   private child: ChildProcess | undefined
-  /**
-   * True when the browser in use was adopted from a previous run rather than launched here.
-   *
-   * Worth recording because the two differ on teardown: a browser this host spawned is its to
-   * kill, while one it merely took over belongs to a process that is already gone — closing it is
-   * still right (it holds the profile nobody else can use), but it is a decision, not cleanup.
-   */
-  private adoptedRunning = false
   /** Whether this connection's surplus blank pages have been collapsed already. */
   private blanksNormalized = false
   private starting: Promise<CdpClient> | undefined
@@ -711,10 +703,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * not a browser at all. What makes adoption safe HERE is that this runs BEFORE launching, on a
    * file that lives inside this plugin's own profile directory — only a browser started with this
    * `--user-data-dir` writes it — and the endpoint is then asked to identify itself.
-   * @param why - a short phrase for the log, naming which attempt this is.
+   * @param _why - a short phrase for the log, naming which attempt this is.
    * @returns a connected client for the running browser, or undefined when there is none.
    */
-  private async adoptRunningBrowser(why: string): Promise<CdpClient | undefined> {
+  private async adoptRunningBrowser(_why: string): Promise<CdpClient | undefined> {
     const portFile = join(this.profileDir, 'DevToolsActivePort')
     let port: number
     try {
@@ -744,7 +736,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       }
       if (this.disposed) { client.close(); return undefined }
       this.client = client
-      this.adoptedRunning = true
       return client
     } catch {
       // No endpoint, nothing listening, or not a browser: all of them mean "launch one".
@@ -882,8 +873,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         return undefined
       }
     })()
-    // Kept for the failure message and for the exit listener's diagnostics; no longer a judgement.
-    const spawnedAt = Date.now()
     let child: ReturnType<typeof spawn>
     try {
       child = this.launcher(this.browser.path, args)
@@ -930,8 +919,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         const after = statSync(portFile)
         const contents = readFileSync(portFile, 'utf8')
         // Unchanged since before the launch: this is the previous browser's file, whatever its
-        // mtime says. Comparing against the snapshot rather than the spawn time is what keeps this
-        // correct on a filesystem whose timestamps are coarser than the clock behind spawnedAt.
+        // mtime says. Comparing against the snapshot rather than a wall-clock instant is what
+        // keeps this correct on a filesystem whose timestamps are coarser than a millisecond.
         if (portFileBefore !== undefined
           && after.mtimeMs <= portFileBefore.mtimeMs
           && contents === portFileBefore.contents) return undefined

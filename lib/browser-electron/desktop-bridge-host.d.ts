@@ -52,7 +52,7 @@ export declare class BrowserPanelNotDisplayedError extends Error {
  * point is a single page both parties can see.
  */
 export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
-    private readonly isQuiet;
+    private readonly _isQuiet;
     private readonly protocol;
     private readonly connection;
     /**

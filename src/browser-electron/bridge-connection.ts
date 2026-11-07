@@ -93,8 +93,6 @@ export class BridgeConnection {
   /** Ids of the requests sent on the current socket, oldest first. */
   private readonly queue: number[] = []
   private nextId = 1
-  /** True once any reply arrived without an id: this bridge does not echo request ids. */
-  private idLessBridge = false
   /** True once this connection may only have one request in flight at a time. */
   private serialisable = false
   /** True once the shell behind this connection has been reported gone. */
@@ -299,7 +297,6 @@ export class BridgeConnection {
       // from the right one. Remember that this bridge does not echo ids, and serialise every
       // later call so the ambiguity cannot arise again.
       if (echoed === undefined) {
-        this.idLessBridge = true
         this.serialisable = true
       }
       try {
@@ -356,7 +353,8 @@ function endpointExpired(updatedAt: unknown): boolean {
   return Date.now() - at > ENDPOINT_TTL_MS
 }
 
-/** The request id a raw answer line echoes back, when it carries one. */function echoOf(line: string): number | undefined {
+/** The request id a raw answer line echoes back, when it carries one. */
+function echoOf(line: string): number | undefined {
   try {
     const answer = JSON.parse(line) as Record<string, unknown>
     const value = answer[REQUEST_ID_FIELD]

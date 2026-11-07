@@ -119,14 +119,6 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      */
     private clientSuspect;
     private child;
-    /**
-     * True when the browser in use was adopted from a previous run rather than launched here.
-     *
-     * Worth recording because the two differ on teardown: a browser this host spawned is its to
-     * kill, while one it merely took over belongs to a process that is already gone — closing it is
-     * still right (it holds the profile nobody else can use), but it is a decision, not cleanup.
-     */
-    private adoptedRunning;
     /** Whether this connection's surplus blank pages have been collapsed already. */
     private blanksNormalized;
     private starting;
@@ -205,7 +197,7 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * not a browser at all. What makes adoption safe HERE is that this runs BEFORE launching, on a
      * file that lives inside this plugin's own profile directory — only a browser started with this
      * `--user-data-dir` writes it — and the endpoint is then asked to identify itself.
-     * @param why - a short phrase for the log, naming which attempt this is.
+     * @param _why - a short phrase for the log, naming which attempt this is.
      * @returns a connected client for the running browser, or undefined when there is none.
      */
     private adoptRunningBrowser;
