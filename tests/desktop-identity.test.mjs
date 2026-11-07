@@ -21,6 +21,15 @@ import { findDesktopInstall, readBridgeStatus } from '../lib/browser-electron/br
 import { MAIN_BODY, makePackedInstall as packedFixture, makeUnpackedInstall as unpackedFixture, writeAsar } from './fake-asar.mjs'
 import { createInstallerSandbox } from './helpers/installer-sandbox.mjs'
 
+/**
+ * The two discovery sources that are answered by the machine, closed for these fixtures.
+ *
+ * Discovery also consults the Windows uninstall registry and the platform's convention locations, so a
+ * test asserting "this directory is not an install" must not be answered by the developer's own.
+ */
+const noRegistry = () => []
+const noConventions = () => []
+
 const sandbox = createInstallerSandbox()
 after(() => sandbox.close())
 const makePackedInstall = options => packedFixture({ ...options, fixtureRoot: sandbox.root })
@@ -199,13 +208,13 @@ test('discovery skips a foreign app even when its product directory is named lik
     writeFileSync(join(impostor, 'resources', 'app', 'lib', 'main.js'), MAIN_BODY)
     writeFileSync(join(impostor, 'resources', 'app', 'package.json'), JSON.stringify({ name: 'unrelated-meeting-app' }))
 
-    assert.equal(findDesktopInstall(base), undefined, 'a name-bearing product directory is not proof')
+    assert.equal(findDesktopInstall(base, noRegistry, noConventions), undefined, 'a name-bearing product directory is not proof')
 
     const real = join(base, 'Programs', 'DSH Desktop')
     mkdirSync(join(real, 'resources', 'app', 'lib'), { recursive: true })
     writeFileSync(join(real, 'resources', 'app', 'lib', 'main.js'), MAIN_BODY)
     writeFileSync(join(real, 'resources', 'app', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-desktop' }))
-    assert.equal(findDesktopInstall(base), real, 'and the real one is still found')
+    assert.equal(findDesktopInstall(base, noRegistry, noConventions), real, 'and the real one is still found')
   } finally {
     rmSync(base, { recursive: true, force: true })
   }

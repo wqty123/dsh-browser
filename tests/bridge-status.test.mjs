@@ -18,6 +18,16 @@ import { writeAsar } from './fake-asar.mjs'
 const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sidebar'
 const shippedBridge = readFileSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url))
 
+/**
+ * The two discovery sources that are answered by the machine, closed for these fixtures.
+ *
+ * Discovery also consults the Windows uninstall registry and the platform's convention locations. A
+ * test asserting "nothing matches" must not be answered by the developer's own install — otherwise it
+ * passes or fails depending on whose computer ran it.
+ */
+const noRegistry = () => []
+const noConventions = () => []
+
 /** An install tree with the pieces a given state needs. */
 function makeInstall({ archive = false, patched = false, backup = false, bridge = shippedBridge } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'dsh-bridge-status-'))
@@ -171,11 +181,11 @@ test('the install is found by identity, under either product name', () => {
       mkdirSync(join(root, 'resources', 'app', 'lib'), { recursive: true })
       writeFileSync(join(root, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
       writeFileSync(join(root, 'resources', 'app', 'package.json'), manifest)
-      assert.equal(findDesktopInstall(base), root, `${name} is found`)
+      assert.equal(findDesktopInstall(base, noRegistry, noConventions), root, `${name} is found`)
       // Remove it again so the next candidate is the one that matches.
       rmSync(root, { recursive: true, force: true })
     }
-    assert.equal(findDesktopInstall(base), undefined, 'and nothing matches when nothing is there')
+    assert.equal(findDesktopInstall(base, noRegistry, noConventions), undefined, 'and nothing matches when nothing is there')
 
     // The half that used to be wrong: the right shape with the wrong name is NOT an install.
     const impostor = join(base, 'Programs', 'DSH Desktop')
@@ -183,7 +193,7 @@ test('the install is found by identity, under either product name', () => {
     writeFileSync(join(impostor, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
     writeFileSync(join(impostor, 'resources', 'app', 'package.json'),
       JSON.stringify({ name: 'unrelated-meeting-app', main: 'lib/main.js' }))
-    assert.equal(findDesktopInstall(base), undefined, 'an Electron app is not DSH Desktop')
+    assert.equal(findDesktopInstall(base, noRegistry, noConventions), undefined, 'an Electron app is not DSH Desktop')
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
@@ -219,18 +229,18 @@ test('the endpoint answers with the reading, same-origin only', async () => {
       JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.1-rc.5', main: 'lib/main.js' }))
 
     const ok = response()
-    await handleBridgeStatus(request(), ok, base)
+    await handleBridgeStatus(request(), ok, base, noRegistry, noConventions)
     assert.equal(ok.recorded.status, 200)
     const payload = JSON.parse(String(ok.recorded.body))
     assert.equal(payload.ok, true)
     assert.equal(payload.bridge.state, 'installed')
 
     const foreign = response()
-    await handleBridgeStatus(request('GET', 'https://evil.example'), foreign, base)
+    await handleBridgeStatus(request('GET', 'https://evil.example'), foreign, base, noRegistry, noConventions)
     assert.equal(foreign.recorded.status, 403, 'a foreign origin learns nothing')
 
     const wrongMethod = response()
-    await handleBridgeStatus(request('POST'), wrongMethod, base)
+    await handleBridgeStatus(request('POST'), wrongMethod, base, noRegistry, noConventions)
     assert.equal(wrongMethod.recorded.status, 405)
   } finally {
     rmSync(base, { recursive: true, force: true })
@@ -241,7 +251,7 @@ test('no install at all is a state, not an error', async () => {
   const base = mkdtempSync(join(tmpdir(), 'dsh-lad-empty-'))
   try {
     const res = response()
-    await handleBridgeStatus(request(), res, base)
+    await handleBridgeStatus(request(), res, base, noRegistry, noConventions)
     assert.equal(res.recorded.status, 200, 'the panel still gets an answer')
     const payload = JSON.parse(String(res.recorded.body))
     assert.equal(payload.bridge.state, 'missing')
