@@ -414,11 +414,23 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       entry.guest = id
       return id
     }
+    // A guest id is only worth naming when the caller is ASKING FOR A PAGE.
+    //
+    // The cached id is a hint, not a fact: folding the sidebar and unfolding it again destroys the
+    // webview and mints a new one, so an id cached before the fold names nothing afterwards. The
+    // bridge forwards `guestId` to the renderer as "the page I expect", and a stale expectation
+    // there is worse than no expectation — it either pins the lookup to a dead id or, when the id
+    // has been recycled, silently binds this conversation to somebody else's page.
+    //
+    // So the hint rides along only when the command carries a url (the caller wants this address
+    // opened in the tab it was already using); a plain "materialize whatever I have" asks the
+    // renderer to resolve it fresh. The id we get back is written to the cache below either way.
+    const hintGuest = url !== undefined && url !== '' ? entry?.guest : undefined
     const ask = (): Promise<Record<string, unknown>> => this.connection.call({
       op: 'ensureSidebar',
       owner,
       viewId,
-      ...entry?.guest === undefined ? {} : { guestId: entry.guest },
+      ...hintGuest === undefined ? {} : { guestId: hintGuest },
       ...url !== undefined && url !== '' ? { url } : {},
     }, 30_000)
     let answer = await ask()
