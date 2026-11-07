@@ -53,6 +53,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     nav: "浏览器",
     "watch.open": "观看浏览器",
     "watch.title": "实时画面",
+    "watch.session": "选择会话",
     "watch.readOnly": "只读,不转发点击与输入",
     "watch.stop": "停止",
     "watch.live": "直播",
@@ -184,6 +185,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     nav: "Browser",
     "watch.open": "Watch browser",
     "watch.title": "Live view",
+    "watch.session": "Session",
     "watch.readOnly": "Read-only; clicks and typing are not forwarded",
     "watch.stop": "Stop",
     "watch.live": "Live",
@@ -536,6 +538,11 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 .dsh-bw-watch-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px; }
 .dsh-bw-watch-title { font-weight: 600; }
 .dsh-bw-watch-state { opacity: .7; margin-left: auto; }
+.dsh-bw-watch-session {
+  max-width: 40%; font-size: 11px; color: inherit; background: transparent; cursor: pointer;
+  border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.45)); border-radius: 5px; padding: 2px 4px;
+}
+.dsh-bw-watch-session[hidden] { display: none; }
 .dsh-bw-watch-close {
   /* A visible control, not a hinted one: the old close was a 16px glyph at 70% opacity with no border
    * or background, in the same colour as the title — reported as 'no way out but a page refresh'
@@ -1820,9 +1827,13 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     const head = make("header", "dsh-bw-watch-head")
     const title = make("span", "dsh-bw-watch-title")
     const state = make("span", "dsh-bw-watch-state")
+    /** Only visible when the host reports more than one session to watch. */
+    const sessionSelect = make("select", "dsh-bw-watch-session")
+    sessionSelect.hidden = true
     const closeButton = make("button", "dsh-bw-watch-close", "×")
     closeButton.setAttribute("type", "button")
     head.appendChild(title)
+    head.appendChild(sessionSelect)
     head.appendChild(state)
     head.appendChild(closeButton)
 
@@ -1874,6 +1885,8 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       readonlyLabel.textContent = say("watch.readOnly")
       stopButton.textContent = say("watch.stop")
       openButton.title = say("watch.open")
+      sessionSelect.title = say("watch.session")
+      sessionSelect.setAttribute("aria-label", say("watch.session"))
     }
     relabel()
     // A runtime language switch must reach labels that are already on screen. `subscribe` fires on
@@ -1896,8 +1909,17 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       layer.remove()
     }
 
-    /** One running view: a session, its frames, and whether it should keep pulling. */
-    const view = { session: undefined, timer: undefined, running: false, lastAt: 0, objectUrl: undefined }
+    /**
+     * One running view. `generation` is the identity of a single watching run: a stop, a session
+     * switch and a reopen all advance it, so a request already in flight can never paint into the
+     * new run or resurrect a second scheduling chain.
+     */
+    const view = {
+      session: undefined, timer: undefined, running: false, lastAt: 0, objectUrl: undefined,
+      generation: 0, controller: undefined,
+    }
+    /** Guards the async probe: two clicks in the same tick must not both reach start(). */
+    let starting = false
 
     const setState = text => { state.textContent = text }
     const showNote = text => {
@@ -1912,12 +1934,21 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         view.objectUrl = undefined
       }
     }
-    const stop = () => {
+    /** End one generation: cancel its request, timer and frame, without touching the panel chrome. */
+    const cancelLoop = () => {
       view.running = false
+      view.generation += 1
+      if (view.controller !== undefined) {
+        try { view.controller.abort() } catch { /* an already settled controller is harmless */ }
+        view.controller = undefined
+      }
       if (view.timer !== undefined) { clearTimeout(view.timer); view.timer = undefined }
       dropFrame()
       img.removeAttribute("src")
       img.hidden = true
+    }
+    const stop = () => {
+      cancelLoop()
       setState(say("watch.stopped"))
       showNote(say("watch.stopped"))
       panel.hidden = true
@@ -1935,34 +1966,55 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       }
     }
 
+    /** Show the sessions the host handed out, so a later-created one can actually be chosen. */
+    const fillSessions = sessions => {
+      // Clearing via innerHTML is the one exception to "build element by element": it removes
+      // options, it does not parse markup, and a stale option list would keep a dead session on screen.
+      sessionSelect.innerHTML = ""
+      for (let index = 0; index < sessions.length; index += 1) {
+        const id = String(sessions[index])
+        const option = make("option")
+        option.setAttribute("value", id)
+        const short = id.length > 24 ? `${id.slice(0, 15)}…${id.slice(-6)}` : id
+        option.textContent = `#${index + 1} ${short}`
+        sessionSelect.appendChild(option)
+      }
+      sessionSelect.hidden = sessions.length < 2
+    }
+
     /**
      * Pull frames until stopped. One request in flight at a time, and the next one is scheduled only
      * after the current image has painted — that is what makes a slow link degrade into fewer
-     * frames rather than a growing queue.
+     * frames rather than a growing queue. `gen` is captured once per run and re-checked after every
+     * await: a frame belonging to a superseded run is dropped instead of painted.
      */
-    const pump = async () => {
-      if (!view.running) return
+    const pump = async gen => {
+      if (!view.running || gen !== view.generation) return
       if (document.visibilityState === "hidden") {
         // The design's rule: a hidden panel stops pulling immediately. Resuming is the user's
         // action, not a timer's.
         setState(say("watch.paused"))
         showNote(say("watch.paused"))
-        view.timer = setTimeout(pump, MIN_INTERVAL_MS * 4)
+        view.timer = setTimeout(() => pump(gen), MIN_INTERVAL_MS * 4)
         return
       }
       const waited = Date.now() - view.lastAt
       if (waited < MIN_INTERVAL_MS) {
-        view.timer = setTimeout(pump, MIN_INTERVAL_MS - waited)
+        view.timer = setTimeout(() => pump(gen), MIN_INTERVAL_MS - waited)
         return
       }
       view.lastAt = Date.now()
       let nextDelay = MIN_INTERVAL_MS
+      const controller = view.controller
       try {
         const url = `${FRAME}?session=${encodeURIComponent(String(view.session))}`
-        const response = await fetch(url, { headers: { accept: "image/jpeg" } })
-        if (!view.running) return
+        const init = { headers: { accept: "image/jpeg" } }
+        if (controller !== undefined) init.signal = controller.signal
+        const response = await fetch(url, init)
+        if (!view.running || gen !== view.generation) return
         if (!response.ok) {
           const body = await response.json().catch(() => undefined)
+          if (!view.running || gen !== view.generation) return
           setState(say("watch.paused"))
           showNote(body?.error === "remote-view-disabled"
             ? say("watch.disabled")
@@ -1973,7 +2025,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
           nextDelay = MIN_INTERVAL_MS * 4
         } else {
           const blob = await response.blob()
-          if (!view.running) return
+          if (!view.running || gen !== view.generation) return
           const painted = new Promise(resolve => {
             img.onload = () => resolve()
             img.onerror = () => resolve()
@@ -1984,35 +2036,61 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
           img.hidden = false
           note.hidden = true
           await painted
-          if (!view.running) return
+          if (!view.running || gen !== view.generation) return
           setState(say("watch.live"))
         }
       } catch {
-        if (!view.running) return
+        if (!view.running || gen !== view.generation) return
         setState(say("watch.disconnected"))
         showNote(say("watch.disconnected"))
         nextDelay = MIN_INTERVAL_MS * 4
       }
-      if (view.running) view.timer = setTimeout(pump, nextDelay)
+      if (view.running && gen === view.generation) view.timer = setTimeout(() => pump(gen), nextDelay)
     }
 
     const start = async session => {
+      cancelLoop()
       view.session = session
       view.running = true
       view.lastAt = 0
+      view.controller = typeof AbortController === "function" ? new AbortController() : undefined
+      const gen = view.generation
       panel.hidden = false
       setState(say("watch.connecting"))
       showNote(say("watch.connecting"))
-      await pump()
+      await pump(gen)
     }
+
+    /**
+     * The session a viewer most likely means when the host cannot name the current conversation:
+     * the newest session it created, rather than always the first entry of the map.
+     */
+    const preferredSession = sessions => sessions[sessions.length - 1]
 
     openButton.addEventListener("click", () => {
       void (async () => {
-        const found = await probe()
-        if (!found.enabled) { showNote(say("watch.disabled")); panel.hidden = false; return }
-        if (found.sessions.length === 0) { showNote(say("watch.noPage")); panel.hidden = false; return }
-        await start(found.sessions[0])
+        if (view.running || starting) return
+        starting = true
+        try {
+          const found = await probe()
+          if (!found.enabled) { showNote(say("watch.disabled")); panel.hidden = false; return }
+          if (found.sessions.length === 0) { showNote(say("watch.noPage")); panel.hidden = false; return }
+          fillSessions(found.sessions)
+          sessionSelect.value = String(preferredSession(found.sessions))
+          const chosen = sessionSelect.value
+          // Release before start(): the first frame may take a long time (or never arrive), and
+          // holding the guard until then would also block a legitimate stop-then-reopen.
+          // There is no await between here and start(), whose synchronous part sets view.running.
+          starting = false
+          await start(chosen)
+        } finally { starting = false }
       })()
+    })
+    // Switching sessions replaces the run; it never adds a second loop alongside the live one.
+    sessionSelect.addEventListener("change", () => {
+      if (!view.running) return
+      const chosen = sessionSelect.value
+      if (typeof chosen === "string" && chosen !== "") void start(chosen)
     })
     closeButton.addEventListener("click", stop)
     stopButton.addEventListener("click", stop)
@@ -2020,7 +2098,8 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden" && view.running) {
         if (view.timer !== undefined) { clearTimeout(view.timer); view.timer = undefined }
-        view.timer = setTimeout(pump, MIN_INTERVAL_MS)
+        const gen = view.generation
+        view.timer = setTimeout(() => pump(gen), MIN_INTERVAL_MS)
       }
     })
 
