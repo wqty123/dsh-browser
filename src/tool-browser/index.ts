@@ -218,6 +218,61 @@ function taskKey(exec: { agent?: { id?: string } } | undefined): string {
 }
 
 /**
+ * A cheap fingerprint of what the human-visible page looks like right now.
+ *
+ * Used to tell "the input was delivered and something happened" apart from "the command
+ * was accepted and nothing moved". CDP does not report dropped `Input.*` events, so the
+ * command's own result cannot answer this: on a carrier whose page has no compositing
+ * surface the events are discarded silently and the tool used to answer `Clicked.`
+ * regardless.
+ *
+ * Deliberately cheap and read-only: one `Runtime.evaluate` returning a short string. It
+ * does not try to prove the click had the INTENDED effect — only that the page is not
+ * identical, which is the strongest claim a probe can honestly make.
+ * @param browser - the seam service.
+ * @param session - the session whose active tab is fingerprinted.
+ * @returns the fingerprint, or undefined when it cannot be read (never throws).
+ */
+async function pageFingerprint(browser: NonNullable<Context['browser']>, session: BrowserSessionId): Promise<string | undefined> {
+  try {
+    const result = await browser.execute(session, {
+      script: `(() => {
+        const a = document.activeElement
+        return [
+          location.href,
+          document.title,
+          a ? (a.tagName + ':' + (a.id || a.getAttribute('name') || a.className || '')) : '',
+          document.body ? document.body.childElementCount : 0,
+          document.body ? document.body.innerHTML.length : 0,
+        ].join('|')
+      })()`,
+    })
+    if (!result.ok) return undefined
+    return typeof result.value === 'string' ? result.value : undefined
+  } catch {
+    // A fingerprint is an observation, never a precondition: failing to take one must not
+    // turn a delivered input into a reported failure.
+    return undefined
+  }
+}
+
+/**
+ * Whether an input action left a visible trace.
+ *
+ * `undefined` means "could not tell" — the probe failed, or the page genuinely did not
+ * change. The caller reports that as an uncertain outcome rather than a failure, because
+ * some inputs legitimately change nothing observable (a JS-managed overlay, a keystroke
+ * into a canvas), and claiming otherwise would train the model to retry working actions.
+ * @param before - fingerprint taken before the action.
+ * @param after - fingerprint taken after it.
+ * @returns true when a change was seen, false when none was, undefined when unknown.
+ */
+function sawEffect(before: string | undefined, after: string | undefined): boolean | undefined {
+  if (before === undefined || after === undefined) return undefined
+  return before !== after
+}
+
+/**
  * Resolve the calling task's browser session, opening one on first use.
  * Concurrent first calls for the same key share a single open. When the call
  * carries an agent, the session's lifetime is tied to the agent's scoped
@@ -841,8 +896,23 @@ export function apply(ctx: Context, config: Config = {}): void {
       y: { type: 'number', description: 'Viewport y coordinate (CSS px), taken from the same screenshot as x.' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { clicked: { type: 'boolean', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: value.clicked ? 'Clicked.' : 'Click failed.' }],
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          clicked: { type: 'boolean', required: true },
+          verified: { type: 'boolean', description: 'Whether the page changed afterwards. Absent when it could not be checked.' },
+          note: { type: 'string', description: 'Present only when the click produced no visible change.' },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.clicked
+          ? (value.verified === false
+            ? 'Clicked (no visible change — the page may not be able to receive input right now).'
+            : 'Clicked.')
+          : 'Click failed.',
+      }],
     },
     timeoutMs,
     isConcurrencySafe: () => false,
@@ -859,6 +929,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         throw new Error('target.value is empty; pass a css selector, visible text or XPath, or omit target entirely to use x/y')
       }
       const index = targetIndex(target)
+      // Take the fingerprint first: a click that navigates changes `location.href`, which is
+      // exactly the kind of evidence this is here to catch.
+      const before = await pageFingerprint(browser, session)
       if (target !== undefined && typeof target.value === 'string' && target.value !== '') {
         await browser.click(session, {
           target: {
@@ -873,7 +946,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         await browser.click(session, { x: args.x, y: args.y }, exec.signal)
       }
-      return { clicked: true }
+      const verified = sawEffect(before, await pageFingerprint(browser, session))
+      return verified === false
+        ? { clicked: true, verified: false, note: 'the page did not change after the click' }
+        : verified === true ? { clicked: true, verified: true } : { clicked: true }
     },
   }))
 
@@ -943,8 +1019,23 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { typed: { type: 'boolean', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: value.typed ? `Typed ${String(_args.text).length} chars.` : 'Type failed.' }],
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          typed: { type: 'boolean', required: true },
+          verified: { type: 'boolean', description: 'Whether the page changed afterwards. Absent when it could not be checked.' },
+          note: { type: 'string', description: 'Present only when typing produced no visible change.' },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.typed
+          ? (value.verified === false
+            ? `Typed ${String(_args.text).length} chars (no visible change — the page may not be able to receive input right now).`
+            : `Typed ${String(_args.text).length} chars.`)
+          : 'Type failed.',
+      }],
     },
     timeoutMs,
     isConcurrencySafe: () => false,
@@ -961,6 +1052,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         throw new Error('target.value is empty; pass a css selector, visible text or XPath, or omit target entirely to use x/y')
       }
       const index = targetIndex(target)
+      // Typing changes an input's value, not the document outline, so this probe is about
+      // "did anything at all move" — a filter box or live search is the case it catches.
+      const before = await pageFingerprint(browser, session)
       if (target !== undefined && typeof target.value === 'string' && target.value !== '') {
         await browser.type(session, {
           text: args.text,
@@ -973,7 +1067,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       } else {
         await browser.type(session, { text: args.text }, exec.signal)
       }
-      return { typed: true }
+      const verified = sawEffect(before, await pageFingerprint(browser, session))
+      return verified === false
+        ? { typed: true, verified: false, note: 'the page did not change after typing' }
+        : verified === true ? { typed: true, verified: true } : { typed: true }
     },
   }))
 
