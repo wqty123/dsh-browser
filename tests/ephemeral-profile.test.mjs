@@ -7,7 +7,7 @@
 // is what these cases pin. (M7b's residue: `process.once('exit')` cannot fire on a kill.)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -24,6 +24,21 @@ const aliveExcept = (...dead) => (pid) => !dead.includes(pid)
 function ageOut(dir, hours = 2) {
   const when = new Date(Date.now() - hours * 60 * 60 * 1000)
   utimesSync(dir, when, when)
+}
+
+/** Age the WHOLE tree: a genuinely abandoned profile has no recent nested writes either. */
+function ageOutTree(dir, hours = 2) {
+  const when = new Date(Date.now() - hours * 60 * 60 * 1000)
+  const pending = [dir]
+  while (pending.length > 0) {
+    const current = pending.pop()
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name)
+      if (entry.isDirectory()) pending.push(path)
+      else utimesSync(path, when, when)
+    }
+    utimesSync(current, when, when)
+  }
 }
 
 test('a profile whose owner is still running is left alone', () => {
@@ -75,9 +90,44 @@ test('a profile with no marker at all is swept once it is old enough', () => {
   const dir = join(root, name)
   mkdirSync(dir)
   writeFileSync(join(dir, 'Preferences'), '{}')
-  ageOut(dir)
+  ageOutTree(dir)
 
   assert.deepEqual(sweepAbandonedEphemeralProfiles(root, 'chrome'), [name])
+  assert.equal(existsSync(dir), false)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('an OLD root directory with a recent nested write is kept even when its owner is gone', () => {
+  // The confirmed baseline defect: a killed DSH leaves a Chromium child that keeps writing
+  // Default/Network/Cookies. Writing that file does not refresh the ROOT directory's mtime, so
+  // the old root-only age check deleted a profile still in use. Reproduced with a real writer
+  // child in the audit; this is the file-system judgement the sweep has to get right.
+  const root = mkdtempSync(join(tmpdir(), 'dsh-ephem-nested-'))
+  const dir = join(root, ephemeralProfileName('chrome', 'nested-live'))
+  const cookiesParent = join(dir, 'Default', 'Network')
+  mkdirSync(cookiesParent, { recursive: true })
+  writeFileSync(join(cookiesParent, 'Cookies'), 'cookie-data')
+  claimEphemeralProfile(dir, DEAD_PID)
+  ageOut(dir)
+
+  const removed = sweepAbandonedEphemeralProfiles(root, 'chrome', { alive: aliveExcept(DEAD_PID) })
+  assert.deepEqual(removed, [], 'recent nested activity wins over a stale root timestamp')
+  assert.ok(existsSync(join(cookiesParent, 'Cookies')), 'the live browser keeps its data')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('a profile whose whole tree is old and whose owner is gone is still removed', () => {
+  // The fix must not turn the sweep into a no-op: genuinely abandoned data is still reclaimed.
+  const root = mkdtempSync(join(tmpdir(), 'dsh-ephem-old-tree-'))
+  const name = ephemeralProfileName('chrome', 'old-tree')
+  const dir = join(root, name)
+  mkdirSync(join(dir, 'Default', 'Network'), { recursive: true })
+  writeFileSync(join(dir, 'Default', 'Network', 'Cookies'), 'stale')
+  claimEphemeralProfile(dir, DEAD_PID)
+  ageOutTree(dir)
+
+  const removed = sweepAbandonedEphemeralProfiles(root, 'chrome', { alive: aliveExcept(DEAD_PID) })
+  assert.deepEqual(removed, [name], 'an abandoned tree is still reclaimed')
   assert.equal(existsSync(dir), false)
   rmSync(root, { recursive: true, force: true })
 })
