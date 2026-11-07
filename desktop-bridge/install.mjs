@@ -842,7 +842,11 @@ if (!existsSync(mainPath) && !existsSync(asarPath)) {
 }
 
 if (revert) {
+  // Tracked separately: restoring a CLI launcher or the runtime resolution is NOT an
+  // uninstall. `reverted` only means some component was restored; whether the bridge is
+  // actually gone is decided from the entry Electron loads, at the end of this branch.
   let reverted = false
+  let mainEntrySkipped = false
   if (existsSync(asarMoved)) {
     if (existsSync(asarPath)) {
       console.error('refusing to replace an app archive that already exists: a desktop upgrade may have installed a newer build')
@@ -897,6 +901,7 @@ if (revert) {
     } else if (!identical) {
       // It carries our marker but does not reduce to the backup: something was patched around
       // our snippet. The backup is left untouched, because guessing here is what destroyed it.
+      mainEntrySkipped = true
       console.error(`WARNING: ${mainPath} carries the bridge import, but removing it does not`)
       console.error(`  reproduce ${backupPath} — another tool has patched this file too`)
       console.error('  (dsh-purge patches it). Reverting would discard those changes, so nothing')
@@ -918,6 +923,36 @@ if (revert) {
   }
   if (!reverted) {
     console.error(`nothing to revert in ${installRoot}`)
+    process.exit(1)
+  }
+  // Verify the OUTCOME, not the actions. `reverted` only says a component was restored, and
+  // the CLI launcher used to set it while `main.js` still imported the bridge — so `--revert`
+  // exited 0 and reported success even though a fresh check still said "installed".
+  // The bridge is gone only when the entry Electron will actually load no longer carries our
+  // marker: in the unpacked layout that is resources/app/lib/main.js; when app.asar is back
+  // the archive wins and the unpacked tree is inert.
+  const archiveBack = existsSync(asarPath)
+  let bridgeStillLoaded = false
+  if (!archiveBack && existsSync(mainPath)) {
+    try {
+      bridgeStillLoaded = readFileSync(mainPath, 'utf8').includes(MARKER)
+    } catch (error) {
+      // An entry we cannot read cannot be certified clean; never claim success on it.
+      console.error(`WARNING: cannot read ${mainPath} to verify the uninstall: ${String(error)}`)
+      bridgeStillLoaded = true
+    }
+  }
+  if (bridgeStillLoaded) {
+    console.error('bridge uninstall is INCOMPLETE: the loaded main entry still imports the bridge.')
+    console.error(`  main entry:   ${mainPath} (still patched)`)
+    console.error(`  backup:       ${backupPath}`)
+    if (mainEntrySkipped) {
+      console.error('  Another tool patched main.js around our snippet. That patch was preserved on')
+      console.error('  purpose, so our snippet could not be removed without discarding their work.')
+    }
+    console.error('  The CLI launcher / runtime resolution may already be restored — that is not')
+    console.error('  an uninstall. Restore the main entry by hand, or run --revert again after the')
+    console.error('  other patch is reconciled, then re-check the bridge status.')
     process.exit(1)
   }
   // Only where an archive actually exists. In the unpacked layout `resources/app` IS what Electron

@@ -15,7 +15,7 @@ import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createInstallerSandbox } from './helpers/installer-sandbox.mjs'
 
 const sandbox = createInstallerSandbox()
@@ -175,6 +175,68 @@ test('--revert preserves a newer archive installed over the old bridge backup', 
     assert.equal(readFileSync(backup, 'utf8'), 'old-desktop-build')
     assert.notEqual(result.code, 0)
     assert.match(result.out, /archive.*exists|newer|refus/i)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/**
+ * An unpacked install that also carries the Desktop CLI launcher. The installer patches that
+ * launcher and backs it up; on --revert the launcher restore used to set the single `reverted`
+ * flag, so the script exited 0 even when a foreign patch kept our bridge import in main.js.
+ * Reported as "uninstallExitCode=0, afterUninstallState=installed, mainStillImportsBridge=true".
+ */
+function makeInstallWithCliShim() {
+  const { root, body } = makeInstall()
+  const shim = join(root, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd')
+  mkdirSync(dirname(shim), { recursive: true })
+  const launcher = [
+    '@echo off',
+    'setlocal',
+    '"%~dp0..\\..\\..\\DeepSeek Harness.exe" "%~dp0..\\..\\..\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js" %*',
+    '',
+  ].join('\n')
+  writeFileSync(shim, launcher)
+  return { root, body, shim, launcher }
+}
+
+test('a restored CLI launcher must not report success while main.js still loads the bridge', () => {
+  const { root, body, shim, launcher } = makeInstallWithCliShim()
+  const mainPath = join(root, 'resources', 'app', 'lib', 'main.js')
+  const backupPath = `${mainPath}.before-bridge`
+  try {
+    assert.equal(run([root]).code, 0, 'install exits 0')
+    const originalShim = readFileSync(shim, 'utf8')
+    assert.notEqual(originalShim, launcher, 'the CLI launcher was patched and backed up')
+
+    // A second tool edits main.js AFTER our backup was taken. Our bridge snippet stays inside.
+    const patched = readFileSync(mainPath, 'utf8')
+    writeFileSync(mainPath, patched.replace('export {};', 'const otherTool = true;\nexport {};'))
+    const before = readFileSync(mainPath, 'utf8')
+
+    const result = run([root, '--revert'])
+    assert.equal(readFileSync(mainPath, 'utf8'), before, 'the foreign patch is still preserved')
+    assert.equal(readFileSync(backupPath, 'utf8'), body, 'and the original backup survives')
+    assert.equal(readFileSync(shim, 'utf8'), launcher, 'the CLI component really was restored')
+    assert.notEqual(result.code, 0, 'but a CLI restore alone is NOT a successful uninstall')
+    assert.match(result.out, /INCOMPLETE|still imports the bridge/,
+      'and the reason is named rather than reported as success')
+    assert.ok(readFileSync(mainPath, 'utf8').includes('plugin-browser-bridge.js'),
+      'the bridge import is still present on disk, which is why the exit is non-zero')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a clean uninstall with a CLI launcher still exits 0', () => {
+  const { root, body, shim, launcher } = makeInstallWithCliShim()
+  const mainPath = join(root, 'resources', 'app', 'lib', 'main.js')
+  try {
+    assert.equal(run([root]).code, 0, 'install exits 0')
+    const result = run([root, '--revert'])
+    assert.equal(result.code, 0, 'an uninstall that really removed the bridge still succeeds')
+    assert.equal(readFileSync(mainPath, 'utf8'), body, 'main.js is restored byte-for-byte')
+    assert.equal(readFileSync(shim, 'utf8'), launcher, 'and the CLI launcher is restored too')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
