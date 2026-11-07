@@ -245,6 +245,27 @@ function describe(contents) {
 }
 
 /**
+ * How long one CDP command may hold the guest's queue before the queue moves on.
+ *
+ * A command that never settles used to wedge the guest permanently: `sendCdp` chains every
+ * command through a per-guest promise, and `queues.set(id, next.catch(...))` only keeps the
+ * chain alive when the command REJECTS. A command that hangs forever is neither fulfilled nor
+ * rejected, so the chain never advances and every later command waits behind it — including
+ * `Runtime.evaluate`, which is how a single `Page.captureScreenshot` on a page with no
+ * compositing surface turned a working session into "every call times out until DSH restarts".
+ *
+ * The timeout is a queue-liveness guard, not a replacement for the caller's own budget: the
+ * command may still be running in Chromium after we stop waiting. That is acceptable — the
+ * point is that ONE stuck command must not cost every later command.
+ */
+const CDP_COMMAND_TIMEOUT_MS = 15_000
+
+/** A CDP command that did not answer within {@link CDP_COMMAND_TIMEOUT_MS}. */
+function cdpTimeoutError(id, method, ms) {
+  return new Error(`cdp command ${method} on guest ${id} did not answer within ${ms}ms`)
+}
+
+/**
  * Send one CDP command to a guest, attaching its debugger on first use.
  * Attaching is per-webContents and idempotent; a destroyed guest drops the
  * attachment so a later guest with a recycled id is not mistaken for this one.
@@ -277,8 +298,25 @@ async function sendCdp(id, method, params) {
     return await current.debugger.sendCommand(method, params ?? {})
   })
   // Keep the chain alive on failure so one bad command does not wedge the guest.
-  queues.set(id, next.catch(() => undefined))
-  return await next
+  //
+  // "Failure" has to include "never answered", which is why the timeout is here rather than
+  // only at the caller: a command that hangs is neither fulfilled nor rejected, so `.catch`
+  // alone never fires and the queue below it waits forever. Racing the command against a
+  // timer converts that into an ordinary rejection, which is what keeps the chain moving.
+  let timer
+  const guarded = Promise.race([
+    next,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(cdpTimeoutError(id, method, CDP_COMMAND_TIMEOUT_MS)), CDP_COMMAND_TIMEOUT_MS)
+      timer.unref?.()
+    }),
+  ])
+  queues.set(id, guarded.catch(() => undefined))
+  try {
+    return await guarded
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /** Convert CDP key data for Electron's per-webContents input channel. */
