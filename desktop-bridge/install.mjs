@@ -173,6 +173,16 @@ function findDefaultInstall(testRoot) {
     const below = probe(explicit)
     if (below !== undefined) return below
   }
+  // The other name the repository already documents for "where is the desktop installed" — see
+  // `tools/install-web-plugin.mjs`. It answers a slightly different question there (the `dsh`
+  // directory inside the install, which holds the host's peers), so its value is tried both as an
+  // install root and as a parent of one rather than assumed to be either.
+  const declared = process.env.DSH_DESKTOP_APP
+  if (declared !== undefined && declared !== '' && declared !== explicit) {
+    if (looksInstalled(declared)) return declared
+    const below = probe(declared)
+    if (below !== undefined) return below
+  }
   const localAppData = process.env.LOCALAPPDATA ?? ''
   const roots = [
     ...(localAppData === '' ? [] : [join(localAppData, 'Programs')]),
@@ -182,9 +192,101 @@ function findDefaultInstall(testRoot) {
     const found = probe(base)
     if (found !== undefined) return found
   }
+  // What the installer actually recorded, which is the one fact no environment variable supplies for
+  // a custom directory. Tried before the platform conventions because on Windows it is authoritative.
+  for (const location of registeredInstallLocations()) {
+    if (!permitted(location)) continue
+    if (looksInstalled(location)) return location
+  }
+  // Off Windows every root above is empty (those variables are Windows-only), so without this the
+  // default answers "nothing found" on a machine that has an install. Empty on Windows.
+  for (const candidate of conventionalInstallRoots()) {
+    if (!permitted(candidate)) continue
+    if (looksInstalled(candidate)) return candidate
+  }
   return testRoot === undefined
     ? join(localAppData === '' ? '.' : join(localAppData, 'Programs'), 'DeepSeek Harness')
     : join(testRoot, 'no-test-desktop-found')
+}
+
+/**
+ * The `InstallLocation` values the Windows uninstall registry lists for this app.
+ *
+ * Read through `reg.exe`: this script runs under plain `node` as well as inside Electron, and spawning
+ * the console tool is the one way that works in both. Every failure — not Windows, `reg` absent, no
+ * such key, unparsable output — means "no answer" rather than an error, because this is one discovery
+ * source among several and the caller falls back to the historical default anyway.
+ * @returns candidate directories, unverified; the caller applies the shape check.
+ */
+function registeredInstallLocations() {
+  if (process.platform !== 'win32') return []
+  const roots = [
+    'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  ]
+  const locations = []
+  for (const root of roots) {
+    let output = ''
+    try {
+      output = execFileSync('reg', ['query', root, '/s', '/f', 'DeepSeek Harness', '/t', 'REG_SZ'],
+        { encoding: 'utf8', stdio: 'pipe', timeout: 15_000, windowsHide: true })
+    } catch {
+      // A key that does not exist exits non-zero, and so does a missing `reg.exe`; both mean the
+      // same thing here.
+      continue
+    }
+    // Output is a flat list of `    ValueName    REG_SZ    Data` lines under `Key` headers. Only
+    // `InstallLocation` is consulted: `DisplayName` also mentions the product and would otherwise
+    // contribute a directory-shaped string that is not a directory.
+    for (const line of output.split(/\r?\n/)) {
+      const match = /^\s+InstallLocation\s+REG_SZ\s+(.+?)\s*$/.exec(line)
+      if (match !== null && match[1] !== '') locations.push(match[1])
+    }
+  }
+  return locations
+}
+
+/**
+ * The places a packaged app is conventionally installed on this platform.
+ *
+ * The counterpart of `registeredInstallLocations` for the platforms that have no registry to read.
+ * Every candidate is shape-checked by the caller, so naming a path here is a place to look, never an
+ * assumption that something is there. On macOS the candidate is the bundle's `Contents` directory,
+ * because that is what holds `Resources` (Electron's `resources`) beside the executable; on Linux the
+ * listed directories are where the common packaging styles actually land the app.
+ *
+ * Directory names only — never a package name. The accepted package names live in
+ * `desktop-identity.json` and nowhere else, and a test enforces that.
+ * @param platform - injected so a test can ask for another platform's list.
+ * @returns candidate install roots, unverified.
+ */
+function conventionalInstallRoots(platform = process.platform) {
+  const home = process.env.HOME ?? ''
+  if (platform === 'darwin') {
+    const bundles = [
+      '/Applications/DeepSeek Harness.app',
+      '/Applications/DSH Desktop.app',
+      ...home === '' ? [] : [
+        join(home, 'Applications', 'DeepSeek Harness.app'),
+        join(home, 'Applications', 'DSH Desktop.app'),
+      ],
+    ]
+    return bundles.map(bundle => join(bundle, 'Contents'))
+  }
+  if (platform === 'linux') {
+    return [
+      '/opt/DeepSeek Harness',
+      '/opt/DSH Desktop',
+      '/usr/lib/DeepSeek Harness',
+      '/usr/lib/DSH Desktop',
+      ...home === '' ? [] : [
+        join(home, '.local', 'share', 'DeepSeek Harness'),
+        join(home, '.local', 'share', 'DSH Desktop'),
+      ],
+    ]
+  }
+  return []
 }
 
 /**

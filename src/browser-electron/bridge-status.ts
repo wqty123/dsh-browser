@@ -14,6 +14,7 @@
  * - `stale` — the archive is back, or the deployed bridge module is missing or outdated.
  * @module dsh-browser/browser-electron/bridge-status
  */
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -37,9 +38,17 @@ const rawExistsSync: typeof existsSync = (() => {
  * probe now verifies the same identity the installer does (see `desktop-identity.js`), so the
  * answer is about DSH Desktop and nothing else.
  * @param localAppData - the base directory; defaults to the environment's.
+ * @param registry - the uninstall-registry lookup; injectable so a test can close a source that is
+ *   otherwise answered by the machine it runs on. A test asserting "nothing is installed here" would
+ *   otherwise pass or fail depending on whose computer ran it.
+ * @param conventions - the platform's conventional install locations; injectable for the same reason.
  * @returns the install directory, or undefined when nothing matches.
  */
-export function findDesktopInstall(localAppData?: string): string | undefined {
+export function findDesktopInstall(
+  localAppData?: string,
+  registry: () => readonly string[] = registeredInstallLocations,
+  conventions: () => readonly string[] = conventionalInstallRoots,
+): string | undefined {
   // Not every install lives in %LOCALAPPDATA%\\Programs: people put the app on another drive, under
   // Program Files, or in their own folder. DSH_DESKTOP_PATH names one explicitly, and the usual roots
   // are all probed. A test or a caller that passes a base directory gets exactly that base, so the
@@ -56,6 +65,21 @@ export function findDesktopInstall(localAppData?: string): string | undefined {
       }
     } catch {
       // Not a directory: fall through to the usual roots.
+    }
+  }
+  // The name `tools/install-web-plugin.mjs` already documents for the same question. It answers a
+  // slightly different one there (where the host's peers live, so it names the `dsh` directory inside
+  // the install), so its value is tried both as an install root and as a parent of one rather than
+  // assumed to be either.
+  const declared = process.env.DSH_DESKTOP_APP
+  if (declared !== undefined && declared !== '' && declared !== explicit) {
+    if (isDesktop(declared)) return declared
+    try {
+      for (const entry of readdirSync(declared, { withFileTypes: true })) {
+        if (entry.isDirectory() && isDesktop(join(declared, entry.name))) return join(declared, entry.name)
+      }
+    } catch {
+      // Same as above: not a directory is not an error.
     }
   }
   const roots = localAppData === undefined
@@ -78,7 +102,117 @@ export function findDesktopInstall(localAppData?: string): string | undefined {
       // A root that does not exist is a state, not an error.
     }
   }
+  // Windows records where the installer actually put the app, which is the one fact no environment
+  // variable can supply for a custom directory. Read after the usual roots so a normal install keeps
+  // answering exactly as it did.
+  try {
+    for (const location of registry()) {
+      if (isDesktop(location)) return location
+    }
+  } catch {
+    // A lookup that cannot run is not evidence of an install.
+  }
+  // No registry and no `Programs` directory off Windows: on macOS and Linux every root above is empty
+  // (those variables are Windows-only), so without this the probe answers "no desktop here" on a
+  // machine that has one. Empty on Windows, where the sources above already cover it.
+  try {
+    for (const candidate of conventions()) {
+      if (isDesktop(candidate)) return candidate
+    }
+  } catch {
+    // Walking a platform directory can fail for reasons the caller cannot act on.
+  }
   return undefined
+}
+
+/**
+ * The `InstallLocation` values the Windows uninstall registry lists for this app.
+ *
+ * Read through `reg.exe` rather than a Node binding: this module also runs under plain `node` (the
+ * installer, the tests), where no registry API exists, and spawning the console tool is the one way
+ * that works in both. Every failure — not Windows, `reg` absent, no such key, unparsable output —
+ * means "no answer", never an error: this is one discovery source among several.
+ *
+ * @returns candidate directories, unverified; the caller applies the identity rule.
+ */
+function registeredInstallLocations(): readonly string[] {
+  if (process.platform !== 'win32') return []
+  // The per-user key holds a per-user install and needs no elevation; the machine-wide one holds an
+  // install for all users. Both spellings of the product name have shipped, so neither key name is
+  // assumed: the whole Uninstall subtree is searched and matched on the value shown to users.
+  const roots = [
+    'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  ]
+  const locations: string[] = []
+  for (const root of roots) {
+    let output = ''
+    try {
+      output = execFileSync('reg', ['query', root, '/s', '/f', 'DeepSeek Harness', '/t', 'REG_SZ'],
+        { encoding: 'utf8', stdio: 'pipe', timeout: 15_000, windowsHide: true })
+    } catch {
+      // A key that does not exist exits non-zero, and so does a missing `reg.exe`; both mean the
+      // same thing here.
+      continue
+    }
+    // Output is a flat list of `    ValueName    REG_SZ    Data` lines under `Key` headers. Only
+    // `InstallLocation` is consulted: `DisplayName` also mentions the product and would otherwise
+    // contribute a directory-shaped string that is not a directory.
+    for (const line of output.split(/\r?\n/)) {
+      const match = /^\s+InstallLocation\s+REG_SZ\s+(.+?)\s*$/.exec(line)
+      if (match !== null && match[1] !== '') locations.push(match[1])
+    }
+  }
+  return locations
+}
+
+/**
+ * The places a packaged app is conventionally installed on this platform.
+ *
+ * Windows has a registry to consult; the other two do not, so the convention IS the record. Naming
+ * these is not a blind guess — every candidate still has to pass the identity rule — but it is what
+ * makes discovery work at all on a platform with no install root this plugin can compute from an
+ * environment variable.
+ *
+ * macOS puts a user-visible app in `/Applications` (all users) or `~/Applications` (one user), and
+ * the identity rule looks for `resources/app` beneath whatever root it is handed — so the candidate
+ * is the bundle's `Contents` directory, the one that holds `Resources` (Electron's `resources`) next
+ * to the executable. Linux has no single convention, so the directories listed are where each
+ * packaging style actually lands: `/opt` for a tarball or a vendor `.deb`, `/usr/lib` for a distro
+ * package, `~/.local/share` for a per-user extract.
+ *
+ * Directory names only — never a package name. The accepted package names live in
+ * `desktop-identity.json` and nowhere else, and a test enforces that.
+ * @param platform - injected so a test can ask for another platform's list.
+ * @returns candidate install roots, unverified.
+ */
+function conventionalInstallRoots(platform: NodeJS.Platform = process.platform): readonly string[] {
+  const home = process.env.HOME ?? ''
+  if (platform === 'darwin') {
+    const bundles = [
+      '/Applications/DeepSeek Harness.app',
+      '/Applications/DSH Desktop.app',
+      ...home === '' ? [] : [
+        join(home, 'Applications', 'DeepSeek Harness.app'),
+        join(home, 'Applications', 'DSH Desktop.app'),
+      ],
+    ]
+    return bundles.map(bundle => join(bundle, 'Contents'))
+  }
+  if (platform === 'linux') {
+    return [
+      '/opt/DeepSeek Harness',
+      '/opt/DSH Desktop',
+      '/usr/lib/DeepSeek Harness',
+      '/usr/lib/DSH Desktop',
+      ...home === '' ? [] : [
+        join(home, '.local', 'share', 'DeepSeek Harness'),
+        join(home, '.local', 'share', 'DSH Desktop'),
+      ],
+    ]
+  }
+  return []
 }
 
 /** The marker the installer inserts into the shell's main.js. */
