@@ -25,8 +25,7 @@
 
 import { BridgeConnection, type BridgeEndpoint } from './bridge-connection.js'
 import { readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { bridgeEndpointPath } from './paths.js'
 import { randomUUID } from 'node:crypto'
 import type { CommandOptions, ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
 import type { BrowserUserAction } from './provider.js'
@@ -34,10 +33,7 @@ import type { CarrierPage, CarrierLossReason } from '../browser/types.js'
 
 
 /** Absolute path of the endpoint file the shell writes. */
-export function bridgeEndpointPath(): string {
-  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-  return join(home, 'dsh-builtin-browser-bridge.json')
-}
+export { bridgeEndpointPath }
 
 /**
  * The error code the bridge uses when the conversation's panel exists but the shell is not showing

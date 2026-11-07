@@ -14,8 +14,8 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { dshHome } from './paths.js'
 import type { VisitedPage } from '../browser/types.js'
 import { writeFileAtomic } from './settings-store.js'
 
@@ -42,7 +42,7 @@ const PRUNE_SLACK = 500
  * @returns the history file path.
  */
 export function visitedHistoryPath(): string {
-  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const home = dshHome()
   return join(home, 'dsh-builtin-browser-host', 'history.jsonl')
 }
 

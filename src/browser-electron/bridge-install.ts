@@ -8,10 +8,11 @@
  */
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile } from 'node:fs/promises'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BridgeConnection } from './bridge-connection.js'
+import { bridgeEndpointPath } from './paths.js'
 
 /** What the panel may ask for. */
 export type BridgeAction = 'install' | 'uninstall'
@@ -72,7 +73,7 @@ export interface BridgeReadyOptions {
  * A previous shell's endpoint, a listening socket, or an authentication refusal is insufficient.
  */
 export async function waitForRestartedBridge(pid: number, options: BridgeReadyOptions = {}): Promise<void> {
-  const path = options.endpointPath ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'dsh-builtin-browser-bridge.json')
+  const path = options.endpointPath ?? bridgeEndpointPath()
   const timeoutMs = options.timeoutMs ?? 30_000
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {

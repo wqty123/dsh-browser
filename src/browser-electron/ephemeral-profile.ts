@@ -18,6 +18,7 @@
  */
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { pidAlive } from './process.js'
 
 /** The marker file, named once because both the claim and the sweep read it. */
 const OWNER_FILE = '.dsh-ephemeral-owner'
@@ -35,23 +36,6 @@ export interface SweepOptions {
   readonly now?: number
   /** Liveness test for an owner pid. */
   readonly alive?: (pid: number) => boolean
-}
-
-/**
- * Whether a process with this pid exists.
- *
- * A signal of 0 performs the permission and existence checks without delivering anything.
- * EPERM is a live process owned by someone else — alive, not gone.
- * @param pid - the pid to test.
- * @returns true when the process exists.
- */
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
-  }
 }
 
 /**
@@ -116,7 +100,7 @@ function readOwner(dir: string): number | undefined {
  */
 export function sweepAbandonedEphemeralProfiles(root: string, kind: string, options: SweepOptions = {}): string[] {
   const now = options.now ?? Date.now()
-  const alive = options.alive ?? processAlive
+  const alive = options.alive ?? pidAlive
   const prefix = `${kind}-profile-ephemeral-`
   const removed: string[] = []
   let names: string[]

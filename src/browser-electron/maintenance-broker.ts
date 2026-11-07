@@ -7,7 +7,7 @@
 import { execFile } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { win32 } from 'node:path'
-import { windowsPowerShellPath } from './windows-system.js'
+import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.js'
 
 export interface MaintenanceBrokerOptions {
   readonly runtimePath: string
@@ -123,7 +123,7 @@ try {
   exit 1
 }
 `
-  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  const encoded = encodePowerShellScript(script)
   const powershellPath = windowsPowerShellPath()
   if (encoded.length + powershellPath.length + 100 >= 32_767) throw new Error('the encoded maintenance broker command exceeds the Windows command-line limit')
   const result = await (deps.execFile ?? defaultExecutor)(powershellPath,

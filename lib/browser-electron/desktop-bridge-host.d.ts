@@ -22,11 +22,12 @@
  * then keeps the self-hosted Electron it has always used.
  * @module dsh-browser/browser-electron/desktop-bridge-host
  */
+import { bridgeEndpointPath } from './paths.js';
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js';
 import type { BrowserUserAction } from './provider.js';
 import type { CarrierPage, CarrierLossReason } from '../browser/types.js';
 /** Absolute path of the endpoint file the shell writes. */
-export declare function bridgeEndpointPath(): string;
+export { bridgeEndpointPath };
 /**
  * A failure worth showing as-is: the carrier is alive and this is a condition the shell can change.
  *

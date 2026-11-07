@@ -34,6 +34,7 @@ import { createRequire } from 'node:module'
 import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
+import { withTimeoutShared } from './timing.js'
 import { fileURLToPath } from 'node:url'
 import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, PresentOptions, ScreenshotOptions } from './provider.js'
 import type { ExportedCookie } from '../browser/types.js'
@@ -1433,13 +1434,7 @@ function appendHostLog(text: string): void {
 
 /** Reject a promise if it does not settle within the budget. */
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${message} (${ms}ms)`)), ms)
-    promise.then(
-      value => { clearTimeout(timer); resolve(value) },
-      error => { clearTimeout(timer); reject(error) },
-    )
-  })
+  return withTimeoutShared(promise, ms, () => new Error(`${message} (${ms}ms)`))
 }
 
 /** Default host-main path relative to this module's build output. */

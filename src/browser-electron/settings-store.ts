@@ -10,8 +10,8 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { dshHome } from './paths.js'
 import type { BrowserChannel } from './system-browser.js'
 
 /** Vision/operation strategy the provider prefers when the model can see. */
@@ -181,7 +181,7 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
  * @returns the settings file path.
  */
 export function settingsPath(): string {
-  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const home = dshHome()
   return join(home, 'dsh-builtin-browser-host', 'settings.json')
 }
 

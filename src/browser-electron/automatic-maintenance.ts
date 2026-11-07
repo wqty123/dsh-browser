@@ -2,7 +2,6 @@
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, open, readFile, rename, stat as statAsync, unlink, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prepareBridgeMaintenance } from './bridge-maintenance.js'
@@ -10,7 +9,8 @@ import { launchMaintenanceBroker, type MaintenanceBrokerOptions, type Maintenanc
 import { runMaintenanceLifecycle, type MaintenanceState } from './maintenance-lifecycle.js'
 import { defaultInstallerPath, runBridgeAction, waitForRestartedBridge, type BridgeAction } from './bridge-install.js'
 import { readDesktopIdentity } from './desktop-identity.js'
-import { windowsPowerShellPath } from './windows-system.js'
+import { dshHome } from './paths.js'
+import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.js'
 
 interface DesktopProcess { readonly pid: number; readonly path: string; readonly command: string; readonly started: string }
 export interface AutomaticMaintenanceJob extends MaintenanceState { readonly id: string; readonly workerPid?: number; readonly startedAt?: string }
@@ -35,7 +35,7 @@ const quitPath = fileURLToPath(new URL('../../desktop-bridge/request-desktop-qui
 const progressPath = fileURLToPath(new URL('../../desktop-bridge/maintenance-progress.ps1', import.meta.url))
 const delay = async (ms: number): Promise<void> => await new Promise(resolve => setTimeout(resolve, ms))
 
-function homePath(): string { return resolve(process.env.DSH_HOME ?? join(homedir(), '.dsh')) }
+function homePath(): string { return resolve(dshHome()) }
 function basePath(home = homePath()): string { return join(home, 'dsh-builtin-browser-host', 'maintenance') }
 function inside(base: string, path: string): boolean {
   const part = relative(base, path)
@@ -57,7 +57,7 @@ async function execute(command: string, args: readonly string[], timeout = 15_00
 }
 async function desktopProcesses(root: string): Promise<DesktopProcess[]> {
   const script = "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $rows = @((Get-CimInstance Win32_Process -Filter \"Name='DeepSeek Harness.exe'\" -ErrorAction Stop) | ForEach-Object { @{pid=[int]$_.ProcessId;path=$_.ExecutablePath;command=$_.CommandLine;started=$_.CreationDate.ToUniversalTime().ToString('o')} }); ConvertTo-Json -InputObject $rows -Compress"
-  const r = await execute(windowsPowerShellPath(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')])
+  const r = await execute(windowsPowerShellPath(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePowerShellScript(script)])
   if (r.code !== 0) throw new Error('cannot inspect running DSH Desktop processes')
   let value: unknown
   try { value = JSON.parse(r.stdout.replace(/^\uFEFF/, '').trim()) } catch { throw new Error('Desktop process inspection returned invalid data') }

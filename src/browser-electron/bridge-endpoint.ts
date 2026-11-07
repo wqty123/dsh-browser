@@ -24,6 +24,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 
 import { ENDPOINT_STALE_AFTER_MS } from './bridge-connection.js'
 import { bridgeEndpointPath } from './desktop-bridge-host.js'
+import { pidAlive } from './process.js'
 
 /** What the panel needs to know about the running shell. */
 export interface BridgeEndpointState {
@@ -35,24 +36,6 @@ export interface BridgeEndpointState {
   readonly detail: string
   /** When the shell said it last refreshed the file, ISO, when the file carries a stamp. */
   readonly updatedAt?: string
-}
-
-/**
- * Whether a pid is alive, without signalling it.
- *
- * Signal 0 performs the permission and existence checks and delivers nothing. `EPERM` means the
- * process exists and belongs to someone else, which is still "alive" for this purpose.
- * @param pid - the process id from the endpoint file.
- * @returns whether that process exists.
- */
-function pidAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException)?.code === 'EPERM'
-  }
 }
 
 /**

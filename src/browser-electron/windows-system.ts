@@ -2,6 +2,11 @@
 import { existsSync } from 'node:fs'
 import { win32 } from 'node:path'
 
+/** PowerShell's `-EncodedCommand` expects a UTF-16LE script encoded as base64. */
+export function encodePowerShellScript(script: string): string {
+  return Buffer.from(script, 'utf16le').toString('base64')
+}
+
 export function windowsPowerShellPath(
   environment: NodeJS.ProcessEnv = process.env,
   exists: (path: string) => boolean = existsSync,

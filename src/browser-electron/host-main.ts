@@ -33,6 +33,7 @@ import { electronRuntimeDiagnosticLines } from './runtime-diagnostics.js'
 import { createRpcLineReader } from './rpc-input.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { withTimeoutShared } from './timing.js'
 
 // Report the binary actually running this child, even when ELECTRON_PATH
 // intentionally selects a different version from the plugin's dependency.
@@ -293,15 +294,7 @@ function ensureToolbarFiles(): void {
  * explicit error instead of a command that never settles.
  */
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${label} timed out after ${ms}ms`))
-    }, ms)
-    promise.then(
-      (value) => { clearTimeout(timer); resolve(value) },
-      (error) => { clearTimeout(timer); reject(error) },
-    )
-  })
+  return withTimeoutShared(promise, ms, () => new Error(`${label} timed out after ${ms}ms`))
 }
 
 /**

@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, renameSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { dshHome } from './paths.js'
 import { setTimeout as wait } from 'node:timers/promises'
 import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.js'
 import { DesktopBridgeViewHost } from './desktop-bridge-host.js'
@@ -375,7 +376,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // `C:\Users\<user>\dsh-builtin-browser-host\` while its settings and history lived in
       // `~/.dsh/dsh-builtin-browser-host/` — two half-profiles that never met, and a
       // settings panel whose switches appeared not to apply.
-      const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+      const home = dshHome()
       // Login state lives in the browser profile, so the cookies setting decides where
       // that profile goes: a stable directory keeps the user signed in across restarts
       // (the point of using their own browser), while turning persistence off gets a

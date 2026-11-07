@@ -6,10 +6,10 @@
  */
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readDesktopIdentity } from './desktop-identity.js'
+import { dshHome as dshHomePath } from './paths.js'
 import type { BridgeAction } from './bridge-install.js'
 
 export interface BridgeMaintenanceOptions {
@@ -120,7 +120,7 @@ export async function prepareBridgeMaintenance(
     throw new Error('the Electron maintenance runtime must belong to the verified Desktop installation')
   }
 
-  const dshHome = checkedPath(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'DSH home')
+  const dshHome = checkedPath(dshHomePath(), 'DSH home')
   const testContext = process.env.DSH_BROWSER_TEST === '1' || process.env.NODE_TEST_CONTEXT !== undefined
   if (testContext && options.directory === undefined && process.env.DSH_BRIDGE_TEST_ROOT === undefined) {
     throw new Error('test preparation requires an explicit private maintenance directory')
