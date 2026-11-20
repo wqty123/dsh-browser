@@ -21,8 +21,9 @@ test('compressed release artifacts retain their full source-build bytes', () => 
 test('compressed source patches retain their complete git format-patch bytes', () => {
   const root = new URL('../dsh-host-patch/sources/', import.meta.url)
   const manifest = JSON.parse(fs.readFileSync(new URL('manifest.json', root), 'utf8'))
-  assert.deepEqual(Object.keys(manifest).sort(), ['main', 'rc3', 'rc5'].flatMap(release =>
-    ['0004-native-views.patch', '0010-sidebar-session-cookies.patch'].map(file => `${release}/${file}`)))
+  const series = JSON.parse(fs.readFileSync(new URL('series.json', root), 'utf8'))
+  assert.deepEqual(Object.keys(manifest).sort(), Object.values(series.releases).flatMap(entry =>
+    entry.patches.map(patch => patch.file.slice(0, -3))).sort())
   for (const [file, expected] of Object.entries(manifest)) {
     const bytes = gunzipSync(fs.readFileSync(new URL(`${file}.gz`, root)))
     assert.equal(bytes.length, expected.bytes, file)

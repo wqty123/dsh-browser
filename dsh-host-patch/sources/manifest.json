@@ -1,26 +1,206 @@
 {
-  "main/0004-native-views.patch": {
-    "bytes": 85275,
-    "sha256": "e0211aabc6b7479530c07a8c35c544fd457071b81b8a978bb066eb10618b764b"
+  "main/0001-feat-sidebar-right-add-session-rendering-holds.patch": {
+    "bytes": 38912,
+    "sha256": "7922c850c5dfdda5b7290ba3f042632e34e9f31cbeb1e1e68e32a20416208aac"
   },
-  "rc3/0004-native-views.patch": {
-    "bytes": 86227,
-    "sha256": "84064739a328652938f4cf8fc30a70d4503d7a8b112ba17d336fc46616ffbaef"
+  "main/0002-feat-desktop-load-trusted-profile-main-extensions.patch": {
+    "bytes": 22684,
+    "sha256": "58882b1347fbfbe3af20ff97eaaecaaa972183a49e7309312ff1606fb8342fa5"
   },
-  "rc5/0004-native-views.patch": {
-    "bytes": 86227,
-    "sha256": "57dc227f3eb17627194994b68e3d4fec56330fac04bb040f255772a4807e38e2"
+  "main/0003-feat-desktop-report-resolved-and-running-main-extens.patch": {
+    "bytes": 18747,
+    "sha256": "33e1e7632fab43c5f1343135d3bbebdc4ca10df7f490adf3225c72a874299498"
   },
-  "main/0010-sidebar-session-cookies.patch": {
-    "bytes": 44306,
-    "sha256": "53e74aedf16fda4289d533a3054f10bd60935ce464c7793f07542835816f68c7"
+  "main/0004-feat-desktop-compose-admitted-native-sidebar-views.patch": {
+    "bytes": 86709,
+    "sha256": "343c757cbb9a6019cf33dbf67b89382be519073ed365b030bbb91cb8e83bc9b9"
   },
-  "rc3/0010-sidebar-session-cookies.patch": {
-    "bytes": 44306,
-    "sha256": "7d0ecb845030b67e696d773c6a0bf4fd43b0a871814c798e19a752d5e71d31f9"
+  "main/0005-fix-client-admit-coded-browser-errors-in-native-comp.patch": {
+    "bytes": 1068,
+    "sha256": "369d76ae9a9d43905bf08929805ea0344f868ccec760d9d722d2c0298108f7be"
   },
-  "rc5/0010-sidebar-session-cookies.patch": {
-    "bytes": 44306,
-    "sha256": "d5a9180171ca8eb37eccfdfafedddd11f8fa653f04bec79fb2cac4e57419a809"
+  "main/0006-fix-desktop-acknowledge-native-same-document-navigat.patch": {
+    "bytes": 3625,
+    "sha256": "731005c9c39817cc853e2e54e60e0925f3e639ab4938128c6ffdf1e90b0272e8"
+  },
+  "main/0007-fix-desktop-restore-auth-in-the-native-lease-partiti.patch": {
+    "bytes": 5021,
+    "sha256": "923ac91dc199a2e1a96a6f08bfb9d42bf8f985f252d3a355076208cd918acba5"
+  },
+  "main/0008-feat-desktop-adopt-native-children-in-admitted-sideb.patch": {
+    "bytes": 37069,
+    "sha256": "fa96c38b4d245fe9859599a60de68e55e9f1e26d60be9adc620834eb400cf81e"
+  },
+  "main/0009-fix-desktop-publish-complete-native-child-close-reco.patch": {
+    "bytes": 8355,
+    "sha256": "f92a8596aee97ed502a01d32d7d32f6908d52d5bd6cb76fffbdf1fb121ff0fba"
+  },
+  "main/0010-fix-desktop-bundle-structured-errors-in-sandboxed-pr.patch": {
+    "bytes": 925,
+    "sha256": "5936341bbad05239c2b8fc612a84a9565557e6627a39f348954bda626613ea7b"
+  },
+  "main/0011-feat-desktop-offer-persistent-Sidebar-sessions-per-D.patch": {
+    "bytes": 14969,
+    "sha256": "8db3628812f8e006f3d839b190d5a0f46e92ef69d139f4ea32d24977e160efbc"
+  },
+  "main/0012-feat-desktop-retain-sidebar-session-cookies-across-r.patch": {
+    "bytes": 15478,
+    "sha256": "cf3f23c7fa9dedcb57427880413d36c6666748b6c1abaa43b9dd6cf05e0e47db"
+  },
+  "main/0013-fix-desktop-honor-sidebar-session-cookie-sidecar-con.patch": {
+    "bytes": 32574,
+    "sha256": "a95d1a6af7afaa83ce3cd6608b61163e0a6fcc10741aaaf76fa34e8868085799"
+  },
+  "main/0014-fix-desktop-retry-cookie-protection-without-failing-.patch": {
+    "bytes": 6712,
+    "sha256": "c8e34bdd96882c46cbde1da107ecc107b12b70acd75a98da70ba9d8ae88fe474"
+  },
+  "main/0015-fix-desktop-preserve-host-only-cookie-identity-in-se.patch": {
+    "bytes": 3973,
+    "sha256": "87a23e85c9926a96457176264d4f7f52f56ebb71573bed9e79f7cf869f72e70c"
+  },
+  "main/0016-fix-desktop-restore-session-cookies-before-checkpoin.patch": {
+    "bytes": 6255,
+    "sha256": "530d8d94ac4b75875f097d3140a18415b3a3657671db2cc0e64e8c3a5db46ca9"
+  },
+  "main/0017-fix-desktop-restore-sidebar-cookies-once-before-gues.patch": {
+    "bytes": 18815,
+    "sha256": "ecf9e17234abdb3c3b579a87029208a08de8c2e9a53d64a8aa2359e7451abca4"
+  },
+  "rc3/0001-feat-sidebar-right-add-session-rendering-holds.patch": {
+    "bytes": 38912,
+    "sha256": "62ed83038b6770c57e4912d0ff8e707579276af9450742f40a9730474020427e"
+  },
+  "rc3/0002-feat-desktop-load-trusted-profile-main-extensions.patch": {
+    "bytes": 22242,
+    "sha256": "5c383ba3f4207039e30378858167fd9a578d629cd938b404785c47c4cf008f19"
+  },
+  "rc3/0003-feat-desktop-report-resolved-and-running-main-extens.patch": {
+    "bytes": 18747,
+    "sha256": "da9a54938b5f5c5b523e92e05e9ef4d459e83ceb4f66d463dbcc22f5832936d9"
+  },
+  "rc3/0004-feat-desktop-compose-admitted-native-sidebar-views.patch": {
+    "bytes": 87721,
+    "sha256": "7d9e4beaf509c8cf21289380395640f1322b3fe98f7651767ac8ae5dc6906c59"
+  },
+  "rc3/0005-fix-client-admit-coded-browser-errors-in-native-comp.patch": {
+    "bytes": 2986,
+    "sha256": "68877adbd58e5ae710d7913ffd8fb15f2b72d0d0f627be60f600594f38a9409c"
+  },
+  "rc3/0006-fix-desktop-acknowledge-native-same-document-navigat.patch": {
+    "bytes": 3625,
+    "sha256": "1d41833420c797e5bb01311c71f7783c7b2d653263f2d78401482bdc1145b9c1"
+  },
+  "rc3/0007-fix-desktop-restore-auth-in-the-native-lease-partiti.patch": {
+    "bytes": 5021,
+    "sha256": "f8c7d69a43c96ded99b9babe4d06000550d29a27425bcf6619388c81be8b56dd"
+  },
+  "rc3/0008-feat-desktop-adopt-native-children-in-admitted-sideb.patch": {
+    "bytes": 37069,
+    "sha256": "07b189d30b440d66e662b485a369a6df03fb76315c605e13245edc972167d4e3"
+  },
+  "rc3/0009-fix-desktop-publish-complete-native-child-close-reco.patch": {
+    "bytes": 8355,
+    "sha256": "e703473d44c778a259bf072d2bbeeeeff8f54eea17f61a480c19199866c4c8c8"
+  },
+  "rc3/0010-fix-desktop-bundle-structured-errors-in-sandboxed-pr.patch": {
+    "bytes": 925,
+    "sha256": "8b4f7d89045e7e5366be04ca19826d1134a678fad5e39aeafb7b012a0a5ff84a"
+  },
+  "rc3/0011-feat-desktop-offer-persistent-Sidebar-sessions-per-D.patch": {
+    "bytes": 14969,
+    "sha256": "5e51117785c89ec481aa42247c45d939f3f134f7691429904496ef698123e77a"
+  },
+  "rc3/0012-feat-desktop-retain-sidebar-session-cookies-across-r.patch": {
+    "bytes": 15478,
+    "sha256": "c34f92795cff3a15fd1ef0c410e1bb52edb204cdf7428d8db293e13c85335b4e"
+  },
+  "rc3/0013-fix-desktop-honor-sidebar-session-cookie-sidecar-con.patch": {
+    "bytes": 32574,
+    "sha256": "28efd5b62e9414fd0e62d352f8bc64b3e742f10eb8a72c8b796ecffc14870552"
+  },
+  "rc3/0014-fix-desktop-retry-cookie-protection-without-failing-.patch": {
+    "bytes": 6712,
+    "sha256": "4a1cf7a5da7be9b1476fb064df4149601dbfd127d5c4edffa766b70b5a9a2272"
+  },
+  "rc3/0015-fix-desktop-preserve-host-only-cookie-identity-in-se.patch": {
+    "bytes": 3973,
+    "sha256": "cb2180f255664cf3a9be9e90b6a297d034be89cfd7572eed4da70da1ba332780"
+  },
+  "rc3/0016-fix-desktop-restore-session-cookies-before-checkpoin.patch": {
+    "bytes": 6255,
+    "sha256": "bffcb0a46d327c181f82366ffe581ac3c94235a300b658eebaac2f23571fba52"
+  },
+  "rc3/0017-fix-desktop-restore-sidebar-cookies-once-before-gues.patch": {
+    "bytes": 18815,
+    "sha256": "8992f41bd426583e5d1b48621b7ed75a282e007c9438d0c71f6aa4eb1db0534e"
+  },
+  "rc5/0001-feat-sidebar-right-add-session-rendering-holds.patch": {
+    "bytes": 38912,
+    "sha256": "08d64c20da702c8fe5d1d8d130c1c2eaa37a3169d72619fa581c12f3bf6a98a1"
+  },
+  "rc5/0002-feat-desktop-load-trusted-profile-main-extensions.patch": {
+    "bytes": 22242,
+    "sha256": "2ae8fbff5da3290225e4d01b5d5ed9636b0702625c6b2ad5560e06ebc13469a6"
+  },
+  "rc5/0003-feat-desktop-report-resolved-and-running-main-extens.patch": {
+    "bytes": 18747,
+    "sha256": "3253be7cc66ff6a6fb0a1d3f55f1ca70736e8d141954be042dd5b41e6ffbbb8b"
+  },
+  "rc5/0004-feat-desktop-compose-admitted-native-sidebar-views.patch": {
+    "bytes": 87721,
+    "sha256": "f1d4354a10e2edeecb55964b2926a8bc980dcf608a645ab5cb676ca1637ac67f"
+  },
+  "rc5/0005-fix-client-admit-coded-browser-errors-in-native-comp.patch": {
+    "bytes": 2986,
+    "sha256": "19d2bb7f2e69cad166ca38998ce4631ad8b737b4a546f4fdd3acde60101358dd"
+  },
+  "rc5/0006-fix-desktop-acknowledge-native-same-document-navigat.patch": {
+    "bytes": 3625,
+    "sha256": "50f611077c8444813dbed5b1bfff64b2ff197bfdf815c222981e233f0db013cb"
+  },
+  "rc5/0007-fix-desktop-restore-auth-in-the-native-lease-partiti.patch": {
+    "bytes": 5021,
+    "sha256": "abd5e74491a65158cbcabdf48eb974df2becf6cb280fd2680097ad9891f435b2"
+  },
+  "rc5/0008-feat-desktop-adopt-native-children-in-admitted-sideb.patch": {
+    "bytes": 37069,
+    "sha256": "5c531c9c2552811cde37533c3955d88563aff2b2d7296602c9b5e56a697de3c8"
+  },
+  "rc5/0009-fix-desktop-publish-complete-native-child-close-reco.patch": {
+    "bytes": 8355,
+    "sha256": "344320aff5894f9cd9e1366f568692c1b4543d30bd2f0b2dca94bf8e16117ec3"
+  },
+  "rc5/0010-fix-desktop-bundle-structured-errors-in-sandboxed-pr.patch": {
+    "bytes": 925,
+    "sha256": "8729cb3ba29860a60b088d6096a121393934cd2f6062ceaad68758436ecf7f49"
+  },
+  "rc5/0011-feat-desktop-offer-persistent-Sidebar-sessions-per-D.patch": {
+    "bytes": 14969,
+    "sha256": "49b22c3db387e9203625e52cc68212956e32fd866c7c3bdb540d2160e8456e4d"
+  },
+  "rc5/0012-feat-desktop-retain-sidebar-session-cookies-across-r.patch": {
+    "bytes": 15478,
+    "sha256": "12f936d4896916e08b899d7080a710b5f9ea95ee8f9c7ffd68a60fa9758b649d"
+  },
+  "rc5/0013-fix-desktop-honor-sidebar-session-cookie-sidecar-con.patch": {
+    "bytes": 32574,
+    "sha256": "0c8da598075cdabf2c16e32dd0a921937648ac429628a14da8d38841476c404f"
+  },
+  "rc5/0014-fix-desktop-retry-cookie-protection-without-failing-.patch": {
+    "bytes": 6712,
+    "sha256": "bffda202bc2ce8a8f53c7fd1d1509e3e2a60f873c59a2b003e3ce18c396a6704"
+  },
+  "rc5/0015-fix-desktop-preserve-host-only-cookie-identity-in-se.patch": {
+    "bytes": 3973,
+    "sha256": "86321ffb69cc60e70e78db4458bb678d9c3ba07aa6cdd126602ee954ab59e2c6"
+  },
+  "rc5/0016-fix-desktop-restore-session-cookies-before-checkpoin.patch": {
+    "bytes": 6255,
+    "sha256": "7e7b180cf74422a196953f6dfe8eeecbb3ce60840a9415f18661d04365a28889"
+  },
+  "rc5/0017-fix-desktop-restore-sidebar-cookies-once-before-gues.patch": {
+    "bytes": 18815,
+    "sha256": "b07086bcba5e887f511b7591d8957e0ba1e3b2e137f1f9d48e3c69348dc0c8bf"
   }
 }
