@@ -140,11 +140,11 @@ export async function preflightReinstall(root: string, home: string): Promise<st
   ].every(path => existsSync(path + '.before-dsh-host-patch')))) {
     throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'An applied host patch has no usable external restore baseline.')
   }
-  if (existsSync(archive) ? readAsarFile(archive, cli) === undefined : !existsSync(join(root, 'resources', 'app', cli))) {
+  if (archiveExists(archive) ? readAsarFile(archive, cli) === undefined : !existsSync(join(root, 'resources', 'app', cli))) {
     throw new ReinstallPreflightError('REINSTALL_CLI_MISSING', 'The authoritative Desktop CLI is missing or unreadable.')
   }
   validateCliBackup(join(root, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'), 'shim')
-  if (!existsSync(archive)) validateCliBackup(join(root, 'resources', 'app', cli), 'host')
+  if (!archiveExists(archive)) validateCliBackup(join(root, 'resources', 'app', cli), 'host')
   const main = join(root, 'resources', 'app', 'lib', 'main.js')
   if (!archiveExists(join(root, 'resources', 'app.asar')) && existsSync(main + '.before-bridge')) {
     const original = readFileSync(main + '.before-bridge', 'utf8')
@@ -153,7 +153,7 @@ export async function preflightReinstall(root: string, home: string): Promise<st
       throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'The legacy bridge differs from its restore baseline.')
     }
   }
-  if (!existsSync(archive) && existsSync(archive + '.before-bridge')) {
+  if (!archiveExists(archive) && existsSync(archive + '.before-bridge')) {
     const preserved = readAsarFile(archive + '.before-bridge', 'lib/main.js')
     const current = readFileSync(existsSync(main + '.before-dsh-host-patch') ? main + '.before-dsh-host-patch' : main, 'utf8')
     if (preserved === undefined || preserved.toString('utf8') !== (stripLegacyBridge(current) ?? current)) {
