@@ -438,7 +438,7 @@ app.whenReady().then(async () => {
 			// would need a shell restart. The stamp makes every load read the current
 			// bytes; start() itself stops the previous instance, so this reloads in place.
 			const bridge = await import(bridgeUrl.href + "?v=" + Date.now());
-			bridge.start();
+			bridge.start({ reload: why === "file changed" });
 			console.log("[dsh-browser-bridge] started" + (why ? " (" + why + ")" : ""));
 		} catch (error) {
 			console.error("[dsh-browser-bridge] start failed:", error);

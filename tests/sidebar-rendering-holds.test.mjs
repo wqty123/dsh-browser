@@ -223,3 +223,26 @@ test('extension and legacy imports share one listener and honor the supplied DSH
     assert.equal(JSON.parse(readFileSync(join(directory, 'dsh-builtin-browser-bridge.json'), 'utf8')).pid, process.pid)
   } finally { bridge.stop() }
 })
+
+test('a legacy file-change reload replaces the listener and invokes the old module cleanup', async () => {
+  const copy = await import(pathToFileURL(join(directory, 'bridge-copy.mjs')))
+  contents.splice(0)
+  const first = bridge.start({ app: application, dshHome: directory })
+  await once(first, 'listening')
+  let cleaned = false
+  const active = globalThis[Symbol.for('dsh-builtin-browser.bridge.active')]
+  const stop = active.stop
+  active.stop = () => { cleaned = true; stop() }
+  const second = copy.start({ app: application, dshHome: directory, reload: true })
+  try {
+    assert.notEqual(second, first)
+    assert.equal(cleaned, true)
+    assert.equal(first.listening, false)
+    assert.equal(application.listenerCount('web-contents-created'), 1)
+    assert.equal(application.listenerCount('will-quit'), 1)
+    await once(second, 'listening')
+    assert.equal(bridge.start(), second, 'an ordinary second startup still deduplicates after reload')
+    const source = readFileSync(new URL('../desktop-bridge/install.mjs', import.meta.url), 'utf8')
+    assert.ok(source.includes('bridge.start({ reload: why === "file changed" })'))
+  } finally { copy.stop() }
+})

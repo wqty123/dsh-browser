@@ -1214,7 +1214,12 @@ export function stop() {
 
 /** Start the bridge: loopback listener + published endpoint file + token. */
 export function start(api) {
-  if (globalThis[ACTIVE]) return globalThis[ACTIVE].server
+  const current = globalThis[ACTIVE]
+  if (current) {
+    if (api?.reload !== true) return current.server
+    if (typeof current.stop === 'function') current.stop()
+    else stop()
+  }
   const application = api?.app ?? app
   // Sidebar guests are created by the shell at any time (including after a
   // bridge reload), so configure both the existing guests and every future one.
@@ -1378,6 +1383,6 @@ export function start(api) {
   keepalive.unref?.()
   const onQuit = () => stop()
   application.on('will-quit', onQuit)
-  globalThis[ACTIVE] = { server, keepalive, onQuit, onGuestCreated }
+  globalThis[ACTIVE] = { server, keepalive, onQuit, onGuestCreated, stop }
   return server
 }
