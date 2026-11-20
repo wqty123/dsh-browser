@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { launchMaintenanceBroker, quoteWin32Argument } from '../lib/browser-electron/maintenance-broker.js'
@@ -121,4 +121,16 @@ windowsTest('malformed broker answers and executor failures are not reported as 
     await assert.rejects(launchMaintenanceBroker(options, { execFile: async () => ({ stdout, stderr: '' }) }), /unreadable|invalid|no valid process id/)
   }
   await assert.rejects(launchMaintenanceBroker(options, { execFile: async () => { throw new Error('access denied by policy') } }), /access denied by policy/)
+})
+
+test('macOS starts the coordinator as a detached process with the explicit environment', { skip: process.platform === 'win32' }, async t => {
+  const options = fixture(t)
+  const marker = join(options.cwd, 'started.txt')
+  const answer = await launchMaintenanceBroker({
+    ...options, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.env.BROKER_TEST_VALUE + ':' + String(process.env.ELECTRON_RUN_AS_NODE))`],
+    environment: { BROKER_TEST_VALUE: 'detached', ELECTRON_RUN_AS_NODE: undefined },
+  }, { platform: 'darwin', execFile: () => { throw new Error('WMI is not used on macOS') } })
+  assert.ok(Number.isSafeInteger(answer.pid) && answer.pid > 0)
+  for (let i = 0; i < 50 && !existsSync(marker); i++) await new Promise(r => setTimeout(r, 100))
+  assert.equal(readFileSync(marker, 'utf8'), 'detached:undefined')
 })

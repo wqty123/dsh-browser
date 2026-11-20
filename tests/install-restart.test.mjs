@@ -1,7 +1,7 @@
 // Maintenance refuses a running target and never terminates its host.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, realpathSync } from 'node:fs'
 import { resolve, join, dirname, basename } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
@@ -34,7 +34,7 @@ test('test mode never launches a Desktop executable', () => {
   const end = source.indexOf('\nconst args =', start)
   let spawns = 0
   const launch = runInNewContext(source.slice(start, end) + '; startShell', {
-    join: (...parts) => parts.join('/'), existsSync: () => true,
+    join: (...parts) => parts.join('/'), existsSync: () => true, layoutPaths: root => ({ executable: root + '/DeepSeek Harness.exe' }),
     process: { env: { DSH_BROWSER_TEST: '1' } }, console: { error() {}, log() {} },
     spawn() { spawns++; throw Error('must not spawn') },
   })
@@ -107,7 +107,7 @@ function processSelection() {
 test('the selected GUI processes exclude native CLI, installer and other installations', () => {
   const root = resolve('test-desktop')
   const exe = resolve(root, 'DeepSeek Harness.exe')
-  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve })
+  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve, layoutPaths: root => ({ executable: resolve(root, 'DeepSeek Harness.exe') }), basename, process: { platform: 'win32' } })
   const row = (pid, parent, commandLine, executablePath = exe) => ({
     ProcessId: pid, ParentProcessId: parent, Name: 'DeepSeek Harness.exe', ExecutablePath: executablePath, CommandLine: commandLine,
   })
@@ -125,7 +125,7 @@ test('the selected GUI processes exclude native CLI, installer and other install
 test('an installer beneath the GUI refuses before any GUI process can be closed', () => {
   const root = resolve('test-desktop')
   const exe = resolve(root, 'DeepSeek Harness.exe')
-  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve })
+  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve, layoutPaths: root => ({ executable: resolve(root, 'DeepSeek Harness.exe') }), basename, process: { platform: 'win32' } })
   const rows = [
     { ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness.exe', ExecutablePath: exe, CommandLine: '"' + exe + '"' },
     { ProcessId: 20, ParentProcessId: 10, Name: 'DeepSeek Harness.exe', ExecutablePath: exe, CommandLine: '"' + exe + '" --expose-internals cli.js' },
@@ -138,11 +138,11 @@ test('failed or malformed process enumeration never means the GUI is stopped', (
   const root = resolve('test-desktop')
   for (const output of [undefined, '', 'not json', 'null', '[]', '{}', '[null]']) {
     const enumerate = runInNewContext(processSelection() + '; shellProcesses', {
-      resolve, process: { pid: 21 }, runCapture: () => output,
+      resolve, layoutPaths: root => ({ executable: resolve(root, 'DeepSeek Harness.exe') }), basename, process: { pid: 21, platform: 'win32' }, runCapture: () => output,
     })
     assert.throws(() => enumerate(root), /process|enumerate|parse|invalid/i)
   }
-  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve })
+  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve, layoutPaths: root => ({ executable: resolve(root, 'DeepSeek Harness.exe') }), basename, process: { platform: 'win32' } })
   assert.throws(() => select([
     { ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness.exe', ExecutablePath: null, CommandLine: null },
   ], root, 21), /could not identify/)
@@ -153,7 +153,7 @@ test('the process query declares UTF-8 before matching Unicode installation path
   const exe = resolve(root, 'DeepSeek Harness.exe')
   let query
   const enumerate = runInNewContext(processSelection() + '; shellProcesses', {
-    resolve, process: { pid: 999 },
+    resolve, layoutPaths: root => ({ executable: resolve(root, 'DeepSeek Harness.exe') }), basename, process: { pid: 999, platform: 'win32' },
     runCapture: (command, args) => {
       assert.equal(command, 'powershell.exe')
       query = args.at(-1)
@@ -174,7 +174,7 @@ test('GUI restart clears Electron Node mode while retaining the remaining enviro
     DSH_BRIDGE_DETACHED: '1', DSH_BRIDGE_HANDOFF_PARENT: '21',
     DSH_BRIDGE_ACTION_RESULT_FILE: 'private-result.json', DSH_BRIDGE_ACTION_LOG_FILE: 'private-log.txt' }
   const startGui = runInNewContext(source.slice(start, end) + '; startShell', {
-    join: (...parts) => parts.join('/'),
+    join: (...parts) => parts.join('/'), layoutPaths: root => ({ executable: root + '/DeepSeek Harness.exe' }),
     existsSync: () => true,
     process: { env: environment },
     console: { log() {}, error() {} },
@@ -191,4 +191,23 @@ test('GUI restart clears Electron Node mode while retaining the remaining enviro
   assert.equal(environment.ELECTRON_RUN_AS_NODE, '1', 'the parent host remains in its original mode')
   assert.equal(options.detached, true)
   assert.equal(detached, true)
+})
+
+test('a macOS installation path matches the running Desktop by its on-disk spelling', { skip: process.platform === 'win32' }, () => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-case-'))
+  try {
+    const root = join(base, 'DeepSeek Harness.app')
+    const exe = join(root, 'Contents', 'MacOS', 'DeepSeek Harness')
+    mkdirSync(dirname(exe), { recursive: true })
+    writeFileSync(exe, 'x')
+    const select = runInNewContext(processSelection() + '; selectShellProcesses', {
+      resolve, basename, realpathSync, process: { platform: 'darwin' },
+      layoutPaths: r => ({ executable: join(r, 'Contents', 'MacOS', 'DeepSeek Harness') }),
+    })
+    const rows = [{ ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness', ExecutablePath: exe, CommandLine: exe }]
+    assert.deepEqual(Array.from(select(rows, root, 21)), [10])
+    const caseInsensitive = existsSync(root.toLowerCase())
+    assert.deepEqual(Array.from(select(rows, join(base, 'deepseek harness.app'), 21)), caseInsensitive ? [10] : [],
+      'another spelling is the same app only when the volume says so')
+  } finally { rmSync(base, { recursive: true, force: true }) }
 })

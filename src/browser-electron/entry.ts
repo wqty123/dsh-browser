@@ -41,7 +41,7 @@ import { findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
 import { readBridgeEndpoint } from './bridge-endpoint.ts'
 import { runBridgeAction } from './bridge-install.ts'
 import { prepareBridgeMaintenance } from './bridge-maintenance.ts'
-import { commitAutomaticMaintenance, readAutomaticMaintenance, startAutomaticMaintenance } from './automatic-maintenance.ts'
+import { automaticMaintenanceSupported, commitAutomaticMaintenance, readAutomaticMaintenance, startAutomaticMaintenance } from './automatic-maintenance.ts'
 import { AUTOMATIC_MAINTENANCE_ROUTE, createAutomaticMaintenanceHandler } from './maintenance-route.ts'
 import { runWithManualBridgePreference } from './bridge-auto.ts'
 import { replyJson, writeJsonText } from './json-reply.ts'
@@ -706,7 +706,9 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     try {
       injectStatus(['webServer'], (host) => {
         const automaticMaintenance = createAutomaticMaintenanceHandler({
-          supported: () => process.platform === 'win32',
+          supported: () => automaticMaintenanceSupported(),
+          // Windows quits through the Desktop's own menu, opened by the panel; macOS through its Quit Apple event.
+          quit: () => process.platform === 'win32' ? 'menu' : 'self',
           busy: () => bridgeActionRunning,
           read: () => readAutomaticMaintenance(),
           commit: async id => { await commitAutomaticMaintenance(id) },

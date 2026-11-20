@@ -67,6 +67,7 @@
 import * as nodeFs from 'node:fs'
 import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { homedir } from 'node:os'
 
 /**
  * The filesystem used for every installer operation.
@@ -87,7 +88,7 @@ const archiveFs = (() => {
 })()
 const { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync,
   readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } = archiveFs
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 function isWithin(root, path) {
   const part = relative(root, path)
@@ -146,11 +147,14 @@ function findDefaultInstall(testRoot) {
     if (!isWithin(testRoot, resolve(candidate))) return false
     try { return isWithin(testRoot, realpathSync(candidate)) } catch { return false }
   }
-  const looksInstalled = candidate => permitted(candidate) && (existsSync(join(candidate, 'resources', 'app', 'lib', 'main.js'))
-    || existsSync(join(candidate, 'resources', 'app.asar')))
+  const looksInstalled = candidate => {
+    if (!permitted(candidate)) return false
+    const resources = layoutPaths(candidate)?.resources
+    return resources !== undefined && (existsSync(join(resources, 'app', 'lib', 'main.js')) || existsSync(join(resources, 'app.asar')))
+  }
   const probe = (base) => {
     if (!permitted(base)) return undefined
-    for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
+    for (const named of ['DSH Desktop', 'DeepSeek Harness', 'DSH Desktop.app', 'DeepSeek Harness.app']) {
       const candidate = join(base, named)
       if (looksInstalled(candidate)) return candidate
     }
@@ -177,13 +181,15 @@ function findDefaultInstall(testRoot) {
   const roots = [
     ...(localAppData === '' ? [] : [join(localAppData, 'Programs')]),
     process.env['ProgramFiles'], process.env['ProgramFiles(x86)'], process.env.APPDATA, process.env.ProgramData,
+    ...(process.platform === 'darwin' ? ['/Applications', join(homedir(), 'Applications')] : []),
   ].filter(base => typeof base === 'string' && base !== '')
   for (const base of roots) {
     const found = probe(base)
     if (found !== undefined) return found
   }
   return testRoot === undefined
-    ? join(localAppData === '' ? '.' : join(localAppData, 'Programs'), 'DeepSeek Harness')
+    ? process.platform === 'darwin' ? '/Applications/DeepSeek Harness.app'
+      : join(localAppData === '' ? '.' : join(localAppData, 'Programs'), 'DeepSeek Harness')
     : join(testRoot, 'no-test-desktop-found')
 }
 
@@ -219,14 +225,20 @@ function selectShellProcesses(rows, root, selfPid) {
     ancestors.add(cursor)
     cursor = byPid.get(cursor)?.ParentProcessId
   }
-  const expectedExe = resolve(root, 'DeepSeek Harness.exe').toLowerCase()
+  // Windows compares case-insensitively. Elsewhere the on-disk spelling decides: `realpathSync.native`
+  // returns the volume's own case, so `/applications/…` matches the running app on a case-insensitive
+  // APFS volume while `Apps` and `apps` stay distinct on a case-sensitive one.
+  const fold = process.platform === 'win32' ? value => value.toLowerCase()
+    : value => { try { return realpathSync.native(value) } catch { return value } }
+  const expectedExe = fold(resolve(layoutPaths(root).executable))
+  const expectedName = fold(basename(expectedExe))
   const selected = []
   for (const row of rows) {
-    if (String(row.Name ?? '').toLowerCase() !== 'deepseek harness.exe') continue
+    if (fold(String(row.Name ?? '')) !== expectedName) continue
     if (typeof row.ExecutablePath !== 'string' || row.ExecutablePath === '') {
       throw new Error('could not identify a running DeepSeek Harness process; refusing to close or patch the application')
     }
-    if (resolve(row.ExecutablePath).toLowerCase() !== expectedExe) continue
+    if (fold(resolve(row.ExecutablePath)) !== expectedExe) continue
     if (!Number.isSafeInteger(row.ProcessId) || row.ProcessId <= 0 || typeof row.CommandLine !== 'string') {
       throw new Error('the Desktop process table is incomplete; refusing to close or patch the application')
     }
@@ -250,6 +262,7 @@ function selectShellProcesses(rows, root, selfPid) {
  * @returns GUI and Chromium helper process ids.
  */
 function shellProcesses(root) {
+  if (process.platform === 'darwin') return selectShellProcesses(posixProcessTable(), root, process.pid)
   const text = runCapture('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-Command',
     '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
@@ -264,6 +277,33 @@ function shellProcesses(root) {
     || !Number.isSafeInteger(row.ProcessId) || !Number.isSafeInteger(row.ParentProcessId)
     || typeof row.Name !== 'string')) throw new Error('the Desktop process table is invalid')
   return selectShellProcesses(rows, root, process.pid)
+}
+
+/**
+ * The process table on macOS/Linux, in the shape the Windows CIM query returns.
+ * `comm` is the full executable path (it may contain spaces, so it is read in its own pass);
+ * `args` is the command line the node-mode filter reads.
+ * @returns every process row.
+ */
+function posixProcessTable() {
+  const executables = runCapture('ps', ['-axww', '-o', 'pid=,ppid=,comm='])
+  const commands = runCapture('ps', ['-axww', '-o', 'pid=,args='])
+  if (executables === undefined || commands === undefined) throw new Error('could not enumerate Desktop processes')
+  const byPid = new Map()
+  for (const line of commands.split('\n')) {
+    const match = /^\s*(\d+)\s(.*)$/.exec(line)
+    if (match !== null) byPid.set(Number(match[1]), match[2])
+  }
+  const rows = []
+  for (const line of executables.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s(.*)$/.exec(line)
+    if (match === null) continue
+    const path = match[3].trim()
+    rows.push({ ProcessId: Number(match[1]), ParentProcessId: Number(match[2]), Name: basename(path),
+      ExecutablePath: isAbsolute(path) ? path : '', CommandLine: byPid.get(Number(match[1])) ?? '' })
+  }
+  if (rows.length === 0) throw new Error('the Desktop process table is invalid')
+  return rows
 }
 
 /**
@@ -290,7 +330,7 @@ function runCapture(command, argv) {
  */
 let lastStartedPid
 function startShell(root) {
-  const exe = join(root, 'DeepSeek Harness.exe')
+  const exe = layoutPaths(root).executable
   if (!existsSync(exe)) {
     console.error(`could not start DSH Desktop: ${exe} does not exist; start it yourself.`)
     return false
@@ -339,7 +379,8 @@ const revert = args.includes('--revert')
 /** Start after maintenance only when the target was already closed; never close a running shell. */
 const restart = args.includes('--restart')
 
-const resourcesDir = join(installRoot, 'resources')
+const installPaths = layoutPaths(installRoot) ?? process.exit(1)
+const resourcesDir = installPaths.resources
 const appDir = join(resourcesDir, 'app')
 const asarPath = join(resourcesDir, 'app.asar')
 const asarMoved = `${asarPath}.before-bridge`
@@ -365,7 +406,7 @@ function copyBridgeModules() {
 //
 // Without them the CLI dies with MODULE_NOT_FOUND even though the app itself
 // runs fine (the shell resolves everything through app.getAppPath()).
-const cliShimPath = join(resourcesDir, 'runtime', 'cli', 'bin', 'dsh.cmd')
+const cliShimPath = installPaths.cliLauncher
 const cliShimBackup = `${cliShimPath}.before-bridge`
 const hostCliPath = join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js')
 const hostCliBackup = `${hostCliPath}.before-bridge`
@@ -546,6 +587,7 @@ function patchCliShim() {
   if (!existsSync(cliShimPath)) return 'launcher not present (skipped)'
   const text = readFileSync(cliShimPath, 'utf8')
   if (text.includes(CLI_SHIM_MARKER)) return 'already patched'
+  if (!cliShimPath.endsWith('.cmd')) return patchPosixCliShim(text)
   if (!/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/.test(text)) return 'unexpected launcher shape (skipped)'
   if (!existsSync(cliShimBackup)) copyFileSync(cliShimPath, cliShimBackup)
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
@@ -560,6 +602,27 @@ function patchCliShim() {
     ? `${injection}${eol}${text}`
     : text.replace(setLocal[0], `${setLocal[0]}${eol}${injection}`)
   writeFileSync(cliShimPath, withVariables.replace(/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/, '%DSH_APP%\\dsh\\'))
+  return 'patched'
+}
+
+/**
+ * The macOS launcher (`runtime/cli/bin/dsh`, a POSIX shell script) spells
+ * `$resources/app.asar/dsh/…` the same way the Windows one does; it gets the same treatment.
+ * @param text - the launcher's current text.
+ * @returns what happened, for the install log.
+ */
+function patchPosixCliShim(text) {
+  const resourcesLine = /^resources=.*$/m.exec(text)
+  if (resourcesLine === null || !text.includes('"$resources/app.asar/dsh/')) return 'unexpected launcher shape (skipped)'
+  if (!existsSync(cliShimBackup)) copyFileSync(cliShimPath, cliShimBackup)
+  const injection = [
+    `# ${CLI_SHIM_MARKER} ($resources/app when the bridge is installed,`,
+    '# $resources/app.asar on a stock installation).',
+    'dsh_app=$resources/app',
+    '[ -f "$dsh_app/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js" ] || dsh_app=$resources/app.asar',
+  ].join('\n')
+  writeFileSync(cliShimPath, text.replace(resourcesLine[0], `${resourcesLine[0]}\n${injection}`)
+    .replace('"$resources/app.asar/dsh/', '"$dsh_app/dsh/'))
   return 'patched'
 }
 
@@ -580,8 +643,10 @@ function patchHostCli() {
   if (!existsSync(hostCliPath)) return 'cli.js not present (skipped)'
   const text = readFileSync(hostCliPath, 'utf8')
   if (text.includes(HOST_CLI_MARKER)) return 'already patched'
-  const before = '\tawait runDesktopCli(runtimeDir, join(dirname(runtimeArchivePath(runtimeDir) ?? runtimeDir), "runtime"));'
-  if (!text.includes(before)) return 'unexpected cli.js shape (skipped)'
+  // Desktop builds differ in what else they pass (`runDesktopCli(runtimeDir, <support>)` in
+  // 0.2.2-rc.3, `runDesktopCli(<support>)` in rc.5); only the support-directory expression is ours.
+  const call = /^(\t)await runDesktopCli\(((?:runtimeDir, )?)join\(dirname\(runtimeArchivePath\(runtimeDir\) \?\? runtimeDir\), "runtime"\)\);$/m.exec(text)
+  if (call === null) return 'unexpected cli.js shape (skipped)'
   if (!existsSync(hostCliBackup)) copyFileSync(hostCliPath, hostCliBackup)
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const after = [
@@ -589,9 +654,9 @@ function patchHostCli() {
     '\t// so an installation whose app.asar was moved aside still finds its runtime.',
     '\tconst cliOwnerDir = dirname(runtimeDir);',
     '\tconst cliSupportRoot = basename(cliOwnerDir) === "app" || basename(cliOwnerDir) === "app.asar" ? dirname(cliOwnerDir) : cliOwnerDir;',
-    '\tawait runDesktopCli(runtimeDir, join(cliSupportRoot, "runtime"));',
+    `\tawait runDesktopCli(${call[2]}join(cliSupportRoot, "runtime"));`,
   ].join(eol)
-  writeFileSync(hostCliPath, text.replace(before, after))
+  writeFileSync(hostCliPath, text.replace(call[0], after))
   return 'patched'
 }
 
@@ -624,15 +689,39 @@ function readIdentityRule() {
     const raw = JSON.parse(readFileSync(new URL('./desktop-identity.json', import.meta.url), 'utf8'))
     const names = raw.packageNames
     const mainEntry = raw.mainEntry
+    const layouts = raw.layouts
+    const field = value => typeof value === 'string' && value !== ''
     if (!Array.isArray(names) || names.length === 0 || names.some(name => typeof name !== 'string')
-      || typeof mainEntry !== 'string' || mainEntry === '') {
-      console.error('desktop-identity.json is malformed: expected packageNames[] and mainEntry')
+      || typeof mainEntry !== 'string' || mainEntry === ''
+      || !Array.isArray(layouts) || layouts.length === 0 || layouts.at(-1)?.marker !== undefined
+      || layouts.some(l => l === null || typeof l !== 'object' || !field(l.name) || !field(l.resources)
+        || !field(l.executable) || !field(l.cliLauncher) || (l.marker !== undefined && !field(l.marker)))) {
+      console.error('desktop-identity.json is malformed: expected packageNames[], mainEntry and layouts[]')
       return undefined
     }
-    return { packageNames: names, mainEntry }
+    return { packageNames: names, mainEntry, layouts }
   } catch (error) {
     console.error(`desktop-identity.json could not be read: ${String(error)}`)
     return undefined
+  }
+}
+
+/**
+ * Absolute paths an install keeps, from the first layout (desktop-identity.json) whose marker it
+ * has: a macOS `.app` bundle keeps resources in Contents/Resources, a Windows install in resources/.
+ * @param root - the install directory.
+ * @returns resources directory, GUI executable and CLI launcher, or undefined without a rule.
+ */
+function layoutPaths(root) {
+  const rule = readIdentityRule()
+  if (rule === undefined) return undefined
+  const layout = rule.layouts.find(l => l.marker === undefined || existsSync(join(root, ...l.marker.split('/'))))
+  const resources = join(root, ...layout.resources.split('/'))
+  return {
+    name: layout.name,
+    resources,
+    executable: join(root, ...layout.executable.split('/')),
+    cliLauncher: join(resources, ...layout.cliLauncher.split('/')),
   }
 }
 
@@ -753,7 +842,7 @@ function validateArchive(archive) {
 function verifyDesktopIdentity(root) {
   const rule = readIdentityRule()
   if (rule === undefined) return { ok: false, reason: 'the identity rule is unavailable' }
-  const resources = join(root, 'resources')
+  const resources = layoutPaths(root).resources
   const archive = join(resources, 'app.asar')
   const appDir = join(resources, 'app')
   const archivePresent = existsSync(archive)
