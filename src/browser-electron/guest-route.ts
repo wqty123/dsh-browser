@@ -6,9 +6,12 @@
  */
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import { promises as dns } from 'node:dns'
+import { randomUUID } from 'node:crypto'
 import { guestRuntimeScript } from './guest-runtime.ts'
-import { GuestCookieJar } from './guest-cookie-jar.ts'
+import type { GuestCookieJar } from './guest-cookie-jar.ts'
+import { localGuestCookies } from './guest-cookie-store.ts'
 import { rewriteCss } from './guest-css.ts'
+import { GuestStorage, localGuestStorage } from './guest-storage.ts'
 
 /** Prefix every proxied document and subresource lives under. */
 
@@ -36,8 +39,6 @@ function isSelfTarget(url: URL): boolean {
 export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/isolated-guest'
 
 class UnsafeGuestTargetError extends Error {}
-
-const cookieJar = new GuestCookieJar()
 
 /** HTML responses larger than this pass through without rewriting. */
 const MAX_REWRITE_BYTES = 4 * 1024 * 1024
@@ -154,46 +155,33 @@ function stripDocumentPolicies(html: string): string {
  */
 export function rewriteDocument(html: string, base: URL): string {
   const proxied = (raw: string): string | undefined => proxyReference(raw, base)
-  return stripDocumentPolicies(html).replace(
-    // 三种引号形式都要改写，因为真实页面三种都在用：`src="/a.js"`、`src='/a.js'`，以及压缩过/服务端渲染
-    // 的 HTML 更偏爱的无引号写法 `src=/a.js`。只处理带引号的两个，会让所有无引号资源指向 DSH 宿主而不是
-    // 站点——实测 example.com 唯一的脚本就是 `<script src=/s.js>`：文档看着正常，脚本和样式全部 404。
-    /(\s(?:href|src|poster|data-src|action)\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/giu,
-    (match, prefix: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
-      const value = doubleQuoted ?? singleQuoted ?? bare
-      if (value === undefined) return match
-      const next = proxied(decodeAttribute(value))
+  const attributes = (tag: string): string => tag.replace(
+    /(\s+)([^\s"'<>/=]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/gu,
+    (match, space: string, name: string, equals: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
+      const value = decodeAttribute(doubleQuoted ?? singleQuoted ?? bare ?? '')
+      const attribute = name.toLowerCase()
+      let next: string | undefined
+      if (['href', 'src', 'poster', 'data-src', 'action'].includes(attribute)) next = proxied(value)
+      else if (attribute === 'target' && /^_(?:blank|new|top|parent)$/iu.test(value)) next = '_self'
+      else if (attribute === 'srcset') {
+        next = value.split(',').map(part => {
+          const [url, descriptor] = part.trim().split(/\s+/u)
+          const rewritten = url === undefined ? undefined : proxied(url)
+          if (rewritten === undefined) return part.trim()
+          return descriptor === undefined ? rewritten : `${rewritten} ${descriptor}`
+        }).join(', ')
+      } else if (attribute === 'style') next = rewriteCss(value, proxied)
       if (next === undefined) return match
-      const quote = singleQuoted !== undefined ? "'" : '"'
-      return `${prefix}${quote}${escapeAttribute(next, quote)}${quote}`
-    },
-  ).replace(
-    // `target="_blank"` 让点击**新开窗口**，代理改写就白做：实测百度新闻 107 个链接里 49 个带
-    // `_blank`，点一下仍跳出侧栏（用户报的「在侧栏点链接却跳到 Edge」）。把目标改成 `_self`，
-    // 导航就落回同一个 iframe——「页内导航不外跳」是这一步的结果，不靠额外拦截。
-    /(\s)target\s*=\s*(["'])_(?:blank|new|top|parent)\2/giu,
-    (match, space: string) => `${space}target="_self"`,
-  ).replace(
-    /(\ssrcset\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/giu,
-    (match, prefix: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
-      const value = doubleQuoted ?? singleQuoted ?? bare ?? ''
-      const quote = singleQuoted !== undefined ? "'" : '"'
-      const rewritten = decodeAttribute(value).split(',').map(part => {
-        const [url, descriptor] = part.trim().split(/\s+/u)
-        const next = url === undefined ? undefined : proxied(url)
-        if (next === undefined) return part.trim()
-        return descriptor === undefined ? next : `${next} ${descriptor}`
-      }).join(', ')
-      return `${prefix}${quote}${escapeAttribute(rewritten, quote)}${quote}`
-    },
-  ).replace(
-    /(<style\b[^>]*>)([\s\S]*?)(<\/style\s*>)/giu,
-    (_match, open: string, css: string, close: string) => open + rewriteCss(css, proxied) + close,
-  ).replace(
-    /(\sstyle\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/giu,
-    (_match, prefix: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
       const quote = singleQuoted === undefined ? '"' : "'"
-      return prefix + quote + escapeAttribute(rewriteCss(decodeAttribute(doubleQuoted ?? singleQuoted ?? bare ?? ''), proxied), quote) + quote
+      return space + name + equals + quote + escapeAttribute(next, quote) + quote
+    },
+  )
+  return stripDocumentPolicies(html).replace(
+    /<!--[\s\S]*?-->|(<(script|style|textarea|title|xmp|iframe|noembed|noframes)\b(?:[^>"']|"[^"]*"|'[^']*')*>)([\s\S]*?)(<\/\2\s*>|$)|<[a-z][a-z\d:-]*\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu,
+    (markup, open: string | undefined, kind: string | undefined, content: string, close: string) => {
+      if (markup.startsWith('<!--')) return markup
+      if (open === undefined) return attributes(markup)
+      return attributes(open) + (kind?.toLowerCase() === 'style' ? rewriteCss(content, proxied) : content) + close
     },
   )
 }
@@ -223,6 +211,8 @@ export async function handleGuest(
   response: ServerResponse,
   overlayScript: string,
   sessionId: string,
+  cookies?: GuestCookieJar,
+  storage?: GuestStorage,
 ): Promise<void> {
   const method = request.method ?? 'GET'
   const authority = request.headers.host ?? ''
@@ -281,6 +271,31 @@ export async function handleGuest(
     response.end('guest proxy: local and DSH host targets are not allowed')
     return
   }
+  const storageToken = query.get('storage-token')
+  if (storageToken !== null) {
+    response.setHeader('cache-control', 'no-store')
+    response.setHeader('content-type', 'application/json')
+    if (method !== 'POST') { writeHead(405); response.end(); return }
+    let size = 0
+    const chunks: Buffer[] = []
+    try {
+      for await (const chunk of request) {
+        const bytes = Buffer.from(chunk)
+        size += bytes.length
+        if (size > 32 * 1024 * 1024) throw Object.assign(new Error(), { name: 'QuotaExceededError' })
+        chunks.push(bytes)
+      }
+      const input: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      const value = (storage ?? localGuestStorage()).execute(storageToken, target.origin, input)
+      writeHead(200); response.end(JSON.stringify({ ok: true, value }))
+    } catch (error) {
+      const name = error instanceof Error && ['SecurityError', 'TypeError', 'QuotaExceededError', 'UnknownError'].includes(error.name)
+        ? error.name : 'UnknownError'
+      writeHead(name === 'SecurityError' ? 403 : 400)
+      response.end(JSON.stringify({ ok: false, name }))
+    }
+    return
+  }
   const destination = request.headers['sec-fetch-dest']
   const subRequest = request.headers['x-dsh-guest-sub'] === '1'
     || (typeof destination === 'string' && destination !== 'document' && destination !== 'iframe')
@@ -288,6 +303,10 @@ export async function handleGuest(
   for (const [name, value] of Object.entries(request.headers)) {
     if (!SAFE_REQUEST_HEADERS.has(name.toLowerCase()) || value === undefined) continue
     headers.set(name, Array.isArray(value) ? value.join(', ') : value)
+  }
+  if (!subRequest) {
+    headers.delete('if-none-match')
+    headers.delete('if-modified-since')
   }
   headers.set('accept-encoding', 'identity')
   headers.set('user-agent', DESKTOP_UA)
@@ -303,6 +322,12 @@ export async function handleGuest(
         headers.set('referer', previous.href)
       }
     } catch {}
+  }
+  let cookieJar: GuestCookieJar
+  try { cookieJar = cookies ?? localGuestCookies() } catch {
+    writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
+    response.end('guest proxy: cookie storage unavailable')
+    return
   }
   const jarCookie = cookieJar.getCookieHeader(target)
   const refreshCookies = (url = target): void => {
@@ -436,7 +461,12 @@ export async function handleGuest(
     return
   }
   const raw = await upstream.text()
-  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href) + '</script>'
+  // Fetch metadata is browser-controlled: scripts must not fetch another site's storage capability.
+  const context = query.get('storage-context') ?? randomUUID()
+  const storageConfig = (destination === 'iframe' || destination === 'document') && request.headers['sec-fetch-mode'] === 'navigate'
+    && /^[\w:-]{16,128}$/u.test(context)
+    ? { token: (storage ?? localGuestStorage()).issue(target.origin, context), context } : undefined
+  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig) + '</script>'
   let body = rewriteDocument(raw, target)
   if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
   else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
@@ -446,6 +476,8 @@ export async function handleGuest(
   out.delete('etag')
   out.delete('content-md5')
   out.set('content-type', type)
+  out.delete('last-modified')
+  out.set('cache-control', 'no-store')
   writeHead(upstream.status, Object.fromEntries(out))
   response.end(body)
 }

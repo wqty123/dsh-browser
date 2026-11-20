@@ -5,12 +5,17 @@ import { once } from 'node:events'
 import { promises as dns } from 'node:dns'
 import { handleGuest, guestPath, rewriteDocument } from '../src/browser-electron/guest-route.ts'
 import { GuestCookieJar } from '../src/browser-electron/guest-cookie-jar.ts'
+import { loadGuestCookies } from '../src/browser-electron/guest-cookie-store.ts'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const nativeFetch = globalThis.fetch
 const nativeLookup = dns.lookup
 const resolved = new Map()
 let upstream, proxy, upstreamOrigin, proxyPort
 const forwarded = []
+let cookieJar = new GuestCookieJar()
 
 before(async () => {
   dns.lookup = async (hostname, options) => {
@@ -22,7 +27,30 @@ before(async () => {
   upstream = createServer(async (req, res) => {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
-    if (req.url === '/login') {
+    if (req.url === '/authenticate' && req.method === 'POST') {
+      res.writeHead(302, { location: '/secure', 'set-cookie': [
+        'express:sess=eyJmaXh0dXJlIjp0cnVlfQ==; path=/; httponly',
+        'express:sess.sig=fixture.signature_-; path=/; httponly',
+      ] })
+      res.end()
+    } else if (req.url === '/secure') {
+      if (req.headers.cookie !== 'express:sess=eyJmaXh0dXJlIjp0cnVlfQ==; express:sess.sig=fixture.signature_-') {
+        res.writeHead(302, { location: '/login' })
+        res.end()
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ cookie: req.headers.cookie }))
+      }
+    } else if (req.url === '/session-login') {
+      res.writeHead(303, { location: '/account', 'set-cookie': ['SESSION=logged-in; Secure; HttpOnly; Path=/'] })
+      res.end()
+    } else if (req.url === '/quoted-login') {
+      res.writeHead(303, { location: '/account', 'set-cookie': ['SID="abc"; Secure; Max-Age=3600; HttpOnly; Path=/'] })
+      res.end()
+    } else if (req.url === '/persistent-login') {
+      res.writeHead(303, { location: '/account', 'set-cookie': ['SAVED=yes; Max-Age=3600; HttpOnly; Path=/', 'SESSION=temporary; Path=/'] })
+      res.end()
+    } else if (req.url === '/login') {
       res.writeHead(303, { location: '/account', 'set-cookie': ['SID=logged-in; HttpOnly; Path=/', 'theme=dark; Path=/'] })
       res.end()
     } else if (req.url === '/cookie-scopes/set') {
@@ -55,7 +83,8 @@ before(async () => {
       res.writeHead(200, { 'content-type': 'application/javascript' })
       res.end('fetch("/api"); const src="/raw";')
     } else if (req.url === '/doc') {
-      res.writeHead(200, { 'content-type': 'text/html', 'x-frame-options': 'DENY' })
+      res.writeHead(200, { 'content-type': 'text/html', 'x-frame-options': 'DENY',
+        'cache-control': 'public, max-age=86400', 'last-modified': 'Mon, 01 Jan 2024 00:00:00 GMT' })
       res.end('<html><head><script>original()</script></head><body><img src="pic.png"></body></html>')
     } else if (req.url === '/csp-doc' || req.url === '/large-csp-doc') {
       res.writeHead(200, { 'content-type': 'text/html',
@@ -87,13 +116,13 @@ before(async () => {
   globalThis.fetch = (target, options) => {
     forwarded.push({ target: String(target), options: { ...options, headers: new Headers(options.headers) } })
     const url = new URL(target)
-    if (!['ordinary.example', 'warm-get.example', 'warm-head.example', 'challenge.example', 'empty.example', 'scoped.example'].includes(url.hostname)) throw new Error('unexpected upstream')
+    if (!['ordinary.example', 'warm-get.example', 'warm-head.example', 'challenge.example', 'empty.example', 'scoped.example', 'practice.expandtesting.com'].includes(url.hostname)) throw new Error('unexpected upstream')
     const headers = new Headers(options.headers)
     headers.set('x-fixture-host', url.hostname)
     return nativeFetch(upstreamOrigin + url.pathname + url.search, { ...options, headers })
   }
   proxy = createServer((req, res) => {
-    void handleGuest(req, res, '<script>overlay()</script>', 'owner').catch(error => res.destroy(error))
+    void handleGuest(req, res, '<script>overlay()</script>', 'owner', cookieJar).catch(error => res.destroy(error))
   }).listen(0, '127.0.0.1')
   await once(proxy, 'listening')
   proxyPort = proxy.address().port
@@ -217,6 +246,197 @@ test('accepts empty bodies and bodies exactly at the request limit', async () =>
   }
 })
 
+test('proxy restores persistent and session login cookies after restart', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'guest-cookies-http-'))
+  const previous = cookieJar
+  t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+  cookieJar = loadGuestCookies(directory)
+  const login = await call(guestPath('https://ordinary.example/persistent-login'), { method: 'POST' })
+  assert.equal(login.status, 303)
+  assert.equal(login.headers['set-cookie'], undefined)
+  let account = await call(login.headers.location)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SAVED=yes; SESSION=temporary')
+  cookieJar = loadGuestCookies(directory)
+  account = await call(login.headers.location)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SAVED=yes; SESSION=temporary')
+})
+
+test('Express login cookies set on a 302 reach the secure page and survive store reload', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'guest-express-'))
+  const previous = cookieJar
+  t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+  cookieJar = loadGuestCookies(directory)
+  const login = await call(guestPath('https://practice.expandtesting.com/authenticate'), {
+    method: 'POST', body: 'username=fixture&password=fixture',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+  })
+  assert.equal(login.status, 302)
+  assert.equal(login.headers['set-cookie'], undefined)
+  assert.equal(login.headers.location, guestPath('https://practice.expandtesting.com/secure') + '&s=owner')
+  const saved = JSON.parse(readFileSync(join(directory, 'cookies.json'), 'utf8')).cookies
+  assert.deepEqual(saved.map(cookie => cookie.name), ['express:sess', 'express:sess.sig'])
+  for (let request = 0; request < 2; request++) {
+    const secure = await call(login.headers.location)
+    assert.equal(secure.status, 200, 'the authenticated page must not redirect back to login')
+    assert.equal(JSON.parse(secure.body).cookie, 'express:sess=eyJmaXh0dXJlIjp0cnVlfQ==; express:sess.sig=fixture.signature_-')
+    if (request === 0) cookieJar = loadGuestCookies(directory)
+  }
+})
+
+test('session-cookie login survives a real HTTP proxy round-trip and store reload', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'guest-session-'))
+  const previous = cookieJar
+  t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+  cookieJar = loadGuestCookies(directory)
+  const login = await call(guestPath('https://ordinary.example/session-login'), { method: 'POST' })
+  assert.equal(login.status, 303)
+  assert.equal(login.headers['set-cookie'], undefined)
+  assert.equal(JSON.parse((await call(login.headers.location)).body).headers.cookie, 'SESSION=logged-in')
+  const saved = JSON.parse(readFileSync(join(directory, 'cookies.json'), 'utf8')).cookies
+  assert.equal(saved.length, 1)
+  assert.equal(saved[0].name, 'SESSION')
+  assert.equal(Object.hasOwn(saved[0], 'expiresAt'), false)
+  cookieJar = loadGuestCookies(directory)
+  const account = await call(login.headers.location)
+  assert.equal(account.status, 200)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SESSION=logged-in')
+})
+
+test('quoted login cookie survives an HTTP proxy round-trip and restart with quotes preserved', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'guest-quoted-'))
+  const previous = cookieJar
+  t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+  cookieJar = loadGuestCookies(directory)
+  const login = await call(guestPath('https://ordinary.example/quoted-login'), { method: 'POST' })
+  assert.equal(login.status, 303)
+  assert.equal(login.headers['set-cookie'], undefined)
+  assert.equal(JSON.parse((await call(login.headers.location)).body).headers.cookie, 'SID="abc"')
+  assert.equal(JSON.parse(readFileSync(join(directory, 'cookies.json'), 'utf8')).cookies[0].value, '"abc"')
+  cookieJar = loadGuestCookies(directory)
+  const account = await call(login.headers.location)
+  assert.equal(account.status, 200)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SID="abc"')
+})
+
+test('browser cookie values are validated on parse, load and use without stripping quotes', () => {
+  const target = new URL('https://ordinary.example/')
+  for (const value of ['', 'abc', '"abc"', '""', 'a=b', '"a=b"', '"', '"abc', 'abc"', '"a"b"', '"a b"', '"a,b"', '"a\\b"', '\u00ff']) {
+    const jar = new GuestCookieJar()
+    jar.setCookies(target, [`SID=${value}; Max-Age=3600`])
+    assert.equal(jar.getCookieHeader(target), `SID=${value}`)
+    const loaded = new GuestCookieJar(undefined, [{ origin: target.origin, name: 'SID', value,
+      path: '/', secure: false, expiresAt: Date.now() + 3600000 }])
+    assert.equal(loaded.getCookieHeader(target), `SID=${value}`)
+  }
+  for (const value of ['"a\nb"', 'abc\n', 'a\u0000b', 'a\tb', '\u007f', '\u0100']) {
+    const jar = new GuestCookieJar()
+    jar.setCookies(target, [`SID=${value}; Max-Age=3600`])
+    assert.equal(jar.getCookieHeader(target), undefined, JSON.stringify(value))
+    const loaded = new GuestCookieJar(undefined, [{ origin: target.origin, name: 'SID', value,
+      path: '/', secure: false, expiresAt: Date.now() + 3600000 }])
+    assert.equal(loaded.getCookieHeader(target), undefined, JSON.stringify(value))
+  }
+})
+
+test('browser cookie names accept punctuation and spaces, trim only SP and HTAB, and support nameless cookies', () => {
+  const target = new URL('https://ordinary.example/')
+  for (const name of ['express:sess', 'express:sess.sig', 'spaced name', 'punct(<>@,":)/?[]{}', '\u00a0name\u00a0']) {
+    const jar = new GuestCookieJar()
+    jar.setCookies(target, [`\t ${name}\t =\t "a=b, c\\d" \t; Path\t=\t/; HttpOnly`])
+    assert.equal(jar.getCookieHeader(target), `${name}="a=b, c\\d"`)
+    const loaded = new GuestCookieJar(undefined, [{ origin: target.origin, name: `\t ${name}\t `,
+      value: '\t "a=b, c\\d" \t', path: '/', secure: false }])
+    assert.equal(loaded.getCookieHeader(target), `${name}="a=b, c\\d"`)
+  }
+  for (const raw of ['value-only', '=value-only']) {
+    const jar = new GuestCookieJar()
+    jar.setCookies(target, [raw])
+    assert.equal(jar.getCookieHeader(target), 'value-only')
+    assert.equal(new GuestCookieJar(undefined, [{ origin: target.origin, name: '', value: 'value-only',
+      path: '/', secure: false }]).getCookieHeader(target), 'value-only')
+  }
+  const jar = new GuestCookieJar()
+  jar.setCookies(target, ['SID=first=second; ignored=attribute', 'NBSP=\u00a0value\u00a0', 'EMPTY=\t '])
+  assert.equal(jar.getCookieHeader(target), 'SID=first=second; NBSP=\u00a0value\u00a0; EMPTY=')
+})
+
+test('browser cookie parsing rejects controls, empty pairs and oversized names plus values without losing good entries', () => {
+  const target = new URL('https://ordinary.example/')
+  const saved = (name, value) => ({ origin: target.origin, name, value, path: '/', secure: false })
+  for (const [name, value] of [['SID', 'x'.repeat(4094)], ['x'.repeat(4097), ''], ['', ''],
+    ['bad\tname', 'x'], ['bad\u0000name', 'x'], ['bad\u001fname', 'x'], ['bad\u007fname', 'x'], ['\u0100', 'x']]) {
+    const jar = new GuestCookieJar()
+    jar.setCookies(target, ['GOOD=kept', `${name}=${value}`])
+    assert.equal(jar.getCookieHeader(target), 'GOOD=kept', JSON.stringify(name))
+    const loaded = new GuestCookieJar(undefined, [saved('GOOD', 'kept'), saved(name, value)])
+    assert.equal(loaded.getCookieHeader(target), 'GOOD=kept', JSON.stringify(name))
+  }
+  for (const [name, value] of [['SID', 'x'.repeat(4093)], ['x'.repeat(4096), ''], ['', 'x'.repeat(4096)]]) {
+    const expected = name === '' ? value : `${name}=${value}`
+    const jar = new GuestCookieJar()
+    jar.setCookies(target, [`${name}=${value}`])
+    assert.equal(jar.getCookieHeader(target), expected)
+    assert.equal(new GuestCookieJar(undefined, [saved(name, value)]).getCookieHeader(target), expected)
+  }
+  for (const [name, value] of [['bad;name', 'x'], ['bad=name', 'x'], ['SID', 'bad;value'], ['', '__Host-injected=x']]) {
+    assert.equal(new GuestCookieJar(undefined, [saved(name, value)]).getCookieHeader(target), undefined)
+  }
+  const jar = new GuestCookieJar()
+  jar.setCookies(target, ['', '\t ; HttpOnly', '=', '__Secure-invalid=x', '=__Secure-invalid=x',
+    '=__Host-invalid=x; Secure', 'SID=x; ignored=internal\ttab', 'SID=x; ignored=internal\u001fcontrol'])
+  assert.equal(jar.getCookieHeader(target), undefined)
+})
+
+test('http port 443 cookies survive restart without breaking any sidebar page', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'guest-http443-'))
+  const previous = cookieJar
+  t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+  cookieJar = loadGuestCookies(directory)
+  const login = await call(guestPath('http://ordinary.example:443/persistent-login'), { method: 'POST' })
+  assert.equal(login.status, 303)
+  assert.equal(JSON.parse((await call(login.headers.location)).body).headers.cookie, 'SAVED=yes; SESSION=temporary')
+  cookieJar = loadGuestCookies(directory)
+  const account = await call(login.headers.location)
+  assert.equal(account.status, 200)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SAVED=yes; SESSION=temporary')
+  for (const url of ['http://ordinary.example/account', 'https://ordinary.example:443/account', 'http://scoped.example:443/account']) {
+    const other = await call(guestPath(url))
+    assert.equal(other.status, 200)
+    assert.doesNotMatch(JSON.parse(other.body).headers.cookie ?? '', /SAVED=|SESSION=/u)
+  }
+  assert.equal(JSON.parse(readFileSync(join(directory, 'cookies.json'), 'utf8')).cookies[0].origin, 'http://ordinary.example:443')
+})
+
+for (const failure of ['corrupt', 'invalid-entry', 'unreadable']) {
+  test(`proxy recovers from ${failure} cookie storage and rewrites sanitized data`, async t => {
+    const directory = mkdtempSync(join(tmpdir(), 'guest-recover-'))
+    const file = join(directory, 'cookies.json')
+    const previous = cookieJar
+    t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+    if (failure === 'unreadable') mkdirSync(file)
+    else if (failure === 'corrupt') writeFileSync(file, '{BROKEN_SECRET')
+    else writeFileSync(file, JSON.stringify({ version: 1, cookies: [null, { origin: 'https://bad host', value: 'SECRET' },
+      { origin: 'https://ORDINARY.example:443/', name: 'VALID', value: 'yes', path: '/', secure: true, expiresAt: Date.now() + 3600000 },
+      { origin: 'https://ordinary.example', name: 'BAD', value: 'line\r\ninjection', path: '/', secure: false, expiresAt: Date.now() + 3600000 },
+    ] }))
+    cookieJar = loadGuestCookies(directory)
+    const account = await call(guestPath('https://ordinary.example/account'))
+    assert.equal(account.status, 200)
+    assert.equal(JSON.parse(account.body).headers.cookie, failure === 'invalid-entry' ? 'VALID=yes' : 'VISITED=root')
+    if (failure === 'unreadable') {
+      rmSync(file, { recursive: true })
+      const login = await call(guestPath('https://ordinary.example/persistent-login'), { method: 'POST' })
+      assert.equal(login.status, 303)
+    }
+    const saved = JSON.parse(readFileSync(file, 'utf8'))
+    assert.equal(saved.cookies.length, failure === 'unreadable' ? 3 : 1)
+    if (failure === 'invalid-entry') assert.equal(saved.cookies[0].origin, 'https://ordinary.example')
+    assert.equal(readFileSync(file, 'utf8').includes('SECRET'), false)
+    cookieJar = loadGuestCookies(directory)
+    assert.equal((await call(guestPath('https://scoped.example/account'))).status, 200)
+  })
+}
+
 test('stores redirect cookies and rewrites redirect location for a login round-trip', async () => {
   const login = await call(guestPath('https://ordinary.example/login'), { method: 'POST', body: 'login=1' })
   assert.equal(login.status, 303)
@@ -244,7 +464,7 @@ test('proxy cookie round-trip honors directory paths, duplicate names and Secure
   const outside = await call(guestPath('https://scoped.example/cookie-scopes-other'), options)
   assert.equal(JSON.parse(outside.body).headers.cookie, 'SID=root; secure=https-only')
   const insecure = await call(guestPath('http://scoped.example/echo'), options)
-  assert.equal(JSON.parse(insecure.body).headers.cookie, 'SID=root')
+  assert.equal(JSON.parse(insecure.body).headers.cookie, undefined)
 })
 
 test('cookie jar validates Domain but conservatively retains exact host and port isolation', () => {
@@ -294,13 +514,13 @@ test('cookie jar ignores malformed cookies and protects Secure and host-prefixed
   const jar = new GuestCookieJar()
   const https = new URL('https://secure.example/')
   const http = new URL('http://secure.example/')
-  jar.setCookies(https, ['', 'bad', '=empty', 'bad name=x', 'control=x\r\ny',
+  jar.setCookies(https, ['', '=', 'bad\tname=x', 'control=x\r\ny',
     '__Secure-invalid=no', '__Host-domain=no; Secure; Domain=secure.example; Path=/',
     '__Host-path=no; Secure; Path=/sub', 'empty=; Path=/', 'SID=safe; Secure; Path=/',
     '__Secure-valid=yes; Secure; Path=/', '__Host-valid=yes; Secure; Path=/'])
   jar.setCookies(http, ['SID=overwrite; Path=/', 'SID=delete; Max-Age=0; Path=/', 'new=no; Secure'])
   assert.equal(jar.getCookieHeader(https), 'empty=; SID=safe; __Secure-valid=yes; __Host-valid=yes')
-  assert.equal(jar.getCookieHeader(http), 'empty=')
+  assert.equal(jar.getCookieHeader(http), undefined)
   jar.setCookies(https, [])
   assert.equal(jar.getCookieHeader(https), 'empty=; SID=safe; __Secure-valid=yes; __Host-valid=yes')
 })
@@ -511,6 +731,33 @@ test('static rewriting keeps supported asset forms and special URLs intact', () 
   }
   const html = '<a href="#top">t</a><img src="data:image/gif;base64,AA">'
   assert.equal(rewriteDocument(html, base), html)
+})
+
+test('HTML rewriting does not reinterpret raw text, comments or attribute values as markup', () => {
+  const base = new URL('https://ordinary.example/dir/page')
+  for (const kind of ['script', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes']) {
+    const text = 'href = $(this).children("a").attr("href"); <img src="/literal.png">'
+    const html = `<${kind} src="/actual.js">${text}</${kind}><img src="/actual.png">`
+    assert.equal(rewriteDocument(html, base),
+      `<${kind} src="${guestPath('https://ordinary.example/actual.js')}">${text}</${kind}><img src="${guestPath('https://ordinary.example/actual.png')}">`)
+  }
+  for (const html of ['', '<!-- <img src="/literal.png"> -->', '<button onclick="href = \'/literal\'">', '<script>href = "/literal";']) {
+    assert.equal(rewriteDocument(html, base), html)
+  }
+  const html = '<style>.x:after{content:\'src="/literal"\'} .x{background:url(/actual.png)}</style>'
+  assert.equal(rewriteDocument(html, base), html.replace('url(/actual.png)', `url("${guestPath('https://ordinary.example/actual.png')}")`))
+})
+
+test('rewritten documents cannot cache an obsolete injected runtime or revalidate into a bare 304', async () => {
+  const result = await call(guestPath('https://ordinary.example/doc'), { headers: {
+    'if-none-match': 'old-runtime', 'if-modified-since': 'Mon, 01 Jan 2024 00:00:00 GMT',
+  } })
+  assert.equal(result.status, 200)
+  assert.equal(result.headers['cache-control'], 'no-store')
+  assert.equal(result.headers['last-modified'], undefined)
+  assert.equal(forwarded.at(-1).options.headers.get('if-none-match'), null)
+  assert.equal(forwarded.at(-1).options.headers.get('if-modified-since'), null)
+  assert.match(result.body, /documentId/)
 })
 
 test('Bing paging decodes HTML ampersands before encoding the proxy target', () => {

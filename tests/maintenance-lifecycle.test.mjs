@@ -17,10 +17,10 @@ function fixture(overrides = {}) {
   return { calls, states, deps }
 }
 
-test('explicit installation closes normally, installs, restarts and verifies before success', async () => {
+test('explicit reinstall closes normally, maintains once, restarts once and verifies before success', async () => {
   const f = fixture()
-  const result = await runMaintenanceLifecycle('install', f.deps)
-  assert.deepEqual(f.calls, ['quit', 'closed', 'maintain', 'restart', 'verify:12345:install'])
+  const result = await runMaintenanceLifecycle('reinstall', f.deps)
+  assert.deepEqual(f.calls, ['quit', 'closed', 'maintain', 'restart', 'verify:12345:reinstall'])
   assert.deepEqual(f.states.map(s => s.phase), ['armed', 'closing', 'installing', 'restarting', 'verifying', 'completed'])
   assert.equal(result.ok, true)
   assert.equal(result.restarted, true)

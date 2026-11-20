@@ -677,7 +677,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     let identified = false
     try {
       const version = await (await fetch(`http://127.0.0.1:${port}/json/version`, {
-        signal: AbortSignal.timeout(Math.max(1, Math.min(PORT_PROBE_MS, deadline - Date.now()))),
+        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
       })).json() as { webSocketDebuggerUrl?: string; Browser?: string }
       if (typeof version.webSocketDebuggerUrl !== 'string') return undefined
       // The port number alone proves nothing — it can be reused once the browser that owned it
@@ -698,6 +698,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     } catch (error) {
       client?.close()
       if (identified) throw error
+      if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+        throw new Error('browser did not acknowledge its discovery endpoint before the launch deadline', { cause: error })
+      }
       // No endpoint, nothing listening, or not a browser: all of them mean "launch one".
       return undefined
     }
@@ -1069,8 +1072,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    */
   async closePage(id: BrowserTabWireId, scope = sessionWireId(readTabHandle(id))): Promise<void> {
     const identity = resolveTabHandle(resolveSessionHandle(scope), id)
-    const client = await this.ensureClient()
     const view = this.views.get(id)
+    if (view === undefined && !identity.tab.startsWith('page:')) return
+    const client = await this.ensureClient()
     const targetId = view === undefined ? identity.tab.replace(/^page:/, '') : this.sessions.get(view.session)
     if (targetId === undefined) throw new Error('dsh-builtin-browser: browser page is stale')
     const answer = await client.send('Target.closeTarget', { targetId }) as { success?: boolean }

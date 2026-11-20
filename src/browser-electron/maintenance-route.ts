@@ -4,7 +4,6 @@ import { sameOrigin } from './settings-route.ts'
 import { isDirectLoopback } from './authenticated-route.ts'
 import { replyJson } from './json-reply.ts'
 import { readJsonBody } from './http-body.ts'
-import type { BridgeAction } from './bridge-install.ts'
 import type { AutomaticMaintenanceJob } from './automatic-maintenance.ts'
 
 export const AUTOMATIC_MAINTENANCE_ROUTE = '/dsh-builtin-browser/bridge-maintenance'
@@ -13,7 +12,7 @@ export interface AutomaticMaintenanceRouteDeps {
   /** How Desktop is asked to quit: `menu` waits for the panel to open the native menu, `self` needs nothing from it. */
   readonly quit?: () => 'menu' | 'self'
   readonly read: () => AutomaticMaintenanceJob | undefined
-  readonly start: (action: BridgeAction, options?: { readonly locale?: 'zh' | 'en' }) => Promise<AutomaticMaintenanceJob>
+  readonly start: (action: 'reinstall', options?: { readonly locale?: 'zh' | 'en' }) => Promise<AutomaticMaintenanceJob>
   /** Commit only after the accepted response has been flushed to the client. */
   readonly commit?: (id: string) => Promise<void>
   /** True while the legacy bridge-action route is running an installer. */
@@ -33,11 +32,12 @@ export function createAutomaticMaintenanceHandler(deps: AutomaticMaintenanceRout
       return
     }
     if (!deps.supported()) { replyJson(response, 409, { ok: false, error: 'automatic bridge maintenance requires DSH Desktop on Windows or macOS' }); return }
-    let action: BridgeAction
+    let action: 'reinstall'
     let locale: 'zh' | 'en' | undefined
     try {
-      const value = await readJsonBody<{ action?: unknown; locale?: unknown }>(request, 4096)
-      if (value?.action !== 'install' && value?.action !== 'uninstall') throw new Error('action must be install or uninstall')
+      const value = await readJsonBody<{ action?: unknown; locale?: unknown; mode?: unknown; hostStatus?: unknown }>(request, 4096)
+      if (value?.action !== 'reinstall') throw new Error('action must be reinstall')
+      if (value.mode !== undefined || value.hostStatus !== undefined) throw new Error('mode and hostStatus are no longer supported')
       if (value.locale !== undefined && value.locale !== 'zh' && value.locale !== 'en') throw new Error('locale must be zh or en')
       action = value.action
       locale = value.locale

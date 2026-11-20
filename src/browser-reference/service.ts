@@ -17,8 +17,9 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { referenceOwnerKey } from '../reference-owner.ts'
+import { webReferenceSources, type WebReferenceSources } from './web-sources.ts'
 import { sameReferenceDocument as samePage } from '../reference-page.ts'
-import { isReferenceText, MAX_REFERENCE_TEXT, referenceTextContent } from '../reference-text.ts'
+import { isReferenceText, normalizeReferenceText, MAX_REFERENCE_TEXT, referenceTextContent, renderReferenceText } from '../reference-text.ts'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { manifestHashOf, ReferenceStore, referenceStorePath } from './store.ts'
@@ -166,6 +167,7 @@ export interface CaptureOutcome {
 
 /** What the caller wants captured. */
 export interface CaptureRequest {
+  readonly sourcePageId?: string
   /** The DSH session that owns the reference. */
   readonly sessionId: string
   /** The browser session holding the page; defaults to `sessionId`. */
@@ -242,6 +244,7 @@ export interface BrowserReferenceDraftAdapter {
 
 /** Tunables; every default is a cap the caller can only tighten. */
 export interface BrowserReferenceServiceOptions {
+  readonly webSources?: WebReferenceSources
   /** Characters of context on each side of a text anchor. Default 32. */
   readonly context?: number
   /** Longest single text part. Default 20000 characters. */
@@ -361,9 +364,10 @@ export interface ReferenceAssetMeta {
 /**
  * Capture and reveal browser references for one host.
  *
- * One instance per plugin context; the store is the only shared state.
+ * Instances share immutable storage and the browser's owned Web source channel.
  */
 export class BrowserReferenceService {
+  readonly webSources: WebReferenceSources | undefined
   private adapter: BrowserReferenceDraftAdapter | undefined
   private readonly assetDir: string
   private readonly host: ReferenceHost
@@ -375,6 +379,7 @@ export class BrowserReferenceService {
     this.host = host
     this.store = store
     this.sourceSession = options.sourceSession
+    this.webSources = options.webSources
     this.options = {
       context: integerOf(options.context, DEFAULTS.context, 0, 512),
       maxTextPartLength: integerOf(options.maxTextPartLength, DEFAULTS.maxTextPartLength, 1, MAX_REFERENCE_TEXT),
@@ -481,6 +486,9 @@ export class BrowserReferenceService {
     // the plugin does not own, so it has no browser:<uuid> at all, and requiring one refused every
     // quote with "session-unavailable" (measured 422 on every attempt, in every conversation).
     const fromFrozen = request.frozenCapture !== undefined && request.browserSessionId === undefined
+    if (request.sourcePageId !== undefined && (!fromFrozen || !this.webSources?.owns(sessionId, request.sourcePageId))) {
+      return { failures: [{ kind: 'reference', reason: 'web-source-not-owned' }] }
+    }
     if (!fromFrozen && !this.host.exists(browserSessionId)) {
       return { failures: [{ kind: 'reference', reason: 'session-unavailable' }] }
     }
@@ -498,13 +506,10 @@ export class BrowserReferenceService {
         // the user navigated away from must fail loudly, not silently become a
         // quote of whatever is on screen now.
         const frozenUrl = typeof frozen.url === 'string' ? frozen.url : ''
-        // Only a capture that OWNS a browser session can be re-checked against the live page. A Web
-        // sidebar capture has no such session (its guest is an iframe the plugin does not own), and
-        // asking for page facts anyway failed the whole capture with a browser-session error.
-        // Re-check the live page whenever this capture actually HAS a browser session; a Web sidebar
-        // capture has none (its guest is an iframe the plugin does not own) and can only trust the
-        // snapshot the page handed over. Asking for page facts without a session failed the capture.
-        if (frozenUrl !== '' && this.host.exists(browserSessionId)) {
+        if (request.sourcePageId !== undefined && !this.webSources?.owns(sessionId, request.sourcePageId, frozenUrl)) {
+          return { failures: [{ kind: 'reference', reason: 'page-changed' }] }
+        }
+        if (!fromFrozen && frozenUrl !== '' && this.host.exists(browserSessionId)) {
           const facts = await this.run<{ url?: unknown }>(browserSessionId, pageFactsScript(), [], signal)
           const currentUrl = typeof facts === 'object' && facts !== null && typeof (facts as { url?: unknown }).url === 'string'
             ? String((facts as { url: string }).url)
@@ -618,7 +623,7 @@ export class BrowserReferenceService {
       version: 1 as const,
       provider: 'dsh-browser' as const,
       referenceId,
-      owner: { sessionId, browserSessionId },
+      owner: { sessionId, ...fromFrozen ? {} : { browserSessionId }, ...request.sourcePageId === undefined ? {} : { sourcePageId: request.sourcePageId } },
       provenance: { origin, entry },
       source: {
         pageUrl,
@@ -668,10 +673,21 @@ export class BrowserReferenceService {
    * @param request - optional specific part.
    * @param signal - cancels the page evaluations.
    */
-  async reveal(referenceId: string, request: { readonly partId?: string; readonly navigate?: boolean; readonly sourcePageId?: string } = {}, signal?: AbortSignal): Promise<RevealOutcome> {
+  async reveal(referenceId: string, request: { readonly partId?: string; readonly navigate?: boolean; readonly sourcePageId?: string; readonly ownerSessionId?: string } = {}, signal?: AbortSignal): Promise<RevealOutcome> {
     const reference = this.store.get(referenceId)
     if (reference === undefined) return { referenceId, status: 'not-found', pageUrl: '', parts: [], note: 'no such reference is stored' }
-    const captured = reference.owner.browserSessionId ?? reference.owner.sessionId
+    const owner = referenceOwnerKey(reference.owner.sessionId ?? '')
+    if (request.ownerSessionId !== undefined && referenceOwnerKey(request.ownerSessionId) !== owner) {
+      return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, parts: [], note: 'reference belongs to another conversation' }
+    }
+    const webPage = request.sourcePageId?.startsWith('iframe:') ? request.sourcePageId : reference.owner.sourcePageId
+    if (webPage !== undefined) {
+      const target = request.partId === undefined ? reference.parts.slice(0, 1) : reference.parts.filter(part => part.partId === request.partId)
+      if (target.length === 0) return { referenceId, status: 'not-found', pageUrl: reference.source.pageUrl, parts: [] }
+      const status = await this.webSources?.reveal(reference, webPage, request.partId, signal) ?? 'unavailable'
+      return { referenceId, status, pageUrl: reference.source.pageUrl, parts: target.map(part => ({ partId: part.partId, type: part.type, status: status === 'revealed' ? 'revealed' : status === 'ambiguous' ? 'ambiguous' : 'missing' })), ...status === 'unavailable' ? { note: 'owned web source is unavailable or did not acknowledge reveal' } : {} }
+    }
+    const captured = reference.owner.browserSessionId
     const live = captured !== undefined && captured !== '' && this.host.exists(captured) ? captured : undefined
     let sessionId = live
     if (request.sourcePageId !== undefined) {
@@ -683,10 +699,10 @@ export class BrowserReferenceService {
     if (sessionId === undefined) {
       return {
         referenceId,
-        status: 'session-unavailable',
+        status: captured === undefined ? 'unavailable' : 'session-unavailable',
         pageUrl: reference.source.pageUrl,
         parts: [],
-        note: 'the browser session that captured this reference is gone',
+        note: captured === undefined ? 'reference has no live source binding' : 'the browser session that captured this reference is gone',
       }
     }
 
@@ -759,7 +775,9 @@ export class BrowserReferenceService {
         }, signal)
         results.push({ partId: part.partId, type: 'image', status: result.status, matches: result.matches })
       } else {
-        const result = await this.revealElement(sessionId, 'table', part.anchor, signal)
+        const cells = part.table.cells.filter(cell => cell.includedAs === 'selection')
+          .map(({ row, column }) => ({ row, column }))
+        const result = await this.revealElement(sessionId, 'table', part.anchor, signal, cells)
         results.push({ partId: part.partId, type: 'table', status: result.status, matches: result.matches })
       }
     }
@@ -776,11 +794,13 @@ export class BrowserReferenceService {
     kind: 'image' | 'table',
     anchor: object,
     signal?: AbortSignal,
+    cells?: readonly { readonly row: number; readonly column: number }[],
   ): Promise<{ status: 'revealed' | 'ambiguous' | 'missing'; matches?: number }> {
     try {
       const result = await this.run<RawElementRevealResult>(sessionId, revealElementScript(), [{
         kind,
         anchor,
+        ...cells === undefined ? {} : { cells },
       }], signal)
       const status = result.status === 'found' ? 'revealed' : result.status === 'ambiguous' ? 'ambiguous' : 'missing'
       return { status, ...typeof result.matches === 'number' ? { matches: result.matches } : {} }
@@ -793,18 +813,22 @@ export class BrowserReferenceService {
   private textPart(event: RawCaptureEvent, nextPartId: () => string): TextReferencePart | CaptureFailure {
     const exact = textOf(event.exact, this.options.maxTextPartLength + 1)
     if (exact.trim() === '') return { kind: 'text', reason: 'empty-text' }
-    if (exact.length > this.options.maxTextPartLength) {
+    if (event.content === undefined && exact.length > this.options.maxTextPartLength) {
       return { kind: 'text', reason: 'text-too-long', detail: { characters: exact.length, limit: this.options.maxTextPartLength } }
     }
-    if (event.content !== undefined && (!isReferenceText(event.content)
-      || referenceTextContent(event.content).replace(/\s/gu, '') !== exact.replace(/\s/gu, ''))) {
+    const content = event.content === undefined ? undefined : normalizeReferenceText(event.content, Infinity)
+    if (event.content !== undefined && (content === undefined
+      || referenceTextContent(content).replace(/\s/gu, '') !== exact.replace(/\s/gu, ''))) {
       return { kind: 'text', reason: 'invalid-text-content' }
+    }
+    if (content !== undefined && !isReferenceText(content, this.options.maxTextPartLength)) {
+      return { kind: 'text', reason: 'text-too-long', detail: { characters: renderReferenceText(content).length, limit: this.options.maxTextPartLength } }
     }
     return {
       partId: nextPartId(),
       type: 'text',
       text: exact,
-      ...(event.content === undefined ? {} : { content: event.content }),
+      ...(content === undefined ? {} : { content }),
       anchor: {
         exact,
         prefix: textOf(event.prefix, 512),
@@ -1068,7 +1092,8 @@ export class BrowserReferenceService {
     const raw = event.table
     if (!isRecord(raw)) return { kind: 'table', reason: 'table-missing' }
     const table = raw as RawTable
-    const rawCells = Array.isArray(table.cells) ? table.cells : []
+    const rawCells = Array.isArray(table.cells) ? table.cells.map(cell => isRecord(cell) && cell.content !== undefined
+      ? { ...cell, content: normalizeReferenceText(cell.content) ?? null } : cell) : []
     if (rawCells.length === 0) return { kind: 'table', reason: 'table-empty' }
     if (booleanOf(table.truncated) || rawCells.length > this.options.maxTableCells) {
       return {
@@ -1078,6 +1103,10 @@ export class BrowserReferenceService {
       }
     }
 
+    if (rawCells.some(cell => isRecord(cell) && cell.content !== undefined && (!isReferenceText(cell.content)
+      || referenceTextContent(cell.content).replace(/\s/gu, '') !== textOf(cell.text, 2000).replace(/\s/gu, '')))) {
+      return { kind: 'table', reason: 'invalid-text-content' }
+    }
     const failures: CaptureFailure[] = []
     const cellImages: ImageReferencePart[] = []
     const cells: TableCellSnapshot[] = []
@@ -1131,6 +1160,7 @@ export class BrowserReferenceService {
         columnSpan: integerOf(cell.columnSpan, 1, 1, 200),
         role,
         text: textOf(cell.text, 2000),
+        ...(cell.content === undefined ? {} : { content: cell.content }),
         includedAs,
         partialText: booleanOf(cell.partialText),
         ...runs.length > 0 ? { inlineContent: runs } : {},
@@ -1273,5 +1303,5 @@ export function createReferenceService(
       await browser.download(sessionId, { url, savePath }, signal)
     },
     ...visibleCapture !== undefined ? { captureVisible: visibleCapture } : {},
-  }, store ?? new ReferenceStore(), rest)
+  }, store ?? new ReferenceStore(), { webSources: webReferenceSources(browser), ...rest })
 }

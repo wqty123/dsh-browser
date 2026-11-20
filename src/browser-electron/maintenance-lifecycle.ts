@@ -2,10 +2,11 @@
 import type { BridgeAction, BridgeActionResult } from './bridge-install.ts'
 
 export type MaintenancePhase = 'armed' | 'closing' | 'installing' | 'restarting' | 'verifying' | 'completed' | 'cancelled' | 'failed'
+export type MaintenanceAction = BridgeAction | 'reinstall'
 
 export interface MaintenanceState {
   readonly phase: MaintenancePhase
-  readonly action: BridgeAction
+  readonly action: MaintenanceAction
   readonly at: string
   readonly ok?: boolean
   readonly restarted?: boolean
@@ -25,7 +26,7 @@ export interface MaintenanceLifecycleDeps {
   /** Reopen exactly the verified installation after it has exited. */
   readonly restart: () => Promise<number>
   /** Installation verifies the new authenticated bridge; uninstall verifies the process. */
-  readonly verify: (pid: number, action: BridgeAction) => Promise<void>
+  readonly verify: (pid: number, action: MaintenanceAction) => Promise<void>
   readonly publish: (state: MaintenanceState) => Promise<void>
 }
 
@@ -33,7 +34,7 @@ export interface MaintenanceLifecycleDeps {
  * A cancelled/failed quit never reaches the installer. After a confirmed exit, reopen Desktop even
  * when maintenance fails, and retain that failure instead of reporting a successful installation.
  */
-export async function runMaintenanceLifecycle(action: BridgeAction, deps: MaintenanceLifecycleDeps): Promise<MaintenanceState> {
+export async function runMaintenanceLifecycle(action: MaintenanceAction, deps: MaintenanceLifecycleDeps): Promise<MaintenanceState> {
   let closed = false
   let restarted = false
   let pid: number | undefined

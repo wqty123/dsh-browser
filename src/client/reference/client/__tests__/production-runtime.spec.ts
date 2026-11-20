@@ -61,6 +61,34 @@ function firstOutcome(report: { outcomes: readonly { intentId: string; outcome: 
 }
 
 describe('createProductionRuntime — prepared delivery full apply (content-level)', () => {
+  it.each(['absent', 'refused', 'throwing'])('never inserts an editable source marker when atomic insertion is %s', async mode => {
+    const { http, runtime, hosts } = harness()
+    const host = hosts['sess-A']!
+    Object.assign(host, { insertQuote: undefined })
+    if (mode !== 'absent') Object.assign(host, { insertQuote: () => {
+      if (mode === 'throwing') throw new Error('editor unavailable')
+      return false
+    } })
+    http.enqueue(deliveriesResponse([makeDelivery({ state: 'acknowledged', sequence: 1 })], 1))
+    await runtime.pollOnce()
+    expect(host.calls).not.toContain('insertText')
+    expect(host.text).toBe('帮我总结这段网页内容')
+    runtime.dispose()
+  })
+
+  it('uses an available atomic reference API when the host has no quote API', async () => {
+    const { http, runtime, hosts } = harness()
+    let inserted: { clipboardText: string } | undefined
+    Object.assign(hosts['sess-A']!, { insertQuote: undefined, insertReference: (ref: { clipboardText: string }) => { inserted = ref; return true } })
+    http.enqueue(deliveriesResponse([makeDelivery({ state: 'acknowledged', sequence: 1 })], 1))
+    await runtime.pollOnce()
+    expect(inserted!.clipboardText).toMatch(/^<dsh-browser-reference /u)
+    expect(inserted!.clipboardText).toContain('uri="dsh-browser-ref:ref-mixed-1"')
+    expect(inserted!.clipboardText).not.toContain(LONG_TEXT)
+    expect(hosts['sess-A']!.calls).not.toContain('insertText')
+    runtime.dispose()
+  })
+
   it('binds every asset, appends the ordered group, then ACKs with a saved draftRev and all hashes', async () => {
     const { http, runtime, hosts } = harness()
     http.enqueue(deliveriesResponse([makeDelivery({ state: 'prepared', sequence: 1 })], 1))
@@ -335,9 +363,12 @@ describe('polling lifecycle', () => {
 })
 
 describe('revealReference — it goes to the source page', () => {
-  async function withCard() {
+  async function withCard(web = false) {
     const { http, runtime } = harness()
-    http.enqueue(deliveriesResponse([makeDelivery({ state: 'prepared', sequence: 1 })], 1))
+    const delivery = makeDelivery({ state: 'prepared', sequence: 1 })
+    http.enqueue(deliveriesResponse([{ ...delivery, snapshot: { ...delivery.snapshot,
+      owner: web ? { sessionId: 'sess-A', sourcePageId: 'iframe:closed' } : delivery.snapshot.owner,
+    } }], 1))
     await runtime.pollOnce()
     return { http, runtime, card: runtime.cards()[0]! }
   }
@@ -380,13 +411,23 @@ describe('revealReference — it goes to the source page', () => {
     http.revealOutcome = { ok: true, status: 'session-unavailable' }
     runtime.setSourceOpener(async () => { throw new Error('sidebar tab API is unavailable') })
     await runtime.revealReference(card.referenceId)
-    expect(runtime.snapshot().reveal?.status).toBe('session-unavailable')
-    expect(runtime.snapshot().reveal?.message).toContain('标签页')
+    expect(runtime.snapshot().reveal?.status).toBe('unavailable')
+    expect(runtime.snapshot().reveal?.message).toContain('sidebar tab API is unavailable')
   })
 
-  it('uses the acknowledged Web source channel instead of retrying the native reveal route', async () => {
-    const { http, runtime, card } = await withCard()
-    http.revealOutcome = { ok: true, status: 'session-unavailable' }
+  it.each(['GUEST_DOCUMENT_IDENTITY_UNAVAILABLE', 'GUEST_REFERENCE_IDENTITY_MISMATCH', 'GUEST_REFERENCE_TIMEOUT', 'GUEST_SOURCE_TIMEOUT'])(
+    'shows the source-channel failure %s instead of retaining page-mismatch or hanging', async reason => {
+      const { http, runtime, card } = await withCard()
+      http.revealOutcome = { ok: true, status: 'page-mismatch' }
+      runtime.setSourceOpener(async () => ({ pageId: 'iframe:owned', reveal: async () => { throw new Error(reason) } }))
+      await expect(runtime.revealReference(card.referenceId)).resolves.toBe('unavailable')
+      expect(runtime.snapshot().reveal).toMatchObject({ status: 'unavailable', message: expect.stringContaining(reason) })
+    },
+  )
+
+  it.each([false, true])('uses the acknowledged Web source channel instead of retrying native reveal (expired Web source: %s)', async web => {
+    const { http, runtime, card } = await withCard(web)
+    http.revealOutcome = { ok: true, status: web ? 'unavailable' : 'session-unavailable' }
     let highlighted = false
     runtime.setSourceOpener(async () => ({ pageId: 'iframe:owned', reveal: async (snapshot, partId, signal) => {
       expect(snapshot.referenceId).toBe(card.referenceId)

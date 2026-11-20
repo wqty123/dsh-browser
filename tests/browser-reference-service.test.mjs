@@ -352,6 +352,7 @@ test('reveal of a table part asks the page for an element locator', async t => {
   const call = calls.find(entry => entry.script.includes('return JSON.stringify(revealElement(spec))'))
   assert.equal(call.args[0].kind, 'table')
   assert.deepEqual(call.args[0].anchor.cell, { row: 0, column: 0 })
+  assert.deepEqual(call.args[0].cells, [{ row: 0, column: 0 }])
 })
 
 test('the draft adapter is a reserved seam that answers honestly when absent', async t => {
@@ -511,7 +512,7 @@ test('a frozen capture is refused when the page has navigated since it was taken
     events: [{ kind: 'text', exact: 'old words' }],
   }
   const { service } = fixture(t, { facts: { ok: true, url: 'https://example.com/new', title: 'New' } })
-  const outcome = await service.capture({ sessionId: 'session-1', frozenCapture: frozen })
+  const outcome = await service.capture({ sessionId: 'session-1', browserSessionId: 'session-1', frozenCapture: frozen })
   assert.equal(outcome.reference, undefined, 'a different document must not become a quote of the old text')
   assert.ok(outcome.failures.some(failure => failure.reason === 'page-changed'), JSON.stringify(outcome.failures))
 })

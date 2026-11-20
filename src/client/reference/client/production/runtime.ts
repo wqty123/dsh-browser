@@ -281,9 +281,9 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     clearTimeout(revealTimer)
     revealTimer = undefined
   }
-  const showReveal = (status: string): void => {
+  const showReveal = (status: string, detail?: string): void => {
     clearRevealHint()
-    lastReveal = { status, message: REVEAL_MESSAGES[status] ?? '' }
+    lastReveal = { status, message: [REVEAL_MESSAGES[status] ?? '', detail].filter(Boolean).join(' ') }
     markDirty()
     publish()
     if (lastReveal.message === '') return
@@ -495,41 +495,19 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
    */
   const insertChip = (delivery: DeliveryRecord, sessionId: string): boolean => {
     const host = hostInputFor(sessionId)
-    const snapshot = delivery.snapshot as {
-      readonly source?: { readonly title?: string }
-      readonly parts?: readonly { readonly type?: string; readonly kind?: string; readonly text?: string }[]
-    }
-    const title = snapshot.source?.title
-    // 快照部件的判别字段是 `type`（`TextReferencePart.type === 'text'`），不是 `kind`。
-    const quoteText = (snapshot.parts ?? [])
-      .filter(part => (part.type ?? part.kind) === 'text')
-      .map(part => part.text ?? '').join('\n').trim()
-
-    // 只插入**标记行**，不插入引文正文：
-    //   · 消息里出现整段原文属于信息泄露（用户明确要求只留胶囊）；
-    //   · 标记行让草稿非空，上游发送闸门因此放行（「只有引用也能发」）；
-    //   · 引文内容本身保存在引用快照里，点胶囊可以查看/回到原文。
+    const title = delivery.snapshot.source.title
     const index = (draftStoreFor(sessionId).state().reflections ?? []).length
     const marker = sourceMarker(delivery.referenceId, index - 1, title)
     // 插入需要编辑器里有光标：确认按钮是在侧栏 iframe 里点的，先聚焦编辑器。
     try { host.focusEditor?.() } catch { /* 没有编辑器就交给下面的失败路径 */ }
-    try {
-      if (host.insertText(host.captureInsertion(), marker)) return true
-    } catch {
-      // 文本插入失败时退回下面旧内核的芯片通道。
-    }
-    // 3) 宿主若提供原生引用芯片（旧内核），仍然优先走它。
-    if (typeof host.insertReference !== 'function') return false
-    const quote = quoteText
     const uri = encodeBrowserRefUri({ referenceId: delivery.referenceId })
     try {
-      return host.insertReference({
-        source: 'browser-reference',
-        ref: uri,
-        label: title !== undefined && title !== '' ? title : '网页引用',
-        appearance: 'session',
-        clipboardText: quote === '' ? (title ?? uri) : quote,
-      }, host.captureInsertion())
+      if (host.insertQuote?.(marker)) return true
+      if (host.insertReference?.({
+        source: 'browser-reference', ref: uri, label: title || '网页引用',
+        appearance: 'session', clipboardText: marker,
+      }, host.captureInsertion())) return true
+      return false
     } catch {
       return false
     }
@@ -907,9 +885,10 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       finally { mutedReveal -= 1 }
     }
     let status = await attempt()
+    let sourceFailure: string | undefined
     try {
       const url = referenceDetail(referenceId)?.snapshot.source.pageUrl
-      if (active() && (status === 'session-unavailable' || status === 'page-mismatch') && url && sourceOpener !== undefined) {
+      if (active() && (status === 'session-unavailable' || status === 'page-mismatch' || status === 'unavailable') && url && sourceOpener !== undefined) {
         const ready = await sourceOpener(url, opening.signal)
         const detail = referenceDetail(referenceId)
         if (!active()) return 'superseded'
@@ -917,11 +896,12 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
           ? await ready.reveal(detail.snapshot, partId, opening.signal)
           : await attempt(ready.pageId)
       }
-    } catch {
-      // A tab-open refusal is not a reveal acknowledgement.
+    } catch (error) {
+      status = 'unavailable'
+      sourceFailure = errorMessage(error)
     }
     if (!active()) return 'superseded'
-    showReveal(status)
+    showReveal(status, sourceFailure)
     return status
   }
 

@@ -7,6 +7,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { BrowserReferenceService } from '../../../browser-reference/service.ts'
+import { WebReferenceSources } from '../../../browser-reference/web-sources.ts'
 import { ReferenceStore } from '../../../browser-reference/store.ts'
 import { createDeliveryQueue } from '../../../browser-reference/delivery.ts'
 import { createReferenceRouteHandlers } from '../../../browser-electron/reference-route.ts'
@@ -53,6 +54,7 @@ function harness(owner = 'owner-B', live?: { url: string; ready: boolean; highli
       throw new Error('unexpected source operation')
     },
   }, new ReferenceStore(join(directory, 'references.jsonl')), {
+    webSources: new WebReferenceSources(),
     assetDir: join(directory, 'assets'),
     sourceSession: async (boundOwner, pageId) => {
       expect([boundOwner, pageId]).toEqual([owner, '42'])
@@ -65,7 +67,7 @@ function harness(owner = 'owner-B', live?: { url: string; ready: boolean; highli
   const request = vi.fn(async (input: string, init?: { method?: string; body?: unknown }) => {
     const url = new URL(input, 'http://127.0.0.1:3080')
     const route = url.pathname.split('/').slice(3).join('/')
-    const handler = ({ capture: handlers.capture, reveal: handlers.reveal, list: handlers.list, deliveries: handlers.deliveries, 'delivery/ack': handlers.ack })[route]
+    const handler = ({ source: handlers.source, capture: handlers.capture, reveal: handlers.reveal, list: handlers.list, deliveries: handlers.deliveries, 'delivery/ack': handlers.ack })[route]
     if (handler === undefined) throw new Error(`unexpected route: ${url.pathname}`)
     let status = 0
     let result: unknown
@@ -211,7 +213,9 @@ it.each(['', 'unsent question'])('binds the Web hero composer with draft "%s" an
 })
 
 it.each([503, 200])('reports a Web capture refusal (%s) instead of silently accepting it', async status => {
-  const request = vi.fn(async (_url: string, _init?: { body?: unknown }) => ({ ok: status === 200, status, json: async () => ({ ok: false }) }))
+  const request = vi.fn(async (url: string, _init?: { body?: unknown }) => url.endsWith('/source')
+    ? { ok: true, status: 200, json: async () => ({ lease: 'capture-refusal', commands: [] }) }
+    : { ok: status === 200, status, json: async () => ({ ok: false }) })
   vi.stubGlobal('fetch', request)
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
   const page = createIframePage({ initial: undefined, persist() {}, openRequested() {} }, `session-${firstOwner}`)
@@ -224,8 +228,9 @@ it.each([503, 200])('reports a Web capture refusal (%s) instead of silently acce
     window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: host.querySelector('iframe')!.contentWindow, data: intent }))
     await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('[dsh-browser] reference capture failed', expect.any(Error)))
     expect(document.querySelector('[role="alert"]')?.textContent).toContain('引用未能加入当前会话')
-    expect(request).toHaveBeenCalledTimes(1)
-    expect(JSON.parse(String(request.mock.calls[0]![1]!.body)).sessionId).toBe(firstOwner)
+    const captures = request.mock.calls.filter(([url]) => url.endsWith('/capture'))
+    expect(captures).toHaveLength(1)
+    expect(JSON.parse(String(captures[0]![1]!.body)).sessionId).toBe(firstOwner)
   } finally { await page.frame.dispose() }
 })
 

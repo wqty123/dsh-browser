@@ -2,6 +2,14 @@
 
 这些是本插件**有意接受**或**受宿主约束**的边界。它们不是待办事项：写在这里是因为"知道为什么"能省掉一次排查。
 
+## Web 登录态持久化
+
+DSH 是本地单用户应用：每个 `DSH_HOME` 只有一个持久 Cookie 存储，所有工作区、会话和标签共享站点登录 Cookie。不使用用户、profile、工作区或会话 ID 分罐。
+
+Web 代理的上游 Cookie 保存在 `<DSH_HOME>/dsh-builtin-browser-host/web-cookies/cookies.json`，临时文件原子替换，权限 0600（Windows 仍需 DSH_HOME 的用户 ACL 保护）。它们不是加密保险库；不要共享或上传该目录。Cookie 值不写日志，也不回传到 DSH 页面的 Cookie 存储。关闭标签及重启 Web 服务均保留登录 Cookie，包括没有 Expires/Max-Age 的 session Cookie，类似 Chrome“继续浏览上次打开的网页”的恢复策略；session Cookie 不会被人为添加有效期。显式有效期与删除仍生效：过期 Expires、非正 Max-Age 会删除 Cookie，且不会在重启时恢复；Max-Age 优先于 Expires。Cookie 按规范化的 origin（协议、主机、端口）隔离。无效条目逐条丢弃；文件损坏或不可读时使用空罐并尝试原子重写。磁盘写入失败不阻断网页，但此次变更可能无法跨重启保留。
+
+这不保证所有网站均可登录：opaque-origin guest 的隔离、第三方登录流程和依赖浏览器存储的站点仍有限制。桌面侧栏使用 #64 宿主提供的 Electron partition；Web 的持久化不改变 Desktop 的 partition 行为。
+
 ## Web 代理文档的嵌套与隔离
 
 Web 页面和嵌套 iframe 都受响应级 `sandbox allow-scripts allow-forms` 约束，不带 `allow-same-origin`。代理不转发 DSH cookie/token，CSP 的网络目标仍只允许 guest 路由，不能访问 DSH API 或存储。

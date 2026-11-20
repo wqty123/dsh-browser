@@ -194,10 +194,7 @@ const react = require("react")
     "readiness.bridge.missing": "未安装",
     "readiness.bridge.stale": "已失效(宿主升级后需重装)",
     "readiness.bridge.absent": "本机没有可用的宿主进程",
-    "readiness.bridge.install": "安装并重启",
-    "readiness.bridge.repair": "修复并重启",
-    "readiness.bridge.reinstall": "重装并重启",
-    "readiness.bridge.uninstall": "卸载并重启",
+    "readiness.bridge.reinstall": "卸载并重装",
     "readiness.bridge.working": "正在准备维护…",
     "readiness.bridge.inProgress": "维护进行中…",
     "readiness.bridge.maintenanceHint": "点击后将正常退出并重启 DSH。",
@@ -207,13 +204,11 @@ const react = require("react")
     "readiness.bridge.phase.armed": "正在准备退出 DSH…",
     "readiness.bridge.phase.closing": "正在正常退出 DSH…",
     "readiness.bridge.phase.installing": "正在安装桥接…",
-    "readiness.bridge.phase.uninstalling": "正在卸载桥接…",
     "readiness.bridge.phase.restarting": "正在重启 DSH…",
     "readiness.bridge.phase.verifying": "正在确认桥接状态…",
     "readiness.bridge.failed": "桥接维护失败，请查看诊断后重试。",
     "readiness.bridge.cancelled": "桥接维护已取消，可重试。",
     "readiness.bridge.installedDone": "桥接安装完成",
-    "readiness.bridge.uninstalledDone": "桥接已卸载",
     "readiness.bridge.actionFailed": "桥接维护未能开始，请查看诊断后重试。",
     "delivery.title": "交付",
     "delivery.tool": "接手下载的工具(MCP 工具名,留空=只存本地)",
@@ -363,10 +358,7 @@ const react = require("react")
     "readiness.bridge.missing": "Not installed",
     "readiness.bridge.stale": "Stale (a desktop update needs a reinstall)",
     "readiness.bridge.absent": "No desktop install on this machine",
-    "readiness.bridge.install": "Install and restart",
-    "readiness.bridge.repair": "Repair and restart",
-    "readiness.bridge.reinstall": "Reinstall and restart",
-    "readiness.bridge.uninstall": "Uninstall and restart",
+    "readiness.bridge.reinstall": "Uninstall and reinstall",
     "readiness.bridge.working": "Preparing maintenance…",
     "readiness.bridge.inProgress": "Maintenance in progress…",
     "readiness.bridge.maintenanceHint": "DSH will exit normally and restart after you click.",
@@ -376,13 +368,11 @@ const react = require("react")
     "readiness.bridge.phase.armed": "Preparing to exit DSH…",
     "readiness.bridge.phase.closing": "Exiting DSH normally…",
     "readiness.bridge.phase.installing": "Installing the bridge…",
-    "readiness.bridge.phase.uninstalling": "Uninstalling the bridge…",
     "readiness.bridge.phase.restarting": "Restarting DSH…",
     "readiness.bridge.phase.verifying": "Checking the bridge…",
     "readiness.bridge.failed": "Bridge maintenance failed. Check diagnostics and try again.",
     "readiness.bridge.cancelled": "Bridge maintenance was cancelled. You can try again.",
     "readiness.bridge.installedDone": "Bridge installed",
-    "readiness.bridge.uninstalledDone": "Bridge uninstalled",
     "readiness.bridge.actionFailed": "Bridge maintenance could not start. Check diagnostics and try again.",
     "delivery.title": "Delivery",
     "delivery.tool": "Tool that takes the download (MCP tool name; empty = local only)",
@@ -964,7 +954,8 @@ const react = require("react")
       }
     }
 
-    const bridgeAction = async action => {
+    const bridgeAction = async () => {
+      const action = "reinstall"
       if (bridgePending.current || busy || bridgeActive) return
       const desktopMenu = () => typeof document.querySelector === "function"
         ? document.querySelector("[data-windows-menu]")?.shadowRoot?.querySelector("button") : null
@@ -1055,8 +1046,6 @@ const react = require("react")
             : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
     const controlsBusy = busy || bridgeBusy !== null || bridgeActive
     const canManageBridge = runtime.bridge.present === true && runtime.bridge.state !== "absent"
-    const installLabel = runtime.bridge.state === "installed" ? "readiness.bridge.reinstall"
-      : runtime.bridge.state === "stale" ? "readiness.bridge.repair" : "readiness.bridge.install"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
     const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
     const bridgeJobError = typeof bridgeJob?.error === "string" ? bridgeJob.error : ""
@@ -1072,12 +1061,12 @@ const react = require("react")
       canManageBridge ? h("div", { key: "bridge-controls" }, [
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
-          h("button", { key: "install", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: () => bridgeAction("install") }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.inProgress" : installLabel)),
+          h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: bridgeAction }, t("readiness.bridge.reinstall")),
         ]),
         h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
       ]) : null,
-      bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase === "installing" && bridgeJob.action === "uninstall" ? "uninstalling" : bridgeJob.phase}`)) : null,
-      bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t(bridgeJob.action === "uninstall" ? "readiness.bridge.uninstalledDone" : "readiness.bridge.installedDone")) : null,
+      bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase}`)) : null,
+      bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t("readiness.bridge.installedDone")) : null,
       bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
       bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
@@ -1108,10 +1097,6 @@ const react = require("react")
           disabled: controlsBusy || preparing,
           onClick: () => { void read() },
         }, t("readiness.recheck")),
-        canManageBridge && runtime.bridge.state === "installed" ? h("button", {
-          key: "uninstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined,
-          onClick: () => bridgeAction("uninstall"),
-        }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.inProgress" : "readiness.bridge.uninstall")) : null,
       ]),
       runtime.canProvision || preparing
         ? h("div", { key: "buttons", style: styles.buttons }, [

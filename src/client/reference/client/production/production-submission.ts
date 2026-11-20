@@ -21,7 +21,7 @@
  *
  * @module dsh-browser-reference/production/production-submission
  */
-import { renderReferenceTable } from '../../../../reference-text.ts'
+import { renderReferenceMarkdownTable } from '../../../../reference-text.ts'
 import { referenceOwnerKey } from '../../../../reference-owner.ts'
 import type { OrderedReferenceGroup } from '../types.ts'
 import { createSubmissionProjector, type TextPosition } from '../ordered-submission.ts'
@@ -134,7 +134,7 @@ export function wireSubmissionContent(input: WireSubmissionInput): readonly Host
       }
     })
     if (markers.length === 0) return
-    blocks.push({ type: 'text', text: `${markers.join('\n')}\n` })
+    blocks.push({ type: 'text', text: `${markers.join('\n')}\n${submissionQuote('Browser reference presentation: the attached references are already displayed as interactive capsules. Do not repeat their markers, reference URIs, source URLs, or source/citation links in the reply. Answer using the quoted content; the capsules provide source navigation.')}` })
   }
   const noted = input.comments === undefined
     ? undefined
@@ -172,7 +172,7 @@ function mapProjected(
     case 'text':
       return { type: 'text', text: part.text }
     case 'table':
-      return { type: 'text', text: part.table === undefined ? part.text : renderReferenceTable(part.table) }
+      return { type: 'text', text: part.table === undefined ? part.text : renderReferenceMarkdownTable(part.table) }
     case 'image': {
       const admitted = admitImage(part.assetKey, part.partId ?? part.assetKey)
       return admitted ?? { type: 'text', text: `[image unavailable: ${part.partId ?? part.assetKey}]` }

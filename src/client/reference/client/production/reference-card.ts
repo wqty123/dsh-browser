@@ -57,6 +57,7 @@ export interface CardTableCell {
   readonly columnSpan: number
   readonly role: 'header' | 'data'
   readonly text: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly includedAs: 'selection' | 'header-context'
   readonly partialText: boolean
   readonly inlineImages: readonly CardInlineImage[]
@@ -149,6 +150,7 @@ function cardTable(
     columnSpan: cell.columnSpan,
     role: cell.role,
     text: cell.text,
+    ...(cell.content === undefined ? {} : { content: cell.content }),
     includedAs: cell.includedAs,
     partialText: cell.partialText,
     inlineImages: (cell.inlineContent ?? [])

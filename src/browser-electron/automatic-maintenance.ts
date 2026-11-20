@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { prepareBridgeMaintenance } from './bridge-maintenance.ts'
 import { launchMaintenanceBroker, type MaintenanceBrokerOptions, type MaintenanceBrokerResult } from './maintenance-broker.ts'
 import { runMaintenanceLifecycle, type MaintenanceState } from './maintenance-lifecycle.ts'
-import { defaultInstallerPath, runBridgeAction, waitForRestartedBridge, type BridgeAction } from './bridge-install.ts'
+import { defaultInstallerPath, runBridgeAction, runBridgeReinstall, waitForRestartedBridge } from './bridge-install.ts'
+import { readBridgeStatus } from './bridge-status.ts'
 import { desktopPaths, readDesktopIdentity } from './desktop-identity.ts'
 import { dshHome } from './paths.ts'
 import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.ts'
@@ -18,7 +19,7 @@ export interface AutomaticMaintenanceOptions { readonly locale?: 'zh' | 'en' }
 interface AutomaticPlan {
   readonly version: 1
   readonly id: string
-  readonly action: BridgeAction
+  readonly action: 'reinstall'
   readonly root: string
   readonly nodePath: string
   readonly electronNode: boolean
@@ -153,7 +154,7 @@ export function maintenanceProgressLaunchOptions(
   locale: 'zh' | 'en' = 'zh',
   powershellPath = windowsPowerShellPath(),
 ): MaintenanceBrokerOptions {
-  if (typeof jobId !== 'string' || !/^(?:install|uninstall)-[A-Za-z0-9]+$/.test(jobId)
+  if (typeof jobId !== 'string' || !/^(?:install|uninstall|reinstall)-[A-Za-z0-9]+$/.test(jobId)
     || typeof directory !== 'string' || !isAbsolute(directory) || basename(directory) !== jobId
     || !['zh', 'en'].includes(locale)) throw new Error('invalid maintenance progress request')
   return {
@@ -207,7 +208,7 @@ export function readAutomaticMaintenance(home = homePath()): AutomaticMaintenanc
       || basename(pointer.directory) !== pointer.id) return undefined
     const state = JSON.parse(readFileSync(join(pointer.directory, 'state.json'), 'utf8')) as AutomaticMaintenanceJob
     if (state.id !== pointer.id || !['armed', 'closing', 'installing', 'restarting', 'verifying', ...terminal].includes(state.phase)
-      || !['install', 'uninstall'].includes(state.action) || !Number.isFinite(Date.parse(state.at))) return undefined
+      || !['install', 'uninstall', 'reinstall'].includes(state.action) || !Number.isFinite(Date.parse(state.at))) return undefined
     return state
   } catch { return undefined }
 }
@@ -218,7 +219,7 @@ async function clearStaleLock(lockPath: string, home: string): Promise<boolean> 
     // Never touch a lock another request may still be preparing (concurrent start window).
     if (Date.now() - info.mtimeMs < 5 * 60_000) return false
     const id = (await readFile(lockPath, 'utf8')).trim()
-    if (!/^(?:install|uninstall)-[A-Za-z0-9]+$/.test(id)) return false
+    if (!/^(?:install|uninstall|reinstall)-[A-Za-z0-9]+$/.test(id)) return false
     const prior = readAutomaticMaintenance(home)
     if (prior === undefined || prior.id !== id) return true
     if (terminal.has(prior.phase)) return true
@@ -245,8 +246,8 @@ function validatePlan(value: unknown, path: string, now = Date.now()): Automatic
   if (value === null || typeof value !== 'object') throw new Error('invalid automatic maintenance plan')
   const plan = value as Partial<AutomaticPlan>
   const created = typeof plan.createdAt === 'string' ? Date.parse(plan.createdAt) : NaN
-  if (plan.version !== 1 || !['install', 'uninstall'].includes(plan.action as string)
-    || typeof plan.id !== 'string' || !/^(?:install|uninstall)-[A-Za-z0-9]+$/.test(plan.id)
+  if (plan.version !== 1 || plan.action !== 'reinstall'
+    || typeof plan.id !== 'string' || !/^reinstall-[A-Za-z0-9]+$/.test(plan.id)
     || ![plan.root, plan.home, plan.nodePath, plan.directory].every(p => typeof p === 'string' && isAbsolute(p))
     || typeof plan.electronNode !== 'boolean' || !Number.isFinite(created) || created > now || now - created > 30_000
     || (plan.locale !== undefined && !['zh', 'en'].includes(plan.locale))) {
@@ -270,7 +271,7 @@ function validatePlan(value: unknown, path: string, now = Date.now()): Automatic
 
 /** Commit only the armed job after its accepted HTTP response has finished writing. */
 export async function commitAutomaticMaintenance(jobId: string, home = homePath()): Promise<void> {
-  if (typeof jobId !== 'string' || !/^(?:install|uninstall)-[A-Za-z0-9]+$/.test(jobId)) throw new Error('invalid bridge maintenance job id')
+  if (typeof jobId !== 'string' || !/^reinstall-[A-Za-z0-9]+$/.test(jobId)) throw new Error('invalid bridge maintenance job id')
   const state = readAutomaticMaintenance(home)
   if (state?.id !== jobId || state.phase !== 'armed' || !Number.isSafeInteger(state.workerPid) || Number(state.workerPid) <= 0) {
     throw new Error('the bridge maintenance job is no longer armed')
@@ -295,9 +296,9 @@ export async function commitAutomaticMaintenance(jobId: string, home = homePath(
 }
 
 /** Only the new, authenticated explicit-click endpoint calls this function. */
-export async function startAutomaticMaintenance(action: BridgeAction, root: string, options: AutomaticMaintenanceOptions = {}): Promise<AutomaticMaintenanceJob> {
+export async function startAutomaticMaintenance(action: 'reinstall', root: string, options: AutomaticMaintenanceOptions = {}): Promise<AutomaticMaintenanceJob> {
   requireLiveDesktop()
-  if (!['install', 'uninstall'].includes(action)) throw new Error('invalid bridge maintenance action')
+  if (action !== 'reinstall') throw new Error('invalid bridge maintenance action')
   if (options.locale !== undefined && !['zh', 'en'].includes(options.locale)) throw new Error('invalid bridge maintenance locale')
   if (!readDesktopIdentity(root).ok) throw new Error('the maintenance target is not a verified DSH Desktop installation')
   if (process.platform === 'win32' && !existsSync(quitPath)) throw new Error('the packaged Desktop quit helper is missing')
@@ -317,19 +318,21 @@ export async function startAutomaticMaintenance(action: BridgeAction, root: stri
   }
   let plan: AutomaticPlan | undefined
   try {
-    const prepared = await prepareBridgeMaintenance(action, root, { directory: base })
+    const prepared = await prepareBridgeMaintenance('install', root, { directory: base })
     const original = JSON.parse(await readFile(prepared.planPath, 'utf8')) as { nodePath: string; electronNode: boolean }
-    const id = basename(prepared.directory)
+    const id = basename(prepared.directory).replace(/^install-/, 'reinstall-')
+    const directory = join(base, id)
+    await rename(prepared.directory, directory)
     await lock.writeFile(id + '\n')
     await lock.close()
     plan = { version: 1, id, action, root: resolve(root), nodePath: original.nodePath, electronNode: original.electronNode,
-      home, directory: prepared.directory, target: mains[0] as DesktopProcess, createdAt: new Date().toISOString(),
+      home, directory, target: mains[0] as DesktopProcess, createdAt: new Date().toISOString(),
       ...options.locale === undefined ? {} : { locale: options.locale } }
-    const path = join(prepared.directory, 'automatic.json')
+    const path = join(directory, 'automatic.json')
     await writeFile(path, JSON.stringify(plan, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
-    await atomicJson(join(base, 'latest.json'), { id, directory: prepared.directory })
+    await atomicJson(join(base, 'latest.json'), { id, directory })
     const launched = await launchMaintenanceBroker({ runtimePath: plan.nodePath,
-      args: [...plan.electronNode ? ['--expose-internals'] : [], workerPath, '--automatic-maintenance', path], cwd: prepared.directory,
+      args: [...plan.electronNode ? ['--expose-internals'] : [], workerPath, '--automatic-maintenance', path], cwd: directory,
       environment: { DSH_HOME: home, ELECTRON_RUN_AS_NODE: plan.electronNode ? '1' : undefined } })
     // WMI's return code proves creation only. The worker must actually load and publish its arm.
     const deadline = Date.now() + 12_000
@@ -434,10 +437,13 @@ async function runWorker(path: string): Promise<void> {
       maintain: async () => {
         checkCancelled()
         if ((await desktopProcesses(plan.root)).length > 0) throw new Error('DSH Desktop was reopened during maintenance; refusing to modify its files')
-        return await runBridgeAction(plan.action, plan.root, {
-          node: () => plan.nodePath, installer: defaultInstallerPath, trackResult: true,
-          run: async (cmd, args, extra) => await execute(cmd, [...plan.electronNode ? ['--expose-internals'] : [], ...args], 180_000,
-            { ...process.env, ...extra, ELECTRON_RUN_AS_NODE: plan.electronNode ? '1' : undefined }),
+        return await runBridgeReinstall({
+          absent: () => readBridgeStatus(plan.root).state === 'missing',
+          run: async action => await runBridgeAction(action, plan.root, {
+            node: () => plan.nodePath, installer: defaultInstallerPath, trackResult: true,
+            run: async (cmd, args, extra) => await execute(cmd, [...plan.electronNode ? ['--expose-internals'] : [], ...args], 180_000,
+              { ...process.env, ...extra, ELECTRON_RUN_AS_NODE: plan.electronNode ? '1' : undefined }),
+          }),
         })
       },
       restart: async () => {
@@ -453,7 +459,7 @@ async function runWorker(path: string): Promise<void> {
         })
       },
       verify: async (pid, action) => {
-        if (action === 'install') { await waitForRestartedBridge(pid, { timeoutMs: 45_000 }); return }
+        if (action !== 'uninstall') { await waitForRestartedBridge(pid, { timeoutMs: 45_000 }); return }
         await delay(1_500)
         if (!(await desktopProcesses(plan.root)).some(p => p.pid === pid)) throw new Error('the reopened Desktop did not remain running')
       },

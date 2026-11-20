@@ -191,6 +191,7 @@ export function fakeHostInput(initialText = '帮我总结这段网页内容', re
       text = text.slice(0, span.start) + inserted + text.slice(span.end)
       return true
     },
+    insertQuote(quote) { calls.push('insertQuote'); text += `> ${quote} `; return true },
     persistDraft() { calls.push('persistDraft') },
     readText() { calls.push('readText'); return text },
     setText(next) { text = next },

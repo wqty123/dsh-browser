@@ -51,6 +51,7 @@ import { handleRuntimeProvision, handleRuntimeStatus, RUNTIME_PROVISION_ROUTE, R
 import { createShortcutRouteHandlers, SHORTCUT_ADD_ROUTE, SHORTCUT_REMOVE_ROUTE, SHORTCUTS_ROUTE } from './shortcuts-route.ts'
 import { createShortcutStore, type ShortcutSettings } from './startpage-shortcuts.ts'
 import { createReferenceService, setReferenceCaptureActionHandler } from '../browser-reference/service.ts'
+import { WEB_SOURCE_ROUTE } from '../reference-source.ts'
 import { createDeliveryQueue, resolveReferenceOwner, type DeliveryQueue } from '../browser-reference/delivery.ts'
 import { createSubmissionReceipts, type ReceiptSession } from '../browser-reference/submission-receipts.ts'
 import type { BrowserReference, BrowserReferenceCarrier } from '../browser-reference/types.ts'
@@ -714,7 +715,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           start: async (action, options) => {
             const root = findDesktopInstall()
             if (root === undefined) throw new Error('no verified DSH Desktop installation was found')
-            return await runWithManualBridgePreference(action, patch => settings.update(patch),
+            return await runWithManualBridgePreference('install', patch => settings.update(patch),
               async () => await startAutomaticMaintenance(action, root, options))
           },
         })
@@ -887,6 +888,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           [REFERENCE_GET_ROUTE, handlers.get, 'dsh-builtin-browser: reference detail'],
           [REFERENCE_CAPTURE_ROUTE, handlers.capture, 'dsh-builtin-browser: reference capture'],
           [REFERENCE_REVEAL_ROUTE, handlers.reveal, 'dsh-builtin-browser: reference reveal'],
+          [WEB_SOURCE_ROUTE, handlers.source, 'dsh-builtin-browser: web reference source'],
           [REFERENCE_INSERT_ROUTE, handlers.insert, 'dsh-builtin-browser: reference draft insert'],
           [REFERENCE_EXPORT_ROUTE, handlers.export, 'dsh-builtin-browser: reference export'],
           [REFERENCE_IMPORT_ROUTE, handlers.importBundle, 'dsh-builtin-browser: reference import'],
