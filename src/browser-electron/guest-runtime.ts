@@ -9,6 +9,13 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
   let real = ${JSON.stringify(pageUrl).replace(/</gu, '\\u003c')};
   const route = '/dsh-builtin-browser/browser-view/isolated-guest';
   const attempt = fn => { try { return fn(); } catch {} };
+  attempt(() => {
+    const cache = { match: async () => undefined, matchAll: async () => [], keys: async () => [],
+      add: async () => {}, addAll: async () => {}, put: async () => {}, delete: async () => false };
+    const caches = { open: async () => cache, match: async () => undefined, has: async () => false,
+      delete: async () => false, keys: async () => [] };
+    Object.defineProperty(window, 'caches', { configurable: true, enumerable: true, get: () => caches });
+  });
   ${storage === undefined ? '' : 'attempt(() => { ' + guestStorageScript(storage) + ' });'}
   const storageContext = ${JSON.stringify(storage?.context ?? '')};
   const contextual = value => {
@@ -49,6 +56,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         const url = toProxy(isRequest ? input.url : input);
         if (!/^https?:$/.test(new URL(url, location.href).protocol)) return nativeFetch(input, init);
         const headers = new Headers(init && init.headers || (isRequest ? input.headers : undefined));
+        headers.set('x-dsh-guest-headers', [...headers.keys()].filter(name => !name.startsWith('x-dsh-')).join(','));
         headers.set('x-dsh-guest-sub', '1');
         const options = Object.assign({}, init, { headers, mode: 'cors', credentials: 'omit' });
         return nativeFetch(isRequest ? new Request(new URL(url, location.href), input) : url, options);
@@ -57,10 +65,25 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
   });
   attempt(() => {
     const open = XMLHttpRequest.prototype.open;
+    const send = XMLHttpRequest.prototype.send;
+    const header = XMLHttpRequest.prototype.setRequestHeader;
+    const names = new WeakMap();
     XMLHttpRequest.prototype.open = function(method, url, ...args) {
       const result = open.call(this, method, toProxy(url), ...args);
+      names.set(this, new Set());
       attempt(() => this.setRequestHeader('x-dsh-guest-sub', '1'));
       return result;
+    };
+    XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+      const result = header.call(this, name, value);
+      const key = String(name).toLowerCase();
+      if (!key.startsWith('x-dsh-')) names.get(this)?.add(key);
+      return result;
+    };
+    XMLHttpRequest.prototype.send = function(...args) {
+      this.withCredentials = false;
+      header.call(this, 'x-dsh-guest-headers', [...(names.get(this) || [])].join(','));
+      return send.apply(this, args);
     };
   });
   attempt(() => {

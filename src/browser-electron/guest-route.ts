@@ -57,6 +57,11 @@ const SAFE_REQUEST_HEADERS = new Set([
   'if-none-match', 'if-modified-since', 'cache-control',
 ])
 
+function siteHeader(name: string): boolean {
+  return /^[!#$%&'*+.^_`|~\da-z-]+$/u.test(name)
+    && !/^(?:cookie2?|authorization|host|origin|referer|connection|content-length|accept-encoding|user-agent|proxy-.*|sec-.*|x-dsh-.*|x-forwarded-.*|x-real-ip)$/u.test(name)
+}
+
 /** Response headers that would break a same-origin document. */
 const DROP_RESPONSE_HEADERS = new Set([
   'content-security-policy', 'content-security-policy-report-only', 'x-frame-options',
@@ -229,9 +234,10 @@ export async function handleGuest(
   response.setHeader('x-content-type-options', 'nosniff')
   response.setHeader('access-control-allow-origin', 'null')
   if (method === 'OPTIONS') {
+    const requested = String(request.headers['access-control-request-headers'] ?? '').toLowerCase().split(',').map(name => name.trim())
     writeHead(204, {
       'access-control-allow-methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
-      'access-control-allow-headers': [...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub'].join(', '),
+      'access-control-allow-headers': [...new Set([...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub', 'x-dsh-guest-headers', ...requested.filter(siteHeader)])].join(', '),
     })
     response.end()
     return
@@ -286,7 +292,17 @@ export async function handleGuest(
         chunks.push(bytes)
       }
       const input: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-      const value = (storage ?? localGuestStorage()).execute(storageToken, target.origin, input)
+      const store = storage ?? localGuestStorage()
+      let value: unknown
+      if (input && typeof input === 'object' && 'area' in input && input.area === 'cookies') {
+        store.authorize(storageToken, target.origin)
+        const operation = input as Record<string, unknown>
+        const jar = cookies ?? localGuestCookies()
+        if (operation.op === 'get') value = jar.getDocumentCookie(target)
+        else if (operation.op === 'set' && typeof operation.value === 'string') {
+          jar.setDocumentCookie(target, operation.value); value = jar.getDocumentCookie(target)
+        } else throw new TypeError('Invalid cookie operation')
+      } else value = store.execute(storageToken, target.origin, input)
       writeHead(200); response.end(JSON.stringify({ ok: true, value }))
     } catch (error) {
       const name = error instanceof Error && ['SecurityError', 'TypeError', 'QuotaExceededError', 'UnknownError'].includes(error.name)
@@ -300,8 +316,10 @@ export async function handleGuest(
   const subRequest = request.headers['x-dsh-guest-sub'] === '1'
     || (typeof destination === 'string' && destination !== 'document' && destination !== 'iframe')
   const headers = new Headers()
+  const siteHeaders = new Set(request.headers['x-dsh-guest-sub'] === '1'
+    ? String(request.headers['x-dsh-guest-headers'] ?? '').toLowerCase().split(',').filter(siteHeader) : [])
   for (const [name, value] of Object.entries(request.headers)) {
-    if (!SAFE_REQUEST_HEADERS.has(name.toLowerCase()) || value === undefined) continue
+    if ((!SAFE_REQUEST_HEADERS.has(name.toLowerCase()) && !siteHeaders.has(name.toLowerCase())) || value === undefined) continue
     headers.set(name, Array.isArray(value) ? value.join(', ') : value)
   }
   if (!subRequest) {
@@ -329,9 +347,9 @@ export async function handleGuest(
     response.end('guest proxy: cookie storage unavailable')
     return
   }
-  const jarCookie = cookieJar.getCookieHeader(target)
   const refreshCookies = (url = target): void => {
-    const cookie = cookieJar.getCookieHeader(url)
+    const previous = headers.get('referer')
+    const cookie = cookieJar.getCookieHeader(url, false, previous ? { site: new URL(previous), topLevel: !subRequest, method } : undefined)
     if (cookie) headers.set('cookie', cookie)
     else headers.delete('cookie')
   }
@@ -364,7 +382,7 @@ export async function handleGuest(
   // 深链接预热：直接拉 `https://host/s?…` 这类页面时，站点看到的是「没有站点 Cookie 的首跳」，
   // 百度会回「安全验证」。先取一次站点根，把服务端种的 Cookie 收进自己的罐子，并把 Referer 指向它，
   // 这次跳转就变成一次正常的站内导航。只在罐子里还没有该站 Cookie 且目标不是根路径时做一次。
-  if (safeNavigation && !jarCookie && target.pathname !== '/' && !headers.has('referer')) {
+  if (safeNavigation && !headers.has('cookie') && target.pathname !== '/' && !headers.has('referer')) {
     try { await warmRoot() } catch { /* 预热失败就按原样请求 */ }
   }
   let upstream: Response
@@ -465,7 +483,7 @@ export async function handleGuest(
   const context = query.get('storage-context') ?? randomUUID()
   const storageConfig = (destination === 'iframe' || destination === 'document') && request.headers['sec-fetch-mode'] === 'navigate'
     && /^[\w:-]{16,128}$/u.test(context)
-    ? { token: (storage ?? localGuestStorage()).issue(target.origin, context), context } : undefined
+    ? { token: (storage ?? localGuestStorage()).issue(target.origin, context), context, cookies: cookieJar.getDocumentCookie(target) } : undefined
   const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig) + '</script>'
   let body = rewriteDocument(raw, target)
   if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)

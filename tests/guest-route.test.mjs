@@ -162,6 +162,27 @@ test('rejects every unsafe DNS answer, DSH address aliases and unresolved target
   resolved.delete('alias.example')
 })
 
+test('site-selected custom headers pass preflight and forwarding without forwarding DSH credentials or metadata', async () => {
+  const path = guestPath('https://ordinary.example/echo')
+  const preflight = await call(path, { method: 'OPTIONS', headers: {
+    'access-control-request-headers': 'x-site-config, is_referer, cookie, authorization, x-dsh-secret, x-dsh-guest-headers',
+  } })
+  assert.equal(preflight.status, 204)
+  const allowed = preflight.headers['access-control-allow-headers'].split(', ')
+  assert.ok(allowed.includes('x-site-config')); assert.ok(allowed.includes('is_referer'))
+  for (const name of ['cookie', 'authorization', 'x-dsh-secret']) assert.ok(!allowed.includes(name))
+  assert.equal(preflight.headers['access-control-allow-credentials'], undefined)
+  const result = await call(path, { headers: { 'x-dsh-guest-sub':'1',
+    'x-dsh-guest-headers':'x-site-config,cookie,authorization,x-dsh-secret,host,origin',
+    'x-site-config':'site-value', 'x-host-private':'host-value', cookie:'DSH=private', authorization:'Bearer host', 'x-dsh-secret':'host-secret',
+  } })
+  const headers = JSON.parse(result.body).headers
+  assert.equal(headers['x-site-config'], 'site-value')
+  for (const name of ['x-host-private', 'cookie', 'authorization', 'x-dsh-secret', 'x-dsh-guest-headers']) assert.equal(headers[name], undefined)
+  const unmarked = await call(path, { headers: { 'sec-fetch-dest':'empty', 'x-dsh-guest-headers':'x-site-config', 'x-site-config':'not-from-guest' } })
+  assert.equal(JSON.parse(unmarked.body).headers['x-site-config'], undefined)
+})
+
 test('validates DNS on redirect targets and again when the next hop is requested', async () => {
   const path = guestPath('https://ordinary.example/dns-redirect')
   resolved.set('redirect.example', ['::1'])
@@ -473,7 +494,7 @@ test('cookie jar validates Domain but conservatively retains exact host and port
   assert.equal(jar.getCookieHeader(target), undefined)
   jar.setCookies(target, ['host=only; Path=/', 'parent=valid; Domain=.example.com; Path=/',
     'suffix=isolated; Domain=com; Path=/', 'foreign=no; Domain=elsewhere.com', 'trailing=no; Domain=example.com.'])
-  assert.equal(jar.getCookieHeader(target), 'host=only; parent=valid; suffix=isolated')
+  assert.equal(jar.getCookieHeader(target), 'host=only; parent=valid')
   for (const url of ['https://example.com/', 'https://other.example.com/', 'https://child.login.example.com/',
     'https://login.example.com:8443/', 'https://login.example.com.evil/']) {
     assert.equal(jar.getCookieHeader(new URL(url)), undefined, url)

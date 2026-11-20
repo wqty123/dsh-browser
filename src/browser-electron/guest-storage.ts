@@ -43,7 +43,7 @@ export class GuestStorage {
     return payload + '.' + createHmac('sha256', this.secret).update(payload).digest('base64url')
   }
 
-  execute(token: string, origin: string, input: unknown): unknown {
+  authorize(token: string, origin: string): { readonly context: string } {
     if (token.length > 8192) fail('SecurityError')
     const [payload, signature, extra] = token.split('.')
     const expected = createHmac('sha256', this.secret).update(payload ?? '').digest()
@@ -52,6 +52,11 @@ export class GuestStorage {
     let scope: { origin?: unknown; context?: unknown }
     try { scope = JSON.parse(Buffer.from(payload!, 'base64url').toString('utf8')) } catch { fail('SecurityError') }
     if (scope?.origin !== origin || typeof scope.context !== 'string') fail('SecurityError')
+    return { context: scope.context }
+  }
+
+  execute(token: string, origin: string, input: unknown): unknown {
+    const scope = this.authorize(token, origin)
     if (!input || typeof input !== 'object' || Array.isArray(input)) fail('TypeError')
     const { area, op, key, value } = input as Record<string, unknown>
     if (area !== 'local' && area !== 'session') fail('TypeError')
