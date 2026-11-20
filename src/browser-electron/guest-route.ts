@@ -25,6 +25,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { promises as dns } from 'node:dns'
 import { guestRuntimeScript } from './guest-runtime.ts'
+import { GuestCookieJar } from './guest-cookie-jar.ts'
 
 /** Prefix every proxied document and subresource lives under. */
 
@@ -53,39 +54,7 @@ export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/guest'
 
 class UnsafeGuestTargetError extends Error {}
 
-/** Per-host cookies seen on proxied responses; replayed on the next request to that host. */
-const cookieJar = new Map<string, Map<string, string>>()
-
-/**
- * Record a response's cookies for one host.
- * @param host - the upstream host.
- * @param values - raw `set-cookie` header values.
- */
-function rememberCookies(host: string, values: readonly string[]): void {
-  if (values.length === 0) return
-  const jar = cookieJar.get(host) ?? new Map<string, string>()
-  for (const raw of values) {
-    const pair = raw.split(';')[0] ?? ''
-    const index = pair.indexOf('=')
-    if (index <= 0) continue
-    const name = pair.slice(0, index).trim()
-    const expiry = /;\s*expires=([^;]+)/iu.exec(raw)?.[1]
-    if (/;\s*max-age\s*=\s*0(?:;|$)/iu.test(raw) || (expiry !== undefined && Date.parse(expiry) <= Date.now())) jar.delete(name)
-    else jar.set(name, pair.slice(index + 1).trim())
-  }
-  cookieJar.set(host, jar)
-}
-
-/**
- * The cookie header to replay for one host.
- * @param host - the upstream host.
- * @returns the header value, or undefined when nothing was recorded.
- */
-function cookiesFor(host: string): string | undefined {
-  const jar = cookieJar.get(host)
-  if (jar === undefined || jar.size === 0) return undefined
-  return [...jar.entries()].map(([name, value]) => `${name}=${value}`).join('; ')
-}
+const cookieJar = new GuestCookieJar()
 
 /** Responses larger than this pass through without rewriting. */
 const MAX_REWRITE_BYTES = 4 * 1024 * 1024
@@ -360,10 +329,10 @@ export async function handleGuest(
       }
     } catch {}
   }
-  const jarCookie = cookiesFor(target.host)
+  const jarCookie = cookieJar.getCookieHeader(target)
   const replay = forwardableCookies(request.headers.cookie)
-  const refreshCookies = (): void => {
-    const cookie = [cookiesFor(target.host), replay].filter(part => typeof part === 'string' && part !== '').join('; ')
+  const refreshCookies = (url = target): void => {
+    const cookie = [cookieJar.getCookieHeader(url), replay].filter(part => typeof part === 'string' && part !== '').join('; ')
     if (cookie !== '') headers.set('cookie', cookie)
     else headers.delete('cookie')
   }
@@ -384,12 +353,14 @@ export async function handleGuest(
   }
   const safeNavigation = !subRequest && (method === 'GET' || method === 'HEAD')
   const warmRoot = async (): Promise<void> => {
-    const origin = new URL('/', target.origin).href
-    const warm = await fetchTarget(new URL(origin), { method: 'GET', headers, redirect: 'manual' })
-    rememberCookies(target.host, warm.headers.getSetCookie?.() ?? [])
-    await warm.body?.cancel()
-    headers.set('referer', origin)
-    refreshCookies()
+    const root = new URL('/', target.origin)
+    refreshCookies(root)
+    try {
+      const warm = await fetchTarget(root, { method: 'GET', headers, redirect: 'manual' })
+      cookieJar.setCookies(root, warm.headers.getSetCookie?.() ?? [])
+      await warm.body?.cancel()
+      headers.set('referer', root.href)
+    } finally { refreshCookies() }
   }
   // 深链接预热：直接拉 `https://host/s?…` 这类页面时，站点看到的是「没有站点 Cookie 的首跳」，
   // 百度会回「安全验证」。先取一次站点根，把服务端种的 Cookie 收进自己的罐子，并把 Referer 指向它，
@@ -424,7 +395,7 @@ export async function handleGuest(
       body = Buffer.concat(chunks)
     }
     upstream = await fetchTarget(target, { method, headers, body: body as BodyInit | undefined, redirect: 'manual' })
-    rememberCookies(target.host, upstream.headers.getSetCookie?.() ?? [])
+    cookieJar.setCookies(target, upstream.headers.getSetCookie?.() ?? [])
     // 反爬挑战识别 + 一次重试：站点（百度 `/s?wd=…`）在没有「先访问过站点」的痕迹时回「安全验证」。
     // 罐子里可能已经带着上次挑战页的 Cookie，所以这里不看有没有 Cookie，而是看**内容**：
     // 命中挑战就先取站点根补一次 Cookie，带上根的 Referer 重试一次。仍失败就把挑战页交给上层。
@@ -446,7 +417,7 @@ export async function handleGuest(
     response.end(`guest proxy: cannot reach ${target.host}: ${String((error as Error).message ?? error)}`)
     return
   }
-  rememberCookies(target.host, upstream.headers.getSetCookie?.() ?? [])
+  cookieJar.setCookies(target, upstream.headers.getSetCookie?.() ?? [])
   const out = new Headers()
   for (const [name, value] of upstream.headers) {
     if (!DROP_RESPONSE_HEADERS.has(name.toLowerCase())) out.set(name, value)

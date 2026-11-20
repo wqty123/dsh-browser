@@ -4,6 +4,7 @@ import { createServer, request as httpRequest } from 'node:http'
 import { once } from 'node:events'
 import { promises as dns } from 'node:dns'
 import { handleGuest, guestPath, rewriteDocument } from '../src/browser-electron/guest-route.ts'
+import { GuestCookieJar } from '../src/browser-electron/guest-cookie-jar.ts'
 
 const nativeFetch = globalThis.fetch
 const nativeLookup = dns.lookup
@@ -24,10 +25,16 @@ before(async () => {
     if (req.url === '/login') {
       res.writeHead(303, { location: '/account', 'set-cookie': ['SID=logged-in; HttpOnly; Path=/', 'theme=dark; Path=/'] })
       res.end()
+    } else if (req.url === '/cookie-scopes/set') {
+      res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': [
+        'default=directory', 'SID=root; Path=/', 'SID=area; Path=/cookie-scopes',
+        'secure=https-only; Path=/; Secure', 'foreign=bad; Domain=unrelated.example; Path=/',
+      ] })
+      res.end('{}')
     } else if (req.url === '/' && req.headers['x-fixture-host'] !== 'empty.example') {
       res.writeHead(200, { 'set-cookie': 'VISITED=root; Path=/' })
       res.end('root')
-    } else if (req.url === '/challenge') {
+    } else if (req.url === '/challenge' || req.url === '/cookie-scopes/challenge') {
       res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': 'CHALLENGE=seen; Path=/' })
       res.end('<html><body>安全验证</body></html>')
     } else if (req.url === '/large') {
@@ -61,7 +68,7 @@ before(async () => {
   globalThis.fetch = (target, options) => {
     forwarded.push({ target: String(target), options: { ...options, headers: new Headers(options.headers) } })
     const url = new URL(target)
-    if (!['ordinary.example', 'warm-get.example', 'warm-head.example', 'challenge.example', 'empty.example'].includes(url.hostname)) throw new Error('unexpected upstream')
+    if (!['ordinary.example', 'warm-get.example', 'warm-head.example', 'challenge.example', 'empty.example', 'scoped.example'].includes(url.hostname)) throw new Error('unexpected upstream')
     const headers = new Headers(options.headers)
     headers.set('x-fixture-host', url.hostname)
     return nativeFetch(upstreamOrigin + url.pathname + url.search, { ...options, headers })
@@ -190,6 +197,77 @@ test('replays only allowlisted inbound site cookies alongside the existing jar',
     headers: { cookie: 'DSH=private; BAIDUID=baidu; SUB=weibo; XSRF=site-token; session=private' },
   })
   assert.equal(JSON.parse(result.body).headers.cookie, 'SID=logged-in; theme=dark; BAIDUID=baidu; SUB=weibo; XSRF=site-token')
+})
+
+test('proxy cookie round-trip honors directory paths, duplicate names and Secure without leaking Set-Cookie', async () => {
+  const options = { headers: { 'x-dsh-guest-sub': '1' } }
+  const result = await call(guestPath('https://scoped.example/cookie-scopes/set'), options)
+  assert.equal(result.status, 200)
+  assert.equal(result.headers['set-cookie'], undefined)
+  const inside = await call(guestPath('https://scoped.example/cookie-scopes/echo'), options)
+  assert.equal(JSON.parse(inside.body).headers.cookie, 'default=directory; SID=area; SID=root; secure=https-only')
+  const outside = await call(guestPath('https://scoped.example/cookie-scopes-other'), options)
+  assert.equal(JSON.parse(outside.body).headers.cookie, 'SID=root; secure=https-only')
+  const insecure = await call(guestPath('http://scoped.example/echo'), options)
+  assert.equal(JSON.parse(insecure.body).headers.cookie, 'SID=root')
+})
+
+test('cookie jar validates Domain but conservatively retains exact host and port isolation', () => {
+  const jar = new GuestCookieJar()
+  const target = new URL('https://login.example.com/account/login')
+  assert.equal(jar.getCookieHeader(target), undefined)
+  jar.setCookies(target, ['host=only; Path=/', 'parent=valid; Domain=.example.com; Path=/',
+    'suffix=isolated; Domain=com; Path=/', 'foreign=no; Domain=elsewhere.com', 'trailing=no; Domain=example.com.'])
+  assert.equal(jar.getCookieHeader(target), 'host=only; parent=valid; suffix=isolated')
+  for (const url of ['https://example.com/', 'https://other.example.com/', 'https://child.login.example.com/',
+    'https://login.example.com:8443/', 'https://login.example.com.evil/']) {
+    assert.equal(jar.getCookieHeader(new URL(url)), undefined, url)
+  }
+})
+
+test('challenge warm-up only sends root-matching jar cookies and restores target-path cookies for retry', async () => {
+  const count = forwarded.length
+  await call(guestPath('https://scoped.example/cookie-scopes/challenge'), {
+    headers: { referer: 'https://dsh.example' + guestPath('https://scoped.example/previous') },
+  })
+  const sent = forwarded.slice(count)
+  assert.equal(sent.length, 3)
+  assert.equal(sent[1].target, 'https://scoped.example/')
+  assert.equal(sent[1].options.headers.get('cookie'), 'SID=root; secure=https-only; CHALLENGE=seen')
+  assert.equal(sent[2].options.headers.get('cookie'), 'default=directory; SID=area; SID=root; secure=https-only; CHALLENGE=seen; VISITED=root')
+})
+
+test('cookie jar expires, deletes and replaces cookies with Max-Age taking precedence over Expires', t => {
+  let now = Date.UTC(2030, 0, 1)
+  t.mock.method(Date, 'now', () => now)
+  const target = new URL('https://site.example/account/page')
+  const jar = new GuestCookieJar()
+  jar.setCookies(target, ['short=lived; Max-Age=2', 'expired=no; Expires=Tue, 01 Jan 2000 00:00:00 GMT',
+    'precedence=yes; Max-Age=10; Expires=Tue, 01 Jan 2000 00:00:00 GMT',
+    'reverse=yes; Expires=Tue, 01 Jan 2000 00:00:00 GMT; Max-Age=10', 'session=one'])
+  jar.setCookies(target, ['session=two'])
+  assert.equal(jar.getCookieHeader(target), 'short=lived; precedence=yes; reverse=yes; session=two')
+  now += 2000
+  assert.equal(jar.getCookieHeader(target), 'precedence=yes; reverse=yes; session=two')
+  jar.setCookies(target, ['precedence=gone; Max-Age=-1', 'reverse=gone; Max-Age=0'])
+  assert.equal(jar.getCookieHeader(target), 'session=two')
+  jar.setCookies(target, ['session=gone; Expires=Tue, 01 Jan 2000 00:00:00 GMT'])
+  assert.equal(jar.getCookieHeader(target), undefined)
+})
+
+test('cookie jar ignores malformed cookies and protects Secure and host-prefixed cookies', () => {
+  const jar = new GuestCookieJar()
+  const https = new URL('https://secure.example/')
+  const http = new URL('http://secure.example/')
+  jar.setCookies(https, ['', 'bad', '=empty', 'bad name=x', 'control=x\r\ny',
+    '__Secure-invalid=no', '__Host-domain=no; Secure; Domain=secure.example; Path=/',
+    '__Host-path=no; Secure; Path=/sub', 'empty=; Path=/', 'SID=safe; Secure; Path=/',
+    '__Secure-valid=yes; Secure; Path=/', '__Host-valid=yes; Secure; Path=/'])
+  jar.setCookies(http, ['SID=overwrite; Path=/', 'SID=delete; Max-Age=0; Path=/', 'new=no; Secure'])
+  assert.equal(jar.getCookieHeader(https), 'empty=; SID=safe; __Secure-valid=yes; __Host-valid=yes')
+  assert.equal(jar.getCookieHeader(http), 'empty=')
+  jar.setCookies(https, [])
+  assert.equal(jar.getCookieHeader(https), 'empty=; SID=safe; __Secure-valid=yes; __Host-valid=yes')
 })
 
 test('restores navigation headers and defaults language without overwriting inbound language', async () => {
