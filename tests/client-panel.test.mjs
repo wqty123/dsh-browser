@@ -2414,7 +2414,7 @@ for (const [action, state, label, success] of [
     const posts = fixture.calls.filter(call => call.init.method === 'POST')
     assert.equal(posts.length, 1)
     assert.equal(posts[0].path, '/dsh-builtin-browser/bridge-maintenance')
-    assert.deepEqual(JSON.parse(posts[0].init.body), { action })
+    assert.deepEqual(JSON.parse(posts[0].init.body), { action, locale: 'zh' })
     assert.equal(new Headers(posts[0].init.headers).get('content-type'), 'application/json')
     assert.deepEqual(clicks, ['official-menu'], 'only the exact official menu button is opened after acknowledgement')
     assert.ok(textOf(armed).includes('readiness.bridge.phase.armed'))
