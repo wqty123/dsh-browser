@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { stripLegacyBridge } from './legacy-bridge.mjs'
 
 const specs = ['rc3', 'rc5'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8')))
-const previousSpecs = ['rc3', 'rc5'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}-revision1.json`, import.meta.url), 'utf8')))
+const previousSpecs = ['rc3', 'rc5'].flatMap(name => [2, 1].map(revision =>
+  JSON.parse(fs.readFileSync(new URL(`./${name}-revision${revision}.json`, import.meta.url), 'utf8'))))
 const suffix = '.before-dsh-host-patch'
 const digest = value => createHash('sha256').update(value).digest('hex')
 
@@ -83,7 +84,8 @@ function plan(packages, restoring, io) {
         if (restoring && original === undefined) throw new Error('no backup for this already patched host')
         return { path, backup, text, output: restoring ? original : text, applied, held, mode: io.statSync(path).mode }
       }
-      const previousTarget = previousSpecs.find(item => item.version === manifest.version)?.targets.find(item => item.id === target.id && item.marker !== target.marker)
+      const previousTarget = previousSpecs.filter(item => item.version === manifest.version).flatMap(item => item.targets)
+        .find(item => item.id === target.id && item.marker !== target.marker && text.includes(item.marker))
       const previous = previousTarget !== undefined && text.includes(previousTarget.marker)
       if (previous) {
         if (original === undefined) throw new Error('no backup for the previous host patch revision')
@@ -110,7 +112,7 @@ function inspect(packages, restoring, io) {
   try {
     const entries = plan(packages, restoring, io)
     return { status: entries.every(entry => entry.applied) ? 'applied' : 'absent',
-      ...(entries.some(entry => entry.previous) ? { reason: 'host patch revision 1; explicit bootstrap upgrade to revision 2 required' } : {}), entries }
+      ...(entries.some(entry => entry.previous) ? { reason: 'host patch revision 1 or 2; explicit bootstrap upgrade to revision 3 required' } : {}), entries }
   } catch (error) {
     return { status: error.status ?? 'anchors mismatch', reason: String(error.message ?? error) }
   }

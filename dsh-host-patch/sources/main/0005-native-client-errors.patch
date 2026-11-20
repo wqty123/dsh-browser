@@ -1,0 +1,25 @@
+From f430580383b5ed0ae07f1b51a63a806a0ea2e954 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 12:50:17 +0000
+Subject: [PATCH] fix(client): admit coded browser errors in native composition
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ scripts/client-bundle-purity.spec.ts | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/scripts/client-bundle-purity.spec.ts b/scripts/client-bundle-purity.spec.ts
+index bad05cbdc7..00dcbc1725 100644
+--- a/scripts/client-bundle-purity.spec.ts
++++ b/scripts/client-bundle-purity.spec.ts
+@@ -451,6 +451,7 @@ describe('client bundle purity gate', () => {
+   })
+ 
+   it('lets inline-safe libraries inline', () => {
++    expect(resolveId('@deepseek-ai/dsh-error')).toBeNull()
+     expect(resolveId('@deepseek-ai/dsh-session/surface')).toBeNull()
+     expect(resolveId('@deepseek-ai/dsh-brand')).toBeNull()
+     expect(resolveId('@deepseek-ai/dsh-deque')).toBeNull()
+-- 
+2.56.0
+

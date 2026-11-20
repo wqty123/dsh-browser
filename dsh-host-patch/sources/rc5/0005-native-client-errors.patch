@@ -1,0 +1,40 @@
+From 52511a6004afea23d313a52fb7c84380e9e20b79 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 12:50:17 +0000
+Subject: [PATCH] fix(client): admit coded browser errors in native composition
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ packages/client/tsdown.client.ts     | 2 +-
+ scripts/client-bundle-purity.spec.ts | 2 ++
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/packages/client/tsdown.client.ts b/packages/client/tsdown.client.ts
+index 7df6b6f529..403a64b973 100644
+--- a/packages/client/tsdown.client.ts
++++ b/packages/client/tsdown.client.ts
+@@ -82,7 +82,7 @@ function styleInjectionModule(
+  * Everything else under @deepseek-ai/* is either a module-table entry
+  * (external) or a leak the purity gate rejects.
+  */
+-export const INLINE_SAFE = /^(?:@deepseek-ai\/dsh-(?:file-reference|fs-patch|session|llm|tools|brand|official-bundles|deque|output-retention|typert-protocol|util-crypto|util-time|util-values|util-workspace-path)(?:\/|$)|@deepseek-ai\/dsh-util-file-drag$|@deepseek-ai\/dsh-token-meter\/client$|@deepseek-ai\/dsh-commands\/builtin$|@deepseek-ai\/dsh-native-command\/types$|@deepseek-ai\/dsh-host-open-in-app\/shared$|@deepseek-ai\/dsh-plugin-manager\/registry$|@deepseek-ai\/dsh-agent-preset-registry\/display$|@deepseek-ai\/dsh-api-workspace-controller\/default-workspace$|@deepseek-ai\/dsh-spill-policy\/notice$)/
++export const INLINE_SAFE = /^(?:@deepseek-ai\/dsh-(?:file-reference|fs-patch|session|llm|tools|brand|official-bundles|deque|output-retention|typert-protocol|util-crypto|util-time|util-values|util-workspace-path)(?:\/|$)|@deepseek-ai\/dsh-error$|@deepseek-ai\/dsh-util-file-drag$|@deepseek-ai\/dsh-token-meter\/client$|@deepseek-ai\/dsh-commands\/builtin$|@deepseek-ai\/dsh-native-command\/types$|@deepseek-ai\/dsh-host-open-in-app\/shared$|@deepseek-ai\/dsh-plugin-manager\/registry$|@deepseek-ai\/dsh-agent-preset-registry\/display$|@deepseek-ai\/dsh-api-workspace-controller\/default-workspace$|@deepseek-ai\/dsh-spill-policy\/notice$)/
+ 
+ /**
+  * Vendored framework libraries: rescoped into @deepseek-ai, so the gate below
+diff --git a/scripts/client-bundle-purity.spec.ts b/scripts/client-bundle-purity.spec.ts
+index 8eec7ba848..6d7c012b19 100644
+--- a/scripts/client-bundle-purity.spec.ts
++++ b/scripts/client-bundle-purity.spec.ts
+@@ -259,6 +259,8 @@ describe('client bundle purity gate', () => {
+   })
+ 
+   it('lets inline-safe libraries inline', () => {
++    expect(resolveId('@deepseek-ai/dsh-error')).toBeNull()
++    expect(() => resolveId('@deepseek-ai/dsh-error/internal')).toThrow(/purity/)
+     expect(resolveId('@deepseek-ai/dsh-session/surface')).toBeNull()
+     expect(resolveId('@deepseek-ai/dsh-brand')).toBeNull()
+     expect(resolveId('@deepseek-ai/dsh-deque')).toBeNull()
+-- 
+2.56.0
+

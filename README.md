@@ -128,7 +128,7 @@ DSH 侧栏下载使用目标页面所属浏览器会话的登录状态，分段�
 
 设置 → 浏览器将宿主引导与普通扩展维护分开：
 
-- **安装或升级宿主补丁并重启**：显式应用随包分发的 **DSH 0.2.2-rc.3 / 0.2.2-rc.5** 兼容补丁（侧栏后台渲染与 Desktop 主进程扩展 API）。revision 2 增加主扩展状态 IPC / preload；旧 revision 可原地升级，仍保留最初备份。**恢复宿主原文件并重启**恢复引导前的精确字节；原先的旧桥接也一并恢复。旧桥接迁移与兼容回退仅属于此显式引导路径。
+- **安装或升级宿主补丁并重启**：显式应用随包分发的 **DSH 0.2.2-rc.3 / 0.2.2-rc.5** 兼容补丁（侧栏后台渲染与 Desktop 主进程扩展 API）。revision 3 增加 `browser.nativeViews` v1：由主进程创建沙箱 WebContentsView，经侧栏认证插槽挂载，无需 DOM `<webview>`。保留 revision 2 的主扩展状态 IPC / preload；旧 revision 可原地升级，仍保留最初备份。**恢复宿主原文件并重启**恢复引导前的精确字节；原先的旧桥接也一并恢复。旧桥接迁移与兼容回退仅属于此显式引导路径。
 - 宿主支持 `dshDesktop.mainExtensions.status(name)` 后，**安装并重启 / 修复并重启 / 重装并重启**仅通过 DSH 的 `plugin --profile desktop add` 更新当前 profile 中的插件包，不修改应用资源、ASAR 或启动器。**卸载并重启**从 Desktop profile 移除插件包（重启后该插件的设置分节也会消失），不恢复宿主补丁。
 - 设置显示 `not-installed` / `pending-restart` / `loaded` / `failed` 对应的主扩展状态；同版本替换代码也会要求重启。缺少状态 API 时显示 `DESKTOP_MAIN_EXTENSION_UNSUPPORTED` 并提供显式引导，不会把普通修复变成旧桥接注入。已安装的旧桥接仍可使用。
 - 维护沿用正常退出与任务确认：取消退出或仍有进程运行时不安装。重启后校验当前 DSH home 的 endpoint、新进程 PID、宿主 `loaded` 状态、包版本与实时桥接代码摘要。

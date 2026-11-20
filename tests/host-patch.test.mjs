@@ -92,6 +92,28 @@ test('a mismatched preload refuses the whole Desktop/sidebar plan without writes
   for (const id of ['client', 'main']) assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'before'))
 })
 
+for (const extraEdit of [false, true]) test(`revision 2 upgrades transactionally and restores originals (${extraEdit})`, t => {
+  const { packages, file } = setup(t)
+  const previous = JSON.parse(fs.readFileSync(new URL(`../dsh-host-patch/${release}-revision2.json`, import.meta.url), 'utf8'))
+  for (const target of previous.targets) {
+    fs.writeFileSync(file(target.id) + backupSuffix, fixture(target.id, 'before'))
+    fs.writeFileSync(file(target.id), patchText(fixture(target.id, 'before'), target))
+  }
+  if (extraEdit) fs.appendFileSync(file('preload'), '\n// unrelated user edit\n')
+  const before = ['client', 'main', 'preload'].map(id => fs.readFileSync(file(id)))
+  if (extraEdit) {
+    assert.equal(applyHostPatch(packages).status, 'anchors mismatch')
+    for (const [index, id] of ['client', 'main', 'preload'].entries()) assert.deepEqual(fs.readFileSync(file(id)), before[index])
+  } else {
+    assert.match(hostPatchStatus(packages).reason, /revision 1 or 2/)
+    assert.deepEqual(applyHostPatch(packages), { status: 'applied', changed: true })
+    for (const id of ['client', 'main', 'preload']) assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'after'))
+    assert.deepEqual(restoreHostPatch(packages), { status: 'absent', changed: true })
+    for (const id of ['client', 'main', 'preload']) assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'before'))
+  }
+  for (const id of ['client', 'main', 'preload']) assert.equal(fs.readFileSync(file(id) + backupSuffix, 'utf8'), fixture(id, 'before'))
+})
+
 for (const extraEdit of [false, true]) test(`revision upgrade preserves a legacy original or refuses unrelated edits (${extraEdit})`, t => {
   const { packages, file } = setup(t)
   const previous = JSON.parse(fs.readFileSync(new URL(`../dsh-host-patch/${release}-revision1.json`, import.meta.url), 'utf8'))
@@ -202,8 +224,8 @@ test('legacy migration validates sidebar anchors before changing either file or 
 
 for (const [name, mutate, status] of [
   ['unsupported version', ({ packages }) => fs.writeFileSync(join(packages[1], 'package.json'), JSON.stringify({ name: spec.targets[1].packageName, version: '0.2.2-rc.4' })), 'unsupported version'],
-  ['missing anchor', ({ file }) => fs.writeFileSync(file('client'), fixture('client', 'before').replace(spec.targets[0].edits[1].before, 'missing')), 'anchors mismatch'],
-  ['ambiguous anchor', ({ file }) => fs.appendFileSync(file('client'), spec.targets[0].edits[1].before), 'anchors mismatch'],
+  ['missing anchor', ({ file }) => fs.writeFileSync(file('client'), fixture('client', 'before').replace(spec.targets[0].edits[0].before, 'missing')), 'anchors mismatch'],
+  ['ambiguous anchor', ({ file }) => fs.appendFileSync(file('client'), spec.targets[0].edits[0].before), 'anchors mismatch'],
   ['ambiguous CSS prefix', ({ file }) => fs.appendFileSync(file('client'), '.other_session{display:contents}'), 'anchors mismatch'],
   ['main pristine hash mismatch', ({ file }) => fs.appendFileSync(file('main'), '\n'), 'anchors mismatch'],
   ['stale backup', ({ file }) => fs.writeFileSync(file('main') + backupSuffix, 'stale'), 'anchors mismatch'],
