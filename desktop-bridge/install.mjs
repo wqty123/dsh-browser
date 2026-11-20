@@ -418,6 +418,7 @@ process.once('exit', code => {
 
 function originalResultError(error) {
   console.error('could not record the bridge installer result: ' + String(error))
+  process.exitCode = process.exitCode || 1
 }
 
 /**
