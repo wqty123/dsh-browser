@@ -1015,14 +1015,31 @@ const PAGE_LIB = String.raw`
     if (!host.firstChild) return 0
     ;(document.body || document.documentElement).appendChild(host)
     var count = host.childNodes.length
-    var lifetime = Math.max(500, Math.min(Number(spec.durationMs) || 2500, 10000))
-    setTimeout(clearHighlight, lifetime)
+    var events = ['pointerdown', 'keydown', 'touchstart', 'wheel', 'resize']
+    var dispose = function () {
+      for (var i = 0; i < events.length; i++) window.removeEventListener(events[i], clearHighlight, true)
+      if (host.parentNode) host.parentNode.removeChild(host)
+    }
+    window.__dshRefHighlightDispose = dispose
+    for (var j = 0; j < events.length; j++) window.addEventListener(events[j], clearHighlight, true)
     return count
   }
 
   function clearHighlight() {
+    var dispose = window.__dshRefHighlightDispose
+    delete window.__dshRefHighlightDispose
+    if (typeof dispose === 'function') dispose()
     var existing = document.getElementById(HIGHLIGHT_ID)
     if (existing && existing.parentNode) existing.parentNode.removeChild(existing)
+  }
+
+  function visibleRect(rects) {
+    for (var i = 0; i < rects.length; i++) {
+      var rect = rects[i]
+      if (rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight
+        && rect.right > 0 && rect.left < window.innerWidth) return true
+    }
+    return false
   }
 
   function scrollRect(rect) {
@@ -1031,7 +1048,7 @@ const PAGE_LIB = String.raw`
       var height = window.innerHeight || 0
       if (height > 0 && (rect.top < 48 || rect.bottom > height - 48)) {
         var target = (window.scrollY || 0) + rect.top - height / 2 + rect.height / 2
-        window.scrollTo({ left: window.scrollX || 0, top: Math.max(0, target), behavior: 'auto' })
+        window.scrollTo({ left: window.scrollX || 0, top: Math.max(0, target), behavior: 'instant' })
         return true
       }
     } catch (error) { /* a page that refuses scrolling still gets the highlight */ }
@@ -1054,11 +1071,23 @@ const PAGE_LIB = String.raw`
     var range = document.createRange()
     range.setStart(startEntry.node, startEntry.offset)
     range.setEnd(endEntry.node, endEntry.offset)
+    var parent = startEntry.node.parentElement
+    if (parent && parent.scrollIntoView) {
+      try { parent.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }) } catch (error) {}
+    }
     var rects = range.getClientRects ? range.getClientRects() : []
     var first = rects.length ? rects[0] : range.getBoundingClientRect()
-    var scrolled = scrollRect(first)
+    scrollRect(first)
+    rects = range.getClientRects ? range.getClientRects() : []
+    if (!visibleRect(rects)) return { ok: false, reason: 'range-not-visible', rects: 0, scrolled: false }
     var count = highlightRects(rects, spec)
-    return { ok: true, rects: count, scrolled: scrolled }
+    if (!count) return { ok: false, reason: 'highlight-not-drawn', rects: 0, scrolled: false }
+    var selection = window.getSelection()
+    if (selection) {
+      selection.removeAllRanges()
+      selection.addRange(range)
+    }
+    return { ok: true, rects: count, scrolled: true }
   }
 
   function loadImage(url) {
@@ -1219,8 +1248,10 @@ const PAGE_LIB = String.raw`
       try { target.scrollIntoView() } catch (ignored) { /* highlight still lands */ }
     }
     var rects = target.getClientRects ? target.getClientRects() : []
-    var count = highlightRects(rects.length ? rects : [target.getBoundingClientRect()], spec)
-    return { ok: true, status: 'found', matches: 1, described: selectorOf(target), rects: count, scrolled: true }
+    if (!rects.length) rects = [target.getBoundingClientRect()]
+    if (!visibleRect(rects)) return { ok: false, status: 'missing', matches: 1, reason: 'element-not-visible' }
+    var count = highlightRects(rects, spec)
+    return { ok: count > 0, status: count > 0 ? 'found' : 'missing', matches: 1, described: selectorOf(target), rects: count, scrolled: count > 0 }
   }
 
   function cellAt(table, row, column) {
@@ -1354,6 +1385,15 @@ export function pageFactsScript(): string {
 /** Highlight one flat [start, end) range of the page text. */
 export function highlightScript(): string {
   return script('return JSON.stringify(highlightText(spec))')
+}
+
+export function guestReferenceHandlerScript(): string {
+  return `function (operation, spec) { ${PAGE_LIB}
+    if (operation === 'text') { var map = flatTextMap(spec.maxChars, false, spec.legacy); return { ok: true, text: map.text } }
+    if (operation === 'highlight') return highlightText(spec)
+    if (operation === 'element') return revealElement(spec)
+    throw new Error('unsupported reference operation')
+  }`
 }
 
 /** Locate one image or table by its stored anchor, scroll to it and highlight it. */

@@ -58,7 +58,7 @@ export interface ReferenceHttpClient {
   consume?(sessionId: string, intentId: string): Promise<void>
   bindSubmission?(sessionId: string, requestId: string, intentIds: readonly string[]): Promise<void>
   remove(intentId: string): Promise<RemoveResponse>
-  reveal(referenceId: string, partId?: string, navigate?: boolean): Promise<RevealResultWire>
+  reveal(referenceId: string, partId?: string, navigate?: boolean, sourcePageId?: string): Promise<RevealResultWire>
   exportBundle(format: ExportFormat, sessionId: string): Promise<Uint8Array>
   importBundle(zip: Uint8Array): Promise<unknown>
 }
@@ -155,8 +155,9 @@ export function createReferenceHttpClient(options: HttpClientOptions): Reference
     async remove(intentId) {
       return await writeJson(`${base}${ROUTES.remove}`, { intentId }) as RemoveResponse
     },
-    async reveal(referenceId, partId, navigate) {
+    async reveal(referenceId, partId, navigate, sourcePageId) {
       const body: Record<string, unknown> = { referenceId }
+      if (sourcePageId !== undefined) body.sourcePageId = sourcePageId
       if (partId !== undefined) body.partId = partId
       // The page is moved to the source by the plugin, which owns it.
       if (navigate === true) body.navigate = true

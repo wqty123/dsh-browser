@@ -1,6 +1,6 @@
 /** Browser-source markers are parsed by the host text registry, preserving React-owned nodes. */
 import type { UserTextRule } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { parseBrowserRefUri } from '../scheme.ts'
+import { readSourceMarker, readSubmissionQuote } from './source-marker.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
   interface UserTextDataMap {
@@ -13,16 +13,15 @@ export const browserSourceRule: UserTextRule<'browser-ref'> = {
   id: 'browser-ref',
   order: 20,
   match(text, from) {
-    const marker = /\[([^\]\r\n]*)\]\((dsh-browser-ref:[^()\s]+)\)/gu
-    marker.lastIndex = from
-    for (let candidate = marker.exec(text); candidate !== null; candidate = marker.exec(text)) {
-      const uri = candidate[2]
-      if (uri === undefined || parseBrowserRefUri(uri) === undefined) continue
-      return {
-        id: 'browser-ref', start: candidate.index, end: candidate.index + candidate[0].length,
-        data: { uri, label: candidate[1] ?? uri },
-      }
+    const marker = readSourceMarker(text, from)
+    const quote = readSubmissionQuote(text, from)
+    if (quote !== undefined && (marker === undefined || quote.start < marker.start)) {
+      return { id: 'text', start: quote.start, end: quote.end,
+        data: { text: text.slice(quote.start, quote.end), display: '' } }
     }
-    return undefined
+    return marker === undefined ? undefined : {
+      id: 'browser-ref', start: marker.start, end: marker.end,
+      data: { uri: marker.uri, label: marker.label },
+    }
   },
 }

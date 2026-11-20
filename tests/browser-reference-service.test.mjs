@@ -252,6 +252,15 @@ test('reveal locates the first part and highlights its exact text offsets', asyn
   assert.deepEqual({ start: highlight.args[0].start, end: highlight.args[0].end }, { start: 6, end: 20 })
 })
 
+test('reveal recognizes the same document across normalized URLs and fragment changes', async t => {
+  const { page, service } = fixture(t)
+  page.capture = { ok: true, url: 'https://example.com/article#quoted', events: [textEvent('selected words')] }
+  page.text = { ok: true, text: 'alpha selected words omega', truncated: false }
+  const reference = (await service.capture({ sessionId: 'session-1' })).reference
+  page.facts = { ok: true, url: 'https://EXAMPLE.com:443/article#current' }
+  assert.equal((await service.reveal(reference.referenceId)).status, 'revealed')
+})
+
 test('reveal reports ambiguity instead of guessing between equal matches', async t => {
   const { page, service, calls } = fixture(t)
   page.capture = { ok: true, url: 'https://example.com/article', title: 'An article', events: [textEvent('same', '', '')] }
@@ -276,7 +285,7 @@ test('reveal distinguishes a page mismatch from a missing session', async t => {
   assert.equal(unavailable.status, 'not-found')
 })
 
-test('reveal takes the page to the stored URL when the caller asks to navigate', async t => {
+test('reveal never treats an unacknowledged navigation request as page readiness', async t => {
   const { page, service, host } = fixture(t)
   page.capture = { ok: true, url: 'https://example.com/article', title: 'An article', events: [textEvent('selected words')] }
   page.text = { ok: true, text: 'alpha selected words omega', truncated: false }
@@ -294,11 +303,11 @@ test('reveal takes the page to the stored URL when the caller asks to navigate',
     return await navigate(sessionId, request, signal)
   }
   const outcome = await service.reveal(reference.referenceId, { navigate: true })
-  assert.equal(outcome.status, 'revealed')
-  assert.equal(outcome.currentUrl, 'https://example.com/article')
+  assert.equal(outcome.status, 'page-mismatch')
+  assert.equal(outcome.currentUrl, 'https://example.com/other')
 })
 
-test('reveal follows the page the person has open when the capture session was replaced', async t => {
+test('reveal binds the exact acknowledged source page when the capture session was replaced', async t => {
   const { page, service, host, assets } = fixture(t)
   page.capture = { ok: true, url: 'https://example.com/article', title: 'An article', events: [textEvent('selected words')] }
   page.text = { ok: true, text: 'alpha selected words omega', truncated: false }
@@ -309,9 +318,14 @@ test('reveal follows the page the person has open when the capture session was r
   const revived = new BrowserReferenceService(
     { ...host, exists: id => id === 'session-new' },
     service.references,
-    { assetDir: assets, currentSession: () => 'session-new' },
+    { assetDir: assets, sourceSession: async (owner, pageId) => {
+      assert.equal(owner, '1')
+      assert.equal(pageId, '42')
+      return 'session-new'
+    } },
   )
-  assert.equal((await revived.reveal(reference.referenceId)).status, 'revealed')
+  assert.equal((await revived.reveal(reference.referenceId)).status, 'session-unavailable')
+  assert.equal((await revived.reveal(reference.referenceId, { sourcePageId: '42' })).status, 'revealed')
 
   // Without that live page the outcome must stay honest, not optimistic.
   const blind = new BrowserReferenceService(

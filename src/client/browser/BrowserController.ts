@@ -15,6 +15,7 @@ import type {
   BrowserInitFailure,
   BrowserInitReceipt,
   BrowserInitializationJournal,
+  BrowserObservedPage,
 } from './initialization.ts'
 
 /** Live tab state; navigation comes from its provider and draft validation stays local. */
@@ -126,11 +127,7 @@ export class BrowserController implements HostObservable<BrowserControllerState>
             })
           }
         } else if (carrier.stage === 'ready') {
-          if (current !== undefined && current.stage !== 'failed' && current.stage !== 'attached'
-            && (current.guestId === undefined || carrier.guestId === undefined || current.guestId === carrier.guestId)) {
-            this.journal.advance(this.options.tabId, 'attached',
-              carrier.guestId === undefined ? {} : { guestId: carrier.guestId })
-          }
+          this.advanceFromFrame(this.page.frame.getSnapshot())
         } else if (carrier.stage === 'failed') {
           // `ownReceipt` already scopes this to the current occurrence.
           if (current !== undefined && current.stage !== 'failed') {
@@ -308,6 +305,14 @@ export class BrowserController implements HostObservable<BrowserControllerState>
     return this.journal.get(this.options.tabId)
   }
 
+  currentPage(): BrowserObservedPage | undefined {
+    const frame = this.page.frame.getSnapshot()
+    const carrier = this.page.frame.lifecycle?.getSnapshot()
+    if (this.disposed || frame.address !== 'observed' || frame.loading || frame.error !== undefined
+      || frame.target === undefined || (carrier !== undefined && carrier.stage !== 'ready')) return undefined
+    return { url: frame.target.url, ...carrier?.guestId === undefined ? {} : { guestId: carrier.guestId } }
+  }
+
   /** Aim this occurrence at a new navigation record revision (plugin/sidebar action). */
   navigate(url: string, navigationRevision: number, requestId?: string): void {
     if (this.disposed) return
@@ -338,7 +343,8 @@ export class BrowserController implements HostObservable<BrowserControllerState>
     }
     this.journal.advance(this.options.tabId, 'navigating',
       { navigationRevision: revision, url: parsed.target.url })
-    this.command(() => { this.page.frame.loadUrl(parsed.target) })
+    const navigationId = this.ownReceipt()?.requestId
+    this.command(() => { this.page.frame.loadUrl(parsed.target, navigationId) })
     this.publishInitialization()
   }
 
@@ -351,11 +357,15 @@ export class BrowserController implements HostObservable<BrowserControllerState>
   /** Carrier state is the strongest proof; the frame's observed address is the fallback. */
   private advanceFromFrame(frame: BrowserFrameState): void {
     const receipt = this.ownReceipt()
-    if (receipt === undefined || receipt.stage === 'failed' || receipt.stage === 'attached') return
+    if (receipt === undefined || receipt.stage === 'failed' || receipt.stage === 'attached'
+      || frame.navigationId !== receipt.requestId) return
     if (frame.error !== undefined) {
       this.journal.fail(this.options.tabId, 'navigation-failed')
-    } else if (frame.address === 'observed') {
-      this.journal.advance(this.options.tabId, 'attached')
+    } else if (frame.address === 'observed' && !frame.loading && frame.target !== undefined) {
+      const carrier = this.page.frame.lifecycle?.getSnapshot()
+      if (carrier !== undefined && carrier.stage !== 'ready') return
+      this.journal.advance(this.options.tabId, 'attached',
+        carrier?.guestId === undefined ? {} : { guestId: carrier.guestId })
     }
     this.publishInitialization()
   }
@@ -431,6 +441,7 @@ export interface BrowserInjected extends BrowserStartPageInjected {
   }): BrowserNavigationOutcome
   /** @param tabId - owning tab. @returns the latest initialization receipt. */
   initialization(tabId: TabId): BrowserInitReceipt | undefined
+  currentPage(tabId: TabId): BrowserObservedPage | undefined
   /** Newest-first receipts for diagnostics; bounded by the shared journal. */
   initializationLog(): readonly BrowserInitReceipt[]
   /** Capability marker: a caller may rely on receipts only when this is true. */
@@ -470,12 +481,13 @@ export interface BrowserInjected extends BrowserStartPageInjected {
  */
 export function createBrowserControllers(actions: BoundActions<BrowserStore>, createPage: BrowserPageFactory,
   isTabOpen: (tabId: TabId) => boolean, startPage?: BrowserStartPageInjected,
-  options: { readonly sessionId?: string; readonly journal?: BrowserInitializationJournal } = {},
+  options: { readonly sessionId?: string; readonly journal?: BrowserInitializationJournal; readonly onInitializationChange?: () => void } = {},
 ): BrowserInjected {
   const page = startPage ?? new StartPageBinding()
   const sessionId = options.sessionId ?? ''
   const ownsJournal = options.journal === undefined
-  const journal = options.journal ?? createBrowserInitializationJournal()
+  const journal = options.journal ?? createBrowserInitializationJournal({ onChange: options.onInitializationChange })
+  let disposal: Promise<void> | undefined
   const mountRequests = new Map<TabId, BrowserMountRequest>()
   let occurrenceSerial = 0
   let currentActions = actions
@@ -571,6 +583,7 @@ export function createBrowserControllers(actions: BoundActions<BrowserStore>, cr
     keyedHooks: { browserState: key => controller(key as TabId) },
     initializationReceipts: true,
     initialization: tabId => journal.get(tabId),
+    currentPage: tabId => controller(tabId)?.currentPage(),
     initializationLog: () => journal.all(),
     mount(request) {
       const { tabId, signal } = request
@@ -598,18 +611,24 @@ export function createBrowserControllers(actions: BoundActions<BrowserStore>, cr
       held.controller.applyMount(request.initialUrl, request.navigationRevision ?? 0)
       return hide
     },
-    dispose: async () => {
-      const pending = [...controllers.values()].map(({ signal, controller: held, forget }) => {
-        signal.removeEventListener('abort', forget)
-        return held.dispose()
-      })
-      controllers.clear()
-      mountRequests.clear()
-      await Promise.all(pending)
-      if (ownsJournal) {
-        journal.dispose()
-        root.__DSH_BROWSER_INIT_JOURNALS__ = (root.__DSH_BROWSER_INIT_JOURNALS__ ?? []).filter(entry => entry !== journal)
-      }
+    dispose: () => {
+      disposal ??= (async () => {
+        try {
+          const pending = [...controllers.values()].map(({ signal, controller: held, forget }) => {
+            signal.removeEventListener('abort', forget)
+            return held.dispose()
+          })
+          await Promise.all(pending)
+        } finally {
+          controllers.clear()
+          mountRequests.clear()
+          if (ownsJournal) journal.dispose()
+          const registered = root.__DSH_BROWSER_INIT_JOURNALS__ ?? []
+          const index = registered.indexOf(journal)
+          if (index !== -1) registered.splice(index, 1)
+        }
+      })()
+      return disposal
     },
     rebind: (next) => {
       currentActions = next

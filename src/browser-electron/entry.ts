@@ -962,11 +962,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   installRuntimeStatusRoute(ctx, settings)
   // One service for the panel's routes; the tool layer builds its own over the same store file.
   const referenceService = createReferenceService(ctx.browser, {
-    // "回到原文" after a restart: the sidebar page is re-adopted under a new
-    // session id, so a reference captured before loses the id it was stored
-    // with. The page this process owns right now is the honest fallback (the
-    // reveal still checks the URL before touching it).
-    currentSession: () => referenceProvider?.referenceStatus().session,
+    sourceSession: (owner, pageId) => ctx.browser.bindPanelPage(`session-${owner}`, pageId),
     // A visible-region snapshot is a read: the clipped CDP path never presents
     // the conversation, raises a window or moves the pointer.
     visibleCapture: async (sessionId, clip, signal) => {

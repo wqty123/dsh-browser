@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { browserSourceRule } from '../production/user-text-rule.ts'
+import { sourceMarker, readSubmissionQuote } from '../production/source-marker.ts'
 /**
  * Report item 7 — the reply-side `dsh-browser-ref:` link had NO producer: the
  * verification script inserted anchors by hand, which only proved the
@@ -81,6 +82,25 @@ afterEach(() => {
 })
 
 describe('item 7 — the real send path produces a locatable source', () => {
+  it('treats attached composer markers as tokens, not another copy of the submission text', () => {
+    const content = wireSubmissionContent({ ...baseInput(), text: `${sourceMarker(REFERENCE_ID, 0)} question` })
+    expect(urisIn(content)).toEqual([encodeBrowserRefUri({ referenceId: REFERENCE_ID })])
+    expect(content.at(-1)).toEqual({ type: 'text', text: ' question' })
+  })
+
+  it('projects distinct references independently even with identical titles', () => {
+    const second = { ...group, referenceId: 'ref-second' }
+    const text = sourceMarker(group.referenceId, 0, 'same') + sourceMarker(second.referenceId, 1, 'same')
+    const content = wireSubmissionContent({ ...baseInput(), groups: [group, second], text, sourceTitleFor: () => 'same' })
+    expect(urisIn(content)).toEqual([encodeBrowserRefUri({ referenceId: REFERENCE_ID }), encodeBrowserRefUri({ referenceId: second.referenceId })])
+  })
+
+  it('preserves unattached and invalid markers as user text, including with no attachments', () => {
+    const text = `${sourceMarker('other-reference', 0)} [bad](dsh-browser-ref:%broken)`
+    expect(wireSubmissionContent({ ...baseInput(), text }).at(-1)).toEqual({ type: 'text', text })
+    expect(wireSubmissionContent({ ...baseInput(), groups: [], text })).toEqual([...uploaded, { type: 'text', text }])
+  })
+
   it('emits a canonical URI that decodes back to the group referenceId', () => {
     const content = wireSubmissionContent(baseInput())
     const uris = urisIn(content)
@@ -94,7 +114,7 @@ describe('item 7 — the real send path produces a locatable source', () => {
     const content = wireSubmissionContent(baseInput())
     expect(content[0]).toEqual({ type: 'file', receiptId: 'receipt-1' })
     // Fifth-round fix: every projected text block keeps its own newline.
-    expect((content[1] as { text: string }).text).toBe(`${LONG_TEXT}\n`)
+    expect(readSubmissionQuote((content[1] as { text: string }).text, 0)?.body).toBe(`${LONG_TEXT}\n`)
     // The marker is its OWN text block, visible to user and model.
     const marker = content.find(part => part.type === 'text' && part.text.includes('dsh-browser-ref:'))
     expect(marker).toBeDefined()
@@ -106,7 +126,8 @@ describe('item 7 — the real send path produces a locatable source', () => {
     const on = wireSubmissionContent(baseInput())
     const off = wireSubmissionContent({ ...baseInput(), sourceLinks: false })
     expect(on).toHaveLength(off.length + 1)
-    expect(on.filter(part => !(part.type === 'text' && part.text.includes('dsh-browser-ref:')))).toEqual(off)
+    expect(on.filter(part => !(part.type === 'text' && part.text.includes('dsh-browser-ref:'))).map(part =>
+      part.type === 'text' ? { ...part, text: readSubmissionQuote(part.text, 0)?.body ?? part.text } : part)).toEqual(off)
     expect(JSON.stringify(off)).not.toContain('dsh-browser-ref:')
     expect(urisIn(off)).toEqual([])
   })
@@ -133,7 +154,7 @@ describe('item 7 — the real send path produces a locatable source', () => {
     const texts = content.map(part => (part.type === 'text' ? part.text : `<${part.type}>`))
     // The label is markdown bold, not literal square brackets: `[引用评论] 321` reached the transcript
     // as raw punctuation and read like part of the quoted page text.
-    expect(texts[1]).toBe(`${COMMENT_LABEL}：只看这段\n`)
+    expect(readSubmissionQuote(texts[1]!, 0)?.body).toBe(`${COMMENT_LABEL}：只看这段\n`)
     expect(texts.at(-1)).toBe('用户问题')
     expect(urisIn(content)).toEqual([encodeBrowserRefUri({ referenceId: REFERENCE_ID })])
   })
@@ -183,7 +204,8 @@ describe('item 7 — the source marker is clickable and reveals the original', (
   it('parses a source marker through the native user-text rule without rewriting DOM', () => {
     const content = wireSubmissionContent(baseInput());
     const plain = content.filter(part => part.type === 'text').map(part => part.type === 'text' ? part.text : '').join('');
-    const node = browserSourceRule.match(plain, 0, { read: () => undefined });
+    let node = browserSourceRule.match(plain, 0, { read: () => undefined });
+    while (node?.id === 'text') node = browserSourceRule.match(plain, node.end, { read: () => undefined });
     expect(node?.id).toBe('browser-ref');
     expect(node?.data).toMatchObject({uri: uriOf(), label: '引用来源 1'});
     if (node !== undefined) expect(plain.slice(node.start,node.end)).toContain(uriOf());

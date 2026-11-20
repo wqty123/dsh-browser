@@ -6,7 +6,7 @@
  * cannot carry:
  *   - `createElement` / `useSyncExternalStore` ← React, a shared platform module.
  *   - `hostInputFor` and the active Session id ← the Session-scope props the
- *     `conversation.input.chips` registration receives on every render
+ *     `conversation.input.dock` registration receives on every render
  *     (`session`, `input`, `inputActions`).
  *
  * Both come from inside this package, so no separate `browserReferenceDeps`
@@ -15,6 +15,9 @@
  * @module dsh-browser-reference/plugin
  */
 import { createElement } from 'react'
+import { referenceOwnerKey } from '../../../reference-owner.ts'
+import type { BrowserInitializationReader } from '../../browser/initialization.ts'
+import { openReferenceSource, type SourceSidebar } from './production/source-opener.ts'
 import {
   apply as applyProduction,
   type AssemblyConfig,
@@ -50,8 +53,9 @@ interface SlotInputActions {
   insertQuote?(text: string, summary?: string): boolean
 }
 
-/** Session-scope props the `conversation.input.chips` registration receives. */
+/** Session-scope props the `conversation.input.dock` registration receives. */
 interface DockProps {
+  readonly sessionId?: string
   readonly session?: { readonly sessionId?: string }
   readonly input?: { readonly draft?: string }
   readonly inputActions?: SlotInputActions
@@ -80,8 +84,9 @@ const inertFace: HostInputFace = {
   readText: () => '',
 }
 
-export function apply(ctx: HostContext, config: AssemblyConfig = {}): void {
+export function apply(ctx: HostContext, config: AssemblyConfig = {}): ProductionRuntime {
   const bindings = new Map<string, InputBinding>()
+  const hostSessions = new Map<string, string>()
 
   const bindingFor = (sessionId: string): HostInputFace =>
     (sessionId === '' ? undefined : bindings.get(sessionId)?.face) ?? inertFace
@@ -93,16 +98,11 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): void {
     onDockProps: (props) => {
       config.onDockProps?.(props)
       const dock = props as DockProps | undefined
-      // The shell hands the session as "session-<uuid>"; the delivery queue, the draft store and the
-      // capture route all key on the bare id. Binding the face under the prefixed id meant
-      // hostInputFor() never found it, every append reported "save-failed", and a capture stayed a
-      // pending delivery with no card and no way to send it.
-      const rawSession = dock?.session?.sessionId
-      const sessionId = typeof rawSession === "string" && rawSession.startsWith("session-")
-        ? rawSession.slice("session-".length)
-        : rawSession
+      const rawSession = dock?.sessionId ?? dock?.session?.sessionId
+      const sessionId = typeof rawSession === 'string' ? referenceOwnerKey(rawSession) : undefined
       const actions = dock?.inputActions
-      if (typeof sessionId !== 'string' || sessionId === '') return
+      if (typeof rawSession !== 'string' || typeof sessionId !== 'string' || sessionId === '') { runtime.setSession(''); return }
+      hostSessions.set(sessionId, rawSession.trim())
       // The visible Session becomes the active one: this is what makes the
       // default entry poll a real conversation instead of the empty id, and it
       // keeps an async delivery bound to the Session it belongs to.
@@ -179,21 +179,11 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): void {
     ctx.effect(() => () => { window.removeEventListener('message', respond) }, 'ui-browser-reference: guest session responder')
   }
 
-  // "回到原文" must actually go there: the sidebar browser tab is the only place
-  // the quote can be shown. The sidebar service is a sibling package, so this is
-  // an optional injection — a host without a sidebar keeps the honest "cannot
-  // locate" answer instead of pretending.
-  // 「回到原文」必须永远成立：侧栏关着就打开、开着就换页、页面不在就新建标签。
-  // 旧实现依赖 `ctx.inject(['sidebarRight'], …)` 回调在 apply 期拿到服务；注入不成立时
-  // opener 始终是 undefined，点击只会得到「侧栏网页已不在原来的标签页里」。
-  // 改为**点击那一刻**从容器里取服务：只要宿主有侧栏，就一定跳得过去。
-  runtime.setSourceOpener(async (url) => {
+  runtime.setSourceOpener(async (url, signal) => {
     const sessionId = runtime.currentSessionId()
     if (sessionId === '') throw new Error('reference source requires a conversation')
-    const service = ctx.get('sidebarRight') as {
-      openTabIn?: (sessionId: string, kind: string, options?: unknown) => void | Promise<unknown>
-    } | undefined
-    if (typeof service?.openTabIn !== 'function') throw new Error('sidebar tab API is unavailable')
-    await service.openTabIn(sessionId, 'browser', { params: { url } })
+    return openReferenceSource(ctx.get('sidebarRight') as SourceSidebar,
+      ctx.get('sidebarBrowserInitialization') as BrowserInitializationReader, hostSessions.get(sessionId) ?? sessionId, url, signal)
   })
+  return runtime
 }

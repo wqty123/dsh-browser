@@ -9,14 +9,19 @@ import { captureReferenceIntent } from './reference-intents.ts'
  * @param options - saved navigation and callbacks.
  * @returns the Web page's navigation and presentation objects.
  */
-export function createIframePage(options: BrowserPageOptions, sessionId?: string): BrowserPage {
+export function createIframePage(options: BrowserPageOptions, sessionId?: string,
+  capture: (intent: object, owner?: string) => Promise<void> = (intent, owner) => captureReferenceIntent(intent, owner ?? '')): BrowserPage {
   const presentation = new IframePresentation({
     loaded: (revision) => { frame.handleLoaded(revision) },
     observed: (revision, observedUrl) => { frame.handleObserved(revision, observedUrl) },
-    ...(sessionId === undefined ? {} : { reference: (intent: object) => captureReferenceIntent(intent, sessionId) }),
+    reference: (intent: object) => capture(intent, sessionId),
+    childRequested: options.openRequested,
+    capabilityFailed: description => { frame.handleCapabilityFailure(description) },
+    guestReady: (revision, pageId) => { frame.handleGuestReady(revision, pageId) },
+    guestPending: () => { frame.handleGuestPending() },
     failed: (revision) => { frame.handleLoadFailed(revision) },
     remounted: () => { frame.reload() },
-  })
+  }, sessionId)
   const frame = new IframeImpl(options, presentation)
   return { frame, presentation }
 }

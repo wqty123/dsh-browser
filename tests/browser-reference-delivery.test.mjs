@@ -78,6 +78,24 @@ function withTempPath(fn) {
   try { return fn(path) } finally { rmSync(root, { recursive: true, force: true }) }
 }
 
+test('legacy queued owner spelling is canonical on replay while its snapshot stays immutable', () => withTempPath(path => {
+  const legacy = snapshot({ owner: { sessionId: 'session-79b4e5bd-5bf4-49f3-b911-5d1a92b7002b', browserSessionId: 'browser:kept' } })
+  const first = createDeliveryQueue({ path })
+  const prepared = first.prepare(legacy)
+  first.dispose()
+  writeFileSync(path, JSON.stringify({ ...prepared, sessionId: legacy.owner.sessionId }) + '\n')
+  const reopened = createDeliveryQueue({ path })
+  try {
+    const owner = '79b4e5bd-5bf4-49f3-b911-5d1a92b7002b'
+    const record = reopened.list({ sessionId: owner }).deliveries[0]
+    assert.equal(record.sessionId, owner)
+    assert.equal(record.browserSessionId, 'browser:kept')
+    assert.deepEqual(record.snapshot, legacy)
+    assert.equal(reopened.consume(record.intentId, 'another-owner'), undefined)
+    assert.equal(reopened.consume(record.intentId, legacy.owner.sessionId).state, 'consumed')
+  } finally { reopened.dispose() }
+}))
+
 test('prepare freezes the WHOLE ordered snapshot; a restart restores it byte-for-byte', () => withTempPath(path => {
   const reference = snapshot()
   const first = createDeliveryQueue({ path })

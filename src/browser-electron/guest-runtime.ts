@@ -1,3 +1,5 @@
+import { guestReferenceHandlerScript } from '../browser-reference/page-script.ts'
+
 /** Early, self-contained interception for documents served from the guest proxy. */
 export function guestRuntimeScript(pageUrl: string): string {
   return `(() => {
@@ -61,7 +63,33 @@ export function guestRuntimeScript(pageUrl: string): string {
       } catch { return false; }
     };
   });
-  attempt(() => { window.open = url => { attempt(() => location.assign(toProxy(url || real))); return window; }; });
+  let childRequestId = 0;
+  const childError = code => {
+    const error = new Error(code + ': this sidebar supports URL-only tabs, not native child windows or opener relationships');
+    error.name = 'NotSupportedError'; error.code = code;
+    return error;
+  };
+  const childRequest = (mode, url) => {
+    if (loadId === undefined) throw childError('sidebar-tab-owner-not-ready');
+    parent.postMessage({ type: 'dsh.browser.guest.child.request', loadId, requestId: ++childRequestId, mode, url }, '*');
+  };
+  const nativeChild = url => {
+    attempt(() => childRequest('native-opener', url));
+    throw childError('native-child-opener-unavailable');
+  };
+  const detached = features => String(features || '').split(',').some(feature => {
+    const [key, value] = feature.trim().toLowerCase().split(/\\s*=\\s*/);
+    return ['noopener', 'noreferrer'].includes(key) && !['0', 'no', 'false'].includes(value);
+  });
+  attempt(() => { window.open = (url, target = '_blank', features = '') => {
+    const name = String(target || '_blank').toLowerCase();
+    if (name !== '_self' && (name !== '_blank' || !detached(features))) return nativeChild(String(url || ''));
+    const next = realURL(url == null || String(url) === '' ? 'about:blank' : url);
+    if (!/^https?:$/.test(next.protocol)) throw childError('invalid-child-url');
+    if (name === '_self') { location.assign(toProxy(next.href)); return window; }
+    childRequest('url-only', next.href);
+    return null;
+  }; });
   for (const name of ['pushState', 'replaceState']) attempt(() => {
     const original = history[name];
     history[name] = function(state, title, url) {
@@ -74,13 +102,35 @@ export function guestRuntimeScript(pageUrl: string): string {
     };
   });
   let loadId;
-  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length, loadId }, '*'));
+  let referenceRequestId = 0;
+  const reference = ${guestReferenceHandlerScript()};
+  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length, loadId, ready: document.readyState !== 'loading' }, '*'));
   attempt(() => window.addEventListener('message', event => {
     if (event.source !== parent || !event.data) return;
     if (event.data.type === 'dsh.browser.guest.navigation.request') {
       if (!Number.isSafeInteger(event.data.loadId) || event.data.loadId <= 0) return;
       loadId = event.data.loadId;
       report();
+    } else if (event.data.type === 'dsh.browser.guest.reference.request') {
+      const data = event.data;
+      if (event.origin !== location.origin || data.loadId !== loadId || loadId === undefined
+        || !Number.isSafeInteger(data.requestId) || data.requestId <= referenceRequestId) return;
+      referenceRequestId = data.requestId;
+      const ack = { type: 'dsh.browser.guest.reference.ack', requestId: data.requestId, loadId, url: real };
+      try {
+        const current = new URL(real), source = new URL(data.url);
+        current.hash = ''; source.hash = '';
+        if (current.href !== source.href || document.readyState === 'loading') throw new Error('source document is not ready');
+        if (!data.spec || typeof data.spec !== 'object' || Array.isArray(data.spec) || !['text', 'highlight', 'element'].includes(data.operation)) throw new Error('invalid reference command');
+        if (data.operation !== 'element' && (!Number.isSafeInteger(data.spec.maxChars) || data.spec.maxChars <= 0
+          || data.spec.maxChars > 2000000 || typeof data.spec.legacy !== 'boolean')) throw new Error('invalid text specification');
+        if (data.operation === 'element' && (!['image', 'table'].includes(data.spec.kind)
+          || !data.spec.anchor || typeof data.spec.anchor !== 'object' || Array.isArray(data.spec.anchor))) throw new Error('invalid element specification');
+        if (data.operation === 'highlight' && (!Number.isSafeInteger(data.spec.start) || !Number.isSafeInteger(data.spec.end)
+          || data.spec.start < 0 || data.spec.end <= data.spec.start)) throw new Error('invalid text positions');
+        const value = reference(data.operation, data.spec);
+        parent.postMessage({ ...ack, ok: true, value }, event.origin);
+      } catch (error) { parent.postMessage({ ...ack, ok: false, reason: String(error).slice(0, 200) }, event.origin); }
     } else if (event.data.type === 'dsh.browser.guest.history') {
       if (event.data.delta === -1) history.back();
       else if (event.data.delta === 1) history.forward();
@@ -165,6 +215,13 @@ export function guestRuntimeScript(pageUrl: string): string {
       const url = realURL(href);
       if (!/^https?:$/.test(url.protocol)) return;
       event.preventDefault();
+      const target = (node.getAttribute('target') || '_self').toLowerCase();
+      if (target !== '_self') {
+        const opener = /(?:^|\\s)opener(?:\\s|$)/i.test(node.getAttribute('rel') || '');
+        try { if (target !== '_blank' || opener) nativeChild(url.href); else childRequest('url-only', url.href); }
+        catch (error) { console.error('[dsh-browser]', error); }
+        return;
+      }
       location.assign(toProxy(href));
     });
   }, true));
@@ -173,12 +230,20 @@ export function guestRuntimeScript(pageUrl: string): string {
     const method = (submitter && submitter.getAttribute('formmethod') || form.getAttribute('method') || 'GET').toUpperCase();
     const url = realURL(action);
     if (!/^https?:$/.test(url.protocol)) return false;
+    const target = (submitter && submitter.getAttribute('formtarget') || form.getAttribute('target') || '_self').toLowerCase();
+    if (target !== '_self' && (target !== '_blank' || method !== 'GET'
+      || /(?:^|\\s)opener(?:\\s|$)/i.test(form.getAttribute('rel') || ''))) {
+      try { nativeChild(url.href); } catch (error) { console.error('[dsh-browser]', error); }
+      return true;
+    }
     if (method === 'GET') {
       const params = new URLSearchParams();
       const data = submitter ? new FormData(form, submitter) : new FormData(form);
       for (const [key, value] of data) params.append(key, typeof value === 'string' ? value : value.name);
       url.search = params.toString();
-      location.assign(toProxy(url.href));
+      if (target === '_blank') {
+        try { childRequest('url-only', url.href); } catch (error) { console.error('[dsh-browser]', error); }
+      } else location.assign(toProxy(url.href));
       return true;
     }
     form.setAttribute('action', toProxy(url.href));

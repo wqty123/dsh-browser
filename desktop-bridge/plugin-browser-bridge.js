@@ -91,6 +91,7 @@ const queues = new Map()
 const claims = new Map()
 // Only pending URL opens participate. A passive guest lookup never cancels a navigation.
 const pendingSidebarOpens = new Map()
+const activeRequests = new Set()
 
 /**
  * When this module was loaded, and the protocol generation it speaks.
@@ -393,51 +394,33 @@ async function downloadGuest(guest, url, savePath) {
  *
  * @param shellId - the shell window's webContents id.
  * @param sessionId - the conversation that asked (the request's `owner`).
- * @param url - address to load when a panel has to be opened; `null` to only READ.
+ * @param url - address to load when a panel has to be opened.
  * @returns the renderer's verdict, normalized so a malformed answer is a named failure.
  */
-async function evaluatePanelService(shellId, sessionId, url, tabId, viewId, guestId, expectedUrl, requestId) {
-  // `null` means read-only. This distinction is not cosmetic: `openPanel` CREATES a tab when the
-  // conversation has none, so polling with it turned a 20-second wait into one empty tab every
-  // 250ms — the "it opens a pile of blank pages at once" report. A wait must never be a write.
-  const reading = url === null
+async function evaluatePanelService(shellId, sessionId, url, viewId, guestId, deadline = Date.now() + 30_000, transactionId) {
   const target = JSON.stringify({
-    ...typeof viewId === 'string' && viewId !== '' ? { viewId } : {},
+    viewId, deadline, transactionId,
     ...Number.isSafeInteger(guestId) && guestId > 0 ? { guestId } : {},
   })
-  const call = reading
-    // `panelGuest` reports state, not success, so the read form supplies the verdict itself: a
-    // conversation with no panel yet is a legitimate answer to "what do you have", not a failure.
-    ? `JSON.stringify({ ok: true, ...api.panelGuest(${JSON.stringify(String(sessionId))}, ${JSON.stringify(tabId ?? null)}, ${target}) })`
-    : `JSON.stringify(api.openPanel(${JSON.stringify(String(sessionId))}, ${JSON.stringify(String(url ?? ''))}, ${target}))`
-  const expression = `(() => {
+  const expression = `(async () => {
     const api = globalThis.__dshBuiltinBrowser;
-    if (api === undefined || api === null || typeof api.openPanel !== 'function') {
-      return JSON.stringify({ ok: false, reason: 'the plugin client half is not loaded in this window' });
-    }
-    if (${typeof viewId === 'string' && viewId !== ''} && Number(api.panelProtocol || 0) < 3) {
-      return JSON.stringify({ ok: false, reason: 'the browser plugin client needs to reload for separate sidebar tabs; reopen DSH Desktop and retry' });
+    if (!api || api.panelProtocol < 5 || typeof api.initializePanel !== 'function') {
+      return JSON.stringify({ ok: false, code: 'panel-initialization-failed', reason: 'reload the browser plugin client for transactional sidebar initialization' });
     }
     try {
-      const answer = JSON.parse(${call});
+      const answer = await api.initializePanel(${JSON.stringify(String(sessionId))}, ${JSON.stringify(String(url ?? ''))}, ${target});
       answer.backgroundRendering = typeof api.isBackgroundRendering === 'function'
         && api.isBackgroundRendering(${JSON.stringify(String(sessionId))}) === true;
-      const exactTab = answer.tabId ?? ${JSON.stringify(tabId ?? null)};
-      if (api.initializationProtocol === 1 && typeof api.panelInitialization === 'function'
-        && typeof exactTab === 'string' && ${typeof expectedUrl === 'string'}) {
-        answer.initialization = api.panelInitialization(${JSON.stringify(String(sessionId))}, exactTab,
-          ${JSON.stringify(expectedUrl ?? '')}, ${JSON.stringify(requestId ?? null)}) ?? null;
-      }
       return JSON.stringify(answer);
     } catch (error) {
-      return JSON.stringify({ ok: false, reason: String((error && error.message) || error) });
+      return JSON.stringify({ ok: false, code: error?.code, reason: String(error?.message ?? error) });
     }
   })()`
   // `executeJavaScript`, NOT the debugger/CDP path.
   //
   // Measured on the running shell: the debugger attachment to the shell WINDOW is unreliable — its
   // commands hang, repeatedly and for minutes, while the same channel to a guest page answers at
-  // once. Nothing here needs the protocol: it is one synchronous call on a global the plugin itself
+  // once. Nothing here needs the protocol: it is one transaction on a global the plugin itself
   // published. `executeJavaScript` reaches the page's main world directly, with no attachment to go
   // stale and no reply to be lost. The guest path keeps CDP, because driving a PAGE genuinely needs
   // it (`Runtime.evaluate`, `Page.*`, `Input.*`).
@@ -464,6 +447,8 @@ async function evaluatePanelService(shellId, sessionId, url, tabId, viewId, gues
     const parsed = JSON.parse(value)
     return {
       ok: parsed?.ok === true,
+      ...typeof parsed?.code === 'string' ? { code: parsed.code } : {},
+      rendererNavigation: parsed?.rendererNavigation === true,
       reason: parsed?.reason === undefined ? undefined : String(parsed.reason),
       panel: parsed?.panel === true,
       created: parsed?.created === true,
@@ -507,9 +492,9 @@ async function committedSidebarNavigation(id, url) {
   if (entry.userTypedURL !== wanted && entry.url !== wanted) return undefined
   const { frameTree } = await sendCdp(id, 'Page.getFrameTree', {})
   const frame = frameTree?.frame
-  if (!frame) return undefined
+  if (!frame || typeof frame.id !== 'string' || frame.id === '' || typeof frame.loaderId !== 'string' || frame.loaderId === '') return undefined
   if (frame.unreachableUrl) throw codedError('panel-navigation-failed', 'the sidebar could not load ' + frame.unreachableUrl)
-  // The main frame and history can move between the two reads. Wait for one committed document.
+  // The main frame and history must acknowledge the same committed document.
   if (frame.url + (frame.urlFragment ?? '') !== entry.url) return undefined
   return { frameId: frame.id, loaderId: frame.loaderId }
 }
@@ -575,7 +560,13 @@ async function panelGuestIds(shell, owner) {
 
 /** Handle one JSON request line; every answer is a JSON line too. */
 async function handle(request, signal) {
-  const checkCurrent = () => signal?.throwIfAborted()
+  signal?.throwIfAborted()
+  const controller = new AbortController()
+  const checkCurrent = () => controller.signal.throwIfAborted()
+  if (request?.op === 'ensureSidebar') request = { ...request,
+    transactionId: request.transactionId ?? randomBytes(16).toString('hex'),
+    deadline: Number.isFinite(request.deadline) ? request.deadline : Date.now() + 30_000,
+  }
   checkCurrent()
   const shell = /^session-/.test(request?.owner) && ['ensureSidebar', 'cdp', 'download'].includes(request?.op)
     ? webContents.getAllWebContents().find(contents => contents.getType() === 'window') : undefined
@@ -584,38 +575,77 @@ async function handle(request, signal) {
   let releasePromise
   const release = () => {
     if (held === false) return Promise.resolve()
-    return releasePromise ??= (async () => {
+    const run = async () => {
       try {
         await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.releaseRendering?.(${JSON.stringify(token)})`, true)
       } catch (error) { console.error('[dsh-browser-bridge] rendering hold release failed:', error) }
-    })()
+    }
+    return held === undefined ? run() : releasePromise ??= run()
+  }
+  let rejectAborted
+  const aborted = new Promise((_resolve, reject) => { rejectAborted = reject })
+  const onAbort = () => {
+    rejectAborted(controller.signal.reason)
+    if (shell !== undefined) {
+      void release()
+      if (request.op === 'ensureSidebar') {
+        void shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.cancelPanelInitialization?.(${JSON.stringify(request.owner)}, ${JSON.stringify(request.viewId)}, ${JSON.stringify(request.transactionId)})`)
+          .catch(error => console.error('[dsh-browser-bridge] initialization cancellation failed:', error))
+      }
+    }
+  }
+  const forwardAbort = () => controller.abort(signal.reason)
+  controller.signal.addEventListener('abort', onAbort, { once: true })
+  signal?.addEventListener('abort', forwardAbort, { once: true })
+  activeRequests.add(controller)
+  const timer = request?.op === 'ensureSidebar' ? setTimeout(() => controller.abort(
+    codedError('BROWSER_DOCUMENT_TIMEOUT', 'sidebar initialization deadline expired')), Math.max(0, request.deadline - Date.now())) : undefined
+  const run = async () => {
+    try {
+      checkCurrent()
+      if (shell !== undefined) {
+        held = await shell.executeJavaScript(`(async () => {
+          const api = globalThis.__dshBuiltinBrowser;
+          if (typeof api?.holdRendering !== 'function') return false;
+          return api.holdRendering(${JSON.stringify(request.owner)}, ${JSON.stringify(token)});
+        })()`, true) === true
+      }
+      checkCurrent()
+      return await handleRequest(request, checkCurrent, controller)
+    } finally {
+      if (shell !== undefined) await release()
+    }
   }
   try {
-    if (shell !== undefined) {
-      signal?.addEventListener('abort', release, { once: true })
-      held = await shell.executeJavaScript(`(async () => {
-        const api = globalThis.__dshBuiltinBrowser;
-        if (typeof api?.holdRendering !== 'function') return false;
-        return api.holdRendering(${JSON.stringify(request.owner)}, ${JSON.stringify(token)});
-      })()`, true) === true
-    }
-    checkCurrent()
-    return await handleRequest(request, checkCurrent)
+    return await Promise.race([run(), aborted])
   } finally {
-    if (shell !== undefined) {
-      signal?.removeEventListener('abort', release)
-      await release()
-    }
+    clearTimeout(timer)
+    activeRequests.delete(controller)
+    signal?.removeEventListener('abort', forwardAbort)
+    controller.signal.removeEventListener('abort', onAbort)
+    if (shell !== undefined) await release()
   }
 }
 
-async function handleRequest(request, checkCancelled) {
-  if (request?.op !== 'ensureSidebar' || !request.url) return dispatch(request, checkCancelled)
+async function handleRequest(request, checkCancelled, controller) {
+  const op = String(request?.op ?? '')
+  if (op !== 'ensureSidebar' && op !== 'cancelSidebar') return dispatch(request, checkCancelled)
   const key = JSON.stringify([request.owner, request.viewId ?? null])
-  const token = Symbol()
+  if (op === 'cancelSidebar') {
+    const pending = pendingSidebarOpens.get(key)
+    if (typeof request.transactionId !== 'string' || pending?.transactionId !== request.transactionId) return { ok: true, cancelled: false }
+    pending.cancelled = true
+    pending.abort()
+    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+    if (shell) await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.cancelPanelInitialization?.(${JSON.stringify(request.owner)}, ${JSON.stringify(request.viewId)}, ${JSON.stringify(request.transactionId)})`)
+    return { ok: true, cancelled: true }
+  }
+  const token = { transactionId: request.transactionId, cancelled: false,
+    abort: () => controller.abort(codedError('BROWSER_NAVIGATION_CANCELLED', 'sidebar initialization was cancelled')) }
   pendingSidebarOpens.set(key, token)
   const checkCurrent = () => {
     checkCancelled?.()
+    if (token.cancelled) throw codedError('BROWSER_NAVIGATION_CANCELLED', 'sidebar initialization was cancelled')
     if (pendingSidebarOpens.get(key) !== token) {
       throw codedError('panel-navigation-superseded', 'a newer navigation was requested for this sidebar view')
     }
@@ -736,109 +766,36 @@ async function dispatch(request, checkCurrent) {
       throw new Error('this host supplied no conversation id, so its own panel cannot be identified')
     }
 
-    let tabId
-    let initializationRequestId
-    const ask = async (withUrl) => {
-      checkCurrent?.()
-      // `null` reads, a string places or navigates. Every round of the wait below uses the READ
-      // form, because a wait must never create anything.
-      const answer = await evaluatePanelService(shell.id, owner, withUrl ? url : null, tabId,
-        typeof request.viewId === 'string' ? request.viewId : undefined, request.guestId, url, initializationRequestId)
-      checkCurrent?.()
-      if (answer.ok !== true) {
-        // Carry the renderer's own findings into the failure: it is the side that can see why the
-        // lookup missed, and a bare "not mounted" leaves the next reader guessing between a real
-        // absence and a lookup that reads the wrong place.
-        const detail = answer.found === undefined ? '' : ' — renderer found ' + JSON.stringify(answer.found)
-        throw new Error(String(answer.reason) + detail)
-      }
-      const receipt = answer.initialization
-      if (receipt !== undefined) {
-        initializationRequestId ??= receipt.requestId
-        if (receipt.stage === 'failed') {
-          const error = codedError('panel-initialization-failed',
-            `sidebar initialization failed: ${String(receipt.reason ?? 'unknown')}${receipt.detail ? ': ' + String(receipt.detail) : ''} (tab ${String(receipt.tabId)}, request ${String(receipt.requestId)})`)
-          error.initialization = receipt
-          throw error
-        }
-      }
-      return answer
-    }
-
-    // Already has a page: reuse it. This is the common case after the first open of a session.
-    //
-    // A read-only caller (the live preview, issue #46) does NOT come through here at all: it uses the
-    // `list` op instead, because this one can drive the shell — that is the difference between "show
-    // me the page" and "let me look at it", and keeping the preview off this path is what stops a
-    // read-only action from moving the reader's layout.
-    const first = await ask(true)
+    const deadline = Number.isFinite(request.deadline) ? request.deadline : Date.now() + 30_000
+    const first = await evaluatePanelService(shell.id, owner, url,
+      typeof request.viewId === 'string' ? request.viewId : undefined, request.guestId, deadline, request.transactionId)
     checkCurrent?.()
-    tabId = first.tabId
-    const nativeLoad = request.attachOnly === true && url !== '' && tabId !== undefined
-      && (first.created || first.navigating) && first.guestId === null
-    if (first.displayed === false && !first.backgroundRendering) {
-      throw codedError(PANEL_NOT_DISPLAYED, 'the requested conversation is still being displayed; its sidebar will attach after rendering')
+    if (Date.now() >= deadline) throw codedError('BROWSER_DOCUMENT_TIMEOUT', 'sidebar initialization deadline expired')
+    if (first.ok !== true) throw codedError(first.code ?? 'panel-initialization-failed', String(first.reason))
+    if (!Number.isSafeInteger(first.guestId) || first.guestId <= 0) {
+      throw codedError('BROWSER_DOCUMENT_UNACKNOWLEDGED', 'the sidebar did not acknowledge its native guest identity')
     }
-    if (first.guestId !== null) {
-      claims.set(first.guestId, owner)
-      if (!request.attachOnly && !guestShows(first.guestId, url)) {
-        await sendCdp(first.guestId, 'Page.navigate', { url }, checkCurrent).catch(() => undefined)
-        checkCurrent?.()
+    const guest = guestById(first.guestId)
+    if (!guest || guest.isDestroyed() || guest.getType() !== 'webview') {
+      throw codedError('BROWSER_GUEST_CLOSED', 'the acknowledged sidebar guest is gone')
+    }
+    let navigation
+    if (first.rendererNavigation || (url !== '' && (first.created || first.navigating))) {
+      if (first.initialization?.stage !== 'attached' || first.initialization.guestId !== String(first.guestId)) {
+        throw codedError('BROWSER_DOCUMENT_UNACKNOWLEDGED', 'the native guest does not match its initialization receipt')
       }
-      return { ok: true, created: false, id: first.guestId, via: 'panel', owner }
-    }
-
-    // A tab was placed, but this conversation is not the one the shell is displaying.
-    //
-    // The shell renders the sidebar of the conversation it SHOWS. A background conversation's panel
-    // exists in its own surface store — which is exactly why the tab could be placed at all — but
-    // it has no DOM, so no webview attaches and no amount of waiting would produce one. Waiting
-    // would turn a true statement into a timeout, and the page is genuinely there: it appears the
-    // moment the conversation is shown.
-    if (first.panel === false) {
-      // Reported as issue #37. This is NOT a lost carrier: the tab exists in this conversation's own
-      // surface store, the conversation is simply not the one on screen, and the page appears the
-      // moment it is. A machine-readable code is what keeps the plugin from concluding the carrier
-      // died — a conclusion that swapped the surface to a separate window and took the open page with
-      // it, because the new window starts blank.
-      throw codedError(
-        PANEL_NOT_DISPLAYED,
-        'a panel was placed in this conversation\'s sidebar, but its page can only attach while the '
-        + 'conversation is the one displayed — show it and the page appears',
-      )
-    }
-
-    // A guest attaches asynchronously once the renderer creates the webview. Poll INSIDE this
-    // conversation's panel, so a guest appearing in any other conversation cannot satisfy the wait
-    // — the scoping is what makes the wait safe.
-    const deadline = Date.now() + (url === '' ? 4_000 : 20_000)
-    while (Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 250))
-      const polled = await ask(false)
+      navigation = await committedSidebarNavigation(first.guestId, url)
       checkCurrent?.()
-      if (polled.guestId === null) continue
-      if (nativeLoad) {
-        const navigation = await committedSidebarNavigation(polled.guestId, url)
-        checkCurrent?.()
-        if (!navigation) continue
-        claims.set(polled.guestId, owner)
-        return { ok: true, created: true, id: polled.guestId, via: 'panel', owner, navigation }
-      }
-      claims.set(polled.guestId, owner)
-      if (!request.attachOnly && !guestShows(polled.guestId, url)) {
-        await sendCdp(polled.guestId, 'Page.navigate', { url }, checkCurrent).catch(() => undefined)
-        checkCurrent?.()
-      }
-      return { ok: true, created: true, id: polled.guestId, via: 'panel', owner }
+      if (!navigation) throw codedError('BROWSER_DOCUMENT_UNACKNOWLEDGED', 'the native guest did not acknowledge the requested document')
     }
-    if (nativeLoad && initializationRequestId !== undefined) {
-      throw codedError(PANEL_INITIALIZING, 'the sidebar has not committed its navigation to ' + url + ' within its budget')
+    if (Date.now() >= deadline) throw codedError('BROWSER_DOCUMENT_TIMEOUT', 'sidebar initialization deadline expired')
+    claims.set(first.guestId, owner)
+    if (!request.attachOnly && !guestShows(first.guestId, url)) {
+      navigation = await sendCdp(first.guestId, 'Page.navigate', { url }, checkCurrent)
+      checkCurrent?.()
+      if (navigation?.errorText) throw codedError('panel-navigation-failed', String(navigation.errorText))
     }
-    throw codedError(
-      PANEL_INITIALIZING,
-      'this conversation\'s browser panel produced no page within its budget '
-      + '(the shell placed no guest in this conversation\'s own sidebar)',
-    )
+    return { ok: true, created: first.created, id: first.guestId, via: 'panel', owner, ...navigation ? { navigation } : {} }
   }
   if (op === 'showTab') {
     // Bring one browser guest to the front — the "switch to this tab" half of opening a page.
@@ -862,7 +819,7 @@ async function dispatch(request, checkCurrent) {
     if (shell === undefined) throw new Error('no shell window to drive')
     // Bind by the exact native guest rather than its title: several tabs can have the same title.
     if (typeof request.logicalViewId === 'string' && request.logicalViewId !== '') {
-      const shown = await evaluatePanelService(shell.id, owner, '', undefined, request.logicalViewId, viewId)
+      const shown = await evaluatePanelService(shell.id, owner, '', request.logicalViewId, viewId)
       if (shown.ok !== true || shown.guestId !== viewId) {
         throw new Error('could not select the requested sidebar tab: ' + String(shown.reason ?? 'the requested guest is not displayed yet'))
       }
@@ -1196,6 +1153,7 @@ async function applySidebarGuestProxy(contents) {
 }
 
 export function stop() {
+  for (const controller of activeRequests) controller.abort(codedError('bridge-request-abandoned', 'the bridge was disposed'))
   const current = globalThis[ACTIVE]
   globalThis[ACTIVE] = undefined
   // Detach BEFORE the early return: a reload replaces this module's `start()`,

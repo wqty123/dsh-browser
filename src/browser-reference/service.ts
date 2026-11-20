@@ -16,6 +16,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { referenceOwnerKey } from '../reference-owner.ts'
+import { sameReferenceDocument as samePage } from '../reference-page.ts'
 import { isReferenceText, MAX_REFERENCE_TEXT, referenceTextContent } from '../reference-text.ts'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -144,7 +146,8 @@ export function setReferenceCaptureActionHandler(
 
 /** Called by the provider when the host reports a human reference action. */
 export async function dispatchReferenceCaptureAction(action: ReferenceCaptureAction): Promise<void> {
-  await referenceCaptureActionHandler?.(action)
+  if (referenceCaptureActionHandler === undefined) throw new Error('reference capture handler is unavailable')
+  await referenceCaptureActionHandler(action)
 }
 
 /** One piece of a capture that could not be committed. */
@@ -255,14 +258,7 @@ export interface BrowserReferenceServiceOptions {
   readonly assetDir?: string
   /** Page evaluation budget. Default 20 s. */
   readonly timeoutMs?: number
-  /**
-   * The browser session the person has open right now.
-   *
-   * Read only by `reveal`, and only when the session that captured the
-   * reference no longer exists: the sidebar page is re-adopted under a new id
-   * after a restart, and this is what lets an older reference still find it.
-   */
-  readonly currentSession?: () => string | undefined
+  readonly sourceSession?: (owner: string, pageId: string) => Promise<string>
 }
 
 /** Every limit after clamping; the caller's values only ever tighten these. */
@@ -348,21 +344,6 @@ export function sniffImageMime(bytes: Buffer): string | undefined {
   return undefined
 }
 
-/** Ignore a fragment when comparing pages: it is navigation, not content. */
-function samePage(current: string, expected: string): boolean {
-  if (current === expected) return true
-  try {
-    const left = new URL(current)
-    const right = new URL(expected)
-    return left.origin === right.origin
-      && left.pathname === right.pathname
-      && left.search === right.search
-      && (left.hash === right.hash || right.hash === '')
-  } catch {
-    return false
-  }
-}
-
 /** What a stored asset file is, beside the bytes. */
 export interface ReferenceAssetMeta {
   readonly assetKey: string
@@ -388,13 +369,12 @@ export class BrowserReferenceService {
   private readonly host: ReferenceHost
   private readonly options: ResolvedOptions
   private readonly store: ReferenceStore
-  /** Live-page lookup used by `reveal` when the capture session is gone. */
-  private readonly currentSession: (() => string | undefined) | undefined
+  private readonly sourceSession: BrowserReferenceServiceOptions['sourceSession']
 
   constructor(host: ReferenceHost, store: ReferenceStore = new ReferenceStore(), options: BrowserReferenceServiceOptions = {}) {
     this.host = host
     this.store = store
-    this.currentSession = options.currentSession
+    this.sourceSession = options.sourceSession
     this.options = {
       context: integerOf(options.context, DEFAULTS.context, 0, 512),
       maxTextPartLength: integerOf(options.maxTextPartLength, DEFAULTS.maxTextPartLength, 1, MAX_REFERENCE_TEXT),
@@ -492,9 +472,9 @@ export class BrowserReferenceService {
    * @returns the stored reference, or the failures that prevented one.
    */
   async capture(request: CaptureRequest, signal?: AbortSignal): Promise<CaptureOutcome> {
-    const sessionId = request.sessionId.trim()
+    const sessionId = referenceOwnerKey(request.sessionId)
     if (sessionId === '') return { failures: [{ kind: 'reference', reason: 'session-id-required' }] }
-    const browserSessionId = (request.browserSessionId ?? sessionId).trim()
+    const browserSessionId = (request.browserSessionId ?? request.sessionId).trim()
     if (browserSessionId === '') return { failures: [{ kind: 'reference', reason: 'browser-session-id-required' }] }
     // A frozen capture needs no browser session: the page already handed over the complete snapshot, so
     // nothing has to be read from a tab. The Web sidebar is exactly that case — its guest is an iframe
@@ -688,18 +668,18 @@ export class BrowserReferenceService {
    * @param request - optional specific part.
    * @param signal - cancels the page evaluations.
    */
-  async reveal(referenceId: string, request: { readonly partId?: string; readonly navigate?: boolean } = {}, signal?: AbortSignal): Promise<RevealOutcome> {
+  async reveal(referenceId: string, request: { readonly partId?: string; readonly navigate?: boolean; readonly sourcePageId?: string } = {}, signal?: AbortSignal): Promise<RevealOutcome> {
     const reference = this.store.get(referenceId)
     if (reference === undefined) return { referenceId, status: 'not-found', pageUrl: '', parts: [], note: 'no such reference is stored' }
     const captured = reference.owner.browserSessionId ?? reference.owner.sessionId
-    // A page is re-adopted under a NEW session id whenever DSH restarts or the
-    // sidebar panel is recreated, so keying only on the captured id would make
-    // every older reference answer "the capture session is gone" while the very
-    // same page is open in front of the person. The live page is the only
-    // honest fallback: the URL check below still refuses another document.
     const live = captured !== undefined && captured !== '' && this.host.exists(captured) ? captured : undefined
-    const candidate = live === undefined ? this.currentSession?.() : undefined
-    const sessionId = live ?? (candidate !== undefined && candidate !== '' && this.host.exists(candidate) ? candidate : undefined)
+    let sessionId = live
+    if (request.sourcePageId !== undefined) {
+      const owner = referenceOwnerKey(reference.owner.sessionId ?? '')
+      if (!owner || this.sourceSession === undefined) return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, parts: [], note: 'sidebar source binding unsupported' }
+      try { sessionId = await this.sourceSession(owner, request.sourcePageId) }
+      catch (error) { return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, parts: [], note: messageOf(error) } }
+    }
     if (sessionId === undefined) {
       return {
         referenceId,
@@ -716,20 +696,7 @@ export class BrowserReferenceService {
     } catch (error) {
       return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, parts: [], note: messageOf(error) }
     }
-    let currentUrl = textOf(facts.url, 4000)
-    if (!samePage(currentUrl, reference.source.pageUrl) && request.navigate === true) {
-      // "回到原文" is a jump: the caller asked to go there, so take the page to
-      // the stored URL and locate the quote once it has arrived.
-      const arrived = await this.navigateTo(sessionId, reference.source.pageUrl, signal)
-      if (arrived) {
-        try {
-          facts = await this.run<{ url?: unknown }>(sessionId, pageFactsScript(), [], signal)
-          currentUrl = textOf(facts.url, 4000)
-        } catch (error) {
-          return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, currentUrl, parts: [], note: messageOf(error) }
-        }
-      }
-    }
+    const currentUrl = textOf(facts.url, 4000)
     if (!samePage(currentUrl, reference.source.pageUrl)) {
       return {
         referenceId,
@@ -764,7 +731,6 @@ export class BrowserReferenceService {
               end: locate.range.end,
               maxChars: this.options.maxPageText,
               legacy: part.content === undefined,
-              durationMs: 2500,
             }], signal)
             results.push({
               partId: part.partId,
@@ -805,36 +771,6 @@ export class BrowserReferenceService {
     return { referenceId, status, pageUrl: reference.source.pageUrl, currentUrl, parts: results }
   }
 
-  /**
-   * Point the session's page at a URL and wait until it is there.
-   *
-   * The navigation itself destroys the page's execution context, so its reply
-   * is expected to be lost; arrival is proven by reading the URL afterwards.
-   */
-  private async navigateTo(sessionId: string, url: string, signal?: AbortSignal): Promise<boolean> {
-    if (!/^https?:\/\//iu.test(url)) return false
-    try {
-      // The host wraps a script as an expression unless it starts with `return`,
-      // so this has to be a returned value, not a bare statement block.
-      await this.run(sessionId,
-        'return JSON.stringify({ ok: true, at: (function () { try { location.href = ' + JSON.stringify(url) + '; return "navigating" } catch (error) { return "refused" } })() })',
-        [], signal)
-    } catch {
-      // Expected: the context that answered is gone with the old document.
-    }
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      if (signal?.aborted === true) return false
-      await new Promise(resolve => { setTimeout(resolve, 250) })
-      try {
-        const facts = await this.run<{ url?: unknown }>(sessionId, pageFactsScript(), [], signal)
-        if (samePage(textOf(facts.url, 4000), url)) return true
-      } catch {
-        // Mid-navigation: there is no execution context yet.
-      }
-    }
-    return false
-  }
-
   private async revealElement(
     sessionId: string,
     kind: 'image' | 'table',
@@ -845,7 +781,6 @@ export class BrowserReferenceService {
       const result = await this.run<RawElementRevealResult>(sessionId, revealElementScript(), [{
         kind,
         anchor,
-        durationMs: 2500,
       }], signal)
       const status = result.status === 'found' ? 'revealed' : result.status === 'ambiguous' ? 'ambiguous' : 'missing'
       return { status, ...typeof result.matches === 'number' ? { matches: result.matches } : {} }

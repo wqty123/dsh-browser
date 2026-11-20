@@ -645,6 +645,8 @@ export interface BrowserProvider {
    * human can tell which task's page is currently shown.
    */
   open(label?: string): Promise<BrowserSessionId>
+  /** Bind an existing carrier page to this session without navigating or creating a page. */
+  bindPage?(session: BrowserSessionId, pageId: string): Promise<void>
   /** Open a URL, optionally in a new tab. Honor `signal` for cancellation. */
   openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void>
   /** List the session's tabs. */
@@ -813,4 +815,3 @@ export interface BrowserHistoryEntry {
  * own (e.g. `BROWSER_CDP_ATTACH_FAILED`).
  */
 export class BrowserError extends HarnessError {}
-

@@ -65,6 +65,7 @@ export interface PendingDelivery {
 
 /** A waitable, cancellable source-reveal intent (§14.1). */
 export interface RevealRequest {
+  readonly sourcePageId?: string
   readonly referenceId: string
   readonly partId?: string
   readonly sessionId: string

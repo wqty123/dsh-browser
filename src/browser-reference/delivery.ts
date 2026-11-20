@@ -16,6 +16,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { referenceOwnerKey } from '../reference-owner.ts'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { dshHome } from '../browser-electron/paths.ts'
@@ -117,6 +118,7 @@ function readEvents(path: string): DeliveryEvent[] {
       const parsed: unknown = JSON.parse(line)
       if (isRecord(parsed)
         && typeof parsed.intentId === 'string'
+        && typeof parsed.sessionId === 'string'
         && Number.isSafeInteger(parsed.sequence) && Number(parsed.sequence) >= 0
         && (parsed.state === 'prepared' || parsed.state === 'draft-applied' || parsed.state === 'acknowledged'
           || parsed.state === 'consumed' || parsed.state === 'removed')
@@ -126,7 +128,7 @@ function readEvents(path: string): DeliveryEvent[] {
         // sequence must still receive writer B's later line with that number.
         cursor = Math.max(cursor + 1, Number(parsed.sequence))
         if (!Number.isSafeInteger(cursor)) continue
-        events.push({ ...parsed, sequence: cursor } as unknown as DeliveryEvent)
+        events.push({ ...parsed, sessionId: referenceOwnerKey(parsed.sessionId), sequence: cursor } as unknown as DeliveryEvent)
       }
     } catch {
       // A torn tail from a crash is ignored; the next append writes a fresh line.
@@ -285,7 +287,7 @@ export function createDeliveryQueue(options: DeliveryQueueOptions = {}): Deliver
   return {
     prepare(reference, prepareOptions = {}) {
       if (disposed) throw new Error('delivery queue is disposed')
-      const sessionId = reference.owner.sessionId
+      const sessionId = referenceOwnerKey(reference.owner.sessionId ?? '')
       if (sessionId === undefined || sessionId === '') throw new Error('reference has no DSH session owner')
       const intentId = reference.referenceId
       const existing = fold().get(intentId)
@@ -316,7 +318,7 @@ export function createDeliveryQueue(options: DeliveryQueueOptions = {}): Deliver
     },
     consume(intentId, sessionId) {
       const current = fold().get(intentId)
-      if (current === undefined || current.sessionId !== sessionId) return undefined
+      if (current === undefined || referenceOwnerKey(current.sessionId) !== referenceOwnerKey(sessionId)) return undefined
       if (current.state === 'consumed') return current
       return transition(intentId, 'consumed')
     },
@@ -330,7 +332,7 @@ export function createDeliveryQueue(options: DeliveryQueueOptions = {}): Deliver
     },
     list(filter = {}) {
       const records = [...fold().values()]
-        .filter(record => filter.sessionId === undefined || record.sessionId === filter.sessionId)
+        .filter(record => filter.sessionId === undefined || referenceOwnerKey(record.sessionId) === referenceOwnerKey(filter.sessionId))
         .filter(record => filter.since === undefined || record.sequence > filter.since)
         .filter(record => record.state !== 'removed')
         .filter(record => filter.includeConsumed === true || record.state !== 'consumed')
@@ -376,6 +378,6 @@ export function resolveReferenceOwner(
   windowId: string,
 ): { readonly sessionId: string; readonly browserSessionId: string } {
   const browserSessionId = windowId.trim()
-  const sessionId = (realSessionId ?? '').trim() || browserSessionId
+  const sessionId = referenceOwnerKey(realSessionId ?? '') || browserSessionId
   return { sessionId, browserSessionId }
 }

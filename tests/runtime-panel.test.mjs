@@ -7,6 +7,7 @@ function runtimeWith(provider) {
   const runtime = Object.create(BrowserRuntime.prototype)
   runtime.providers = new Map(provider === undefined ? [] : [[provider.id, provider]])
   runtime.panelSessions = new Map()
+  runtime.panelPages = new Map()
   Object.defineProperty(runtime, 'ctx', { value: { effect: effect => {
     const cleanup = effect()
     return () => cleanup()
@@ -23,6 +24,27 @@ function provider(id, calls) {
     return name === 'exists' ? true : id
   } })
 }
+
+test('source binding targets the sidebar provider and never the selected carrier', async () => {
+  const calls = []
+  const runtime = runtimeWith(provider('external', calls))
+  runtime.registerPanelProvider(async () => provider('sidebar', calls))
+  assert.equal(await runtime.bindPanelPage('session-owner', '42'), 'browser:sidebar')
+  assert.equal(await runtime.bindPanelPage('session-owner', '42'), 'browser:sidebar')
+  assert.deepEqual(calls, [
+    ['sidebar', 'open', 'session-owner'], ['sidebar', 'bindPage', 'browser:sidebar', '42'], ['sidebar', 'exists', 'browser:sidebar'],
+  ])
+})
+
+test('source binding rejects an unavailable or incapable panel without fallback', async () => {
+  const calls = []
+  const runtime = runtimeWith(provider('external', calls))
+  await assert.rejects(runtime.bindPanelPage('session-owner', '42'), /unavailable/)
+  runtime.registerPanelProvider(async () => ({ id: 'unsupported', open: async () => 'unsupported', close: async id => calls.push(['close', id]) }))
+  await assert.rejects(runtime.bindPanelPage('session-owner', '42'), /unsupported/)
+  assert.deepEqual(calls, [['close', 'unsupported']])
+  assert.equal(runtime.panelSessions.size, 0)
+})
 
 test('all session operations dispatch to the panel provider even when the default carrier changes', async () => {
   const calls = []

@@ -116,7 +116,7 @@ test('query-only, fragment-only and empty URLs resolve against the real page, in
   assert.equal(context.location.href, 'https://dsh.example' + guestPath('https://ordinary.example/next/page?replaced=1'))
 })
 
-test('XHR, beacon and window.open stay in the proxy', () => {
+test('XHR and beacon stay in the proxy; window.open never impersonates a child by replacing its opener', () => {
   const { context, requests, navigations, XHR } = page()
   const xhr = new XHR()
   xhr.open('POST', '../api', false)
@@ -127,8 +127,8 @@ test('XHR, beacon and window.open stay in the proxy', () => {
   assert.equal(requests[0].input, guestPath('https://ordinary.example/metrics'))
   assert.equal(requests[0].init.headers['x-dsh-guest-sub'], '1')
   assert.equal(requests[0].init.body, 'payload')
-  context.open('next', '_blank')
-  assert.equal(navigations[0], guestPath('https://ordinary.example/dir/next'))
+  assert.throws(() => context.open('next', '_blank'), error => error.name === 'NotSupportedError' && error.code === 'native-child-opener-unavailable')
+  assert.deepEqual(navigations, [])
 })
 
 test('history updates the real resolution base and dynamic attributes and property setters are proxied', () => {
@@ -155,7 +155,7 @@ test('anchor clicks and GET forms navigate self; POST forms retain native body e
   const anchor = new Element()
   anchor.tagName = 'A'
   anchor.setAttribute('href', '../next')
-  anchor.setAttribute('target', '_blank')
+  anchor.setAttribute('target', '_self')
   let prevented = false
   listeners.get('click')({ target: anchor, preventDefault() { prevented = true } })
   assert.equal(prevented, true)
@@ -173,6 +173,45 @@ test('anchor clicks and GET forms navigate self; POST forms retain native body e
   const fetch = context.fetch
   vm.runInContext(guestRuntimeScript('https://ignored.example/'), context)
   assert.equal(context.fetch, fetch)
+})
+
+test('explicit noopener window.open, blank links and GET forms dispatch URL-only sidebar tabs without moving the opener', () => {
+  const { context, listeners, navigations, Element, Form } = page()
+  const requests = []
+  context.parent.postMessage = data => { if (data.type === 'dsh.browser.guest.child.request') requests.push(data) }
+  listeners.get('message')({ source: context.parent, data: { type: 'dsh.browser.guest.navigation.request', loadId: 7 } })
+  assert.equal(context.open('../child', '_blank', 'noopener'), null)
+  const link = new Element(); link.tagName = 'A'; link.setAttribute('href', '/linked'); link.setAttribute('target', '_blank')
+  listeners.get('click')({ target: link, preventDefault() {} })
+  const form = new Form(); form.setAttribute('target', '_blank'); form.setAttribute('action', '/search')
+  let prevented = false
+  listeners.get('submit')({ target: form, preventDefault() { prevented = true } })
+  assert.equal(prevented, true)
+  assert.deepEqual(requests.map(({ mode, url, loadId, requestId }) => [mode, url, loadId, requestId]), [
+    ['url-only', 'https://ordinary.example/child', 7, 1],
+    ['url-only', 'https://ordinary.example/linked', 7, 2],
+    ['url-only', 'https://ordinary.example/search?q=hello+world&page=2', 7, 3],
+  ])
+  assert.deepEqual(navigations, [])
+})
+
+test('native opener, named targets, blank children, POST targets and unready tab owners fail explicitly without navigation', () => {
+  const { context, listeners, navigations, Form } = page()
+  assert.throws(() => context.open('next', '_blank', 'noopener'), error => error.code === 'sidebar-tab-owner-not-ready')
+  const requests = []
+  context.parent.postMessage = data => { if (data.type === 'dsh.browser.guest.child.request') requests.push(data) }
+  listeners.get('message')({ source: context.parent, data: { type: 'dsh.browser.guest.navigation.request', loadId: 1 } })
+  for (const args of [[], [''], ['about:blank'], ['next', 'login'], ['next', '_blank', 'noopener=0']]) {
+    assert.throws(() => context.open(...args), error => error.code === 'native-child-opener-unavailable')
+  }
+  const form = new Form(); form.setAttribute('target', '_blank'); form.setAttribute('method', 'POST')
+  listeners.get('submit')({ target: form, preventDefault() {} })
+  form.submit()
+  assert.notEqual(form.submitted, true)
+  assert.ok(requests.every(request => request.mode === 'native-opener'))
+  assert.deepEqual(navigations, [])
+  assert.equal(vm.runInContext('window.open("/self", "_self") === window', context), true)
+  assert.equal(navigations[0], guestPath('https://ordinary.example/self'))
 })
 
 test('installer tolerates missing optional APIs and safely embeds unusual URLs', () => {

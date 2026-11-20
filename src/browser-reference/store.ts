@@ -10,6 +10,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { referenceOwnerKey } from '../reference-owner.ts'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { writeFileAtomic } from '../browser-electron/settings-store.ts'
@@ -149,7 +150,7 @@ export class ReferenceStore {
    */
   list(filter: { readonly sessionId?: string; readonly pageUrl?: string; readonly limit?: number } = {}): BrowserReference[] {
     let records = readRecords(this.path)
-    if (filter.sessionId !== undefined) records = records.filter(record => record.owner.sessionId === filter.sessionId)
+    if (filter.sessionId !== undefined) records = records.filter(record => referenceOwnerKey(record.owner.sessionId ?? '') === referenceOwnerKey(filter.sessionId!))
     if (filter.pageUrl !== undefined) records = records.filter(record => record.source.pageUrl === filter.pageUrl)
     const limit = filter.limit
     return limit !== undefined && limit > 0 ? records.slice(-limit) : records

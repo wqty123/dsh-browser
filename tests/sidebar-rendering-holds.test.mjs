@@ -21,7 +21,7 @@ writeFileSync(join(directory, 'bridge-copy.mjs'), source)
 writeFileSync(join(directory, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-bridge/guest-proxy.mjs', import.meta.url)))
 const bridge = await import(pathToFileURL(join(directory, 'bridge.mjs')))
 
-function mount(t, { supported = true, selected = 'session-reader' } = {}) {
+function mount(t, { supported = true, selected = 'session-reader', marker = true, reader = { protocolVersion: 1, read() {}, wait() {} } } = {}) {
   t.mock.method(globalThis, 'setInterval', () => 0)
   const cleanups = []
   const held = new Set()
@@ -44,7 +44,7 @@ function mount(t, { supported = true, selected = 'session-reader' } = {}) {
     locale: { register: () => {}, bind: () => key => key },
     slots: { inject: (_name, run) => run(), register: () => {} },
     inject: (names, callback) => {
-      const scope = { sidebarRight, uiWorkspace, effect }
+      const scope = { sidebarRight, uiWorkspace, effect, sidebarBrowserInitialization: reader }
       if (names.some(name => scope[name] !== undefined)) callback(scope)
     },
   })
@@ -53,7 +53,7 @@ function mount(t, { supported = true, selected = 'session-reader' } = {}) {
   globalThis.requestAnimationFrame = callback => setImmediate(callback)
   globalThis.document = {
     querySelector: () => null,
-    querySelectorAll: selector => selector === '[data-sidebar-right-background-rendering]'
+    querySelectorAll: selector => marker && selector === '[data-sidebar-right-background-rendering]'
       ? [...held].map(entry => ({ getAttribute: name => name === 'data-sidebar-right-session' ? entry.sessionId : null })) : [],
   }
   const shell = { id: 1, getType: () => 'window', isDestroyed: () => false,
@@ -110,10 +110,10 @@ test('held DOM backgrounds are accepted, while the unheld panel-not-displayed fa
   const state = mount(t)
   contents.push({ id: 2, getType: () => 'webview', isDestroyed: () => false })
   state.api.openPanel = () => ({ ok: true, panel: true, displayed: false, guestId: 2, url: '' })
-  assert.equal((await bridge.handle({ op: 'ensureSidebar', owner: 'session-agent' })).id, 2)
+  assert.equal((await bridge.handle({ op: 'ensureSidebar', owner: 'session-agent', viewId: 'v' })).id, 2)
   assert.equal(state.held.size, 0)
   state.api.holdRendering = () => false
-  await assert.rejects(bridge.handle({ op: 'ensureSidebar', owner: 'session-agent' }), { code: 'panel-not-displayed' })
+  await assert.rejects(bridge.handle({ op: 'ensureSidebar', owner: 'session-agent', viewId: 'v' }), { code: 'panel-not-displayed' })
 })
 
 test('a minimized window dispatches held commands without animation frames', async t => {
@@ -121,9 +121,54 @@ test('a minimized window dispatches held commands without animation frames', asy
   globalThis.requestAnimationFrame = () => assert.fail('minimized windows do not produce animation frames')
   state.api.openPanel = () => ({ ok: true, panel: true, displayed: false, guestId: 2, url: '' })
   contents.push({ id: 2, getType: () => 'webview', isDestroyed: () => false })
-  assert.equal((await bridge.handle({ op: 'ensureSidebar', owner: 'session-agent' })).id, 2)
+  assert.equal((await bridge.handle({ op: 'ensureSidebar', owner: 'session-agent', viewId: 'v' })).id, 2)
   assert.equal(state.held.size, 0)
 })
+
+for (const options of [{ marker: false }, { supported: false }]) {
+  test(`protocol 5 refuses a background session without ${options.marker === false ? 'a DOM marker' : 'a rendering hold'}`, async t => {
+    const state = mount(t, options)
+    state.api.openPanel = () => assert.fail('an undisplayed panel must not be initialized')
+    await assert.rejects(bridge.handle({ op: 'ensureSidebar', owner: 'session-agent', viewId: 'v' }), { code: 'panel-not-displayed' })
+    assert.equal(state.held.size, 0)
+    assert.deepEqual(state.switched, [])
+  })
+}
+
+for (const mode of ['deadline', 'cancel', 'socket-abort', 'bridge-dispose', 'client-dispose', 'error']) {
+  test(`protocol-5 ${mode} aborts initialization and releases its background hold`, async t => {
+    let initialized, cancelled
+    const started = new Promise(resolve => { initialized = resolve })
+    const reader = { protocolVersion: 1, read() {}, wait(_query, signal) {
+      initialized()
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => { cancelled = true; reject(signal.reason) }, { once: true })
+      })
+    } }
+    const state = mount(t, { reader })
+    state.api.openPanel = () => mode === 'error'
+      ? { ok: false, code: 'panel-initialization-failed', reason: 'open failed' }
+      : { ok: true, created: true, panel: true, guestId: null, tabId: 'tab-1' }
+    const controller = new AbortController()
+    const pending = bridge.handle({ op: 'ensureSidebar', owner: 'session-agent', viewId: 'v', transactionId: 'one',
+      deadline: Date.now() + (mode === 'deadline' ? 40 : 1000) }, controller.signal)
+    const rejected = assert.rejects(pending, mode === 'socket-abort' ? /disconnected/ : mode === 'bridge-dispose' ? /disposed/ :
+      mode === 'deadline' ? { code: 'BROWSER_DOCUMENT_TIMEOUT' } : mode === 'cancel' ? { code: 'BROWSER_NAVIGATION_CANCELLED' } : /disposed|open failed/)
+    if (mode !== 'error') {
+      await started
+      assert.equal(state.held.size, 1)
+      if (mode === 'cancel') assert.equal((await bridge.handle({ op: 'cancelSidebar', owner: 'session-agent', viewId: 'v', transactionId: 'one' })).cancelled, true)
+      if (mode === 'socket-abort') controller.abort(new Error('disconnected'))
+      if (mode === 'bridge-dispose') bridge.stop()
+      if (mode === 'client-dispose') for (const cleanup of state.cleanups.splice(0).reverse()) cleanup()
+    }
+    await rejected
+    assert.equal(state.held.size, 0)
+    assert.equal(state.released(), 1)
+    if (mode !== 'error') assert.equal(cancelled, true)
+    assert.deepEqual(state.switched, [])
+  })
+}
 
 test('abandoning a request releases a hold even before its renderer reply, and never dispatches it later', async t => {
   const state = mount(t)

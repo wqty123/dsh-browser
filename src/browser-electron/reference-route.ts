@@ -14,6 +14,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { referenceOwnerKey } from '../reference-owner.ts'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { BrowserHttpHandler } from './authenticated-route.ts'
@@ -43,7 +44,7 @@ export const REFERENCE_GET_ROUTE = '/dsh-builtin-browser/reference/get'
  * @returns the same id without a leading \`session-\`.
  */
 export function bareSession(value: string): string {
-  return value.startsWith('session-') ? value.slice('session-'.length) : value
+  return referenceOwnerKey(value)
 }
 
 /** 客户端产物的版本（mtime+size），用于让浏览器自动换到新 bundle。 */
@@ -284,6 +285,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
     // Explicit jump: the caller wants the page moved to the stored URL rather
     // than a report that it is showing something else.
     const outcome = await service.reveal(referenceId, {
+      ...typeof body.sourcePageId === 'string' && body.sourcePageId !== '' ? { sourcePageId: body.sourcePageId } : {},
       ...partId !== undefined ? { partId } : {},
       ...body.navigate === true ? { navigate: true } : {},
     })

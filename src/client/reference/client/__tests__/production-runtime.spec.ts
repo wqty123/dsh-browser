@@ -342,19 +342,19 @@ describe('revealReference — it goes to the source page', () => {
     return { http, runtime, card: runtime.cards()[0]! }
   }
 
-  it('asks the plugin to navigate its page to the source, then locates the quote', async () => {
+  it('opens and acknowledges the source before locating a mismatched page', async () => {
     const { http, runtime, card } = await withCard()
     http.revealOutcome = { ok: true, status: 'page-mismatch' }
-    const seen: (boolean | undefined)[] = []
+    const seen: (string | undefined)[] = []
     const original = http.reveal.bind(http)
-    http.reveal = async (referenceId, partId, navigate) => {
-      seen.push(navigate)
-      // The navigating call is the one that lands on the page.
-      if (navigate === true) http.revealOutcome = { ok: true, status: 'revealed' }
+    http.reveal = async (referenceId, partId, navigate, sourcePageId) => {
+      seen.push(sourcePageId)
+      if (sourcePageId === '42') http.revealOutcome = { ok: true, status: 'revealed' }
       return await original(referenceId, partId, navigate)
     }
+    runtime.setSourceOpener(async () => ({ pageId: '42' }))
     await runtime.revealReference(card.referenceId)
-    expect(seen).toEqual([false, true])
+    expect(seen).toEqual([undefined, '42'])
     // Success is silent: the person is looking at the source, not at a toast.
     expect(runtime.snapshot().reveal).toBeUndefined()
   })
@@ -367,10 +367,11 @@ describe('revealReference — it goes to the source page', () => {
       opened.push(url)
       // Stands for the page finishing its load: the next attempt locates it.
       http.revealOutcome = { ok: true, status: 'revealed' }
+      return { pageId: '42' }
     })
     await runtime.revealReference(card.referenceId)
     expect(opened).toEqual([card.source.pageUrl])
-    expect(http.revealCalls.length).toBeGreaterThanOrEqual(2)
+    expect(http.revealCalls.length).toBe(2)
     expect(runtime.snapshot().reveal).toBeUndefined()
   })
 
@@ -381,5 +382,21 @@ describe('revealReference — it goes to the source page', () => {
     await runtime.revealReference(card.referenceId)
     expect(runtime.snapshot().reveal?.status).toBe('session-unavailable')
     expect(runtime.snapshot().reveal?.message).toContain('标签页')
+  })
+
+  it('uses the acknowledged Web source channel instead of retrying the native reveal route', async () => {
+    const { http, runtime, card } = await withCard()
+    http.revealOutcome = { ok: true, status: 'session-unavailable' }
+    let highlighted = false
+    runtime.setSourceOpener(async () => ({ pageId: 'iframe:owned', reveal: async (snapshot, partId, signal) => {
+      expect(snapshot.referenceId).toBe(card.referenceId)
+      expect(partId).toBeUndefined()
+      expect(signal.aborted).toBe(false)
+      highlighted = true
+      return 'revealed'
+    } }))
+    expect(await runtime.revealReference(card.referenceId)).toBe('revealed')
+    expect(highlighted).toBe(true)
+    expect(http.revealCalls).toHaveLength(1)
   })
 })

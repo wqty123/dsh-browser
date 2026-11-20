@@ -8,6 +8,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { promises as dns } from 'node:dns'
 import { guestRuntimeScript } from './guest-runtime.ts'
 import { GuestCookieJar } from './guest-cookie-jar.ts'
+import { rewriteCss } from './guest-css.ts'
 
 /** Prefix every proxied document and subresource lives under. */
 
@@ -38,11 +39,11 @@ class UnsafeGuestTargetError extends Error {}
 
 const cookieJar = new GuestCookieJar()
 
-/** Responses larger than this pass through without rewriting. */
+/** HTML responses larger than this pass through without rewriting. */
 const MAX_REWRITE_BYTES = 4 * 1024 * 1024
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
 
-/** Content types eligible for rewriting; sub-requests and non-HTML still pass through raw. */
+/** Document content types eligible for rewriting. */
 const REWRITABLE = /^(text\/|application\/(json|javascript|xhtml\+xml|xml|rss\+xml|atom\+xml))/iu
 
 /** A desktop Chrome identity; several sites refuse a request without one. */
@@ -118,33 +119,42 @@ function escapeAttribute(value: string, quote: string): string {
   })
 }
 
+function proxyReference(raw: string, base: URL): string | undefined {
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed.startsWith('#')) return undefined
+  try {
+    const absolute = new URL(trimmed, base)
+    if (absolute.protocol !== 'http:' && absolute.protocol !== 'https:') return undefined
+    return guestPath(absolute.href)
+  } catch {
+    return undefined
+  }
+}
+
+function stripDocumentPolicies(html: string): string {
+  return html.replace(
+    /<!--[\s\S]*?-->|<(script|style|textarea|title)\b(?:[^>"']|"[^"]*"|'[^']*')*>[\s\S]*?<\/\1\s*>|<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu,
+    tag => {
+      if (!/^<meta\s/iu.test(tag)) return tag
+      for (const attribute of tag.matchAll(/\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/gu)) {
+        if (attribute[1]?.toLowerCase() !== 'http-equiv') continue
+        const policy = decodeAttribute(attribute[2] ?? attribute[3] ?? attribute[4] ?? '').trim().toLowerCase()
+        return policy === 'content-security-policy' || policy === 'content-security-policy-report-only' ? '' : tag
+      }
+      return tag
+    },
+  )
+}
+
 /**
  * Rewrite one document so its own links and assets stay inside the proxy.
- *
- * Attribute rewriting is deliberately conservative: only URL-bearing attributes are touched, and
- * `http(s)://` / protocol-relative / root-relative / relative references are all funnelled through
- * {@link guestPath}. Fragments, `data:`, `blob:` and `javascript:` are left alone — rewriting them
- * would break the page.
  * @param html - the fetched document.
- * @param base - the URL the document was fetched from (for resolving relative references).
+ * @param base - the original document URL used for relative references.
  * @returns the rewritten document.
  */
 export function rewriteDocument(html: string, base: URL): string {
-  const proxied = (raw: string): string | undefined => {
-    const trimmed = raw.trim()
-    if (trimmed === '' || trimmed.startsWith('#') || trimmed.startsWith('data:')
-      || trimmed.startsWith('blob:') || trimmed.startsWith('javascript:') || trimmed.startsWith('mailto:')) {
-      return undefined
-    }
-    try {
-      const absolute = new URL(trimmed, base)
-      if (absolute.protocol !== 'http:' && absolute.protocol !== 'https:') return undefined
-      return guestPath(absolute.href)
-    } catch {
-      return undefined
-    }
-  }
-  return html.replace(
+  const proxied = (raw: string): string | undefined => proxyReference(raw, base)
+  return stripDocumentPolicies(html).replace(
     // 三种引号形式都要改写，因为真实页面三种都在用：`src="/a.js"`、`src='/a.js'`，以及压缩过/服务端渲染
     // 的 HTML 更偏爱的无引号写法 `src=/a.js`。只处理带引号的两个，会让所有无引号资源指向 DSH 宿主而不是
     // 站点——实测 example.com 唯一的脚本就是 `<script src=/s.js>`：文档看着正常，脚本和样式全部 404。
@@ -177,10 +187,13 @@ export function rewriteDocument(html: string, base: URL): string {
       return `${prefix}${quote}${escapeAttribute(rewritten, quote)}${quote}`
     },
   ).replace(
-    /url\((\s*['"]?)([^'")]+)\1\)/giu,
-    (match, quote: string, value: string) => {
-      const next = proxied(value)
-      return next === undefined ? match : `url(${quote}${next}${quote})`
+    /(<style\b[^>]*>)([\s\S]*?)(<\/style\s*>)/giu,
+    (_match, open: string, css: string, close: string) => open + rewriteCss(css, proxied) + close,
+  ).replace(
+    /(\sstyle\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/giu,
+    (_match, prefix: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
+      const quote = singleQuoted === undefined ? '"' : "'"
+      return prefix + quote + escapeAttribute(rewriteCss(decodeAttribute(doubleQuoted ?? singleQuoted ?? bare ?? ''), proxied), quote) + quote
     },
   )
 }
@@ -212,7 +225,7 @@ export async function handleGuest(
   const sources = ['http:', 'https:'].map(protocol => new URL(protocol + '//' + authority).origin + GUEST_ROUTE).join(' ')
   response.setHeader('content-security-policy', "sandbox allow-scripts allow-forms; default-src " + sources
     + "; script-src " + sources + " 'unsafe-inline' 'unsafe-eval'; style-src " + sources
-    + " 'unsafe-inline'; img-src " + sources + " data: blob:; connect-src " + sources
+    + " 'unsafe-inline'; img-src " + sources + " data: blob:; font-src " + sources + " data:; connect-src " + sources
     + "; frame-src " + sources + "; form-action " + sources
     + "; object-src 'none'; worker-src 'none'; base-uri 'none'")
   response.setHeader('referrer-policy', 'no-referrer')
@@ -398,10 +411,21 @@ export async function handleGuest(
     response.end()
     return
   }
+  if (/^text\/css(?:;|$)/iu.test(type) && !(upstream.status >= 300 && upstream.status < 400)) {
+    const css = rewriteCss(await upstream.text(), value => proxyReference(value, target))
+    out.delete('etag')
+    out.delete('content-md5')
+    out.set('content-type', 'text/css; charset=utf-8')
+    response.writeHead(upstream.status, Object.fromEntries(out))
+    response.end(css)
+    return
+  }
   if (subRequest || !REWRITABLE.test(type) || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
     || length > MAX_REWRITE_BYTES || (upstream.status >= 300 && upstream.status < 400)) {
     response.writeHead(upstream.status, Object.fromEntries(out))
-    response.end(Buffer.from(await upstream.arrayBuffer()))
+    const body = Buffer.from(await upstream.arrayBuffer())
+    response.end(/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
+      ? Buffer.from(stripDocumentPolicies(body.toString('latin1')), 'latin1') : body)
     return
   }
   const raw = await upstream.text()

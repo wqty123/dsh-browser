@@ -17,6 +17,8 @@
  * @module dsh-browser-reference/production/runtime
  */
 import type { KeyValueStorage, OrderedReferenceGroup } from '../types.ts'
+import { referenceOwnerKey } from '../../../../reference-owner.ts'
+import type { ReferenceSourcePage } from '../../../browser/iframe-reference.ts'
 import { createDeliveryQueue, type DeliveryQueue } from '../pending-delivery.ts'
 import type { TextPosition } from '../ordered-submission.ts'
 import {
@@ -39,10 +41,10 @@ import { encodeBrowserRefUri, parseBrowserRefUri } from '../scheme.ts'
 import type { RevealStatus } from '../types.ts'
 import {
   createSubmissionSeam,
-  SOURCE_LINK_LABEL,
   type HostPromptContentPart,
   type SubmissionSeam,
 } from './production-submission.ts'
+import { sourceMarker } from './source-marker.ts'
 import {
   createProductionRevealer,
   type ProductionRevealer,
@@ -208,7 +210,7 @@ export interface ProductionRuntime {
    * another page (or none at all) the only useful answer is to open the stored
    * URL there and try again, not to explain that it could not.
    */
-  setSourceOpener(opener: ((url: string) => void | Promise<void>) | undefined): void
+  setSourceOpener(opener: ((url: string, signal: AbortSignal) => Promise<ReferenceSourcePage>) | undefined): void
   /** 一条引用的可展示详情（消息胶囊悬停卡用）。 */
   referenceDetail(referenceId: string): (StoredReflection & { readonly sessionId: string; readonly card: CardViewModel }) | undefined
   /** Activate a canonical `dsh-browser-ref:` URI (reply-side link bridge). */
@@ -236,7 +238,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
   const admitAsset = options.admitAsset
   const hostInputFor = options.hostInputFor
   const cancellation = options.cancellation ?? createCancellationSource()
-  let current = options.initialSessionId
+  let current = referenceOwnerKey(options.initialSessionId)
   /** 会话切换的订阅者：侧栏页要在 id 到手后立刻收到，而不是只能靠下一次询问。 */
   const sessionListeners = new Set<(sessionId: string) => void>()
   /** 每条引用的插入尝试次数（本运行时实例内有效），用于限次重试。 */
@@ -264,7 +266,8 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
    * the source page: only the outcome the person ends up with is reported.
    */
   let mutedReveal = 0
-  let sourceOpener: ((url: string) => void | Promise<void>) | undefined
+  let sourceOpener: ((url: string, signal: AbortSignal) => Promise<ReferenceSourcePage>) | undefined
+  let sourceOpening: AbortController | undefined
   let revealIntent = 0
   let lastIssue: string | undefined
   // A failed "回到原文" used to stay on screen forever: the hint was only
@@ -296,6 +299,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     const parsed = parseBrowserRefUri(uri)
     if (parsed !== undefined) return revealReference(parsed.referenceId, parsed.partId)
     revealIntent += 1
+    sourceOpening?.abort()
     showReveal('unknown-reference')
     return 'unknown-reference'
   }
@@ -505,10 +509,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     //   · 标记行让草稿非空，上游发送闸门因此放行（「只有引用也能发」）；
     //   · 引文内容本身保存在引用快照里，点胶囊可以查看/回到原文。
     const index = (draftStoreFor(sessionId).state().reflections ?? []).length
-    const label = title === undefined || title === ''
-      ? `${SOURCE_LINK_LABEL} ${index}`
-      : `${SOURCE_LINK_LABEL} ${index}：${title}`
-    const marker = `[${label}](${encodeBrowserRefUri({ referenceId: delivery.referenceId })})`
+    const marker = sourceMarker(delivery.referenceId, index - 1, title)
     // 插入需要编辑器里有光标：确认按钮是在侧栏 iframe 里点的，先聚焦编辑器。
     try { host.focusEditor?.() } catch { /* 没有编辑器就交给下面的失败路径 */ }
     try {
@@ -811,6 +812,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
   // object as `browserReferenceSubmission`, so service.ts can reach it.
   Object.assign(submission, {
     prepare: async (sessionId: string): Promise<void> => {
+      sessionId = referenceOwnerKey(sessionId)
       if (http.consume === undefined) return
       const state = draftStoreFor(sessionId).state()
       const visible = new Set(state.groups.map(group => group.referenceId))
@@ -857,7 +859,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     if (detail === undefined) return undefined
     const { snapshot } = detail
     return {
-      sessionId: snapshot.owner.sessionId ?? detail.sessionId,
+      sessionId: referenceOwnerKey(snapshot.owner.sessionId ?? detail.sessionId),
       browserSessionId: detail.browserSessionId,
       label: snapshot.source.title,
       ...(snapshot.source.frameRoute === undefined ? {} : { frameRoute: snapshot.source.frameRoute }),
@@ -878,29 +880,29 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
   })
 
   const revealReference = async (referenceId: string, partId?: string): Promise<RevealStatus> => {
+    sourceOpening?.abort()
+    const opening = new AbortController()
+    sourceOpening = opening
     const intent = ++revealIntent
     const sessionId = current
     const active = (): boolean => !disposed && intent === revealIntent && current === sessionId
     const uri = encodeBrowserRefUri({ referenceId, ...(partId === undefined ? {} : { partId }) })
-    const attempt = async (navigate: boolean): Promise<RevealStatus> => {
+    const attempt = async (sourcePageId?: string): Promise<RevealStatus> => {
       if (!active()) return 'superseded'
       mutedReveal += 1
-      try { return await revealer.activate(uri, { navigate }) }
+      try { return await revealer.activate(uri, { sourcePageId }) }
       finally { mutedReveal -= 1 }
     }
-    let status = await attempt(false)
+    let status = await attempt()
     try {
-      if (status === 'page-mismatch') status = await attempt(true)
       const url = referenceDetail(referenceId)?.snapshot.source.pageUrl
-      if (active() && status === 'session-unavailable' && url && sourceOpener !== undefined) {
-        await sourceOpener(url)
-        for (const delay of [0, 700, 1100, 1600, 2200, 3000]) {
-          if (!active()) break
-          if (delay !== 0) await new Promise(resolve => { setTimeout(resolve, delay) })
-          status = await attempt(false)
-          if (status === 'page-mismatch') status = await attempt(true)
-          if (!['session-unavailable', 'unavailable'].includes(status)) break
-        }
+      if (active() && (status === 'session-unavailable' || status === 'page-mismatch') && url && sourceOpener !== undefined) {
+        const ready = await sourceOpener(url, opening.signal)
+        const detail = referenceDetail(referenceId)
+        if (!active()) return 'superseded'
+        status = ready.reveal !== undefined && detail !== undefined
+          ? await ready.reveal(detail.snapshot, partId, opening.signal)
+          : await attempt(ready.pageId)
       }
     } catch {
       // A tab-open refusal is not a reveal acknowledgement.
@@ -984,7 +986,9 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       publish()
     },
     setSession(sessionId) {
+      sessionId = referenceOwnerKey(sessionId)
       if (disposed || sessionId === current) return
+      sourceOpening?.abort()
       revealIntent += 1
       clearRevealHint()
       lastReveal = undefined
@@ -1042,6 +1046,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       stores.clear()
       assets.clear()
       disposed = true
+      sourceOpening?.abort()
     },
     get disposed() { return disposed },
     poller,
