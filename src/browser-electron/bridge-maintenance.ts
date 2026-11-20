@@ -71,9 +71,9 @@ function prospectiveRealPath(path: string): string {
   return resolve(realpathSync(ancestor), ...missing)
 }
 
-/** Windows and (by default) macOS volumes are case-insensitive. */
+/** Case-insensitive on Windows; elsewhere both sides are already on-disk spellings (`realpathSync.native`). */
 function samePath(a: string, b: string): boolean {
-  return process.platform === 'linux' ? a === b : a.toLowerCase() === b.toLowerCase()
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
 }
 
 /** One POSIX shell word: single-quoted, with embedded quotes closed and escaped. */
@@ -140,7 +140,7 @@ export async function prepareBridgeMaintenance(
   const nodePath = checkedPath(selected, 'Maintenance runtime')
   if (!existsSync(nodePath) || !statSync(nodePath).isFile()) throw new Error('the maintenance runtime does not exist')
   const electronNode = !/^(?:node|node\.exe)$/i.test(basename(nodePath))
-  if (electronNode && (!existsSync(desktopRuntime) || !samePath(realpathSync(nodePath), realpathSync(desktopRuntime)))) {
+  if (electronNode && (!existsSync(desktopRuntime) || !samePath(realpathSync.native(nodePath), realpathSync.native(desktopRuntime)))) {
     throw new Error('the Electron maintenance runtime must belong to the verified Desktop installation')
   }
 

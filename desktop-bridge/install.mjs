@@ -225,9 +225,11 @@ function selectShellProcesses(rows, root, selfPid) {
     ancestors.add(cursor)
     cursor = byPid.get(cursor)?.ParentProcessId
   }
-  // Windows and (by default) macOS volumes are case-insensitive: `/applications/…` names the same
-  // running app, and a missed match here would patch a live installation.
-  const fold = process.platform === 'linux' ? value => value : value => value.toLowerCase()
+  // Windows compares case-insensitively. Elsewhere the on-disk spelling decides: `realpathSync.native`
+  // returns the volume's own case, so `/applications/…` matches the running app on a case-insensitive
+  // APFS volume while `Apps` and `apps` stay distinct on a case-sensitive one.
+  const fold = process.platform === 'win32' ? value => value.toLowerCase()
+    : value => { try { return realpathSync.native(value) } catch { return value } }
   const expectedExe = fold(resolve(layoutPaths(root).executable))
   const expectedName = fold(basename(expectedExe))
   const selected = []

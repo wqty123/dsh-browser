@@ -1,7 +1,7 @@
 // Maintenance refuses a running target and never terminates its host.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, realpathSync } from 'node:fs'
 import { resolve, join, dirname, basename } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
@@ -193,13 +193,21 @@ test('GUI restart clears Electron Node mode while retaining the remaining enviro
   assert.equal(detached, true)
 })
 
-test('a macOS installation path in different case still matches the running Desktop', () => {
-  const root = resolve('Applications', 'DeepSeek Harness.app')
-  const exe = resolve(root, 'Contents', 'MacOS', 'DeepSeek Harness')
-  const select = runInNewContext(processSelection() + '; selectShellProcesses', {
-    resolve, basename, process: { platform: 'darwin' },
-    layoutPaths: r => ({ executable: resolve(r, 'Contents', 'MacOS', 'DeepSeek Harness') }),
-  })
-  const rows = [{ ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness', ExecutablePath: exe, CommandLine: exe }]
-  assert.deepEqual(Array.from(select(rows, root.toLowerCase(), 21)), [10])
+test('a macOS installation path matches the running Desktop by its on-disk spelling', { skip: process.platform === 'win32' }, () => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-case-'))
+  try {
+    const root = join(base, 'DeepSeek Harness.app')
+    const exe = join(root, 'Contents', 'MacOS', 'DeepSeek Harness')
+    mkdirSync(dirname(exe), { recursive: true })
+    writeFileSync(exe, 'x')
+    const select = runInNewContext(processSelection() + '; selectShellProcesses', {
+      resolve, basename, realpathSync, process: { platform: 'darwin' },
+      layoutPaths: r => ({ executable: join(r, 'Contents', 'MacOS', 'DeepSeek Harness') }),
+    })
+    const rows = [{ ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness', ExecutablePath: exe, CommandLine: exe }]
+    assert.deepEqual(Array.from(select(rows, root, 21)), [10])
+    const caseInsensitive = existsSync(root.toLowerCase())
+    assert.deepEqual(Array.from(select(rows, join(base, 'deepseek harness.app'), 21)), caseInsensitive ? [10] : [],
+      'another spelling is the same app only when the volume says so')
+  } finally { rmSync(base, { recursive: true, force: true }) }
 })

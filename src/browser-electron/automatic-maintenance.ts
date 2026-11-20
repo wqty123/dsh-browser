@@ -1,6 +1,6 @@
 /** User-requested Desktop maintenance (Windows and macOS), coordinated outside the Desktop process tree. */
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { mkdir, open, readFile, rename, stat as statAsync, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -50,9 +50,11 @@ function inside(base: string, path: string): boolean {
 export function automaticMaintenanceSupported(platform: NodeJS.Platform = process.platform): boolean {
   return platform === 'win32' || platform === 'darwin'
 }
-/** Same-path comparison: Windows and (by default) macOS volumes are case-insensitive. */
+/** Same-path comparison: case-insensitive on Windows, by on-disk spelling elsewhere (APFS may be either). */
 function samePath(a: string, b: string): boolean {
-  return process.platform === 'linux' ? resolve(a) === resolve(b) : resolve(a).toLowerCase() === resolve(b).toLowerCase()
+  if (process.platform === 'win32') return resolve(a).toLowerCase() === resolve(b).toLowerCase()
+  const canonical = (path: string): string => { try { return realpathSync.native(path) } catch { return resolve(path) } }
+  return canonical(a) === canonical(b)
 }
 function requireLiveDesktop(): void {
   if (!automaticMaintenanceSupported()) throw new Error('automatic bridge maintenance requires DSH Desktop on Windows or macOS')
