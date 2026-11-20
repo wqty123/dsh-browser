@@ -126,7 +126,8 @@ export async function preflightReinstall(root: string, home: string): Promise<st
     }
     const installed = join(home, 'profiles', 'desktop', 'node_modules', MAIN_EXTENSION_NAME)
     if (existsSync(installed)) {
-      const owner = fs.realpathSync(installed), source = fs.realpathSync(path)
+      const source = fs.realpathSync(path)
+      const owner = fs.lstatSync(installed).isSymbolicLink() ? resolve(home, 'profiles', 'desktop', 'node_modules') : fs.realpathSync(installed)
       if (source === owner || inside(owner, source)) throw new ReinstallPreflightError('REINSTALL_DEPENDENCY_UNSAFE', 'The captured dependency source would be deleted by plugin removal.')
     }
   }

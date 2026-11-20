@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync, symlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -85,6 +85,20 @@ test('missing dependency refuses with a structured error and zero writes', async
     await assert.rejects(preflightReinstall(f.root, f.home), { code: 'REINSTALL_DEPENDENCY_MISSING' })
     assert.deepEqual(snapshot(f.directory), before)
   }
+})
+
+test('an external link source survives profile-link removal and can be captured again', async t => {
+  const f = fixture(t), source = join(f.directory, 'external-checkout')
+  mkdirSync(source)
+  writeFileSync(join(source, 'package.json'), JSON.stringify({ name: 'dsh-builtin-browser', version: '0.7.42' }))
+  const spec = `link:${source}`, installed = join(f.home, 'profiles/desktop/node_modules/dsh-builtin-browser')
+  mkdirSync(dirname(installed), { recursive: true })
+  symlinkSync(source, installed, 'junction')
+  writeFileSync(f.manifest, JSON.stringify({ dependencies: { 'dsh-builtin-browser': spec } }))
+  assert.equal(await preflightReinstall(f.root, f.home), spec)
+  rmSync(installed)
+  assert.ok(existsSync(join(source, 'package.json')))
+  assert.equal(await preflightReinstall(f.root, f.home), spec)
 })
 
 test('packed preflight uses the authoritative archive rather than a stale extraction', async t => {
