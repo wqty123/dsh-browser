@@ -57,6 +57,15 @@ before(async () => {
     } else if (req.url === '/doc') {
       res.writeHead(200, { 'content-type': 'text/html', 'x-frame-options': 'DENY' })
       res.end('<html><head><script>original()</script></head><body><img src="pic.png"></body></html>')
+    } else if (req.url === '/styles/site.css') {
+      res.writeHead(200, { 'content-type': 'text/css', etag: 'upstream-css', 'content-md5': 'upstream-digest' })
+      res.end('@import "theme/base.css"; .logo{background:url(../assets/img/logo.png)} @font-face{src:url(../fonts/font.woff2?v=4.7.0)}')
+    } else if (req.url === '/styles/theme/base.css') {
+      res.writeHead(200, { 'content-type': 'text/css' })
+      res.end('.icon{background:url(/images/icon.png)}')
+    } else if (req.url.startsWith('/fonts/') || req.url.startsWith('/assets/img/') || req.url.startsWith('/images/')) {
+      res.writeHead(200, { 'content-type': req.url.startsWith('/fonts/') ? 'font/woff2' : 'image/png' })
+      res.end('resource-bytes')
     } else {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ method: req.method, headers: req.headers, body: Buffer.concat(chunks).toString() }))
@@ -373,6 +382,46 @@ test('non-HTML bodies remain byte-for-byte unchanged', async () => {
   const result = await call(guestPath('https://ordinary.example/script'))
   assert.equal(result.body, 'fetch("/api"); const src="/raw";')
   assert.equal(result.headers['content-type'], 'application/javascript')
+})
+
+test('stylesheet imports, images and fonts resolve against each original resource URL', async () => {
+  const sheet = await call(guestPath('https://ordinary.example/styles/site.css'), {
+    headers: { 'sec-fetch-dest': 'style', cookie: 'DSH_SESSION=private' },
+  })
+  assert.equal(sheet.status, 200)
+  assert.equal(sheet.headers['content-type'], 'text/css; charset=utf-8')
+  assert.equal(sheet.headers.etag, undefined)
+  assert.equal(sheet.headers['content-md5'], undefined)
+  assert.equal(sheet.headers['access-control-allow-origin'], 'null')
+  const imported = guestPath('https://ordinary.example/styles/theme/base.css')
+  const image = guestPath('https://ordinary.example/assets/img/logo.png')
+  const font = guestPath('https://ordinary.example/fonts/font.woff2?v=4.7.0')
+  assert.equal(sheet.body, `@import "${imported}"; .logo{background:url("${image}")} @font-face{src:url("${font}")}`)
+  const nested = await call(imported, { headers: { 'x-dsh-guest-sub': '1' } })
+  assert.equal(nested.body, `.icon{background:url("${guestPath('https://ordinary.example/images/icon.png')}")}`)
+  for (const [path, destination] of [[image, 'image'], [font, 'font']]) {
+    const result = await call(path, { headers: { 'sec-fetch-dest': destination, cookie: 'DSH_SESSION=private' } })
+    assert.equal(result.status, 200)
+    assert.equal(result.body, 'resource-bytes')
+    assert.equal(result.headers['access-control-allow-origin'], 'null')
+    assert.doesNotMatch(forwarded.at(-1).options.headers.get('cookie') ?? '', /DSH_SESSION/)
+  }
+})
+
+test('guest CSP permits proxied and data image/font resources without admitting app APIs', async () => {
+  const { headers } = await call(guestPath('https://ordinary.example/doc'))
+  const csp = Object.fromEntries(headers['content-security-policy'].split(';').filter(value => value.trim()).map(value => {
+    const [directive, ...sources] = value.trim().split(/\s+/u)
+    return [directive, sources]
+  }))
+  assert.deepEqual(csp.sandbox, ['allow-scripts', 'allow-forms'])
+  for (const directive of ['img-src', 'font-src']) {
+    assert.ok(csp[directive].includes('data:'))
+    assert.ok(csp[directive].every(value => value === 'data:' || value === 'blob:' || value.endsWith('/dsh-builtin-browser/browser-view/isolated-guest')))
+  }
+  assert.deepEqual(csp['base-uri'], ["'none'"])
+  assert.deepEqual(csp['worker-src'], ["'none'"])
+  assert.ok(!csp.sandbox.includes('allow-same-origin'))
 })
 
 test('forwards empty PUT bodies and preserves bodyless HEAD responses', async () => {
