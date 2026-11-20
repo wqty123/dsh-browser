@@ -83,6 +83,21 @@ async function open(tools) {
   )
 }
 
+test('the prompt section coexists with another browser plugin in either registration order', () => {
+  for (const siblingFirst of [true, false]) {
+    const { ctx, tools } = makeContext()
+    const sections = new Set(siblingFirst ? ['tool:browser'] : [])
+    ctx.systemPrompt.section = ({ name }) => {
+      assert.equal(sections.has(name), false, 'prompt section identity is unique')
+      sections.add(name)
+    }
+    apply(ctx)
+    if (!siblingFirst) ctx.systemPrompt.section({ name: 'tool:browser' })
+    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:dsh-builtin-browser'])
+    assert.ok(tools.has('dsh_browser_open'), 'tool registration completes')
+  }
+})
+
 test('dsh_browser_a11y hands the selector on', async () => {
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
   apply(ctx)

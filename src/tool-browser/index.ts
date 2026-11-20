@@ -471,7 +471,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   state.configRestrictedTo = config.allowedActions !== undefined ? [...config.allowedActions] : undefined
 
   ctx.systemPrompt.section({
-    name: 'tool:browser',
+    name: 'tool:dsh-builtin-browser',
     // Tool guidance band is 100-199; 150 keeps clear of the common 110/120
     // tool sections so ordering does not depend on plugin load sequence.
     order: 150,
