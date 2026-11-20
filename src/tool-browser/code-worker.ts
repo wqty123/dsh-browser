@@ -212,4 +212,5 @@ process.on('message', (message: Reply | Run) => {
     })()
   }
 })
+process.on('disconnect', () => process.exit(0))
 send({ type: 'ready' })
