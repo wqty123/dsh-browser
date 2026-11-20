@@ -1,5 +1,5 @@
 /** Common browser chrome; a presentation adapter attaches the page inside its content container. */
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import {
   Button,
@@ -23,6 +23,7 @@ import type { BrowserStore } from '../browser/store.ts'
 import { EngineSettingsDialog, SearchEngineMenu, ShortcutDialog, StartPage } from './StartPage.tsx'
 import { TakeoverBanner } from './TakeoverBanner.tsx'
 import { connectBrowserTakeover } from '../browser/takeover-channel.ts'
+import { iframePage, subscribeIframePages } from '../browser/iframe-reference.ts'
 import type { TakeoverNotice } from '../../takeover-protocol.ts'
 import css from './Browser.module.css'
 
@@ -92,8 +93,11 @@ export function BrowserBody(props: BrowserBodyProps): ReactNode {
   const takeoverCurrent = useRef({ url: '' })
   const [takeover, setTakeover] = useState<{ notice?: TakeoverNotice; error?: boolean }>({})
   const takeoverChannel = useRef<ReturnType<typeof connectBrowserTakeover>>()
-  const pageId = props.currentPage?.(tab.id)?.guestId ?? state?.initialization?.guestId
-  takeoverCurrent.current.url = state?.frame.target?.url ?? ''
+  const webPage = useSyncExternalStore(subscribeIframePages, () => iframePage(sessionId, viewportId))
+  const observedPage = props.currentPage?.(tab.id)
+  const carrierPageId = observedPage?.guestId ?? state?.initialization?.guestId
+  const pageId = webPage?.pageId ?? (carrierPageId?.startsWith('iframe:') ? undefined : carrierPageId)
+  takeoverCurrent.current.url = webPage?.url ?? observedPage?.url ?? state?.frame.target?.url ?? ''
   useEffect(() => {
     if (!pageId) return
     const lifetime = new AbortController()

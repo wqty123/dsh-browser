@@ -6,6 +6,7 @@ import { BrowserBody, type BrowserBodyProps } from '../../view/BrowserBody.tsx'
 import { emptyBrowserFrame } from '../BrowserFrame.ts'
 import { zh } from '../../locales.ts'
 import { connectBrowserTakeover, readTakeoverSummary, registerTakeoverSummary } from '../takeover-channel.ts'
+import { iframePage, registerIframePage } from '../iframe-reference.ts'
 import type { TakeoverNotice } from '../../../takeover-protocol.ts'
 
 vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
@@ -73,13 +74,17 @@ it.each(['42', 'iframe:page'])('shared BrowserBody wires the current Desktop/Web
   const tab = { id: 'sidebar-tab', navigation: { params: { url }, revision: 1 }, actions: { bindCommands: () => () => {} } }
   const props = { sessionId: 'session-owner', useTabInfo: () => ({ tab }), useContextMenu: () => ({ getTriggerProps: () => ({}) }),
     useStore: () => undefined, useStartPage: () => ({ status: 'ready', engines: [], shortcuts: [] }),
-    useBrowserState: () => ({ frame: { ...emptyBrowserFrame(), target: { kind: 'https', url }, address: 'observed' }, initialization: { guestId: 'stale-page' } }),
-    currentPage: () => ({ url, guestId: pageId }), mount: () => () => {}, bindAddressFocus: () => () => {},
+    useBrowserState: () => ({ frame: { ...emptyBrowserFrame(), target: { kind: 'https', url }, address: 'observed' }, initialization: { guestId: pageId.startsWith('iframe:') ? 'iframe:stale-page' : 'stale-page' } }),
+    currentPage: () => pageId.startsWith('iframe:') ? undefined : ({ url, guestId: pageId }), mount: () => () => {}, bindAddressFocus: () => () => {},
     loadUrl() {}, reload() {}, shortcuts: {}, engines: {},
     t: (key: keyof typeof zh, params?: Record<string, string>) => zh[key].replace('{reason}', params?.reason ?? ''),
   } as unknown as BrowserBodyProps
   const view = render(<BrowserBody {...props} />)
   Object.defineProperty(view.container.firstElementChild!, 'checkVisibility', { value: () => true })
+  let unregister: (() => void) | undefined
+  if (pageId.startsWith('iframe:')) await act(async () => {
+    unregister = registerIframePage('owner', view.container.querySelector('[id]')!.id, pageId, url)
+  })
   await act(async () => { await vi.advanceTimersByTimeAsync(0) })
   expect(requests[0]).toMatchObject({ operation: 'register', owner: 'session-owner', tabId: 'sidebar-tab', pageId })
   expect(requests.some(request => request.operation === 'poll' && request.active === true)).toBe(true)
@@ -88,7 +93,18 @@ it.each(['42', 'iframe:page'])('shared BrowserBody wires the current Desktop/Web
   expect(requests).toContainEqual({ operation: 'answer', lease: 'body-lease', id: waiting.id, outcome: 'done' })
   expect(screen.queryByText(labels.label)).toBeNull()
   view.unmount()
+  unregister?.()
   expect(requests.at(-1)).toEqual({ operation: 'remove', lease: 'body-lease' })
+})
+
+it('iframe page registry scopes the live viewport to its owner and removes disposed pages', () => {
+  expect(iframePage('owner', 'viewport')).toBeUndefined()
+  const remove = registerIframePage('session-owner', 'viewport', 'iframe:live', 'https://example.test/')
+  expect(iframePage('owner', 'viewport')?.pageId).toBe('iframe:live')
+  expect(iframePage('other', 'viewport')).toBeUndefined()
+  expect(iframePage('owner', 'hidden-viewport')).toBeUndefined()
+  remove()
+  expect(iframePage('owner', 'viewport')).toBeUndefined()
 })
 
 it('Web summary is fresh, owner-scoped and submitted only after the answer is committed', async () => {

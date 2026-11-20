@@ -4,8 +4,54 @@ import { Context } from '@deepseek-ai/cordis'
 import { spawnSync } from 'node:child_process'
 import { readFile, readdir } from 'node:fs/promises'
 import { isBuiltin } from 'node:module'
-import ts from 'typescript'
 import { ApprovalContract } from './fixtures/takeover-host.mjs'
+
+const importTriviaToken = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\r\n]*(?:\r?\n|$))`
+const importTrivia = importTriviaToken + '*'
+const importLiteral = String.raw`(?:"(?:\\[\s\S]|[^"\\\r\n])*"|'(?:\\[\s\S]|[^'\\\r\n])*'|\x60(?:\\[\s\S]|[^\x60\\$]|\$(?!\{))*\x60)`
+const importBindings = String.raw`(?:[\p{ID_Continue}$*{},]|${importTriviaToken}|${importLiteral})*?`
+const importPatterns = [
+  String.raw`(?<![\p{ID_Continue}$-])import${importTrivia}(?:${importBindings}\bfrom${importTrivia})?(${importLiteral})`,
+  String.raw`\b(?:import|require)${importTrivia}\(${importTrivia}(${importLiteral})`,
+  String.raw`\bexport${importTrivia}(?:type${importTrivia})?(?:\*${importTrivia}(?:as${importTrivia}[\p{ID_Continue}$]+${importTrivia})?|\{${importBindings}\}${importTrivia})from${importTrivia}(${importLiteral})`,
+]
+
+function moduleSpecifiers(source) {
+  return [...new Set(importPatterns.flatMap(pattern => [...source.matchAll(new RegExp(pattern, 'gu'))].map(match =>
+    match[1].slice(1, -1).replace(/\\(?:\r\n|[\r\n\u2028\u2029]|u\{[\da-f]+\}|u[\da-f]{4}|x[\da-f]{2}|[^])/giu, escape => {
+      const value = escape.slice(1)
+      if (/^[\r\n\u2028\u2029]/u.test(value)) return ''
+      if (value[0] === 'u' || value[0] === 'x') return String.fromCodePoint(parseInt(value.replace(/^[ux]\{?|\}$/gu, ''), 16))
+      return ({ n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', 0: '\0' })[value] ?? value
+    }))))]
+}
+
+test('dependency scan covers import/export/require forms without a TypeScript API', () => {
+  const source = String.raw`
+    import 'side-effect';
+    import type { Foo, type Bar } /* gap */ from 'types';
+    import Default, { 'strange-name' as value } from "bindings" with { type: 'json' };
+    import * as ns from 'namespace';
+    export { value as renamed } from 'reexport';
+    export type { Foo } from 'export-types';
+    export * as ns from 'export-namespace';
+    export type * from 'export-star';
+    const lazy = import(/* gap */ 'dynamic');
+    type T = import('type-query').T;
+    import Legacy = require('legacy');
+    const common = require('common');
+    import '@deepseek-ai/\u0064sh-user-approval';
+    export * from '@deepseek-ai/\x64sh-user-approval/subpath';
+    import 'line\
+continuation';
+  ` + '\nimport(`static-template`); import(`dynamic-${name}`);'
+  assert.deepEqual(moduleSpecifiers(source).sort(), ['side-effect', 'types', 'bindings', 'namespace', 'reexport',
+    'export-types', 'export-namespace', 'export-star', 'dynamic', 'type-query', 'legacy', 'common',
+    '@deepseek-ai/dsh-user-approval', '@deepseek-ai/dsh-user-approval/subpath', 'linecontinuation', 'static-template'].sort())
+  assert.deepEqual(moduleSpecifiers(''), [])
+  assert.deepEqual(moduleSpecifiers(`const from = 'not-an-import'; import(variable); export const value = 'ordinary';`), [])
+  assert.deepEqual(moduleSpecifiers(`const guestScript = "import('generated-dependency')"`), ['generated-dependency'])
+})
 
 function harness(Service) {
   const events = new Context(), audit = []
@@ -130,7 +176,7 @@ test('production has no host approval import and takeover uses only existing wor
       const path = prefix + entry.name, url = new URL(entry.name + (entry.isDirectory() ? '/' : ''), directory)
       if (entry.isDirectory()) { if (entry.name !== '__tests__') await visit(url, path + '/'); continue }
       if (!/\.tsx?$/u.test(entry.name)) continue
-      for (const { fileName: specifier } of ts.preProcessFile(await readFile(url, 'utf8'), true, true).importedFiles) {
+      for (const specifier of moduleSpecifiers(await readFile(url, 'utf8'))) {
         assert.ok(!/^@deepseek-ai\/dsh-user-approval(?:\/|$)/u.test(specifier), `${path}: host approval must be injected, not imported`)
         if (!takeoverFiles.has(path) || specifier.startsWith('.') || isBuiltin(specifier)) continue
         const root = specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0]

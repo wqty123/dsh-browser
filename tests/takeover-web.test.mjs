@@ -23,7 +23,21 @@ test('real Chromium opaque Web guest: human login, sidebar completion, fresh sna
   const bundle = await rolldown({ input: fileURLToPath(new URL('./fixtures/takeover-client.tsx', import.meta.url)), platform: 'browser',
     transform: { define: { 'process.env.NODE_ENV': '"production"' } },
     plugins: [{ name: 'test-client-types-and-styles',
+      resolveId(id) {
+        if (id === '@deepseek-ai/dsh-client-ui-primitives') return '\0primitives'
+        if (id === '@deepseek-ai/dsh-client-store') return '\0store'
+        if (id.endsWith('/StartPage.tsx')) return '\0start-page'
+      },
       async load(id) {
+        if (id === '\0store') return `export function createSnapshotStore(value) {
+          const listeners=new Set();return {getSnapshot:()=>value,set:next=>{value=next;for(const listener of listeners)listener()},
+          subscribe:listener=>{listeners.add(listener);return ()=>listeners.delete(listener)}};
+        }`
+        if (id === '\0primitives') return `export const Button='button', Tooltip=({children})=>children;
+          export const IconChevronLeftOutlineRegular=()=>null, IconChevronRightOutlineRegular=()=>null,
+          IconLinkOutlineRegular=()=>null, IconRefreshOutlineRegular=()=>null, IconRightUpOutlineRegular=()=>null;
+          export const SHIELD_OUTLINE_PATH='', ICON_REGULAR_STROKE=1;`
+        if (id === '\0start-page') return `export const EngineSettingsDialog=()=>null, SearchEngineMenu=()=>null, ShortcutDialog=()=>null, StartPage=()=>null;`
         if (!id.endsWith('.css')) return
         const css = await readFile(id, 'utf8')
         const names = Object.fromEntries([...css.matchAll(/\.([a-zA-Z][\w-]*)/gu)].map(match => [match[1], match[1]]))
@@ -44,12 +58,15 @@ test('real Chromium opaque Web guest: human login, sidebar completion, fresh sna
     ? new Response(`<!doctype html><title>Login required</title><h1>Sign in</h1><label>Your name <input id="name"></label>
       <button id="login" onclick="document.title='Logged in';document.querySelector('h1').textContent='Welcome back, '+document.querySelector('#name').value;history.replaceState({},'', '/finished')">Sign in manually</button>`, { headers: { 'content-type': 'text/html' } })
     : originalFetch(target, options)
-  const host = takeoverHost(), jar = new GuestCookieJar(), storage = new GuestStorage(), errors = []
+  const host = takeoverHost(new Proxy({}, { get() { throw new Error('Web takeover must not use a native browser bridge') } })), jar = new GuestCookieJar(), storage = new GuestStorage(), errors = []
+  let connected = false
   const font = process.env.DSH_TEST_FONT ? await readFile(process.env.DSH_TEST_FONT) : undefined
   const server = createServer((req, res) => {
     if (req.url === '/') { res.setHeader('content-type', 'text/html'); res.end(`<!doctype html><meta charset="utf-8"><style>${font ? '@font-face{font-family:TakeoverTest;src:url(/font)}' : ''}body{font:14px TakeoverTest,sans-serif;margin:0}#viewport{position:relative;height:500px}.takeover{min-height:30px;background:#eff6ff}</style><div id="toolbar"></div><div id="viewport"></div><script type="module" src="/client.js"></script>`); return }
     if (req.url === '/font' && font) { res.setHeader('content-type', 'font/otf'); res.end(font); return }
     if (req.url === '/client.js') { res.setHeader('content-type', 'text/javascript'); res.end(javascript); return }
+    if (req.url === '/connected') { res.end(JSON.stringify(connected)); return }
+    if (req.url?.startsWith(TAKEOVER_ROUTE)) res.once('finish', () => { if (res.statusCode === 200) connected = true })
     void (req.url?.startsWith(TAKEOVER_ROUTE) ? host.routes.get(TAKEOVER_ROUTE)(req, res) : handleGuest(req, res, '', '', jar, storage))
       .catch(error => { errors.push(String(error)); res.destroy(error) })
   }).listen(0, '127.0.0.1')
@@ -61,7 +78,7 @@ test('real Chromium opaque Web guest: human login, sidebar completion, fresh sna
   const page = await chromiumPage(t)
   await page.navigate(`http://127.0.0.1:${server.address().port}/`)
   const waitBrowser = expression => page.evaluate(`new Promise((resolve,reject)=>{const started=Date.now();const timer=setInterval(()=>{if(${expression}){clearInterval(timer);resolve(true)}else if(Date.now()-started>7000){clearInterval(timer);reject(new Error('browser condition timed out: '+${JSON.stringify(expression)}))}},20)})`)
-  await waitBrowser('window.takeoverConnected === true')
+  await page.evaluate(`new Promise((resolve,reject)=>{const started=Date.now();const poll=async()=>{if(await (await fetch('/connected')).json())resolve(true);else if(Date.now()-started>7000)reject(new Error('Web iframe did not register takeover'));else setTimeout(poll,20)};poll()})`)
   const tool = host.tools.get(TAKEOVER_TOOL)
   const result = tool.execute({ reason: '请登录测试网站', instructions: '请亲自完成登录，然后确认。' }, host.exec)
   await until(() => host.native.length === 1)

@@ -3,7 +3,7 @@
 import type { BrowserTarget } from '../browser/url.ts'
 import type { BrowserPresentation } from './BrowserPresentation.ts'
 import css from './Browser.module.css'
-import { registerIframeReference, type GuestReferenceCommand } from '../browser/iframe-reference.ts'
+import { registerIframePage, registerIframeReference, type GuestReferenceCommand } from '../browser/iframe-reference.ts'
 import { connectWebReferenceSource } from '../browser/web-reference-source.ts'
 import { registerTakeoverSummary } from '../browser/takeover-channel.ts'
 import type { TakeoverSummary } from '../../takeover-protocol.ts'
@@ -64,6 +64,7 @@ export class IframePresentation implements BrowserPresentation {
   private readonly sourceLifetime = new AbortController()
   private sourceConnection: Promise<void> | undefined
   private observedUrl: string | undefined
+  private unregisterPage: (() => void) | undefined
   private nextRequestId = 0
   private readonly pending = new Map<number, { readonly loadId: number; readonly url: string; readonly resolve: (value: Record<string, unknown>) => void; readonly reject: (error: Error) => void }>()
   private host: HTMLElement | undefined
@@ -145,6 +146,10 @@ export class IframePresentation implements BrowserPresentation {
     if (data.ready === true) this.markLoaded()
     this.observedUrl = data.url
     this.events.observed(this.document.revision, data.url)
+    if (data.ready === true && this.owner !== undefined && this.host !== undefined) {
+      this.unregisterPage?.()
+      this.unregisterPage = registerIframePage(this.owner, this.host.id, this.pageId, data.url)
+    }
     if (data.ready === true) this.events.guestReady?.(this.document.revision, this.pageId)
   }
 
@@ -187,6 +192,8 @@ export class IframePresentation implements BrowserPresentation {
   }
 
   private invalidateGuest(): void {
+    this.unregisterPage?.()
+    this.unregisterPage = undefined
     clearTimeout(this.identityTimer)
     this.identityTimer = undefined
     this.identityRetried = false
