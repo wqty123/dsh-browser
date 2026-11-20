@@ -232,11 +232,14 @@ const PAGE_LIB = String.raw`
     if (node.nodeType === 3) return node.nodeValue || ''
     var tag = String(node.localName || '').toLowerCase()
     if (tag === 'annotation' || tag === 'annotation-xml') return ''
-    var children = Array.prototype.map.call(node.childNodes || [], function (child) { return mathMLText(child, (depth || 0) + 1) })
+    var children = Array.prototype.filter.call(node.childNodes || [], function (child) {
+      return child.nodeType === 1 || /^(mi|mn|mo|mtext|ms)$/.test(tag)
+    }).map(function (child) { return mathMLText(child, (depth || 0) + 1) })
     if (tag === 'mfrac') return '\\frac{' + (children[0] || '') + '}{' + (children[1] || '') + '}'
-    if (tag === 'msup' || tag === 'msub') return (children[0] || '') + (tag === 'msup' ? '^{' : '_{') + (children[1] || '') + '}'
-    if (tag === 'msubsup') return (children[0] || '') + '_{' + (children[1] || '') + '}^{' + (children[2] || '') + '}'
+    if (tag === 'msup' || tag === 'msub' || tag === 'mover' || tag === 'munder') return (children[0] || '') + (tag === 'msup' || tag === 'mover' ? '^{' : '_{') + (children[1] || '') + '}'
+    if (tag === 'msubsup' || tag === 'munderover') return (children[0] || '') + '_{' + (children[1] || '') + '}^{' + (children[2] || '') + '}'
     if (tag === 'msqrt') return '\\sqrt{' + children.join('') + '}'
+    if (tag === 'mroot') return '\\sqrt[' + (children[1] || '') + ']{' + (children[0] || '') + '}'
     return children.join('')
   }
 
@@ -246,14 +249,22 @@ const PAGE_LIB = String.raw`
     var script = tag === 'SCRIPT' && /^math\/tex/i.test(node.getAttribute('type') || '')
     if (script && node.previousElementSibling && node.previousElementSibling.matches(MATH_SELECTOR)) return null
     if (!script && !matches(MATH_SELECTOR)) return null
-    var annotation = node.querySelector('annotation[encoding="application/x-tex"], annotation[encoding="application/x-latex"]')
+    var annotations = node.querySelectorAll('annotation')
+    var annotation = ''
+    for (var a = 0; a < annotations.length; a++) {
+      if (/^(application\/(x-tex|x-latex)|text\/(x-tex|tex))$/i.test(String(annotations[a].getAttribute('encoding') || '').split(';')[0].trim())) {
+        annotation = String(annotations[a].textContent || '').trim()
+        if (annotation) break
+      }
+    }
     var data = node.getAttribute('data-latex') || (node.querySelector('[data-latex]') || {}).getAttribute?.('data-latex')
     var next = node.nextElementSibling
     var sourceScript = next && /^math\/tex/i.test(next.getAttribute('type') || '') ? next : null
     var math = tag === 'MATH' ? node : node.querySelector('math')
-    var latex = script ? node.textContent : annotation ? annotation.textContent : data || (sourceScript ? sourceScript.textContent : math ? mathMLText(math) : '[math source unavailable]')
+    var sourceTex = script ? String(node.textContent || '').trim() : annotation || String(data || '').trim() || String(sourceScript ? sourceScript.textContent || '' : '').trim()
+    var latex = sourceTex || (math ? mathMLText(math) : '[math source unavailable]')
     return { latex: String(latex || '[math source unavailable]').trim() || '[math source unavailable]',
-      mathml: math && !annotation && !data && !sourceScript && !script && String(math.outerHTML || '').length <= 64000 ? String(math.outerHTML) : undefined,
+      mathml: math && !sourceTex && String(math.outerHTML || '').length <= 64000 ? String(math.outerHTML) : undefined,
       display: matches('.katex-display, .MathJax_Display, .MathJax_SVG_Display, .MathJax_CHTML_Display') || node.getAttribute('display') === 'block' || node.getAttribute('display') === 'true' || /mode\s*=\s*display/i.test((script ? node : sourceScript)?.getAttribute('type') || '') }
   }
 
@@ -368,7 +379,7 @@ const PAGE_LIB = String.raw`
       if (node.type === 'text') {
         result.push({ type: 'text', text: node.text.slice(Math.max(0, start - node.start), Math.min(node.text.length, end - node.start)) })
       } else if (node.type === 'break' || node.type === 'rule') result.push({ type: node.type })
-      else if (node.type === 'math') result.push({ type: 'math', latex: node.latex, display: node.display })
+      else if (node.type === 'math') result.push(Object.assign({ type: 'math', latex: node.latex, display: node.display }, node.mathml === undefined ? {} : { mathml: node.mathml }))
       else {
         var children = selectedContent(node.children, start, end, preserveWhitespace || node.type === 'pre' || node.type === 'code')
         if (!children.length) continue

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
+import { renderToString as renderKatex } from 'katex'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { cleanup, fireEvent, render } from '@testing-library/react'
 import { captureScript, highlightScript, pageTextScript, revealElementScript, type RawCaptureResult } from '../../../../browser-reference/page-script.ts'
@@ -131,6 +132,46 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
     expect(document.querySelector('[data-reference-math]')?.getAttribute('data-reference-math')).toBe(display ? 'display' : 'inline')
     expect(document.querySelector('[data-reference-math]')?.querySelector(mathSelector)).not.toBeNull()
+  })
+
+  it.each([
+    ['KaTeX annotation', renderKatex('\\sqrt[3]{x}', { throwOnError: false, trust: false }), false],
+    ['MathJax assistive MathML', '<mjx-container><mjx-math>x3</mjx-math><mjx-assistive-mml><math><mroot>\n<mi>x</mi>\n<mn>3</mn>\n</mroot></math></mjx-assistive-mml></mjx-container>', true],
+    ['raw MathML', '<math><mroot><mi>x</mi><mn>3</mn></mroot></math>', true],
+    ['later nonempty annotation', '<math><semantics><mroot><mi>x</mi><mn>3</mn></mroot><annotation encoding="application/x-tex"> </annotation><annotation encoding="Application/X-TeX; charset=utf-8">\\sqrt[3]{x}</annotation></semantics></math>', false],
+    ['empty annotation fallback', '<math><semantics><mroot><mi>x</mi><mn>3</mn></mroot><annotation encoding="application/x-tex"> </annotation></semantics></math>', true],
+  ] as const)('preserves cube-root structure and source through %s capture, storage, model and preview', async (_name, html, native) => {
+    const raw = select(html)
+    const math = raw.events![0]!.content![0]!
+    expect(math).toMatchObject({ type: 'math', latex: '\\sqrt[3]{x}', display: false })
+    if (math.type !== 'math') throw new Error('missing captured formula')
+    expect(math.mathml !== undefined).toBe(native)
+    if (native) expect(math.mathml).toContain('<mroot>')
+    const { snapshot, group, parts } = await submit(raw)
+    expect(parts).toEqual([{ type: 'text', text: '$\\sqrt[3]{x}$\n' }])
+    expect(snapshot.parts[0]).toMatchObject({ type: 'text', content: [math] })
+    const preview = render(createElement(ReferenceText, { content: group.parts[0]!.content! }))
+    expect(preview.container.querySelector('math mroot mi')?.textContent).toBe('x')
+    expect(preview.container.querySelector('math mroot mn')?.textContent).toBe('3')
+    expect(Boolean(preview.container.querySelector('.katex'))).toBe(!native)
+    expect(preview.container.querySelector('code')).toBeNull()
+    if (!native) expect(preview.container.querySelector('annotation[encoding="application/x-tex"]')?.textContent).toBe('\\sqrt[3]{x}')
+  })
+
+  it.each([
+    ['msqrt', '<mi>x</mi>', '\\sqrt{x}'],
+    ['mfrac', '<mi>x</mi>\n<mi>y</mi>', '\\frac{x}{y}'],
+    ['msup', '<mi>x</mi>\n<mn>2</mn>', 'x^{2}'],
+    ['msub', '<mi>x</mi>\n<mi>i</mi>', 'x_{i}'],
+    ['munderover', '<mi>x</mi>\n<mi>i</mi>\n<mi>n</mi>', 'x_{i}^{n}'],
+  ])('retains native %s layout rather than concatenating its children', async (tag, children, latex) => {
+    const raw = select(`<math><${tag}>\n${children}\n</${tag}></math>`)
+    expect(raw.events![0]!.content![0]).toMatchObject({ type: 'math', latex, mathml: expect.stringContaining(`<${tag}>`) })
+    const { group, parts } = await submit(raw)
+    expect(parts).toEqual([{ type: 'text', text: `$${latex}$\n` }])
+    const preview = render(createElement(ReferenceText, { content: group.parts[0]!.content! }))
+    expect(preview.container.querySelector(`math ${tag}`)?.children.length).toBe(tag === 'msqrt' ? 1 : tag === 'munderover' ? 3 : 2)
+    expect(preview.container.querySelector('.katex, code')).toBeNull()
   })
 
   it('expands a partial rendered-formula selection atomically, without capturing adjacent text', async () => {
