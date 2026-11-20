@@ -41,7 +41,7 @@ test('packed host and cookie jar load after extraction without plugin node_modul
       || path.replaceAll('\\', '/').startsWith(`node_modules/${dependency}/`)), `${dependency} must be bundled without esbuild`)
   }
   const packed = JSON.parse(run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', directory], staging))
-  run('tar', ['-xzf', join(directory, packed[0].filename), '-C', extracted])
+  run('tar', ['-xzf', packed[0].filename, '-C', 'extracted'])
   const pkg = join(extracted, 'package')
   assert.equal(existsSync(join(pkg, 'node_modules')), false)
   const license = readFileSync(join(pkg, 'lib/browser-electron/guest-cookie-jar.LICENSE.txt'), 'utf8')
