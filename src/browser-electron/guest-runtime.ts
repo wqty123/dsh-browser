@@ -143,21 +143,6 @@ export function guestRuntimeScript(pageUrl: string): string {
     report();
   }));
   attempt(() => {
-    const set = Element.prototype.setAttribute;
-    Element.prototype.setAttribute = function(name, value) {
-      return set.call(this, name, /^(src|href|action)$/i.test(name) ? toProxy(value) : value);
-    };
-  });
-  for (const [name, prop] of [['HTMLImageElement', 'src'], ['HTMLScriptElement', 'src'],
-    ['HTMLIFrameElement', 'src'], ['HTMLLinkElement', 'href'], ['HTMLSourceElement', 'src']]) attempt(() => {
-    const proto = window[name].prototype;
-    const descriptor = Object.getOwnPropertyDescriptor(proto, prop);
-    if (!descriptor || !descriptor.set) return;
-    Object.defineProperty(proto, prop, Object.assign({}, descriptor, {
-      set(value) { descriptor.set.call(this, toProxy(value)); }
-    }));
-  });
-  attempt(() => {
     const proxyResource = value => {
       if (/^(#|data:|blob:|about:|javascript:)/i.test(value.trim())) return value;
       return toProxy(value);
@@ -181,6 +166,21 @@ export function guestRuntimeScript(pageUrl: string): string {
       }
       return result;
     };
+    const resourceAttribute = (name, value) => name.toLowerCase() === 'srcset' ? proxySrcset(String(value)) : proxyResource(String(value));
+    const set = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value) {
+      return set.call(this, name, /^(src|href|action|poster|srcset)$/i.test(name) ? resourceAttribute(name, value) : value);
+    };
+    for (const [name, prop] of [['HTMLImageElement', 'src'], ['HTMLScriptElement', 'src'],
+      ['HTMLIFrameElement', 'src'], ['HTMLLinkElement', 'href'], ['HTMLSourceElement', 'src'],
+      ['HTMLImageElement', 'srcset'], ['HTMLSourceElement', 'srcset'], ['HTMLVideoElement', 'poster']]) attempt(() => {
+      const proto = window[name].prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!descriptor || !descriptor.set) return;
+      Object.defineProperty(proto, prop, Object.assign({}, descriptor, {
+        set(value) { descriptor.set.call(this, resourceAttribute(prop, value)); }
+      }));
+    });
     const rewriteResource = node => {
       if (!node || node.nodeType !== 1 || /^(A|FORM)$/.test(node.tagName)) return;
       for (const attribute of ['src', 'href', 'srcset', 'poster']) attempt(() => {
@@ -196,6 +196,47 @@ export function guestRuntimeScript(pageUrl: string): string {
         for (const descendant of node.querySelectorAll('[src],[href],[srcset],[poster]')) rewriteResource(descendant);
       }
     };
+    for (const name of ['Node', 'Element', 'Document', 'DocumentFragment']) {
+      for (const method of ['appendChild', 'insertBefore', 'replaceChild', 'append', 'prepend', 'before', 'after', 'replaceWith', 'replaceChildren', 'insertAdjacentElement']) attempt(() => {
+        const proto = window[name].prototype;
+        if (!Object.prototype.hasOwnProperty.call(proto, method)) return;
+        const original = proto[method];
+        proto[method] = function(...args) {
+          for (const node of args) if (node && typeof node === 'object') rewriteTree(node);
+          return original.apply(this, args);
+        };
+      });
+    }
+    const html = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+    let inert;
+    const rewriteMarkup = (value, context) => {
+      if (!inert) inert = document.implementation.createHTMLDocument('');
+      const container = context && context.nodeType === 1
+        ? inert.createElementNS(context.namespaceURI, context.localName) : inert.createElement('div');
+      html.set.call(container, value);
+      rewriteTree(container.content || container);
+      return html.get.call(container);
+    };
+    for (const prop of ['innerHTML', 'outerHTML']) attempt(() => {
+      const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, prop);
+      Object.defineProperty(Element.prototype, prop, Object.assign({}, descriptor, {
+        set(value) { descriptor.set.call(this, rewriteMarkup(value, prop === 'innerHTML' ? this : this.parentElement)); }
+      }));
+    });
+    attempt(() => {
+      const original = Element.prototype.insertAdjacentHTML;
+      Element.prototype.insertAdjacentHTML = function(position, value) {
+        const outside = /^(beforebegin|afterend)$/i.test(position);
+        return original.call(this, position, rewriteMarkup(value, outside ? this.parentElement : this));
+      };
+    });
+    attempt(() => {
+      const original = window.Range.prototype.createContextualFragment;
+      window.Range.prototype.createContextualFragment = function(value) {
+        const context = this.startContainer.nodeType === 1 ? this.startContainer : this.startContainer.parentElement;
+        return original.call(this, rewriteMarkup(value, context));
+      };
+    });
     const observer = new MutationObserver(records => {
       for (const record of records) attempt(() => {
         if (record.type === 'attributes') rewriteResource(record.target);

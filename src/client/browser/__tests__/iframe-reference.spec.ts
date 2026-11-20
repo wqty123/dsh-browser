@@ -219,6 +219,42 @@ it('reports missing and ambiguous text and guest operation errors explicitly', a
   await expect(source.reveal!(snapshot, undefined, new AbortController().signal)).rejects.toThrow('guest range failed')
 })
 
+it.each(['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'fragment', 'properties'] as const)('proxies runtime stylesheet and image URLs synchronously through %s', async insertion => {
+  const f = fixture('https://www.bing.com/search?q=example')
+  const guest = f.connect('<div id="dynamic"></div>')
+  const doc = guest.guest.window.document
+  const host = doc.querySelector('#dynamic')!
+  const markup = '<link rel="stylesheet" href="/x.css"><img src="/y.png">'
+  if (insertion === 'innerHTML') host.innerHTML = markup
+  else if (insertion === 'outerHTML') host.outerHTML = markup
+  else if (insertion === 'insertAdjacentHTML') host.insertAdjacentHTML('beforeend', markup)
+  else if (insertion === 'fragment') {
+    const range = doc.createRange()
+    range.selectNodeContents(host)
+    const fragment = range.createContextualFragment(markup)
+    expect(new URL(fragment.querySelector('link')!.getAttribute('href')!, location.origin).pathname).toBe('/dsh-builtin-browser/browser-view/isolated-guest')
+    host.append(fragment)
+  } else {
+    const link = doc.createElement('link')
+    link.rel = 'stylesheet'
+    link.href = '/x.css'
+    const image = doc.createElement('img')
+    image.src = '/y.png'
+    host.append(link, image)
+  }
+  for (const [selector, attribute, source] of [['link', 'href', 'https://www.bing.com/x.css'], ['img', 'src', 'https://www.bing.com/y.png']]) {
+    const resolved = new URL(doc.querySelector(selector)!.getAttribute(attribute)!, location.origin)
+    expect(resolved.origin).toBe(location.origin)
+    expect(resolved.pathname).toBe('/dsh-builtin-browser/browser-view/isolated-guest')
+    expect(resolved.searchParams.get('u')).toBe(source)
+  }
+  const table = doc.createElement('table')
+  table.innerHTML = '<tbody><tr><td>Preserved table context</td></tr></tbody>'
+  expect(table.rows[0]!.cells[0]!.textContent).toBe('Preserved table context')
+  await Promise.resolve()
+  expect(doc.querySelectorAll('link')).toHaveLength(1)
+})
+
 it('rejects forged/stale acknowledgements and cancels pending commands on abort or navigation', async () => {
   const f = fixture()
   const guest = f.connect()
