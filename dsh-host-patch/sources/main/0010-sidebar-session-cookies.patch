@@ -1,0 +1,595 @@
+From 2ab004816a18aa287bdf5092a16d523e48d54678 Mon Sep 17 00:00:00 2001
+From: 山与 <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 14:49:14 +0000
+Subject: [PATCH] feat(desktop): checkpoint Sidebar session cookies before guest admission
+
+
+diff --git a/apps/desktop/src/browser-guests.ts b/apps/desktop/src/browser-guests.ts
+index e0c0758989..1809138ea1 100644
+--- a/apps/desktop/src/browser-guests.ts
++++ b/apps/desktop/src/browser-guests.ts
+@@ -4,6 +4,7 @@ import { app, session, type BrowserWindow, type Session, type WebContents } from
+ import { HarnessError } from '@deepseek-ai/dsh-error'
+ import type { DesktopBrowserLeaseId, DesktopBrowserOpenRequest, DesktopBrowserReservation } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
+ import { DESKTOP_IPC } from './ipc.ts'
++import { SidebarSessionCookies } from './sidebar-session-cookies.ts'
+ 
+ interface GuestLease {
+   readonly owner: WebContents
+@@ -17,10 +18,41 @@ interface GuestLease {
+ export class DesktopBrowserGuests {
+   private readonly partitions = new Map<string, string>()
+   private readonly leases = new Map<DesktopBrowserLeaseId, GuestLease>()
++  private persistence: Promise<void> | undefined
++  private cookieStore: SidebarSessionCookies | undefined
++  private closing = false
+ 
+   /** @param hostUrl - current authenticated DSH Host, which guests cannot request. */
+   constructor(private readonly hostUrl: () => string | undefined, private readonly dshHome?: string) {}
+ 
++  /** Restore session cookies before exposing the persistent partition to either guest carrier. */
++  preparePersistent(): Promise<void> {
++    if (this.closing) return Promise.reject(new HarnessError('Sidebar storage is shutting down', 'BROWSER_GUEST_CLOSED'))
++    this.persistence ??= (async () => {
++      if (this.dshHome === undefined) {
++        throw new HarnessError('Persistent Sidebar storage is unavailable', 'BROWSER_PERSISTENT_SESSION_UNAVAILABLE')
++      }
++      const partition = `persist:dsh-sidebar-browser-${createHash('sha256').update(this.dshHome).digest('hex')}`
++      const cookies = SidebarSessionCookies.forSession(session.fromPartition(partition), this.dshHome)
++      await cookies.restore()
++      this.cookieStore = cookies
++    })()
++    return this.persistence
++  }
++
++  /** Reconcile before a host cookie-changing operation reports completion. */
++  async reconcilePersistent(): Promise<void> {
++    await this.persistence
++    await this.cookieStore?.flush()
++  }
++
++  /** Stop admission before draining storage for partition teardown. */
++  async shutdown(): Promise<void> {
++    this.closing = true
++    await this.persistence
++    await this.cookieStore?.shutdown()
++  }
++
+   /**
+    * Reserve a guest in workspace memory storage or opt-in persistent profile storage.
+    * @param owner - authenticated primary application WebContents.
+@@ -29,6 +61,7 @@ export class DesktopBrowserGuests {
+    * @returns opaque lease and the partition approved for it.
+    */
+   acquire(owner: WebContents, workspace: unknown, persistent = false): DesktopBrowserReservation {
++    if (this.closing) throw new HarnessError('Sidebar storage is shutting down', 'BROWSER_GUEST_CLOSED')
+     if (typeof workspace !== 'string' || workspace.length === 0 || workspace.length > 4096) {
+       throw new Error('desktop browser: a workspace storage identity is required')
+     }
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index b5a1d7ec97..23d538e5f6 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -861,10 +861,23 @@ async function main(): Promise<void> {
+     reportFatal(new Error(message), 'web-boot')
+   })
+ 
+-  ipcMain.handle(DESKTOP_IPC.browserAcquire, (event, workspace: unknown, persistent: unknown) => {
++  ipcMain.handle(DESKTOP_IPC.browserAcquire, async (event, workspace: unknown, persistent: unknown) => {
+     assertProductSender(event)
++    if (persistent === true) await browserGuests.preparePersistent()
+     return browserGuests.acquire(event.sender, workspace, persistent === true)
+   })
++  let sidebarStorageClosed = false
++  let sidebarStorageClosing = false
++  app.on('will-quit', (event) => {
++    if (sidebarStorageClosed) return
++    event.preventDefault()
++    if (sidebarStorageClosing) return
++    sidebarStorageClosing = true
++    void browserGuests.shutdown().catch((error: unknown) => { console.error(error) }).finally(() => {
++      sidebarStorageClosed = true
++      app.quit()
++    })
++  })
+   ipcMain.handle(DESKTOP_IPC.nativeViewsRequest, (event, request: unknown) => {
+     assertProductSender(event)
+     return nativeViews.request(event.sender, request)
+diff --git a/apps/desktop/src/native-views.ts b/apps/desktop/src/native-views.ts
+index 0f44926f0e..69d3f8149f 100644
+--- a/apps/desktop/src/native-views.ts
++++ b/apps/desktop/src/native-views.ts
+@@ -95,7 +95,10 @@ export class DesktopNativeViews {
+         case 'register': result = this.register(renderer, request.admission, request.scope); break
+         case 'update': result = this.update(renderer, request.slot, request.placement); break
+         case 'revoke': result = await this.revoke(renderer, request.slot); break
+-        case 'acquire': result = this.acquire(renderer, request.scope, request.workspace, request.persistent === true); break
++        case 'acquire':
++          if (request.persistent === true) await this.policy.preparePersistent()
++          result = this.acquire(renderer, request.scope, request.workspace, request.persistent === true)
++          break
+         case 'attach': result = this.attach(renderer, request.lease, request.slot); break
+         case 'command': result = await this.command(renderer, request.lease, request.method, request.params); break
+         case 'release': result = await this.release(renderer, request.lease); break
+@@ -106,6 +109,9 @@ export class DesktopNativeViews {
+       }
+       return { ok: true, result }
+     } catch (error) {
++      if (error instanceof HarnessError && error.code === 'BROWSER_PERSISTENT_SESSION_UNAVAILABLE') {
++        return { ok: false, code: error.code, message: 'Persistent Sidebar storage is unavailable' }
++      }
+       return { ok: false, code: error instanceof DesktopNativeViewError ? error.code : 'BROWSER_NATIVE_SURFACE_UNAVAILABLE',
+         message: error instanceof DesktopNativeViewError ? error.message : 'Native Sidebar operation failed' }
+     }
+@@ -205,7 +211,8 @@ export class DesktopNativeViews {
+     })
+     const committed = (): void => {
+       const generation = native.generation
+-      void this.send(native, 'Page.getFrameTree').then((value) => {
++      void this.send(native, 'Page.getFrameTree').then(async (value) => {
++        await this.policy.reconcilePersistent().catch(() => { console.error('Sidebar cookie reconciliation failed') })
+         const frame = record(record(record(value).frameTree).frame)
+         if (this.views.get(lease) === native && generation === native.generation
+           && typeof frame.id === 'string' && typeof frame.loaderId === 'string') {
+@@ -394,7 +401,11 @@ export class DesktopNativeViews {
+     if (method === 'Page.navigate' && (typeof input.url !== 'string' || !this.policy.allowedNavigation(input.url))) return refuse('BROWSER_URL_DENIED')
+     if (native.state.stage !== 'document' && !['Page.navigate', 'Page.stopLoading', 'Page.getFrameTree'].includes(method)) return refuse('BROWSER_DOCUMENT_UNACKNOWLEDGED')
+     const expectedGeneration = ['Page.navigate', 'Page.stopLoading', 'Page.getFrameTree'].includes(method) ? undefined : native.generation
+-    try { return await this.send(native, method === 'Storage.setCookies' ? 'Network.setCookies' : method, input, expectedGeneration) }
++    try {
++      const result = await this.send(native, method === 'Storage.setCookies' ? 'Network.setCookies' : method, input, expectedGeneration)
++      if (method === 'Storage.setCookies' || method === 'Runtime.evaluate') await this.policy.reconcilePersistent()
++      return result
++    }
+     catch (error) {
+       if (error instanceof DesktopNativeViewError && error.code === 'BROWSER_DOCUMENT_TIMEOUT') this.fail(id as DesktopNativeLease, native, 'BROWSER_DOCUMENT_TIMEOUT')
+       throw error
+@@ -470,7 +481,9 @@ export class DesktopNativeViews {
+     const native = this.native(renderer, lease)
+     if (native.scope !== tab(scope).wire) return refuse('BROWSER_OWNER_UNKNOWN')
+     if (!this.policy.allowedNavigation(url)) return refuse('BROWSER_URL_DENIED')
+-    return native.view.webContents.session.fetch(url, { credentials: 'include', signal })
++    const response = await native.view.webContents.session.fetch(url, { credentials: 'include', signal })
++    await this.policy.reconcilePersistent()
++    return response
+   }
+ 
+   /** Resolve the scoped binding again at dispatch, rather than exposing Electron guests. */
+diff --git a/apps/desktop/src/sidebar-session-cookies.ts b/apps/desktop/src/sidebar-session-cookies.ts
+new file mode 100644
+index 0000000000..6299fe233f
+--- /dev/null
++++ b/apps/desktop/src/sidebar-session-cookies.ts
+@@ -0,0 +1,164 @@
++import { execFile } from 'node:child_process'
++import { chmod, mkdir, readFile } from 'node:fs/promises'
++import { dirname, join } from 'node:path'
++import { promisify } from 'node:util'
++import type { Cookie, CookiesSetDetails, Session } from 'electron'
++import { z } from 'zod'
++import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
++import { HarnessError } from '@deepseek-ai/dsh-error'
++
++const cookieRecord = z.object({ name: z.string(), value: z.string(), domain: z.string().min(1),
++  path: z.string().startsWith('/'), secure: z.boolean(), httpOnly: z.boolean(), hostOnly: z.boolean(),
++  sameSite: z.enum(['unspecified', 'no_restriction', 'lax', 'strict']), session: z.literal(true),
++  expirationDate: z.never().optional(),
++}).strict()
++type SavedCookie = z.infer<typeof cookieRecord>
++const sidecar = z.object({ version: z.literal(1), cookies: z.array(z.unknown()) })
++const stores = new WeakMap<Session['cookies'], SidebarSessionCookies>()
++
++function details(cookie: SavedCookie): CookiesSetDetails {
++  const domain = cookie.domain.replace(/^\./, '')
++  const host = domain.includes(':') && !domain.startsWith('[') ? `[${domain}]` : domain
++  const url = new URL(`${cookie.secure ? 'https:' : 'http:'}//${host}/`)
++  if (url.username || url.password || url.port || url.hostname.toLowerCase() !== host.toLowerCase()) {
++    throw new HarnessError('Unsupported Sidebar cookie scope', 'BROWSER_PERSISTENT_SESSION_UNAVAILABLE')
++  }
++  url.pathname = cookie.path
++  return { url: url.href, name: cookie.name, value: cookie.value, path: cookie.path,
++    secure: cookie.secure, httpOnly: cookie.httpOnly, sameSite: cookie.sameSite,
++    ...cookie.hostOnly ? {} : { domain: cookie.domain } }
++}
++
++function key(cookie: Pick<Cookie, 'domain' | 'path' | 'name'>): string {
++  return JSON.stringify([cookie.domain?.replace(/^\./, '').toLowerCase(), cookie.path, cookie.name])
++}
++
++/** Partition-local session-cookie checkpoints; Chromium retains expiring cookies. */
++export class SidebarSessionCookies {
++  static forSession(browserSession: Pick<Session, 'cookies'>, home: string): SidebarSessionCookies {
++    const existing = stores.get(browserSession.cookies)
++    if (existing !== undefined) {
++      if (existing.file !== join(home, 'dsh-builtin-browser-host', 'desktop-session-cookies.json')) throw existing.failure()
++      return existing
++    }
++    const store = new SidebarSessionCookies(browserSession, home)
++    stores.set(browserSession.cookies, store)
++    return store
++  }
++
++  private writes = Promise.resolve()
++  private readonly file: string
++  private ready = false
++  private disposed = false
++  private permissions: Promise<void> | undefined
++  private lastSnapshot: string | undefined
++  private restoration: Promise<void> | undefined
++  private readonly changed = (): void => {
++    if (this.ready && !this.disposed) void this.flush().catch(() => { this.warn() })
++  }
++
++  private constructor(private readonly browserSession: Pick<Session, 'cookies'>, home: string) {
++    this.file = join(home, 'dsh-builtin-browser-host', 'desktop-session-cookies.json')
++  }
++
++  private async protect(): Promise<void> {
++    await mkdir(dirname(this.file), { recursive: true, mode: 0o700 })
++    if (process.platform !== 'win32') {
++      await chmod(dirname(this.file), 0o700)
++      return
++    }
++    const script = [
++      '$ErrorActionPreference="Stop"',
++      '$u=[Security.Principal.WindowsIdentity]::GetCurrent().User',
++      '$d=New-Object Security.AccessControl.DirectorySecurity',
++      '$d.SetOwner($u)', '$d.SetAccessRuleProtection($true,$false)',
++      '$r=New-Object Security.AccessControl.FileSystemAccessRule($u,"FullControl","ContainerInherit,ObjectInherit","None","Allow")',
++      '$d.AddAccessRule($r)', 'Set-Acl -LiteralPath $env:DSH_SIDECAR_DIRECTORY -AclObject $d',
++      'if(Test-Path -LiteralPath $env:DSH_SIDECAR_FILE){'
++        + '$f=New-Object Security.AccessControl.FileSecurity;'
++        + '$f.SetOwner($u);$f.SetAccessRuleProtection($true,$false);'
++        + '$f.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($u,"FullControl","Allow")));'
++        + 'Set-Acl -LiteralPath $env:DSH_SIDECAR_FILE -AclObject $f}',
++    ].join(';')
++    const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
++    await promisify(execFile)(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
++      windowsHide: true, timeout: 10_000,
++      env: { ...process.env, DSH_SIDECAR_DIRECTORY: dirname(this.file), DSH_SIDECAR_FILE: this.file },
++    })
++  }
++
++  /** Listen before reading; gate checkpoints until individually valid entries are restored. */
++  restore(): Promise<void> {
++    this.restoration ??= this.initialize()
++    return this.restoration
++  }
++
++  private async initialize(): Promise<void> {
++    this.browserSession.cookies.on('changed', this.changed)
++    let saved: unknown[] = []
++    try {
++      this.permissions ??= this.protect()
++      await this.permissions
++      saved = sidecar.parse(JSON.parse(await readFile(this.file, 'utf8'))).cookies
++    } catch (error) {
++      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.warn()
++    }
++    try {
++      const persistent = new Set((await this.browserSession.cookies.get({ session: false })).map(key))
++      for (const entry of saved) {
++        const parsed = cookieRecord.safeParse(entry)
++        if (!parsed.success) { this.warn(); continue }
++        if (persistent.has(key(parsed.data))) continue
++        try { await this.browserSession.cookies.set(details(parsed.data)) }
++        catch (_unsupportedCookie) { this.warn() }
++      }
++    } catch (_unavailableCookies) { this.warn() }
++    this.ready = true
++    await this.flush().catch(() => { this.warn() })
++  }
++
++  /** Await after host cookie mutations/logout, including deletion and replacement. */
++  flush(): Promise<void> {
++    if (!this.ready || this.disposed) return this.writes
++    this.writes = this.writes.catch(() => undefined).then(async () => {
++      this.permissions ??= this.protect()
++      await this.permissions
++      const cookies: SavedCookie[] = []
++      for (const value of await this.browserSession.cookies.get({ session: true })) {
++        const parsed = cookieRecord.safeParse(value)
++        if (!parsed.success) { this.warn(); continue }
++        try { details(parsed.data); cookies.push(parsed.data) }
++        catch (_unsupportedScope) { this.warn() }
++      }
++      const raw = JSON.stringify({ version: 1, cookies })
++      if (raw === this.lastSnapshot) return
++      await writeFileAtomic(this.file, raw, { mode: 0o600, dirMode: 0o700 })
++      this.lastSnapshot = raw
++    }).catch(() => { throw this.failure() })
++    return this.writes
++  }
++
++  /** Drain changes, checkpoint, flush Chromium, then detach the listener. */
++  async shutdown(): Promise<void> {
++    try {
++      await this.flush()
++    } finally {
++      try {
++        await this.browserSession.cookies.flushStore()
++        let pending = this.writes
++        await pending
++        while (pending !== this.writes) { pending = this.writes; await pending }
++      } finally {
++        this.disposed = true
++        this.browserSession.cookies.removeListener('changed', this.changed)
++        stores.delete(this.browserSession.cookies)
++      }
++    }
++  }
++
++  private warn(): void { console.error('Sidebar session-cookie checkpoint unavailable or unsupported; cookie values omitted') }
++
++  private failure(): HarnessError {
++    return new HarnessError('Sidebar session cookie storage is unavailable', 'BROWSER_PERSISTENT_SESSION_UNAVAILABLE')
++  }
++}
+diff --git a/apps/desktop/tests/browser-partitions.spec.ts b/apps/desktop/tests/browser-partitions.spec.ts
+index a62edbd199..7c3500a943 100644
+--- a/apps/desktop/tests/browser-partitions.spec.ts
++++ b/apps/desktop/tests/browser-partitions.spec.ts
+@@ -23,3 +23,14 @@ it('shares persistent storage across workspaces and process owners only within t
+   expect(() => new DesktopBrowserGuests(() => undefined).acquire(owner, 'workspace', true))
+     .toThrow('Persistent Sidebar storage is unavailable')
+ })
++
++it('stops all guest admission before shutdown completes without clearing storage', async () => {
++  const policy = new DesktopBrowserGuests(() => undefined, '/profiles/one')
++  const owner = {} as WebContents
++  policy.acquire(owner, 'workspace', true)
++  const closing = policy.shutdown()
++  expect(() => policy.acquire(owner, 'workspace', true)).toThrow('shutting down')
++  expect(() => policy.acquire(owner, 'workspace')).toThrow('shutting down')
++  await expect(policy.preparePersistent()).rejects.toMatchObject({ code: 'BROWSER_GUEST_CLOSED' })
++  await closing
++})
+diff --git a/apps/desktop/tests/native-views.spec.ts b/apps/desktop/tests/native-views.spec.ts
+index c763a12d88..61e8ccdc36 100644
+--- a/apps/desktop/tests/native-views.spec.ts
++++ b/apps/desktop/tests/native-views.spec.ts
+@@ -1,6 +1,7 @@
+ import { EventEmitter } from 'node:events'
+ import type { BrowserWindow, WebContents } from 'electron'
+ import { afterEach, expect, it, vi } from 'vitest'
++import { HarnessError } from '@deepseek-ai/dsh-error'
+ import { DesktopBrowserGuests } from '../src/browser-guests.ts'
+ import { DesktopNativeViews } from '../src/native-views.ts'
+ import type { DesktopBrowserLeaseId } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
+@@ -159,6 +160,44 @@ function fixture() {
+   return { service, renderer, owner, policy, window, request, ok, admit, acquire, attached }
+ }
+ 
++it('waits for session cookie restoration before creating a persistent native view', async () => {
++  const f = fixture()
++  await f.admit()
++  const restored = Promise.withResolvers<undefined>()
++  vi.spyOn(f.policy, 'preparePersistent').mockReturnValue(restored.promise)
++  const pending = f.request({ op: 'acquire', scope: scope('owner', 'tab'), workspace: 'workspace', persistent: true })
++  await Promise.resolve()
++  expect(f.policy.acquire).not.toHaveBeenCalled()
++  restored.resolve(undefined)
++  expect(await pending).toMatchObject({ ok: true })
++  expect(f.policy.acquire).toHaveBeenCalledOnce()
++})
++
++it.each(['Storage.setCookies', 'Runtime.evaluate'])('awaits cookie reconciliation before %s completes', async (method) => {
++  const f = fixture(), { guest, lease } = await f.attached()
++  guest.emit('did-navigate')
++  await vi.waitFor(() => expect(f.service.snapshot()[0]?.state.stage).toBe('document'))
++  const gate = Promise.withResolvers<undefined>()
++  const reconcile = vi.spyOn(f.policy, 'reconcilePersistent').mockReturnValue(gate.promise)
++  let completed = false
++  const pending = f.service.command(f.renderer, lease, method, method === 'Storage.setCookies' ? { cookies: [] } : {})
++    .then(() => { completed = true })
++  await vi.waitFor(() => expect(reconcile).toHaveBeenCalledOnce())
++  expect(completed).toBe(false)
++  gate.resolve(undefined)
++  await pending
++  expect(completed).toBe(true)
++})
++
++it('refuses persistent native admission when cookie restoration fails without creating a view', async () => {
++  const f = fixture()
++  await f.admit()
++  vi.spyOn(f.policy, 'preparePersistent').mockRejectedValue(new HarnessError('private detail', 'BROWSER_PERSISTENT_SESSION_UNAVAILABLE'))
++  expect(await f.request({ op: 'acquire', scope: scope('owner', 'tab'), workspace: 'workspace', persistent: true }))
++    .toEqual({ ok: false, code: 'BROWSER_PERSISTENT_SESSION_UNAVAILABLE', message: 'Persistent Sidebar storage is unavailable' })
++  expect(f.policy.acquire).not.toHaveBeenCalled()
++})
++
+ afterEach(async () => {
+   for (const { service, renderer } of services.splice(0)) {
+     for (const binding of service.snapshot()) await service.release(renderer, binding.lease)
+diff --git a/apps/desktop/tests/sidebar-session-cookies.spec.ts b/apps/desktop/tests/sidebar-session-cookies.spec.ts
+new file mode 100644
+index 0000000000..22bd3dbcc5
+--- /dev/null
++++ b/apps/desktop/tests/sidebar-session-cookies.spec.ts
+@@ -0,0 +1,186 @@
++import { EventEmitter } from 'node:events'
++import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { dirname, join } from 'node:path'
++import type { Cookie, CookiesGetFilter, CookiesSetDetails, Session } from 'electron'
++import { afterEach, expect, it, vi } from 'vitest'
++import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
++import { SidebarSessionCookies } from '../src/sidebar-session-cookies.ts'
++
++vi.mock('@deepseek-ai/dsh-atomic-write', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@deepseek-ai/dsh-atomic-write')>()
++  return { ...actual, writeFileAtomic: vi.fn(actual.writeFileAtomic) }
++})
++vi.mock('node:fs/promises', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('node:fs/promises')>()
++  return { ...actual, readFile: vi.fn(actual.readFile) }
++})
++
++const homes: string[] = []
++afterEach(async () => {
++  vi.restoreAllMocks()
++  vi.clearAllMocks()
++  await Promise.all(homes.splice(0).map(home => rm(home, { recursive: true, force: true })))
++})
++const login: Cookie = { name: 'login', value: '"session-secret"', domain: 'example.com',
++  hostOnly: true, path: '/', secure: true, httpOnly: true, session: true, sameSite: 'lax' }
++
++async function fixture(values: Cookie[] = [], existingHome?: string) {
++  const home = existingHome ?? await mkdtemp(join(tmpdir(), 'sidebar-session-cookies-'))
++  if (existingHome === undefined) homes.push(home)
++  const cookies = Object.assign(new EventEmitter(), {
++    get: vi.fn(async (filter: CookiesGetFilter) => values.filter(cookie => cookie.session === filter.session)),
++    set: vi.fn(async (details: CookiesSetDetails) => {
++      const cookie: Cookie = { name: details.name ?? '', value: details.value ?? '',
++        domain: details.domain ?? new URL(details.url).hostname, hostOnly: details.domain === undefined,
++        path: details.path ?? '/', secure: details.secure === true, httpOnly: details.httpOnly === true,
++        sameSite: details.sameSite ?? 'unspecified', session: true }
++      values.push(cookie)
++      cookies.emit('changed', {}, cookie, 'explicit', false)
++    }),
++    flushStore: vi.fn(async () => {}),
++  })
++  const store = SidebarSessionCookies.forSession({ cookies: cookies as Session['cookies'] }, home)
++  const file = join(home, 'dsh-builtin-browser-host', 'desktop-session-cookies.json')
++  await mkdir(dirname(file), { recursive: true })
++  return { home, file, store, cookies, values }
++}
++async function snapshot(file: string) { return JSON.parse(await readFile(file, 'utf8')) }
++
++it('checkpoints only session cookies and restores quoted host-only values without expiry', async () => {
++  const f = await fixture([login, { ...login, name: 'durable', session: false, expirationDate: 2e10 }])
++  await f.store.restore()
++  expect((await snapshot(f.file)).cookies).toEqual([login])
++  expect(f.cookies.get).toHaveBeenCalledWith({ session: true })
++  if (process.platform !== 'win32') {
++    expect((await stat(f.file)).mode & 0o777).toBe(0o600)
++    expect((await stat(dirname(f.file))).mode & 0o777).toBe(0o700)
++  }
++  const restarted = await fixture([], f.home)
++  await restarted.store.restore()
++  expect(restarted.cookies.set).toHaveBeenCalledExactlyOnceWith({ url: 'https://example.com/',
++    name: 'login', value: '"session-secret"', path: '/', secure: true, httpOnly: true, sameSite: 'lax' })
++  expect(restarted.values[0]?.session).toBe(true)
++})
++
++it('restores domain scope and URL-encodes path characters without changing the cookie path', async () => {
++  const f = await fixture()
++  const saved = { ...login, domain: '.example.com', hostOnly: false, path: '/a?#b', sameSite: 'strict' }
++  await writeFile(f.file, JSON.stringify({ version: 1, cookies: [saved] }))
++  await f.store.restore()
++  expect(f.cookies.set).toHaveBeenCalledExactlyOnceWith({ url: 'https://example.com/a%3F%23b',
++    name: 'login', value: '"session-secret"', domain: '.example.com', path: '/a?#b',
++    secure: true, httpOnly: true, sameSite: 'strict' })
++})
++
++it('does not overwrite a persistent replacement with a stale session snapshot', async () => {
++  const f = await fixture([{ ...login, value: 'persistent-replacement', session: false, expirationDate: 2e10 }])
++  await writeFile(f.file, JSON.stringify({ version: 1, cookies: [login] }))
++  await f.store.restore()
++  expect(f.cookies.set).not.toHaveBeenCalled()
++  expect(f.values[0]?.value).toBe('persistent-replacement')
++  expect((await snapshot(f.file)).cookies).toEqual([])
++})
++
++it.each(['overwrite', 'expired-overwrite', 'expired', 'explicit', 'evicted'])('reconciles %s removals from a complete enumeration', async (cause) => {
++  const f = await fixture([login])
++  await f.store.restore()
++  f.values.splice(0)
++  f.cookies.emit('changed', {}, login, cause, true)
++  await f.store.flush()
++  expect(await snapshot(f.file)).toEqual({ version: 1, cookies: [] })
++  const restarted = await fixture([], f.home)
++  await restarted.store.restore()
++  expect(restarted.cookies.set).not.toHaveBeenCalled()
++})
++
++it('removes a session-to-persistent replacement and clear-site-data from the sidecar', async () => {
++  const f = await fixture([login])
++  await f.store.restore()
++  f.values.splice(0, 1, { ...login, session: false, expirationDate: 2e10 })
++  f.cookies.emit('changed', {}, login, 'overwrite', true)
++  await f.store.flush()
++  expect((await snapshot(f.file)).cookies).toEqual([])
++  f.values.push({ ...login, name: 'other' })
++  f.cookies.emit('changed')
++  await f.store.flush()
++  expect((await snapshot(f.file)).cookies).toHaveLength(1)
++  f.values.splice(0)
++  f.cookies.emit('changed', {}, login, 'explicit', true)
++  await f.store.flush()
++  expect((await snapshot(f.file)).cookies).toEqual([])
++})
++
++it('validates entries independently and refuses unsupported attributes without weakening scope', async () => {
++  const f = await fixture()
++  const warning = vi.spyOn(console, 'error').mockImplementation(() => {})
++  await writeFile(f.file, JSON.stringify({ version: 1, cookies: [
++    { ...login, partitionKey: { topLevelSite: 'https://other.example' } },
++    { ...login, domain: 'attacker@example.com' }, { ...login, expirationDate: 2e10 }, login,
++  ] }))
++  await f.store.restore()
++  expect(f.cookies.set).toHaveBeenCalledTimes(1)
++  expect((await snapshot(f.file)).cookies).toEqual([login])
++  expect(JSON.stringify(warning.mock.calls)).not.toContain('session-secret')
++  f.values.push(Object.assign({ ...login }, { partitionKey: 'unsupported' }))
++  await f.store.flush()
++  expect((await snapshot(f.file)).cookies).toEqual([login])
++})
++
++it.each(['corrupt', 'unreadable'])('starts empty and sanitizes %s input without failing admission', async (mode) => {
++  const f = await fixture()
++  const warning = vi.spyOn(console, 'error').mockImplementation(() => {})
++  await writeFile(f.file, '{corrupt-session-secret')
++  if (mode === 'unreadable') vi.mocked(readFile).mockRejectedValueOnce(Object.assign(new Error('session-secret'), { code: 'EACCES' }))
++  await expect(f.store.restore()).resolves.toBeUndefined()
++  expect(f.cookies.set).not.toHaveBeenCalled()
++  expect(await snapshot(f.file)).toEqual({ version: 1, cookies: [] })
++  expect(JSON.stringify(warning.mock.calls)).not.toContain('session-secret')
++})
++
++it('installs one listener before restore and cannot checkpoint an initial empty enumeration', async () => {
++  const f = await fixture()
++  await writeFile(f.file, JSON.stringify({ version: 1, cookies: [login] }))
++  const gate = Promise.withResolvers<undefined>()
++  const set = f.cookies.set.getMockImplementation()!
++  f.cookies.set.mockImplementation(async (details) => { await gate.promise; await set(details) })
++  const restoring = f.store.restore()
++  await vi.waitFor(() => expect(f.cookies.set).toHaveBeenCalled())
++  f.cookies.emit('changed')
++  expect(f.cookies.listenerCount('changed')).toBe(1)
++  expect(writeFileAtomic).not.toHaveBeenCalled()
++  expect((await snapshot(f.file)).cookies).toEqual([login])
++  gate.resolve(undefined)
++  await Promise.all([restoring, f.store.restore()])
++  const samePartition = SidebarSessionCookies.forSession({ cookies: f.cookies as Session['cookies'] }, f.home)
++  expect(samePartition).toBe(f.store)
++  await samePartition.restore()
++  expect(f.cookies.listenerCount('changed')).toBe(1)
++  expect((await snapshot(f.file)).cookies).toEqual([login])
++})
++
++it('retains the previous complete checkpoint on write failure and can retry', async () => {
++  const f = await fixture([login])
++  await f.store.restore()
++  const original = await readFile(f.file, 'utf8')
++  vi.mocked(writeFileAtomic).mockRejectedValueOnce(new Error('disk unavailable'))
++  f.values.splice(0)
++  await expect(f.store.flush()).rejects.toMatchObject({ code: 'BROWSER_PERSISTENT_SESSION_UNAVAILABLE' })
++  expect(await readFile(f.file, 'utf8')).toBe(original)
++  await f.store.flush()
++  expect((await snapshot(f.file)).cookies).toEqual([])
++})
++
++it('drains queued changes and final snapshot before Chromium flush and listener disposal', async () => {
++  const f = await fixture([login])
++  await f.store.restore()
++  f.values.splice(0)
++  f.cookies.emit('changed')
++  f.cookies.flushStore.mockImplementation(async () => {
++    expect((await snapshot(f.file)).cookies).toEqual([])
++    expect(f.cookies.listenerCount('changed')).toBe(1)
++  })
++  await f.store.shutdown()
++  expect(f.cookies.flushStore).toHaveBeenCalledTimes(1)
++  expect(f.cookies.listenerCount('changed')).toBe(0)
++})
