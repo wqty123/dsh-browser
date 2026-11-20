@@ -273,7 +273,9 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // A host supplied by the composition (the desktop shell's own seam) wins and is
   // synchronous, so registration stays synchronous on that path.
   if (config.viewHost !== undefined) {
-    const external = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(config.viewHost as ElectronBrowserViewHost, providerConfig)))
+    const provider = trackProvider(new ElectronBrowserProvider(config.viewHost as ElectronBrowserViewHost, providerConfig))
+    const external = ctx.browser.registerBrowserProvider(provider)
+    ctx.browser.registerPanelProvider(async () => provider)
     ctx.effect(() => () => { external() })
     // The composition supplied the carrier, so `browser.channel` is not ours to honour on this
     // surface. Saying so is the difference between a setting that cannot apply and a setting that
@@ -288,6 +290,39 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }
     return
   }
+
+  let panelOpening: Promise<{ host: DesktopBridgeViewHost; provider: ElectronBrowserProvider } | undefined> | undefined
+  let panelsDisposed = false
+  const unregisterPanel = ctx.browser.registerPanelProvider(async () => {
+    if (panelOpening === undefined) {
+      panelOpening = (async () => {
+        const host = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
+        if (host === undefined) return undefined
+        if (panelsDisposed) { host.dispose(); return undefined }
+        const provider = new ElectronBrowserProvider(host, providerConfig)
+        return { host, provider }
+      })()
+    }
+    try {
+      const panel = await panelOpening
+      if (panel === undefined) panelOpening = undefined
+      return panel?.provider
+    } catch (error) {
+      panelOpening = undefined
+      throw error
+    }
+  })
+  ctx.effect(() => () => {
+    panelsDisposed = true
+    unregisterPanel()
+    void panelOpening?.then(async panel => {
+      if (panel === undefined) return
+      panel.provider.dispose()
+      try {
+        await Promise.allSettled(panel.provider.watchableSessions().map(id => panel.provider.close(id)))
+      } finally { panel.host.dispose() }
+    }).catch(() => {})
+  })
 
   // Explicit sidebar selection stays on the desktop's carrier, including while its bridge
   // reconnects. Other choices can use the independently hosted browser when appropriate.

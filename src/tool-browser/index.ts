@@ -18,9 +18,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { setLastOpen } from '../browser-electron/open-slot.ts'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { pageOperationScript } from './page-probe.ts'
-import { readPanelPage } from './panel-page.ts'
 import { SettingsStore, settingsPath } from '../browser-electron/settings-store.ts'
 import { createShortcutStore, type ShortcutSettings } from '../browser-electron/startpage-shortcuts.ts'
 import { createReferenceService, summarizeReference, type BrowserReferenceService } from '../browser-reference/service.ts'
@@ -33,6 +32,8 @@ import {
   projectElement,
   projectNode,
 } from './element-fields.ts'
+
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
 /**
  * Register a cleanup that runs once when the process exits.
@@ -165,21 +166,15 @@ interface ToolBrowserState {
    */
   configRestrictedTo: readonly string[] | undefined
   restrictedByTask: Map<string, readonly string[]>
-  /**
-   * Panel-surface page per task.
-   *
-   * On the Web shell `dsh_browser_open` hands the address to the sidebar instead of starting a
-   * carrier session, so read tools had no way to see the page they had just opened ("nothing is
-   * open in this task yet"). The address recorded here lets those tools read the same page through
-   * the plugin's own proxy.
-   */
+  /** Active panel opens, including Web iframes that cannot be driven over CDP. */
   panelUrlByTask: Map<string, string>
+  pendingPanelOpens: Map<string, Promise<void>>
 }
 
 function createState(): ToolBrowserState {
   return {
     sessionsByTask: new Map(), pendingOpens: new Map(), configRestrictedTo: undefined,
-    restrictedByTask: new Map(), panelUrlByTask: new Map(),
+    restrictedByTask: new Map(), panelUrlByTask: new Map(), pendingPanelOpens: new Map(),
   }
 }
 
@@ -315,30 +310,30 @@ function taskKey(exec: { agent?: { id?: string } } | undefined): string {
   return exec?.agent?.id ?? 'default'
 }
 
-/**
- * Panel 面已知地址：`dsh_browser_open` 在 panel 面只交给侧栏，读工具据此读同一页。
- * @param state - the calling context's tool state.
- * @param key - the task key.
- * @returns the recorded address, or undefined when nothing was opened on the panel.
- */
-function panelUrlFor(state: ToolBrowserState, key: string): string | undefined {
-  return state.panelUrlByTask.get(key)
-}
-
-/**
- * 本进程自己的源（用于回环直连代理页）。
- * @param ctx - the plugin context (carries the webServer service).
- * @returns origin such as `http://127.0.0.1:3080`.
- */
-function selfOrigin(ctx: Context): string {
+function rememberSession(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string, agent: ExecAgent | undefined, session: BrowserSessionId | undefined, panelUrl?: string): void {
+  const previous = state.sessionsByTask.get(key)
+  const previousPanelUrl = state.panelUrlByTask.get(key)
+  if (session === undefined) state.sessionsByTask.delete(key)
+  else state.sessionsByTask.set(key, session)
+  if (panelUrl === undefined) state.panelUrlByTask.delete(key)
+  else state.panelUrlByTask.set(key, panelUrl)
+  if (previous === session && (previousPanelUrl !== undefined) === (panelUrl !== undefined)) return
+  const cleanup = (): void => {
+    if (state.sessionsByTask.get(key) !== session || state.panelUrlByTask.has(key) !== (panelUrl !== undefined)) return
+    state.sessionsByTask.delete(key)
+    state.panelUrlByTask.delete(key)
+    if (session !== undefined) void browser.close(session).catch(() => {})
+  }
   try {
-    const server = ctx.get('webServer') as { getOrigin?: () => string } | undefined
-    const origin = server?.getOrigin?.()
-    if (typeof origin === 'string' && origin !== '') return origin
-  } catch { /* 读不到就退回环境变量 */ }
-  const fromEnv = process.env.DSH_WEB_ORIGIN
-  if (typeof fromEnv === 'string' && fromEnv !== '') return fromEnv
-  return `http://127.0.0.1:${process.env.DSH_PORT ?? '3080'}`
+    if (agent?.ctx !== undefined) agent.ctx.effect(() => cleanup)
+    else if (key === 'default' && session !== undefined) registerExitCleanup(() => browser.close(session).catch(() => {}))
+  } catch (error) {
+    cleanup()
+    if (previous !== undefined) state.sessionsByTask.set(key, previous)
+    if (previousPanelUrl !== undefined) state.panelUrlByTask.set(key, previousPanelUrl)
+    throw error
+  }
+  if (previous !== undefined && previous !== session) void browser.close(previous).catch(() => {})
 }
 
 /**
@@ -354,6 +349,7 @@ function selfOrigin(ctx: Context): string {
  * @returns the task's session id.
  */
 async function ensureSession(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string, agent?: ExecAgent, create = false): Promise<BrowserSessionId> {
+  await state.pendingPanelOpens.get(key)
   const existing = state.sessionsByTask.get(key)
   if (existing !== undefined) {
     // The human closing a browser window ends that session, so a cached id can
@@ -363,6 +359,12 @@ async function ensureSession(browser: NonNullable<Context['browser']>, state: To
   }
   const pending = state.pendingOpens.get(key)
   if (pending !== undefined) return pending
+  if (state.panelUrlByTask.has(key)) {
+    throw new Error('dsh-builtin-browser: the panel surface has no live CDP session for this operation. '
+      + 'Use the CDP-backed DSH desktop sidebar with a connected desktop bridge and call dsh_browser_open again. '
+      + 'The Web iframe panel cannot provide live snapshots, a11y, content, scrape, screenshots, interactions, '
+      + 'uploads, downloads, or reference capture. Reading tools never start a separate browser.')
+  }
   // Starting a browser is `dsh_browser_open`'s job and nobody else's. A read tool asking "what is on
   // screen" used to start one — which, with the human's own Edge already running, handed the command over
   // and opened yet another window, reported as "one look, two Edge windows". A reader with nothing open
@@ -375,35 +377,8 @@ async function ensureSession(browser: NonNullable<Context['browser']>, state: To
   // which task's page is currently visible to the human.
   const opening = browser.open(key).then(
     session => {
-      // Tie the session's lifetime to the agent's scoped context FIRST: when
-      // the agent (and its DSH session) is disposed, the effect's disposer
-      // runs and closes the browser session. Registration happens once per
-      // session (only on first open for the key). If the agent is already
-      // gone, close the fresh session instead of leaking it.
-      state.sessionsByTask.set(key, session)
       state.pendingOpens.delete(key)
-      try {
-        if (agent?.ctx !== undefined) {
-          agent.ctx.effect(() => () => {
-            const current = state.sessionsByTask.get(key)
-            if (current === undefined) return
-            state.sessionsByTask.delete(key)
-            void browser.close(current).catch(() => {})
-          })
-        } else if (key === 'default') {
-          // Agentless / CLI probe: close the session on process exit so the
-          // window is not orphaned.
-          // One hook for the whole process, not one listener per session: a default session can
-          // be created repeatedly (a CLI probe does), and each registration lived for the life of
-          // the process — so the listener list grew without bound and Node warned at eleven.
-          registerExitCleanup(() => browser.close(session).catch(() => {}))
-        }
-      } catch (error) {
-        // effect() failed — undo the registration so future calls retry.
-        state.sessionsByTask.delete(key)
-        void browser.close(session).catch(() => {})
-        throw error
-      }
+      rememberSession(browser, state, key, agent, session)
       return session
     },
     error => { state.pendingOpens.delete(key); throw error },
@@ -625,7 +600,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   registerSafely(defineTool({
     name: 'dsh_browser_open',
-    description: 'Open a URL in the shared browser window and return the resulting snapshot. Opens this task\'s session on first use; newTab is optional. A fresh session starts on a blank tab: call this with the REAL target URL before reading, because reading that tab returns an empty page instead of waiting. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
+    description: 'Open a URL on the selected surface (default: panel). The CDP-backed desktop sidebar returns a live snapshot and supports subsequent browser tools on that same page. The Web iframe panel only queues sidebar navigation: carrier=panel-iframe-navigation-requested, with no snapshot or live-control capability. Reading tools never start another browser. newTab is optional on CDP surfaces. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
     parameters: {
       url: { type: 'string', required: true, description: 'The URL to open (HTTP/HTTPS).' },
       newTab: { type: 'boolean', description: 'Open in a new tab instead of the active one.' },
@@ -675,38 +650,60 @@ export function apply(ctx: Context, config: Config = {}): void {
       // places the page in the sidebar and opens no window; "builtin" is the debugging surface.
       const surfaceHint = (args as { surface?: 'panel' | 'builtin' }).surface
       const surface = enforceSurface(surfaceHint ?? readSurface(), args.url)
-      assertSurfaceCanHost(surface, args.url)
-      if (surface === 'panel') {
-        try { setLastOpen(args.url, Date.now()) } catch { /* best effort */ }
-        // 侧栏展示这份地址；读工具据此通过代理读同一页（panel 面没有 CDP 会话）。
-        state.panelUrlByTask.set(taskKey(exec), args.url)
-        // Same declared shape as the builtin path: the tool schema is strict about extra properties.
-        // 能读到页面就把真实标题与元素一并返回：panel 面「只返回空壳」正是「打开了却什么都读不到」的来源。
-        try {
-          const page = await readPanelPage(args.url, selfOrigin(ctx), {
-            ...exec.signal === undefined ? {} : { signal: exec.signal },
-          })
-          return {
-            url: page.url,
-            title: page.title,
-            elements: page.elements.map(element => ({
-              ref: element.index,
-              kind: element.kind,
-              label: element.name,
-              ...element.detail === undefined ? {} : { selector: element.detail },
-              x: 0,
-              y: 0,
-              frame: false,
-            })),
-            truncated: page.truncated,
-          }
-        } catch {
-          return { url: args.url, title: '', elements: [], truncated: false }
-        }
-      }
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec), true)
+      const key = taskKey(exec)
+      if (surface === 'panel') {
+        const preceding = state.pendingPanelOpens.get(key)
+        let previous: BrowserSessionId | undefined
+        let session: BrowserSessionId | undefined
+        const opening = (async () => {
+          await preceding
+          await state.pendingOpens.get(key)
+          previous = state.sessionsByTask.get(key)
+          const target = new URL(args.url)
+          if (target.protocol !== 'http:' && target.protocol !== 'https:') throw new Error('dsh_browser_open: panel requires an HTTP/HTTPS URL')
+          exec.signal?.throwIfAborted()
+          session = state.panelUrlByTask.has(key) && previous !== undefined && browser.exists(previous)
+            ? previous : await browser.openPanel?.(key)
+          if (session === undefined) {
+            assertSurfaceCanHost(surface, args.url)
+            exec.signal?.throwIfAborted()
+            setLastOpen(args.url, Date.now())
+            rememberSession(browser, state, key, agentOf(exec), undefined, args.url)
+            return { url: args.url, carrier: 'panel-iframe-navigation-requested', title: '', elements: [], truncated: false }
+          }
+          await browser.openUrl(session, { url: args.url, ...args.newTab === true ? { newTab: true } : {} }, exec.signal)
+          const snapshot = await browser.snapshot(session, exec.signal)
+          exec.signal?.throwIfAborted()
+          rememberSession(browser, state, key, agentOf(exec), session, args.url)
+          return {
+            url: snapshot.url,
+            ...snapshot.title !== undefined ? { title: snapshot.title } : {},
+            elements: snapshot.elements.map(el => projectElement(el)),
+            truncated: snapshot.truncated,
+            ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
+          }
+        })()
+        const pending = opening.then(() => {})
+        state.pendingPanelOpens.set(key, pending)
+        void pending.catch(() => {})
+        try { return await opening } catch (error) {
+          if (session !== undefined && session !== previous) await browser.close(session).catch(() => {})
+          throw error
+        } finally {
+          if (state.pendingPanelOpens.get(key) === pending) state.pendingPanelOpens.delete(key)
+        }
+      }
+      await state.pendingPanelOpens.get(key)
+      await state.pendingOpens.get(key)
+      if (state.panelUrlByTask.has(key)) {
+        const previous = state.sessionsByTask.get(key)
+        state.sessionsByTask.delete(key)
+        state.panelUrlByTask.delete(key)
+        if (previous !== undefined) await browser.close(previous)
+      }
+      const session = await ensureSession(browser, state, key, agentOf(exec), true)
       try {
         await browser.openUrl(session, {
           url: args.url,
@@ -808,26 +805,6 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const key = taskKey(exec)
-      if (!state.sessionsByTask.has(key) && panelUrlFor(state, key) !== undefined) {
-        // panel 面没有 CDP 会话：直接读代理页，而不是报「nothing is open」。
-        const page = await readPanelPage(panelUrlFor(state, key) as string, selfOrigin(ctx), {
-          ...exec.signal === undefined ? {} : { signal: exec.signal },
-        })
-        return {
-          url: page.url,
-          title: page.title,
-          elements: page.elements.map(element => ({
-            ref: element.index,
-            kind: element.kind,
-            label: element.name,
-            ...element.detail === undefined ? {} : { selector: element.detail },
-            x: 0,
-            y: 0,
-            frame: false,
-          })),
-          truncated: page.truncated,
-        }
-      }
       const session = await ensureSession(browser, state, key, agentOf(exec))
       const snapshot = await browser.snapshot(session, exec.signal)
       return {
@@ -2216,6 +2193,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const key = taskKey(exec)
+      await state.pendingPanelOpens.get(key)
+      state.panelUrlByTask.delete(key)
       const session = state.sessionsByTask.get(key)
       if (session !== undefined) {
         try {
@@ -3194,27 +3173,6 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const key = taskKey(exec)
-      if (!state.sessionsByTask.has(key) && panelUrlFor(state, key) !== undefined) {
-        const page = await readPanelPage(panelUrlFor(state, key) as string, selfOrigin(ctx), {
-          ...exec.signal === undefined ? {} : { signal: exec.signal },
-        })
-        const count = (kind: string): number => page.elements.filter(element => element.kind === kind).length
-        return {
-          summary: {
-            url: page.url,
-            title: page.title,
-            readyState: 'panel-proxy',
-            pending: 0,
-            quietMs: 0,
-            inputs: page.elements.filter(element => ['input', 'select', 'textarea'].includes(element.kind)).length,
-            buttons: count('button'),
-            links: count('link'),
-            scrollY: 0,
-            selection: '',
-            text: page.text.slice(0, 400),
-          },
-        }
-      }
       const session = await ensureSession(browser, state, key, agentOf(exec))
       await installProbe(browser, session, exec.signal)
       const summary = await probe<ProbeRow>(browser, session, 'summary', [], exec.signal)
@@ -3293,7 +3251,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         browserSessionId: session,
         origin: args.excerptText !== undefined ? 'agent-excerpt' : 'user-selection',
         entry: 'agent-tool',
-        carrier: referenceCarrier(),
+        carrier: state.panelUrlByTask.has(taskKey(exec)) ? 'sidebar' : referenceCarrier(),
         ...args.allowPartial !== undefined ? { allowPartial: args.allowPartial } : {},
         ...args.tableSelector !== undefined ? { tableSelector: args.tableSelector } : {},
         ...args.excerptText !== undefined ? { excerptText: args.excerptText } : {},

@@ -31,7 +31,7 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
   t.mock.method(DesktopBridgeViewHost, 'discover', discover)
   const registered = []
   const disposers = []
-  let current, handler
+  let current, handler, panelFactory
   const routes = new Map()
   const ctx = {
     get(name) {
@@ -45,7 +45,10 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
       }
       return undefined
     },
-    browser: { registerBrowserProvider(provider) {
+    browser: { registerPanelProvider(factory) {
+      panelFactory = factory
+      return () => { panelFactory = undefined }
+    }, registerBrowserProvider(provider) {
       current = provider.host
       registered.push(current)
       return () => {}
@@ -73,7 +76,7 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
   })
   apply(ctx, {})
   return {
-    get current() { return current }, registered, dispose,
+    get current() { return current }, get panelFactory() { return panelFactory }, registered, dispose,
     async choose(nextChannel) {
       const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel } })])
       request.method = 'PUT'
@@ -177,4 +180,29 @@ test('a current sidebar loss installs a fallback that is also released at teardo
     /disposed/,
     'the fallback is released and cannot restart a child',
   )
+})
+
+test('the panel provider uses a discovered sidebar independently of an explicit Chrome carrier', async t => {
+  const sidebar = new Sidebar()
+  let discoveries = 0
+  const h = harness(t, 'chrome', async () => { discoveries += 1; return sidebar })
+  const selected = h.current
+  const panel = await h.panelFactory('task-1')
+  assert.equal(panel.host, sidebar)
+  assert.equal(h.current, selected, 'opening the panel does not replace the explicit carrier')
+  assert.equal(await h.panelFactory('task-2'), panel, 'one sidebar provider owns isolated per-task sessions')
+  assert.equal(discoveries, 1)
+  h.dispose()
+  await new Promise(setImmediate)
+  assert.equal(sidebar.disposed, true)
+})
+
+test('unsupported panel discovery never returns Chrome, and a later explicit open may rediscover', async t => {
+  let discoveries = 0
+  const h = harness(t, 'chrome', async () => { discoveries += 1; return undefined })
+  const selected = h.current
+  assert.equal(await h.panelFactory('task'), undefined)
+  assert.equal(await h.panelFactory('task'), undefined)
+  assert.equal(discoveries, 2)
+  assert.equal(h.current, selected)
 })

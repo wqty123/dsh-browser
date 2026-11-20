@@ -42,6 +42,7 @@ function fakeBrowser(overrides = {}) {
     open: async () => 'session-1',
     session: () => 'session-1',
     exists: () => true,
+    openUrl: async () => {},
     a11y: async () => ({
       url: 'https://example.com/',
       title: 'Example Domain',
@@ -76,9 +77,16 @@ async function run(tools, name) {
   return await tool.execute({}, { task: 'test' })
 }
 
+async function open(tools) {
+  await tools.get('dsh_browser_open').execute(
+    { url: 'https://example.com/', surface: 'builtin' }, { task: 'test' },
+  )
+}
+
 test('dsh_browser_a11y hands the selector on', async () => {
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
   apply(ctx)
+  await open(tools)
 
   const value = await run(tools, 'dsh_browser_a11y')
 
@@ -93,6 +101,7 @@ test('dsh_browser_a11y hands the selector on', async () => {
 test('dsh_browser_snapshot hands the selector on', async () => {
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
   apply(ctx)
+  await open(tools)
 
   const value = await run(tools, 'dsh_browser_snapshot')
   assert.equal(value.elements[0].selector, '#probe-btn', 'the snapshot mapping carries selector')
@@ -103,6 +112,7 @@ test('both element mappings carry the same field set', async () => {
   // other did not. Comparing them catches the next field that only lands in one of them.
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
   apply(ctx)
+  await open(tools)
 
   const a11y = await run(tools, 'dsh_browser_a11y')
   const snapshot = await run(tools, 'dsh_browser_snapshot')
@@ -124,6 +134,7 @@ test('a required field in the output schema is one the tool can actually produce
   // ran a tool). Optional fields are exempt, since those may legitimately be absent.
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
   apply(ctx)
+  await open(tools)
 
   const problems = []
   for (const name of ['dsh_browser_a11y', 'dsh_browser_snapshot']) {
