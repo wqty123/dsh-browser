@@ -1,6 +1,7 @@
 /** Profile-only extension maintenance through the installation's supported dsh plugin command. */
 import { createHash } from 'node:crypto'
-import { readFile, access } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { readFile, access, stat } from 'node:fs/promises'
 import { join, resolve, isAbsolute } from 'node:path'
 import type { BridgeAction, BridgeActionResult } from './bridge-install.ts'
 import { BridgeConnection } from './bridge-connection.ts'
@@ -54,6 +55,18 @@ export async function profileDependencySpec(home: string): Promise<string> {
   return dependency
 }
 
+export async function profileRuntimeDirectory(root: string): Promise<string> {
+  const directory = join(root, 'resources', 'runtime')
+  const pnpm = join(directory, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
+  try {
+    await access(pnpm, constants.R_OK)
+    if (!(await stat(pnpm)).isFile()) throw new Error('Not a regular file')
+  } catch {
+    throw Object.assign(new Error(`The Desktop bundled package manager is missing or unreadable: ${pnpm}`), { code: 'REINSTALL_RUNTIME_MISSING' })
+  }
+  return directory
+}
+
 export async function profileExtensionCommand(action: BridgeAction, root: string, home: string, capturedSpec?: string): Promise<readonly string[]> {
   if (!isAbsolute(root) || !isAbsolute(home)) throw new Error('invalid Desktop profile location')
   const profile = join(home, 'profiles', 'desktop')
@@ -75,7 +88,9 @@ export async function profileExtensionCommand(action: BridgeAction, root: string
 export async function repairProfileExtension(action: BridgeAction, root: string, home: string, run: (
   command: string, argv: readonly string[], environment: NodeJS.ProcessEnv,
 ) => Promise<{ code: number; output: string }>, capturedSpec?: string): Promise<BridgeActionResult> {
-  const argv = ['--expose-internals', ...await profileExtensionCommand(action, root, home, capturedSpec)]
+  const support = await profileRuntimeDirectory(root)
+  const script = `import { dirname, resolve } from 'node:path'; import { pathToFileURL } from 'node:url'; const { runDesktopCli } = await import(pathToFileURL(process.argv[1]).href); const support = ${JSON.stringify(support)}; await (runDesktopCli.length >= 2 ? runDesktopCli(resolve(dirname(process.argv[1]), '../../../..'), support) : runDesktopCli(support));`
+  const argv = ['--expose-internals', '--input-type=module', '--eval', script, '--', ...await profileExtensionCommand(action, root, home, capturedSpec)]
   const command = join(root, 'DeepSeek Harness.exe')
   const environment = { ...process.env, DSH_HOME: home, ELECTRON_RUN_AS_NODE: '1' }
   const result = await run(command, argv, environment)

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createServer } from 'node:net'
 import { once } from 'node:events'
+import { execFileSync } from 'node:child_process'
 import { installedProfileExtension, profileExtensionCommand, repairProfileExtension, extensionHomeId, readHostExtensionStatus } from '../src/browser-electron/profile-extension.ts'
 import { waitForRestartedBridge } from '../src/browser-electron/bridge-install.ts'
 import { readBridgeStatus } from '../src/browser-electron/bridge-status.ts'
@@ -17,6 +18,8 @@ function fixture(t) {
   const home = join(root, 'home'), app = join(root, 'desktop'), profile = join(home, 'profiles/desktop')
   const cli = join(app, 'resources/app/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js')
   mkdirSync(dirname(cli), { recursive: true }); writeFileSync(cli, 'supported CLI')
+  const pnpm = join(app, 'resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs')
+  mkdirSync(dirname(pnpm), { recursive: true }); writeFileSync(pnpm, 'bundled pnpm')
   mkdirSync(profile, { recursive: true })
   writeFileSync(join(profile, 'package.json'), JSON.stringify({ dependencies: { 'dsh-builtin-browser': 'file:../../plugin.tgz', other: '1.0.0' } }))
   const resources = ['resources/app/lib/main.js', 'resources/app/lib/preload-app.cjs', 'resources/app.asar', 'resources/cli/dsh.cmd']
@@ -32,10 +35,12 @@ test('profile repair and removal invoke the trusted CLI and do not change app re
     const result = await repairProfileExtension(action, f.app, f.home, async (command, argv, env) => {
       calls.push({ command, argv, env })
       assert.equal(command, join(f.app, 'DeepSeek Harness.exe'))
-      assert.deepEqual(argv.slice(0, 5), ['--expose-internals', f.cli, 'plugin', '--profile', 'desktop'])
+      assert.deepEqual(argv.slice(0, 3), ['--expose-internals', '--input-type=module', '--eval'])
+      const args = argv.slice(argv.indexOf('--') + 1)
+      assert.deepEqual(args.slice(0, 4), [f.cli, 'plugin', '--profile', 'desktop'])
       assert.equal(env.DSH_HOME, f.home); assert.equal(env.ELECTRON_RUN_AS_NODE, '1')
-      assert.equal(argv[5], action === 'install' ? 'add' : 'remove')
-      assert.equal(argv[6], action === 'install' ? `dsh-builtin-browser@file:${join(f.home, 'plugin.tgz')}` : 'dsh-builtin-browser')
+      assert.equal(args[4], action === 'install' ? 'add' : 'remove')
+      assert.equal(args[5], action === 'install' ? `dsh-builtin-browser@file:${join(f.home, 'plugin.tgz')}` : 'dsh-builtin-browser')
       return { code: 0, output: 'profile package operation completed' }
     })
     assert.equal(result.ok, true); assert.equal(result.restarted, false)
@@ -44,6 +49,38 @@ test('profile repair and removal invoke the trusted CLI and do not change app re
   f.resources.forEach((path, i) => assert.deepEqual(readFileSync(join(f.app, path)), before[i]))
   assert.equal(existsSync(join(f.app, 'resources/app/lib/main.js.before-bridge')), false)
 })
+
+for (const layout of ['app', 'app.asar']) for (const legacy of [true, false]) {
+  test(`${layout} profile add/remove uses the external runtime with the ${legacy ? 'rc.3' : 'current'} cold CLI API`, async t => {
+    const f = fixture(t), owner = join(f.app, 'resources', layout)
+    if (layout === 'app.asar') rmSync(join(f.app, 'resources/app.asar'))
+    const cli = join(owner, 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js')
+    mkdirSync(dirname(cli), { recursive: true })
+    if (layout === 'app.asar') rmSync(f.cli)
+    writeFileSync(join(owner, 'package.json'), JSON.stringify({ type: 'module' }))
+    writeFileSync(cli, `import { join } from 'node:path'; import { execFileSync } from 'node:child_process';
+      export async function runDesktopCli(${legacy ? 'runtimeDir, supportDir' : 'supportDir'}) {
+        ${legacy ? `if (runtimeDir !== ${JSON.stringify(join(owner, 'dsh'))}) throw new Error('wrong DSH directory');` : ''}
+        process.stdout.write(execFileSync(process.execPath, ['--expose-internals', join(supportDir, 'primary-runtime/dependencies/pnpm/bin/pnpm.mjs'), ...process.argv.slice(2)], {env: process.env}));
+      }
+      if (import.meta.main) throw new Error('must not use the unpacked CLI auto-entry runtime guess');`)
+    const pnpm = join(f.app, 'resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs')
+    writeFileSync(pnpm, `console.log(JSON.stringify({entry: import.meta.filename, args: process.argv.slice(2), home: process.env.DSH_HOME}))`)
+    for (const action of ['install', 'uninstall']) {
+      const result = await repairProfileExtension(action, f.app, f.home, async (_command, argv, env) => {
+        const output = execFileSync(process.execPath, argv, { env, encoding: 'utf8' })
+        const observed = JSON.parse(output)
+        assert.equal(observed.entry, pnpm)
+        assert.equal(observed.home, f.home)
+        assert.deepEqual(observed.args.slice(0, 4), ['plugin', '--profile', 'desktop', action === 'install' ? 'add' : 'remove'])
+        return { code: 0, output }
+      })
+      assert.equal(result.ok, true)
+    }
+    rmSync(pnpm)
+    await assert.rejects(repairProfileExtension('uninstall', f.app, f.home, async () => assert.fail('must not spawn')), { code: 'REINSTALL_RUNTIME_MISSING' })
+  })
+}
 
 test('missing profiles and missing package specs fail before starting any installer; CLI permission failures remain failures', async t => {
   const f = fixture(t)

@@ -34,6 +34,8 @@ function fixture(t, parent = tmpdir()) {
   const spec = 'file:../../plugin.tgz'
   writeFileSync(join(home, 'plugin.tgz'), 'preserved dependency archive')
   writeFileSync(manifest, JSON.stringify({ dependencies: { 'dsh-builtin-browser': spec, other: '^1' } }))
+  const pnpm = join(root, 'resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs')
+  mkdirSync(dirname(pnpm), { recursive: true }); writeFileSync(pnpm, 'bundled pnpm')
   return { directory, root, home, app, sidebar, files, manifest, spec, packages: [app, sidebar] }
 }
 
@@ -43,6 +45,18 @@ function snapshot(path) {
     return entry.isDirectory() ? Object.entries(snapshot(file)) : [[file, readFileSync(file).toString('base64')]]
   }))
 }
+
+for (const packed of [false, true]) test(`rc.3 ${packed ? 'packed' : 'unpacked'} runtime preflight checks the sibling payload without writes`, async t => {
+  const f = fixture(t), pnpm = join(f.root, 'resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs')
+  if (packed) { writeAsar(join(f.root, 'resources/app.asar'), f.files); rmSync(f.app, { recursive: true }) }
+  assert.equal(await preflightReinstall(f.root, f.home), f.spec)
+  rmSync(pnpm)
+  const misleading = join(f.app, 'runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs')
+  mkdirSync(dirname(misleading), { recursive: true }); writeFileSync(misleading, 'wrong location')
+  const before = snapshot(f.directory)
+  await assert.rejects(preflightReinstall(f.root, f.home), { code: 'REINSTALL_RUNTIME_MISSING' })
+  assert.deepEqual(snapshot(f.directory), before)
+})
 
 test('read-only preflight admits clean and installed hosts, preserving restore baselines', async t => {
   const f = fixture(t)

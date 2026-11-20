@@ -13,7 +13,7 @@ import { readAsarFile, readDesktopIdentity } from './desktop-identity.ts'
 import { dshHome } from './paths.ts'
 import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.ts'
 import { renameMaintenanceFile } from '../../desktop-bridge/maintenance-files.mjs'
-import { installedProfileExtension, repairProfileExtension, profileDependencySpec, MAIN_EXTENSION_NAME, type InstalledExtension } from './profile-extension.ts'
+import { installedProfileExtension, repairProfileExtension, profileDependencySpec, profileRuntimeDirectory, MAIN_EXTENSION_NAME, type InstalledExtension } from './profile-extension.ts'
 
 const { hostPatchStatus }: { hostPatchStatus: (packages: readonly string[], options?: { fs: object }) => HostPatchResult } = await import(new URL('../../dsh-host-patch/apply.mjs', import.meta.url).href)
 const { stripLegacyBridge }: { stripLegacyBridge: (text: string) => string | undefined } = await import(new URL('../../dsh-host-patch/legacy-bridge.mjs', import.meta.url).href)
@@ -161,6 +161,7 @@ export async function preflightReinstall(root: string, home: string): Promise<st
       throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'The preserved archive belongs to different Desktop bytes.')
     }
   }
+  await profileRuntimeDirectory(root)
   return dependency
 }
 
