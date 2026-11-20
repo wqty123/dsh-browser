@@ -31,6 +31,7 @@ export class IframeImpl implements BrowserFrame {
   private error: BrowserLoadError | undefined
   private disposed = false
   private disposal: Promise<void> | undefined
+  private navigationId: string | undefined
 
   /** @param options - initial checkpoint and persistence writer. @param presentation - iframe DOM adapter. */
   constructor(private readonly options: BrowserPageOptions, private readonly presentation: IframePresentation) {
@@ -77,8 +78,9 @@ export class IframeImpl implements BrowserFrame {
   subscribe = (listener: () => void): (() => void) => this.store.subscribe(listener)
 
   /** @param target - validated address; submitting the current address reloads it. */
-  loadUrl(target: BrowserTarget): void {
+  loadUrl(target: BrowserTarget, navigationId?: string): void {
     if (this.disposed) return
+    this.navigationId = navigationId
     const request = BrowserNavigation.current(this.navigation.snapshot)?.url === target.url
       ? this.navigation.reload() : this.navigation.navigate(target)
     this.load(request)
@@ -132,7 +134,7 @@ export class IframeImpl implements BrowserFrame {
   private snapshot(): BrowserFrameState {
     const state = this.navigation.snapshot
     const target = BrowserNavigation.current(state)
-    return { target, address: target === undefined ? 'empty' : state.navigation.status === 'unknown' ? 'unknown' : 'requested',
+    return { navigationId: this.navigationId, target, address: target === undefined ? 'empty' : state.navigation.status === 'unknown' ? 'unknown' : 'requested',
       loading: state.navigation.status === 'loading' && this.error === undefined,
       canGoBack: this.navigation.canGoBack || this.presentation.historyDepth() > 1,
       canGoForward: this.navigation.canGoForward || this.frameHistoryForward,

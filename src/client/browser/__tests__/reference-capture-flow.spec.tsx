@@ -205,7 +205,8 @@ it.each(['native', 'web'] as const)('%s overlay intent reaches its owning compos
     host.id = 'capture-flow'
     document.body.append(host)
     page.presentation.mount(host.id)
-    page.frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' })
+    page.frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' }, 'iframe-request')
+    expect(page.frame.getSnapshot().navigationId).toBe('iframe-request')
     window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: host.querySelector('iframe')!.contentWindow, data: intent }))
     dispose = () => page.frame.dispose()
   } else {
@@ -224,7 +225,8 @@ it.each(['native', 'web'] as const)('%s overlay intent reaches its owning compos
     } as unknown as DesktopBrowserBridge
     const frame = new ElectronWebViewImpl({ initial: undefined, persist() {}, openRequested() {} }, bridge, async () => 'workspace', presentation, `session-${firstOwner}`)
     frame.attach()
-    frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' })
+    frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' }, 'native-request')
+    expect(frame.getSnapshot().navigationId).toBe('native-request')
     dispose = () => frame.dispose()
   }
   try {

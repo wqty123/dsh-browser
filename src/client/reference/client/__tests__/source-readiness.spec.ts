@@ -32,7 +32,7 @@ function fixture() {
 }
 
 describe('source page readiness', () => {
-  it('requires document completion as well as guest readiness before acknowledging a controller navigation', async () => {
+  it.each([url, 'https://example.com/redirected'])('acknowledges the current completed navigation at %s without accepting stale documents', async observedUrl => {
     const frame = createSnapshotStore(emptyBrowserFrame())
     const lifecycle = createSnapshotStore<BrowserCarrierState>({ stage: 'guest', guestId: '42' })
     const journal = createBrowserInitializationJournal()
@@ -41,15 +41,20 @@ describe('source page readiness', () => {
       applicationOrigin: 'https://dsh.test', initial: undefined,
       actions: { replace() {} } as BrowserControllerOptions['actions'], openTab() {},
       createPage: () => ({
-        frame: { ...frame, lifecycle, loadUrl() {}, goBack() {}, goForward() {}, reload() {}, async dispose() {} },
+        frame: { ...frame, lifecycle, loadUrl(_target, navigationId) {
+          frame.set({ ...frame.getSnapshot(), navigationId, address: 'requested', loading: true })
+        }, goBack() {}, goForward() {}, reload() {}, async dispose() {} },
         presentation: { mount: () => () => {} },
       }),
     })
     try {
       controller.navigate(url, 1)
+      const navigationId = journal.get(tabId)!.requestId
       lifecycle.set({ stage: 'ready', guestId: '42' })
       expect(journal.get(tabId)?.stage).toBe('navigating')
-      frame.set({ ...emptyBrowserFrame(), address: 'observed', target: { kind: 'https', url, title: '' }, loading: true })
+      frame.set({ ...emptyBrowserFrame(), navigationId: 'stale-request', address: 'observed', target: { kind: 'https', url: observedUrl, title: '' }, loading: false })
+      expect(journal.get(tabId)?.stage).toBe('navigating')
+      frame.set({ ...frame.getSnapshot(), navigationId, loading: true })
       expect(journal.get(tabId)?.stage).toBe('navigating')
       frame.set({ ...frame.getSnapshot(), loading: false })
       expect(journal.get(tabId)).toMatchObject({ stage: 'attached', guestId: '42', url })

@@ -85,16 +85,17 @@ export class ElectronWebViewImpl implements BrowserFrame {
   }
 
   /** @param target - validated address, loaded without replacing the guest. */
-  loadUrl(target: BrowserTarget): void {
+  loadUrl(target: BrowserTarget, navigationId?: string): void {
     if (this.lifetime.signal.aborted) return
     const current = this.store.getSnapshot()
     if (this.ready && current.address === 'observed' && current.target?.url === target.url) {
+      this.store.set({ ...current, navigationId, loading: true })
       this.reload()
       return
     }
     this.revision++
     this.pending = target
-    this.store.set({ ...current, target, address: 'requested', loading: true, error: undefined })
+    this.store.set({ ...current, navigationId, target, address: 'requested', loading: true, error: undefined })
     this.persist(target)
     if (this.ready) this.loadPending()
     else this.initialize()

@@ -334,7 +334,8 @@ export class BrowserController implements HostObservable<BrowserControllerState>
     }
     this.journal.advance(this.options.tabId, 'navigating',
       { navigationRevision: revision, url: parsed.target.url })
-    this.command(() => { this.page.frame.loadUrl(parsed.target) })
+    const navigationId = this.ownReceipt()?.requestId
+    this.command(() => { this.page.frame.loadUrl(parsed.target, navigationId) })
     this.publishInitialization()
   }
 
@@ -347,10 +348,11 @@ export class BrowserController implements HostObservable<BrowserControllerState>
   /** Carrier state is the strongest proof; the frame's observed address is the fallback. */
   private advanceFromFrame(frame: BrowserFrameState): void {
     const receipt = this.ownReceipt()
-    if (receipt === undefined || receipt.stage === 'failed' || receipt.stage === 'attached') return
+    if (receipt === undefined || receipt.stage === 'failed' || receipt.stage === 'attached'
+      || frame.navigationId !== receipt.requestId) return
     if (frame.error !== undefined) {
       this.journal.fail(this.options.tabId, 'navigation-failed')
-    } else if (frame.address === 'observed' && !frame.loading && frame.target?.url === receipt.url) {
+    } else if (frame.address === 'observed' && !frame.loading && frame.target !== undefined) {
       const carrier = this.page.frame.lifecycle?.getSnapshot()
       if (carrier !== undefined && carrier.stage !== 'ready') return
       this.journal.advance(this.options.tabId, 'attached',
