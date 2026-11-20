@@ -1,0 +1,1307 @@
+From 91b18f68a6e7dc816587a764f029c6a18a4d0373 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 03:44:02 +0000
+Subject: [PATCH] fix: bind panel tools to the visible sidebar session
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ src/browser-electron/entry.ts              |  37 +++-
+ src/browser/runtime.ts                     | 118 +++++++----
+ src/startpage.ts                           |   6 +-
+ src/tool-browser/index.ts                  | 222 ++++++++------------
+ tests/carrier-selection-behaviour.test.mjs |  34 ++-
+ tests/delivery.test.mjs                    |   7 +
+ tests/panel-session.test.mjs               | 229 +++++++++++++++++++++
+ tests/runtime-panel.test.mjs               | 110 ++++++++++
+ tests/tool-boundaries.test.mjs             |  14 +-
+ tests/tool-layer-passthrough.test.mjs      |  11 +
+ 10 files changed, 605 insertions(+), 183 deletions(-)
+ create mode 100644 tests/panel-session.test.mjs
+ create mode 100644 tests/runtime-panel.test.mjs
+
+diff --git a/src/browser-electron/entry.ts b/src/browser-electron/entry.ts
+index 0fdd0bc..3eb9460 100644
+--- a/src/browser-electron/entry.ts
++++ b/src/browser-electron/entry.ts
+@@ -273,7 +273,9 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
+   // A host supplied by the composition (the desktop shell's own seam) wins and is
+   // synchronous, so registration stays synchronous on that path.
+   if (config.viewHost !== undefined) {
+-    const external = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(config.viewHost as ElectronBrowserViewHost, providerConfig)))
++    const provider = trackProvider(new ElectronBrowserProvider(config.viewHost as ElectronBrowserViewHost, providerConfig))
++    const external = ctx.browser.registerBrowserProvider(provider)
++    ctx.browser.registerPanelProvider(async () => provider)
+     ctx.effect(() => () => { external() })
+     // The composition supplied the carrier, so `browser.channel` is not ours to honour on this
+     // surface. Saying so is the difference between a setting that cannot apply and a setting that
+@@ -289,6 +291,39 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
+     return
+   }
+ 
++  let panelOpening: Promise<{ host: DesktopBridgeViewHost; provider: ElectronBrowserProvider } | undefined> | undefined
++  let panelsDisposed = false
++  const unregisterPanel = ctx.browser.registerPanelProvider(async () => {
++    if (panelOpening === undefined) {
++      panelOpening = (async () => {
++        const host = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
++        if (host === undefined) return undefined
++        if (panelsDisposed) { host.dispose(); return undefined }
++        const provider = new ElectronBrowserProvider(host, providerConfig)
++        return { host, provider }
++      })()
++    }
++    try {
++      const panel = await panelOpening
++      if (panel === undefined) panelOpening = undefined
++      return panel?.provider
++    } catch (error) {
++      panelOpening = undefined
++      throw error
++    }
++  })
++  ctx.effect(() => () => {
++    panelsDisposed = true
++    unregisterPanel()
++    void panelOpening?.then(async panel => {
++      if (panel === undefined) return
++      panel.provider.dispose()
++      try {
++        await Promise.allSettled(panel.provider.watchableSessions().map(id => panel.provider.close(id)))
++      } finally { panel.host.dispose() }
++    }).catch(() => {})
++  })
++
+   // Explicit sidebar selection stays on the desktop's carrier, including while its bridge
+   // reconnects. Other choices can use the independently hosted browser when appropriate.
+   const selfHosted = new RemoteElectronViewHost(defaultHostMainPath())
+diff --git a/src/browser/runtime.ts b/src/browser/runtime.ts
+index 1fc7088..16b3f42 100644
+--- a/src/browser/runtime.ts
++++ b/src/browser/runtime.ts
+@@ -142,6 +142,8 @@ export class BrowserRuntime extends Service {
+ 
+   private providers = new Map<string, BrowserProvider>()
+   private readonly providerId: string | undefined
++  private panelProvider: ((label?: string) => Promise<BrowserProvider | undefined>) | undefined
++  private readonly panelSessions = new Map<BrowserSessionId, BrowserProvider>()
+ 
+   constructor(ctx: Context, config: BrowserRuntimeConfig = {}) {
+     super(ctx, 'browser')
+@@ -171,7 +173,9 @@ export class BrowserRuntime extends Service {
+   }
+ 
+   /** Resolve the selected provider or throw the matching {@link BrowserError}. */
+-  private resolveProvider(): BrowserProvider {
++  private resolveProvider(session?: BrowserSessionId): BrowserProvider {
++    const panel = session === undefined ? undefined : this.panelSessions.get(session)
++    if (panel !== undefined) return panel
+     const { providerId, providers } = this
+     if (providerId !== undefined) {
+       const provider = providers.get(providerId)
+@@ -214,44 +218,79 @@ export class BrowserRuntime extends Service {
+     return this.resolveProvider().open(label)
+   }
+ 
++  /** Register an explicit sidebar-only opener, independent of the default carrier. */
++  registerPanelProvider(factory: (label?: string) => Promise<BrowserProvider | undefined>): () => void {
++    const owned = new Set<BrowserProvider>()
++    const tracked = async (label?: string): Promise<BrowserProvider | undefined> => {
++      const provider = await factory(label)
++      if (provider !== undefined) owned.add(provider)
++      return provider
++    }
++    const dispose = this.ctx.effect(() => {
++      this.panelProvider = tracked
++      return () => {
++        if (this.panelProvider === tracked) this.panelProvider = undefined
++        for (const [session, provider] of this.panelSessions) {
++          if (owned.has(provider)) this.panelSessions.delete(session)
++        }
++        owned.clear()
++      }
++    }, 'browser.registerPanelProvider()')
++    return () => void dispose()
++  }
++
++  /** Undefined means this surface has no controllable sidebar; never use the default carrier. */
++  async openPanel(label?: string): Promise<BrowserSessionId | undefined> {
++    const factory = this.panelProvider
++    const provider = await factory?.(label)
++    if (provider === undefined) return undefined
++    const session = await provider.open(label)
++    if (this.panelProvider !== factory) {
++      await provider.close(session)
++      throw new BrowserError('panel surface provider was disposed during open; reconnect the desktop sidebar and retry', 'BROWSER_SURFACE_UNAVAILABLE')
++    }
++    this.panelSessions.set(session, provider)
++    return session
++  }
++
+   /** Open a URL through the selected provider, optionally in a new tab. */
+   async openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void> {
+-    return this.resolveProvider().openUrl(session, request, signal)
++    return this.resolveProvider(session).openUrl(session, request, signal)
+   }
+ 
+   /** List the session's tabs through the selected provider. */
+   async listTabs(session: BrowserSessionId): Promise<readonly BrowserTab[]> {
+-    return this.resolveProvider().listTabs(session)
++    return this.resolveProvider(session).listTabs(session)
+   }
+ 
+   /** Switch to a tab through the selected provider. */
+   async switchTab(session: BrowserSessionId, tabId: string): Promise<void> {
+-    return this.resolveProvider().switchTab(session, tabId)
++    return this.resolveProvider(session).switchTab(session, tabId)
+   }
+ 
+   /** Close one tab through the selected provider. */
+   async closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
+-    return this.resolveProvider().closeTab(session, tabId)
++    return this.resolveProvider(session).closeTab(session, tabId)
+   }
+ 
+   /** Close every tab and reset the session through the selected provider. */
+   async reset(session: BrowserSessionId): Promise<void> {
+-    return this.resolveProvider().reset(session)
++    return this.resolveProvider(session).reset(session)
+   }
+ 
+   /** Navigate the session's page through the selected provider. */
+   async navigate(session: BrowserSessionId, request: BrowserNavigateRequest, signal?: AbortSignal): Promise<void> {
+-    return this.resolveProvider().navigate(session, request, signal)
++    return this.resolveProvider(session).navigate(session, request, signal)
+   }
+ 
+   /** Execute JS in the session's page context through the selected provider. */
+   async execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
+-    return this.resolveProvider().execute(session, request, signal)
++    return this.resolveProvider(session).execute(session, request, signal)
+   }
+ 
+   /** Execute one provider-owned page operation with validated operation names. */
+   async pageOperation(session: BrowserSessionId, request: BrowserPageOperationRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
+-    const provider = this.resolveProvider()
++    const provider = this.resolveProvider(session)
+     // Legacy providers retain their execute permission checks.
+     return provider.pageOperation
+       ? provider.pageOperation(session, request, signal)
+@@ -260,101 +299,101 @@ export class BrowserRuntime extends Service {
+ 
+   /** Wait until the session's page is ready (and optional URL/selector match). */
+   async waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult> {
+-    return this.resolveProvider().waitFor(session, request, signal)
++    return this.resolveProvider(session).waitFor(session, request, signal)
+   }
+ 
+   /** Produce an AI-friendly snapshot of the session's page. */
+   async snapshot(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserSnapshotResult> {
+-    return this.resolveProvider().snapshot(session, signal)
++    return this.resolveProvider(session).snapshot(session, signal)
+   }
+ 
+   /** Read the session's page accessibility tree through the selected provider. */
+   async a11y(session: BrowserSessionId, request: BrowserA11yRequest, signal?: AbortSignal): Promise<BrowserA11yResult> {
+-    return this.resolveProvider().a11y(session, request, signal)
++    return this.resolveProvider(session).a11y(session, request, signal)
+   }
+ 
+   /** Reload the session's active tab through the selected provider. */
+   async reload(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+-    return this.resolveProvider().reload(session, signal)
++    return this.resolveProvider(session).reload(session, signal)
+   }
+ 
+   /** Fetch page content in a requested format. */
+   async content(session: BrowserSessionId, request: BrowserContentRequest, signal?: AbortSignal): Promise<BrowserContentResult> {
+-    return this.resolveProvider().content(session, request, signal)
++    return this.resolveProvider(session).content(session, request, signal)
+   }
+ 
+   /** Click at viewport coordinates (or a located element) through the selected provider. */
+   async click(session: BrowserSessionId, request: BrowserClickRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void> {
+-    return this.resolveProvider().click(session, request, signal)
++    return this.resolveProvider(session).click(session, request, signal)
+   }
+ 
+   /** Click several points in order through the selected provider. */
+   async clickSequence(session: BrowserSessionId, request: BrowserClickSequenceRequest, signal?: AbortSignal): Promise<BrowserClickSequenceResult> {
+-    return this.resolveProvider().clickSequence(session, request, signal)
++    return this.resolveProvider(session).clickSequence(session, request, signal)
+   }
+   /** Type into the focused element (or a located one) through the selected provider. */
+   async type(session: BrowserSessionId, request: BrowserTypeRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void> {
+-    return this.resolveProvider().type(session, request, signal)
++    return this.resolveProvider(session).type(session, request, signal)
+   }
+ 
+   /** Scroll the session's page through the selected provider. */
+   async scroll(session: BrowserSessionId, request: BrowserScrollRequest, signal?: AbortSignal): Promise<void> {
+-    return this.resolveProvider().scroll(session, request, signal)
++    return this.resolveProvider(session).scroll(session, request, signal)
+   }
+ 
+   /** Go back in the session's page history through the selected provider. */
+   async back(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+-    return this.resolveProvider().back(session, signal)
++    return this.resolveProvider(session).back(session, signal)
+   }
+ 
+   /** Go forward in the session's page history through the selected provider. */
+   async forward(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+-    return this.resolveProvider().forward(session, signal)
++    return this.resolveProvider(session).forward(session, signal)
+   }
+ 
+   /** Press one named key through the selected provider. */
+   async key(session: BrowserSessionId, request: BrowserKeyRequest, signal?: AbortSignal): Promise<void> {
+-    return this.resolveProvider().key(session, request, signal)
++    return this.resolveProvider(session).key(session, request, signal)
+   }
+ 
+   /** Fill a form's fields in one batch through the selected provider. */
+   async fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult> {
+-    return this.resolveProvider().fillForm(session, request, signal)
++    return this.resolveProvider(session).fillForm(session, request, signal)
+   }
+ 
+   /** Set one element's value through the selected provider. */
+   async setValue(session: BrowserSessionId, request: BrowserSetValueRequest, signal?: AbortSignal): Promise<BrowserSetValueResult> {
+-    return this.resolveProvider().setValue(session, request, signal)
++    return this.resolveProvider(session).setValue(session, request, signal)
+   }
+ 
+   /** Check or uncheck one checkbox/radio through the selected provider. */
+   async check(session: BrowserSessionId, request: BrowserCheckRequest, signal?: AbortSignal): Promise<{ readonly checked: boolean }> {
+-    return this.resolveProvider().check(session, request, signal)
++    return this.resolveProvider(session).check(session, request, signal)
+   }
+ 
+   /** Select one option of a `<select>` through the selected provider. */
+   async selectOption(session: BrowserSessionId, request: BrowserSelectRequest, signal?: AbortSignal): Promise<BrowserSelectResult> {
+-    return this.resolveProvider().selectOption(session, request, signal)
++    return this.resolveProvider(session).selectOption(session, request, signal)
+   }
+ 
+   /** Clear one element through the selected provider. */
+   async clearField(session: BrowserSessionId, request: BrowserClearRequest, signal?: AbortSignal): Promise<{ readonly cleared: boolean }> {
+-    return this.resolveProvider().clearField(session, request, signal)
++    return this.resolveProvider(session).clearField(session, request, signal)
+   }
+ 
+   /** Read one element's value through the selected provider. */
+   async getValue(session: BrowserSessionId, request: BrowserGetValueRequest, signal?: AbortSignal): Promise<BrowserGetValueResult> {
+-    return this.resolveProvider().getValue(session, request, signal)
++    return this.resolveProvider(session).getValue(session, request, signal)
+   }
+ 
+   /** Extract structured data through the selected provider. */
+   async scrape(session: BrowserSessionId, request: BrowserScrapeRequest, signal?: AbortSignal): Promise<BrowserScrapeResult> {
+-    return this.resolveProvider().scrape(session, request, signal)
++    return this.resolveProvider(session).scrape(session, request, signal)
+   }
+ 
+   /** Capture the current page through the selected provider. */
+   async screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult> {
+-    return this.resolveProvider().screenshot(session, request, signal)
++    return this.resolveProvider(session).screenshot(session, request, signal)
+   }
+ 
+   /**
+@@ -368,7 +407,7 @@ export class BrowserRuntime extends Service {
+    * @returns the encoded frame.
+    */
+   async capturePassive(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserPreviewFrame> {
+-    const provider = this.resolveProvider()
++    const provider = this.resolveProvider(session)
+     if (typeof provider.capturePassive !== 'function') {
+       throw new BrowserError(
+         'browser: this carrier cannot provide a passive preview (watching is unavailable here)',
+@@ -380,12 +419,12 @@ export class BrowserRuntime extends Service {
+ 
+   /** Check for a human-verification challenge on the active tab. */
+   async detectChallenge(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserChallenge> {
+-    return this.resolveProvider().detectChallenge(session, signal)
++    return this.resolveProvider(session).detectChallenge(session, signal)
+   }
+ 
+   /** Return the session's chronological operation log through the provider. */
+   async history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]> {
+-    return this.resolveProvider().history(session)
++    return this.resolveProvider(session).history(session)
+   }
+ 
+   /**
+@@ -405,7 +444,7 @@ export class BrowserRuntime extends Service {
+    * @param session - the session id to test.
+    */
+   exists(session: BrowserSessionId): boolean {
+-    const provider = this.resolveProvider()
++    const provider = this.resolveProvider(session)
+     return provider.exists === undefined ? true : provider.exists(session)
+   }
+ 
+@@ -424,29 +463,29 @@ export class BrowserRuntime extends Service {
+ 
+   /** Replay one recorded operation by sequence number through the provider. */
+   async replay(session: BrowserSessionId, seq: number): Promise<void> {
+-    return this.resolveProvider().replay(session, seq)
++    return this.resolveProvider(session).replay(session, seq)
+   }
+ 
+   /** Download a URL to a local file through the provider. */
+   async download(session: BrowserSessionId, request: BrowserDownloadRequest, signal?: AbortSignal): Promise<{ readonly path: string }> {
+-    return this.resolveProvider().download(session, request, signal)
++    return this.resolveProvider(session).download(session, request, signal)
+   }
+ 
+   /** Export the session's cookies through the provider. */
+   async flushAuth(session: BrowserSessionId): Promise<readonly ExportedCookie[]> {
+-    return this.resolveProvider().flushAuth(session)
++    return this.resolveProvider(session).flushAuth(session)
+   }
+ 
+   /** Import cookies into the session through the provider. */
+   async restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number> {
+-    return this.resolveProvider().restoreAuth(session, cookies)
++    return this.resolveProvider(session).restoreAuth(session, cookies)
+   }
+ 
+   /** Close the session through the selected provider. Idempotent; a missing
+    *  provider is treated as already-closed so teardown paths stay no-ops. */
+   async close(session: BrowserSessionId): Promise<void> {
+     try {
+-      await this.resolveProvider().close(session)
++      await this.resolveProvider(session).close(session)
+     } catch (error) {
+       const code = error instanceof BrowserError ? (error as { code?: string }).code : undefined
+       if (code === 'BROWSER_PROVIDER_UNAVAILABLE'
+@@ -456,9 +495,10 @@ export class BrowserRuntime extends Service {
+         return // provider gone; nothing to close
+       }
+       throw error
++    } finally {
++      this.panelSessions.delete(session)
+     }
+   }
+ }
+ 
+ export default BrowserRuntime
+-
+diff --git a/src/startpage.ts b/src/startpage.ts
+index 812a114..26abc07 100644
+--- a/src/startpage.ts
++++ b/src/startpage.ts
+@@ -49,16 +49,16 @@ const DEFAULT_SHORTCUT_OBJECTS = DEFAULT_SHORTCUTS.map(shortcut => ({ ...shortcu
+  *
+  * 显式标注类型：schemastery 的 `z.object(...)` 推导类型在本仓库的声明生成里会引入无法命名的
+  * `Dict` 引用（`TS2883`），导致 `target/dts` 里缺少本文件的 `.d.ts`，进而被发布前检查判为
+- * 「声明缺失」。标注 `z.Schema<Config>` 只影响类型，运行期对象一字未改。
++ * 「声明缺失」。标注 `z<Config>` 只影响类型，运行期对象一字未改。
+  */
+-export const Config: z.Schema<Config> = z.object({
++export const Config: z<Config> = z.object({
+   version: z.number().default(BROWSER_STARTPAGE_VERSION).volatile(),
+   defaultSearchEngineId: z.string().default(DEFAULT_SEARCH_ENGINE_ID).volatile(),
+   searchEngines: z.array(searchEngineSchema).max(MAX_STARTPAGE_ENGINES)
+     .default(DEFAULT_ENGINE_OBJECTS).volatile(),
+   shortcuts: z.array(shortcutSchema).max(MAX_STARTPAGE_SHORTCUTS)
+     .default(DEFAULT_SHORTCUT_OBJECTS).volatile(),
+-}) as z.Schema<Config>
++}) as z<Config>
+ 
+ /**
+  * Keep preference writes live instead of reloading the owning entry.
+diff --git a/src/tool-browser/index.ts b/src/tool-browser/index.ts
+index c68ad01..1652b85 100644
+--- a/src/tool-browser/index.ts
++++ b/src/tool-browser/index.ts
+@@ -18,9 +18,8 @@ import type { Context } from '@deepseek-ai/cordis'
+ import { setLastOpen } from '../browser-electron/open-slot.ts'
+ import { readFileSync, statSync } from 'node:fs'
+ import { join } from 'node:path'
+-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
++import { defineTool } from '@deepseek-ai/dsh-tools'
+ import { pageOperationScript } from './page-probe.ts'
+-import { readPanelPage } from './panel-page.ts'
+ import { SettingsStore, settingsPath } from '../browser-electron/settings-store.ts'
+ import { createShortcutStore, type ShortcutSettings } from '../browser-electron/startpage-shortcuts.ts'
+ import { createReferenceService, summarizeReference, type BrowserReferenceService } from '../browser-reference/service.ts'
+@@ -34,6 +33,8 @@ import {
+   projectNode,
+ } from './element-fields.ts'
+ 
++type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
++
+ /**
+  * Register a cleanup that runs once when the process exits.
+  *
+@@ -165,21 +166,15 @@ interface ToolBrowserState {
+    */
+   configRestrictedTo: readonly string[] | undefined
+   restrictedByTask: Map<string, readonly string[]>
+-  /**
+-   * Panel-surface page per task.
+-   *
+-   * On the Web shell `dsh_browser_open` hands the address to the sidebar instead of starting a
+-   * carrier session, so read tools had no way to see the page they had just opened ("nothing is
+-   * open in this task yet"). The address recorded here lets those tools read the same page through
+-   * the plugin's own proxy.
+-   */
++  /** Active panel opens, including Web iframes that cannot be driven over CDP. */
+   panelUrlByTask: Map<string, string>
++  pendingPanelOpens: Map<string, Promise<void>>
+ }
+ 
+ function createState(): ToolBrowserState {
+   return {
+     sessionsByTask: new Map(), pendingOpens: new Map(), configRestrictedTo: undefined,
+-    restrictedByTask: new Map(), panelUrlByTask: new Map(),
++    restrictedByTask: new Map(), panelUrlByTask: new Map(), pendingPanelOpens: new Map(),
+   }
+ }
+ 
+@@ -315,30 +310,30 @@ function taskKey(exec: { agent?: { id?: string } } | undefined): string {
+   return exec?.agent?.id ?? 'default'
+ }
+ 
+-/**
+- * Panel 面已知地址：`dsh_browser_open` 在 panel 面只交给侧栏，读工具据此读同一页。
+- * @param state - the calling context's tool state.
+- * @param key - the task key.
+- * @returns the recorded address, or undefined when nothing was opened on the panel.
+- */
+-function panelUrlFor(state: ToolBrowserState, key: string): string | undefined {
+-  return state.panelUrlByTask.get(key)
+-}
+-
+-/**
+- * 本进程自己的源（用于回环直连代理页）。
+- * @param ctx - the plugin context (carries the webServer service).
+- * @returns origin such as `http://127.0.0.1:3080`.
+- */
+-function selfOrigin(ctx: Context): string {
++function rememberSession(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string, agent: ExecAgent | undefined, session: BrowserSessionId | undefined, panelUrl?: string): void {
++  const previous = state.sessionsByTask.get(key)
++  const previousPanelUrl = state.panelUrlByTask.get(key)
++  if (session === undefined) state.sessionsByTask.delete(key)
++  else state.sessionsByTask.set(key, session)
++  if (panelUrl === undefined) state.panelUrlByTask.delete(key)
++  else state.panelUrlByTask.set(key, panelUrl)
++  if (previous === session && (previousPanelUrl !== undefined) === (panelUrl !== undefined)) return
++  const cleanup = (): void => {
++    if (state.sessionsByTask.get(key) !== session || state.panelUrlByTask.has(key) !== (panelUrl !== undefined)) return
++    state.sessionsByTask.delete(key)
++    state.panelUrlByTask.delete(key)
++    if (session !== undefined) void browser.close(session).catch(() => {})
++  }
+   try {
+-    const server = ctx.get('webServer') as { getOrigin?: () => string } | undefined
+-    const origin = server?.getOrigin?.()
+-    if (typeof origin === 'string' && origin !== '') return origin
+-  } catch { /* 读不到就退回环境变量 */ }
+-  const fromEnv = process.env.DSH_WEB_ORIGIN
+-  if (typeof fromEnv === 'string' && fromEnv !== '') return fromEnv
+-  return `http://127.0.0.1:${process.env.DSH_PORT ?? '3080'}`
++    if (agent?.ctx !== undefined) agent.ctx.effect(() => cleanup)
++    else if (key === 'default' && session !== undefined) registerExitCleanup(() => browser.close(session).catch(() => {}))
++  } catch (error) {
++    cleanup()
++    if (previous !== undefined) state.sessionsByTask.set(key, previous)
++    if (previousPanelUrl !== undefined) state.panelUrlByTask.set(key, previousPanelUrl)
++    throw error
++  }
++  if (previous !== undefined && previous !== session) void browser.close(previous).catch(() => {})
+ }
+ 
+ /**
+@@ -354,6 +349,7 @@ function selfOrigin(ctx: Context): string {
+  * @returns the task's session id.
+  */
+ async function ensureSession(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string, agent?: ExecAgent, create = false): Promise<BrowserSessionId> {
++  await state.pendingPanelOpens.get(key)
+   const existing = state.sessionsByTask.get(key)
+   if (existing !== undefined) {
+     // The human closing a browser window ends that session, so a cached id can
+@@ -363,6 +359,12 @@ async function ensureSession(browser: NonNullable<Context['browser']>, state: To
+   }
+   const pending = state.pendingOpens.get(key)
+   if (pending !== undefined) return pending
++  if (state.panelUrlByTask.has(key)) {
++    throw new Error('dsh-builtin-browser: the panel surface has no live CDP session for this operation. '
++      + 'Use the CDP-backed DSH desktop sidebar with a connected desktop bridge and call dsh_browser_open again. '
++      + 'The Web iframe panel cannot provide live snapshots, a11y, content, scrape, screenshots, interactions, '
++      + 'uploads, downloads, or reference capture. Reading tools never start a separate browser.')
++  }
+   // Starting a browser is `dsh_browser_open`'s job and nobody else's. A read tool asking "what is on
+   // screen" used to start one — which, with the human's own Edge already running, handed the command over
+   // and opened yet another window, reported as "one look, two Edge windows". A reader with nothing open
+@@ -375,35 +377,8 @@ async function ensureSession(browser: NonNullable<Context['browser']>, state: To
+   // which task's page is currently visible to the human.
+   const opening = browser.open(key).then(
+     session => {
+-      // Tie the session's lifetime to the agent's scoped context FIRST: when
+-      // the agent (and its DSH session) is disposed, the effect's disposer
+-      // runs and closes the browser session. Registration happens once per
+-      // session (only on first open for the key). If the agent is already
+-      // gone, close the fresh session instead of leaking it.
+-      state.sessionsByTask.set(key, session)
+       state.pendingOpens.delete(key)
+-      try {
+-        if (agent?.ctx !== undefined) {
+-          agent.ctx.effect(() => () => {
+-            const current = state.sessionsByTask.get(key)
+-            if (current === undefined) return
+-            state.sessionsByTask.delete(key)
+-            void browser.close(current).catch(() => {})
+-          })
+-        } else if (key === 'default') {
+-          // Agentless / CLI probe: close the session on process exit so the
+-          // window is not orphaned.
+-          // One hook for the whole process, not one listener per session: a default session can
+-          // be created repeatedly (a CLI probe does), and each registration lived for the life of
+-          // the process — so the listener list grew without bound and Node warned at eleven.
+-          registerExitCleanup(() => browser.close(session).catch(() => {}))
+-        }
+-      } catch (error) {
+-        // effect() failed — undo the registration so future calls retry.
+-        state.sessionsByTask.delete(key)
+-        void browser.close(session).catch(() => {})
+-        throw error
+-      }
++      rememberSession(browser, state, key, agent, session)
+       return session
+     },
+     error => { state.pendingOpens.delete(key); throw error },
+@@ -625,7 +600,7 @@ export function apply(ctx: Context, config: Config = {}): void {
+ 
+   registerSafely(defineTool({
+     name: 'dsh_browser_open',
+-    description: 'Open a URL in the shared browser window and return the resulting snapshot. Opens this task\'s session on first use; newTab is optional. A fresh session starts on a blank tab: call this with the REAL target URL before reading, because reading that tab returns an empty page instead of waiting. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
++    description: 'Open a URL on the selected surface (default: panel). The CDP-backed desktop sidebar returns a live snapshot and supports subsequent browser tools on that same page. The Web iframe panel only queues sidebar navigation: carrier=panel-iframe-navigation-requested, with no snapshot or live-control capability. Reading tools never start another browser. newTab is optional on CDP surfaces. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
+     parameters: {
+       url: { type: 'string', required: true, description: 'The URL to open (HTTP/HTTPS).' },
+       newTab: { type: 'boolean', description: 'Open in a new tab instead of the active one.' },
+@@ -675,38 +650,60 @@ export function apply(ctx: Context, config: Config = {}): void {
+       // places the page in the sidebar and opens no window; "builtin" is the debugging surface.
+       const surfaceHint = (args as { surface?: 'panel' | 'builtin' }).surface
+       const surface = enforceSurface(surfaceHint ?? readSurface(), args.url)
+-      assertSurfaceCanHost(surface, args.url)
++      const browser = ctx.get('browser')
++      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
++      const key = taskKey(exec)
+       if (surface === 'panel') {
+-        try { setLastOpen(args.url, Date.now()) } catch { /* best effort */ }
+-        // 侧栏展示这份地址；读工具据此通过代理读同一页（panel 面没有 CDP 会话）。
+-        state.panelUrlByTask.set(taskKey(exec), args.url)
+-        // Same declared shape as the builtin path: the tool schema is strict about extra properties.
+-        // 能读到页面就把真实标题与元素一并返回：panel 面「只返回空壳」正是「打开了却什么都读不到」的来源。
+-        try {
+-          const page = await readPanelPage(args.url, selfOrigin(ctx), {
+-            ...exec.signal === undefined ? {} : { signal: exec.signal },
+-          })
++        const preceding = state.pendingPanelOpens.get(key)
++        let previous: BrowserSessionId | undefined
++        let session: BrowserSessionId | undefined
++        const opening = (async () => {
++          await preceding
++          await state.pendingOpens.get(key)
++          previous = state.sessionsByTask.get(key)
++          const target = new URL(args.url)
++          if (target.protocol !== 'http:' && target.protocol !== 'https:') throw new Error('dsh_browser_open: panel requires an HTTP/HTTPS URL')
++          exec.signal?.throwIfAborted()
++          session = state.panelUrlByTask.has(key) && previous !== undefined && browser.exists(previous)
++            ? previous : await browser.openPanel?.(key)
++          if (session === undefined) {
++            assertSurfaceCanHost(surface, args.url)
++            exec.signal?.throwIfAborted()
++            setLastOpen(args.url, Date.now())
++            rememberSession(browser, state, key, agentOf(exec), undefined, args.url)
++            return { url: args.url, carrier: 'panel-iframe-navigation-requested', title: '', elements: [], truncated: false }
++          }
++          await browser.openUrl(session, { url: args.url, ...args.newTab === true ? { newTab: true } : {} }, exec.signal)
++          const snapshot = await browser.snapshot(session, exec.signal)
++          exec.signal?.throwIfAborted()
++          rememberSession(browser, state, key, agentOf(exec), session, args.url)
+           return {
+-            url: page.url,
+-            title: page.title,
+-            elements: page.elements.map(element => ({
+-              ref: element.index,
+-              kind: element.kind,
+-              label: element.name,
+-              ...element.detail === undefined ? {} : { selector: element.detail },
+-              x: 0,
+-              y: 0,
+-              frame: false,
+-            })),
+-            truncated: page.truncated,
++            url: snapshot.url,
++            ...snapshot.title !== undefined ? { title: snapshot.title } : {},
++            elements: snapshot.elements.map(el => projectElement(el)),
++            truncated: snapshot.truncated,
++            ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
+           }
+-        } catch {
+-          return { url: args.url, title: '', elements: [], truncated: false }
++        })()
++        const pending = opening.then(() => {})
++        state.pendingPanelOpens.set(key, pending)
++        void pending.catch(() => {})
++        try { return await opening } catch (error) {
++          if (session !== undefined && session !== previous) await browser.close(session).catch(() => {})
++          throw error
++        } finally {
++          if (state.pendingPanelOpens.get(key) === pending) state.pendingPanelOpens.delete(key)
+         }
+       }
+-      const browser = ctx.get('browser')
+-      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+-      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec), true)
++      await state.pendingPanelOpens.get(key)
++      await state.pendingOpens.get(key)
++      if (state.panelUrlByTask.has(key)) {
++        const previous = state.sessionsByTask.get(key)
++        state.sessionsByTask.delete(key)
++        state.panelUrlByTask.delete(key)
++        if (previous !== undefined) await browser.close(previous)
++      }
++      const session = await ensureSession(browser, state, key, agentOf(exec), true)
+       try {
+         await browser.openUrl(session, {
+           url: args.url,
+@@ -808,26 +805,6 @@ export function apply(ctx: Context, config: Config = {}): void {
+       const browser = ctx.get('browser')
+       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+       const key = taskKey(exec)
+-      if (!state.sessionsByTask.has(key) && panelUrlFor(state, key) !== undefined) {
+-        // panel 面没有 CDP 会话：直接读代理页，而不是报「nothing is open」。
+-        const page = await readPanelPage(panelUrlFor(state, key) as string, selfOrigin(ctx), {
+-          ...exec.signal === undefined ? {} : { signal: exec.signal },
+-        })
+-        return {
+-          url: page.url,
+-          title: page.title,
+-          elements: page.elements.map(element => ({
+-            ref: element.index,
+-            kind: element.kind,
+-            label: element.name,
+-            ...element.detail === undefined ? {} : { selector: element.detail },
+-            x: 0,
+-            y: 0,
+-            frame: false,
+-          })),
+-          truncated: page.truncated,
+-        }
+-      }
+       const session = await ensureSession(browser, state, key, agentOf(exec))
+       const snapshot = await browser.snapshot(session, exec.signal)
+       return {
+@@ -2216,6 +2193,8 @@ export function apply(ctx: Context, config: Config = {}): void {
+       const browser = ctx.get('browser')
+       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+       const key = taskKey(exec)
++      await state.pendingPanelOpens.get(key)
++      state.panelUrlByTask.delete(key)
+       const session = state.sessionsByTask.get(key)
+       if (session !== undefined) {
+         try {
+@@ -3194,27 +3173,6 @@ export function apply(ctx: Context, config: Config = {}): void {
+       const browser = ctx.get('browser')
+       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+       const key = taskKey(exec)
+-      if (!state.sessionsByTask.has(key) && panelUrlFor(state, key) !== undefined) {
+-        const page = await readPanelPage(panelUrlFor(state, key) as string, selfOrigin(ctx), {
+-          ...exec.signal === undefined ? {} : { signal: exec.signal },
+-        })
+-        const count = (kind: string): number => page.elements.filter(element => element.kind === kind).length
+-        return {
+-          summary: {
+-            url: page.url,
+-            title: page.title,
+-            readyState: 'panel-proxy',
+-            pending: 0,
+-            quietMs: 0,
+-            inputs: page.elements.filter(element => ['input', 'select', 'textarea'].includes(element.kind)).length,
+-            buttons: count('button'),
+-            links: count('link'),
+-            scrollY: 0,
+-            selection: '',
+-            text: page.text.slice(0, 400),
+-          },
+-        }
+-      }
+       const session = await ensureSession(browser, state, key, agentOf(exec))
+       await installProbe(browser, session, exec.signal)
+       const summary = await probe<ProbeRow>(browser, session, 'summary', [], exec.signal)
+@@ -3293,7 +3251,7 @@ export function apply(ctx: Context, config: Config = {}): void {
+         browserSessionId: session,
+         origin: args.excerptText !== undefined ? 'agent-excerpt' : 'user-selection',
+         entry: 'agent-tool',
+-        carrier: referenceCarrier(),
++        carrier: state.panelUrlByTask.has(taskKey(exec)) ? 'sidebar' : referenceCarrier(),
+         ...args.allowPartial !== undefined ? { allowPartial: args.allowPartial } : {},
+         ...args.tableSelector !== undefined ? { tableSelector: args.tableSelector } : {},
+         ...args.excerptText !== undefined ? { excerptText: args.excerptText } : {},
+diff --git a/tests/carrier-selection-behaviour.test.mjs b/tests/carrier-selection-behaviour.test.mjs
+index 9cc6704..a5bea16 100644
+--- a/tests/carrier-selection-behaviour.test.mjs
++++ b/tests/carrier-selection-behaviour.test.mjs
+@@ -31,7 +31,7 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
+   t.mock.method(DesktopBridgeViewHost, 'discover', discover)
+   const registered = []
+   const disposers = []
+-  let current, handler
++  let current, handler, panelFactory
+   const routes = new Map()
+   const ctx = {
+     get(name) {
+@@ -45,7 +45,10 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
+       }
+       return undefined
+     },
+-    browser: { registerBrowserProvider(provider) {
++    browser: { registerPanelProvider(factory) {
++      panelFactory = factory
++      return () => { panelFactory = undefined }
++    }, registerBrowserProvider(provider) {
+       current = provider.host
+       registered.push(current)
+       return () => {}
+@@ -73,7 +76,7 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
+   })
+   apply(ctx, {})
+   return {
+-    get current() { return current }, registered, dispose,
++    get current() { return current }, get panelFactory() { return panelFactory }, registered, dispose,
+     async choose(nextChannel) {
+       const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel } })])
+       request.method = 'PUT'
+@@ -178,3 +181,28 @@ test('a current sidebar loss installs a fallback that is also released at teardo
+     'the fallback is released and cannot restart a child',
+   )
+ })
++
++test('the panel provider uses a discovered sidebar independently of an explicit Chrome carrier', async t => {
++  const sidebar = new Sidebar()
++  let discoveries = 0
++  const h = harness(t, 'chrome', async () => { discoveries += 1; return sidebar })
++  const selected = h.current
++  const panel = await h.panelFactory('task-1')
++  assert.equal(panel.host, sidebar)
++  assert.equal(h.current, selected, 'opening the panel does not replace the explicit carrier')
++  assert.equal(await h.panelFactory('task-2'), panel, 'one sidebar provider owns isolated per-task sessions')
++  assert.equal(discoveries, 1)
++  h.dispose()
++  await new Promise(setImmediate)
++  assert.equal(sidebar.disposed, true)
++})
++
++test('unsupported panel discovery never returns Chrome, and a later explicit open may rediscover', async t => {
++  let discoveries = 0
++  const h = harness(t, 'chrome', async () => { discoveries += 1; return undefined })
++  const selected = h.current
++  assert.equal(await h.panelFactory('task'), undefined)
++  assert.equal(await h.panelFactory('task'), undefined)
++  assert.equal(discoveries, 2)
++  assert.equal(h.current, selected)
++})
+diff --git a/tests/delivery.test.mjs b/tests/delivery.test.mjs
+index 2a683c5..d00d287 100644
+--- a/tests/delivery.test.mjs
++++ b/tests/delivery.test.mjs
+@@ -59,6 +59,8 @@ function makeContext(handoff = async () => ({ isError: false, value: { uploaded:
+         return {
+           open: async () => 'session-1',
+           exists: () => true,
++          openUrl: async () => {},
++          snapshot: async () => ({ url: 'https://example.com/', elements: [], truncated: false }),
+           download: async () => ({ path: savedFile }),
+         }
+       }
+@@ -74,6 +76,7 @@ const run = async (delivery, handoff, batched = true) => {
+   apply(built.ctx, {})
+   const tool = built.registered.get('dsh_browser_download')
+   const exec = { callId: 'download-1', rootCallId: 'root-1', token: Symbol('outer'), signal: new AbortController().signal, agent: { id: 'task-1' }, toolSet: { view() {} }, deferContext() {}, concludeTurn() {} }
++  await built.registered.get('dsh_browser_open').execute({ url: 'https://example.com/', surface: 'builtin' }, exec)
+   const value = await tool.execute({ url: 'https://example.com/report.pdf', savePath: savedFile }, exec)
+   return { value, calls: built.calls, tool, exec }
+ }
+@@ -182,6 +185,10 @@ test('caller cancellation is propagated after a receiver failure', async () => {
+   })
+   settings({ tool: 'upload', args: {}, onFail: 'keep-local', sites: {} })
+   apply(built.ctx, {})
++  await built.registered.get('dsh_browser_open').execute(
++    { url: 'https://example.com/', surface: 'builtin' },
++    { signal: controller.signal, agent: { id: 'task-cancel' } },
++  )
+   await assert.rejects(
+     built.registered.get('dsh_browser_download').execute(
+       { url: 'https://example.com/report.pdf', savePath: savedFile },
+diff --git a/tests/panel-session.test.mjs b/tests/panel-session.test.mjs
+new file mode 100644
+index 0000000..c166544
+--- /dev/null
++++ b/tests/panel-session.test.mjs
+@@ -0,0 +1,229 @@
++import { after, test } from 'node:test'
++import assert from 'node:assert/strict'
++import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++
++const home = mkdtempSync(join(tmpdir(), 'dsh-panel-session-'))
++process.env.DSH_HOME = home
++after(() => rmSync(home, { recursive: true, force: true }))
++const { apply } = await import('../lib/tool-browser/index.js')
++
++function mount(overrides = {}, owner = 'panel-task') {
++  const calls = []
++  let url = 'https://example.com/'
++  let title = 'Visible page'
++  const record = (name, result) => async (session, request) => {
++    calls.push({ name, session, request })
++    return typeof result === 'function' ? result(request) : result
++  }
++  const browser = {
++    open: record('open', 'browser:builtin'),
++    openPanel: record('openPanel', 'browser:panel'),
++    exists: () => true,
++    close: record('close'),
++    openUrl: record('openUrl', request => { url = request.url }),
++    snapshot: record('snapshot', () => ({ url, title, elements: [], truncated: false })),
++    a11y: record('a11y', () => ({ url, title, count: 0, nodes: [], truncated: false })),
++    content: record('content', { content: 'live content', truncated: false }),
++    scrape: record('scrape', { count: 0, items: [] }),
++    screenshot: record('screenshot', { dataUrl: 'data:image/png;base64,AA==', width: 1, height: 1 }),
++    click: record('click'),
++    type: record('type'),
++    download: record('download', { path: join(home, 'download.txt') }),
++    pageOperation: record('pageOperation', request => ({ ok: true, value: request.operation === 'upload'
++      ? JSON.stringify({ ok: true, name: request.file.name, size: Buffer.from(request.file.base64, 'base64').length }) : 3 })),
++    execute: record('execute', () => ({ ok: true, value: { ok: true, url, title,
++      events: [{ kind: 'text', exact: 'Selected words', prefix: 'Before ', suffix: ' after' }] } })),
++    ...overrides,
++  }
++  const tools = new Map()
++  const cleanups = []
++  const exec = { signal: new AbortController().signal, agent: { id: owner,
++    session: { header: { cwd: home } }, ctx: { effect: effect => { cleanups.push(effect()) } } } }
++  apply({ tools: { register: tool => tools.set(tool.name, tool) },
++    systemPrompt: { section() {} }, effect() {}, get: name => name === 'browser' ? browser : undefined })
++  return { browser, calls, exec, cleanups,
++    navigate: (next, heading) => { url = next; title = heading },
++    run: (name, args = {}) => tools.get('dsh_browser_' + name).execute(args, exec) }
++}
++
++const operations = [
++  ['snapshot', {}], ['a11y', {}], ['content', { format: 'text' }],
++  ['scrape', { item: '.item', fields: { title: 'h2' } }], ['screenshot', {}],
++  ['click', { target: { by: 'css', value: '#go' } }], ['type', { text: 'hello' }],
++  ['upload', { target: { by: 'css', value: '#file' }, path: join(home, 'upload.txt') }],
++  ['download', { url: 'https://example.com/file', savePath: join(home, 'download.txt') }],
++  ['reference_capture', {}],
++]
++writeFileSync(join(home, 'upload.txt'), 'upload bytes')
++
++test('default panel open drives every operation on its live sidebar session, without a builtin open', async () => {
++  const { run, calls, navigate } = mount()
++  const opened = await run('open', { url: 'https://example.com/' })
++  assert.equal(opened.title, 'Visible page')
++  assert.deepEqual(opened.elements, [])
++  navigate('https://example.com/human-navigation', 'Changed by human')
++  assert.equal((await run('snapshot')).title, 'Changed by human')
++  assert.equal((await run('a11y')).url, 'https://example.com/human-navigation')
++  for (const [name, args] of operations) {
++    const start = calls.length
++    const value = await run(name, args)
++    if (name === 'reference_capture') assert.equal(value.ok, true)
++    if (name === 'upload') assert.equal(value.ok, true)
++    assert.ok(calls.length > start, name + ' reached the live session')
++    assert.ok(calls.slice(start).every(call => call.session === 'browser:panel'), name + ' stayed on the sidebar')
++  }
++  assert.equal(calls.filter(call => call.name === 'open').length, 0)
++  assert.equal(calls.filter(call => call.name === 'openPanel').length, 1)
++  const references = await run('reference_list')
++  assert.equal(references.references[0].carrier, 'sidebar')
++})
++
++test('Web panel open records a navigation request; unsupported tools name the surface and desktop alternative', async () => {
++  const { run, calls } = mount({ openPanel: async () => undefined })
++  const opened = await run('open', { url: 'https://example.com/' })
++  assert.equal(opened.carrier, 'panel-iframe-navigation-requested')
++  assert.deepEqual(opened.elements, [])
++  for (const [name, args] of [...operations, ['state', {}]]) {
++    await assert.rejects(run(name, args), error => {
++      assert.match(error.message, /panel surface/)
++      assert.match(error.message, /CDP-backed DSH desktop sidebar/)
++      assert.doesNotMatch(error.message, /nothing is open/)
++      return true
++    })
++  }
++  assert.deepEqual(calls, [], 'neither a static refetch nor another browser was used')
++  await run('reset_session')
++  await assert.rejects(run('a11y'), /nothing is open/)
++})
++
++test('reading an unopened task never opens any surface', async () => {
++  const { run, calls } = mount()
++  for (const [name, args] of operations) await assert.rejects(run(name, args), /nothing is open/)
++  assert.deepEqual(calls, [])
++})
++
++test('builtin -> CDP panel -> builtin switches sessions instead of driving a stale page', async () => {
++  const { run, calls } = mount()
++  await run('open', { url: 'https://old.example/', surface: 'builtin' })
++  await run('open', { url: 'https://new.example/' })
++  await run('content', { format: 'text' })
++  assert.equal(calls.at(-1).session, 'browser:panel')
++  assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:builtin'))
++  await run('open', { url: 'https://third.example/', surface: 'builtin' })
++  await run('a11y')
++  assert.equal(calls.at(-1).session, 'browser:builtin')
++  assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:panel'))
++})
++
++test('builtin -> Web panel forgets and closes the old controllable session', async () => {
++  const { run, calls } = mount({ openPanel: async () => undefined })
++  await run('open', { url: 'https://old.example/', surface: 'builtin' })
++  await run('open', { url: 'https://new.example/' })
++  const before = calls.length
++  await assert.rejects(run('content', { format: 'text' }), /panel surface/)
++  assert.equal(calls.length, before)
++  assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:builtin'))
++})
++
++test('panel navigation errors propagate, close the failed session, and never fall back to builtin', async () => {
++  const failure = new Error('sidebar navigation failed')
++  const { run, calls } = mount({ openUrl: async () => { throw failure } })
++  await assert.rejects(run('open', { url: 'https://example.com/' }), error => error === failure)
++  assert.deepEqual(calls.map(call => call.name), ['openPanel', 'close'])
++  await assert.rejects(run('a11y'), /nothing is open/)
++})
++
++test('a failed panel switch does not replace the working builtin session', async () => {
++  const { run, browser, calls } = mount()
++  await run('open', { url: 'https://old.example/', surface: 'builtin' })
++  browser.openUrl = async () => { throw new Error('network failed') }
++  await assert.rejects(run('open', { url: 'https://new.example/' }), /network failed/)
++  await run('a11y')
++  assert.equal(calls.at(-1).session, 'browser:builtin')
++})
++
++test('a stale panel session yields a capability error without launching a replacement', async () => {
++  const { run, browser, calls } = mount()
++  await run('open', { url: 'https://example.com/' })
++  browser.exists = () => false
++  const before = calls.length
++  await assert.rejects(run('screenshot'), /panel surface/)
++  assert.equal(calls.length, before)
++})
++
++test('panel sessions close with their task and the next read requires an explicit open', async () => {
++  const { run, calls, cleanups } = mount()
++  await run('open', { url: 'https://example.com/' })
++  for (const cleanup of cleanups) cleanup()
++  assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:panel'))
++  await assert.rejects(run('a11y'), /nothing is open/)
++})
++
++test('reads wait for an in-flight explicit panel open but never initiate one', async () => {
++  let ready
++  let started
++  const opening = new Promise(resolve => { ready = resolve })
++  const reached = new Promise(resolve => { started = resolve })
++  const { run, calls } = mount({ openPanel: async () => { started(); return opening } })
++  const pending = run('open', { url: 'https://example.com/' })
++  await reached
++  const reading = run('a11y')
++  ready('browser:panel')
++  await pending
++  await reading
++  assert.equal(calls.at(-1).name, 'a11y')
++  assert.equal(calls.at(-1).session, 'browser:panel')
++})
++
++test('loopback targets are supported on the native CDP panel, not on the Web proxy panel', async () => {
++  const native = mount()
++  await native.run('open', { url: 'http://127.0.0.1:4444/page' })
++  assert.ok(native.calls.some(call => call.name === 'openUrl'))
++  const web = mount({ openPanel: async () => undefined })
++  await assert.rejects(web.run('open', { url: 'http://127.0.0.1:4444/page' }), /cannot host this machine/)
++  assert.deepEqual(web.calls, [])
++})
++
++test('reopening the panel reuses the live session and registers task cleanup only once', async () => {
++  const { run, calls, cleanups } = mount()
++  await run('open', { url: 'https://example.com/first' })
++  await run('open', { url: 'https://example.com/second', newTab: true })
++  assert.equal(calls.filter(call => call.name === 'openPanel').length, 1)
++  assert.deepEqual(calls.filter(call => call.name === 'openUrl').at(-1).request,
++    { url: 'https://example.com/second', newTab: true })
++  assert.equal(cleanups.length, 1)
++  cleanups[0]()
++  await assert.rejects(run('snapshot'), /nothing is open/)
++})
++
++test('panel snapshot and discovery failures are not disguised as successful empty opens', async () => {
++  const snapshot = mount({ snapshot: async () => { throw new Error('CDP disconnected') } })
++  await assert.rejects(snapshot.run('open', { url: 'https://example.com/' }), /CDP disconnected/)
++  assert.ok(snapshot.calls.some(call => call.name === 'close' && call.session === 'browser:panel'))
++  const discovery = mount({ openPanel: async () => { throw new Error('bridge refused') } })
++  await assert.rejects(discovery.run('open', { url: 'https://example.com/' }), /bridge refused/)
++  assert.deepEqual(discovery.calls, [])
++})
++
++test('a cancelled panel open never launches a browser or establishes a task session', async () => {
++  const { run, calls, exec } = mount()
++  const controller = new AbortController()
++  controller.abort(new Error('cancelled before open'))
++  exec.signal = controller.signal
++  await assert.rejects(run('open', { url: 'https://example.com/' }), /cancelled before open/)
++  assert.deepEqual(calls, [])
++  await assert.rejects(run('a11y'), /nothing is open/)
++})
++
++test('concurrent explicit panel opens serialize navigation and share one live session', async () => {
++  const { run, calls } = mount()
++  await Promise.all([
++    run('open', { url: 'https://example.com/first' }),
++    run('open', { url: 'https://example.com/second' }),
++  ])
++  assert.equal(calls.filter(call => call.name === 'openPanel').length, 1)
++  assert.deepEqual(calls.filter(call => call.name === 'openUrl').map(call => call.request.url),
++    ['https://example.com/first', 'https://example.com/second'])
++})
+diff --git a/tests/runtime-panel.test.mjs b/tests/runtime-panel.test.mjs
+new file mode 100644
+index 0000000..e3f84c3
+--- /dev/null
++++ b/tests/runtime-panel.test.mjs
+@@ -0,0 +1,110 @@
++import { test } from 'node:test'
++import assert from 'node:assert/strict'
++import { BrowserRuntime } from '../lib/browser/runtime.js'
++
++// Exercise the real registry/dispatch without starting Cordis or a carrier process.
++function runtimeWith(provider) {
++  const runtime = Object.create(BrowserRuntime.prototype)
++  runtime.providers = new Map(provider === undefined ? [] : [[provider.id, provider]])
++  runtime.panelSessions = new Map()
++  Object.defineProperty(runtime, 'ctx', { value: { effect: effect => {
++    const cleanup = effect()
++    return () => cleanup()
++  } } })
++  return runtime
++}
++
++function provider(id, calls) {
++  return new Proxy({ id, available: () => true, open: async label => {
++    calls.push([id, 'open', label])
++    return 'browser:' + id
++  } }, { get: (target, name) => name === 'then' ? undefined : name in target ? target[name] : (session, ...args) => {
++    calls.push([id, name, session, ...args])
++    return name === 'exists' ? true : id
++  } })
++}
++
++test('all session operations dispatch to the panel provider even when the default carrier changes', async () => {
++  const calls = []
++  const builtin = provider('builtin', calls)
++  const sidebar = provider('sidebar', calls)
++  const runtime = runtimeWith(builtin)
++  runtime.registerPanelProvider(async label => {
++    assert.equal(label, 'task-1')
++    return sidebar
++  })
++  const session = await runtime.openPanel('task-1')
++  assert.equal(session, 'browser:sidebar')
++  runtime.providers = new Map([['replacement', provider('replacement', calls)]])
++  for (const method of [
++    'openUrl', 'listTabs', 'switchTab', 'closeTab', 'reset', 'navigate', 'execute', 'pageOperation',
++    'waitFor', 'snapshot', 'a11y', 'reload', 'content', 'click', 'clickSequence', 'type', 'scroll',
++    'back', 'forward', 'key', 'fillForm', 'setValue', 'check', 'selectOption', 'clearField',
++    'getValue', 'scrape', 'screenshot', 'capturePassive', 'detectChallenge', 'history',
++    'exists', 'replay', 'download', 'flushAuth', 'restoreAuth',
++  ]) {
++    const before = calls.length
++    await runtime[method](session, {})
++    assert.equal(calls.length, before + 1, method)
++    assert.deepEqual(calls.at(-1).slice(0, 3), ['sidebar', method, session], method)
++  }
++  await runtime.close(session)
++  assert.deepEqual(calls.at(-1).slice(0, 3), ['sidebar', 'close', session])
++  assert.equal(runtime.panelSessions.size, 0)
++  assert.equal(await runtime.open('task-1'), 'browser:replacement')
++})
++
++test('no panel provider or unsupported Web panel never falls back to the default provider', async () => {
++  const calls = []
++  const runtime = runtimeWith(provider('builtin', calls))
++  assert.equal(await runtime.openPanel('task-1'), undefined)
++  runtime.registerPanelProvider(async () => undefined)
++  assert.equal(await runtime.openPanel('task-1'), undefined)
++  assert.deepEqual(calls, [])
++})
++
++test('a panel session does not require any default provider', async () => {
++  const calls = []
++  const runtime = runtimeWith()
++  runtime.registerPanelProvider(async () => provider('sidebar', calls))
++  const session = await runtime.openPanel('task')
++  assert.equal(await runtime.a11y(session, {}), 'sidebar')
++  assert.throws(() => runtime.exists('unknown-session'), /no browser provider/)
++})
++
++test('panel provider discovery errors propagate without trying a default carrier', async () => {
++  const calls = []
++  const runtime = runtimeWith(provider('builtin', calls))
++  runtime.registerPanelProvider(async () => { throw new Error('bridge refused') })
++  await assert.rejects(runtime.openPanel('task'), /bridge refused/)
++  assert.deepEqual(calls, [])
++})
++
++test('disposing panel registration removes its sessions and opener', async () => {
++  const runtime = runtimeWith()
++  const dispose = runtime.registerPanelProvider(async () => provider('sidebar', []))
++  await runtime.openPanel('task')
++  assert.equal(runtime.panelSessions.size, 1)
++  dispose()
++  assert.equal(runtime.panelSessions.size, 0)
++  assert.equal(await runtime.openPanel('task'), undefined)
++})
++
++test('an open racing disposal closes the new session and rejects rather than leaking it', async () => {
++  const calls = []
++  const sidebar = provider('sidebar', calls)
++  let ready
++  let started
++  const opening = new Promise(resolve => { ready = resolve })
++  const reached = new Promise(resolve => { started = resolve })
++  sidebar.open = async () => { started(); return opening }
++  const runtime = runtimeWith()
++  const dispose = runtime.registerPanelProvider(async () => sidebar)
++  const pending = runtime.openPanel('task')
++  await reached
++  dispose()
++  ready('browser:sidebar')
++  await assert.rejects(pending, /disposed during open/)
++  assert.deepEqual(calls, [['sidebar', 'close', 'browser:sidebar']])
++  assert.equal(runtime.panelSessions.size, 0)
++})
+diff --git a/tests/tool-boundaries.test.mjs b/tests/tool-boundaries.test.mjs
+index 8f5dc66..8ae960c 100644
+--- a/tests/tool-boundaries.test.mjs
++++ b/tests/tool-boundaries.test.mjs
+@@ -16,7 +16,9 @@ await mkdir(outside)
+ await writeFile(join(workspace, 'allowed.txt'), 'task-file')
+ await writeFile(join(outside, 'secret.txt'), 'outside-file')
+ 
+-function mount(browser, extra = {}) {
++async function mount(browser, extra = {}) {
++  browser.openUrl ??= async () => {}
++  browser.snapshot ??= async () => ({ url: 'https://fixture.test/page', elements: [], truncated: false })
+   const tools = new Map()
+   const ctx = {
+     get: name => name === 'browser' ? browser : name === 'workingDirectory' ? extra.directory : undefined,
+@@ -25,6 +27,7 @@ function mount(browser, extra = {}) {
+   }
+   apply(ctx)
+   const exec = { signal: new AbortController().signal, agent: { id: 'boundary-task', session: { header: { cwd: workspace } } } }
++  await tools.get('dsh_browser_open').execute({ url: 'https://fixture.test/page', surface: 'builtin' }, exec)
+   return { run: (name, args) => tools.get('dsh_browser_' + name).execute(args, exec) }
+ }
+ 
+@@ -37,7 +40,7 @@ test('upload uses the task workspace and rejects an external junction and oversi
+       return { ok: true, value: request.operation === 'upload' ? JSON.stringify({ ok: true, name: request.file.name, size: Buffer.from(request.file.base64, 'base64').length }) : 3 }
+     },
+   }
+-  const { run } = mount(browser)
++  const { run } = await mount(browser)
+   const target = { by: 'css', value: '#file' }
+   const valid = await run('upload', { target, path: join(workspace, 'allowed.txt') })
+   assert.equal(valid.ok, true)
+@@ -67,7 +70,7 @@ test('upload uses the task workspace and rejects an external junction and oversi
+ 
+ test('the working directory service takes precedence over the original session metadata', async () => {
+   const browser = { open: async () => 'browser:cwd', exists: () => true, pageOperation: async () => ({ ok: true, value: 3 }) }
+-  const { run } = mount(browser, { directory: { ensure: async () => outside } })
++  const { run } = await mount(browser, { directory: { ensure: async () => outside } })
+   await assert.rejects(run('upload', { target: { by: 'css', value: '#file' }, path: join(workspace, 'allowed.txt') }), /outside the task workspace/)
+ })
+ 
+@@ -88,7 +91,7 @@ function pageBrowser() {
+ 
+ test('response waits reject previous completions and accept a request completed while waiting', async () => {
+   const { page, browser } = pageBrowser()
+-  const { run } = mount(browser)
++  const { run } = await mount(browser)
+   await browser.pageOperation('', { operation: 'install' })
+   await vm.runInContext('fetch("/completed")', page)
+   assert.equal((await run('wait_for_response', { urlContains: '/completed', timeoutMs: 0 })).matched, false)
+@@ -119,7 +122,8 @@ test('batch accepts the documented object forms and the existing shorthand', asy
+     execute: async () => ({ ok: true, value: 'script result' }),
+     pageOperation: async (_s, request) => ({ ok: true, value: request.operation === 'text' ? 'true' : request.operation === 'url' ? '"https://fixture.test/page"' : request.operation === 'probe' ? '{"pending":0,"quietMs":500}' : 3 }),
+   }
+-  const { run } = mount(browser)
++  const { run } = await mount(browser)
++  calls.length = 0
+   const value = await run('do', { autoDismiss: false, steps: [
+     { open: { url: 'https://fixture.test/page' } },
+     { tap: { target: { by: 'css', value: '#go' } } },
+diff --git a/tests/tool-layer-passthrough.test.mjs b/tests/tool-layer-passthrough.test.mjs
+index be83809..e92fe40 100644
+--- a/tests/tool-layer-passthrough.test.mjs
++++ b/tests/tool-layer-passthrough.test.mjs
+@@ -42,6 +42,7 @@ function fakeBrowser(overrides = {}) {
+     open: async () => 'session-1',
+     session: () => 'session-1',
+     exists: () => true,
++    openUrl: async () => {},
+     a11y: async () => ({
+       url: 'https://example.com/',
+       title: 'Example Domain',
+@@ -76,9 +77,16 @@ async function run(tools, name) {
+   return await tool.execute({}, { task: 'test' })
+ }
+ 
++async function open(tools) {
++  await tools.get('dsh_browser_open').execute(
++    { url: 'https://example.com/', surface: 'builtin' }, { task: 'test' },
++  )
++}
++
+ test('dsh_browser_a11y hands the selector on', async () => {
+   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
+   apply(ctx)
++  await open(tools)
+ 
+   const value = await run(tools, 'dsh_browser_a11y')
+ 
+@@ -93,6 +101,7 @@ test('dsh_browser_a11y hands the selector on', async () => {
+ test('dsh_browser_snapshot hands the selector on', async () => {
+   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
+   apply(ctx)
++  await open(tools)
+ 
+   const value = await run(tools, 'dsh_browser_snapshot')
+   assert.equal(value.elements[0].selector, '#probe-btn', 'the snapshot mapping carries selector')
+@@ -103,6 +112,7 @@ test('both element mappings carry the same field set', async () => {
+   // other did not. Comparing them catches the next field that only lands in one of them.
+   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
+   apply(ctx)
++  await open(tools)
+ 
+   const a11y = await run(tools, 'dsh_browser_a11y')
+   const snapshot = await run(tools, 'dsh_browser_snapshot')
+@@ -124,6 +134,7 @@ test('a required field in the output schema is one the tool can actually produce
+   // ran a tool). Optional fields are exempt, since those may legitimately be absent.
+   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
+   apply(ctx)
++  await open(tools)
+ 
+   const problems = []
+   for (const name of ['dsh_browser_a11y', 'dsh_browser_snapshot']) {
+-- 
+2.56.0
+
