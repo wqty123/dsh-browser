@@ -260,6 +260,21 @@ describe('production assembly — shared composer and sent capsules', () => {
     expect(document.querySelector('[role="dialog"] [role="status"]')?.textContent).toContain('桥接版本过旧，请点击 卸载并重装')
   })
 
+  it.each([
+    ['BROWSER_BRIDGE_OUTDATED', '桥接版本过旧，请点击 卸载并重装'],
+    ['BROWSER_NATIVE_SURFACE_UNAVAILABLE', '浏览器桥接不可用（原生侧栏未就绪），请打开 Desktop 浏览器侧栏后重试'],
+  ])('keeps %s visible on the Desktop sent capsule without navigating', async (code, message) => {
+    const app = await assembled(undefined, { client: true, native: true, away: true })
+    const sent = await app.sentMessage(await send(app.runtime))
+    app.outcome({ ok: false, code })
+    vi.useFakeTimers()
+    await act(async () => { pill(sent).click(); pill(sent).focus() })
+    await act(async () => { await vi.advanceTimersByTimeAsync(12000) })
+    expect(document.querySelector('[role="dialog"] [role="status"]')?.textContent).toContain(message)
+    expect(app.reveals).toHaveLength(1)
+    expect(app.navigate).not.toHaveBeenCalled()
+  })
+
   it.each([false, true])('shows persistent bridge-skew text on the actual sent capsule (retry=%s)', async retry => {
     const app = await assembled(undefined, { client: true, native: true, away: true })
     const message = await send(app.runtime)

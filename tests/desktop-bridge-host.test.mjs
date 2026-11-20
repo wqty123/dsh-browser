@@ -308,16 +308,17 @@ test('discovery version refusals and missing versions are explicit, while unrela
   } finally { await bridge.close() }
 })
 
-test('a missing loader package is a named reinstall error during discovery and native commands', async () => {
-  const unavailable = { ok: false, code: 'DSH_BRIDGE_PACKAGE_UNAVAILABLE', error: 'package cannot be resolved' }
+for (const [code, name, message, errorCode] of [
+  ['DSH_BRIDGE_PACKAGE_UNAVAILABLE', 'BridgeVersionError', '浏览器桥接不可用，请点击 卸载并重装', 'BROWSER_BRIDGE_VERSION_MISMATCH'],
+  ['BROWSER_BRIDGE_OUTDATED', 'BridgeVersionError', '桥接版本过旧，请点击 卸载并重装', 'BROWSER_BRIDGE_VERSION_MISMATCH'],
+  ['BROWSER_NATIVE_SURFACE_UNAVAILABLE', 'NativeSurfaceUnavailableError', '浏览器桥接不可用（原生侧栏未就绪），请打开 Desktop 浏览器侧栏后重试', 'BROWSER_NATIVE_SURFACE_UNAVAILABLE'],
+]) test(`${code} is an actionable error during discovery and native commands`, async () => {
+  const unavailable = { ok: false, code, error: 'bridge refused' }
   const state = { tabs: 1, dead: [], listAnswer: unavailable, cdpAnswer: undefined }
   const bridge = await startFakeBridge(state)
   withEndpoint(bridge.port)
   let host
-  const expected = {
-    name: 'BridgeVersionError', code: 'BROWSER_BRIDGE_VERSION_MISMATCH',
-    message: '浏览器桥接不可用，请点击 卸载并重装',
-  }
+  const expected = { name, code: errorCode, message }
   try {
     await assert.rejects(DesktopBridgeViewHost.discover(), expected)
     assert.equal(DesktopBridgeViewHost.compatibilityError(), expected.message)

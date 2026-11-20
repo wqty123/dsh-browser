@@ -445,6 +445,18 @@ describe('revealReference — it goes to the source page', () => {
     expect(runtime.snapshot().reveal?.message).toContain('浏览器桥接不可用，请点击 卸载并重装')
   })
 
+  it.each([
+    ['BROWSER_BRIDGE_OUTDATED', '桥接版本过旧，请点击 卸载并重装'],
+    ['BROWSER_NATIVE_SURFACE_UNAVAILABLE', '浏览器桥接不可用（原生侧栏未就绪），请打开 Desktop 浏览器侧栏后重试'],
+  ])('shows %s from reveal without navigating', async (code, message) => {
+    const { http, runtime, card } = await withCard()
+    http.revealOutcome = { ok: false, code }
+    runtime.setSourceOpener(async () => { throw new Error('must not open a source') })
+    await expect(runtime.revealReference(card.referenceId)).resolves.toBe('unavailable')
+    expect(http.revealCalls).toHaveLength(1)
+    expect(runtime.snapshot().reveal?.message).toContain(message)
+  })
+
   it('shows a missing bridge package after source binding is retried', async () => {
     const { http, runtime, card } = await withCard()
     http.revealOutcome = { ok: true, status: 'unavailable' }
