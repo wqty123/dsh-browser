@@ -225,8 +225,9 @@ function selectShellProcesses(rows, root, selfPid) {
     ancestors.add(cursor)
     cursor = byPid.get(cursor)?.ParentProcessId
   }
-  // Windows paths compare case-insensitively; a macOS bundle path is compared as written.
-  const fold = process.platform === 'win32' ? value => value.toLowerCase() : value => value
+  // Windows and (by default) macOS volumes are case-insensitive: `/applications/…` names the same
+  // running app, and a missed match here would patch a live installation.
+  const fold = process.platform === 'linux' ? value => value : value => value.toLowerCase()
   const expectedExe = fold(resolve(layoutPaths(root).executable))
   const expectedName = fold(basename(expectedExe))
   const selected = []

@@ -50,9 +50,9 @@ function inside(base: string, path: string): boolean {
 export function automaticMaintenanceSupported(platform: NodeJS.Platform = process.platform): boolean {
   return platform === 'win32' || platform === 'darwin'
 }
-/** Same-path comparison: Windows paths are case-insensitive, a macOS bundle path is not. */
+/** Same-path comparison: Windows and (by default) macOS volumes are case-insensitive. */
 function samePath(a: string, b: string): boolean {
-  return process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
+  return process.platform === 'linux' ? resolve(a) === resolve(b) : resolve(a).toLowerCase() === resolve(b).toLowerCase()
 }
 function requireLiveDesktop(): void {
   if (!automaticMaintenanceSupported()) throw new Error('automatic bridge maintenance requires DSH Desktop on Windows or macOS')

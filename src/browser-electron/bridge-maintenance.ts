@@ -71,9 +71,9 @@ function prospectiveRealPath(path: string): string {
   return resolve(realpathSync(ancestor), ...missing)
 }
 
-/** Windows paths compare case-insensitively; a macOS bundle path is compared as written. */
+/** Windows and (by default) macOS volumes are case-insensitive. */
 function samePath(a: string, b: string): boolean {
-  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+  return process.platform === 'linux' ? a === b : a.toLowerCase() === b.toLowerCase()
 }
 
 /** One POSIX shell word: single-quoted, with embedded quotes closed and escaped. */
