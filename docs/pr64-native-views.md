@@ -16,7 +16,7 @@ The native adapter also installs the existing reference overlay through scoped e
 
 ## Runtime delivery
 
-`0004-native-views.patch` and `0005-native-client-errors.patch` supplement each rc.3/rc.5/main source series. Revision-3 runtime specs cover Sidebar-right `lib/client.js`, Desktop `lib/main.js` and `lib/preload-app.cjs`. Sidebar-browser changes only types/Host references, not its client runtime. The source-built release outputs compare byte-for-byte with runtime-patched pristine outputs. Full output fixtures remain compressed with uncompressed length/SHA-256 checks.
+`0004-native-views.patch.gz` and `0005-native-client-errors.patch` supplement each rc.3/rc.5/main source series. Decompress the first patch before applying the series; its complete source bytes are pinned by `sources/manifest.json`. Revision-3 runtime specs cover Sidebar-right `lib/client.js`, Desktop `lib/main.js` and `lib/preload-app.cjs`. Sidebar-browser changes only types/Host references, not its client runtime. The source-built release outputs compare byte-for-byte with runtime-patched pristine outputs. Full output fixtures remain compressed with uncompressed length/SHA-256 checks.
 
 Source commits: rc.3 `062adf7365` / `13705d30f0`; rc.5 `da20bebd9d` / `52511a6004`; main `aa0109aba9` / `f430580383`. Applying each new pair to its prior status-source commit reproduces the entire committed Git tree, not only selected files.
 

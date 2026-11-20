@@ -1,0 +1,14 @@
+{
+  "main/0004-native-views.patch": {
+    "bytes": 85275,
+    "sha256": "e0211aabc6b7479530c07a8c35c544fd457071b81b8a978bb066eb10618b764b"
+  },
+  "rc3/0004-native-views.patch": {
+    "bytes": 86227,
+    "sha256": "84064739a328652938f4cf8fc30a70d4503d7a8b112ba17d336fc46616ffbaef"
+  },
+  "rc5/0004-native-views.patch": {
+    "bytes": 86227,
+    "sha256": "57dc227f3eb17627194994b68e3d4fec56330fac04bb040f255772a4807e38e2"
+  }
+}

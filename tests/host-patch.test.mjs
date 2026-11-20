@@ -18,6 +18,17 @@ test('compressed release artifacts retain their full source-build bytes', () => 
   }
 })
 
+test('compressed native-view source patches retain their complete git format-patch bytes', () => {
+  const root = new URL('../dsh-host-patch/sources/', import.meta.url)
+  const manifest = JSON.parse(fs.readFileSync(new URL('manifest.json', root), 'utf8'))
+  assert.deepEqual(Object.keys(manifest).sort(), ['main', 'rc3', 'rc5'].map(release => `${release}/0004-native-views.patch`))
+  for (const [file, expected] of Object.entries(manifest)) {
+    const bytes = gunzipSync(fs.readFileSync(new URL(`${file}.gz`, root)))
+    assert.equal(bytes.length, expected.bytes, file)
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), expected.sha256, file)
+  }
+})
+
 for (const release of ['rc3', 'rc5']) describe(release, () => {
 const spec = JSON.parse(fs.readFileSync(new URL(`../dsh-host-patch/${release}.json`, import.meta.url), 'utf8'))
 const fixture = (id, kind) => hostPatchFixture(id, kind, release)

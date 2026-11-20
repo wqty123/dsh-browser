@@ -6,6 +6,8 @@ The explicit host-bootstrap settings action selects the runtime specification by
 
 The rc.5 source base is release tag `dsh-v0.2.2-rc.5`, commit `9c2670d3bce5275e0d1610272958121af87787bb`, not the later master merge `2e39e704`. Its sidebar sources match the published npm package, `lib/index.js` matches byte for byte, and `lib/client.js` matches after normalizing only the three build-directory-dependent CSS-module prefixes. The rc.5 Desktop pristine hash is from a source build, not a published Desktop artifact: the GitHub release exposes source archives only. Desktop installations with a different pristine hash are refused safely and retain the legacy bridge fallback.
 
+The largest source patches, `0004-native-views.patch.gz`, are losslessly compressed; `sources/manifest.json` records their uncompressed lengths and SHA-256 hashes. For a source build, decompress each with `gzip -dc` into `0004-native-views.patch`, then apply the complete source series in filename order. Runtime bootstrap does not read these source-patch files.
+
 ## Standalone CLI (including Web)
 
 Run the dependency-free applier using a package's real directory, not the profile directory:
