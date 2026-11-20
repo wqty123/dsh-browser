@@ -1,13 +1,32 @@
 /**
- * Web guests execute in CSP-sandboxed opaque origins, including direct document loads.
- * Only this proxy prefix is available to guest network requests. App storage, APIs,
- * cookies and authenticated reference submission remain in the owning app frame.
+ * Same-origin guest proxy for the Web sidebar.
+ *
+ * WHY THIS EXISTS
+ * The DSH desktop shell hosts a sidebar tab in an Electron `<webview>`, so the plugin can reach into
+ * that guest and inject the reference bar. The Web shell has no such handle: its sidebar renders an
+ * ordinary `<iframe>`, and an iframe pointed at a real site is cross-origin — unreadable and
+ * uninjectable. That is why "the sidebar cannot reference" on Web while the same flow works in the
+ * desktop shell, and why opening a page used to escape into a separate browser window.
+ *
+ * The fix is to serve the guest THROUGH the host: the iframe loads
+ * `/dsh-builtin-browser/browser-view/guest/<encoded-url>`, this module fetches the page, rewrites its
+ * document and subresource URLs to the same prefix, injects the reference overlay, and returns it
+ * from the plugin's own origin. The frame is then same-origin, so selection, the bar and the intent
+ * channel all work exactly as they do in the desktop guest.
+ *
+ * SCOPE AND LIMITS (deliberate, documented rather than hidden)
+ * - Methods and bodies are forwarded; only HTML document responses are rewritten.
+ * - Frames and scripts inside the page are not executed by the host; they load through the same
+ *   prefix so they stay readable.
+ * - The overlay is injected on every HTML response, so a rewritten navigation keeps the bar.
  * @module dsh-builtin-browser/browser-electron/guest-route
  */
+
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { promises as dns } from 'node:dns'
 import { guestRuntimeScript } from './guest-runtime.ts'
 import { GuestCookieJar } from './guest-cookie-jar.ts'
+import { guestEnginePool, shouldUseEngineFirst } from './guest-engine-pool.ts'
 
 /** Prefix every proxied document and subresource lives under. */
 
@@ -32,7 +51,7 @@ function isSelfTarget(url: URL): boolean {
   return false
 }
 
-export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/isolated-guest'
+export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/guest'
 
 class UnsafeGuestTargetError extends Error {}
 
@@ -44,6 +63,16 @@ const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
 
 /** Content types eligible for rewriting; sub-requests and non-HTML still pass through raw. */
 const REWRITABLE = /^(text\/|application\/(json|javascript|xhtml\+xml|xml|rss\+xml|atom\+xml))/iu
+
+/** Only these site-minted cookies on the proxy origin may accompany jar cookies upstream. */
+const FORWARD_COOKIE = /^(BAIDUID|BDUSS|BIDUPSID|PSTM|ZFY|BDSVRTM|H_PS_PSSID|__bsi|ab_sr|sug|sugstore|H_PS_|SUB|SUBP|SSOLoginState|SRF|ALF|XSRF)/iu
+
+function forwardableCookies(header: string | undefined): string | undefined {
+  if (typeof header !== 'string' || header === '') return undefined
+  const pairs = header.split(';').map(part => part.trim()).filter(part => part !== '')
+  const kept = pairs.filter(part => FORWARD_COOKIE.test(part.split('=')[0] ?? ''))
+  return kept.length === 0 ? undefined : kept.join('; ')
+}
 
 /** A desktop Chrome identity; several sites refuse a request without one. */
 const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
@@ -182,17 +211,85 @@ export function rewriteDocument(html: string, base: URL): string {
       const next = proxied(value)
       return next === undefined ? match : `url(${quote}${next}${quote})`
     },
+  ).replace(
+    /\s+integrity\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+)/giu,
+    '',
+  ).replace(
+    /<meta\b[^>]*http-equiv\s*=\s*(?:"content-security-policy"|'content-security-policy'|content-security-policy)[^>]*>/giu,
+    '',
+  ).replace(
+    /(<meta\b[^>]*name\s*=\s*(?:"referrer"|'referrer'|referrer)[^>]*content\s*=\s*)(["']?)no-referrer\2/giu,
+    '$1"same-origin"',
   )
 }
 
-/** Relay reference data to the owning app frame, never authenticated API requests. */
-export function relayTag(_sessionId: string): string {
-  return `<script data-dsh-ref-guest-relay="1">
-  window.addEventListener('message', function (event) {
-    if (event.source !== window || !event.data || event.data.type !== 'dsh-browser-ref:intent') return;
-    if (parent !== window) parent.postMessage(event.data, '*');
-  });
-  </script>`
+/** Rewrite CSS `url(...)` references so external stylesheets keep assets inside the proxy. */
+export function rewriteCss(css: string, base: URL): string {
+  return css.replace(
+    /url\((\s*['"]?)([^'")]+)\1\)/giu,
+    (match, quote: string, value: string) => {
+      const trimmed = value.trim()
+      if (trimmed === '' || trimmed.startsWith('#') || trimmed.startsWith('data:')
+        || trimmed.startsWith('blob:') || trimmed.startsWith('javascript:')) return match
+      try {
+        const absolute = new URL(trimmed, base)
+        if (absolute.protocol !== 'http:' && absolute.protocol !== 'https:') return match
+        return `url(${quote}${guestPath(absolute.href)}${quote})`
+      } catch {
+        return match
+      }
+    },
+  )
+}
+
+/**
+ * The last mile for a proxied guest: hand the reference intent to the plugin.
+ *
+ * The desktop guest exposes a preload bridge; a proxied document does not, so the bar leaves its intent
+ * in the queue. This relay drains that queue into the plugin's own capture route, which is same-origin
+ * here and therefore carries the session cookie. Without it the bar appears and confirming looks like it
+ * did nothing at all.
+ * @param sessionId - the conversation the tab belongs to.
+ * @returns the inline script element.
+ */
+export function relayTag(sessionId: string): string {
+  const seeded = JSON.stringify(sessionId).replace(/</gu, '\\u003c')
+  const body = [
+    "(function(){",
+    `  var session = ${seeded}`,
+    "  var queue = window.__dshRefIntents || (window.__dshRefIntents = [])",
+    "  var log = window.__relayLog || (window.__relayLog = [])",
+    // The panel knows which conversation it belongs to, the document does not. Ask the parent (same
+    // origin) once, and use the answer for every intent. Seeded value wins when it is present.
+    "  try {",
+    "    if (typeof session !== 'string' || session === '') top.postMessage({ type: 'dsh.sidebar.session.request' }, location.origin)",
+    "  } catch (error) { /* top-level document: nothing to ask */ }",
+    "  window.addEventListener('message', function (event) {",
+    "    if (!event || event.origin !== location.origin) return",
+    "    var data = event.data || {}",
+    "    if (data.type === 'dsh.sidebar.session' && typeof data.sessionId === 'string') { session = data.sessionId; console.log('[relay] got session', session) }",
+    "    if (data && (data.type === 'dsh-browser-ref:intent' || data.type === 'dsh.browser-reference.intent')) post(data)",
+    "  })",
+    "  log.push('relay:loaded')",
+    "  var post = function (intent) {",
+    "    log.push('relay:post session=' + session)",
+    "    console.log('[relay] post intent, session=', session)",
+    "    if (typeof session !== 'string' || session === '') return",
+    "    try {",
+    "      (window.__dshGuestFetch || window.fetch)('/dsh-builtin-browser/reference/capture', {",
+    "        method: 'POST',",
+    "        headers: { 'content-type': 'application/json' },",
+    "        credentials: 'same-origin',",
+    "        body: JSON.stringify(Object.assign({}, intent, { sessionId: session })),",
+    "      }).then(function (r) { return r.text().then(function (b) { log.push('relay:status=' + r.status + ' ' + String(b).slice(0, 90)) }) }).catch(function (e) { log.push('relay:err=' + e) })",
+    "    } catch (error) { /* the reader can retry; nothing is lost */ }",
+    "  }",
+    "  log.push('relay:queue len=' + queue.length)",
+    "  var push = queue.push",
+    "  queue.push = function (item) { post(item); return push.call(queue, item) }",
+    "})()",
+  ].join('\n')
+  return `<script data-dsh-ref-guest-relay="1">${body}</script>`
 }
 
 /** Forward a document or sub-request, keeping upstream cookies off the DSH origin. */
@@ -203,29 +300,6 @@ export async function handleGuest(
   sessionId: string,
 ): Promise<void> {
   const method = request.method ?? 'GET'
-  const authority = request.headers.host ?? ''
-  if (!/^(?:\[[\da-f:]+\]|[a-z\d.-]+)(?::\d+)?$/iu.test(authority)) {
-    response.writeHead(400)
-    response.end('guest proxy: invalid host')
-    return
-  }
-  const sources = ['http:', 'https:'].map(protocol => new URL(protocol + '//' + authority).origin + GUEST_ROUTE).join(' ')
-  response.setHeader('content-security-policy', "sandbox allow-scripts allow-forms; default-src " + sources
-    + "; script-src " + sources + " 'unsafe-inline' 'unsafe-eval'; style-src " + sources
-    + " 'unsafe-inline'; img-src " + sources + " data: blob:; connect-src " + sources
-    + "; frame-src " + sources + "; form-action " + sources
-    + "; object-src 'none'; worker-src 'none'; base-uri 'none'; frame-ancestors 'self'")
-  response.setHeader('referrer-policy', 'no-referrer')
-  response.setHeader('x-content-type-options', 'nosniff')
-  response.setHeader('access-control-allow-origin', 'null')
-  if (method === 'OPTIONS') {
-    response.writeHead(204, {
-      'access-control-allow-methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
-      'access-control-allow-headers': [...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub'].join(', '),
-    })
-    response.end()
-    return
-  }
   const query = new URLSearchParams((request.url ?? '').split('?')[1] ?? '')
   const session = query.get('s') ?? sessionId
   const target = guestTarget(request.url ?? '')
@@ -285,9 +359,10 @@ export async function handleGuest(
     } catch {}
   }
   const jarCookie = cookieJar.getCookieHeader(target)
+  const replay = forwardableCookies(request.headers.cookie)
   const refreshCookies = (url = target): void => {
-    const cookie = cookieJar.getCookieHeader(url)
-    if (cookie) headers.set('cookie', cookie)
+    const cookie = [cookieJar.getCookieHeader(url), replay].filter(part => typeof part === 'string' && part !== '').join('; ')
+    if (cookie !== '') headers.set('cookie', cookie)
     else headers.delete('cookie')
   }
   refreshCookies()
@@ -315,6 +390,29 @@ export async function handleGuest(
       await warm.body?.cancel()
       headers.set('referer', root.href)
     } finally { refreshCookies() }
+  }
+  // 双通道真引擎直通：百度搜索/贴吧/百科等已知服务端 fetch 必被拦的页面，过完 SSRF DNS 校验后直接走后台无头引擎。
+  if (safeNavigation && shouldUseEngineFirst(target)) {
+    try {
+      if (await blockedResolved(target)) {
+        response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        response.end('guest proxy: local and DSH host targets are not allowed')
+        return
+      }
+      const rendered = await guestEnginePool.fetchRenderedDocument(target, cookieJar)
+      if (rendered !== undefined) {
+        const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(rendered.finalUrl.href) + '</script>'
+        let body = rewriteDocument(rendered.html, rendered.finalUrl)
+        if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
+        else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
+        else body = runtime + body
+        const tail = '\n' + overlayScript + '\n' + relayTag(session)
+        body = /<\/body\s*>/iu.test(body) ? body.replace(/<\/body\s*>/iu, match => tail + match) : body + tail
+        response.writeHead(rendered.status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        response.end(body)
+        return
+      }
+    } catch { /* fall through to standard fetch */ }
   }
   // 深链接预热：直接拉 `https://host/s?…` 这类页面时，站点看到的是「没有站点 Cookie 的首跳」，
   // 百度会回「安全验证」。先取一次站点根，把服务端种的 Cookie 收进自己的罐子，并把 Referer 指向它，
@@ -374,7 +472,7 @@ export async function handleGuest(
   cookieJar.setCookies(target, upstream.headers.getSetCookie?.() ?? [])
   const out = new Headers()
   for (const [name, value] of upstream.headers) {
-    if (!DROP_RESPONSE_HEADERS.has(name.toLowerCase()) && !name.toLowerCase().startsWith('access-control-')) out.set(name, value)
+    if (!DROP_RESPONSE_HEADERS.has(name.toLowerCase())) out.set(name, value)
   }
   const location = upstream.headers.get('location')
   if (location !== null && upstream.status >= 300 && upstream.status < 400) {
@@ -398,15 +496,37 @@ export async function handleGuest(
     response.end()
     return
   }
+  const isCss = /^text\/css(?:;|$)/iu.test(type)
+  if (isCss && length <= MAX_REWRITE_BYTES && !(upstream.status >= 300 && upstream.status < 400)) {
+    const css = rewriteCss(await upstream.text(), target)
+    out.delete('etag')
+    out.delete('content-md5')
+    out.set('content-type', type)
+    response.writeHead(upstream.status, Object.fromEntries(out))
+    response.end(css)
+    return
+  }
   if (subRequest || !REWRITABLE.test(type) || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
     || length > MAX_REWRITE_BYTES || (upstream.status >= 300 && upstream.status < 400)) {
     response.writeHead(upstream.status, Object.fromEntries(out))
     response.end(Buffer.from(await upstream.arrayBuffer()))
     return
   }
-  const raw = await upstream.text()
-  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href) + '</script>'
-  let body = rewriteDocument(raw, target)
+  let raw = await upstream.text()
+  let finalTarget = target
+  let finalStatus = upstream.status
+  // If fast HTTP + warmRoot still landed on a JS/TLS challenge or 403/429, fall back to real headless engine.
+  if (safeNavigation && (upstream.status === 403 || upstream.status === 429
+    || /安全验证|wappass|cf-browser-verification|Just a moment/iu.test(raw))) {
+    const rendered = await guestEnginePool.fetchRenderedDocument(target, cookieJar)
+    if (rendered !== undefined) {
+      raw = rendered.html
+      finalTarget = rendered.finalUrl
+      finalStatus = rendered.status
+    }
+  }
+  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(finalTarget.href) + '</script>'
+  let body = rewriteDocument(raw, finalTarget)
   if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
   else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
   else body = runtime + body
@@ -415,6 +535,6 @@ export async function handleGuest(
   out.delete('etag')
   out.delete('content-md5')
   out.set('content-type', type)
-  response.writeHead(upstream.status, Object.fromEntries(out))
+  response.writeHead(finalStatus, Object.fromEntries(out))
   response.end(body)
 }

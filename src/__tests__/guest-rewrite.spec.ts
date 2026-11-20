@@ -66,4 +66,16 @@ describe('document rewriting', () => {
     const html = '<form action="/search"></form>'
     expect(rewritten(html)).toBe(`<form action="${guestPath('https://example.test/search')}"></form>`)
   })
+
+  it('strips SRI integrity attributes and inline CSP meta tags', () => {
+    const html = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'"><script src="/a.js" integrity="sha384-abc"></script>'
+    const out = rewritten(html)
+    expect(out).not.toContain('Content-Security-Policy')
+    expect(out).not.toContain('integrity=')
+  })
+
+  it('upgrades no-referrer meta to same-origin', () => {
+    const out = rewritten('<meta name="referrer" content="no-referrer">')
+    expect(out).toContain('content="same-origin"')
+  })
 })
