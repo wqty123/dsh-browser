@@ -956,6 +956,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   installRuntimeStatusRoute(ctx, settings)
   // One service for the panel's routes; the tool layer builds its own over the same store file.
   const referenceService = createReferenceService(ctx.browser, {
+    sourceReady: async owner => { (await DesktopBridgeViewHost.discover(`session-${owner}`))?.dispose() },
     sourceSession: (owner, pageId) => ctx.browser.bindPanelPage(`session-${owner}`, pageId),
     // A visible-region snapshot is a read: the clipped CDP path never presents
     // the conversation, raises a window or moves the pointer.

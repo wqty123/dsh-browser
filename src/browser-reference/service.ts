@@ -262,6 +262,7 @@ export interface BrowserReferenceServiceOptions {
   /** Page evaluation budget. Default 20 s. */
   readonly timeoutMs?: number
   readonly sourceSession?: (owner: string, pageId: string) => Promise<string>
+  readonly sourceReady?: (owner: string) => Promise<void>
 }
 
 /** Every limit after clamping; the caller's values only ever tighten these. */
@@ -374,11 +375,13 @@ export class BrowserReferenceService {
   private readonly options: ResolvedOptions
   private readonly store: ReferenceStore
   private readonly sourceSession: BrowserReferenceServiceOptions['sourceSession']
+  private readonly sourceReady: BrowserReferenceServiceOptions['sourceReady']
 
   constructor(host: ReferenceHost, store: ReferenceStore = new ReferenceStore(), options: BrowserReferenceServiceOptions = {}) {
     this.host = host
     this.store = store
     this.sourceSession = options.sourceSession
+    this.sourceReady = options.sourceReady
     this.webSources = options.webSources
     this.options = {
       context: integerOf(options.context, DEFAULTS.context, 0, 512),
@@ -697,6 +700,10 @@ export class BrowserReferenceService {
       catch (error) { return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, parts: [], note: messageOf(error) } }
     }
     if (sessionId === undefined) {
+      if (reference.source.carrier === 'sidebar') {
+        try { await this.sourceReady?.(owner) }
+        catch (error) { return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, parts: [], note: messageOf(error) } }
+      }
       return {
         referenceId,
         status: captured === undefined ? 'unavailable' : 'session-unavailable',

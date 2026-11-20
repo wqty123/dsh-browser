@@ -329,11 +329,12 @@ export function ReferenceCapsules({ sessionId, cards, actions, labels, notice, r
         <button type="button" className={css.source} title={active.source.pageUrl} onClick={() => { actions.onReveal?.(active.referenceId) }}>
           <IconLinkOutlineRegular size={12} /><span>{labels.reveal}</span>
         </button>
+        {(anchor !== undefined || readOnly) && notice !== undefined && <p className={css.status} role="status">{notice}</p>}
       </div>,
       document.body,
     )}
 
-    {cards.length > 0 && notice !== undefined && <p className={css.status} role="status">{notice}</p>}
+    {anchor === undefined && (!readOnly || active === undefined) && cards.length > 0 && notice !== undefined && <p className={css.status} role="status">{notice}</p>}
   </span>
 }
 

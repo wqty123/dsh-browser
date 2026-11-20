@@ -121,7 +121,7 @@ export interface DockSnapshot {
   readonly cards: readonly CardViewModel[]
   readonly availability: AvailabilityState
   /** Outcome of the last "回到原文" attempt, so a failure is never silent. */
-  readonly reveal?: { readonly status: string; readonly message: string }
+  readonly reveal?: { readonly status: string; readonly message: string; readonly referenceId?: string }
   /** Why a captured reference has not reached the composer yet, in one sentence. */
   readonly issue?: string
 }
@@ -271,9 +271,6 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
   let revealIntent = 0
   let pendingReveal: { readonly referenceId: string; readonly partId: string | undefined; readonly intent: number; readonly promise: Promise<RevealStatus> } | undefined
   let lastIssue: string | undefined
-  // A failed "回到原文" used to stay on screen forever: the hint was only
-  // rewritten by the NEXT reveal attempt, so recovering the sidebar never
-  // cleared it. Failures now expire; successes are silent immediately.
   const REVEAL_HINT_MS = 5_000
   let revealTimer: ReturnType<typeof setTimeout> | undefined
   const clearRevealHint = (): void => {
@@ -281,12 +278,12 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     clearTimeout(revealTimer)
     revealTimer = undefined
   }
-  const showReveal = (status: string, detail?: string): void => {
+  const showReveal = (status: string, detail?: string, referenceId?: string): void => {
     clearRevealHint()
-    lastReveal = { status, message: [REVEAL_MESSAGES[status] ?? '', detail].filter(Boolean).join(' ') }
+    lastReveal = { status, message: [REVEAL_MESSAGES[status] ?? '', detail].filter(Boolean).join(' '), ...(referenceId === undefined ? {} : { referenceId }) }
     markDirty()
     publish()
-    if (lastReveal.message === '') return
+    if (lastReveal.message === '' || detail?.includes('桥接版本过旧') || detail?.includes('浏览器桥接不可用')) return
     revealTimer = setTimeout(() => {
       revealTimer = undefined
       lastReveal = undefined
@@ -905,7 +902,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       sourceFailure = errorMessage(error)
     }
     if (!active()) return 'superseded'
-    showReveal(status, sourceFailure ?? bridgeFailure())
+    showReveal(status, sourceFailure ?? bridgeFailure(), referenceId)
     return status
   }
 

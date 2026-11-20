@@ -71,6 +71,7 @@ export async function nativeMainReveal(snapshot, live, guestId = 2, evaluate) {
   if (snapshot.referenceId !== undefined) store.append({ ...snapshot, manifestHash: manifestHashOf(snapshot) })
   const service = createReferenceService(ctx.browser, {
     store, assetDir: join(home, 'assets'),
+    sourceReady: async task => { (await DesktopBridgeViewHost.discover(`session-${task}`))?.dispose() },
     sourceSession: (task, page) => ctx.browser.bindPanelPage(`session-${task}`, page),
   })
   const routes = createReferenceRouteHandlers({ service })

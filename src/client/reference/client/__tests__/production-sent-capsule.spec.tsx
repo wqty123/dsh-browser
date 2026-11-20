@@ -226,6 +226,61 @@ function pill(container: HTMLElement): HTMLButtonElement {
 }
 
 describe('production assembly — shared composer and sent capsules', () => {
+  it('shows the real protocol-3 bridge refusal before navigating a sent native capsule', async () => {
+    const source = makeSnapshot()
+    const frozen = { ...source, owner: { sessionId: source.owner.sessionId }, source: { ...source.source, carrier: 'sidebar' as const } }
+    const app = await assembled(undefined, { snapshot: frozen, client: true, native: true, away: true })
+    const snapshot = app.runtime.referenceDetail('ref-mixed-1')!.snapshot
+    const backend = await nativeMainReveal(snapshot, app.live, 42)
+    cleanups.push(() => backend.close())
+    await backend.start(3)
+    const sent = await app.sentMessage(await send(app.runtime))
+    let finished!: () => void
+    const completed = new Promise<void>(resolve => { finished = resolve })
+    app.outcome(async () => { const result = await backend.post(app.reveals.at(-1)); finished(); return result })
+    await act(async () => { pill(sent).focus(); pill(sent).click(); await completed })
+    expect(document.querySelector('[role="dialog"] [role="status"]')?.textContent).toContain('桥接版本过旧，请点击 卸载并重装')
+    expect(app.reveals).toHaveLength(1)
+    expect(app.navigate).not.toHaveBeenCalled()
+    expect(backend.commands).toHaveLength(0)
+  })
+
+  it('shows a bridge refusal in the deployed markdown-anchor hover without a shell-overlay slot', async () => {
+    const app = await assembled()
+    await send(app.runtime)
+    app.outcome({ ok: true, status: 'unavailable', note: '桥接版本过旧，请点击 卸载并重装' })
+    const anchor = document.createElement('a')
+    anchor.href = encodeBrowserRefUri({ referenceId: 'ref-mixed-1' })
+    anchor.textContent = '引用来源 1：原文'
+    document.body.append(anchor)
+    vi.useFakeTimers()
+    await act(async () => { anchor.focus() })
+    await act(async () => { anchor.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(12000) })
+    expect(document.querySelector('[role="dialog"] [role="status"]')?.textContent).toContain('桥接版本过旧，请点击 卸载并重装')
+  })
+
+  it.each([false, true])('shows persistent bridge-skew text on the actual sent capsule (retry=%s)', async retry => {
+    const app = await assembled(undefined, { client: true, native: true, away: true })
+    const message = await send(app.runtime)
+    const sent = await app.sentMessage(message)
+    app.outcome(() => Promise.resolve({ ok: true, status: 'unavailable', note: retry && !app.reveals.at(-1)?.sourcePageId
+      ? 'reference has no live source binding' : '桥接版本过旧，请点击 卸载并重装' }))
+    vi.useFakeTimers()
+    await act(async () => { pill(sent).click() })
+    if (retry) await act(async () => { app.ready() })
+    expect(sent.textContent).toContain('桥接版本过旧，请点击 卸载并重装')
+    await act(async () => { pill(sent).focus() })
+    expect(document.querySelector('[role="dialog"] [role="status"]')?.textContent).toContain('桥接版本过旧，请点击 卸载并重装')
+    expect(app.reveals).toHaveLength(retry ? 2 : 1)
+    if (!retry) expect(app.navigate).not.toHaveBeenCalled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(12000) })
+    expect(document.querySelector('[role="dialog"] [role="status"]')?.textContent).toContain('桥接版本过旧，请点击 卸载并重装')
+    app.outcome({ ok: true, status: 'revealed' })
+    await act(async () => { pill(sent).click() })
+    expect(document.querySelector('[role="dialog"] [role="status"]')).toBeNull()
+  })
+
   it.each([false, true])('preserves structured math through send, capsule-only bubble, preview and reveal retry (native=%s)', async native => {
     const snapshot = { ...makeSnapshot(), parts: [{ partId: 'math', type: 'text' as const, text: 'x^2', content: [{ type: 'math' as const, latex: 'x^2', display: false }], anchor: { exact: 'x^2', prefix: '', suffix: '' } }] }
     const app = await assembled(undefined, { snapshot, client: true, away: true, native })
