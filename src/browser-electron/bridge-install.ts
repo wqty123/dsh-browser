@@ -50,6 +50,18 @@ export interface BridgeActionResult {
   readonly pid?: number
 }
 
+export async function runBridgeReinstall(deps: {
+  readonly absent: () => boolean
+  readonly run: (action: BridgeAction) => Promise<BridgeActionResult>
+}): Promise<BridgeActionResult> {
+  const removed = deps.absent() ? undefined : await deps.run('uninstall')
+  if (removed && !removed.ok) throw new Error(`REINSTALL_REMOVE_FAILED: ${removed.output}`)
+  if (!deps.absent()) throw new Error('REINSTALL_REMOVE_FAILED: bridge remains installed')
+  const installed = await deps.run('install')
+  if (!installed.ok) throw new Error(`REINSTALL_ADD_FAILED: ${installed.output}`)
+  return { ...installed, output: [removed?.output, installed.output].filter(Boolean).join('\n').slice(-20_000) }
+}
+
 /** Final record written by the installer that actually performed the operation. */
 export interface BridgeActionCompletion {
   readonly action: BridgeAction

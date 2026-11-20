@@ -6,7 +6,7 @@ param(
   [string]$StatePath,
 
   [Parameter(Mandatory = $true)]
-  [ValidatePattern('^(install|uninstall)-[A-Za-z0-9]+$')]
+  [ValidatePattern('^(install|uninstall|reinstall)-[A-Za-z0-9]+$')]
   [string]$JobId,
 
   [ValidateSet('zh', 'en')]
@@ -28,7 +28,7 @@ function Read-ProgressState {
     $value = [IO.File]::ReadAllText($script:verifiedStatePath) | ConvertFrom-Json
     if ($null -eq $value -or -not [StringComparer]::Ordinal.Equals([string]$value.id, $JobId) -or
       @('armed', 'closing', 'installing', 'restarting', 'verifying', 'completed', 'complete', 'failed', 'cancelled') -cnotcontains [string]$value.phase -or
-      @('install', 'uninstall') -cnotcontains [string]$value.action) { return $null }
+      @('install', 'uninstall', 'reinstall') -cnotcontains [string]$value.action) { return $null }
     return $value
   } catch { return $null }
 }

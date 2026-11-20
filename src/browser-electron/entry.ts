@@ -713,7 +713,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           start: async (action, options) => {
             const root = findDesktopInstall()
             if (root === undefined) throw new Error('no verified DSH Desktop installation was found')
-            return await runWithManualBridgePreference(action, patch => settings.update(patch),
+            return await runWithManualBridgePreference('install', patch => settings.update(patch),
               async () => await startAutomaticMaintenance(action, root, options))
           },
         })
