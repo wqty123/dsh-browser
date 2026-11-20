@@ -16,6 +16,8 @@ export interface WebviewElement extends HTMLElement {
   goForward(): void
   reload(): void
   isLoading(): boolean
+  getZoomFactor(): number
+  setZoomFactor(factor: number): void
 }
 
 /** Physical attachment notifications; hiding a retained Sidebar body emits neither. */
@@ -28,6 +30,13 @@ export interface ElectronPresentationEvents {
 export class ElectronWebviewPresentation implements BrowserPresentation {
   private element: WebviewElement | undefined
   private host: HTMLElement | undefined
+  private zoomRevision = 0
+  private scaleQuery: MediaQueryList | undefined
+  private readonly ready = (): void => { void this.syncZoom() }
+  private readonly scaleChanged = (): void => {
+    this.watchScale()
+    void this.syncZoom()
+  }
 
   constructor(private readonly events: ElectronPresentationEvents) {}
 
@@ -37,10 +46,12 @@ export class ElectronWebviewPresentation implements BrowserPresentation {
     if (host === null) throw new Error('Electron presentation: content container is not mounted')
     if (this.host !== undefined) this.events.unmounted()
     this.host = host
+    this.watchScale()
     this.events.mounted()
     return () => {
       if (this.host !== host) return
       this.events.unmounted()
+      this.unwatchScale()
       this.host = undefined
     }
   }
@@ -70,6 +81,7 @@ export class ElectronWebviewPresentation implements BrowserPresentation {
     if (this.host === undefined) throw new Error('Electron presentation: cannot attach without a content container')
     this.clear()
     this.element = element
+    element.addEventListener('dom-ready', this.ready)
     this.host.append(element)
   }
 
@@ -83,6 +95,8 @@ export class ElectronWebviewPresentation implements BrowserPresentation {
 
   /** Destroy only the guest DOM; a replacement may use the same mounted container. */
   clear(): void {
+    this.zoomRevision++
+    this.element?.removeEventListener('dom-ready', this.ready)
     this.element?.remove()
     this.element = undefined
   }
@@ -90,6 +104,34 @@ export class ElectronWebviewPresentation implements BrowserPresentation {
   /** Destroy the guest DOM and release its content container. */
   dispose(): void {
     this.clear()
+    this.unwatchScale()
     this.host = undefined
+  }
+
+  private watchScale(): void {
+    this.unwatchScale()
+    this.scaleQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+    this.scaleQuery.addEventListener('change', this.scaleChanged)
+  }
+
+  private unwatchScale(): void {
+    this.scaleQuery?.removeEventListener('change', this.scaleChanged)
+    this.scaleQuery = undefined
+  }
+
+  private async syncZoom(): Promise<void> {
+    const element = this.element
+    if (element === undefined) return
+    const revision = ++this.zoomRevision
+    try {
+      const guestRatio = await element.executeJavaScript('window.devicePixelRatio')
+      if (this.element !== element || revision !== this.zoomRevision) return
+      if (typeof guestRatio !== 'number' || !Number.isFinite(guestRatio) || guestRatio <= 0) return
+      const zoom = element.getZoomFactor()
+      const factor = zoom * window.devicePixelRatio / guestRatio
+      if (Math.abs(zoom - factor) > 0.0001) element.setZoomFactor(factor)
+    } catch (error) {
+      if (this.element === element && revision === this.zoomRevision) console.error('Electron presentation: cannot align guest zoom', error)
+    }
   }
 }
