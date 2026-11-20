@@ -16,7 +16,9 @@ await mkdir(outside)
 await writeFile(join(workspace, 'allowed.txt'), 'task-file')
 await writeFile(join(outside, 'secret.txt'), 'outside-file')
 
-function mount(browser, extra = {}) {
+async function mount(browser, extra = {}) {
+  browser.openUrl ??= async () => {}
+  browser.snapshot ??= async () => ({ url: 'https://fixture.test/page', elements: [], truncated: false })
   const tools = new Map()
   const ctx = {
     get: name => name === 'browser' ? browser : name === 'workingDirectory' ? extra.directory : undefined,
@@ -25,6 +27,7 @@ function mount(browser, extra = {}) {
   }
   apply(ctx)
   const exec = { signal: new AbortController().signal, agent: { id: 'boundary-task', session: { header: { cwd: workspace } } } }
+  await tools.get('dsh_browser_open').execute({ url: 'https://fixture.test/page', surface: 'builtin' }, exec)
   return { run: (name, args) => tools.get('dsh_browser_' + name).execute(args, exec) }
 }
 
@@ -37,7 +40,7 @@ test('upload uses the task workspace and rejects an external junction and oversi
       return { ok: true, value: request.operation === 'upload' ? JSON.stringify({ ok: true, name: request.file.name, size: Buffer.from(request.file.base64, 'base64').length }) : 3 }
     },
   }
-  const { run } = mount(browser)
+  const { run } = await mount(browser)
   const target = { by: 'css', value: '#file' }
   const valid = await run('upload', { target, path: join(workspace, 'allowed.txt') })
   assert.equal(valid.ok, true)
@@ -67,7 +70,7 @@ test('upload uses the task workspace and rejects an external junction and oversi
 
 test('the working directory service takes precedence over the original session metadata', async () => {
   const browser = { open: async () => 'browser:cwd', exists: () => true, pageOperation: async () => ({ ok: true, value: 3 }) }
-  const { run } = mount(browser, { directory: { ensure: async () => outside } })
+  const { run } = await mount(browser, { directory: { ensure: async () => outside } })
   await assert.rejects(run('upload', { target: { by: 'css', value: '#file' }, path: join(workspace, 'allowed.txt') }), /outside the task workspace/)
 })
 
@@ -88,7 +91,7 @@ function pageBrowser() {
 
 test('response waits reject previous completions and accept a request completed while waiting', async () => {
   const { page, browser } = pageBrowser()
-  const { run } = mount(browser)
+  const { run } = await mount(browser)
   await browser.pageOperation('', { operation: 'install' })
   await vm.runInContext('fetch("/completed")', page)
   assert.equal((await run('wait_for_response', { urlContains: '/completed', timeoutMs: 0 })).matched, false)
@@ -119,7 +122,8 @@ test('batch accepts the documented object forms and the existing shorthand', asy
     execute: async () => ({ ok: true, value: 'script result' }),
     pageOperation: async (_s, request) => ({ ok: true, value: request.operation === 'text' ? 'true' : request.operation === 'url' ? '"https://fixture.test/page"' : request.operation === 'probe' ? '{"pending":0,"quietMs":500}' : 3 }),
   }
-  const { run } = mount(browser)
+  const { run } = await mount(browser)
+  calls.length = 0
   const value = await run('do', { autoDismiss: false, steps: [
     { open: { url: 'https://fixture.test/page' } },
     { tap: { target: { by: 'css', value: '#go' } } },
