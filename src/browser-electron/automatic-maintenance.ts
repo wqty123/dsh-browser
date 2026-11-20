@@ -66,18 +66,53 @@ async function desktopProcesses(root: string): Promise<DesktopProcess[]> {
   if (r.code !== 0) throw new Error('cannot inspect running DSH Desktop processes')
   let value: unknown
   try { value = JSON.parse(r.stdout.replace(/^\uFEFF/, '').trim()) } catch { throw new Error('Desktop process inspection returned invalid data') }
+  return identifyDesktopProcesses(root, value)
+}
+
+class DesktopProcessIdentityUnavailable extends Error {}
+
+/** Validate a CIM snapshot without treating an incomplete process identity as an exited process. */
+export function identifyDesktopProcesses(root: string, value: unknown): DesktopProcess[] {
   const rows = Array.isArray(value) ? value : value === null ? [] : [value]
   const expected = resolve(root, 'DeepSeek Harness.exe').toLowerCase()
   return rows.filter((row): row is DesktopProcess => {
     if (row === null || typeof row !== 'object') throw new Error('Desktop process inspection was incomplete')
     const p = row as Partial<DesktopProcess>
     if (typeof p.path !== 'string' || p.path === '' || typeof p.command !== 'string' || !Number.isSafeInteger(p.pid) || typeof p.started !== 'string') {
-      throw new Error('cannot identify a running DSH Desktop process')
+      throw new DesktopProcessIdentityUnavailable('cannot identify a running DSH Desktop process')
     }
     if (resolve(p.path).toLowerCase() !== expected) return false
     // The Desktop also ships a Node-mode CLI under this exe; it is not a GUI to close.
     return !/(?:^|\s)--expose-internals(?:\s|$)|\.[cm]?js(?:"|\s|$)|(?:^|\s)(?:--eval|--print|--input-type)(?:=|\s|$)|(?:^|\s)-(?:e|p)(?:\s|$)/i.test(p.command)
   })
+}
+
+/** Wait through incomplete shutdown snapshots, but require a complete empty snapshot before writing. */
+export async function waitForDesktopExit(deps: {
+  readonly inspect: () => Promise<readonly DesktopProcess[]>
+  readonly checkCancelled: () => void
+  readonly pause?: () => Promise<void>
+  readonly now?: () => number
+}): Promise<void> {
+  const now = deps.now ?? Date.now
+  const deadline = now() + 60_000
+  let incomplete = false
+  while (now() < deadline) {
+    deps.checkCancelled()
+    try {
+      const rows = await deps.inspect()
+      deps.checkCancelled()
+      if (rows.length === 0) return
+      incomplete = false
+    } catch (error) {
+      if (!(error instanceof DesktopProcessIdentityUnavailable)) throw error
+      incomplete = true
+    }
+    await (deps.pause ?? (() => delay(1_000)))()
+  }
+  throw new Error(incomplete
+    ? 'cannot verify that DSH Desktop exited: process identity remains unavailable; maintenance was cancelled'
+    : 'Desktop did not exit; maintenance was cancelled. Any running-task confirmation remains under your control.')
 }
 async function atomicJson(path: string, value: unknown, exclusive = false): Promise<void> {
   if (exclusive && existsSync(path)) {
@@ -367,13 +402,7 @@ async function runWorker(path: string): Promise<void> {
         if (result.code !== 0) throw new Error(result.output || 'the official Desktop Quit menu was not available')
       },
       waitUntilClosed: async () => {
-        const deadline = Date.now() + 60_000
-        while (Date.now() < deadline) {
-          checkCancelled()
-          if ((await desktopProcesses(plan.root)).length === 0) return
-          await delay(1_000)
-        }
-        throw new Error('Desktop did not exit; maintenance was cancelled. Any running-task confirmation remains under your control.')
+        await waitForDesktopExit({ inspect: async () => await desktopProcesses(plan.root), checkCancelled })
       },
       maintain: async () => {
         checkCancelled()

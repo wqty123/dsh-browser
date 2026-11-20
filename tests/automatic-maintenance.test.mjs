@@ -3,7 +3,85 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { commitAutomaticMaintenance, maintenanceProgressLaunchOptions, readAutomaticMaintenance, startAutomaticMaintenance, startMaintenanceProgressNotification } from '../lib/browser-electron/automatic-maintenance.js'
+import { commitAutomaticMaintenance, identifyDesktopProcesses, maintenanceProgressLaunchOptions, readAutomaticMaintenance, startAutomaticMaintenance, startMaintenanceProgressNotification, waitForDesktopExit } from '../lib/browser-electron/automatic-maintenance.js'
+import { runMaintenanceLifecycle } from '../lib/browser-electron/maintenance-lifecycle.js'
+
+const processRoot = join(tmpdir(), 'desktop-process-fixture')
+const desktopProcess = { pid: 54600, path: join(processRoot, 'DeepSeek Harness.exe'), command: '"DeepSeek Harness.exe" --remote-debugging-port=9333', started: '2026-11-20T09:36:37.9057920Z' }
+
+function exitWait(snapshots) {
+  let clock = 0
+  let reads = 0
+  const deps = {
+    inspect: async () => identifyDesktopProcesses(processRoot, snapshots[Math.min(reads++, snapshots.length - 1)]),
+    checkCancelled: () => {},
+    now: () => clock,
+    pause: async () => { clock += 1_000 },
+  }
+  return { deps, reads: () => reads }
+}
+
+test('Desktop discovery accepts a debugging argument without requiring Explorer ancestry', () => {
+  assert.deepEqual(identifyDesktopProcesses(processRoot, [desktopProcess]), [desktopProcess])
+  assert.deepEqual(identifyDesktopProcesses(processRoot, [{ ...desktopProcess, command: '"DeepSeek Harness.exe" --expose-internals worker.js' }]), [])
+})
+
+test('a complete empty process snapshot permits maintenance without waiting', async () => {
+  const f = exitWait([[]])
+  await waitForDesktopExit(f.deps)
+  assert.equal(f.reads(), 1)
+})
+
+test('quit tolerates disappearing process identities but does not install until a complete empty snapshot', async () => {
+  for (const field of ['path', 'command', 'started']) {
+    const f = exitWait([[{ ...desktopProcess, [field]: null }], [desktopProcess], []])
+    const calls = []
+    const result = await runMaintenanceLifecycle('install', {
+      requestQuit: async () => { calls.push('quit') },
+      waitUntilClosed: async () => await waitForDesktopExit(f.deps),
+      maintain: async () => {
+        assert.equal(f.reads(), 3)
+        calls.push('install')
+        return { ok: true, code: 0, output: 'installed', command: 'fixture' }
+      },
+      restart: async () => { calls.push('restart'); return 12345 },
+      verify: async () => { calls.push('verify') },
+      publish: async () => {},
+    })
+    assert.equal(result.phase, 'completed')
+    assert.deepEqual(calls, ['quit', 'install', 'restart', 'verify'])
+  }
+})
+
+test('persistent identity loss or a live Desktop times out without authorizing writes', async () => {
+  for (const row of [{ ...desktopProcess, path: null }, desktopProcess]) {
+    const f = exitWait([[row]])
+    let modified = false
+    const result = await runMaintenanceLifecycle('install', {
+      requestQuit: async () => {},
+      waitUntilClosed: async () => await waitForDesktopExit(f.deps),
+      maintain: async () => { modified = true; throw new Error('unexpected install') },
+      restart: async () => { modified = true; return 12345 },
+      verify: async () => {},
+      publish: async () => {},
+    })
+    assert.equal(result.phase, 'cancelled')
+    assert.match(result.error, row.path === null ? /identity remains unavailable/ : /Desktop did not exit/)
+    assert.equal(f.reads(), 60)
+    assert.equal(modified, false)
+  }
+})
+
+test('inspection failures and explicit cancellation are not retried as shutdown races', async () => {
+  const f = exitWait([[]])
+  await assert.rejects(waitForDesktopExit({ ...f.deps, inspect: async () => { throw new Error('CIM access denied') } }), /CIM access denied/)
+  await assert.rejects(waitForDesktopExit({ ...f.deps, checkCancelled: () => { throw new Error('job cancelled') } }), /job cancelled/)
+  assert.equal(f.reads(), 0)
+  await assert.rejects(waitForDesktopExit({ ...f.deps, inspect: async () => {
+    f.deps.checkCancelled = () => { throw new Error('cancelled during inspection') }
+    return []
+  }, checkCancelled: () => f.deps.checkCancelled() }), /cancelled during inspection/)
+})
 
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-automatic-maintenance-'))
