@@ -49,7 +49,7 @@ test('missing profiles and missing package specs fail before starting any instal
   const f = fixture(t)
   await assert.rejects(profileExtensionCommand('install', f.app, join(f.root, 'missing-home')), /ENOENT/)
   writeFileSync(join(f.profile, 'package.json'), '{}')
-  await assert.rejects(profileExtensionCommand('install', f.app, f.home), /EXTENSION_NOT_INSTALLED/)
+  await assert.rejects(profileExtensionCommand('install', f.app, f.home), { code: 'REINSTALL_DEPENDENCY_MISSING' })
   writeFileSync(join(f.profile, 'package.json'), JSON.stringify({ dependencies: { 'dsh-builtin-browser': '^0.7.42' } }))
   let calls = 0
   const result = await repairProfileExtension('install', f.app, f.home, async () => {

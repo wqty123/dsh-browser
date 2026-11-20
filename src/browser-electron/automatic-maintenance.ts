@@ -1,30 +1,32 @@
 /** User-requested Windows maintenance, coordinated outside the Desktop process tree. */
 import { execFile, spawn } from 'node:child_process'
+import * as fs from 'node:fs'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdir, open, readFile, stat as statAsync, unlink, writeFile } from 'node:fs/promises'
+import { cp, mkdir, open, readFile, stat as statAsync, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prepareBridgeMaintenance } from './bridge-maintenance.ts'
 import { launchMaintenanceBroker, type MaintenanceBrokerOptions, type MaintenanceBrokerResult } from './maintenance-broker.ts'
 import { runMaintenanceLifecycle, type MaintenanceState } from './maintenance-lifecycle.ts'
-import { defaultInstallerPath, runBridgeAction, waitForRestartedBridge, type BridgeAction } from './bridge-install.ts'
-import { readDesktopIdentity } from './desktop-identity.ts'
+import { defaultInstallerPath, runBridgeAction, waitForRestartedBridge, type BridgeActionResult, type HostPatchResult } from './bridge-install.ts'
+import { readAsarFile, readDesktopIdentity } from './desktop-identity.ts'
 import { dshHome } from './paths.ts'
 import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.ts'
 import { renameMaintenanceFile } from '../../desktop-bridge/maintenance-files.mjs'
-import { installedProfileExtension, repairProfileExtension, readHostExtensionStatus, MAIN_EXTENSION_UNSUPPORTED, type MainExtensionStatus, type InstalledExtension } from './profile-extension.ts'
+import { installedProfileExtension, repairProfileExtension, profileDependencySpec, MAIN_EXTENSION_NAME, type InstalledExtension } from './profile-extension.ts'
+
+const { hostPatchStatus }: { hostPatchStatus: (packages: readonly string[], options?: { fs: object }) => HostPatchResult } = await import(new URL('../../dsh-host-patch/apply.mjs', import.meta.url).href)
+const { stripLegacyBridge }: { stripLegacyBridge: (text: string) => string | undefined } = await import(new URL('../../dsh-host-patch/legacy-bridge.mjs', import.meta.url).href)
 
 interface DesktopProcess { readonly pid: number; readonly path: string; readonly command: string; readonly started: string }
 export interface AutomaticMaintenanceJob extends MaintenanceState { readonly id: string; readonly workerPid?: number; readonly startedAt?: string }
 export interface AutomaticMaintenanceOptions {
   readonly locale?: 'zh' | 'en'
-  readonly mode?: 'profile' | 'bootstrap'
-  readonly hostStatus?: MainExtensionStatus
 }
 interface AutomaticPlan {
   readonly version: 1
   readonly id: string
-  readonly action: BridgeAction
+  readonly action: 'reinstall'
   readonly root: string
   readonly nodePath: string
   readonly electronNode: boolean
@@ -33,7 +35,164 @@ interface AutomaticPlan {
   readonly target: DesktopProcess
   readonly createdAt: string
   readonly locale?: 'zh' | 'en'
-  readonly mode?: 'profile' | 'bootstrap'
+  readonly dependency: string
+}
+
+export class ReinstallPreflightError extends Error {
+  constructor(readonly code: string, message: string) { super(message) }
+}
+
+function patchDirectories(root: string): string[] {
+  const app = join(root, 'resources', 'app')
+  return [app, join(app, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
+}
+
+function validateCliBackup(path: string, kind: 'host' | 'shim'): void {
+  const backup = path + '.before-bridge'
+  if (!existsSync(backup)) return
+  if (![path, backup].every(file => fs.lstatSync(file).isFile() && !fs.lstatSync(file).isSymbolicLink())) {
+    throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'A CLI restore baseline is not a regular file.')
+  }
+  const original = readFileSync(backup, 'utf8'), current = readFileSync(path, 'utf8')
+  if (current === original) return
+  const eol = original.includes('\r\n') ? '\r\n' : '\n'
+  let expected: string
+  if (kind === 'host') {
+    expected = original.replace('\tawait runDesktopCli(runtimeDir, join(dirname(runtimeArchivePath(runtimeDir) ?? runtimeDir), "runtime"));', [
+      '\t// dsh-builtin-browser: recognize an unpacked `app` directory as the app root,',
+      '\t// so an installation whose app.asar was moved aside still finds its runtime.',
+      '\tconst cliOwnerDir = dirname(runtimeDir);',
+      '\tconst cliSupportRoot = basename(cliOwnerDir) === "app" || basename(cliOwnerDir) === "app.asar" ? dirname(cliOwnerDir) : cliOwnerDir;',
+      '\tawait runDesktopCli(runtimeDir, join(cliSupportRoot, "runtime"));',
+    ].join(eol))
+  } else {
+    const injection = [
+      'rem dsh-builtin-browser: resolve the app directory (resources\\app when the bridge is installed,',
+      'rem resources\\app.asar on a stock installation).',
+      'set "DSH_APP=%~dp0..\\..\\..\\app"',
+      'if not exist "%DSH_APP%\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js" set "DSH_APP=%~dp0..\\..\\..\\app.asar"',
+    ].join(eol)
+    const setLocal = /^.*setlocal.*$/m.exec(original)
+    expected = (setLocal === null ? injection + eol + original : original.replace(setLocal[0], setLocal[0] + eol + injection))
+      .replace(/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/, '%DSH_APP%\\dsh\\')
+  }
+  if (current !== expected) throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'The CLI differs from its recognized restore baseline.')
+}
+
+/** Inspect the archive Electron will load, never a leftover extraction beside it. */
+export function inspectReinstallHost(root: string): ReturnType<typeof hostPatchStatus> {
+  const identity = readDesktopIdentity(root)
+  if (!identity.ok) throw new ReinstallPreflightError('REINSTALL_DESKTOP_INVALID', identity.reason)
+  const archive = join(root, 'resources', 'app.asar')
+  if (existsSync(archive) && existsSync(archive + '.before-bridge')) {
+    throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'Both the Desktop archive and its restore baseline exist.')
+  }
+  if (identity.layout === 'unpacked') return hostPatchStatus(patchDirectories(root))
+  const app = patchDirectories(root)[0]!
+  const archiveFile = (path: fs.PathLike): Buffer | undefined => readAsarFile(archive, relative(app, String(path)).split('\\').join('/'))
+  const snapshot = {
+    ...fs,
+    realpathSync: (path: fs.PathLike) => resolve(String(path)),
+    readFileSync: (path: fs.PathLike) => {
+      const content = archiveFile(path)
+      if (content === undefined) throw new Error(`Missing or unreadable archive entry: ${relative(app, String(path))}`)
+      return content.toString('utf8')
+    },
+    existsSync: (path: fs.PathLike) => archiveFile(path) !== undefined,
+    lstatSync: () => ({ isFile: () => true, isSymbolicLink: () => false }),
+    statSync: () => ({ mode: 0o644 }),
+  }
+  return hostPatchStatus(patchDirectories(root), { fs: snapshot })
+}
+
+/** Entirely read-only: a missing dependency never creates a lock, plan or replacement source. */
+export async function preflightReinstall(root: string, home: string): Promise<string> {
+  let dependency: string
+  try { dependency = await profileDependencySpec(home) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new ReinstallPreflightError('REINSTALL_DEPENDENCY_MISSING', 'The Desktop profile has no dependency specification to reinstall.')
+    throw error
+  }
+  if (/^(?:file|link):/.test(dependency)) {
+    const path = resolve(home, 'profiles', 'desktop', dependency.slice(dependency.indexOf(':') + 1))
+    try { fs.accessSync(path, fs.constants.R_OK) } catch {
+      throw new ReinstallPreflightError('REINSTALL_DEPENDENCY_UNAVAILABLE', 'The captured local dependency source is not readable.')
+    }
+    const installed = join(home, 'profiles', 'desktop', 'node_modules', MAIN_EXTENSION_NAME)
+    if (existsSync(installed)) {
+      const owner = fs.realpathSync(installed), source = fs.realpathSync(path)
+      if (source === owner || inside(owner, source)) throw new ReinstallPreflightError('REINSTALL_DEPENDENCY_UNSAFE', 'The captured dependency source would be deleted by plugin removal.')
+    }
+  }
+  const status = inspectReinstallHost(root)
+  if (status.status !== 'absent' && status.status !== 'applied') throw new ReinstallPreflightError('REINSTALL_HOST_CONFLICT', status.reason ?? status.status)
+  const cli = 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js'
+  const archive = join(root, 'resources', 'app.asar')
+  if (status.status === 'applied' && (existsSync(archive) || ![
+    join(root, 'resources', 'app', 'lib', 'main.js'), join(root, 'resources', 'app', 'lib', 'preload-app.cjs'),
+    join(patchDirectories(root)[1]!, 'lib', 'client.js'),
+  ].every(path => existsSync(path + '.before-dsh-host-patch')))) {
+    throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'An applied host patch has no usable external restore baseline.')
+  }
+  if (existsSync(archive) ? readAsarFile(archive, cli) === undefined : !existsSync(join(root, 'resources', 'app', cli))) {
+    throw new ReinstallPreflightError('REINSTALL_CLI_MISSING', 'The authoritative Desktop CLI is missing or unreadable.')
+  }
+  validateCliBackup(join(root, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'), 'shim')
+  if (!existsSync(archive)) validateCliBackup(join(root, 'resources', 'app', cli), 'host')
+  const main = join(root, 'resources', 'app', 'lib', 'main.js')
+  if (!existsSync(join(root, 'resources', 'app.asar')) && existsSync(main + '.before-bridge')) {
+    const original = readFileSync(main + '.before-bridge', 'utf8')
+    const current = readFileSync(existsSync(main + '.before-dsh-host-patch') ? main + '.before-dsh-host-patch' : main, 'utf8')
+    if ((stripLegacyBridge(current) ?? current) !== original) {
+      throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'The legacy bridge differs from its restore baseline.')
+    }
+  }
+  if (!existsSync(archive) && existsSync(archive + '.before-bridge')) {
+    const preserved = readAsarFile(archive + '.before-bridge', 'lib/main.js')
+    const current = readFileSync(existsSync(main + '.before-dsh-host-patch') ? main + '.before-dsh-host-patch' : main, 'utf8')
+    if (preserved === undefined || preserved.toString('utf8') !== (stripLegacyBridge(current) ?? current)) {
+      throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'The preserved archive belongs to different Desktop bytes.')
+    }
+  }
+  return dependency
+}
+
+/** Copy only shipped runtime files; the running worker and installer survive profile removal. */
+export async function stageReinstallRuntime(directory: string, source = fileURLToPath(new URL('../../', import.meta.url))): Promise<string> {
+  const destination = join(directory, 'runtime')
+  const packageDirectory = fs.realpathSync(source)
+  const parent = fs.realpathSync(directory)
+  if (parent === packageDirectory || inside(packageDirectory, parent)) throw new Error('Reinstall runtime must be staged outside the removed package')
+  await mkdir(destination, { mode: 0o700 })
+  for (const name of ['lib', 'desktop-bridge', 'dsh-host-patch', 'package.json']) {
+    await cp(join(packageDirectory, name), join(destination, name), { recursive: true, dereference: true, errorOnExist: true, force: false })
+  }
+  return join(destination, 'lib', 'browser-electron', 'automatic-maintenance.js')
+}
+
+export interface ReinstallSteps {
+  readonly remove: () => Promise<BridgeActionResult>
+  readonly absent: () => Promise<boolean>
+  readonly revert: () => Promise<BridgeActionResult>
+  readonly hostAbsent: () => boolean
+  readonly apply: () => Promise<BridgeActionResult>
+  readonly add: () => Promise<BridgeActionResult>
+}
+
+/** Called under the automatic job lock, only after the closed-process barrier. */
+export async function runReinstallTransaction(steps: ReinstallSteps): Promise<BridgeActionResult> {
+  const removed = await steps.absent() ? undefined : await steps.remove()
+  if (removed && !removed.ok) throw new Error(`REINSTALL_REMOVE_FAILED: ${removed.output}`)
+  if (!await steps.absent()) throw new Error('REINSTALL_REMOVE_FAILED: profile dependency remains installed')
+  const wasAbsent = steps.hostAbsent()
+  const reverted = await steps.revert()
+  if (!reverted.ok && !(wasAbsent && steps.hostAbsent() && reverted.code === 1 && /^nothing to revert in /m.test(reverted.output)
+    && !/error|refus|incomplete|EACCES|EPERM/i.test(reverted.output))) throw new Error(`REINSTALL_REVERT_FAILED: ${reverted.output}`)
+  if (!steps.hostAbsent()) throw new Error('REINSTALL_REVERT_FAILED: host patch is still present')
+  const applied = await steps.apply()
+  if (!applied.ok || applied.hostPatch?.status !== 'applied') throw new Error(`REINSTALL_APPLY_FAILED: ${applied.output}`)
+  const added = await steps.add()
+  if (!added.ok) throw new Error(`REINSTALL_ADD_FAILED: ${added.output}`)
+  return { ...added, hostPatch: applied.hostPatch, output: [removed?.output, reverted.output, applied.output, added.output].filter(Boolean).join('\n').slice(-20_000) }
 }
 
 const terminal = new Set(['completed', 'failed', 'cancelled'])
@@ -161,7 +320,7 @@ export function maintenanceProgressLaunchOptions(
   locale: 'zh' | 'en' = 'zh',
   powershellPath = windowsPowerShellPath(),
 ): MaintenanceBrokerOptions {
-  if (typeof jobId !== 'string' || !/^(?:install|uninstall)-[A-Za-z0-9]+$/.test(jobId)
+  if (typeof jobId !== 'string' || !/^(?:install|uninstall|reinstall)-[A-Za-z0-9]+$/.test(jobId)
     || typeof directory !== 'string' || !isAbsolute(directory) || basename(directory) !== jobId
     || !['zh', 'en'].includes(locale)) throw new Error('invalid maintenance progress request')
   return {
@@ -215,7 +374,7 @@ export function readAutomaticMaintenance(home = homePath()): AutomaticMaintenanc
       || basename(pointer.directory) !== pointer.id) return undefined
     const state = JSON.parse(readFileSync(join(pointer.directory, 'state.json'), 'utf8')) as AutomaticMaintenanceJob
     if (state.id !== pointer.id || !['armed', 'closing', 'installing', 'restarting', 'verifying', ...terminal].includes(state.phase)
-      || !['install', 'uninstall'].includes(state.action) || !Number.isFinite(Date.parse(state.at))) return undefined
+      || !['install', 'uninstall', 'reinstall'].includes(state.action) || !Number.isFinite(Date.parse(state.at))) return undefined
     return state
   } catch { return undefined }
 }
@@ -226,7 +385,7 @@ async function clearStaleLock(lockPath: string, home: string): Promise<boolean> 
     // Never touch a lock another request may still be preparing (concurrent start window).
     if (Date.now() - info.mtimeMs < 5 * 60_000) return false
     const id = (await readFile(lockPath, 'utf8')).trim()
-    if (!/^(?:install|uninstall)-[A-Za-z0-9]+$/.test(id)) return false
+    if (!/^(?:install|uninstall|reinstall)-[A-Za-z0-9]+$/.test(id)) return false
     const prior = readAutomaticMaintenance(home)
     if (prior === undefined || prior.id !== id) return true
     if (terminal.has(prior.phase)) return true
@@ -253,12 +412,12 @@ function validatePlan(value: unknown, path: string, now = Date.now()): Automatic
   if (value === null || typeof value !== 'object') throw new Error('invalid automatic maintenance plan')
   const plan = value as Partial<AutomaticPlan>
   const created = typeof plan.createdAt === 'string' ? Date.parse(plan.createdAt) : NaN
-  if (plan.version !== 1 || !['install', 'uninstall'].includes(plan.action as string)
-    || typeof plan.id !== 'string' || !/^(?:install|uninstall)-[A-Za-z0-9]+$/.test(plan.id)
+  if (plan.version !== 1 || plan.action !== 'reinstall'
+    || typeof plan.dependency !== 'string' || plan.dependency.trim() === ''
+    || typeof plan.id !== 'string' || !/^reinstall-[A-Za-z0-9]+$/.test(plan.id)
     || ![plan.root, plan.home, plan.nodePath, plan.directory].every(p => typeof p === 'string' && isAbsolute(p))
     || typeof plan.electronNode !== 'boolean' || !Number.isFinite(created) || created > now || now - created > 30_000
-    || (plan.locale !== undefined && !['zh', 'en'].includes(plan.locale))
-    || (plan.mode !== undefined && !['profile', 'bootstrap'].includes(plan.mode))) {
+    || (plan.locale !== undefined && !['zh', 'en'].includes(plan.locale))) {
     throw new Error('invalid or expired automatic maintenance plan')
   }
   const checked = plan as AutomaticPlan
@@ -279,7 +438,7 @@ function validatePlan(value: unknown, path: string, now = Date.now()): Automatic
 
 /** Commit only the armed job after its accepted HTTP response has finished writing. */
 export async function commitAutomaticMaintenance(jobId: string, home = homePath()): Promise<void> {
-  if (typeof jobId !== 'string' || !/^(?:install|uninstall)-[A-Za-z0-9]+$/.test(jobId)) throw new Error('invalid bridge maintenance job id')
+  if (typeof jobId !== 'string' || !/^reinstall-[A-Za-z0-9]+$/.test(jobId)) throw new Error('invalid bridge maintenance job id')
   const state = readAutomaticMaintenance(home)
   if (state?.id !== jobId || state.phase !== 'armed' || !Number.isSafeInteger(state.workerPid) || Number(state.workerPid) <= 0) {
     throw new Error('the bridge maintenance job is no longer armed')
@@ -304,13 +463,11 @@ export async function commitAutomaticMaintenance(jobId: string, home = homePath(
 }
 
 /** Only the new, authenticated explicit-click endpoint calls this function. */
-export async function startAutomaticMaintenance(action: BridgeAction, root: string, options: AutomaticMaintenanceOptions = {}): Promise<AutomaticMaintenanceJob> {
+export async function startAutomaticMaintenance(action: 'reinstall', root: string, options: AutomaticMaintenanceOptions = {}): Promise<AutomaticMaintenanceJob> {
   requireLiveWindows()
-  if (!['install', 'uninstall'].includes(action)) throw new Error('invalid bridge maintenance action')
+  if (action !== 'reinstall') throw new Error('invalid bridge maintenance action')
   if (options.locale !== undefined && !['zh', 'en'].includes(options.locale)) throw new Error('invalid bridge maintenance locale')
-  const mode = options.mode ?? 'profile'
-  if (mode !== 'bootstrap' && mode !== 'profile') throw new Error('invalid bridge maintenance mode')
-  if (mode === 'profile' && options.hostStatus === undefined && await readHostExtensionStatus(homePath()) === undefined) throw new Error(MAIN_EXTENSION_UNSUPPORTED)
+  const dependency = await preflightReinstall(root, homePath())
   if (!readDesktopIdentity(root).ok) throw new Error('the maintenance target is not a verified DSH Desktop installation')
   if (!existsSync(quitPath)) throw new Error('the packaged Desktop quit helper is missing')
   const processes = await desktopProcesses(root)
@@ -329,19 +486,22 @@ export async function startAutomaticMaintenance(action: BridgeAction, root: stri
   }
   let plan: AutomaticPlan | undefined
   try {
-    const prepared = await prepareBridgeMaintenance(action, root, { directory: base })
+    const prepared = await prepareBridgeMaintenance('install', root, { directory: base })
     const original = JSON.parse(await readFile(prepared.planPath, 'utf8')) as { nodePath: string; electronNode: boolean }
-    const id = basename(prepared.directory)
+    const id = basename(prepared.directory).replace(/^install-/, 'reinstall-')
+    const directory = join(base, id)
+    await renameMaintenanceFile(prepared.directory, directory)
+    const stagedWorker = await stageReinstallRuntime(directory)
     await lock.writeFile(id + '\n')
     await lock.close()
-    plan = { version: 1, id, action, mode, root: resolve(root), nodePath: original.nodePath, electronNode: original.electronNode,
-      home, directory: prepared.directory, target: mains[0] as DesktopProcess, createdAt: new Date().toISOString(),
+    plan = { version: 1, id, action, dependency, root: resolve(root), nodePath: original.nodePath, electronNode: original.electronNode,
+      home, directory, target: mains[0] as DesktopProcess, createdAt: new Date().toISOString(),
       ...options.locale === undefined ? {} : { locale: options.locale } }
-    const path = join(prepared.directory, 'automatic.json')
+    const path = join(directory, 'automatic.json')
     await writeFile(path, JSON.stringify(plan, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
-    await atomicJson(join(base, 'latest.json'), { id, directory: prepared.directory })
+    await atomicJson(join(base, 'latest.json'), { id, directory })
     const launched = await launchMaintenanceBroker({ runtimePath: plan.nodePath,
-      args: [...plan.electronNode ? ['--expose-internals'] : [], workerPath, '--automatic-maintenance', path], cwd: prepared.directory,
+      args: [...plan.electronNode ? ['--expose-internals'] : [], stagedWorker, '--automatic-maintenance', path], cwd: directory,
       environment: { DSH_HOME: home, ELECTRON_RUN_AS_NODE: plan.electronNode ? '1' : undefined } })
     // WMI's return code proves creation only. The worker must actually load and publish its arm.
     const deadline = Date.now() + 12_000
@@ -423,17 +583,26 @@ async function runWorker(path: string): Promise<void> {
       maintain: async () => {
         checkCancelled()
         if ((await desktopProcesses(plan.root)).length > 0) throw new Error('DSH Desktop was reopened during maintenance; refusing to modify its files')
-        if (plan.mode === 'profile') {
-          const result = await repairProfileExtension(plan.action, plan.root, plan.home,
-            async (command, argv, environment) => await execute(command, argv, 180_000, environment))
-          if (result.ok && plan.action === 'install') extension = await installedProfileExtension(plan.home)
-          return result
-        }
-        return await runBridgeAction(plan.action, plan.root, {
+        if (await preflightReinstall(plan.root, plan.home) !== plan.dependency) throw new Error('REINSTALL_DEPENDENCY_CHANGED')
+        const bridge = async (action: 'install' | 'uninstall'): Promise<BridgeActionResult> => await runBridgeAction(action, plan.root, {
           node: () => plan.nodePath, installer: defaultInstallerPath, trackResult: true,
           run: async (cmd, args, extra) => await execute(cmd, [...plan.electronNode ? ['--expose-internals'] : [], ...args], 180_000,
             { ...process.env, ...extra, ELECTRON_RUN_AS_NODE: plan.electronNode ? '1' : undefined }),
         })
+        const profile = async (action: 'install' | 'uninstall'): Promise<BridgeActionResult> => await repairProfileExtension(action, plan.root, plan.home,
+          async (command, argv, environment) => await execute(command, argv, 180_000, environment), plan.dependency)
+        const result = await runReinstallTransaction({
+          remove: () => profile('uninstall'),
+          absent: async () => {
+            const manifest = JSON.parse(await readFile(join(plan.home, 'profiles', 'desktop', 'package.json'), 'utf8')) as { dependencies?: Record<string, unknown> }
+            return manifest.dependencies?.[MAIN_EXTENSION_NAME] === undefined && !existsSync(join(plan.home, 'profiles', 'desktop', 'node_modules', MAIN_EXTENSION_NAME))
+          },
+          revert: () => bridge('uninstall'),
+          hostAbsent: () => inspectReinstallHost(plan.root).status === 'absent',
+          apply: () => bridge('install'), add: () => profile('install'),
+        })
+        extension = await installedProfileExtension(plan.home)
+        return result
       },
       restart: async () => {
         if ((await desktopProcesses(plan.root)).length > 0) throw new Error('DSH Desktop is already running; not opening a second instance')
@@ -448,7 +617,8 @@ async function runWorker(path: string): Promise<void> {
         })
       },
       verify: async (pid, action) => {
-        if (action === 'install') {
+        if (action === 'reinstall') {
+          if (inspectReinstallHost(plan.root).status !== 'applied') throw new Error('REINSTALL_HOST_VERIFY_FAILED')
           await waitForRestartedBridge(pid, { timeoutMs: 45_000, endpointPath: join(plan.home, 'dsh-builtin-browser-bridge.json'),
             ...(extension === undefined ? {} : { extension, home: plan.home }) })
           return

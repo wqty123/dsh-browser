@@ -47,12 +47,18 @@ export async function installedProfileExtension(home: string): Promise<Installed
   return { version: pkg.version, build }
 }
 
-export async function profileExtensionCommand(action: BridgeAction, root: string, home: string): Promise<readonly string[]> {
+export async function profileDependencySpec(home: string): Promise<string> {
+  const manifest = JSON.parse(await readFile(join(home, 'profiles', 'desktop', 'package.json'), 'utf8')) as { dependencies?: Record<string, unknown> }
+  const dependency = manifest.dependencies?.[MAIN_EXTENSION_NAME]
+  if (typeof dependency !== 'string' || dependency.trim() === '') throw Object.assign(new Error('The Desktop profile has no dsh-builtin-browser dependency to reinstall.'), { code: 'REINSTALL_DEPENDENCY_MISSING' })
+  return dependency
+}
+
+export async function profileExtensionCommand(action: BridgeAction, root: string, home: string, capturedSpec?: string): Promise<readonly string[]> {
   if (!isAbsolute(root) || !isAbsolute(home)) throw new Error('invalid Desktop profile location')
   const profile = join(home, 'profiles', 'desktop')
-  const manifest = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8')) as { dependencies?: Record<string, unknown> }
-  const dependency = manifest.dependencies?.[MAIN_EXTENSION_NAME]
-  if (action === 'install' && (typeof dependency !== 'string' || dependency.trim() === '')) throw new Error('EXTENSION_NOT_INSTALLED')
+  const dependency = action === 'install' ? capturedSpec ?? await profileDependencySpec(home) : undefined
+  if (action === 'install' && (typeof dependency !== 'string' || dependency.trim() === '')) throw new Error('REINSTALL_DEPENDENCY_MISSING')
   const resources = join(root, 'resources')
   let cli = join(resources, 'app.asar', 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js')
   try { await access(cli) } catch { cli = join(resources, 'app', 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js'); await access(cli) }
@@ -68,8 +74,8 @@ export async function profileExtensionCommand(action: BridgeAction, root: string
 
 export async function repairProfileExtension(action: BridgeAction, root: string, home: string, run: (
   command: string, argv: readonly string[], environment: NodeJS.ProcessEnv,
-) => Promise<{ code: number; output: string }>): Promise<BridgeActionResult> {
-  const argv = ['--expose-internals', ...await profileExtensionCommand(action, root, home)]
+) => Promise<{ code: number; output: string }>, capturedSpec?: string): Promise<BridgeActionResult> {
+  const argv = ['--expose-internals', ...await profileExtensionCommand(action, root, home, capturedSpec)]
   const command = join(root, 'DeepSeek Harness.exe')
   const environment = { ...process.env, DSH_HOME: home, ELECTRON_RUN_AS_NODE: '1' }
   const result = await run(command, argv, environment)

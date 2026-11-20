@@ -2255,8 +2255,8 @@ test('bridge maintenance names its automatic restart and retains the diagnostic 
 })
 
 for (const [state, label] of [
-  ['missing', 'readiness.bridge.install'],
-  ['stale', 'readiness.bridge.repair'],
+  ['missing', 'readiness.bridge.reinstall'],
+  ['stale', 'readiness.bridge.reinstall'],
   ['installed', 'readiness.bridge.reinstall'],
 ]) {
   test(`bridge ${state} offers its action outside folded diagnostics`, async () => {
@@ -2269,7 +2269,7 @@ for (const [state, label] of [
     assert.ok(controls, 'bridge management remains visible without opening diagnostics')
     assert.ok(bridgeButton(controls, label), 'the action matches the actual bridge state')
     assert.equal(bridgeButton(diagnostics, label), undefined, 'the primary action is not buried in diagnostics')
-    assert.equal(Boolean(bridgeButton(controls, 'readiness.bridge.uninstall')), state === 'installed', 'installed users can restore without opening diagnostics')
+    assert.equal(elements(controls).filter(node => node.type === 'button').length, 1)
     assert.equal(bridgeButton(diagnostics, 'readiness.bridge.uninstall'), undefined, 'restore is not buried in diagnostics')
     assert.ok(textOf(controls).includes('readiness.bridge.maintenanceHint'), 'the restart is stated beside the explicit action')
     assert.equal(calls.filter(call => call.method === 'POST').length, 0, 'viewing settings starts no installation')
@@ -2353,15 +2353,14 @@ test('production settings reads host status even when the bridge endpoint is mis
     assert.match(textOf(tree).join(' '), /0\.7\.42/)
     assert.doesNotMatch(textOf(tree).join(' '), /legacy-injector/)
     if (state === 'failed') assert.match(textOf(tree).join(' '), /EXTENSION_START_FAILED/)
-    const install = elements(tree).find(node => node.props.key === 'install')
+    const install = elements(tree).find(node => node.props.key === 'reinstall')
     await install.props.onClick()
     const post = fixture.calls.find(call => call.init.method === 'POST')
-    assert.equal(JSON.parse(post.init.body).mode, 'profile')
-    assert.equal(JSON.parse(post.init.body).hostStatus.state, state)
+    assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall' })
   }
 })
 
-test('production unsupported settings reports the capability code and makes bootstrap explicit', async () => {
+test('production unsupported settings reports the capability code and offers the same reinstall', async () => {
   const fixture = maintenanceFixture({ state: 'installed' }), runtime = bridgeRuntime('installed')
   delete runtime.bridge.mainExtension
   fixture.setRuntime(runtime)
@@ -2369,35 +2368,35 @@ test('production unsupported settings reports the capability code and makes boot
   const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, locale: locale.api, document: maintenanceDocument(), timers: maintenanceTimers() })
   const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
   assert.match(textOf(tree).join(' '), /DESKTOP_MAIN_EXTENSION_UNSUPPORTED/)
-  const install = elements(tree).find(node => node.props.key === 'install')
-  assert.match(textOf(install).join(' '), /宿主补丁/)
+  const install = elements(tree).find(node => node.props.key === 'reinstall')
+  assert.match(textOf(install).join(' '), /卸载并重装/)
   await install.props.onClick()
   const post = fixture.calls.find(call => call.init.method === 'POST')
-  assert.equal(JSON.parse(post.init.body).mode, 'bootstrap')
-  assert.equal('hostStatus' in JSON.parse(post.init.body), false)
+  assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall' })
 })
 
-test('production settings keeps profile repair and host restore separate', async () => {
-  for (const [key, action, mode] of [['install', 'install', 'profile'], ['uninstall', 'uninstall', 'profile'], ['bootstrap', 'install', 'bootstrap'], ['restore-host', 'uninstall', 'bootstrap']]) {
-    const fixture = maintenanceFixture({ state: 'installed' })
+test('production settings exposes exactly one fixed reinstall control in every bridge state', async () => {
+  for (const state of ['missing', 'stale', 'installed']) {
+    const fixture = maintenanceFixture({ state })
     const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(), timers: maintenanceTimers() })
     const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
-    const button = elements(tree).find(node => node.props.key === key)
+    const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
+    assert.equal(elements(controls).filter(node => node.type === 'button').length, 1)
+    const button = elements(tree).find(node => node.props.key === 'reinstall')
     assert.ok(button)
     await button.props.onClick()
     const post = fixture.calls.find(call => call.init.method === 'POST')
-    assert.equal(JSON.parse(post.init.body).action, action)
-    assert.equal(JSON.parse(post.init.body).mode, mode)
+    assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall' })
   }
 })
 
 for (const [action, state, label, success] of [
-  ['install', 'missing', 'readiness.bridge.install', 'readiness.bridge.installedDone'],
-  ['uninstall', 'installed', 'readiness.bridge.uninstall', 'readiness.bridge.uninstalledDone'],
+  ['reinstall', 'missing', 'readiness.bridge.reinstall', 'readiness.bridge.installedDone'],
+  ['reinstall', 'installed', 'readiness.bridge.reinstall', 'readiness.bridge.installedDone'],
 ]) {
   test(`automatic bridge ${action} arms the new endpoint before opening the official menu and waits for completion`, async () => {
     const fixture = maintenanceFixture({ state }), clicks = [], timers = maintenanceTimers()
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
     const Component = readinessComponent(mounted.exports)
     const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
     await bridgeButton(tree, label).props.onClick()
@@ -2405,19 +2404,19 @@ for (const [action, state, label, success] of [
     const posts = fixture.calls.filter(call => call.init.method === 'POST')
     assert.equal(posts.length, 1)
     assert.equal(posts[0].path, '/dsh-builtin-browser/bridge-maintenance')
-    assert.deepEqual(JSON.parse(posts[0].init.body), { action, locale: 'zh' })
+    assert.deepEqual(JSON.parse(posts[0].init.body), { action })
     assert.equal(new Headers(posts[0].init.headers).get('content-type'), 'application/json')
     assert.deepEqual(clicks, ['official-menu'], 'only the exact official menu button is opened after acknowledgement')
     assert.ok(textOf(armed).includes('readiness.bridge.phase.armed'))
     assert.ok(textOf(armed).includes('readiness.bridge.progressHint'), 'handoff explains the independent progress and automatic startup')
     assert.equal(elements(armed).some(node => node.props.key === 'bridge-result'), false, 'an armed job is never reported as completed')
     assert.ok(elements(armed).filter(node => node.type === 'button').every(node => node.props.disabled === true))
-    fixture.setRuntime(bridgeRuntime(action === 'install' ? 'installed' : 'missing'))
+    fixture.setRuntime(bridgeRuntime('installed'))
     fixture.setJob({ id: 'maintenance-1', action, phase: 'completed', ok: true, restarted: true })
     await timers.run()
     const finished = await renderPanel(Component, mounted.host, fixture.fetchMock)
     assert.ok(elements(finished).some(node => node.props.key === 'bridge-result' && textOf(node).includes(success)))
-    assert.ok(bridgeButton(finished, action === 'install' ? 'readiness.bridge.reinstall' : 'readiness.bridge.install'))
+    assert.ok(bridgeButton(finished, 'readiness.bridge.reinstall'))
     assert.equal(fixture.calls.filter(call => call.path.endsWith('/runtime-status')).length, 2, 'completion refreshes actual runtime state')
     assert.equal(timers.pending.size, 0, 'terminal jobs leave no background maintenance polling')
   })
@@ -2427,7 +2426,7 @@ test('an in-flight handoff ignores duplicate clicks and disables concurrent cont
   let complete
   const response = new Promise(resolve => { complete = resolve })
   const fixture = maintenanceFixture({ state: 'installed', post: () => response }), clicks = [], timers = maintenanceTimers()
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
   const Component = readinessComponent(mounted.exports)
   const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
   const install = bridgeButton(tree, 'readiness.bridge.reinstall')
@@ -2436,53 +2435,29 @@ test('an in-flight handoff ignores duplicate clicks and disables concurrent cont
   const pending = await renderPanel(Component, mounted.host, fixture.fetchMock)
   assert.equal(fixture.calls.filter(call => call.init.method === 'POST').length, 1)
   assert.ok(elements(pending).filter(node => node.type === 'button').every(node => node.props.disabled === true))
-  const pendingButton = elements(pending).find(node => node.props.key === 'install')
-  assert.deepEqual(textOf(pendingButton), ['readiness.bridge.working'], 'the button changes immediately before the POST settles')
+  const pendingButton = elements(pending).find(node => node.props.key === 'reinstall')
+  assert.deepEqual(textOf(pendingButton), ['readiness.bridge.reinstall'], 'the label stays fixed while preparing')
   assert.equal(pendingButton.props['aria-busy'], 'true')
   assert.equal(pendingButton.props.style.cursor, 'default')
   assert.ok(elements(pending).some(node => node.props.role === 'status' && textOf(node).includes('readiness.bridge.working')), 'preparation feedback is present before the acknowledgement')
   assert.deepEqual(clicks, [], 'the menu remains closed until the worker is armed')
-  complete({ ok: true, status: 202, json: async () => ({ ok: true, accepted: true, protocol: 1, job: { id: 'one', phase: 'armed', action: 'install' } }) })
+  complete({ ok: true, status: 202, json: async () => ({ ok: true, accepted: true, protocol: 1, job: { id: 'one', phase: 'armed', action: 'reinstall' } }) })
   await task
   await install.props.onClick()
   assert.equal(fixture.calls.filter(call => call.init.method === 'POST').length, 1, 'a stale click handler cannot submit after acceptance either')
   assert.deepEqual(clicks, ['official-menu'])
 })
 
-for (const { name, snapshot, documentLanguage, switchLanguage, expected } of [
-  { name: 'current English snapshot', snapshot: 'en', documentLanguage: 'zh-CN', expected: 'en' },
-  { name: 'current Chinese snapshot', snapshot: 'zh', documentLanguage: 'en-GB', expected: 'zh' },
-  { name: 'a language switch before the click', snapshot: 'zh', switchLanguage: 'en', documentLanguage: 'zh-CN', expected: 'en' },
-  { name: 'legacy English document language', documentLanguage: 'en-GB', expected: 'en' },
-  { name: 'legacy Chinese document language', documentLanguage: 'zh-CN', expected: 'zh' },
-  { name: 'an unavailable language source', documentLanguage: '', expected: 'zh' },
-]) {
-  test(`maintenance passes locale from ${name}`, async () => {
-    const fixture = maintenanceFixture(), locale = lazyLocale()
-    const document = maintenanceDocument()
-    document.documentElement.lang = documentLanguage
-    if (snapshot !== undefined) locale.setLocale(snapshot)
-    else delete locale.api.getSnapshot
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document, locale: locale.api, timers: maintenanceTimers() })
-    const Component = readinessComponent(mounted.exports)
-    const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
-    if (switchLanguage) locale.setLocale(switchLanguage)
-    await elements(tree).find(node => node.props.key === 'install').props.onClick()
-    const post = fixture.calls.find(call => call.init.method === 'POST')
-    assert.deepEqual(JSON.parse(post.init.body), { action: 'install', locale: expected })
-  })
-}
-
 test('remote or unsupported surfaces cannot arm bridge maintenance', async () => {
   const fixture = maintenanceFixture(), timers = maintenanceTimers()
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: makeDocument(), timers })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: makeDocument(), timers })
   const Component = readinessComponent(mounted.exports)
   const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
-  await bridgeButton(tree, 'readiness.bridge.install').props.onClick()
+  await bridgeButton(tree, 'readiness.bridge.reinstall').props.onClick()
   const refused = await renderPanel(Component, mounted.host, fixture.fetchMock)
   assert.equal(fixture.calls.some(call => call.init.method === 'POST'), false)
   assert.ok(textOf(refused).includes('readiness.bridge.localOnly'))
-  assert.equal(bridgeButton(refused, 'readiness.bridge.install').props.disabled, false)
+  assert.equal(bridgeButton(refused, 'readiness.bridge.reinstall').props.disabled, false)
 })
 
 for (const [name, response, reason] of [
@@ -2497,15 +2472,15 @@ for (const [name, response, reason] of [
       if (!response) throw Error(reason)
       return { ...response, json: async () => response.data }
     } }), clicks = [], timers = maintenanceTimers()
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
     const Component = readinessComponent(mounted.exports)
     const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
-    await bridgeButton(tree, 'readiness.bridge.install').props.onClick()
+    await bridgeButton(tree, 'readiness.bridge.reinstall').props.onClick()
     const failed = await renderPanel(Component, mounted.host, fixture.fetchMock)
     assert.deepEqual(clicks, [])
     assert.ok(textOf(failed).join(' ').includes(reason), 'the reason remains visible in the short notice or diagnostics')
     assert.equal(elements(failed).some(node => node.props.key === 'bridge-result'), false)
-    assert.equal(bridgeButton(failed, 'readiness.bridge.install').props.disabled, false)
+    assert.equal(bridgeButton(failed, 'readiness.bridge.reinstall').props.disabled, false)
     assert.equal(fixture.calls.some(call => call.path.endsWith('/bridge-action')), false)
   })
 }
@@ -2513,7 +2488,7 @@ for (const [name, response, reason] of [
 test('a remounted panel resumes an active job and keeps polling through the restart disconnect', async () => {
   const job = { id: 'resumed', action: 'install', phase: 'installing' }
   const fixture = maintenanceFixture({ initialJob: job }), timers = maintenanceTimers(), clicks = []
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
   const Component = readinessComponent(mounted.exports)
   const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
   assert.ok(textOf(tree).includes('readiness.bridge.phase.installing'))
@@ -2542,7 +2517,7 @@ test('a fresh panel recovers a completed job without rearming maintenance', asyn
   assert.ok(textOf(tree).includes('readiness.bridge.installedDone'))
   assert.equal(bridgeButton(tree, 'readiness.bridge.reinstall').props.disabled, false)
   const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
-  assert.equal(bridgeButton(controls, 'readiness.bridge.uninstall').props.disabled, false, 'completed extension install retains visible restore')
+  assert.equal(elements(controls).filter(node => node.type === 'button').length, 1)
   assert.equal(fixture.calls.some(call => call.init.method === 'POST'), false)
   assert.deepEqual(clicks, [])
   assert.equal(timers.pending.size, 0)
@@ -2552,14 +2527,14 @@ for (const phase of ['failed', 'cancelled']) {
   test(`a ${phase} job exposes details only in diagnostics and enables retry`, async () => {
     const detail = 'worker diagnostic '.repeat(150)
     const fixture = maintenanceFixture({ initialJob: { id: 'finished', action: 'install', phase, error: detail, output: 'worker output' } }), timers = maintenanceTimers()
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(), timers })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(), timers })
     const Component = readinessComponent(mounted.exports)
     const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
     const alert = elements(tree).find(node => node.props.key === 'bridge-job-error')
     assert.deepEqual(textOf(alert), ['readiness.bridge.' + phase])
     const diagnostics = elements(tree).find(node => node.props.key === 'diagnostics')
     assert.ok(textOf(diagnostics).join(' ').includes(detail))
-    assert.equal(bridgeButton(tree, 'readiness.bridge.install').props.disabled, false)
+    assert.equal(bridgeButton(tree, 'readiness.bridge.reinstall').props.disabled, false)
     assert.equal(elements(tree).some(node => node.props.key === 'bridge-result'), false)
     assert.equal(timers.pending.size, 0)
   })
@@ -2571,7 +2546,7 @@ for (const { name, error, output, expected } of [
 ]) {
   test(`maintenance diagnostics retain ${name} without duplicate output`, async () => {
     const fixture = maintenanceFixture({ initialJob: { id: 'diagnostic', action: 'install', phase: 'failed', error, output } })
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(), timers: maintenanceTimers() })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(), timers: maintenanceTimers() })
     const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
     const detail = elements(tree).find(node => node.props.key === 'bridge-job-detail')
     assert.deepEqual(textOf(detail), [expected])
@@ -2581,7 +2556,7 @@ for (const { name, error, output, expected } of [
 
 test('an idle settings panel reads maintenance once without polling or opening the menu', async () => {
   const fixture = maintenanceFixture(), timers = maintenanceTimers(), clicks = []
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
   await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
   assert.equal(fixture.calls.filter(call => call.path.endsWith('/bridge-maintenance')).length, 1)
   assert.equal(timers.pending.size, 0)

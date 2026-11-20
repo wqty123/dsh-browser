@@ -4,13 +4,13 @@ import { Readable } from 'node:stream'
 import { EventEmitter } from 'node:events'
 import { createAutomaticMaintenanceHandler } from '../lib/browser-electron/maintenance-route.js'
 
-const job = { id: 'install-fixture', action: 'install', phase: 'armed', at: new Date().toISOString() }
+const job = { id: 'reinstall-fixture', action: 'reinstall', phase: 'armed', at: new Date().toISOString() }
 function fixture(overrides = {}) {
   const calls = []
   const handler = createAutomaticMaintenanceHandler({ supported: () => true, read: () => undefined,
     start: async action => { calls.push(action); return { ...job, action } }, ...overrides })
   const request = async (options = {}) => {
-    const req = Readable.from([options.body ?? '{"action":"install"}'])
+    const req = Readable.from([options.body ?? '{"action":"reinstall"}'])
     req.method = options.method ?? 'POST'
     req.headers = { host: '127.0.0.1:3456', origin: 'http://127.0.0.1:3456', ...options.headers }
     req.socket = { remoteAddress: options.remoteAddress ?? '127.0.0.1' }
@@ -28,7 +28,7 @@ test('maintenance protocol starts only an explicit valid local POST and returns 
   assert.equal(r.body.protocol, 1)
   assert.equal(r.body.accepted, true)
   assert.equal(r.body.job.phase, 'armed')
-  assert.deepEqual(f.calls, ['install'])
+  assert.deepEqual(f.calls, ['reinstall'])
 })
 test('status reads do not start maintenance and retain the durable last outcome', async () => {
   const last = { ...job, phase: 'completed', ok: true, restarted: true }
@@ -77,7 +77,7 @@ test('the progress language follows the explicit supported interface locale', as
   for (const locale of ['zh', 'en']) {
     let supplied
     const f = fixture({ start: async (action, options) => { supplied = options; return { ...job, action } } })
-    const r = await f.request({ body: JSON.stringify({ action: 'install', locale }) })
+    const r = await f.request({ body: JSON.stringify({ action: 'reinstall', locale }) })
     assert.equal(r.statusCode, 202)
     assert.deepEqual(supplied, { locale })
   }
@@ -85,7 +85,24 @@ test('the progress language follows the explicit supported interface locale', as
 
 test('unsupported progress language is rejected without starting a worker', async () => {
   const f = fixture()
-  const r = await f.request({ body: '{"action":"install","locale":"unexpected"}' })
+  const r = await f.request({ body: '{"action":"reinstall","locale":"unexpected"}' })
   assert.equal(r.statusCode, 400)
   assert.deepEqual(f.calls, [])
+})
+
+test('legacy actions and mode selection are rejected before worker startup', async () => {
+  for (const body of [{ action: 'install' }, { action: 'uninstall' }, { action: 'reinstall', mode: 'profile' }, { action: 'reinstall', hostStatus: { state: 'loaded' } }]) {
+    const f = fixture()
+    assert.equal((await f.request({ body: JSON.stringify(body) })).statusCode, 400)
+    assert.deepEqual(f.calls, [])
+  }
+})
+
+test('missing dependency preflight returns its structured error and never commits', async () => {
+  let commits = 0
+  const f = fixture({ start: async () => { throw Object.assign(new Error('Dependency missing'), { code: 'REINSTALL_DEPENDENCY_MISSING' }) }, commit: async () => { commits++ } })
+  const r = await f.request()
+  assert.equal(r.statusCode, 409)
+  assert.equal(r.body.code, 'REINSTALL_DEPENDENCY_MISSING')
+  assert.equal(commits, 0)
 })
