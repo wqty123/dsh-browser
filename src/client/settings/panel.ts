@@ -1913,66 +1913,6 @@ const react = require("react")
       } catch { /* no DOM */ }
       return null
     }
-    /**
-     * Reveal a reference inside the Web sidebar.
-     *
-     * A web-panel capture has no browser session, so the host's revealer cannot point a tab at it. The
-     * panel is just a tab in this shell, so navigation is ours to do: read the reference's page and aim
-     * the bound tab at it. Registered as a global hook because the reply-side renderer lives in another
-     * package and must stay free of shell imports.
-     *
-     * @param uri - canonical `dsh-browser-ref:` URI.
-     * @returns whether a tab was aimed.
-     */
-    function revealInPanel(uri) {
-      try {
-        const match = /^dsh-browser-ref:([^/\s]+)/u.exec(String(uri))
-        if (match === null) return false
-        const referenceId = decodeURIComponent(match[1])
-        const sessionId = guestSession()
-        if (typeof sessionId !== "string" || sessionId === "") return false
-        const tabs = sidebarRight && typeof sidebarRight.tabsIn === "function" ? Array.from(sidebarRight.tabsIn(sessionId)) : []
-        const page = tabs.find(tab => tab && typeof tab === "object" && tab.kind === "browser")
-        fetch("/dsh-builtin-browser/reference/get?id=" + encodeURIComponent(referenceId), { headers: { accept: "application/json" } })
-          .then(response => (response.ok ? response.json() : undefined))
-          .then(body => {
-            // The record keeps the page under `source` (the route ships {ok, reference, summary}); reading
-            // `reference.url` yielded "" and the panel never moved.
-            // The page lives at `source.pageUrl`. A capture taken through the proxy stores the PROXY address
-            // there, so unwrap it to the real page and re-wrap it consistently.
-            const source = body && body.reference ? body.reference.source : undefined
-            const raw = source && typeof source.pageUrl === "string" ? source.pageUrl
-              : (body && body.summary && typeof body.summary.pageUrl === "string" ? body.summary.pageUrl : "")
-            const url = (() => {
-              if (typeof raw !== "string" || raw === "") return ""
-              const marker = "browser-view/guest?u="
-              const at = raw.indexOf(marker)
-              if (at === -1) return raw
-              try { return decodeURIComponent(raw.slice(at + marker.length).split("&")[0]) } catch { return "" }
-            })()
-            if (url === "") return
-            try { if (typeof sidebarRight.isExpanded === "function" && sidebarRight.isExpanded() === false) sidebarRight.toggleExpanded() } catch { /* folded is fine */ }
-            // The Web panel is an iframe in THIS document, so aiming it needs no tab id at all: rewrite
-            // the frame's src through the same-origin proxy. The shell does not publish the visible
-            // browser tab through `tabsIn`, which is why the tab-based path silently did nothing.
-            const frame = document.querySelector('iframe[data-sidebar-browser-frame]')
-            if (frame !== null) {
-              // 经同源代理加载。直连会让站点用 `X-Frame-Options: SAMEORIGIN`（sudoku.com、必应）
-              // 或 `frame-ancestors 'none'`（GitHub）直接拒绝嵌入，侧栏里表现为"拒绝连接"。
-              // 代理的 HTML 由宿主返回，没有这些头，任何站点都嵌得进来。
-              frame.src = location.origin + "/dsh-builtin-browser/browser-view/guest?u=" + encodeURIComponent(url)
-            } else {
-              try {
-                if (page !== undefined) sidebarRight.navigateTabIn(sessionId, page.id, { params: { url } })
-                else sidebarRight.openTabIn(sessionId, "browser", { params: { url } })
-              } catch { /* tab gone */ }
-            }
-          })
-          .catch(() => {})
-        return true
-      } catch { return false }
-    }
-    try { globalThis.__DSH_BROWSER_REF_REVEAL__ = revealInPanel } catch { /* non-writable */ }
     function onScreenSession() {
       try {
         const screen = sidebarRight === null || typeof sidebarRight.screen !== "function" ? undefined : sidebarRight.screen()

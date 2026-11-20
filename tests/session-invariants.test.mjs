@@ -10,36 +10,56 @@
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { Script } from 'node:vm'
 
 const bridge = readFileSync('desktop-bridge/plugin-browser-bridge.js', 'utf8')
 const host = readFileSync('src/browser-electron/desktop-bridge-host.ts', 'utf8')
 
-/** The bridge's ops, with the line each starts on. */
-function ops () {
-  const found = []
-  bridge.split('\n').forEach((line, i) => {
-    const m = /if \(op === '([a-zA-Z]+)'\)/.exec(line)
-    if (m) found.push({ name: m[1], line: i + 1 })
+function ops (source) {
+  return [...source.matchAll(/if \(op === '([a-zA-Z]+)'\) \{/g)].map(match => {
+    for (let end = source.indexOf('}', match.index); end !== -1; end = source.indexOf('}', end + 1)) {
+      const body = source.slice(match.index, end + 1)
+      try {
+        // Parse, never execute. JavaScript itself handles braces in templates,
+        // strings, comments and regexes; only a complete branch compiles.
+        new Script(`async function operation() { ${body}\n }`)
+        return { name: match[1], body }
+      } catch { /* the branch has not ended yet */ }
+    }
+    throw new Error(`unclosed operation: ${match[1]}`)
   })
-  return found
 }
 
-test('every guest-touching op consults the owner ledger', () => {
-  const lines = bridge.split('\n')
+function ledgerOffenders (source) {
   const offenders = []
-  const list = ops()
-  list.forEach((op, k) => {
-    const end = k + 1 < list.length ? list[k + 1].line - 1 : lines.length
-    const body = lines.slice(op.line - 1, end).join('\n')
-    if (!/getType\(\) === 'webview'/.test(body)) return
+  ops(source).forEach(({ name, body }) => {
+    if (!/getType\(\) === 'webview'|guestById\(|sendCdp\(id,|downloadGuest\(/.test(body)) return
     const uses = /claims\.get\([^)]*\) === owner/.test(body)
       || /claims\.set\([^)]*owner\)/.test(body)
       || /!claims\.has\([^)]*\)/.test(body)
       || /mineOrFree/.test(body)
       || /unclaimed\(/.test(body)
-    if (!uses) offenders.push(op.name)
+      || /await assertGuestOwner\(id, owner\)/.test(body)
+      || /claims\.get\([^)]*\) !== owner/.test(body)
+    if (!uses) offenders.push(name)
   })
+  return offenders
+}
+
+test('every guest-touching op consults the owner ledger', () => {
+  const offenders = ledgerOffenders(bridge)
   assert.deepEqual(offenders, [], 'these ops touch guests without asking who is asking: ' + offenders.join(', '))
+})
+
+test('owner-ledger scan is branch-scoped and catches a real bypass', () => {
+  const branches = ops(bridge)
+  assert.ok(!branches.find(op => op.name === 'collapseSidebar').body.includes('setWindowOpenHandler'))
+  const cdp = branches.find(op => op.name === 'cdp').body
+  const bypass = cdp.replace('await assertGuestOwner(id, owner)', '')
+  assert.notEqual(bypass, cdp)
+  assert.deepEqual(ledgerOffenders(bridge.replace(cdp, bypass)), ['cdp'])
+  assert.deepEqual(ops("if (op === 'one') { const s = `brace } ${1}`; /* } */ return /}/.test(s) }\nfunction later() { guestById(1) }").map(op => op.body),
+    ["if (op === 'one') { const s = `brace } ${1}`; /* } */ return /}/.test(s) }"])
 })
 
 test('nothing in the bridge clicks or types into the shell any more', () => {

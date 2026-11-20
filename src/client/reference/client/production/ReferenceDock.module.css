@@ -21,6 +21,8 @@
   margin: 0 0 4px;
 }
 .rail[data-pending='yes'] .chip { opacity: 0.72; }
+.sentRail { display: inline-flex; max-width: 100%; vertical-align: middle; margin: 0 2px; }
+.sentRail .chip { max-width: min(320px, 100%); }
 
 /* One collapsed pill per reference. Nothing but the number and the source label
    is shown here; the captured content is one hover away. */
