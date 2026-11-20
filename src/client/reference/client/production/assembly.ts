@@ -387,10 +387,7 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
   }, 'ui-browser-reference: reply link bridge')
 
   /**
-   * The dock reads the Session id and the live draft off its owner props. The
-   * rail it lands on declares no owner share, so the adapter rebuilds those two
-   * fields from the Session standard kit (`sessionId`, `useInput`) the slot
-   * runtime injects anyway.
+   * Prefer the Session standard kit over stale owner snapshots.
    */
   const dockComponent = (props: unknown): unknown => {
     const face = props as {
@@ -412,11 +409,9 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
     config.onDockProps?.(dockProps)
     return cardComponent(dockProps)
   }
-  // 胶囊行属于输入框内部布局：注册进宿主在 composer card 里提供的 `conversation.input.chips`。
-  // 注册到 `conversation.input.overlay` 会让胶囊浮在输入框之上——占位文字与附件图片都会与它重叠。
-  ctx.slots.inject('conversation.input.chips', function* () {
+  ctx.slots.inject('conversation.input.dock', function* () {
     yield ctx.slots.register({
-      name: 'conversation.input.chips', id: 'dsh-browser-reference', priority: 50,
+      name: 'conversation.input.dock', id: 'dsh-browser-reference', priority: 50,
       // The dictionary rides the same namespace `apply` registers with the host
       // locale service, so the rail's copy follows the active language.
       locale: REFERENCE_LOCALE,

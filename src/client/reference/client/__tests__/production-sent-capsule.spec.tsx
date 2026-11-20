@@ -111,7 +111,7 @@ async function assembled(storage = memoryKV(), options: { empty?: boolean; clien
         components.get('conversation.user.text.node')!({ node, raw: text }) as ReactNode)))
     },
     async composer() {
-      return mount(() => components.get('conversation.input.chips')!() as ReactNode)
+      return mount(() => components.get('conversation.input.dock')!() as ReactNode)
     },
   }
 }

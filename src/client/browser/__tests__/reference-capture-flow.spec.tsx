@@ -143,7 +143,7 @@ it.each([false, true])('highlights the same sidebar tab without unnecessary navi
   } finally { runtime.dispose(); queue.dispose() }
 })
 
-it('binds capture, queue, composer and send to the host Session key before the first send and after a new Session', async () => {
+it.each(['', 'unsent question'])('binds the Web hero composer with draft "%s" and no model before first send', async draft => {
   const { service, queue, request, runtime: unused } = harness()
   unused.dispose()
   let dock!: (props: unknown) => unknown
@@ -153,9 +153,11 @@ it('binds capture, queue, composer and send to the host Session key before the f
     set() {},
     effect: effect => { const stop = effect(); if (stop) disposers.push(stop) },
     slots: {
-      inject: (_name, produce) => { [...produce()] },
+      inject: (name, produce) => {
+        if (['conversation.input.dock', 'conversation.user.text.node', 'shell.overlay'].includes(name)) [...produce()]
+      },
       register: (registration, component) => {
-        if ((registration as { name: string }).name === 'conversation.input.chips') dock = component as typeof dock
+        if ((registration as { name: string }).name === 'conversation.input.dock') dock = component as typeof dock
       },
     },
   }
@@ -163,15 +165,25 @@ it('binds capture, queue, composer and send to the host Session key before the f
   const bind = (sessionId: string | undefined) => dock({
     sessionId,
     session: { sessionId: `session-${firstOwner}` },
-    useInput: () => ({ draft: 'unsent question' }),
+    useInput: () => ({ draft }),
     inputActions: { captureInsertion: () => ({ start: 0, end: 0, draftRev: 1 }), insertText: () => true, persistDraft() {} },
   })
   try {
     for (const owner of [firstOwner, nextOwner]) {
       bind(`session-${owner}`)
       expect(runtime.currentSessionId()).toBe(owner)
+      expect(renderToStaticMarkup(bind(`session-${owner}`) as ReturnType<typeof createElement>)).toContain('data-cards="0"')
       await runtime.pollOnce()
-      await captureReferenceIntent(intent, `session-${owner}`)
+      const page = createIframePage({ initial: undefined, persist() {}, openRequested() {} }, `session-${owner}`)
+      const host = document.createElement('div')
+      host.id = `hero-${owner}`
+      document.body.append(host)
+      page.presentation.mount(host.id)
+      page.frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' })
+      window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: host.querySelector('iframe')!.contentWindow, data: intent }))
+      await vi.waitFor(() => expect(queue.list({ sessionId: owner }).deliveries).toHaveLength(1))
+      expect(request.mock.calls.filter(([url]) => url.endsWith('/capture'))).toHaveLength(owner === firstOwner ? 1 : 2)
+      await page.frame.dispose()
       const record = queue.list({ sessionId: owner }).deliveries[0]!
       expect(record.sessionId).toBe(owner)
       expect(record.snapshot.owner.sessionId).toBe(owner)
@@ -195,6 +207,24 @@ it('binds capture, queue, composer and send to the host Session key before the f
     await expect(captureReferenceIntent(intent, '')).rejects.toThrow('owner is unavailable')
     expect(queue.list({ includeConsumed: true }).deliveries).toHaveLength(2)
   } finally { for (const stop of disposers.reverse()) stop(); runtime.dispose(); queue.dispose() }
+})
+
+it.each([503, 200])('reports a Web capture refusal (%s) instead of silently accepting it', async status => {
+  const request = vi.fn(async (_url: string, _init?: { body?: unknown }) => ({ ok: status === 200, status, json: async () => ({ ok: false }) }))
+  vi.stubGlobal('fetch', request)
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const page = createIframePage({ initial: undefined, persist() {}, openRequested() {} }, `session-${firstOwner}`)
+  const host = document.createElement('div')
+  host.id = 'failed-web-capture'
+  document.body.append(host)
+  page.presentation.mount(host.id)
+  page.frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' })
+  try {
+    window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: host.querySelector('iframe')!.contentWindow, data: intent }))
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('[dsh-browser] reference capture failed', expect.any(Error)))
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(String(request.mock.calls[0]![1]!.body)).sessionId).toBe(firstOwner)
+  } finally { await page.frame.dispose() }
 })
 
 it.each(['native', 'web'] as const)('%s overlay intent reaches its owning composer through the real capture, store and delivery handlers', async surface => {

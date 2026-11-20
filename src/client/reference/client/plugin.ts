@@ -6,7 +6,7 @@
  * cannot carry:
  *   - `createElement` / `useSyncExternalStore` ← React, a shared platform module.
  *   - `hostInputFor` and the active Session id ← the Session-scope props the
- *     `conversation.input.chips` registration receives on every render
+ *     `conversation.input.dock` registration receives on every render
  *     (`session`, `input`, `inputActions`).
  *
  * Both come from inside this package, so no separate `browserReferenceDeps`
@@ -53,7 +53,7 @@ interface SlotInputActions {
   insertQuote?(text: string, summary?: string): boolean
 }
 
-/** Session-scope props the `conversation.input.chips` registration receives. */
+/** Session-scope props the `conversation.input.dock` registration receives. */
 interface DockProps {
   readonly sessionId?: string
   readonly session?: { readonly sessionId?: string }

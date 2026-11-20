@@ -79,9 +79,9 @@ describe('assembly inject / apply(ctx)', () => {
       scheduler: manualScheduler(),
       createElement: (tag, props, ...children) => ({ tag, props, children }),
     })
-    expect(ctx.slotInjections).toEqual(['conversation.input.chips', 'conversation.user.text.node', 'shell.overlay'])
+    expect(ctx.slotInjections).toEqual(['conversation.input.dock', 'conversation.user.text.node', 'shell.overlay'])
     expect(ctx.registrations).toEqual([
-      { name: 'conversation.input.chips', id: 'dsh-browser-reference' },
+      { name: 'conversation.input.dock', id: 'dsh-browser-reference' },
       { name: 'conversation.user.text.node', key: 'browser-ref' },
       { name: 'shell.overlay', id: 'dsh-browser-reference-feedback' },
     ])
@@ -108,7 +108,7 @@ describe('assembly inject / apply(ctx)', () => {
     })
     // The dock is registered as a component, not rendered through a separate
     // zero-React tree: the seat hands it the host React hooks on every render.
-    expect(ctx.registrations).toContainEqual({ name: 'conversation.input.chips', id: 'dsh-browser-reference' })
+    expect(ctx.registrations).toContainEqual({ name: 'conversation.input.dock', id: 'dsh-browser-reference' })
     const dock = ctx.components[0] as (props?: unknown) => { type?: { name?: string } } | null
     expect(typeof dock).toBe('function')
     expect(dock()?.type?.name).toBe('ReferenceDock')
