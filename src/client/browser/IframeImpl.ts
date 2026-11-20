@@ -39,22 +39,25 @@ export class IframeImpl implements BrowserFrame {
   }
 
   /**
-   * Record a controlled load or a later navigation to an unreadable address.
+   * Complete a native iframe navigation, including documents without a guest runtime.
    * @param revision - document generation whose iframe emitted load.
-   * @param observedUrl - same-origin page the frame ended up on (proxy form), when readable.
    */
-  handleLoaded(revision: number, observedUrl?: string): void {
+  handleLoaded(revision: number): void {
     if (this.disposed) return
     const navigation = this.navigation.snapshot.navigation
     if (navigation.status !== 'empty' && navigation.revision !== revision) return
-    if (observedUrl === undefined || navigation.status === 'loading') this.navigation.frameLoaded(revision)
-    if (observedUrl !== undefined && observedUrl !== '') {
-      const current = BrowserNavigation.current(this.navigation.snapshot)
-      if (current === undefined || current.url !== observedUrl) {
-        const target = toTarget(observedUrl, current?.title ?? '')
-        if (target !== undefined) this.navigation.recordObserved(target)
-      }
-    }
+    this.navigation.frameLoaded(revision)
+    this.publish()
+  }
+
+  /** Accept metadata correlated to the current completed native load, without completing it again. */
+  handleObserved(revision: number, observedUrl: string): void {
+    if (this.disposed) return
+    const navigation = this.navigation.snapshot.navigation
+    if (navigation.status === 'empty' || navigation.status === 'loading' || navigation.revision !== revision) return
+    const current = BrowserNavigation.current(this.navigation.snapshot)
+    const target = toTarget(observedUrl, current?.title ?? '')
+    if (target !== undefined) this.navigation.recordObserved(target)
     this.publish()
   }
 

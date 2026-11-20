@@ -36,7 +36,7 @@ async function initialize() {
   native.addEventListener('dom-ready', () => { ready = true })
   presentation.present(native)
   await until(() => ready)
-  const iframe = new IframePresentation({ loaded() {}, failed() {}, remounted() {} })
+  const iframe = new IframePresentation({ loaded() {}, observed() {}, failed() {}, remounted() {} })
   const remove = iframe.mount('viewport')
   iframe.show({ target: { url: location.origin + '/guest', title: 'Viewport' }, revision: 1, sandboxed: true })
   state = { native, presentation, unmount, iframe, remove }

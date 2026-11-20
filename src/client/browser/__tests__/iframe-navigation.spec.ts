@@ -65,7 +65,7 @@ describe('iframe navigation and presentation assembly', () => {
     await page.frame.dispose()
   })
 
-  it.each(['before', 'after'])('keeps guest reports authoritative when iframe load fires %s the report', async order => {
+  it.each(['before', 'after'])('completes only on native load when the guest report arrives %s it', async order => {
     const page = createIframePage({ initial: undefined, persist: () => {}, openRequested: () => {} })
     const host = document.createElement('div')
     host.id = 'authoritative-navigation'
@@ -73,21 +73,77 @@ describe('iframe navigation and presentation assembly', () => {
     const unmount = page.presentation.mount(host.id)
     page.frame.loadUrl(target('https://example.com/'))
     const frame = host.querySelector('iframe')!
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage')
     const report = (url: string, depth: number) => window.dispatchEvent(new MessageEvent('message', {
       origin: 'null', source: frame.contentWindow,
-      data: { type: 'dsh.browser.guest.navigation', url, depth },
+      data: { type: 'dsh.browser.guest.navigation', url, depth, loadId: post.mock.calls.at(-1)?.[0].loadId },
     }))
+    if (order === 'after') frame.dispatchEvent(new Event('load'))
+    report('https://example.com/', 1)
+    expect(page.frame.getSnapshot().loading).toBe(order === 'before')
     if (order === 'before') frame.dispatchEvent(new Event('load'))
     report('https://example.com/', 1)
-    if (order === 'after') frame.dispatchEvent(new Event('load'))
+    expect(page.frame.getSnapshot().loading).toBe(false)
     expect(page.frame.getSnapshot().canGoBack).toBe(false)
-    report('https://example.com/next', 2)
     frame.dispatchEvent(new Event('load'))
+    report('https://example.com/next', 2)
     report('https://example.com/next', 2)
     expect(page.frame.getSnapshot().canGoBack).toBe(true)
     page.frame.goBack()
     expect(page.frame.getSnapshot().target?.url).toBe('https://example.com/')
     unmount()
+    await page.frame.dispose()
+  })
+
+  it.each(['text/plain', 'application/json', 'image/png', 'application/pdf', 'proxy error'])('completes %s without a runtime report and retains application Back', async kind => {
+    const page = createIframePage({ initial: undefined, persist: () => {}, openRequested: () => {} })
+    const host = document.createElement('div')
+    host.id = 'non-html'
+    document.body.append(host)
+    page.presentation.mount(host.id)
+    expect(page.frame.getSnapshot().loading).toBe(false)
+    expect(host.querySelector('iframe')).toBeNull()
+    page.frame.loadUrl(target('https://example.com/first'))
+    host.querySelector('iframe')!.dispatchEvent(new Event('load'))
+    page.frame.loadUrl(target(`https://example.com/${encodeURIComponent(kind)}`))
+    expect(page.frame.getSnapshot().loading).toBe(true)
+    host.querySelector('iframe')!.dispatchEvent(new Event('load'))
+    expect(page.frame.getSnapshot().loading).toBe(false)
+    expect(page.frame.getSnapshot().canGoBack).toBe(true)
+    page.frame.goBack()
+    expect(page.frame.getSnapshot().target?.url).toBe('https://example.com/first')
+    await page.frame.dispose()
+  })
+
+  it('invalidates the old address on HTML-to-text navigation and rejects old load metadata', async () => {
+    const page = createIframePage({ initial: undefined, persist: () => {}, openRequested: () => {} })
+    const host = document.createElement('div')
+    host.id = 'metadata'
+    document.body.append(host)
+    page.presentation.mount(host.id)
+    page.frame.loadUrl(target('https://example.com/'))
+    const frame = host.querySelector('iframe')!
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage')
+    const report = (loadId: number) => window.dispatchEvent(new MessageEvent('message', {
+      origin: 'null', source: frame.contentWindow,
+      data: { type: 'dsh.browser.guest.navigation', url: 'https://example.com/', depth: 1, loadId },
+    }))
+    frame.dispatchEvent(new Event('load'))
+    const first = post.mock.calls.at(-1)![0].loadId
+    report(first)
+    frame.dispatchEvent(new Event('load'))
+    expect(page.frame.getSnapshot().loading).toBe(false)
+    expect(page.frame.getSnapshot().address).toBe('unknown')
+    report(first)
+    expect(page.frame.getSnapshot().address).toBe('unknown')
+    report(post.mock.calls.at(-1)![0].loadId)
+    expect(page.frame.getSnapshot().address).toBe('requested')
+    expect(page.frame.getSnapshot().canGoBack).toBe(false)
+    page.frame.loadUrl(target('https://example.com/new'))
+    frame.dispatchEvent(new Event('load'))
+    report(first)
+    expect(page.frame.getSnapshot().loading).toBe(true)
+    expect(page.frame.getSnapshot().target?.url).toBe('https://example.com/new')
     await page.frame.dispose()
   })
 })

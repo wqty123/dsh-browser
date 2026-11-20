@@ -73,11 +73,18 @@ export function guestRuntimeScript(pageUrl: string): string {
       return result;
     };
   });
-  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length }, '*'));
+  let loadId;
+  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length, loadId }, '*'));
   attempt(() => window.addEventListener('message', event => {
-    if (event.source !== parent || !event.data || event.data.type !== 'dsh.browser.guest.history') return;
-    if (event.data.delta === -1) history.back();
-    else if (event.data.delta === 1) history.forward();
+    if (event.source !== parent || !event.data) return;
+    if (event.data.type === 'dsh.browser.guest.navigation.request') {
+      if (!Number.isSafeInteger(event.data.loadId) || event.data.loadId <= 0) return;
+      loadId = event.data.loadId;
+      report();
+    } else if (event.data.type === 'dsh.browser.guest.history') {
+      if (event.data.delta === -1) history.back();
+      else if (event.data.delta === 1) history.forward();
+    }
   }));
   attempt(() => window.addEventListener('DOMContentLoaded', report));
   attempt(() => window.addEventListener('popstate', () => {

@@ -23,8 +23,10 @@ interface IframeDocument {
 
 /** Reports only what an iframe can observe without inspecting cross-origin content. */
 export interface IframePresentationEvents {
+  /** @param revision - document generation whose native load completed. */
+  readonly loaded: (revision: number) => void
   /** @param revision - document generation. @param observedUrl - URL reported by the owned opaque guest. */
-  readonly loaded: (revision: number, observedUrl?: string) => void
+  readonly observed: (revision: number, observedUrl: string) => void
   readonly failed: (revision: number) => void
   readonly remounted: () => void
 }
@@ -36,13 +38,20 @@ export class IframePresentation implements BrowserPresentation {
   private document: IframeDocument | undefined
   private rendered = false
   private depth = 1
+  private loadId: number | undefined
+  private nextLoadId = 0
   private readonly receive = (event: MessageEvent): void => {
     if (event.origin !== 'null' || event.source !== this.element?.contentWindow) return
     const data = event.data
     if (!data || data.type !== 'dsh.browser.guest.navigation' || typeof data.url !== 'string'
       || !/^https?:\/\//iu.test(data.url) || this.document === undefined) return
+    if (this.loadId === undefined) return
+    if (data.loadId !== this.loadId) {
+      this.requestNavigation()
+      return
+    }
     this.depth = Number.isSafeInteger(data.depth) && data.depth > 0 ? data.depth : 1
-    this.events.loaded(this.document.revision, data.url)
+    this.events.observed(this.document.revision, data.url)
   }
 
   /** @param events - provider-owned load and remount callbacks. */
@@ -102,6 +111,14 @@ export class IframePresentation implements BrowserPresentation {
     this.document = undefined
   }
 
+  private requestNavigation(): void {
+    try {
+      this.element?.contentWindow?.postMessage({ type: 'dsh.browser.guest.navigation.request', loadId: this.loadId }, '*')
+    } catch {
+      // Native load completion does not depend on a scriptable guest.
+    }
+  }
+
   private render(): void {
     const current = this.document
     const host = this.host
@@ -114,10 +131,17 @@ export class IframePresentation implements BrowserPresentation {
     element.referrerPolicy = 'no-referrer'
     element.dataset.sidebarBrowserFrame = 'iframe'
     element.setAttribute('sandbox', current.sandboxed ? WEB_BROWSER_SANDBOX : RELAXED_BROWSER_SANDBOX)
+    element.addEventListener('load', () => {
+      if (this.element !== element) return
+      this.loadId = ++this.nextLoadId
+      this.events.loaded(current.revision)
+      this.requestNavigation()
+    })
     element.addEventListener('error', () => {
       if (this.element === element) this.events.failed(current.revision)
     })
     this.depth = 1
+    this.loadId = undefined
     this.element = element
     this.rendered = true
     host.append(element)

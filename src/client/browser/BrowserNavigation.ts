@@ -136,7 +136,11 @@ export class BrowserNavigation {
    */
   recordObserved(target: BrowserTarget): void {
     const current = BrowserNavigation.current(this.value)
-    if (current !== undefined && current.url === target.url) return
+    if (current !== undefined && current.url === target.url) {
+      const navigation = this.value.navigation
+      if (navigation.status === 'unknown') this.value = { ...this.value, navigation: { status: 'known', revision: navigation.revision } }
+      return
+    }
     const entries = [...this.value.entries.slice(0, this.value.index + 1), target]
     if (entries.length > MAX_BROWSER_HISTORY) entries.splice(0, entries.length - MAX_BROWSER_HISTORY)
     this.value = {

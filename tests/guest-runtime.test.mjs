@@ -69,6 +69,26 @@ test('toProxy resolves relative, root-relative, absolute and URL values against 
   assert.equal(toProxy('http://['), 'http://[')
 })
 
+test('navigation metadata echoes the parent load identity without inventing completion', () => {
+  const { context, listeners } = page()
+  const sent = []
+  context.parent.postMessage = data => sent.push(data)
+  const receive = (loadId, source = context.parent) => listeners.get('message')({ source,
+    data: { type: 'dsh.browser.guest.navigation.request', loadId } })
+  receive(1, {})
+  receive(0)
+  receive('1')
+  assert.equal(sent.length, 0)
+  receive(1)
+  assert.equal(sent[0].loadId, 1)
+  assert.equal(sent[0].url, 'https://ordinary.example/dir/page')
+  context.history.pushState({}, '', '/next')
+  assert.equal(sent.at(-1).loadId, 1)
+  assert.equal(sent.at(-1).url, 'https://ordinary.example/next')
+  receive(2)
+  assert.equal(sent.at(-1).loadId, 2)
+})
+
 test('fetch handles string, URL and Request inputs, preserving POST body and adding the subrequest marker', async () => {
   const { context, requests } = page()
   await context.fetch('/api', { method: 'POST', body: 'a=1', headers: { 'content-type': 'text/plain' } })
