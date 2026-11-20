@@ -49,7 +49,7 @@ function mount(overrides = {}, owner = 'panel-task') {
 }
 
 const operations = [
-  ['snapshot', {}], ['a11y', {}], ['content', { format: 'text' }],
+  ['snapshot', {}], ['a11y', {}], ['content', { format: 'txt' }],
   ['scrape', { item: '.item', fields: { title: 'h2' } }], ['screenshot', {}],
   ['click', { target: { by: 'css', value: '#go' } }], ['type', { text: 'hello' }],
   ['upload', { target: { by: 'css', value: '#file' }, path: join(home, 'upload.txt') }],
@@ -108,7 +108,7 @@ test('builtin -> CDP panel -> builtin switches sessions instead of driving a sta
   const { run, calls } = mount()
   await run('open', { url: 'https://old.example/', surface: 'builtin' })
   await run('open', { url: 'https://new.example/' })
-  await run('content', { format: 'text' })
+  await run('content', { format: 'txt' })
   assert.equal(calls.at(-1).session, 'browser:panel')
   assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:builtin'))
   await run('open', { url: 'https://third.example/', surface: 'builtin' })
@@ -122,7 +122,7 @@ test('builtin -> Web panel forgets and closes the old controllable session', asy
   await run('open', { url: 'https://old.example/', surface: 'builtin' })
   await run('open', { url: 'https://new.example/' })
   const before = calls.length
-  await assert.rejects(run('content', { format: 'text' }), /panel surface/)
+  await assert.rejects(run('content', { format: 'txt' }), /panel surface/)
   assert.equal(calls.length, before)
   assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:builtin'))
 })

@@ -77,6 +77,39 @@ test('console lines are captured with their level, newest last', () => {
   assert.deepEqual([...rows.map(row => `${row.level}:${row.text}`)], ['warn:careful', 'log:value 42'])
 })
 
+test('summary and findText normalize whitespace without deleting lowercase s', () => {
+  const { page, probe } = install()
+  const text = 'This is\t a session\n success'
+  page.document.body.innerText = text
+  assert.equal(probe.summary().text, 'This is a session success')
+  const node = { nodeValue: text, parentElement: null }
+  page.document.createTreeWalker = () => {
+    let next = node
+    return { nextNode: () => { const current = next; next = null; return current } }
+  }
+  page.document.createRange = () => ({
+    setStart() {}, setEnd() {},
+    getBoundingClientRect: () => ({ left: 10, top: 20, width: 40, height: 10 }),
+  })
+  const hits = probe.findText('session', false)
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].text, 'This is a session success')
+  assert.equal(hits[0].x, 30)
+  assert.equal(hits[0].y, 25)
+  assert.equal(probe.findText('missing', false).length, 0)
+  assert.equal(probe.findText('', false).length, 0)
+  page.document.body.innerText = ''
+  assert.equal(probe.summary().text, '')
+})
+
+test('a probe from before the whitespace fix is disposed and replaced', () => {
+  let disposed = 0
+  const { probe } = install({ __dshProbe: { version: PROBE_VERSION - 1, dispose() { disposed++ } } })
+  assert.equal(disposed, 1)
+  assert.equal(probe.version, PROBE_VERSION)
+  assert.throws(() => install({ __dshProbe: { version: PROBE_VERSION - 1 } }), /reload this page/)
+})
+
 test('a fetch is recorded with its status, and its rejection still propagates', async () => {
   const failing = makePage({ fetch: async () => { throw new Error('offline') } })
   vm.runInNewContext(PROBE_INSTALL_SCRIPT, failing)
