@@ -6,6 +6,7 @@ import css from '../view/Browser.module.css'
 /** The Electron tag API used by its navigation provider. */
 export interface WebviewElement extends HTMLElement {
   loadURL(url: string): Promise<void>
+  executeJavaScript(source: string): Promise<unknown>
   getURL(): string
   getTitle(): string
   canGoBack(): boolean

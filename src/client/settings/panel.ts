@@ -7,6 +7,8 @@
  * 外壳由 `window.__ModuleLoader__.load({factory})` 换成普通导出函数：本仓库的客户端半由
  * tsdown 打成 CJS 工厂，`require` 由模块加载器在运行期注入，语义与旧加载器一致。
  */
+import { captureReferenceIntent } from '../reference-intents.ts'
+
 export interface LegacyClientModule {
   readonly name?: string
   readonly inject?: readonly string[]
@@ -1801,13 +1803,7 @@ const react = require("react")
         let intent
         try { intent = guest.__dshRefTake() } catch { continue }
         while (intent && typeof intent === "object") {
-          try {
-            fetch("/dsh-builtin-browser/reference/capture", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ ...intent, sessionId }),
-            })
-          } catch { /* the reader can retry from the bar */ }
+          void captureReferenceIntent(intent, sessionId)
           try { intent = guest.__dshRefTake() } catch { break }
         }
       }

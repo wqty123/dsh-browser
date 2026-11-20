@@ -12,11 +12,11 @@ import { ElectronWebviewPresentation } from './ElectronWebviewPresentation.ts'
  * @returns separate navigation and presentation faces.
  */
 export function createElectronPage(options: BrowserPageOptions, bridge: DesktopBrowserBridge,
-  workspace: (signal: AbortSignal) => Promise<string>): BrowserPage {
+  workspace: (signal: AbortSignal) => Promise<string>, sessionId: string): BrowserPage {
   const presentation = new ElectronWebviewPresentation({
     mounted: () => { frame.attach() },
     unmounted: () => { frame.detach() },
   })
-  const frame = new ElectronWebViewImpl(options, bridge, workspace, presentation)
+  const frame = new ElectronWebViewImpl(options, bridge, workspace, presentation, sessionId)
   return { frame, presentation }
 }
