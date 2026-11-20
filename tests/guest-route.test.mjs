@@ -2,13 +2,22 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, request as httpRequest } from 'node:http'
 import { once } from 'node:events'
+import { promises as dns } from 'node:dns'
 import { handleGuest, guestPath, rewriteDocument } from '../src/browser-electron/guest-route.ts'
 
 const nativeFetch = globalThis.fetch
+const nativeLookup = dns.lookup
+const resolved = new Map()
 let upstream, proxy, upstreamOrigin, proxyPort
 const forwarded = []
 
 before(async () => {
+  dns.lookup = async (hostname, options) => {
+    assert.equal(options.all, true)
+    if (hostname === 'missing.example') throw new Error('getaddrinfo ENOTFOUND')
+    return (resolved.get(hostname) ?? [hostname === 'dsh.example' ? '93.184.216.35' : '93.184.216.34'])
+      .map(address => ({ address, family: address.includes(':') ? 6 : 4 }))
+  }
   upstream = createServer(async (req, res) => {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
@@ -27,6 +36,9 @@ before(async () => {
       res.end(body)
     } else if (req.url === '/bad-redirect') {
       res.writeHead(307, { location: 'http://127.0.0.1/private' })
+      res.end()
+    } else if (req.url === '/dns-redirect') {
+      res.writeHead(302, { location: 'https://redirect.example/private' })
       res.end()
     } else if (req.url === '/fragment') {
       res.writeHead(201, { 'content-type': 'text/html', 'x-frame-options': 'DENY',
@@ -63,6 +75,7 @@ before(async () => {
 
 after(async () => {
   globalThis.fetch = nativeFetch
+  dns.lookup = nativeLookup
   await Promise.all([new Promise(resolve => proxy.close(resolve)), new Promise(resolve => upstream.close(resolve))])
 })
 
@@ -78,6 +91,35 @@ function call(path, { method = 'GET', headers = {}, body } = {}) {
     req.end(body)
   })
 }
+
+test('rejects every unsafe DNS answer, DSH address aliases and unresolved targets before fetching', async () => {
+  for (const address of ['127.0.0.1', '10.0.0.1', '172.16.0.1', '192.168.0.1', '169.254.169.254',
+    '0.0.0.0', '::', '::1', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1', '93.184.216.35']) {
+    resolved.set('alias.example', ['93.184.216.34', address])
+    const count = forwarded.length
+    const result = await call(guestPath('https://alias.example/'), { headers: { 'x-dsh-guest-sub': '1' } })
+    assert.equal(result.status, 403, address)
+    assert.equal(forwarded.length, count)
+  }
+  const count = forwarded.length
+  assert.equal((await call(guestPath('https://missing.example/'))).status, 502)
+  assert.equal(forwarded.length, count)
+  resolved.delete('alias.example')
+})
+
+test('validates DNS on redirect targets and again when the next hop is requested', async () => {
+  const path = guestPath('https://ordinary.example/dns-redirect')
+  resolved.set('redirect.example', ['::1'])
+  assert.equal((await call(path, { headers: { 'x-dsh-guest-sub': '1' } })).status, 403)
+  resolved.set('redirect.example', ['93.184.216.34'])
+  const redirect = await call(path, { headers: { 'x-dsh-guest-sub': '1' } })
+  assert.equal(redirect.status, 302)
+  resolved.set('redirect.example', ['192.168.1.1'])
+  const count = forwarded.length
+  assert.equal((await call(redirect.headers.location)).status, 403)
+  assert.equal(forwarded.length, count)
+  resolved.delete('redirect.example')
+})
 
 test('forwards POST body, content type and safe headers without app cookies or internal headers', async () => {
   const result = await call(guestPath('https://ordinary.example/echo'), { method: 'POST', body: 'q=hello&pw=secret',

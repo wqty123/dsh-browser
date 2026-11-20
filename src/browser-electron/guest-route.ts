@@ -23,6 +23,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { promises as dns } from 'node:dns'
 import { guestRuntimeScript } from './guest-runtime.ts'
 
 /** Prefix every proxied document and subresource lives under. */
@@ -49,6 +50,8 @@ function isSelfTarget(url: URL): boolean {
 }
 
 export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/guest'
+
+class UnsafeGuestTargetError extends Error {}
 
 /** Per-host cookies seen on proxied responses; replayed on the next request to that host. */
 const cookieJar = new Map<string, Map<string, string>>()
@@ -306,11 +309,27 @@ export async function handleGuest(
     response.end('guest proxy: a canonical http(s) URL is required')
     return
   }
+  let host = ''
+  try { host = new URL('http://' + (request.headers.host ?? '')).hostname.toLowerCase().replace(/\.$/u, '') } catch {}
   const blocked = (url: URL): boolean => {
-    let host = ''
-    try { host = new URL('http://' + (request.headers.host ?? '')).hostname.toLowerCase().replace(/\.$/u, '') } catch {}
     return !/^https?:$/u.test(url.protocol) || url.username !== '' || url.password !== ''
       || isSelfTarget(url) || url.hostname.toLowerCase().replace(/\.$/u, '') === host
+  }
+  const addressesFor = async (hostname: string): Promise<string[]> =>
+    (await dns.lookup(hostname.replace(/^\[|\]$/gu, ''), { all: true })).map(record => record.address)
+  const blockedResolved = async (url: URL): Promise<boolean> => {
+    if (blocked(url)) return true
+    const addresses = await addressesFor(url.hostname)
+    const hostUrl = host === '' ? undefined : new URL('http://' + host)
+    const hostAddresses = hostUrl === undefined || isSelfTarget(hostUrl) ? [] : await addressesFor(host)
+    return addresses.length === 0 || addresses.some(address => {
+      const literal = new URL('http://' + (address.includes(':') ? '[' + address + ']' : address))
+      return isSelfTarget(literal) || hostAddresses.includes(address) || address === request.socket.localAddress
+    })
+  }
+  const fetchTarget = async (url: URL, options: RequestInit): Promise<Response> => {
+    if (await blockedResolved(url)) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
+    return fetch(url, options)
   }
   if (blocked(target)) {
     response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
@@ -365,7 +384,7 @@ export async function handleGuest(
   const safeNavigation = !subRequest && (method === 'GET' || method === 'HEAD')
   const warmRoot = async (): Promise<void> => {
     const origin = new URL('/', target.origin).href
-    const warm = await fetch(origin, { method: 'GET', headers, redirect: 'manual' })
+    const warm = await fetchTarget(new URL(origin), { method: 'GET', headers, redirect: 'manual' })
     rememberCookies(target.host, warm.headers.getSetCookie?.() ?? [])
     await warm.body?.cancel()
     headers.set('referer', origin)
@@ -385,7 +404,7 @@ export async function handleGuest(
       for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
       body = Buffer.concat(chunks)
     }
-    upstream = await fetch(target, { method, headers, body: body as BodyInit | undefined, redirect: 'manual' })
+    upstream = await fetchTarget(target, { method, headers, body: body as BodyInit | undefined, redirect: 'manual' })
     rememberCookies(target.host, upstream.headers.getSetCookie?.() ?? [])
     // 反爬挑战识别 + 一次重试：站点（百度 `/s?wd=…`）在没有「先访问过站点」的痕迹时回「安全验证」。
     // 罐子里可能已经带着上次挑战页的 Cookie，所以这里不看有没有 Cookie，而是看**内容**：
@@ -397,14 +416,14 @@ export async function handleGuest(
       if (looksLikeChallenge.test(probe)) {
         try {
           await warmRoot()
-          const retried = await fetch(target, { method, headers, redirect: 'manual' })
+          const retried = await fetchTarget(target, { method, headers, redirect: 'manual' })
           await upstream.body?.cancel()
           upstream = retried
         } catch { /* 重试失败就用首次响应 */ }
       }
     }
   } catch (error) {
-    response.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
+    response.writeHead(error instanceof UnsafeGuestTargetError ? 403 : 502, { 'content-type': 'text/plain; charset=utf-8' })
     response.end(`guest proxy: cannot reach ${target.host}: ${String((error as Error).message ?? error)}`)
     return
   }
@@ -416,8 +435,11 @@ export async function handleGuest(
   const location = upstream.headers.get('location')
   if (location !== null && upstream.status >= 300 && upstream.status < 400) {
     let next: URL | undefined
-    try { next = new URL(location, target) } catch {}
-    if (next === undefined || blocked(next)) {
+    try {
+      const candidate = new URL(location, target)
+      if (!await blockedResolved(candidate)) next = candidate
+    } catch {}
+    if (next === undefined) {
       await upstream.body?.cancel()
       response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
       response.end('guest proxy: redirect target is not allowed')
