@@ -1,8 +1,8 @@
 # DSH host APIs
 
-The bridge settings installer selects the runtime specification by the package's exact version: `rc3.json` for **DSH 0.2.2-rc.3**, and `rc5.json` for **DSH 0.2.2-rc.5**. It installs sidebar rendering holds and Desktop main extensions, not replacements for arbitrary DSH bundles. Desktop updates may require reinstalling from plugin settings.
+The explicit host-bootstrap settings action selects the runtime specification by the package's exact version: `rc3.json` for **DSH 0.2.2-rc.3**, and `rc5.json` for **DSH 0.2.2-rc.5**. It installs sidebar rendering holds and Desktop main extensions, not replacements for arbitrary DSH bundles. Ordinary extension repair is separate: it runs the installation's supported `dsh plugin --profile desktop add` command and does not run this applier or the legacy injector.
 
-`sources/rc3/`, `sources/rc5/`, and `sources/main/` contain the two upstream source commits as `git format-patch` files for source builds. Each runtime spec was derived from its own unpatched/patched release builds; its anchors include unchanged context, `before` is the unique input anchor, and `after` is its replacement. Tests compare the complete output artifacts byte for byte. The fixtures are repository tests only and are not published.
+`sources/rc3/`, `sources/rc5/`, and `sources/main/` contain the three upstream source commits as `git format-patch` files for source builds. `0003` adds resolved/running per-package status and authenticated IPC/preload. Each runtime spec was derived from its own unpatched/patched release builds; its anchors include unchanged context, `before` is the unique input anchor, and `after` is its replacement. Tests compare complete output artifacts byte for byte, including `lib/preload-app.cjs`. The fixtures are repository tests only and are not published.
 
 The rc.5 source base is release tag `dsh-v0.2.2-rc.5`, commit `9c2670d3bce5275e0d1610272958121af87787bb`, not the later master merge `2e39e704`. Its sidebar sources match the published npm package, `lib/index.js` matches byte for byte, and `lib/client.js` matches after normalizing only the three build-directory-dependent CSS-module prefixes. The rc.5 Desktop pristine hash is from a source build, not a published Desktop artifact: the GitHub release exposes source archives only. Desktop installations with a different pristine hash are refused safely and retain the legacy bridge fallback.
 
@@ -23,12 +23,26 @@ For standalone Web/npm CLI use, resolve that package from the Web profile's `nod
 
 ## Safety and fallback
 
-- Every package manifest must name a supported package and the exact supported DSH version. Main additionally requires the pristine SHA-256. Sidebar anchors do **not** require a build hash: `{{sidebar}}` is resolved from the single `.<prefix>_session{display:contents}` rule. Other CSS modules are untouched. Missing or ambiguous anchors/prefixes are refused.
+- Every package manifest must name a supported package and the exact supported DSH version. Main and preload additionally require pristine SHA-256 values. Sidebar anchors do **not** require a build hash: `{{sidebar}}` is resolved from the single `.<prefix>_session{display:contents}` rule. Other CSS modules are untouched. Missing or ambiguous anchors/prefixes are refused.
 - Status is `absent` (validated and ready), `applied` (already present), `unsupported version`, or `anchors mismatch`, with a reason on refusal. `dry-run`/`status` write nothing. Applying an already applied patch is a no-op.
 - All targets are validated before writes. Files and backups are staged beside the target; backups are created exclusively once as `<file>.before-dsh-host-patch`, and targets are replaced by rename, never edited through pnpm hardlinks. Commit errors roll back earlier targets and newly created backups. An OS failure that also prevents rollback is explicitly reported rather than claimed successful.
 - Restore checks the patched bytes against their backup plus this specification; unrelated edits are refused. Backups are preserved for subsequent installs. Do not copy an old backup over a new Desktop release.
-- The compiled background-rendering attribute and Desktop extension module region are the detectable applied markers, so output remains identical to the source-built patched artifacts.
-- On a patched Desktop the bridge loads from the profile plugin's `dsh.desktop.main` entry. Legacy installations migrate only when `main.js` carries the bridge marker and `main.js.before-bridge` matches the release's pristine hash. That pristine copy is the patch source; `.before-dsh-host-patch` preserves the actual legacy-injected bytes. Restore returns both host files to their pre-install bytes and retains the legacy bridge's module copies, CLI and archive layout. Reapply migrates again. Unsupported/mismatched hosts keep the existing injection path; bridge installation is independent of the optional host-patch status.
+- Revision 2 is identified by source-built status-channel and preload-revision markers. A previous-revision main entry is validated against its original backup using the retained `*-revision1.json` spec before upgrading. All selected files, including both Desktop bundles, are validated before any write. Upgrade never replaces the original backups; rollback restores the pre-upgrade bytes and restore returns the exact pre-bootstrap originals. Unrelated edits are refused.
+- On a patched Desktop the bridge loads from the profile plugin's `dsh.desktop.main` entry. Legacy installations migrate only when `main.js` carries the bridge marker and `main.js.before-bridge` matches the release's pristine hash. That pristine copy is the patch source; `.before-dsh-host-patch` preserves the actual legacy-injected bytes. Restore returns all host files to their pre-install bytes and retains the legacy bridge's module copies, CLI and archive layout. Reapply migrates again. Unsupported/mismatched hosts retain the compatibility injector only inside this explicit bootstrap action; supported profile repair never uses it.
 - Browser operations feature-detect `sidebarRight.holdRendering`, hold a non-selected conversation for the request, and release on success/error or plugin disposal. The background DOM marker is required before accepting a hidden panel. Older hosts retain selection and `panel-not-displayed` behavior.
 
 The applier's JS API exports `hostPatchStatus`, `applyHostPatch`, and `restoreHostPatch`; each accepts one package directory or an array. It has no npm dependencies. The installer supplies raw Electron `original-fs`. Migration, validation and restore share the same version-specific legacy-backup validation, including through the standalone applier. Removing one recognized legacy injection from the live main entry must reproduce that pristine backup byte for byte; unknown injections and unrelated edits refuse migration without writes.
+
+## Extension status and source-build checks
+
+`dshDesktop.mainExtensions = { revision: 2, status(name) }` reports `not-installed`, `pending-restart`, `loaded`, or `failed`, with optional `version`, `loadedAt`, and sanitized `code`. Status fingerprints the resolved installed package and compares it with the package loaded by this Desktop process, including same-version replacements. The primary `dsh-app://app` frame alone can invoke the renderer IPC. Trusted main extensions receive the same status capability in `start(api)`.
+
+The status source commits are rc.3 `d38ed963510b8f9688374f1112075b6124cda09b`, rc.5 `8b0e829bfd22d6e131cdc66a5a0f6592c7a6f074`, and main `1a01e26b8e0c25fcdbc2e6cbcd191fcf216eef08`.
+
+To compare actual release source builds (not only checked-in fixtures), arrange each build under `<artifacts>/{rc3,rc5}/{unpatched,patched}/`, retaining `apps/desktop/lib/{main.js,preload-app.cjs}` and `packages/client/ui-sidebar-right/lib/client.js`, then run:
+
+```sh
+node tools/check-host-patch-source.mjs <artifacts>
+```
+
+All six comparisons must be byte-for-byte equal. See [the #36 verification record](../docs/pr64-extension-status.md) for scope and limitations.
