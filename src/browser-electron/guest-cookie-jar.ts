@@ -1,11 +1,36 @@
-/** Host-isolated cookies with path, expiry and Secure matching for guest requests. */
-interface StoredCookie {
-  readonly host: string
+/** Origin-isolated cookies with path, expiry and Secure matching for guest requests. */
+export interface StoredCookie {
+  readonly origin: string
   readonly name: string
   readonly value: string
   readonly path: string
   readonly secure: boolean
   readonly expiresAt?: number
+}
+
+function validCookieValue(value: string): boolean {
+  const octets = value.length >= 2 && value.startsWith('"') && value.endsWith('"')
+    ? value.slice(1, -1) : value
+  return !/[^\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]/u.test(octets)
+}
+
+export function normalizeStoredCookie(value: unknown): StoredCookie | undefined {
+  if (value === null || typeof value !== 'object') return undefined
+  const c = value as Record<string, unknown>
+  if (typeof c.origin !== 'string' || typeof c.name !== 'string' || typeof c.value !== 'string'
+    || typeof c.path !== 'string' || typeof c.secure !== 'boolean'
+    || (c.expiresAt !== undefined && (typeof c.expiresAt !== 'number' || !Number.isFinite(c.expiresAt)))
+    || !c.path.startsWith('/') || /[\x00-\x1f\x7f]/u.test(c.path)
+    || !/^[!#$%&'*+\-.^_`|~\da-z]+$/iu.test(c.name) || !validCookieValue(c.value)) return undefined
+  try {
+    const url = new URL(c.origin)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
+      || url.pathname !== '/' || url.search || url.hash || (c.secure && url.protocol !== 'https:')
+      || (c.name.startsWith('__Secure-') && !c.secure)
+      || (c.name.startsWith('__Host-') && (!c.secure || c.path !== '/'))) return undefined
+    return { origin: url.origin, name: c.name, value: c.value, path: c.path, secure: c.secure,
+      expiresAt: c.expiresAt as number | undefined }
+  } catch { return undefined }
 }
 
 function defaultPath(pathname: string): string {
@@ -20,15 +45,29 @@ function pathMatches(pathname: string, path: string): boolean {
 export class GuestCookieJar {
   private readonly store = new Map<string, StoredCookie>()
 
+  constructor(private readonly changed?: (cookies: readonly StoredCookie[]) => void, saved: readonly StoredCookie[] = []) {
+    for (const value of saved) {
+      const cookie = normalizeStoredCookie(value)
+      if (cookie !== undefined && cookie.expiresAt !== undefined && cookie.expiresAt > Date.now()) {
+        this.store.set(cookie.origin + '\0' + cookie.path + '\0' + cookie.name, cookie)
+      }
+    }
+  }
+
+  private save(): void {
+    this.changed?.([...this.store.values()].filter(cookie => cookie.expiresAt !== undefined && cookie.expiresAt > Date.now()))
+  }
+
   setCookies(target: URL, values: readonly string[]): void {
     const now = Date.now()
     for (const raw of values) {
+      if (/[\r\n]/u.test(raw)) continue
       const [pair = '', ...attributes] = raw.split(';').map(part => part.trim())
       const index = pair.indexOf('=')
       if (index <= 0) continue
       const name = pair.slice(0, index).trim()
       const value = pair.slice(index + 1).trim()
-      if (!/^[!#$%&'*+\-.^_`|~\da-z]+$/iu.test(name) || /[\x00-\x20\x7f;,]/u.test(value)) continue
+      if (!/^[!#$%&'*+\-.^_`|~\da-z]+$/iu.test(name) || !validCookieValue(value)) continue
       let path = defaultPath(target.pathname), secure = false, domain: string | undefined
       let expires: number | undefined, maxAge: number | undefined
       for (const attribute of attributes) {
@@ -46,25 +85,28 @@ export class GuestCookieJar {
       if (name.startsWith('__Secure-') && !secure) continue
       if (name.startsWith('__Host-') && (!secure || domain !== undefined || path !== '/')) continue
       // Without a public-suffix list, never widen the existing host/port isolation for Domain cookies.
-      const cookie: StoredCookie = { host: target.host, name, value, path, secure,
-        expiresAt: maxAge === undefined ? expires : maxAge <= 0 ? 0 : now + maxAge * 1000 }
-      const key = cookie.host + '\0' + path + '\0' + name
+      const cookie = normalizeStoredCookie({ origin: target.origin, name, value, path, secure,
+        expiresAt: maxAge === undefined ? expires : maxAge <= 0 ? 0 : now + maxAge * 1000 })
+      if (cookie === undefined) continue
+      const key = cookie.origin + '\0' + path + '\0' + name
       const existing = this.store.get(key)
       if (existing?.secure && target.protocol !== 'https:') continue
       if (cookie.expiresAt !== undefined && cookie.expiresAt <= now) this.store.delete(key)
       else this.store.set(key, cookie)
     }
+    if (values.length > 0) this.save()
   }
 
   getCookieHeader(target: URL): string | undefined {
     const now = Date.now()
     const matched: StoredCookie[] = []
-    for (const [key, cookie] of this.store) {
-      if (cookie.expiresAt !== undefined && cookie.expiresAt <= now) {
+    for (const [key, value] of this.store) {
+      const cookie = normalizeStoredCookie(value)
+      if (cookie === undefined || (cookie.expiresAt !== undefined && cookie.expiresAt <= now)) {
         this.store.delete(key)
         continue
       }
-      if (cookie.host !== target.host || (cookie.secure && target.protocol !== 'https:')
+      if (cookie.origin !== target.origin || (cookie.secure && target.protocol !== 'https:')
         || !pathMatches(target.pathname, cookie.path)) continue
       matched.push(cookie)
     }

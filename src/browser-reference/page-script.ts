@@ -358,7 +358,7 @@ const PAGE_LIB = String.raw`
     return out
   }
 
-  function selectedContent(nodes, start, end) {
+  function selectedContent(nodes, start, end, preserveWhitespace) {
     var result = []
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i]
@@ -368,7 +368,7 @@ const PAGE_LIB = String.raw`
       } else if (node.type === 'break' || node.type === 'rule') result.push({ type: node.type })
       else if (node.type === 'math') result.push({ type: 'math', latex: node.latex, display: node.display })
       else {
-        var children = selectedContent(node.children, start, end)
+        var children = selectedContent(node.children, start, end, preserveWhitespace || node.type === 'pre' || node.type === 'code')
         if (!children.length) continue
         var part = { type: node.type, children: children }
         if (node.level !== undefined) part.level = node.level
@@ -386,7 +386,14 @@ const PAGE_LIB = String.raw`
         result.push(part)
       }
     }
-    return result
+    if (preserveWhitespace) return result
+    function block(node) {
+      return node && /^(block|paragraph|heading|list|list-item|definition-list|term|definition|pre|blockquote|rule)$/.test(node.type)
+    }
+    return result.filter(function (node, index) {
+      return node.type !== 'text' || !/^\s*$/.test(node.text)
+        || (!block(result[index - 1]) && !block(result[index + 1]))
+    })
   }
 
   function safeStart(text, index) {

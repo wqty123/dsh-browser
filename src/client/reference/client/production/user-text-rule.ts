@@ -11,7 +11,7 @@ declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
 /** Match the next canonical source marker without changing the logged message. */
 export const browserSourceRule: UserTextRule<'browser-ref'> = {
   id: 'browser-ref',
-  order: 20,
+  order: -20,
   match(text, from) {
     const marker = readSourceMarker(text, from)
     const quote = readSubmissionQuote(text, from)
@@ -19,8 +19,11 @@ export const browserSourceRule: UserTextRule<'browser-ref'> = {
       return { id: 'text', start: quote.start, end: quote.end,
         data: { text: text.slice(quote.start, quote.end), display: '' } }
     }
-    return marker === undefined ? undefined : {
-      id: 'browser-ref', start: marker.start, end: marker.end,
+    if (marker === undefined) return undefined
+    const line = text.lastIndexOf('\n', marker.start - 1) + 1
+    const start = line >= from && /^ {0,3}>[ \t]?$/u.test(text.slice(line, marker.start)) ? line : marker.start
+    return {
+      id: 'browser-ref', start, end: marker.end,
       data: { uri: marker.uri, label: marker.label },
     }
   },

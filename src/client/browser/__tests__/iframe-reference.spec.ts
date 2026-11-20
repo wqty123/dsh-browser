@@ -3,6 +3,7 @@ import { runInNewContext } from 'node:vm'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { guestRuntimeScript } from '../../../browser-electron/guest-runtime.ts'
+import { captureEntrySource } from '../../../browser-reference/page-script.ts'
 import { BrowserController, type BrowserControllerOptions } from '../BrowserController.ts'
 import { createBrowserInitializationJournal, createBrowserInitializationReader } from '../initialization.ts'
 import { createIframePage } from '../../pages.ts'
@@ -75,15 +76,17 @@ function fixture(initial = url) {
   return { connect, controller, reader, sidebar, navigate, journal, page: () => page }
 }
 
-it('captures from the isolated Web guest and completes a registered model-tool reveal over real HTTP through the same owned client source', async () => {
+it.each(['canonical', 'proxy'] as const)('captures a %s-URL frozen selection from the isolated Web guest and completes a registered model-tool reveal over real HTTP', async transport => {
   const server = await webReferenceHttp()
   disposers.push(() => server.close())
   const previousFetch = globalThis.fetch
   let captured: { referenceId: string } | undefined
+  const sequence: string[] = []
   let removed = false
   globalThis.fetch = vi.fn(async (input, init) => {
     const path = new URL(String(input), server.baseUrl).pathname
     const body = init?.body ? JSON.parse(String(init.body)) : undefined
+    sequence.push(body?.operation ?? path.split('/').pop()!)
     const response = await server.call(path, body)
     if (path.endsWith('/capture') && response.status === 200) captured = response.json().reference
     if (body?.operation === 'remove') removed = true
@@ -92,11 +95,22 @@ it('captures from the isolated Web guest and completes a registered model-tool r
   disposers.push(() => { globalThis.fetch = previousFetch })
   const f = fixture()
   const guest = f.connect()
-  guest.receive({ type: 'dsh-browser-ref:intent', origin: 'user-selection', entry: 'page-overlay', capture: {
-    ok: true, url, title: 'Article', events: [{ kind: 'text', exact: 'selected words', prefix: '', suffix: '' }],
-  } })
+  const range = guest.guest.window.document.createRange()
+  range.selectNodeContents(guest.guest.window.document.querySelector('p')!)
+  guest.guest.window.getSelection()!.addRange(range)
+  const frozen = runInNewContext(`(${captureEntrySource()})({context:32})`, {
+    window: guest.guest.window, document: guest.guest.window.document,
+    location: transport === 'proxy' ? guest.guest.window.location : { href: url },
+    URL, NodeFilter: guest.guest.window.NodeFilter,
+  })
+  expect(frozen.ok).toBe(true)
+  expect(frozen.url).toBe(transport === 'proxy' ? guest.frame.src : url)
+  guest.receive({ type: 'dsh-browser-ref:intent', origin: 'user-selection', entry: 'page-overlay', hasSelection: true, capture: frozen })
   await vi.waitFor(() => { expect(captured).toBeDefined() })
+  expect(sequence.slice(0, 3)).toEqual(['register', 'poll', 'capture'])
   const reference = server.service.get(captured!.referenceId)
+  expect(reference.source.pageUrl).toBe(url)
+  expect(reference.source.frameUrl).toBe(url)
   expect(reference.owner).toEqual({ sessionId: owner, sourcePageId: f.controller.currentPage()!.guestId })
   expect(reference.owner.browserSessionId).toBeUndefined()
   expect((await server.reveal(reference.referenceId, sessionId)).status).toBe('revealed')

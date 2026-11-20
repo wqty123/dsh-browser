@@ -5,12 +5,17 @@ import { once } from 'node:events'
 import { promises as dns } from 'node:dns'
 import { handleGuest, guestPath, rewriteDocument } from '../src/browser-electron/guest-route.ts'
 import { GuestCookieJar } from '../src/browser-electron/guest-cookie-jar.ts'
+import { loadGuestCookies } from '../src/browser-electron/guest-cookie-store.ts'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const nativeFetch = globalThis.fetch
 const nativeLookup = dns.lookup
 const resolved = new Map()
 let upstream, proxy, upstreamOrigin, proxyPort
 const forwarded = []
+let cookieJar = new GuestCookieJar()
 
 before(async () => {
   dns.lookup = async (hostname, options) => {
@@ -22,7 +27,13 @@ before(async () => {
   upstream = createServer(async (req, res) => {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
-    if (req.url === '/login') {
+    if (req.url === '/quoted-login') {
+      res.writeHead(303, { location: '/account', 'set-cookie': ['SID="abc"; Secure; Max-Age=3600; HttpOnly; Path=/'] })
+      res.end()
+    } else if (req.url === '/persistent-login') {
+      res.writeHead(303, { location: '/account', 'set-cookie': ['SAVED=yes; Max-Age=3600; HttpOnly; Path=/', 'SESSION=temporary; Path=/'] })
+      res.end()
+    } else if (req.url === '/login') {
       res.writeHead(303, { location: '/account', 'set-cookie': ['SID=logged-in; HttpOnly; Path=/', 'theme=dark; Path=/'] })
       res.end()
     } else if (req.url === '/cookie-scopes/set') {
@@ -93,7 +104,7 @@ before(async () => {
     return nativeFetch(upstreamOrigin + url.pathname + url.search, { ...options, headers })
   }
   proxy = createServer((req, res) => {
-    void handleGuest(req, res, '<script>overlay()</script>', 'owner').catch(error => res.destroy(error))
+    void handleGuest(req, res, '<script>overlay()</script>', 'owner', cookieJar).catch(error => res.destroy(error))
   }).listen(0, '127.0.0.1')
   await once(proxy, 'listening')
   proxyPort = proxy.address().port
@@ -217,6 +228,107 @@ test('accepts empty bodies and bodies exactly at the request limit', async () =>
   }
 })
 
+test('proxy restores persistent login cookies after restart, not session cookies', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'guest-cookies-http-'))
+  const previous = cookieJar
+  t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+  cookieJar = loadGuestCookies(directory)
+  const login = await call(guestPath('https://ordinary.example/persistent-login'), { method: 'POST' })
+  assert.equal(login.status, 303)
+  assert.equal(login.headers['set-cookie'], undefined)
+  let account = await call(login.headers.location)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SAVED=yes; SESSION=temporary')
+  cookieJar = loadGuestCookies(directory)
+  account = await call(login.headers.location)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SAVED=yes')
+})
+
+test('quoted login cookie survives an HTTP proxy round-trip and restart with quotes preserved', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'guest-quoted-'))
+  const previous = cookieJar
+  t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+  cookieJar = loadGuestCookies(directory)
+  const login = await call(guestPath('https://ordinary.example/quoted-login'), { method: 'POST' })
+  assert.equal(login.status, 303)
+  assert.equal(login.headers['set-cookie'], undefined)
+  assert.equal(JSON.parse((await call(login.headers.location)).body).headers.cookie, 'SID="abc"')
+  assert.equal(JSON.parse(readFileSync(join(directory, 'cookies.json'), 'utf8')).cookies[0].value, '"abc"')
+  cookieJar = loadGuestCookies(directory)
+  const account = await call(login.headers.location)
+  assert.equal(account.status, 200)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SID="abc"')
+})
+
+test('RFC 6265 cookie values are validated on parse, load and use', () => {
+  const target = new URL('https://ordinary.example/')
+  for (const value of ['', 'abc', '"abc"', '""', 'a=b', '"a=b"']) {
+    const jar = new GuestCookieJar()
+    jar.setCookies(target, [`SID=${value}; Max-Age=3600`])
+    assert.equal(jar.getCookieHeader(target), `SID=${value}`)
+    const loaded = new GuestCookieJar(undefined, [{ origin: target.origin, name: 'SID', value,
+      path: '/', secure: false, expiresAt: Date.now() + 3600000 }])
+    assert.equal(loaded.getCookieHeader(target), `SID=${value}`)
+  }
+  for (const value of ['"', '"abc', 'abc"', '"a"b"', '"a b"', '"a,b"', '"a;b"', '"a\\b"', '"a\nb"', 'abc\n', '\u007f', '\u0100']) {
+    const jar = new GuestCookieJar()
+    jar.setCookies(target, [`SID=${value}; Max-Age=3600`])
+    assert.equal(jar.getCookieHeader(target), undefined, JSON.stringify(value))
+    const loaded = new GuestCookieJar(undefined, [{ origin: target.origin, name: 'SID', value,
+      path: '/', secure: false, expiresAt: Date.now() + 3600000 }])
+    assert.equal(loaded.getCookieHeader(target), undefined, JSON.stringify(value))
+  }
+})
+
+test('http port 443 cookies survive restart without breaking any sidebar page', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'guest-http443-'))
+  const previous = cookieJar
+  t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+  cookieJar = loadGuestCookies(directory)
+  const login = await call(guestPath('http://ordinary.example:443/persistent-login'), { method: 'POST' })
+  assert.equal(login.status, 303)
+  assert.equal(JSON.parse((await call(login.headers.location)).body).headers.cookie, 'SAVED=yes; SESSION=temporary')
+  cookieJar = loadGuestCookies(directory)
+  const account = await call(login.headers.location)
+  assert.equal(account.status, 200)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SAVED=yes')
+  for (const url of ['http://ordinary.example/account', 'https://ordinary.example:443/account', 'http://scoped.example:443/account']) {
+    const other = await call(guestPath(url))
+    assert.equal(other.status, 200)
+    assert.doesNotMatch(JSON.parse(other.body).headers.cookie ?? '', /SAVED=|SESSION=/u)
+  }
+  assert.equal(JSON.parse(readFileSync(join(directory, 'cookies.json'), 'utf8')).cookies[0].origin, 'http://ordinary.example:443')
+})
+
+for (const failure of ['corrupt', 'invalid-entry', 'unreadable']) {
+  test(`proxy recovers from ${failure} cookie storage and rewrites sanitized data`, async t => {
+    const directory = mkdtempSync(join(tmpdir(), 'guest-recover-'))
+    const file = join(directory, 'cookies.json')
+    const previous = cookieJar
+    t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+    if (failure === 'unreadable') mkdirSync(file)
+    else if (failure === 'corrupt') writeFileSync(file, '{BROKEN_SECRET')
+    else writeFileSync(file, JSON.stringify({ version: 1, cookies: [null, { origin: 'https://bad host', value: 'SECRET' },
+      { origin: 'https://ORDINARY.example:443/', name: 'VALID', value: 'yes', path: '/', secure: true, expiresAt: Date.now() + 3600000 },
+      { origin: 'https://ordinary.example', name: 'BAD', value: 'line\r\ninjection', path: '/', secure: false, expiresAt: Date.now() + 3600000 },
+    ] }))
+    cookieJar = loadGuestCookies(directory)
+    const account = await call(guestPath('https://ordinary.example/account'))
+    assert.equal(account.status, 200)
+    assert.equal(JSON.parse(account.body).headers.cookie, failure === 'invalid-entry' ? 'VALID=yes' : 'VISITED=root')
+    if (failure === 'unreadable') {
+      rmSync(file, { recursive: true })
+      const login = await call(guestPath('https://ordinary.example/persistent-login'), { method: 'POST' })
+      assert.equal(login.status, 303)
+    }
+    const saved = JSON.parse(readFileSync(file, 'utf8'))
+    assert.equal(saved.cookies.length, failure === 'corrupt' ? 0 : 1)
+    if (failure === 'invalid-entry') assert.equal(saved.cookies[0].origin, 'https://ordinary.example')
+    assert.equal(readFileSync(file, 'utf8').includes('SECRET'), false)
+    cookieJar = loadGuestCookies(directory)
+    assert.equal((await call(guestPath('https://scoped.example/account'))).status, 200)
+  })
+}
+
 test('stores redirect cookies and rewrites redirect location for a login round-trip', async () => {
   const login = await call(guestPath('https://ordinary.example/login'), { method: 'POST', body: 'login=1' })
   assert.equal(login.status, 303)
@@ -244,7 +356,7 @@ test('proxy cookie round-trip honors directory paths, duplicate names and Secure
   const outside = await call(guestPath('https://scoped.example/cookie-scopes-other'), options)
   assert.equal(JSON.parse(outside.body).headers.cookie, 'SID=root; secure=https-only')
   const insecure = await call(guestPath('http://scoped.example/echo'), options)
-  assert.equal(JSON.parse(insecure.body).headers.cookie, 'SID=root')
+  assert.equal(JSON.parse(insecure.body).headers.cookie, undefined)
 })
 
 test('cookie jar validates Domain but conservatively retains exact host and port isolation', () => {
@@ -300,7 +412,7 @@ test('cookie jar ignores malformed cookies and protects Secure and host-prefixed
     '__Secure-valid=yes; Secure; Path=/', '__Host-valid=yes; Secure; Path=/'])
   jar.setCookies(http, ['SID=overwrite; Path=/', 'SID=delete; Max-Age=0; Path=/', 'new=no; Secure'])
   assert.equal(jar.getCookieHeader(https), 'empty=; SID=safe; __Secure-valid=yes; __Host-valid=yes')
-  assert.equal(jar.getCookieHeader(http), 'empty=')
+  assert.equal(jar.getCookieHeader(http), undefined)
   jar.setCookies(https, [])
   assert.equal(jar.getCookieHeader(https), 'empty=; SID=safe; __Secure-valid=yes; __Host-valid=yes')
 })
