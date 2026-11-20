@@ -22,6 +22,7 @@
  * @module dsh-browser-reference/production/production-submission
  */
 import { renderReferenceTable } from '../../../../reference-text.ts'
+import { referenceOwnerKey } from '../../../../reference-owner.ts'
 import type { OrderedReferenceGroup } from '../types.ts'
 import { createSubmissionProjector, type TextPosition } from '../ordered-submission.ts'
 import { encodeBrowserRefUri } from '../scheme.ts'
@@ -299,6 +300,7 @@ export function createSubmissionSeam(options: CreateSubmissionSeamOptions): Subm
 
   return {
     async bind(sessionId, requestId, hostRequestId) {
+      sessionId = referenceOwnerKey(sessionId)
       const ids = tokenized.get(requestId)
       if (ids !== undefined && ids.length > 0) await options.bind?.(sessionId, hostRequestId, ids)
     },
@@ -307,7 +309,7 @@ export function createSubmissionSeam(options: CreateSubmissionSeamOptions): Subm
       // bindings are all keyed on the bare id. Without this the chips were visible in the composer while
       // buildContent saw ZERO groups, so the message went out with the typed text alone and the model
       // answered "there is nothing attached".
-      const sessionId = rawSessionId.startsWith('session-') ? rawSessionId.slice('session-'.length) : rawSessionId
+      const sessionId = referenceOwnerKey(rawSessionId)
       const groups = options.groupsFor(sessionId)
       const content = wireSubmissionContent({
         uploaded,
@@ -330,12 +332,14 @@ export function createSubmissionSeam(options: CreateSubmissionSeamOptions): Subm
       return content
     },
     commit(sessionId, requestId) {
+      sessionId = referenceOwnerKey(sessionId)
       const referenceIds = consume(sessionId, requestId)
       if (referenceIds !== undefined && referenceIds.length > 0) {
         return options.submitted?.(sessionId, referenceIds)
       }
     },
     rollback(sessionId, requestId) {
+      sessionId = referenceOwnerKey(sessionId)
       consume(sessionId, requestId)
     },
   }

@@ -14,6 +14,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { referenceOwnerKey } from '../reference-owner.ts'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { BrowserHttpHandler } from './authenticated-route.ts'
@@ -43,7 +44,7 @@ export const REFERENCE_GET_ROUTE = '/dsh-builtin-browser/reference/get'
  * @returns the same id without a leading \`session-\`.
  */
 export function bareSession(value: string): string {
-  return value.startsWith('session-') ? value.slice('session-'.length) : value
+  return referenceOwnerKey(value)
 }
 
 /** 客户端产物的版本（mtime+size），用于让浏览器自动换到新 bundle。 */

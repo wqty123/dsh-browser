@@ -393,14 +393,10 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
    * runtime injects anyway.
    */
   const dockComponent = (props: unknown): unknown => {
-    // 这一行是「只有引用发不出去」的根因所在：座位把标准 props（`sessionId`/`useInput`/`inputActions`）
-    // 交给**组件**，而 `inject()` 工厂参数里没有它们。原实现只在注槽时用 `noteDockProps` 回传，
-    // 于是 `inputActions` 恒为 undefined → `hostInputFor()` 里没有 `insertReference` → 引用只画成浮层
-    // 胶囊、没进编辑器 → 上游闸门（rc.3：`draft.trim()==='' && attachments===0`）判为空 → 发送禁用。
-    // 在组件里回传真实 props，`inputActions.insertReference` 才能拿到，胶囊才会成为原生引用节点。
-    config.onDockProps?.(props)
     const face = props as {
       readonly sessionId?: string
+      readonly session?: { readonly sessionId?: string }
+      readonly input?: { readonly draft?: string }
       readonly useInput?: (
         selector: (state: { readonly draft?: string }) => { readonly draft?: string },
       ) => { readonly draft?: string }
@@ -408,11 +404,13 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
     const input = face?.useInput === undefined ? undefined : face.useInput(value => value)
     // Delegated by call rather than through an element so the seat renders the
     // dock itself: one React boundary, same hook order on every render.
-    return cardComponent({
+    const dockProps = {
       ...(props as Readonly<Record<string, unknown>>),
-      session: { sessionId: face?.sessionId ?? '' },
-      input: { draft: input?.draft ?? '' },
-    })
+      session: { sessionId: face?.sessionId ?? face?.session?.sessionId ?? '' },
+      input: { draft: input?.draft ?? face?.input?.draft ?? '' },
+    }
+    config.onDockProps?.(dockProps)
+    return cardComponent(dockProps)
   }
   // 胶囊行属于输入框内部布局：注册进宿主在 composer card 里提供的 `conversation.input.chips`。
   // 注册到 `conversation.input.overlay` 会让胶囊浮在输入框之上——占位文字与附件图片都会与它重叠。
@@ -422,12 +420,9 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
       // The dictionary rides the same namespace `apply` registers with the host
       // locale service, so the rail's copy follows the active language.
       locale: REFERENCE_LOCALE,
-      // `hooks.dockCards` becomes the component's `useDockCards` selector hook,
-      // bound by the host's React; `noteDockProps` hands the Session-scope props
-      // (session id, input actions) back to the runtime on each render.
+      // `hooks.dockCards` becomes the host-bound selector hook.
       inject: () => ({
         hooks: { dockCards: { getSnapshot: () => runtime.snapshot(), subscribe: (listener: () => void) => runtime.subscribe(listener) } },
-        noteDockProps: (props: unknown) => { config.onDockProps?.(props) },
       }),
     }, dockComponent)
   })

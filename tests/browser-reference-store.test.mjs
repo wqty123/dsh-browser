@@ -52,6 +52,16 @@ test('append then read returns the same snapshot', t => {
   assert.equal(existsSync(path), true)
 })
 
+test('legacy prefixed owners are discoverable without rewriting their signed snapshots', t => {
+  const { path } = fixture(t)
+  const store = new ReferenceStore(path)
+  const legacy = reference('legacy-owner', 'frozen words', { owner: { sessionId: 'session-79b4e5bd-5bf4-49f3-b911-5d1a92b7002b' } })
+  store.append(legacy)
+  assert.deepEqual(store.list({ sessionId: '79b4e5bd-5bf4-49f3-b911-5d1a92b7002b' }), [legacy])
+  assert.deepEqual(store.get(legacy.referenceId), legacy)
+  assert.deepEqual(store.list({ sessionId: 'another-owner' }), [])
+})
+
 test('the same reference is idempotent, not duplicated', t => {
   const { path } = fixture(t)
   const store = new ReferenceStore(path)

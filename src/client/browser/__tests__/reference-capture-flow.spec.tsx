@@ -16,9 +16,12 @@ import type { ElectronWebviewPresentation, WebviewElement } from '../../electron
 import type { DesktopBrowserBridge } from '../../../types.ts'
 import { createReferenceHttpClient } from '../../reference/client/production/http-transport.ts'
 import { createProductionRuntime } from '../../reference/client/production/runtime.ts'
+import { apply as applyClient } from '../../reference/client/plugin.ts'
+import type { HostContext } from '../../reference/client/production/assembly.ts'
+import { captureReferenceIntent } from '../../reference-intents.ts'
 import { ReferenceCapsules } from '../../reference/client/production/ReferenceCapsules.tsx'
 import { referenceLabels } from '../../reference/client/production/reference-labels.ts'
-import { fakeHostInput, memoryKV } from '../../reference/client/__tests__/production.fixtures.ts'
+import { fakeHostInput, manualScheduler, memoryKV } from '../../reference/client/__tests__/production.fixtures.ts'
 
 const directories: string[] = []
 afterEach(() => {
@@ -28,7 +31,7 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
-function harness() {
+function harness(owner = 'owner-B') {
   const directory = mkdtempSync(join(homedir(), '.dsh-reference-flow-'))
   directories.push(directory)
   const service = new BrowserReferenceService({
@@ -58,7 +61,7 @@ function harness() {
   vi.stubGlobal('fetch', request)
   const input = fakeHostInput('保留我的问题')
   const runtime = createProductionRuntime({
-    http: createReferenceHttpClient({ request }), storage: memoryKV(), initialSessionId: 'owner-B', hostInputFor: () => input,
+    http: createReferenceHttpClient({ request }), storage: memoryKV(), initialSessionId: owner, hostInputFor: () => input,
   })
   return { service, queue, request, runtime, input }
 }
@@ -70,12 +73,69 @@ const intent = {
   ] },
 }
 
+const firstOwner = '79b4e5bd-5bf4-49f3-b911-5d1a92b7002b'
+const nextOwner = '96092e17-63b5-4f8a-a466-54be10d7daba'
+
+it('binds capture, queue, composer and send to the host Session key before the first send and after a new Session', async () => {
+  const { service, queue, request, runtime: unused } = harness()
+  unused.dispose()
+  let dock!: (props: unknown) => unknown
+  const disposers: (() => void)[] = []
+  const ctx: HostContext = {
+    get: name => name === 'uiConversation' ? { userText: { register: () => () => {} } } : undefined,
+    set() {},
+    effect: effect => { const stop = effect(); if (stop) disposers.push(stop) },
+    slots: {
+      inject: (_name, produce) => { [...produce()] },
+      register: (registration, component) => {
+        if ((registration as { name: string }).name === 'conversation.input.chips') dock = component as typeof dock
+      },
+    },
+  }
+  const runtime = applyClient(ctx, { request, storage: memoryKV(), scheduler: manualScheduler() })
+  const bind = (sessionId: string | undefined) => dock({
+    sessionId,
+    session: { sessionId: `session-${firstOwner}` },
+    useInput: () => ({ draft: 'unsent question' }),
+    inputActions: { captureInsertion: () => ({ start: 0, end: 0, draftRev: 1 }), insertText: () => true, persistDraft() {} },
+  })
+  try {
+    for (const owner of [firstOwner, nextOwner]) {
+      bind(`session-${owner}`)
+      expect(runtime.currentSessionId()).toBe(owner)
+      await runtime.pollOnce()
+      await captureReferenceIntent(intent, `session-${owner}`)
+      const record = queue.list({ sessionId: owner }).deliveries[0]!
+      expect(record.sessionId).toBe(owner)
+      expect(record.snapshot.owner.sessionId).toBe(owner)
+      expect(service.list({ sessionId: `session-${owner}` })).toHaveLength(1)
+      await runtime.pollOnce()
+      expect(runtime.cards()).toHaveLength(1)
+      expect(runtime.cards()[0]!.referenceId).toBe(record.referenceId)
+      expect(renderToStaticMarkup(bind(`session-${owner}`) as ReturnType<typeof createElement>)).toContain('data-cards="1"')
+      const content = runtime.submission.buildContent({ sessionId: `session-${owner}`, uploaded: [], text: '', requestId: owner })
+      expect(JSON.stringify(content)).toContain('selected words')
+      await runtime.submission.commit(`session-${owner}`, owner)
+      expect(runtime.cards()).toHaveLength(0)
+      expect(runtime.draftState(owner).sent).toHaveLength(1)
+    }
+    expect(queue.list({ sessionId: nextOwner, includeConsumed: true }).deliveries).toHaveLength(1)
+    expect(runtime.draftState(firstOwner).groups).toHaveLength(0)
+    // No selected Session must not leave the previously displayed draft active.
+    dock({ sessionId: '', inputActions: undefined })
+    expect(runtime.currentSessionId()).toBe('')
+    expect(runtime.cards()).toHaveLength(0)
+    await expect(captureReferenceIntent(intent, '')).rejects.toThrow('owner is unavailable')
+    expect(queue.list({ includeConsumed: true }).deliveries).toHaveLength(2)
+  } finally { for (const stop of disposers.reverse()) stop(); runtime.dispose(); queue.dispose() }
+})
+
 it.each(['native', 'web'] as const)('%s overlay intent reaches its owning composer through the real capture, store and delivery handlers', async surface => {
-  const { service, queue, request, runtime, input } = harness()
+  const { service, queue, request, runtime, input } = harness(firstOwner)
   await service.capture({ sessionId: 'owner-A', frozenCapture: intent.capture })
   let dispose: () => Promise<void>
   if (surface === 'web') {
-    const page = createIframePage({ initial: undefined, persist() {}, openRequested() {} }, 'owner-B')
+    const page = createIframePage({ initial: undefined, persist() {}, openRequested() {} }, `session-${firstOwner}`)
     const host = document.createElement('div')
     host.id = 'capture-flow'
     document.body.append(host)
@@ -97,25 +157,25 @@ it.each(['native', 'web'] as const)('%s overlay intent reaches its owning compos
     const bridge = {
       acquire: async () => ({ lease: 'lease', partition: 'persist:flow' }), release: async () => {}, onOpenRequested: () => () => {},
     } as unknown as DesktopBrowserBridge
-    const frame = new ElectronWebViewImpl({ initial: undefined, persist() {}, openRequested() {} }, bridge, async () => 'workspace', presentation, 'owner-B')
+    const frame = new ElectronWebViewImpl({ initial: undefined, persist() {}, openRequested() {} }, bridge, async () => 'workspace', presentation, `session-${firstOwner}`)
     frame.attach()
     frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' })
     dispose = () => frame.dispose()
   }
   try {
-    await vi.waitFor(() => expect(queue.list({ sessionId: 'owner-B' }).deliveries).toHaveLength(1))
+    await vi.waitFor(() => expect(queue.list({ sessionId: firstOwner }).deliveries).toHaveLength(1))
     const posts = request.mock.calls.filter(([url]) => url.endsWith('/capture'))
     expect(posts).toHaveLength(1)
-    expect(JSON.parse(String(posts[0]![1]!.body)).sessionId).toBe('owner-B')
-    expect(service.list({ sessionId: 'owner-B' })).toHaveLength(1)
-    expect(service.list({ sessionId: 'owner-B' })[0]?.source.carrier).toBe('sidebar')
+    expect(JSON.parse(String(posts[0]![1]!.body)).sessionId).toBe(firstOwner)
+    expect(service.list({ sessionId: firstOwner })).toHaveLength(1)
+    expect(service.list({ sessionId: firstOwner })[0]?.source.carrier).toBe('sidebar')
     const report = await runtime.pollOnce()
     expect(report?.outcomes[0]?.outcome.kind).toBe('acknowledged')
     expect(runtime.cards()).toHaveLength(1)
-    expect(runtime.draftState('owner-B').groups[0]?.parts[0]).toMatchObject({ kind: 'text', text: 'selected words' })
+    expect(runtime.draftState(firstOwner).groups[0]?.parts[0]).toMatchObject({ kind: 'text', text: 'selected words' })
     expect(input.text).toBe('保留我的问题')
     const capsule = renderToStaticMarkup(createElement(ReferenceCapsules, {
-      sessionId: 'owner-B', cards: runtime.cards(), actions: {}, labels: referenceLabels(),
+      sessionId: firstOwner, cards: runtime.cards(), actions: {}, labels: referenceLabels(),
     }))
     expect(capsule).toContain('data-cards="1"')
     expect(capsule).toContain('selected words')

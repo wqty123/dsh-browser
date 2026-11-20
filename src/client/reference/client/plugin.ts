@@ -15,6 +15,7 @@
  * @module dsh-browser-reference/plugin
  */
 import { createElement } from 'react'
+import { referenceOwnerKey } from '../../../reference-owner.ts'
 import {
   apply as applyProduction,
   type AssemblyConfig,
@@ -52,6 +53,7 @@ interface SlotInputActions {
 
 /** Session-scope props the `conversation.input.chips` registration receives. */
 interface DockProps {
+  readonly sessionId?: string
   readonly session?: { readonly sessionId?: string }
   readonly input?: { readonly draft?: string }
   readonly inputActions?: SlotInputActions
@@ -80,7 +82,7 @@ const inertFace: HostInputFace = {
   readText: () => '',
 }
 
-export function apply(ctx: HostContext, config: AssemblyConfig = {}): void {
+export function apply(ctx: HostContext, config: AssemblyConfig = {}): ProductionRuntime {
   const bindings = new Map<string, InputBinding>()
 
   const bindingFor = (sessionId: string): HostInputFace =>
@@ -93,16 +95,10 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): void {
     onDockProps: (props) => {
       config.onDockProps?.(props)
       const dock = props as DockProps | undefined
-      // The shell hands the session as "session-<uuid>"; the delivery queue, the draft store and the
-      // capture route all key on the bare id. Binding the face under the prefixed id meant
-      // hostInputFor() never found it, every append reported "save-failed", and a capture stayed a
-      // pending delivery with no card and no way to send it.
-      const rawSession = dock?.session?.sessionId
-      const sessionId = typeof rawSession === "string" && rawSession.startsWith("session-")
-        ? rawSession.slice("session-".length)
-        : rawSession
+      const rawSession = dock?.sessionId ?? dock?.session?.sessionId
+      const sessionId = typeof rawSession === 'string' ? referenceOwnerKey(rawSession) : undefined
       const actions = dock?.inputActions
-      if (typeof sessionId !== 'string' || sessionId === '') return
+      if (typeof sessionId !== 'string' || sessionId === '') { runtime.setSession(''); return }
       // The visible Session becomes the active one: this is what makes the
       // default entry poll a real conversation instead of the empty id, and it
       // keeps an async delivery bound to the Session it belongs to.
@@ -196,4 +192,5 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): void {
     if (typeof service?.openTabIn !== 'function') throw new Error('sidebar tab API is unavailable')
     await service.openTabIn(sessionId, 'browser', { params: { url } })
   })
+  return runtime
 }

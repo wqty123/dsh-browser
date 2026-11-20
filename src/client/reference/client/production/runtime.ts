@@ -17,6 +17,7 @@
  * @module dsh-browser-reference/production/runtime
  */
 import type { KeyValueStorage, OrderedReferenceGroup } from '../types.ts'
+import { referenceOwnerKey } from '../../../../reference-owner.ts'
 import { createDeliveryQueue, type DeliveryQueue } from '../pending-delivery.ts'
 import type { TextPosition } from '../ordered-submission.ts'
 import {
@@ -236,7 +237,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
   const admitAsset = options.admitAsset
   const hostInputFor = options.hostInputFor
   const cancellation = options.cancellation ?? createCancellationSource()
-  let current = options.initialSessionId
+  let current = referenceOwnerKey(options.initialSessionId)
   /** 会话切换的订阅者：侧栏页要在 id 到手后立刻收到，而不是只能靠下一次询问。 */
   const sessionListeners = new Set<(sessionId: string) => void>()
   /** 每条引用的插入尝试次数（本运行时实例内有效），用于限次重试。 */
@@ -811,6 +812,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
   // object as `browserReferenceSubmission`, so service.ts can reach it.
   Object.assign(submission, {
     prepare: async (sessionId: string): Promise<void> => {
+      sessionId = referenceOwnerKey(sessionId)
       if (http.consume === undefined) return
       const state = draftStoreFor(sessionId).state()
       const visible = new Set(state.groups.map(group => group.referenceId))
@@ -857,7 +859,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     if (detail === undefined) return undefined
     const { snapshot } = detail
     return {
-      sessionId: snapshot.owner.sessionId ?? detail.sessionId,
+      sessionId: referenceOwnerKey(snapshot.owner.sessionId ?? detail.sessionId),
       browserSessionId: detail.browserSessionId,
       label: snapshot.source.title,
       ...(snapshot.source.frameRoute === undefined ? {} : { frameRoute: snapshot.source.frameRoute }),
@@ -984,6 +986,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       publish()
     },
     setSession(sessionId) {
+      sessionId = referenceOwnerKey(sessionId)
       if (disposed || sessionId === current) return
       revealIntent += 1
       clearRevealHint()

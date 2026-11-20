@@ -16,6 +16,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { referenceOwnerKey } from '../reference-owner.ts'
 import { isReferenceText, MAX_REFERENCE_TEXT, referenceTextContent } from '../reference-text.ts'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -492,9 +493,9 @@ export class BrowserReferenceService {
    * @returns the stored reference, or the failures that prevented one.
    */
   async capture(request: CaptureRequest, signal?: AbortSignal): Promise<CaptureOutcome> {
-    const sessionId = request.sessionId.trim()
+    const sessionId = referenceOwnerKey(request.sessionId)
     if (sessionId === '') return { failures: [{ kind: 'reference', reason: 'session-id-required' }] }
-    const browserSessionId = (request.browserSessionId ?? sessionId).trim()
+    const browserSessionId = (request.browserSessionId ?? request.sessionId).trim()
     if (browserSessionId === '') return { failures: [{ kind: 'reference', reason: 'browser-session-id-required' }] }
     // A frozen capture needs no browser session: the page already handed over the complete snapshot, so
     // nothing has to be read from a tab. The Web sidebar is exactly that case — its guest is an iframe
