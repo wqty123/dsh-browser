@@ -1,0 +1,1781 @@
+From 77c7d15e0daa29dbb372fe15dc10ec3d39428879 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 04:07:10 +0000
+Subject: [PATCH] fix: unify reference capsules and sidebar reveal
+ orchestration
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ .../__tests__/production-runtime.spec.ts      |   5 +-
+ .../production-sent-capsule.spec.tsx          | 285 +++++++++++++++
+ src/client/reference/client/plugin.ts         |  15 +-
+ .../client/production/ReferenceCapsules.tsx   | 339 ++++++++++++++++++
+ .../production/ReferenceDock.module.css       |   2 +
+ .../client/production/ReferenceDock.tsx       | 314 +---------------
+ .../reference/client/production/assembly.ts   |  94 ++---
+ .../client/production/reply-link-bridge.ts    |  93 ++---
+ .../reference/client/production/reveal.ts     |  10 +-
+ .../reference/client/production/runtime.ts    | 150 ++++----
+ .../reference/client/production/styles.ts     |  23 +-
+ src/client/settings/panel.ts                  |  60 ----
+ tests/session-invariants.test.mjs             |  50 ++-
+ 13 files changed, 804 insertions(+), 636 deletions(-)
+ create mode 100644 src/client/reference/client/__tests__/production-sent-capsule.spec.tsx
+ create mode 100644 src/client/reference/client/production/ReferenceCapsules.tsx
+
+diff --git a/src/client/reference/client/__tests__/production-runtime.spec.ts b/src/client/reference/client/__tests__/production-runtime.spec.ts
+index da3cb56..e17bd5f 100644
+--- a/src/client/reference/client/__tests__/production-runtime.spec.ts
++++ b/src/client/reference/client/__tests__/production-runtime.spec.ts
+@@ -363,11 +363,10 @@ describe('revealReference — it goes to the source page', () => {
+     const { http, runtime, card } = await withCard()
+     http.revealOutcome = { ok: true, status: 'session-unavailable' }
+     const opened: string[] = []
+-    runtime.setSourceOpener((url) => {
++    runtime.setSourceOpener(async (url) => {
+       opened.push(url)
+       // Stands for the page finishing its load: the next attempt locates it.
+       http.revealOutcome = { ok: true, status: 'revealed' }
+-      return true
+     })
+     await runtime.revealReference(card.referenceId)
+     expect(opened).toEqual([card.source.pageUrl])
+@@ -378,7 +377,7 @@ describe('revealReference — it goes to the source page', () => {
+   it('keeps the specific reason when the host cannot open a page', async () => {
+     const { http, runtime, card } = await withCard()
+     http.revealOutcome = { ok: true, status: 'session-unavailable' }
+-    runtime.setSourceOpener(() => false)
++    runtime.setSourceOpener(async () => { throw new Error('sidebar tab API is unavailable') })
+     await runtime.revealReference(card.referenceId)
+     expect(runtime.snapshot().reveal?.status).toBe('session-unavailable')
+     expect(runtime.snapshot().reveal?.message).toContain('标签页')
+diff --git a/src/client/reference/client/__tests__/production-sent-capsule.spec.tsx b/src/client/reference/client/__tests__/production-sent-capsule.spec.tsx
+new file mode 100644
+index 0000000..f311435
+--- /dev/null
++++ b/src/client/reference/client/__tests__/production-sent-capsule.spec.tsx
+@@ -0,0 +1,285 @@
++// @vitest-environment jsdom
++import { act, createElement, type ReactNode } from 'react'
++import { createRoot, type Root } from 'react-dom/client'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { apply, type HostContext, type AssemblyConfig } from '../production/assembly.ts'
++import { apply as applyClient } from '../plugin.ts'
++import type { ProductionRuntime } from '../production/runtime.ts'
++import type { RequestLike } from '../production/http-transport.ts'
++import { ROUTES, type RevealResultWire } from '../production/protocol.ts'
++import { browserSourceRule } from '../production/user-text-rule.ts'
++import { encodeBrowserRefUri } from '../scheme.ts'
++import {
++  ASSET_MAP, LONG_TEXT, TAIL_TEXT, assetOf, deliveriesResponse,
++  fakeHostInput, makeDelivery, manualScheduler, memoryKV,
++} from './production.fixtures.ts'
++
++const roots: Root[] = []
++const cleanups: (() => void)[] = []
++;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
++
++afterEach(async () => {
++  await act(async () => {
++    for (const root of roots.splice(0)) root.unmount()
++    for (const cleanup of cleanups.splice(0).reverse()) cleanup()
++  })
++  vi.useRealTimers()
++  document.body.innerHTML = ''
++})
++
++async function assembled(storage = memoryKV(), options: { empty?: boolean; client?: boolean } = {}) {
++  const components = new Map<string, (props?: unknown) => unknown>()
++  const services: Record<string, unknown> = {}
++  let sourceRule: typeof browserSourceRule | undefined
++  services.uiConversation = { userText: { register(rule: typeof browserSourceRule) { sourceRule = rule; return () => {} } } }
++  const reveals: { referenceId: string; partId?: string; navigate?: boolean }[] = []
++  let outcome: () => Promise<RevealResultWire> = async () => ({ ok: true, status: 'revealed' })
++  let deliveries = options.empty ? [] : [makeDelivery({ state: 'prepared', sequence: 1 })]
++  const openTabIn = vi.fn()
++  services.sidebarRight = { openTabIn }
++  const request: RequestLike = async (url, init) => {
++    const parsed = new URL(url, 'https://dsh.test')
++    let body: unknown
++    if (parsed.pathname === ROUTES.deliveries) {
++      body = deliveriesResponse(deliveries, 1)
++      deliveries = []
++    } else if (parsed.pathname === ROUTES.asset) {
++      const key = parsed.searchParams.get('key')!
++      body = assetOf(key, ASSET_MAP[key]!)
++    } else if (parsed.pathname === ROUTES.ack) {
++      const ack = JSON.parse(init!.body as string)
++      body = { ok: true, ...ack, state: ack.phase ?? 'acknowledged' }
++    } else if (parsed.pathname === ROUTES.reveal) {
++      reveals.push(JSON.parse(init!.body as string))
++      body = await outcome()
++    } else {
++      throw new Error(`unexpected production request: ${url}`)
++    }
++    return { ok: true, status: 200, json: async () => body, bytes: async () => new Uint8Array() }
++  }
++  const ctx: HostContext = {
++    get: name => services[name],
++    set: (name, value) => { services[name] = value },
++    effect: fn => { const dispose = fn(); if (dispose) cleanups.push(dispose) },
++    slots: {
++      inject: (_name, producer) => { [...producer()] },
++      register: (registration, component) => {
++        components.set((registration as { name: string }).name, component as (props?: unknown) => unknown)
++      },
++    },
++  }
++  const config: AssemblyConfig = {
++    initialSessionId: 'sess-A', storage, request,
++    createElement: createElement as AssemblyConfig['createElement'],
++    scheduler: manualScheduler(), hostInputFor: () => fakeHostInput(),
++  }
++  let runtime: ProductionRuntime | undefined
++  await act(async () => {
++    if (options.client) applyClient(ctx, config)
++    else { runtime = apply(ctx, config); await runtime.pollOnce() }
++  })
++  return {
++    runtime: runtime!, storage, reveals, openTabIn,
++    outcome(value: RevealResultWire | (() => Promise<RevealResultWire>)) {
++      outcome = typeof value === 'function' ? value : async () => value
++    },
++    async sent(uri = encodeBrowserRefUri({ referenceId: 'ref-mixed-1' })) {
++      const component = components.get('conversation.user.text.node')!
++      return mount(() => component({ node: { data: { uri, label: '引用来源 3：原文' } } }) as ReactNode)
++    },
++    async sentMessage(text: string) {
++      expect(sourceRule).toBe(browserSourceRule)
++      const node = sourceRule!.match(text, 0)
++      expect(node).toMatchObject({ id: 'browser-ref', data: { uri: encodeBrowserRefUri({ referenceId: 'ref-mixed-1' }) } })
++      return mount(() => components.get('conversation.user.text.node')!({ node, raw: text }) as ReactNode)
++    },
++    async composer() {
++      return mount(() => components.get('conversation.input.chips')!() as ReactNode)
++    },
++  }
++}
++
++async function mount(component: () => ReactNode): Promise<HTMLElement> {
++  const container = document.createElement('div')
++  document.body.append(container)
++  const root = createRoot(container)
++  roots.push(root)
++  await act(async () => { root.render(createElement(component)) })
++  return container
++}
++
++async function send(runtime: ProductionRuntime): Promise<string> {
++  runtime.setComment('ref-mixed-1', 'My frozen-source comment')
++  const content = runtime.submission.buildContent({ sessionId: 'sess-A', uploaded: [], text: 'question', requestId: 'send-1' })
++  await runtime.submission.commit('sess-A', 'send-1')
++  expect(runtime.cards()).toHaveLength(0)
++  return content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')
++}
++
++function pill(container: HTMLElement): HTMLButtonElement {
++  return container.querySelector<HTMLButtonElement>('[data-reference-id]')!
++}
++
++describe('production assembly — shared composer and sent capsules', () => {
++  it('keeps a sent capsule, with ordered snapshot parts + comment on hover after durable reload', async () => {
++    const first = await assembled()
++    const before = first.runtime.referenceDetail('ref-mixed-1')!
++    expect(before.snapshot.parts[0]).toMatchObject({ type: 'text', text: LONG_TEXT })
++    const composer = await first.composer()
++    expect(pill(composer)).not.toBeNull()
++    const message = await send(first.runtime)
++    expect(first.runtime.draftState().sent).toHaveLength(1)
++    first.runtime.dispose()
++
++    const restored = await assembled(first.storage, { empty: true })
++    const detail = restored.runtime.referenceDetail('ref-mixed-1')!
++    expect(detail.snapshot).toEqual(before.snapshot)
++    expect(detail.comment).toBe('My frozen-source comment')
++    const sent = await restored.sentMessage(message)
++    const button = pill(sent)
++    expect(sent.querySelector('.dsh-browser-reference-capsules')).not.toBeNull()
++    expect(button.getAttribute('aria-haspopup')).toBe('dialog')
++    expect(button.querySelector('[data-chip-remove]')).toBeNull()
++    expect(button.getAttribute('data-index')).toBe('1')
++    await act(async () => { button.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
++    const panel = document.querySelector('[role="dialog"]')!
++    expect([...panel.querySelectorAll('[data-part-kind]')].map(node => node.getAttribute('data-part-kind')))
++      .toEqual(['text', 'image', 'table', 'image', 'text'])
++    expect(panel.querySelector('[data-part-kind="text"]')!.textContent).toBe(LONG_TEXT)
++    expect(panel.textContent).toContain(TAIL_TEXT)
++    expect(panel.textContent).toContain('My frozen-source comment')
++    expect(panel.querySelector('img')!.src).toMatch(/^data:image\/png;base64,/u)
++    expect(panel.querySelector('th[colspan="2"]')).not.toBeNull()
++    expect(panel.querySelector('td[rowspan="2"]')).not.toBeNull()
++  })
++
++  it('shows the same quoted content on keyboard focus in the composer and sent message', async () => {
++    const app = await assembled()
++    const composer = await app.composer()
++    await act(async () => { pill(composer).focus() })
++    const content = [...document.querySelectorAll('[role="dialog"] [data-part-kind]')].map(node => node.textContent)
++    expect(content[0]).toBe(LONG_TEXT)
++    await act(async () => { roots.pop()!.unmount() })
++    await send(app.runtime)
++    const sent = await app.sent()
++    vi.spyOn(pill(sent), 'getBoundingClientRect').mockReturnValue({ left: 10, top: 20, bottom: 46, width: 100, height: 26 } as DOMRect)
++    await act(async () => { pill(sent).focus() })
++    expect((document.querySelector('[role="dialog"]') as HTMLElement).style.top).toBe('54px')
++    expect([...document.querySelectorAll('[role="dialog"] [data-part-kind]')].map(node => node.textContent)).toEqual(content)
++  })
++
++  it('resolves the snapshot and comment during a pending archive write, without resurrecting the draft', async () => {
++    const storage = memoryKV()
++    const write = storage.setItem.bind(storage)
++    storage.setItem = (key, value) => {
++      const record = JSON.parse(value)
++      if (Array.isArray(record.sent) && record.sent.length > 0) throw new Error('archive quota exceeded')
++      write(key, value)
++    }
++    const app = await assembled(storage)
++    const snapshot = app.runtime.referenceDetail('ref-mixed-1')!.snapshot
++    await send(app.runtime)
++    expect(app.runtime.draftState().pendingArchive).toHaveLength(1)
++    expect(app.runtime.draftState().sent).toHaveLength(0)
++    const detail = app.runtime.referenceDetail('ref-mixed-1')!
++    expect(detail.snapshot).toEqual(snapshot)
++    expect(detail.comment).toBe('My frozen-source comment')
++    const sent = await app.sent()
++    await act(async () => { pill(sent).focus() })
++    expect(document.querySelector('[role="dialog"]')!.textContent).toContain('My frozen-source comment')
++  })
++
++  it('sent-capsule activation navigates a changed page, preserving a part-specific URI', async () => {
++    const app = await assembled()
++    await send(app.runtime)
++    app.outcome(async () => ({ ok: true, status: app.reveals.at(-1)?.navigate ? 'revealed' : 'page-mismatch' }))
++    const sent = await app.sent(encodeBrowserRefUri({ referenceId: 'ref-mixed-1', partId: 'tb-1' }))
++    await act(async () => { pill(sent).click() })
++    expect(app.reveals).toEqual([
++      { referenceId: 'ref-mixed-1', partId: 'tb-1' },
++      { referenceId: 'ref-mixed-1', partId: 'tb-1', navigate: true },
++    ])
++    expect(app.openTabIn).not.toHaveBeenCalled()
++    expect(app.runtime.snapshot().reveal).toBeUndefined()
++  })
++
++  it('the client assembly opens the sidebar for a sent capsule with no live session, then awaits reveal', async () => {
++    const first = await assembled()
++    const sourceUrl = first.runtime.cards()[0]!.source.pageUrl
++    await send(first.runtime)
++    first.runtime.dispose()
++    const app = await assembled(first.storage, { empty: true, client: true })
++    app.outcome({ ok: true, status: 'session-unavailable' })
++    app.openTabIn.mockImplementation(async () => { app.outcome({ ok: true, status: 'revealed' }) })
++    const sent = await app.sent()
++    await act(async () => { pill(sent).click() })
++    expect(app.openTabIn).toHaveBeenCalledExactlyOnceWith('sess-A', 'browser', { params: { url: sourceUrl } })
++    expect(app.reveals).toHaveLength(2)
++  })
++
++  it('uses the shared hover panel and orchestration for the anchor fallback and Enter activation', async () => {
++    const app = await assembled()
++    await send(app.runtime)
++    app.outcome(async () => ({ ok: true, status: app.reveals.at(-1)?.navigate ? 'revealed' : 'page-mismatch' }))
++    const anchor = document.createElement('a')
++    anchor.href = encodeBrowserRefUri({ referenceId: 'ref-mixed-1' })
++    anchor.textContent = '引用来源 1：原文'
++    document.body.append(anchor)
++    await act(async () => { anchor.focus() })
++    expect(document.querySelector('[role="dialog"] [data-part-kind="table"]')).not.toBeNull()
++    const keyboard = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
++    await act(async () => { anchor.dispatchEvent(keyboard) })
++    expect(keyboard.defaultPrevented).toBe(true)
++    expect(app.reveals.map(request => request.navigate ?? false)).toEqual([false, true])
++    await act(async () => { anchor.remove() })
++    expect(document.querySelector('[role="dialog"]')).toBeNull()
++  })
++
++  it('refuses missing and cross-session references without opening a tab or contacting reveal', async () => {
++    const app = await assembled()
++    await send(app.runtime)
++    const missing = await app.sent(encodeBrowserRefUri({ referenceId: 'missing' }))
++    await act(async () => { missing.querySelector('button')!.click() })
++    expect(app.runtime.referenceDetail('missing')).toBeUndefined()
++    expect(app.runtime.snapshot().reveal?.status).toBe('unknown-reference')
++    app.runtime.setSession('sess-B')
++    const foreign = await app.sent()
++    expect(foreign.querySelector('[data-reference-id]')).toBeNull()
++    await act(async () => { foreign.querySelector('button')!.click() })
++    expect(app.runtime.snapshot().reveal?.status).toBe('session-mismatch')
++    expect(app.reveals).toHaveLength(0)
++    expect(app.openTabIn).not.toHaveBeenCalled()
++  })
++
++  it('never calls a tab-open request or an unacknowledged reply a successful reveal', async () => {
++    const app = await assembled()
++    await send(app.runtime)
++    app.outcome({ ok: true, status: 'session-unavailable' })
++    app.runtime.setSourceOpener(async () => {})
++    vi.useFakeTimers()
++    const activation = app.runtime.activateUri(encodeBrowserRefUri({ referenceId: 'ref-mixed-1' }))
++    await vi.runAllTimersAsync()
++    expect(await activation).toBe('session-unavailable')
++    expect(app.runtime.snapshot().reveal?.status).not.toBe('revealed')
++    app.outcome({ ok: true })
++    expect(await app.runtime.revealReference('ref-mixed-1')).toBe('unavailable')
++  })
++
++  it('does not resume a pending sidebar reveal after switching conversations', async () => {
++    const app = await assembled()
++    await send(app.runtime)
++    app.outcome({ ok: true, status: 'session-unavailable' })
++    let opened!: () => void
++    let resume!: () => void
++    const opening = new Promise<void>(resolve => { opened = resolve })
++    const pending = new Promise<void>(resolve => { resume = resolve })
++    app.runtime.setSourceOpener(async () => { opened(); await pending })
++    const activation = app.runtime.revealReference('ref-mixed-1')
++    await opening
++    app.runtime.setSession('sess-B')
++    resume()
++    expect(await activation).toBe('superseded')
++    expect(app.reveals).toHaveLength(1)
++    expect(app.runtime.snapshot().reveal).toBeUndefined()
++  })
++})
+diff --git a/src/client/reference/client/plugin.ts b/src/client/reference/client/plugin.ts
+index 7a69599..24fab11 100644
+--- a/src/client/reference/client/plugin.ts
++++ b/src/client/reference/client/plugin.ts
+@@ -187,18 +187,13 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): void {
+   // 旧实现依赖 `ctx.inject(['sidebarRight'], …)` 回调在 apply 期拿到服务；注入不成立时
+   // opener 始终是 undefined，点击只会得到「侧栏网页已不在原来的标签页里」。
+   // 改为**点击那一刻**从容器里取服务：只要宿主有侧栏，就一定跳得过去。
+-  runtime.setSourceOpener((url) => {
++  runtime.setSourceOpener(async (url) => {
+     const sessionId = runtime.currentSessionId()
+-    if (sessionId === '') return false
++    if (sessionId === '') throw new Error('reference source requires a conversation')
+     const service = ctx.get('sidebarRight') as {
+-      openTabIn?: (sessionId: string, kind: string, options?: unknown) => void
++      openTabIn?: (sessionId: string, kind: string, options?: unknown) => void | Promise<unknown>
+     } | undefined
+-    if (typeof service?.openTabIn !== 'function') return false
+-    try {
+-      service.openTabIn(sessionId, 'browser', { params: { url } })
+-      return true
+-    } catch {
+-      return false
+-    }
++    if (typeof service?.openTabIn !== 'function') throw new Error('sidebar tab API is unavailable')
++    await service.openTabIn(sessionId, 'browser', { params: { url } })
+   })
+ }
+diff --git a/src/client/reference/client/production/ReferenceCapsules.tsx b/src/client/reference/client/production/ReferenceCapsules.tsx
+new file mode 100644
+index 0000000..feac7ca
+--- /dev/null
++++ b/src/client/reference/client/production/ReferenceCapsules.tsx
+@@ -0,0 +1,339 @@
++/**
++ * Browser references inside the composer.
++ *
++ * COLLAPSED BY DEFAULT: every reference is one compact pill (`[1] 标题`) in a
++ * single wrapping row. A second selection is added BESIDE the first, so the row
++ * grows sideways instead of the composer growing taller, and the box keeps the
++ * height the user typed into.
++ *
++ * Hovering or focusing a pill opens a floating detail card ABOVE it: the
++ * captured content in its own shape (paragraphs keep their line breaks, images
++ * stay images, tables stay tables), the user's note, and the three actions —
++ * edit note, go to source, remove. The card is portalled with fixed positioning
++ * and bounded height, so opening it never pushes the input box or the
++ * conversation around; it also stays open while the pointer travels from the
++ * pill into the card, which is what makes “edit the note” reachable by mouse.
++ * Removal is final: the pill disappears and nothing offers to undo it.
++ */
++import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
++import { createPortal } from 'react-dom'
++import { IconEditOutlineRegular, IconLinkOutlineRegular, IconTrashOutlineRegular, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
++import type { CardActions, CardPart, CardViewModel } from './reference-card.ts'
++import type { ReferenceLabels } from './reference-labels.ts'
++import css from './ReferenceDock.module.css'
++
++export interface ReferenceCapsulesProps {
++  readonly sessionId: string
++  readonly cards: readonly CardViewModel[]
++  readonly actions: CardActions
++  readonly labels: ReferenceLabels
++  readonly notice?: string
++  readonly readOnly?: boolean
++  readonly anchor?: HTMLElement
++}
++
++/** Time the pointer may leave the pill and land on the card without a flicker. */
++const CLOSE_DELAY_MS = 180
++const PANEL_GAP_PX = 8
++const VIEWPORT_PAD_PX = 8
++const PANEL_MAX_WIDTH_PX = 460
++const PANEL_MAX_HEIGHT_PX = 420
++
++
++function Part({ part, labels }: { readonly part: CardPart; readonly labels: ReferenceLabels }): ReactNode {
++  if (part.kind === 'text') return <p className={css.quote} data-part-kind="text">{part.value.text}</p>
++  if (part.kind === 'image') return part.value.bound
++    ? <img className={css.image} data-part-kind="image" src={part.value.thumbnailSrc} alt={part.value.alt ?? labels.image} />
++    : <p className={css.secondary} data-part-kind="image" role="status">{labels.loadingImage}</p>
++  const rows = new Map<number, typeof part.value.cells[number][]>()
++  for (const cell of part.value.cells) rows.set(cell.row, [...rows.get(cell.row) ?? [], cell])
++  return <div className={css.tableScroll} data-part-kind="table" tabIndex={0} aria-label={part.value.caption ?? labels.table}>
++    <table className={css.table}>
++      {part.value.caption !== undefined && <caption>{part.value.caption}</caption>}
++      <tbody>{[...rows].sort(([a], [b]) => a - b).map(([row, cells]) => <tr key={row}>
++        {cells.sort((a, b) => a.column - b.column).map((cell) => {
++          const Cell = cell.role === 'header' ? 'th' : 'td'
++          return <Cell key={cell.column} rowSpan={cell.rowSpan} colSpan={cell.columnSpan}>{cell.text}
++            {cell.inlineImages.map(image => image.thumbnailSrc === undefined
++              ? <span key={image.partId} className={css.secondary}>{labels.loadingImage}</span>
++              : <img key={image.partId} className={css.image} src={image.thumbnailSrc} alt={labels.image} />)}
++          </Cell>
++        })}
++      </tr>)}</tbody>
++    </table>
++  </div>
++}
++
++/** Presentation receives only data and callbacks; delivery and sending stay in the runtime. */
++export function ReferenceCapsules({ sessionId, cards, actions, labels, notice, readOnly = true, anchor }: ReferenceCapsulesProps): ReactNode {
++  const [openId, setOpenId] = useState<string | undefined>(anchor === undefined ? undefined : cards[0]?.referenceId)
++  /** A click pins the card open so a touch user (and the note editor) keeps it. */
++  const [pinned, setPinned] = useState(false)
++  const [edit, setEdit] = useState<{ id: string; value: string }>()
++  const chips = useRef(new Map<string, HTMLButtonElement>())
++  const panel = useRef<HTMLDivElement | null>(null)
++  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
++  const id = useIdSafe()
++
++  const active = useMemo(() => cards.find(card => card.referenceId === openId), [cards, openId])
++
++  const clearTimer = useCallback(() => {
++    if (closeTimer.current !== undefined) { clearTimeout(closeTimer.current); closeTimer.current = undefined }
++  }, [])
++
++  const open = useCallback((referenceId: string) => {
++    clearTimer()
++    setOpenId(referenceId)
++  }, [clearTimer])
++
++  const scheduleClose = useCallback(() => {
++    if (pinned) return
++    clearTimer()
++    closeTimer.current = setTimeout(() => {
++      closeTimer.current = undefined
++      setOpenId(undefined)
++      setEdit(undefined)
++    }, CLOSE_DELAY_MS)
++  }, [clearTimer, pinned])
++
++  const close = useCallback(() => {
++    clearTimer()
++    setPinned(false)
++    setOpenId(undefined)
++    setEdit(undefined)
++  }, [clearTimer])
++
++  useEffect(() => () => { clearTimer() }, [clearTimer])
++
++  // The card floats over the composer instead of living in it. Placement is written STRAIGHT TO THE
++  // NODE: routing a measurement back through `setState` re-renders the card, and a render that can
++  // change measured geometry is exactly the measure→render→measure cycle that ends in
++  // "ResizeObserver loop completed with undelivered notifications". A `position: fixed` node cannot
++  // feed back into the layout it measured, so writing its style is final — no state, no second pass.
++  useLayoutEffect(() => {
++    const node = panel.current
++    if (openId === undefined || node === null) return
++    const measure = (): void => {
++      const chip = anchor ?? chips.current.get(openId)
++      if (chip === undefined) return
++      const rect = chip.getBoundingClientRect()
++      // A zero box means the pill is not laid out yet (or the host hides the composer). Fall back near
++      // the bottom-left corner so the card still renders rather than leaving the reference with no detail.
++      const laidOut = rect.width !== 0 || rect.height !== 0
++      const anchorTop = laidOut ? rect.top : window.innerHeight - 96
++      const anchorBottom = laidOut ? rect.bottom : anchorTop
++      const anchorLeft = laidOut ? rect.left : VIEWPORT_PAD_PX
++      const width = Math.max(240, Math.min(PANEL_MAX_WIDTH_PX, window.innerWidth - VIEWPORT_PAD_PX * 2))
++      const left = Math.min(Math.max(VIEWPORT_PAD_PX, anchorLeft), window.innerWidth - width - VIEWPORT_PAD_PX)
++      // Anchored by its BOTTOM edge so the card grows upward: the composer sits at the bottom of the
++      // window, a top-anchored card would open off-screen.
++      const bottom = Math.max(VIEWPORT_PAD_PX, window.innerHeight - anchorTop + PANEL_GAP_PX)
++      const below = readOnly && window.innerHeight - anchorBottom > anchorTop
++      const maxHeight = Math.min(PANEL_MAX_HEIGHT_PX, Math.max(140,
++        below ? window.innerHeight - anchorBottom - PANEL_GAP_PX - VIEWPORT_PAD_PX : anchorTop - VIEWPORT_PAD_PX * 2))
++      node.style.left = `${left}px`
++      node.style.bottom = below ? 'auto' : `${bottom}px`
++      node.style.top = below ? `${Math.max(VIEWPORT_PAD_PX, anchorBottom + PANEL_GAP_PX)}px` : 'auto'
++      node.style.width = `${width}px`
++      node.style.maxHeight = `${maxHeight}px`
++    }
++    measure()
++    window.addEventListener('resize', measure)
++    window.addEventListener('scroll', measure, true)
++    return () => {
++      window.removeEventListener('resize', measure)
++      window.removeEventListener('scroll', measure, true)
++    }
++  }, [openId, cards.length, anchor, readOnly])
++
++  useEffect(() => {
++    if (openId === undefined) return
++    const onKey = (event: KeyboardEvent): void => {
++      if (event.key !== 'Escape') return
++      if (edit !== undefined) { setEdit(undefined); return }
++      close()
++    }
++    const onPointerDown = (event: MouseEvent): void => {
++      const target = event.target as Node | null
++      if (target === null) return
++      if (panel.current?.contains(target) === true) return
++      if (anchor?.contains(target) === true) return
++      for (const chip of chips.current.values()) if (chip.contains(target)) return
++      close()
++    }
++    window.addEventListener('keydown', onKey)
++    window.addEventListener('mousedown', onPointerDown)
++    return () => {
++      window.removeEventListener('keydown', onKey)
++      window.removeEventListener('mousedown', onPointerDown)
++    }
++  }, [openId, edit, close, anchor])
++
++  useEffect(() => {
++    if (anchor === undefined) return
++    const enter = (): void => { if (cards[0] !== undefined) open(cards[0].referenceId) }
++    anchor.addEventListener('pointerenter', enter)
++    anchor.addEventListener('focus', enter)
++    anchor.addEventListener('pointerleave', scheduleClose)
++    anchor.addEventListener('blur', scheduleClose)
++    return () => {
++      anchor.removeEventListener('pointerenter', enter)
++      anchor.removeEventListener('focus', enter)
++      anchor.removeEventListener('pointerleave', scheduleClose)
++      anchor.removeEventListener('blur', scheduleClose)
++    }
++  }, [anchor, cards, open, scheduleClose])
++
++  const save = (): void => {
++    if (edit === undefined) return
++    actions.onEditComment?.(edit.id, edit.value)
++    setEdit(undefined)
++  }
++
++  // Nothing to draw: render NOTHING rather than an empty wrapper. The host seat
++  // is a flex row inside the composer card, and a zero-height child would still
++  // defeat the row's `:empty` collapse (and its -4px pull on the text surface).
++  // Never return null when empty: this component is the ONLY place the host's input face is handed to
++  // the runtime (`noteDockProps`), and the runtime needs that face to append a card. Returning null
++  // made it a chicken-and-egg loop — no cards, so no face, so no card could ever be appended, and the
++  // reference stayed a pending delivery forever. The empty host is invisible (the stylesheet hides an
++  // empty `.dock`), so nothing is drawn until a card exists.
++  if (cards.length === 0 && notice === undefined) {
++    return <div className={`dsh-browser-reference-dock ${css.dock}`} data-session={sessionId} data-cards={0} data-dock-build="0.7.15" />
++  }
++
++  return <span className={readOnly ? 'dsh-browser-reference-capsules' : `dsh-browser-reference-dock ${css.dock}`} data-session={sessionId} data-cards={cards.length}>
++    {anchor === undefined && cards.length > 0 && <span className={readOnly ? css.sentRail : css.rail} role="group" aria-label={labels.count} data-count={cards.length}
++      data-pending={cards.some(card => card.state !== 'acknowledged') ? 'yes' : 'no'}>
++      {cards.map(card => <button
++        key={card.referenceId}
++        ref={(node) => {
++          if (node === null) chips.current.delete(card.referenceId)
++          else chips.current.set(card.referenceId, node)
++        }}
++        type="button"
++        className={css.chip}
++        data-reference-id={card.referenceId}
++        data-index={card.index}
++        data-has-note={card.comment !== undefined && card.comment !== '' ? 'yes' : 'no'}
++        aria-haspopup="dialog"
++        aria-expanded={openId === card.referenceId}
++        aria-controls={openId === card.referenceId ? `${id}-${card.index}` : undefined}
++        onMouseEnter={() => { open(card.referenceId) }}
++        onMouseLeave={scheduleClose}
++        onFocus={() => { open(card.referenceId) }}
++        onBlur={() => { if (!pinned) scheduleClose() }}
++        onClick={(event) => {
++          if (readOnly) {
++            if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) actions.onReveal?.(card.referenceId)
++            return
++          }
++          // Click pins the card (touch has no hover); a second click releases it.
++          if (openId === card.referenceId && pinned) { close(); return }
++          setPinned(true)
++          open(card.referenceId)
++        }}
++      >
++        <span className={css.badge} aria-hidden>{card.index}</span>
++        <span className={css.label}>{card.excerpt || card.source.title || card.source.host}</span>
++        {/* 这个位置原来是装饰性灰点：直接换成可点的删除键（交叉线由 CSS 画，避免字形缺失渲染成圆点）。 */}
++        {!readOnly && <span
++          role="button"
++          tabIndex={0}
++          className={css.chipRemove}
++          aria-label={labels.removeDraft}
++          title={labels.removeDraft}
++          data-chip-remove={card.referenceId}
++          onClick={(event) => {
++            event.preventDefault()
++            event.stopPropagation()
++            actions.onRemove?.(card.referenceId)
++          }}
++          onKeyDown={(event) => {
++            if (event.key !== 'Enter' && event.key !== ' ') return
++            event.preventDefault()
++            event.stopPropagation()
++            actions.onRemove?.(card.referenceId)
++          }}
++        >
++          {/* 叉用内联 SVG 画：不依赖字体字形，也不依赖 CSS 伪元素（两者都曾导致它不可见）。 */}
++          <svg width="9" height="9" viewBox="0 0 9 9" aria-hidden="true" focusable="false">
++            <path d="M1 1 L8 8 M8 1 L1 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" fill="none" />
++          </svg>
++        </span>}
++
++      </button>)}
++    </span>}
++
++    {active !== undefined && typeof document !== 'undefined' && createPortal(
++      <div
++        id={`${id}-${active.index}`}
++        ref={node => { panel.current = node }}
++        className={css.panel}
++        role="dialog"
++        aria-label={`${active.index}. ${active.source.title || active.source.host}`}
++        // `position: fixed` is also in the stylesheet; inline keeps the card out of the
++        // composer's flow even if the stylesheet has not loaded yet. Left/bottom/width/maxHeight
++        // are written by the layout effect above, directly on this node.
++        style={{ position: 'fixed' }}
++        // The pointer may travel from the pill into the card: crossing the gap
++        // must not close it, or the note editor is unreachable by mouse.
++        onMouseEnter={() => { clearTimer() }}
++        onMouseLeave={scheduleClose}
++        onFocus={clearTimer}
++        onBlur={(event) => {
++          if (event.relatedTarget !== null && event.currentTarget.contains(event.relatedTarget)) return
++          scheduleClose()
++        }}
++        onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); close() } }}
++      >
++        <div className={css.head}>
++          <span className={css.badge} aria-hidden>{active.index}</span>
++          <div className={css.heading}>
++            <span className={css.title}>{active.source.title || active.source.host}</span>
++            <span className={css.host}>{active.source.host}</span>
++          </div>
++          {!readOnly && <div className={css.tools}>
++            <Tooltip label={labels.edit} portal><button type="button" aria-label={labels.edit} className={css.icon}
++              aria-pressed={edit?.id === active.referenceId}
++              onClick={() => {
++                setPinned(true)
++                setEdit(previous => previous?.id === active.referenceId
++                  ? undefined
++                  : { id: active.referenceId, value: active.comment ?? '' })
++              }}><IconEditOutlineRegular size={14} /></button></Tooltip>
++            <Tooltip label={labels.remove} portal><button type="button" aria-label={labels.remove} className={css.icon}
++              onClick={() => { close(); actions.onRemove?.(active.referenceId) }}><IconTrashOutlineRegular size={14} /></button></Tooltip>
++          </div>}
++        </div>
++        <div className={css.parts}>{active.parts.map((part, index) => <Part key={`${part.kind}:${index}`} part={part} labels={labels} />)}</div>
++        {active.failures.length > 0 && <p className={css.notice} role="status">{labels.partial}</p>}
++        {edit?.id === active.referenceId ? <div className={css.editor}>
++          <label htmlFor={`${id}-${active.index}-note`}>{labels.comment}</label>
++          <textarea id={`${id}-${active.index}-note`} value={edit.value} rows={2} placeholder={labels.optional} autoFocus
++            onChange={(event) => { setEdit({ id: active.referenceId, value: event.currentTarget.value }) }}
++            onKeyDown={(event) => {
++              if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); save() }
++              // First Escape leaves the editor; the card stays open (a second one closes it).
++              if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setEdit(undefined) }
++            }} />
++          <div className={css.editorActions}><button type="button" onClick={() => { setEdit(undefined) }}>{labels.cancel}</button><button type="button" onClick={save}>{labels.save}</button></div>
++        </div> : active.comment !== undefined && active.comment !== ''
++          ? <div className={css.comment}><span className={css.secondary}>{labels.comment}</span><p>{active.comment}</p></div>
++          : null}
++        <button type="button" className={css.source} title={active.source.pageUrl} onClick={() => { actions.onReveal?.(active.referenceId) }}>
++          <IconLinkOutlineRegular size={12} /><span>{labels.reveal}</span>
++        </button>
++      </div>,
++      document.body,
++    )}
++
++    {cards.length > 0 && notice !== undefined && <p className={css.status} role="status">{notice}</p>}
++  </span>
++}
++
++/** `useId` is React 18-only; the bundle also loads in hosts that pin 17. */
++function useIdSafe(): string {
++  const [value] = useState(() => `dsh-ref-${Math.random().toString(36).slice(2, 9)}`)
++  return value
++}
+diff --git a/src/client/reference/client/production/ReferenceDock.module.css b/src/client/reference/client/production/ReferenceDock.module.css
+index 332e7f2..ea11a82 100644
+--- a/src/client/reference/client/production/ReferenceDock.module.css
++++ b/src/client/reference/client/production/ReferenceDock.module.css
+@@ -21,6 +21,8 @@
+   margin: 0 0 4px;
+ }
+ .rail[data-pending='yes'] .chip { opacity: 0.72; }
++.sentRail { display: inline-flex; max-width: 100%; vertical-align: middle; margin: 0 2px; }
++.sentRail .chip { max-width: min(320px, 100%); }
+ 
+ /* One collapsed pill per reference. Nothing but the number and the source label
+    is shown here; the captured content is one hover away. */
+diff --git a/src/client/reference/client/production/ReferenceDock.tsx b/src/client/reference/client/production/ReferenceDock.tsx
+index 9a997e8..d518d18 100644
+--- a/src/client/reference/client/production/ReferenceDock.tsx
++++ b/src/client/reference/client/production/ReferenceDock.tsx
+@@ -1,308 +1,6 @@
+-/**
+- * Browser references inside the composer.
+- *
+- * COLLAPSED BY DEFAULT: every reference is one compact pill (`[1] 标题`) in a
+- * single wrapping row. A second selection is added BESIDE the first, so the row
+- * grows sideways instead of the composer growing taller, and the box keeps the
+- * height the user typed into.
+- *
+- * Hovering or focusing a pill opens a floating detail card ABOVE it: the
+- * captured content in its own shape (paragraphs keep their line breaks, images
+- * stay images, tables stay tables), the user's note, and the three actions —
+- * edit note, go to source, remove. The card is portalled with fixed positioning
+- * and bounded height, so opening it never pushes the input box or the
+- * conversation around; it also stays open while the pointer travels from the
+- * pill into the card, which is what makes “edit the note” reachable by mouse.
+- * Removal is final: the pill disappears and nothing offers to undo it.
+- */
+-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+-import { createPortal } from 'react-dom'
+-import { IconEditOutlineRegular, IconLinkOutlineRegular, IconTrashOutlineRegular, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+-import type { CardActions, CardPart, CardViewModel } from './reference-card.ts'
+-import type { ReferenceLabels } from './reference-labels.ts'
+-import css from './ReferenceDock.module.css'
+-
+-interface Props {
+-  readonly sessionId: string
+-  readonly cards: readonly CardViewModel[]
+-  readonly actions: CardActions
+-  readonly labels: ReferenceLabels
+-  readonly notice?: string
+-}
+-
+-/** Time the pointer may leave the pill and land on the card without a flicker. */
+-const CLOSE_DELAY_MS = 180
+-const PANEL_GAP_PX = 8
+-const VIEWPORT_PAD_PX = 8
+-const PANEL_MAX_WIDTH_PX = 460
+-const PANEL_MAX_HEIGHT_PX = 420
+-
+-
+-function Part({ part, labels }: { readonly part: CardPart; readonly labels: ReferenceLabels }): ReactNode {
+-  if (part.kind === 'text') return <p className={css.quote}>{part.value.text}</p>
+-  if (part.kind === 'image') return part.value.bound
+-    ? <img className={css.image} src={part.value.thumbnailSrc} alt={part.value.alt ?? labels.image} />
+-    : <p className={css.secondary} role="status">{labels.loadingImage}</p>
+-  const rows = new Map<number, typeof part.value.cells[number][]>()
+-  for (const cell of part.value.cells) rows.set(cell.row, [...rows.get(cell.row) ?? [], cell])
+-  return <div className={css.tableScroll} tabIndex={0} aria-label={part.value.caption ?? labels.table}>
+-    <table className={css.table}>
+-      {part.value.caption !== undefined && <caption>{part.value.caption}</caption>}
+-      <tbody>{[...rows].sort(([a], [b]) => a - b).map(([row, cells]) => <tr key={row}>
+-        {cells.sort((a, b) => a.column - b.column).map((cell) => {
+-          const Cell = cell.role === 'header' ? 'th' : 'td'
+-          return <Cell key={cell.column} rowSpan={cell.rowSpan} colSpan={cell.columnSpan}>{cell.text}
+-            {cell.inlineImages.map(image => image.thumbnailSrc === undefined
+-              ? <span key={image.partId} className={css.secondary}>{labels.loadingImage}</span>
+-              : <img key={image.partId} className={css.image} src={image.thumbnailSrc} alt={labels.image} />)}
+-          </Cell>
+-        })}
+-      </tr>)}</tbody>
+-    </table>
+-  </div>
+-}
+-
+-/** Presentation receives only data and callbacks; delivery and sending stay in the runtime. */
+-export function ReferenceDock({ sessionId, cards, actions, labels, notice }: Props): ReactNode {
+-  const [openId, setOpenId] = useState<string>()
+-  /** A click pins the card open so a touch user (and the note editor) keeps it. */
+-  const [pinned, setPinned] = useState(false)
+-  const [edit, setEdit] = useState<{ id: string; value: string }>()
+-  const chips = useRef(new Map<string, HTMLButtonElement>())
+-  const panel = useRef<HTMLDivElement | null>(null)
+-  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+-  const id = useIdSafe()
+-
+-  const active = useMemo(() => cards.find(card => card.referenceId === openId), [cards, openId])
+-
+-  const clearTimer = useCallback(() => {
+-    if (closeTimer.current !== undefined) { clearTimeout(closeTimer.current); closeTimer.current = undefined }
+-  }, [])
+-
+-  const open = useCallback((referenceId: string) => {
+-    clearTimer()
+-    setOpenId(referenceId)
+-  }, [clearTimer])
+-
+-  const scheduleClose = useCallback(() => {
+-    if (pinned) return
+-    clearTimer()
+-    closeTimer.current = setTimeout(() => {
+-      closeTimer.current = undefined
+-      setOpenId(undefined)
+-      setEdit(undefined)
+-    }, CLOSE_DELAY_MS)
+-  }, [clearTimer, pinned])
+-
+-  const close = useCallback(() => {
+-    clearTimer()
+-    setPinned(false)
+-    setOpenId(undefined)
+-    setEdit(undefined)
+-  }, [clearTimer])
+-
+-  useEffect(() => () => { clearTimer() }, [clearTimer])
+-
+-  // The card floats over the composer instead of living in it. Placement is written STRAIGHT TO THE
+-  // NODE: routing a measurement back through `setState` re-renders the card, and a render that can
+-  // change measured geometry is exactly the measure→render→measure cycle that ends in
+-  // "ResizeObserver loop completed with undelivered notifications". A `position: fixed` node cannot
+-  // feed back into the layout it measured, so writing its style is final — no state, no second pass.
+-  useLayoutEffect(() => {
+-    const node = panel.current
+-    if (openId === undefined || node === null) return
+-    const measure = (): void => {
+-      const anchor = chips.current.get(openId)
+-      if (anchor === undefined) return
+-      const rect = anchor.getBoundingClientRect()
+-      // A zero box means the pill is not laid out yet (or the host hides the composer). Fall back near
+-      // the bottom-left corner so the card still renders rather than leaving the reference with no detail.
+-      const laidOut = rect.width !== 0 || rect.height !== 0
+-      const anchorTop = laidOut ? rect.top : window.innerHeight - 96
+-      const anchorLeft = laidOut ? rect.left : VIEWPORT_PAD_PX
+-      const width = Math.max(240, Math.min(PANEL_MAX_WIDTH_PX, window.innerWidth - VIEWPORT_PAD_PX * 2))
+-      const left = Math.min(Math.max(VIEWPORT_PAD_PX, anchorLeft), window.innerWidth - width - VIEWPORT_PAD_PX)
+-      // Anchored by its BOTTOM edge so the card grows upward: the composer sits at the bottom of the
+-      // window, a top-anchored card would open off-screen.
+-      const bottom = Math.max(VIEWPORT_PAD_PX, window.innerHeight - anchorTop + PANEL_GAP_PX)
+-      const maxHeight = Math.min(PANEL_MAX_HEIGHT_PX, Math.max(140, anchorTop - VIEWPORT_PAD_PX * 2))
+-      node.style.left = `${left}px`
+-      node.style.bottom = `${bottom}px`
+-      node.style.width = `${width}px`
+-      node.style.maxHeight = `${maxHeight}px`
+-    }
+-    measure()
+-    window.addEventListener('resize', measure)
+-    window.addEventListener('scroll', measure, true)
+-    return () => {
+-      window.removeEventListener('resize', measure)
+-      window.removeEventListener('scroll', measure, true)
+-    }
+-  }, [openId, cards.length])
+-
+-  useEffect(() => {
+-    if (openId === undefined) return
+-    const onKey = (event: KeyboardEvent): void => {
+-      if (event.key !== 'Escape') return
+-      if (edit !== undefined) { setEdit(undefined); return }
+-      close()
+-    }
+-    const onPointerDown = (event: MouseEvent): void => {
+-      const target = event.target as Node | null
+-      if (target === null) return
+-      if (panel.current?.contains(target) === true) return
+-      for (const chip of chips.current.values()) if (chip.contains(target)) return
+-      close()
+-    }
+-    window.addEventListener('keydown', onKey)
+-    window.addEventListener('mousedown', onPointerDown)
+-    return () => {
+-      window.removeEventListener('keydown', onKey)
+-      window.removeEventListener('mousedown', onPointerDown)
+-    }
+-  }, [openId, edit, close])
+-
+-  const save = (): void => {
+-    if (edit === undefined) return
+-    actions.onEditComment?.(edit.id, edit.value)
+-    setEdit(undefined)
+-  }
+-
+-  // Nothing to draw: render NOTHING rather than an empty wrapper. The host seat
+-  // is a flex row inside the composer card, and a zero-height child would still
+-  // defeat the row's `:empty` collapse (and its -4px pull on the text surface).
+-  // Never return null when empty: this component is the ONLY place the host's input face is handed to
+-  // the runtime (`noteDockProps`), and the runtime needs that face to append a card. Returning null
+-  // made it a chicken-and-egg loop — no cards, so no face, so no card could ever be appended, and the
+-  // reference stayed a pending delivery forever. The empty host is invisible (the stylesheet hides an
+-  // empty `.dock`), so nothing is drawn until a card exists.
+-  if (cards.length === 0 && notice === undefined) {
+-    return <div className={`dsh-browser-reference-dock ${css.dock}`} data-session={sessionId} data-cards={0} data-dock-build="0.7.15" />
+-  }
+-
+-  return <div className={`dsh-browser-reference-dock ${css.dock}`} data-session={sessionId} data-cards={cards.length} data-dock-build="0.7.15">
+-    {cards.length > 0 && <div className={css.rail} role="group" aria-label={labels.count} data-count={cards.length}
+-      data-pending={cards.some(card => card.state !== 'acknowledged') ? 'yes' : 'no'}>
+-      {cards.map(card => <button
+-        key={card.referenceId}
+-        ref={(node) => {
+-          if (node === null) chips.current.delete(card.referenceId)
+-          else chips.current.set(card.referenceId, node)
+-        }}
+-        type="button"
+-        className={css.chip}
+-        data-reference-id={card.referenceId}
+-        data-index={card.index}
+-        data-has-note={card.comment !== undefined && card.comment !== '' ? 'yes' : 'no'}
+-        aria-haspopup="dialog"
+-        aria-expanded={openId === card.referenceId}
+-        aria-controls={openId === card.referenceId ? `${id}-${card.index}` : undefined}
+-        onMouseEnter={() => { open(card.referenceId) }}
+-        onMouseLeave={scheduleClose}
+-        onFocus={() => { open(card.referenceId) }}
+-        onBlur={() => { if (!pinned) scheduleClose() }}
+-        onClick={() => {
+-          // Click pins the card (touch has no hover); a second click releases it.
+-          if (openId === card.referenceId && pinned) { close(); return }
+-          setPinned(true)
+-          open(card.referenceId)
+-        }}
+-      >
+-        <span className={css.badge} aria-hidden>{card.index}</span>
+-        <span className={css.label}>{card.excerpt || card.source.title || card.source.host}</span>
+-        {/* 这个位置原来是装饰性灰点：直接换成可点的删除键（交叉线由 CSS 画，避免字形缺失渲染成圆点）。 */}
+-        <span
+-          role="button"
+-          tabIndex={0}
+-          className={css.chipRemove}
+-          aria-label={labels.removeDraft}
+-          title={labels.removeDraft}
+-          data-chip-remove={card.referenceId}
+-          onClick={(event) => {
+-            event.preventDefault()
+-            event.stopPropagation()
+-            actions.onRemove?.(card.referenceId)
+-          }}
+-          onKeyDown={(event) => {
+-            if (event.key !== 'Enter' && event.key !== ' ') return
+-            event.preventDefault()
+-            event.stopPropagation()
+-            actions.onRemove?.(card.referenceId)
+-          }}
+-        >
+-          {/* 叉用内联 SVG 画：不依赖字体字形，也不依赖 CSS 伪元素（两者都曾导致它不可见）。 */}
+-          <svg width="9" height="9" viewBox="0 0 9 9" aria-hidden="true" focusable="false">
+-            <path d="M1 1 L8 8 M8 1 L1 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" fill="none" />
+-          </svg>
+-        </span>
+-
+-      </button>)}
+-    </div>}
+-
+-    {active !== undefined && typeof document !== 'undefined' && createPortal(
+-      <div
+-        id={`${id}-${active.index}`}
+-        ref={node => { panel.current = node }}
+-        className={css.panel}
+-        role="dialog"
+-        aria-label={`${active.index}. ${active.source.title || active.source.host}`}
+-        // `position: fixed` is also in the stylesheet; inline keeps the card out of the
+-        // composer's flow even if the stylesheet has not loaded yet. Left/bottom/width/maxHeight
+-        // are written by the layout effect above, directly on this node.
+-        style={{ position: 'fixed' }}
+-        // The pointer may travel from the pill into the card: crossing the gap
+-        // must not close it, or the note editor is unreachable by mouse.
+-        onMouseEnter={() => { clearTimer() }}
+-        onMouseLeave={scheduleClose}
+-        onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); close() } }}
+-      >
+-        <div className={css.head}>
+-          <span className={css.badge} aria-hidden>{active.index}</span>
+-          <div className={css.heading}>
+-            <span className={css.title}>{active.source.title || active.source.host}</span>
+-            <span className={css.host}>{active.source.host}</span>
+-          </div>
+-          <div className={css.tools}>
+-            <Tooltip label={labels.edit} portal><button type="button" aria-label={labels.edit} className={css.icon}
+-              aria-pressed={edit?.id === active.referenceId}
+-              onClick={() => {
+-                setPinned(true)
+-                setEdit(previous => previous?.id === active.referenceId
+-                  ? undefined
+-                  : { id: active.referenceId, value: active.comment ?? '' })
+-              }}><IconEditOutlineRegular size={14} /></button></Tooltip>
+-            <Tooltip label={labels.remove} portal><button type="button" aria-label={labels.remove} className={css.icon}
+-              onClick={() => { close(); actions.onRemove?.(active.referenceId) }}><IconTrashOutlineRegular size={14} /></button></Tooltip>
+-          </div>
+-        </div>
+-        <div className={css.parts}>{active.parts.map((part, index) => <Part key={`${part.kind}:${index}`} part={part} labels={labels} />)}</div>
+-        {active.failures.length > 0 && <p className={css.notice} role="status">{labels.partial}</p>}
+-        {edit?.id === active.referenceId ? <div className={css.editor}>
+-          <label htmlFor={`${id}-${active.index}-note`}>{labels.comment}</label>
+-          <textarea id={`${id}-${active.index}-note`} value={edit.value} rows={2} placeholder={labels.optional} autoFocus
+-            onChange={(event) => { setEdit({ id: active.referenceId, value: event.currentTarget.value }) }}
+-            onKeyDown={(event) => {
+-              if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); save() }
+-              // First Escape leaves the editor; the card stays open (a second one closes it).
+-              if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setEdit(undefined) }
+-            }} />
+-          <div className={css.editorActions}><button type="button" onClick={() => { setEdit(undefined) }}>{labels.cancel}</button><button type="button" onClick={save}>{labels.save}</button></div>
+-        </div> : active.comment !== undefined && active.comment !== ''
+-          ? <div className={css.comment}><span className={css.secondary}>{labels.comment}</span><p>{active.comment}</p></div>
+-          : null}
+-        <button type="button" className={css.source} title={active.source.pageUrl} onClick={() => { actions.onReveal?.(active.referenceId) }}>
+-          <IconLinkOutlineRegular size={12} /><span>{labels.reveal}</span>
+-        </button>
+-      </div>,
+-      document.body,
+-    )}
+-
+-    {cards.length > 0 && notice !== undefined && <p className={css.status} role="status">{notice}</p>}
+-  </div>
+-}
+-
+-/** `useId` is React 18-only; the bundle also loads in hosts that pin 17. */
+-function useIdSafe(): string {
+-  const [value] = useState(() => `dsh-ref-${Math.random().toString(36).slice(2, 9)}`)
+-  return value
+-}
++import type { ReactNode } from 'react'
++import { ReferenceCapsules, type ReferenceCapsulesProps } from './ReferenceCapsules.tsx'
++
++export function ReferenceDock(props: Omit<ReferenceCapsulesProps, 'readOnly' | 'anchor'>): ReactNode {
++  return <ReferenceCapsules {...props} readOnly={false} />
++}
+diff --git a/src/client/reference/client/production/assembly.ts b/src/client/reference/client/production/assembly.ts
+index a368114..c94f7dc 100644
+--- a/src/client/reference/client/production/assembly.ts
++++ b/src/client/reference/client/production/assembly.ts
+@@ -42,7 +42,9 @@ import { installReplyLinkBridge } from './reply-link-bridge.ts'
+ import { browserSourceRule } from './user-text-rule.ts'
+ import { decodeBrowserRefUri } from '../scheme.ts'
+ import { createElement as element } from 'react'
++import { createRoot } from 'react-dom/client'
+ import { ReferenceDock } from './ReferenceDock.tsx'
++import { ReferenceCapsules } from './ReferenceCapsules.tsx'
+ import { ReferenceFeedback } from './ReferenceFeedback.tsx'
+ import { referenceCopy, referenceLabels, REFERENCE_LOCALE, type ReferenceLabels, type ReferenceLabelKey } from './reference-labels.ts'
+ 
+@@ -228,23 +230,7 @@ export function createReplyLinkComponent(
+     // fallback; without this gate it was rendered as a disabled "来源不可用"
+     // dead button. createBrowserRefRenderer applies the same scheme check.
+     if (!candidate.startsWith(BROWSER_REF_SCHEME)) return null
+-    const dom = buildBrowserRefLinkProps(runtime.revealer.linkSpec(candidate, typed?.children ?? typed?.node?.data?.label))
+-    // This is the path a USER message takes, so it is the one the reader sees after sending: the
+-    // composer chip is a numbered badge plus a label, and without this split the sent pill is only
+-    // its outer shell ("胶囊只做了一半").
+-    const badge = splitSourceLabel(dom.children, createElement)
+-    return createElement('button', {
+-      type: dom.type,
+-      role: dom.role,
+-      'aria-disabled': dom['aria-disabled'],
+-      disabled: dom.disabled,
+-      ...(dom.className === undefined ? {} : { className: dom.className }),
+-      ...(dom.title === undefined ? {} : { title: dom.title }),
+-      onClick: dom.onClick,
+-      onKeyDown: dom.onKeyDown,
+-      onAuxClick: dom.onAuxClick,
+-      onMouseDown: dom.onMouseDown,
+-    }, badge ?? dom.children)
++    return renderSentCapsule(runtime, createElement, candidate, typed?.children ?? typed?.node?.data?.label)
+   }
+ }
+ 
+@@ -260,24 +246,25 @@ export const BROWSER_REF_RENDERER_GLOBAL = '__DSH_BROWSER_REF_RENDERER__'
+ export const REPLY_LINK_BRIDGE_GLOBAL = '__DSH_BROWSER_REF_LINK_BRIDGE__'
+ export const BROWSER_REF_SCHEME = 'dsh-browser-ref:'
+ 
+-/**
+- * Split the reply-side wire label back into the two halves the composer chip shows.
+- *
+- * `wireSubmissionContent` writes `引用来源 N：标题`; rendering that as one string leaves the sent pill
+- * without the numbered badge the dock chip has, which is what "胶囊只做了一半" described.
+- * @param label - the wire label.
+- * @param createElement - the host's element factory.
+- * @returns a badge + label pair, or undefined to keep the plain string.
+- */
+-function splitSourceLabel(label: string | undefined, createElement: HostElementFactory): readonly unknown[] | undefined {
+-  if (label === undefined) return undefined
+-  const match = /^\s*(引用来源\s*\d+)\s*[：:]\s*(.*)$/u.exec(label)
+-  if (match === null) return undefined
+-  const number = /(\d+)/u.exec(match[1] ?? '')
+-  return [
+-    createElement('span', { className: 'dsh-browser-ref-badge', 'aria-hidden': 'true' }, number?.[1] ?? ''),
+-    createElement('span', { className: 'dsh-browser-ref-label' }, match[2] ?? ''),
+-  ]
++function renderSentCapsule(runtime: ProductionRuntime, createElement: HostElementFactory, uri: string, label?: string, key?: unknown, anchor?: HTMLElement): unknown {
++  let referenceId: string | undefined
++  try { referenceId = decodeBrowserRefUri(uri).referenceId } catch { /* invalid URI */ }
++  const detail = referenceId === undefined ? undefined : runtime.referenceDetail(referenceId)
++  const owner = referenceId === undefined ? undefined : runtime.ownerFor(referenceId)
++  if (detail !== undefined && owner?.sessionId === runtime.currentSessionId()) {
++    const index = Number(/引用来源\s*(\d+)/u.exec(label ?? '')?.[1]) || detail.card.index
++    return element(ReferenceCapsules, {
++      key: String(key ?? uri),
++      sessionId: runtime.currentSessionId(),
++      cards: [{ ...detail.card, index }],
++      labels: referenceLabels(),
++      actions: { onReveal: () => { void runtime.activateUri(uri) } },
++      ...(anchor === undefined ? {} : { anchor }),
++    })
++  }
++  if (anchor !== undefined) return null
++  const dom = buildBrowserRefLinkProps(runtime.revealer.linkSpec(uri, label))
++  return createElement('button', { ...dom, key }, dom.children)
+ }
+ 
+ /**
+@@ -293,25 +280,7 @@ export function createBrowserRefRenderer(
+   return (url, children, key) => {
+     if (!url.startsWith(BROWSER_REF_SCHEME)) return undefined
+     const first = children[0]
+-    const label = typeof first === 'string' ? first : undefined
+-    const dom = buildBrowserRefLinkProps(runtime.revealer.linkSpec(url, label))
+-    // The composer chip is a numbered badge plus a label; the sent message used to be one run of
+-    // text, so the pill was only "half" of the same control. Split the wire label back into its two
+-    // halves so both surfaces have the identical anatomy.
+-    const badge = splitSourceLabel(dom.children, createElement)
+-    return createElement('button', {
+-      key,
+-      type: dom.type,
+-      role: dom.role,
+-      'aria-disabled': dom['aria-disabled'],
+-      disabled: dom.disabled,
+-      ...(dom.className === undefined ? {} : { className: dom.className }),
+-      ...(dom.title === undefined ? {} : { title: dom.title }),
+-      onClick: dom.onClick,
+-      onKeyDown: dom.onKeyDown,
+-      onAuxClick: dom.onAuxClick,
+-      onMouseDown: dom.onMouseDown,
+-    }, badge ?? dom.children)
++    return renderSentCapsule(runtime, createElement, url, typeof first === 'string' ? first : undefined, key)
+   }
+ }
+ 
+@@ -399,15 +368,14 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
+   const replyLinkBridge = installReplyLinkBridge({
+     isAvailable: uri => runtime.revealer.linkSpec(uri).available,
+     activate: (uri) => { void runtime.activateUri(uri) },
+-    // 消息里的胶囊悬停时给出与输入栏一致的详情：标题、域名、原文、用户评论。
+-    cardFor: async (uri) => {
+-      let referenceId: string
+-      try {
+-        referenceId = decodeBrowserRefUri(uri).referenceId
+-      } catch {
+-        return undefined
+-      }
+-      return runtime.referenceDetail(referenceId)
++    mountCard: (uri, anchor) => {
++      const card = renderSentCapsule(runtime, elementFactory, uri, anchor.textContent ?? undefined, undefined, anchor)
++      if (card === null) return undefined
++      const container = anchor.ownerDocument.createElement('span')
++      anchor.ownerDocument.body.append(container)
++      const root = createRoot(container)
++      root.render(card as Parameters<typeof root.render>[0])
++      return () => { root.unmount(); container.remove() }
+     },
+   })
+   globalHost[REPLY_LINK_BRIDGE_GLOBAL] = replyLinkBridge
+diff --git a/src/client/reference/client/production/reply-link-bridge.ts b/src/client/reference/client/production/reply-link-bridge.ts
+index ff2bdfe..6307318 100644
+--- a/src/client/reference/client/production/reply-link-bridge.ts
++++ b/src/client/reference/client/production/reply-link-bridge.ts
+@@ -24,8 +24,7 @@ export interface ReplyLinkBridgeOptions {
+   readonly isAvailable: (uri: string) => boolean
+   /** Primary activation; the runtime decides the outcome and shows feedback. */
+   readonly activate: (uri: string) => void
+-  /** 悬停时要展示的详情（标题/域名/原文/评论）；缺省则不显示卡片。 */
+-  readonly cardFor?: (uri: string) => Promise<{ readonly title: string; readonly host: string; readonly quote: string; readonly comment?: string } | undefined>
++  readonly mountCard?: (uri: string, anchor: HTMLElement) => (() => void) | undefined
+ }
+ 
+ export interface ReplyLinkBridge {
+@@ -121,75 +120,38 @@ export function installReplyLinkBridge(options: ReplyLinkBridgeOptions): ReplyLi
+     options.activate(uri)
+   }
+ 
+-  // —— 悬停详情卡（消息里的引用胶囊）——
+-  let card: HTMLElement | undefined
+-  let hideTimer: ReturnType<typeof setTimeout> | undefined
+-  const hideCard = (): void => {
+-    if (hideTimer !== undefined) { clearTimeout(hideTimer); hideTimer = undefined }
+-    card?.remove()
+-    card = undefined
+-  }
+-  const scheduleHide = (): void => {
+-    if (hideTimer !== undefined) clearTimeout(hideTimer)
+-    hideTimer = setTimeout(hideCard, 160)
+-  }
+-  const showCard = async (anchor: Element): Promise<void> => {
+-    if (options.cardFor === undefined) return
+-    const uri = anchor.getAttribute('href') ?? ''
+-    const data = await options.cardFor(uri).catch(() => undefined)
+-    if (data === undefined) return
+-    hideCard()
+-    const panel = doc.createElement('div')
+-    panel.className = 'dsh-browser-ref-card'
+-    panel.setAttribute('role', 'dialog')
+-    const title = doc.createElement('div')
+-    title.className = 'dsh-browser-ref-card-title'
+-    title.textContent = data.title
+-    const host = doc.createElement('div')
+-    host.className = 'dsh-browser-ref-card-host'
+-    host.textContent = data.host
+-    const quote = doc.createElement('div')
+-    quote.className = 'dsh-browser-ref-card-quote'
+-    quote.textContent = data.quote
+-    panel.append(title, host, quote)
+-    if (data.comment !== undefined && data.comment !== '') {
+-      const comment = doc.createElement('div')
+-      comment.className = 'dsh-browser-ref-card-comment'
+-      comment.textContent = data.comment
+-      panel.append(comment)
+-    }
+-    const go = doc.createElement('button')
+-    go.type = 'button'
+-    go.className = 'dsh-browser-ref-card-go'
+-    go.textContent = '回到原文'
+-    go.addEventListener('click', (event) => { event.preventDefault(); options.activate(uri); hideCard() })
+-    panel.append(go)
+-    panel.addEventListener('mouseenter', () => { if (hideTimer !== undefined) { clearTimeout(hideTimer); hideTimer = undefined } })
+-    panel.addEventListener('mouseleave', scheduleHide)
+-    const box = anchor.getBoundingClientRect()
+-    panel.style.left = `${Math.max(8, box.left)}px`
+-    panel.style.top = `${Math.min(window.innerHeight - 200, box.bottom + 8)}px`
+-    doc.body.append(panel)
+-    card = panel
++  let activeAnchor: Element | undefined
++  let unmountCard: (() => void) | undefined
++  const clearCard = (): void => {
++    const unmount = unmountCard
++    activeAnchor = undefined
++    unmountCard = undefined
++    unmount?.()
+   }
+   const onOver = (event: Event): void => {
+     const target = event.target as Element | null
+     const anchor = target && typeof (target as ClosestElement).closest === 'function'
+       ? (target as ClosestElement).closest?.(REPLY_LINK_SELECTOR) ?? null
+       : null
+-    if (anchor === null) return
+-    void showCard(anchor)
++    if (anchor === null || anchor === activeAnchor) return
++    clearCard()
++    activeAnchor = anchor
++    unmountCard = options.mountCard?.(anchor.getAttribute('href') ?? '', anchor as HTMLElement)
+   }
+-  const onOut = (event: Event): void => {
+-    const target = event.target as Element | null
+-    const anchor = target && typeof (target as ClosestElement).closest === 'function'
+-      ? (target as ClosestElement).closest?.(REPLY_LINK_SELECTOR) ?? null
+-      : null
+-    if (anchor === null) return
+-    scheduleHide()
++  const onKeyDown = (event: Event): void => {
++    const typed = event as KeyboardEvent
++    if (typed.defaultPrevented || (typed.key !== 'Enter' && typed.key !== ' ')) return
++    const anchor = (typed.target as Element | null)?.closest?.(REPLY_LINK_SELECTOR)
++    if (anchor == null) return
++    typed.preventDefault()
++    const uri = anchor.getAttribute('href') ?? ''
++    if (typed.ctrlKey || typed.metaKey || typed.shiftKey || typed.altKey || parseBrowserRefUri(uri) === undefined) return
++    typed.stopPropagation()
++    options.activate(uri)
+   }
+   doc.addEventListener('pointerover', onOver, true)
+-  doc.addEventListener('pointerout', onOut, true)
++  doc.addEventListener('focusin', onOver, true)
++  doc.addEventListener('keydown', onKeyDown, true)
+ 
+   doc.addEventListener('click', onClick, true)
+   doc.addEventListener('auxclick', onClick, true)
+@@ -198,12 +160,14 @@ export function installReplyLinkBridge(options: ReplyLinkBridgeOptions): ReplyLi
+   const observer = typeof MutationObserver === 'undefined'
+     ? undefined
+     : new MutationObserver((records) => {
++      if (activeAnchor !== undefined && !activeAnchor.isConnected) clearCard()
+       for (const record of records) {
+         // Streamed rendering assigns `href` AFTER the anchor already exists in
+         // the DOM. An attribute record (filtered to href) is the only way to
+         // see that; childList alone never fires for a late attribute write.
+         if (record.type === 'attributes') {
+           const target = record.target
++          if (target === activeAnchor) clearCard()
+           if (target.nodeType === 1) {
+             const element = target as Element & ClosestElement
+             if (typeof element.matches === 'function' && element.matches(REPLY_LINK_SELECTOR)) {
+@@ -249,8 +213,9 @@ export function installReplyLinkBridge(options: ReplyLinkBridgeOptions): ReplyLi
+       doc.removeEventListener('click', onClick, true)
+       doc.removeEventListener('auxclick', onClick, true)
+       doc.removeEventListener('pointerover', onOver, true)
+-      doc.removeEventListener('pointerout', onOut, true)
+-      hideCard()
++      doc.removeEventListener('focusin', onOver, true)
++      doc.removeEventListener('keydown', onKeyDown, true)
++      clearCard()
+       observer?.disconnect()
+     },
+   }
+diff --git a/src/client/reference/client/production/reveal.ts b/src/client/reference/client/production/reveal.ts
+index 220a7c5..79bf1d2 100644
+--- a/src/client/reference/client/production/reveal.ts
++++ b/src/client/reference/client/production/reveal.ts
+@@ -37,6 +37,7 @@ export interface ProductionRevealerOptions {
+   readonly resolveOwner: (referenceId: string) => RevealOwner | undefined
+   /** Current DSH session id (for session-mismatch validation). */
+   readonly currentSessionId: () => string
++  readonly onActivate?: (uri: string) => Promise<RevealStatus>
+   /**
+    * Report the outcome of EVERY activation (including the reply-side link's
+    * `onActivate`, which used to call `run` directly and stay silent). The
+@@ -73,7 +74,6 @@ class RevealUnavailableError extends Error {}
+  */
+ function wireStatus(status: string | undefined): RevealStatus {
+   switch (status) {
+-    case undefined:
+     case 'revealed':
+     case 'ok':
+     case 'partial':
+@@ -190,13 +190,7 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
+         // chip (26px tall, 999px radius, the same two theme tokens).
+         className: 'dsh-browser-ref-link',
+         onActivate: (activated) => {
+-          // The Web sidebar's guest is not a plugin browser session, so the host revealer has nothing to
+-          // aim. Try it anyway (desktop path) and then hand the URI to the shell's panel hook.
+-          void run(parseBrowserRefUri(activated))
+-          try {
+-            const hook = (globalThis as unknown as { __DSH_BROWSER_REF_REVEAL__?: (uri: string) => boolean }).__DSH_BROWSER_REF_REVEAL__
+-            if (typeof hook === 'function') hook(activated)
+-          } catch { /* the host path already reported */ }
++          void (options.onActivate === undefined ? run(parseBrowserRefUri(activated)) : options.onActivate(activated))
+         },
+         ...(label === undefined ? {} : { children: label }),
+         // Always carry a tooltip: a chip with no title reads as decoration. When the reference is not
+diff --git a/src/client/reference/client/production/runtime.ts b/src/client/reference/client/production/runtime.ts
+index 1a56080..f380e20 100644
+--- a/src/client/reference/client/production/runtime.ts
++++ b/src/client/reference/client/production/runtime.ts
+@@ -35,7 +35,7 @@ import {
+   buildCardViewModel,
+   type CardViewModel,
+ } from './reference-card.ts'
+-import { encodeBrowserRefUri } from '../scheme.ts'
++import { encodeBrowserRefUri, parseBrowserRefUri } from '../scheme.ts'
+ import type { RevealStatus } from '../types.ts'
+ import {
+   createSubmissionSeam,
+@@ -200,7 +200,7 @@ export interface ProductionRuntime {
+   /** Remove a card for good: tombstoned locally and dropped on the plugin side. */
+   removeCard(referenceId: string): Promise<void>
+   /** Jump the sidebar browser back to a reference's原文 and highlight it. */
+-  revealReference(referenceId: string): Promise<void>
++  revealReference(referenceId: string, partId?: string): Promise<RevealStatus>
+   /**
+    * "Open this URL in the sidebar browser", supplied by the client shell.
+    *
+@@ -208,11 +208,11 @@ export interface ProductionRuntime {
+    * another page (or none at all) the only useful answer is to open the stored
+    * URL there and try again, not to explain that it could not.
+    */
+-  setSourceOpener(opener: ((url: string) => boolean) | undefined): void
++  setSourceOpener(opener: ((url: string) => void | Promise<void>) | undefined): void
+   /** 一条引用的可展示详情（消息胶囊悬停卡用）。 */
+-  referenceDetail(referenceId: string): { readonly title: string; readonly host: string; readonly quote: string; readonly comment?: string } | undefined
++  referenceDetail(referenceId: string): (StoredReflection & { readonly sessionId: string; readonly card: CardViewModel }) | undefined
+   /** Activate a canonical `dsh-browser-ref:` URI (reply-side link bridge). */
+-  activateUri(uri: string): Promise<void>
++  activateUri(uri: string): Promise<RevealStatus>
+   /** Edit the draft's own copy of the user's note (§5); never rewrites the snapshot. */
+   setComment(referenceId: string, comment: string): boolean
+   /** Production revealer (activate a `dsh-browser-ref:` link). */
+@@ -264,7 +264,8 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
+    * the source page: only the outcome the person ends up with is reported.
+    */
+   let mutedReveal = 0
+-  let sourceOpener: ((url: string) => boolean) | undefined
++  let sourceOpener: ((url: string) => void | Promise<void>) | undefined
++  let revealIntent = 0
+   let lastIssue: string | undefined
+   // A failed "回到原文" used to stay on screen forever: the hint was only
+   // rewritten by the NEXT reveal attempt, so recovering the sidebar never
+@@ -291,15 +292,12 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
+     const unref = (revealTimer as unknown as { unref?: () => void }).unref
+     if (typeof unref === 'function') unref.call(revealTimer)
+   }
+-  const activateUri = async (uri: string): Promise<void> => {
+-    try {
+-      // The revealer reports its own status through `showReveal` (injected as
+-      // `report`), so the bridge path and the React source link give the SAME
+-      // user-facing feedback. Only a thrown activation needs a fallback.
+-      await revealer.activate(uri)
+-    } catch {
+-      showReveal('unavailable')
+-    }
++  const activateUri = async (uri: string): Promise<RevealStatus> => {
++    const parsed = parseBrowserRefUri(uri)
++    if (parsed !== undefined) return revealReference(parsed.referenceId, parsed.partId)
++    revealIntent += 1
++    showReveal('unknown-reference')
++    return 'unknown-reference'
+   }
+ 
+   // --- wake-on-visible --------------------------------------------------------
+@@ -836,7 +834,8 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
+     },
+   })
+ 
+-  const ownerFor = (referenceId: string): RevealOwner | undefined => {
++  const referenceDetail = (referenceId: string): (StoredReflection & { readonly sessionId: string; readonly card: CardViewModel }) | undefined => {
++    draftStoreFor(current)
+     for (const [sessionId, store] of stores) {
+       // A reference carried by a sent message lives in the archive, not in the
+       // draft: its source link must keep working after the card clears. It may
+@@ -847,22 +846,30 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
+         ?? store.sentReflection(referenceId)
+         ?? store.pendingReflection(referenceId)
+       if (reflection === undefined) continue
+-      const snapshot = reflection.snapshot
+-      return {
+-        sessionId: snapshot.owner.sessionId ?? sessionId,
+-        browserSessionId: reflection.browserSessionId,
+-        label: snapshot.source.title,
+-        ...(snapshot.source.frameRoute === undefined ? {} : { frameRoute: snapshot.source.frameRoute }),
+-        ...(snapshot.source.frameSelector === undefined ? {} : { frameSelector: snapshot.source.frameSelector }),
+-      }
++      const index = store.state().reflections.indexOf(reflection) + 1
++      return { ...reflection, sessionId, card: buildCardViewModel(reflection, assetStoreFor(sessionId), index || 1) }
+     }
+     return undefined
+   }
+ 
++  const ownerFor = (referenceId: string): RevealOwner | undefined => {
++    const detail = referenceDetail(referenceId)
++    if (detail === undefined) return undefined
++    const { snapshot } = detail
++    return {
++      sessionId: snapshot.owner.sessionId ?? detail.sessionId,
++      browserSessionId: detail.browserSessionId,
++      label: snapshot.source.title,
++      ...(snapshot.source.frameRoute === undefined ? {} : { frameRoute: snapshot.source.frameRoute }),
++      ...(snapshot.source.frameSelector === undefined ? {} : { frameSelector: snapshot.source.frameSelector }),
++    }
++  }
++
+   const revealer = createProductionRevealer({
+     http,
+     resolveOwner: ownerFor,
+     currentSessionId: () => current,
++    onActivate: activateUri,
+     // A failed reply-side source link (linkSpec.onActivate) now surfaces the
+     // same dock hint as the document-level bridge (B6). A retry in progress
+     // stays quiet: intermediate "still on the wrong page" hints would flash
+@@ -870,6 +877,39 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
+     report: status => { if (mutedReveal === 0) showReveal(status) },
+   })
+ 
++  const revealReference = async (referenceId: string, partId?: string): Promise<RevealStatus> => {
++    const intent = ++revealIntent
++    const sessionId = current
++    const active = (): boolean => !disposed && intent === revealIntent && current === sessionId
++    const uri = encodeBrowserRefUri({ referenceId, ...(partId === undefined ? {} : { partId }) })
++    const attempt = async (navigate: boolean): Promise<RevealStatus> => {
++      if (!active()) return 'superseded'
++      mutedReveal += 1
++      try { return await revealer.activate(uri, { navigate }) }
++      finally { mutedReveal -= 1 }
++    }
++    let status = await attempt(false)
++    try {
++      if (status === 'page-mismatch') status = await attempt(true)
++      const url = referenceDetail(referenceId)?.snapshot.source.pageUrl
++      if (active() && status === 'session-unavailable' && url && sourceOpener !== undefined) {
++        await sourceOpener(url)
++        for (const delay of [0, 700, 1100, 1600, 2200, 3000]) {
++          if (!active()) break
++          if (delay !== 0) await new Promise(resolve => { setTimeout(resolve, delay) })
++          status = await attempt(false)
++          if (status === 'page-mismatch') status = await attempt(true)
++          if (!['session-unavailable', 'unavailable'].includes(status)) break
++        }
++      }
++    } catch {
++      // A tab-open refusal is not a reveal acknowledgement.
++    }
++    if (!active()) return 'superseded'
++    showReveal(status)
++    return status
++  }
++
+   const snapshot = (): DockSnapshot => {
+     const availability = availabilityOf(poller.lastError)
+     // The availability status is part of the cached view: a transport that went
+@@ -945,6 +985,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
+     },
+     setSession(sessionId) {
+       if (disposed || sessionId === current) return
++      revealIntent += 1
+       clearRevealHint()
+       lastReveal = undefined
+       lastIssue = undefined
+@@ -1039,66 +1080,9 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
+       if (!store.state().reflections.some(entry => entry.referenceId === referenceId)) return
+       removeReferences(current, [referenceId])
+     },
+-    async revealReference(referenceId) {
+-      const uri = encodeBrowserRefUri({ referenceId })
+-      const url = snapshot().cards.find(entry => entry.referenceId === referenceId)?.source.pageUrl
+-      const attempt = async (navigate: boolean): Promise<RevealStatus> => {
+-        mutedReveal += 1
+-        try {
+-          return await revealer.activate(uri, { navigate })
+-        } finally {
+-          mutedReveal -= 1
+-        }
+-      }
+-      let status = await attempt(false)
+-      // The sidebar is on another page: the plugin owns that page, so it is the
+-      // one that can take it to the stored URL.
+-      if (status === 'page-mismatch') status = await attempt(true)
+-      // No page at all: only the shell can create the sidebar's browser tab.
+-      if (status === 'session-unavailable' && url !== undefined && url !== '' && sourceOpener?.(url) === true) {
+-        for (const delay of [700, 1100, 1600, 2200, 3000]) {
+-          await new Promise(resolve => { setTimeout(resolve, delay) })
+-          status = await attempt(false)
+-          if (status === 'revealed') break
+-          // Still loading elsewhere: keep waiting, but a real answer is final.
+-          if (status !== 'page-mismatch' && status !== 'session-unavailable' && status !== 'unavailable') break
+-        }
+-      }
+-      // Web 形态（同源代理）没有浏览器会话，宿主的 reveal 只能回答 session-unavailable。
+-      // 这时用引用快照里的原文拼 text-fragment 打开页面，由浏览器原生高亮——这是 web 端
+-      // 「点胶囊回原文」唯一可靠的路径。
+-      if (status !== 'revealed' && url !== undefined && url !== '') {
+-        const owner = ownerFor(referenceId)
+-        const stored = owner?.snapshot as { readonly parts?: readonly { readonly type?: string; readonly text?: string }[] } | undefined
+-        const quote = (stored?.parts ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join(' ').replace(/\s+/g, ' ').trim()
+-        const excerpt = quote.slice(0, 80)
+-        const target = excerpt === '' ? url : `${url.split('#')[0]}#:~:text=${encodeURIComponent(excerpt)}`
+-        if (sourceOpener?.(target) === true) {
+-          showReveal('revealed')
+-          return
+-        }
+-      }
+-      showReveal(status)
+-    },
++    revealReference,
+     setSourceOpener(opener) { sourceOpener = opener },
+-    referenceDetail(referenceId) {
+-      const owner = ownerFor(referenceId)
+-      if (owner === undefined) return undefined
+-      const snapshot = owner.snapshot as {
+-        readonly source?: { readonly title?: string; readonly pageUrl?: string }
+-        readonly parts?: readonly { readonly type?: string; readonly text?: string }[]
+-      }
+-      const quote = (snapshot.parts ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join('\n').trim()
+-      const pageUrl = snapshot.source?.pageUrl ?? ''
+-      let host = ''
+-      try { host = pageUrl === '' ? '' : new URL(pageUrl).host } catch { host = '' }
+-      return {
+-        title: snapshot.source?.title ?? (host === '' ? referenceId : host),
+-        host,
+-        quote,
+-        ...(owner.comment === undefined || owner.comment === '' ? {} : { comment: owner.comment }),
+-      }
+-    },
++    referenceDetail,
+     activateUri,
+     revealer,
+     exportBundle(format, sessionId) {
+diff --git a/src/client/reference/client/production/styles.ts b/src/client/reference/client/production/styles.ts
+index 74173c0..0bfa9b5 100644
+--- a/src/client/reference/client/production/styles.ts
++++ b/src/client/reference/client/production/styles.ts
+@@ -83,7 +83,7 @@ export function ensureDockStyles(doc: Document | undefined = typeof document ===
+   if (doc.getElementById(DOCK_STYLE_ID) !== null) return
+   const style = doc.createElement('style')
+   style.id = DOCK_STYLE_ID
+-  style.textContent = DOCK_CSS + DOCK_EXTRA_CSS
++  style.textContent = DOCK_CSS
+   // A host UI served under `style-src 'nonce-…'` refuses an inline style element
+   // without the nonce; borrowing the document's own keeps the dock styled there.
+   let nonce: string | undefined
+@@ -102,24 +102,3 @@ export function ensureDockStyles(doc: Document | undefined = typeof document ===
+     // A document that refuses the node simply stays unstyled; never break the dock.
+   }
+ }
+-
+-/** 消息里引用胶囊的悬停详情卡样式（与 DOCK_CSS 一起注入）。 */
+-const DOCK_EXTRA_CSS = `
+-/* 消息里引用胶囊的悬停详情卡：与输入栏的明细卡同一套信息（标题/域名/原文/评论/回到原文）。 */
+-.dsh-browser-ref-card {
+-  position: fixed; z-index: 2147483000; display: flex; flex-direction: column; gap: 6px;
+-  width: min(380px, calc(100vw - 24px)); max-height: 320px; overflow: auto; padding: 12px 14px;
+-  border: .5px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35)); border-radius: 12px;
+-  background: var(--dsw-alias-bg-layer-2, #1f2023); box-shadow: 0 8px 24px rgba(0,0,0,.35);
+-  color: var(--dsw-alias-label-primary, #eee); font: 13px/1.5 system-ui, sans-serif;
+-}
+-.dsh-browser-ref-card-title { font-weight: 600; }
+-.dsh-browser-ref-card-host { color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9)); font-size: 12px; }
+-.dsh-browser-ref-card-quote { white-space: pre-wrap; opacity: .92; }
+-.dsh-browser-ref-card-comment { margin-top: 2px; padding-top: 6px;
+-  border-top: .5px solid var(--dsw-alias-border-l3, rgba(127,127,127,.25)); white-space: pre-wrap; }
+-.dsh-browser-ref-card-go { align-self: flex-start; margin-top: 4px; padding: 4px 10px;
+-  border: .5px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35)); border-radius: 999px;
+-  background: transparent; color: inherit; font: inherit; cursor: pointer; }
+-.dsh-browser-ref-card-go:hover { background: var(--dsw-alias-bg-layer-3, rgba(127,127,127,.22)); }
+-`
+diff --git a/src/client/settings/panel.ts b/src/client/settings/panel.ts
+index e1e46cb..e7c2b53 100644
+--- a/src/client/settings/panel.ts
++++ b/src/client/settings/panel.ts
+@@ -1913,66 +1913,6 @@ const react = require("react")
+       } catch { /* no DOM */ }
+       return null
+     }
+-    /**
+-     * Reveal a reference inside the Web sidebar.
+-     *
+-     * A web-panel capture has no browser session, so the host's revealer cannot point a tab at it. The
+-     * panel is just a tab in this shell, so navigation is ours to do: read the reference's page and aim
+-     * the bound tab at it. Registered as a global hook because the reply-side renderer lives in another
+-     * package and must stay free of shell imports.
+-     *
+-     * @param uri - canonical `dsh-browser-ref:` URI.
+-     * @returns whether a tab was aimed.
+-     */
+-    function revealInPanel(uri) {
+-      try {
+-        const match = /^dsh-browser-ref:([^/\s]+)/u.exec(String(uri))
+-        if (match === null) return false
+-        const referenceId = decodeURIComponent(match[1])
+-        const sessionId = guestSession()
+-        if (typeof sessionId !== "string" || sessionId === "") return false
+-        const tabs = sidebarRight && typeof sidebarRight.tabsIn === "function" ? Array.from(sidebarRight.tabsIn(sessionId)) : []
+-        const page = tabs.find(tab => tab && typeof tab === "object" && tab.kind === "browser")
+-        fetch("/dsh-builtin-browser/reference/get?id=" + encodeURIComponent(referenceId), { headers: { accept: "application/json" } })
+-          .then(response => (response.ok ? response.json() : undefined))
+-          .then(body => {
+-            // The record keeps the page under `source` (the route ships {ok, reference, summary}); reading
+-            // `reference.url` yielded "" and the panel never moved.
+-            // The page lives at `source.pageUrl`. A capture taken through the proxy stores the PROXY address
+-            // there, so unwrap it to the real page and re-wrap it consistently.
+-            const source = body && body.reference ? body.reference.source : undefined
+-            const raw = source && typeof source.pageUrl === "string" ? source.pageUrl
+-              : (body && body.summary && typeof body.summary.pageUrl === "string" ? body.summary.pageUrl : "")
+-            const url = (() => {
+-              if (typeof raw !== "string" || raw === "") return ""
+-              const marker = "browser-view/guest?u="
+-              const at = raw.indexOf(marker)
+-              if (at === -1) return raw
+-              try { return decodeURIComponent(raw.slice(at + marker.length).split("&")[0]) } catch { return "" }
+-            })()
+-            if (url === "") return
+-            try { if (typeof sidebarRight.isExpanded === "function" && sidebarRight.isExpanded() === false) sidebarRight.toggleExpanded() } catch { /* folded is fine */ }
+-            // The Web panel is an iframe in THIS document, so aiming it needs no tab id at all: rewrite
+-            // the frame's src through the same-origin proxy. The shell does not publish the visible
+-            // browser tab through `tabsIn`, which is why the tab-based path silently did nothing.
+-            const frame = document.querySelector('iframe[data-sidebar-browser-frame]')
+-            if (frame !== null) {
+-              // 经同源代理加载。直连会让站点用 `X-Frame-Options: SAMEORIGIN`（sudoku.com、必应）
+-              // 或 `frame-ancestors 'none'`（GitHub）直接拒绝嵌入，侧栏里表现为"拒绝连接"。
+-              // 代理的 HTML 由宿主返回，没有这些头，任何站点都嵌得进来。
+-              frame.src = location.origin + "/dsh-builtin-browser/browser-view/guest?u=" + encodeURIComponent(url)
+-            } else {
+-              try {
+-                if (page !== undefined) sidebarRight.navigateTabIn(sessionId, page.id, { params: { url } })
+-                else sidebarRight.openTabIn(sessionId, "browser", { params: { url } })
+-              } catch { /* tab gone */ }
+-            }
+-          })
+-          .catch(() => {})
+-        return true
+-      } catch { return false }
+-    }
+-    try { globalThis.__DSH_BROWSER_REF_REVEAL__ = revealInPanel } catch { /* non-writable */ }
+     function onScreenSession() {
+       try {
+         const screen = sidebarRight === null || typeof sidebarRight.screen !== "function" ? undefined : sidebarRight.screen()
+diff --git a/tests/session-invariants.test.mjs b/tests/session-invariants.test.mjs
+index 8b50cda..7dc88b2 100644
+--- a/tests/session-invariants.test.mjs
++++ b/tests/session-invariants.test.mjs
+@@ -10,38 +10,58 @@
+ import { readFileSync } from 'node:fs'
+ import { test } from 'node:test'
+ import assert from 'node:assert/strict'
++import { Script } from 'node:vm'
+ 
+ const bridge = readFileSync('desktop-bridge/plugin-browser-bridge.js', 'utf8')
+ const host = readFileSync('src/browser-electron/desktop-bridge-host.ts', 'utf8')
+ 
+-/** The bridge's ops, with the line each starts on. */
+-function ops () {
+-  const found = []
+-  bridge.split('\n').forEach((line, i) => {
+-    const m = /if \(op === '([a-zA-Z]+)'\)/.exec(line)
+-    if (m) found.push({ name: m[1], line: i + 1 })
++function ops (source) {
++  return [...source.matchAll(/if \(op === '([a-zA-Z]+)'\) \{/g)].map(match => {
++    for (let end = source.indexOf('}', match.index); end !== -1; end = source.indexOf('}', end + 1)) {
++      const body = source.slice(match.index, end + 1)
++      try {
++        // Parse, never execute. JavaScript itself handles braces in templates,
++        // strings, comments and regexes; only a complete branch compiles.
++        new Script(`async function operation() { ${body}\n }`)
++        return { name: match[1], body }
++      } catch { /* the branch has not ended yet */ }
++    }
++    throw new Error(`unclosed operation: ${match[1]}`)
+   })
+-  return found
+ }
+ 
+-test('every guest-touching op consults the owner ledger', () => {
+-  const lines = bridge.split('\n')
++function ledgerOffenders (source) {
+   const offenders = []
+-  const list = ops()
+-  list.forEach((op, k) => {
+-    const end = k + 1 < list.length ? list[k + 1].line - 1 : lines.length
+-    const body = lines.slice(op.line - 1, end).join('\n')
+-    if (!/getType\(\) === 'webview'/.test(body)) return
++  ops(source).forEach(({ name, body }) => {
++    if (!/getType\(\) === 'webview'|guestById\(|sendCdp\(id,|downloadGuest\(/.test(body)) return
+     const uses = /claims\.get\([^)]*\) === owner/.test(body)
+       || /claims\.set\([^)]*owner\)/.test(body)
+       || /!claims\.has\([^)]*\)/.test(body)
+       || /mineOrFree/.test(body)
+       || /unclaimed\(/.test(body)
+-    if (!uses) offenders.push(op.name)
++      || /await assertGuestOwner\(id, owner\)/.test(body)
++      || /claims\.get\([^)]*\) !== owner/.test(body)
++    if (!uses) offenders.push(name)
+   })
++  return offenders
++}
++
++test('every guest-touching op consults the owner ledger', () => {
++  const offenders = ledgerOffenders(bridge)
+   assert.deepEqual(offenders, [], 'these ops touch guests without asking who is asking: ' + offenders.join(', '))
+ })
+ 
++test('owner-ledger scan is branch-scoped and catches a real bypass', () => {
++  const branches = ops(bridge)
++  assert.ok(!branches.find(op => op.name === 'collapseSidebar').body.includes('setWindowOpenHandler'))
++  const cdp = branches.find(op => op.name === 'cdp').body
++  const bypass = cdp.replace('await assertGuestOwner(id, owner)', '')
++  assert.notEqual(bypass, cdp)
++  assert.deepEqual(ledgerOffenders(bridge.replace(cdp, bypass)), ['cdp'])
++  assert.deepEqual(ops("if (op === 'one') { const s = `brace } ${1}`; /* } */ return /}/.test(s) }\nfunction later() { guestById(1) }").map(op => op.body),
++    ["if (op === 'one') { const s = `brace } ${1}`; /* } */ return /}/.test(s) }"])
++})
++
+ test('nothing in the bridge clicks or types into the shell any more', () => {
+   // The mechanism of the reported bug was "do what a human does": press the shell's shortcut,
+   // click the guide card, type into the address bar. Each of those reaches the conversation the
+-- 
+2.56.0
+
