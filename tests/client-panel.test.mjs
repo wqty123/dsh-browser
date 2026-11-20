@@ -18,7 +18,11 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
-import { createBrowserInitializationJournal, createBrowserInitializationReader } from '../lib/client/browser/initialization.js'
+
+const initializationSource = ts.transpileModule(readFileSync(new URL('../src/client/browser/initialization.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+const initialization = {}
+vm.runInThisContext(`(exports) => { ${initializationSource}\n }`, { filename: 'initialization.js' })(initialization)
+const { createBrowserInitializationJournal, createBrowserInitializationReader } = initialization
 
 const { DEFAULT_SETTINGS } = await import('../lib/browser-electron/settings-store.js')
 

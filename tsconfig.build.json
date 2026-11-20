@@ -14,13 +14,15 @@
     "rewriteRelativeImportExtensions": true,
     "types": ["node"],
     "paths": {
-      "electron": ["./src/types/electron-shim.d.ts"]
+      "electron": ["./src/types/electron-shim.d.ts"],
+      "@deepseek-ai/*": ["./node_modules/@deepseek-ai/*/lib/types/index.d.ts"]
     }
   },
   "include": ["src/**/*.ts"],
   "exclude": [
     "src/client/**",
     "src/reference/**",
+    "src/**/__tests__/**",
     "src/tool-browser/page-probe.ts"
   ]
 }
