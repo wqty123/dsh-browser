@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserSessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 import type { CommandOptions, ElectronBrowserViewHost, ElectronViewHandle, BrowserUserAction } from './provider.ts'
 import type { CarrierPage, CarrierLossReason } from '../browser/types.ts'
-import { BridgeVersionError, isBridgeVersionMismatch } from './bridge-compatibility.ts'
+import { BridgeVersionError, bridgePackageError, isBridgeVersionMismatch } from '../bridge-compatibility.ts'
 
 export { bridgeEndpointPath }
 
@@ -66,9 +66,10 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       if (typeof answer.protocol !== 'number' || !Number.isInteger(answer.protocol)) throw new BridgeVersionError()
       return new DesktopBridgeViewHost(endpoint, isQuiet)
     } catch (error) {
-      if (error instanceof BridgeVersionError) {
-        this.versionError = error.message
-        throw error
+      const versionError = bridgePackageError(error) ?? (error instanceof BridgeVersionError ? error : undefined)
+      if (versionError !== undefined) {
+        this.versionError = versionError.message
+        throw versionError
       }
       return undefined
     }

@@ -436,6 +436,34 @@ describe('revealReference — it goes to the source page', () => {
     expect(runtime.snapshot().reveal?.message).toContain('桥接版本过旧，请点击 卸载并重装')
   })
 
+  it.each(['code', 'note', 'reason'] as const)('shows a missing bridge package from reveal %s without navigating', async field => {
+    const { http, runtime, card } = await withCard()
+    http.revealOutcome = { ok: true, status: 'unavailable', [field]: 'DSH_BRIDGE_PACKAGE_UNAVAILABLE' }
+    runtime.setSourceOpener(async () => { throw new Error('must not open a source') })
+    await expect(runtime.revealReference(card.referenceId)).resolves.toBe('unavailable')
+    expect(http.revealCalls).toHaveLength(1)
+    expect(runtime.snapshot().reveal?.message).toContain('浏览器桥接不可用，请点击 卸载并重装')
+  })
+
+  it('shows a missing bridge package after source binding is retried', async () => {
+    const { http, runtime, card } = await withCard()
+    http.revealOutcome = { ok: true, status: 'unavailable' }
+    runtime.setSourceOpener(async () => {
+      http.revealOutcome = { ok: true, status: 'unavailable', note: '浏览器桥接不可用，请点击 卸载并重装' }
+      return { pageId: '2' }
+    })
+    await runtime.revealReference(card.referenceId)
+    expect(http.revealCalls).toHaveLength(2)
+    expect(runtime.snapshot().reveal?.message).toContain('浏览器桥接不可用，请点击 卸载并重装')
+  })
+
+  it('maps a loader exception thrown by the reveal transport to the reinstall error', async () => {
+    const { http, runtime, card } = await withCard()
+    http.reveal = async () => { throw Object.assign(new Error('package unavailable'), { code: 'DSH_BRIDGE_PACKAGE_UNAVAILABLE' }) }
+    await runtime.revealReference(card.referenceId)
+    expect(runtime.snapshot().reveal?.message).toContain('浏览器桥接不可用，请点击 卸载并重装')
+  })
+
   it.each(['GUEST_DOCUMENT_IDENTITY_UNAVAILABLE', 'GUEST_REFERENCE_IDENTITY_MISMATCH', 'GUEST_REFERENCE_TIMEOUT', 'GUEST_SOURCE_TIMEOUT'])(
     'shows the source-channel failure %s instead of retaining page-mismatch or hanging', async reason => {
       const { http, runtime, card } = await withCard()

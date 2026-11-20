@@ -207,6 +207,7 @@ export interface RemoveResponse {
 
 export interface RevealResultWire {
   readonly ok: true
+  readonly code?: string
   readonly status?: string
   readonly reason?: string
   readonly note?: string

@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
 import { readDesktopIdentity } from './desktop-identity.ts'
-import { BRIDGE_VERSION_MESSAGE } from './bridge-compatibility.ts'
+import { BRIDGE_VERSION_MESSAGE } from '../bridge-compatibility.ts'
 
 // A normal Electron existsSync(app.asar) caches the archive and keeps it locked on Windows.
 // Status inspection must leave maintenance free to rename it after Desktop exits.

@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs'
 
 import { connect, type Socket } from 'node:net'
 import type { BrowserSessionWireId, BrowserTabWireId } from '../browser/handles.ts'
+import { bridgePackageError } from '../bridge-compatibility.ts'
 
 export type BridgeRequest =
   | { readonly op: 'version' }
@@ -312,6 +313,11 @@ export class BridgeConnection {
       }
       try {
         const answer = JSON.parse(line) as Record<string, unknown>
+        const packageError = bridgePackageError(answer)
+        if (packageError !== undefined) {
+          entry.reject(packageError)
+          continue
+        }
         // A rejected token means the shell restarted with a new one, so this socket
         // can never succeed again: answer (the caller needs the error) and drop it,
         // so the next call dials afresh instead of retrying a doomed credential.

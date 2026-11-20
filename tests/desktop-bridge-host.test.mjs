@@ -113,6 +113,7 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
           }
           if (request.op === 'cancelSidebar') return { ok: true, cancelled: true }
           if (request.op === 'cdp') {
+            if (state.cdpAnswer) return state.cdpAnswer
             // A closed tab makes the real bridge answer exactly like this; the host
             // must treat it as "the page is gone", not as a command failure.
             const id = views.get(request.handle)
@@ -305,6 +306,31 @@ test('discovery version refusals and missing versions are explicit, while unrela
     host.dispose()
     assert.ok(bridge.requests.every(request => request.op === 'list'))
   } finally { await bridge.close() }
+})
+
+test('a missing loader package is a named reinstall error during discovery and native commands', async () => {
+  const unavailable = { ok: false, code: 'DSH_BRIDGE_PACKAGE_UNAVAILABLE', error: 'package cannot be resolved' }
+  const state = { tabs: 1, dead: [], listAnswer: unavailable, cdpAnswer: undefined }
+  const bridge = await startFakeBridge(state)
+  withEndpoint(bridge.port)
+  let host
+  const expected = {
+    name: 'BridgeVersionError', code: 'BROWSER_BRIDGE_VERSION_MISMATCH',
+    message: '浏览器桥接不可用，请点击 卸载并重装',
+  }
+  try {
+    await assert.rejects(DesktopBridgeViewHost.discover(), expected)
+    assert.equal(DesktopBridgeViewHost.compatibilityError(), expected.message)
+    assert.ok(bridge.requests.every(request => request.op === 'list'))
+    state.listAnswer = undefined
+    host = await DesktopBridgeViewHost.discover()
+    assert.equal(DesktopBridgeViewHost.compatibilityError(), undefined)
+    const view = host.createView(testTab())
+    state.cdpAnswer = unavailable
+    await assert.rejects(view.sendCommand('Runtime.evaluate', { expression: '1' }), expected)
+    state.cdpAnswer = undefined
+    assert.equal((await view.sendCommand('Runtime.evaluate', { expression: '1' })).echo, 'Runtime.evaluate')
+  } finally { host?.dispose(); await bridge.close() }
 })
 
 test('a passive preview never assigns another live page to an unopened logical view', async () => {

@@ -887,7 +887,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     let status = await attempt()
     const bridgeFailure = (): string | undefined => {
       const reason = revealer.lastReason()
-      return reason?.includes('桥接版本过旧') ? reason : undefined
+      return reason?.includes('桥接版本过旧') || reason?.includes('浏览器桥接不可用') ? reason : undefined
     }
     let sourceFailure: string | undefined
     try {

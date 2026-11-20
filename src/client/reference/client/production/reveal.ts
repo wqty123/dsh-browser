@@ -21,6 +21,7 @@ import { createRevealer, RevealFailed, type RevealAdapter, type RevealLocation }
 import { parseBrowserRefUri } from '../scheme.ts'
 import type { BrowserRefLinkSpec } from '../BrowserRefLink.tsx'
 import type { ReferenceHttpClient } from './http-transport.ts'
+import { bridgePackageError } from '../../../../bridge-compatibility.ts'
 
 /** Frozen identity of a captured reference, resolved from the stored snapshot. */
 export interface RevealOwner {
@@ -110,6 +111,9 @@ export function createRevealAdapter(options: ProductionRevealerOptions): RevealA
       const owner = resolveOwner(request.referenceId)
       if (owner === undefined) throw new RevealUnavailableError('unknown reference')
       const wire = await http.reveal(request.referenceId, request.partId, request.navigate === true, request.sourcePageId)
+        .catch((error: unknown) => { throw bridgePackageError(error) ?? error })
+      const packageError = bridgePackageError(wire)
+      if (packageError !== undefined) throw packageError
       // A transport-level refusal (ok !== true) has no cause to report; a
       // decoded answer always does, so it travels with the status.
       if (wire.ok !== true) throw new RevealUnavailableError(wire.reason ?? 'reveal was refused')
