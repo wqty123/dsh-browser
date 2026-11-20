@@ -7,10 +7,11 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHostPatchMaintenance, servedSidebarPackage } from '../src/browser-electron/host-patch-maintenance.ts'
 import { loadSettingsPanel } from '../src/client/settings/panel.ts'
+import { hostPatchFixture } from './helpers/host-patch-fixture.mjs'
 
 const sidebar = '@deepseek-ai/dsh-client-ui-sidebar-right'
-const before = readFileSync(new URL('./fixtures/dsh-host-patch/client.before.js', import.meta.url), 'utf8')
-const after = readFileSync(new URL('./fixtures/dsh-host-patch/client.after.js', import.meta.url), 'utf8')
+const before = hostPatchFixture('client', 'before')
+const after = hostPatchFixture('client', 'after')
 function fixture(t, layout = 'node_modules/@deepseek-ai/dsh-client-ui-sidebar-right', options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'web-host-patch-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))

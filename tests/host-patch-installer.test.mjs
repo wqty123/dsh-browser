@@ -6,9 +6,10 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createInstallerSandbox } from './helpers/installer-sandbox.mjs'
 import { readBridgeStatus } from '../src/browser-electron/bridge-status.ts'
+import { hostPatchFixture } from './helpers/host-patch-fixture.mjs'
 
 const installer = fileURLToPath(new URL('../desktop-bridge/install.mjs', import.meta.url))
-const artifact = (name, kind) => readFileSync(new URL(`./fixtures/dsh-host-patch/${name}.${kind}.js`, import.meta.url), 'utf8')
+const artifact = hostPatchFixture
 function setup(t) {
   const sandbox = createInstallerSandbox()
   t.after(() => sandbox.close())

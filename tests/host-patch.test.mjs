@@ -3,12 +3,24 @@ import assert from 'node:assert/strict'
 import * as fs from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { gunzipSync } from 'node:zlib'
 import { applyHostPatch, hostPatchStatus, patchText, restoreHostPatch } from '../dsh-host-patch/apply.mjs'
 import { legacyBridgeSnippets } from '../dsh-host-patch/legacy-bridge.mjs'
+import { hostPatchFixture } from './helpers/host-patch-fixture.mjs'
+
+test('compressed release artifacts retain their full source-build bytes', () => {
+  const manifest = JSON.parse(fs.readFileSync(new URL('./fixtures/dsh-host-patch/manifest.json', import.meta.url), 'utf8'))
+  for (const [file, expected] of Object.entries(manifest)) {
+    const bytes = gunzipSync(fs.readFileSync(new URL(`./fixtures/dsh-host-patch/${file}.gz`, import.meta.url)))
+    assert.equal(bytes.length, expected.bytes, file)
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), expected.sha256, file)
+  }
+})
 
 for (const release of ['rc3', 'rc5']) describe(release, () => {
 const spec = JSON.parse(fs.readFileSync(new URL(`../dsh-host-patch/${release}.json`, import.meta.url), 'utf8'))
-const fixture = (id, kind) => fs.readFileSync(new URL(`./fixtures/dsh-host-patch/${release === 'rc3' ? '' : release + '/'}${id}.${kind}.js`, import.meta.url), 'utf8')
+const fixture = (id, kind) => hostPatchFixture(id, kind, release)
 const backupSuffix = '.before-dsh-host-patch'
 function setup(t, ids = ['client', 'main']) {
   const root = fs.mkdtempSync(join(tmpdir(), 'dsh-host-patch-'))
