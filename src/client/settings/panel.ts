@@ -1793,6 +1793,10 @@ const react = require("react")
   function guestStateFor(sessionId, tabId) {
     const roots = panelRootsFor(sessionId)
     if (roots === undefined ? tabStripFor(sessionId) === null : roots.length === 0) return { panel: false, guestId: null, url: "" }
+    if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof tabId === "string") {
+      const page = initializationReader?.current({ sessionId, tabId })
+      return { panel: true, guestId: page?.guestId ?? null, url: page?.url ?? "", ...page?.generation === undefined ? {} : { nativeState: page } }
+    }
     const guests = guestsInPanel(sessionId).filter(view => tabId === undefined
       || tabIdOfElement(view, new Set([tabId]), roots) === tabId)
     if (guests.length === 0) return { panel: true, guestId: null, url: "" }
@@ -2153,7 +2157,13 @@ const react = require("react")
         return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native tab for this browser view was closed; close or reset the view before retrying", panel: true, guestId: null }
       }
       const guests = guestsInPanel(sessionId)
-      const hasCachedGuest = Number.isInteger(guestId) && guestId > 0
+      const hasNativeGuest = globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof guestId === "string"
+      const hasCachedGuest = (Number.isInteger(guestId) && guestId > 0) || hasNativeGuest
+      if (binding === undefined && hasNativeGuest) {
+        const cached = browsers.find(tab => initializationReader?.current({ sessionId, tabId: tab.id })?.guestId === guestId)
+        if (cached === undefined || owned.has(cached.id)) return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native guest is not in this conversation", panel: true, guestId: null }
+        binding = { sessionId, id: cached.id, url: address, scoped: true }
+      }
       if (binding === undefined && hasCachedGuest) {
         const cached = guests.find(view => view.getWebContentsId() === guestId)
         if (cached !== undefined) {
@@ -2270,14 +2280,24 @@ const react = require("react")
         const previous = initializing.get(key)
         const controller = new AbortController()
         const transaction = { controller, transactionId: options.transactionId }
+        let placed
+        const closeNative = () => {
+          if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion !== 1 || typeof placed?.tabId !== "string") return
+          sidebarRight.closeIn?.(sessionId, placed.tabId)
+          if (pendingTabs.get(key)?.id === placed.tabId) pendingTabs.delete(key)
+        }
+        controller.signal.addEventListener("abort", closeNative, { once: true })
         initializing.set(key, transaction)
         previous?.controller.abort(Object.assign(new Error("a newer sidebar initialization was requested"), { code: "panel-navigation-superseded" }))
         const timer = setTimeout(() => controller.abort(Object.assign(new Error("sidebar initialization deadline expired"), { code: "BROWSER_DOCUMENT_TIMEOUT" })), deadline - Date.now())
         try {
           const answer = api.openPanel(sessionId, url, options)
+          placed = answer
+          if (controller.signal.aborted) { closeNative(); controller.signal.throwIfAborted() }
           if (!answer.ok) return answer
           const rendererNavigation = url !== "" && (answer.created || answer.navigating)
-          if (!rendererNavigation && answer.guestId !== null) return answer
+          if (!rendererNavigation && answer.guestId !== null) return globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1
+            ? { ...answer, nativeState: reader.current({ sessionId, tabId: answer.tabId }) } : answer
           if (typeof answer.tabId !== "string") return refuse("panel-initialization-failed", "the shell did not acknowledge its native tab identity")
           const receipt = await reader.wait({ sessionId, tabId: answer.tabId, url }, controller.signal)
           controller.signal.throwIfAborted()
@@ -2286,11 +2306,13 @@ const react = require("react")
           if (state.guestId === null || String(state.guestId) !== receipt.guestId || observed?.guestId !== receipt.guestId) {
             return refuse("panel-initialization-failed", "the mounted native guest did not acknowledge its initialization identity")
           }
-          return { ...answer, ...state, url: observed.url, initialization: receipt, rendererNavigation }
+          return { ...answer, ...state, url: observed.url, initialization: receipt, rendererNavigation,
+            ...observed.generation === undefined ? {} : { nativeState: observed } }
         } catch (error) {
           return refuse(error?.code ?? "panel-initialization-failed", String(error?.message ?? error))
         } finally {
           clearTimeout(timer)
+          controller.signal.removeEventListener("abort", closeNative)
           if (initializing.get(key) === transaction) initializing.delete(key)
         }
       },
@@ -2450,6 +2472,13 @@ const react = require("react")
       closePanelGuest(sessionId, guestId) {
         const refuse = reason => ({ ok: false, reason, closed: 0 })
         if (typeof sessionId !== "string" || !/^session-/.test(sessionId)) return refuse("a conversation id is required")
+        if (typeof guestId === "string" && globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1) {
+          const tabs = sidebarRight.tabsIn(sessionId)
+          const tab = tabs.find(tab => tab.kind === "browser" && initializationReader?.current({ sessionId, tabId: tab.id })?.guestId === guestId)
+          if (tab === undefined || typeof sidebarRight.closeIn !== "function") return refuse("the native guest does not belong to this conversation")
+          sidebarRight.closeIn(sessionId, tab.id)
+          return { ok: true, closed: 1 }
+        }
         const view = guestsInPanel(sessionId).find(candidate => candidate.getWebContentsId() === guestId)
         if (view === undefined) return refuse("the guest does not belong to this conversation panel")
         const roots = panelRootsFor(sessionId)

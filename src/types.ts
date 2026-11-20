@@ -1,6 +1,26 @@
 /** Type-only Electron bridge declarations shared by the desktop shell and browser provider. */
 import type { Branded } from '@deepseek-ai/dsh-brand'
 
+export type DesktopNativeLease = Branded<'DesktopNativeLease'>
+export type SidebarNativeSlot = Branded<'SidebarNativeSlot'>
+
+export interface DesktopNativeState {
+  readonly stage: 'attached' | 'document' | 'closed' | 'failed'
+  readonly generation: string
+  readonly frameId?: string
+  readonly loaderId?: string
+  readonly code?: string
+}
+
+export interface DesktopNativeViews {
+  readonly protocolVersion: 1
+  acquire(scope: string, workspace: string): Promise<{ readonly lease: DesktopNativeLease }>
+  attach(lease: DesktopNativeLease, slot: SidebarNativeSlot): Promise<void>
+  command(lease: DesktopNativeLease, method: string, params?: object): Promise<object>
+  onState(lease: DesktopNativeLease, listener: (state: DesktopNativeState) => void): () => void
+  release(lease: DesktopNativeLease): Promise<void>
+}
+
 /** Main-issued identity of one guest reservation. */
 export type DesktopBrowserLeaseId = Branded<'DesktopBrowserLeaseId'>
 
@@ -33,6 +53,7 @@ export interface DesktopBrowserChildTabs {
 
 /** Origin-scoped operations; no Electron objects or arbitrary IPC cross this interface. */
 export interface DesktopBrowserBridge {
+  readonly nativeViews?: DesktopNativeViews
   /** Version 1 supports URL-only sidebar tabs, not native children or WindowProxy adoption. */
   readonly childTabs?: DesktopBrowserChildTabs
   /** @param workspace - resolved storage account. @returns one approved guest reservation. */

@@ -38,6 +38,9 @@ export interface BrowserCarrierState {
   readonly stage: BrowserCarrierStage
   /** Native guest id once the shell reports one. */
   readonly guestId?: string
+  readonly generation?: string
+  readonly frameId?: string
+  readonly loaderId?: string
   /** Why the carrier could not reach `ready`; machine code, localized by the UI. */
   readonly reason?: 'workspace-unavailable' | 'acquire-failed' | 'guest-bootstrap-failed'
   /** Original carrier failure text, bounded and kept with its owning attempt. */

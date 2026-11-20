@@ -78,6 +78,7 @@ export class BrowserController implements HostObservable<BrowserControllerState>
     this.occurrenceId = options.occurrenceId ?? `${options.tabId}:0`
     this.checkpoint = options.initial
     this.page = options.createPage({
+      tabId: options.tabId,
       initial: options.initial,
       persist: (state) => {
         if (this.disposed) return
@@ -310,7 +311,8 @@ export class BrowserController implements HostObservable<BrowserControllerState>
     const carrier = this.page.frame.lifecycle?.getSnapshot()
     if (this.disposed || frame.address !== 'observed' || (frame.loading && frame.documentReady !== true) || frame.error !== undefined
       || frame.target === undefined || (carrier !== undefined && carrier.stage !== 'ready')) return undefined
-    return { url: frame.target.url, ...carrier?.guestId === undefined ? {} : { guestId: carrier.guestId } }
+    return { url: frame.target.url, ...carrier?.guestId === undefined ? {} : { guestId: carrier.guestId },
+      ...carrier?.generation === undefined ? {} : { generation: carrier.generation, frameId: carrier.frameId, loaderId: carrier.loaderId } }
   }
 
   /** Aim this occurrence at a new navigation record revision (plugin/sidebar action). */
@@ -365,7 +367,8 @@ export class BrowserController implements HostObservable<BrowserControllerState>
       const carrier = this.page.frame.lifecycle?.getSnapshot()
       if (carrier !== undefined && carrier.stage !== 'ready') return
       this.journal.advance(this.options.tabId, 'attached',
-        carrier?.guestId === undefined ? {} : { guestId: carrier.guestId })
+        carrier?.guestId === undefined ? {} : { guestId: carrier.guestId,
+          ...carrier.generation === undefined ? {} : { generation: carrier.generation, frameId: carrier.frameId, loaderId: carrier.loaderId } })
     }
     this.publishInitialization()
   }

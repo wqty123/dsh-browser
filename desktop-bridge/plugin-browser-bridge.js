@@ -29,6 +29,7 @@ import { homedir } from 'node:os'
 import { join, dirname, isAbsolute, resolve } from 'node:path'
 import { app, webContents } from 'electron'
 import { sidebarProxyConfig, parseSystemProxy, normalizeGuestUserAgent, shouldFallbackToSystemProxy, DEFAULT_SIDEBAR_PROXY_BYPASS } from './guest-proxy.mjs'
+import { nativeGuestRegistry } from './native-guests.mjs'
 
 /**
  * The conversation's sidebar panel exists but the shell is not displaying that conversation, so no
@@ -210,11 +211,15 @@ async function evaluateInPanel(shellId, sessionId, method, params) {
 
 
 function guestById(id) {
+  if (typeof id === 'string') return nativeGuests.get(id)
   for (const contents of webContents.getAllWebContents()) {
     if (contents.id === id) return contents
   }
   return undefined
 }
+
+const nativeCapability = () => globalThis[ACTIVE]?.api?.browserGuests?.protocolVersion === 1 ? globalThis[ACTIVE].api.browserGuests : undefined
+const nativeGuests = nativeGuestRegistry(nativeCapability)
 
 /** Describe one candidate guest. */
 function describe(contents) {
@@ -383,7 +388,7 @@ async function downloadGuest(guest, url, savePath) {
 async function evaluatePanelService(shellId, sessionId, url, viewId, guestId, deadline = Date.now() + 30_000, transactionId) {
   const target = JSON.stringify({
     viewId, deadline, transactionId,
-    ...Number.isSafeInteger(guestId) && guestId > 0 ? { guestId } : {},
+    ...(Number.isSafeInteger(guestId) && guestId > 0) || typeof guestId === 'string' ? { guestId } : {},
   })
   const expression = `(async () => {
     const api = globalThis.__dshBuiltinBrowser;
@@ -438,13 +443,14 @@ async function evaluatePanelService(shellId, sessionId, url, viewId, guestId, de
       navigating: parsed?.navigating === true,
       backgroundRendering: parsed?.backgroundRendering === true,
       ...typeof parsed?.displayed === 'boolean' ? { displayed: parsed.displayed } : {},
-      guestId: typeof parsed?.guestId === 'number' && Number.isFinite(parsed.guestId) ? parsed.guestId : null,
+      guestId: (typeof parsed?.guestId === 'number' && Number.isFinite(parsed.guestId)) || typeof parsed?.guestId === 'string' ? parsed.guestId : null,
       ...typeof parsed?.tabId === 'string' ? { tabId: parsed.tabId } : {},
       url: typeof parsed?.url === 'string' ? parsed.url : '',
       // A refusal carries what the renderer found, so the reason is actionable rather than a guess.
       found: parsed?.found === undefined ? undefined : parsed.found,
       ...parsed?.initialization !== null && typeof parsed?.initialization === 'object'
         ? { initialization: parsed.initialization } : {},
+      ...parsed?.nativeState !== null && typeof parsed?.nativeState === 'object' ? { nativeState: parsed.nativeState } : {},
     }
   } catch (error) {
     return { ok: false, reason: 'the shell answered a shape this bridge does not understand', panel: false, guestId: null, url: '' }
@@ -504,6 +510,7 @@ async function committedSidebarNavigation(id, url) {
  * @returns 'webview' | 'iframe' | 'none' (no panel yet) | 'unknown' (could not be read).
  */
 async function sidebarFrameKind(shellId) {
+  if (nativeCapability() !== undefined) return 'native'
   if (typeof shellId !== 'number') return 'unknown'
   try {
     // `executeJavaScript`, not the debugger: the same measured reason as every other shell-side
@@ -526,6 +533,7 @@ async function sidebarFrameKind(shellId) {
 /** Read the exact guest set from the named conversation's renderer, never from free globals. */
 async function panelGuestIds(shell, owner) {
   if (!/^session-/.test(owner)) return []
+  if (nativeCapability() !== undefined) return nativeGuests.ids(owner)
   const value = await shell.executeJavaScript(`(() => {
     const api = globalThis.__dshBuiltinBrowser;
     if (!api || typeof api.panelGuests !== 'function') {
@@ -705,7 +713,7 @@ async function dispatch(request, checkCurrent) {
     const sidebar = []
     for (const id of ids) {
       const guest = guestById(id)
-      if (!guest || guest.isDestroyed() || guest.getType() !== 'webview') continue
+      if (!guest || guest.isDestroyed() || !['webview', 'native'].includes(guest.getType())) continue
       let handle
       for (const [key, entry] of handles) {
         if (entry.owner === scope.owner && entry.session === scope.session && entry.guest === guest) { handle = key; break }
@@ -750,7 +758,14 @@ async function dispatch(request, checkCurrent) {
     }
     if (first.guestId === null) throw codedError('BROWSER_DOCUMENT_UNACKNOWLEDGED', 'sidebar initialization did not acknowledge a guest')
     const guest = guestById(first.guestId)
-    if (!guest || guest.isDestroyed() || guest.getType() !== 'webview') throw codedError('BROWSER_GUEST_CLOSED', 'the acknowledged sidebar guest is gone')
+    if (!guest || guest.isDestroyed() || !['webview', 'native'].includes(guest.getType())) throw codedError('BROWSER_GUEST_CLOSED', 'the acknowledged sidebar guest is gone')
+    if (guest.getType() === 'native') {
+      const admission = wireHandle(guest.scope, 'tab')
+      const state = nativeGuests.state(guest.id)
+      if (admission.owner !== owner || state?.stage !== 'document' || first.nativeState?.guestId !== guest.id
+        || first.nativeState?.generation !== state.generation || first.nativeState?.frameId !== state.frameId
+        || first.nativeState?.loaderId !== state.loaderId) throw codedError('BROWSER_DOCUMENT_UNACKNOWLEDGED', 'native document generation was not acknowledged')
+    }
     const existing = handles.get(request.handle)
     if (existing && existing.guest !== guest) throw codedError('BROWSER_HANDLE_STALE', 'the sidebar returned a replacement guest')
     let navigation
@@ -813,7 +828,7 @@ async function dispatch(request, checkCurrent) {
     const value = await shell.executeJavaScript(`(() => {
       const api = globalThis.__dshBuiltinBrowser;
       if (!api || typeof api.closePanelGuest !== 'function') throw new Error('sidebar close API is unavailable; refresh or upgrade the browser plugin client');
-      return JSON.stringify(api.closePanelGuest(${JSON.stringify(owner)}, ${guest.id}));
+      return JSON.stringify(api.closePanelGuest(${JSON.stringify(owner)}, ${JSON.stringify(guest.id)}));
     })()`, true)
     let answer
     try { answer = JSON.parse(value) } catch { throw new Error('invalid sidebar close reply') }
@@ -1041,6 +1056,7 @@ async function applySidebarGuestProxy(contents) {
 export function stop() {
   for (const controller of activeRequests) controller.abort(codedError('bridge-request-abandoned', 'the bridge was disposed'))
   const current = globalThis[ACTIVE]
+  if (nativeCapability() !== undefined) void nativeGuests.releaseAll().catch(error => console.error('[dsh-browser-bridge] native release failed:', error))
   globalThis[ACTIVE] = undefined
   // Detach BEFORE the early return: a reload replaces this module's `start()`,
   // and a listener left on a live webContents keeps a stale closure alive that

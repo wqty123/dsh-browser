@@ -2,9 +2,11 @@
 import type { BrowserPresentation } from '../view/BrowserPresentation.ts'
 import type { BrowserFrame } from './BrowserFrame.ts'
 import type { BrowserTabState } from './BrowserPersistence.ts'
+import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 
 /** Provider construction inputs; persistence does not enter the live navigation interface. */
 export interface BrowserPageOptions {
+  readonly tabId?: TabId
   readonly initial: BrowserTabState | undefined
   readonly persist: (state: BrowserTabState) => void
   readonly openRequested: (url: string) => void

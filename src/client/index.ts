@@ -20,7 +20,8 @@ import type { BrowserInitializationReader } from './browser/initialization.ts'
 import { createIframePage } from './pages.ts'
 import { createReferenceCapture, type ReferenceCaptureContext } from './reference-capture-owner.ts'
 import { createElectronPage } from './electron/pages.ts'
-import type { DesktopBrowserBridge } from '../types.ts'
+import { createNativePage } from './electron/NativeViewPage.ts'
+import type { DesktopBrowserBridge, SidebarNativeSlot } from '../types.ts'
 import { browserWorkspace } from './electron/workspace.ts'
 import type { BrowserPageFactory } from './browser/BrowserPage.ts'
 import { BROWSER_ID, BROWSER_KIND, browserDefinition } from './definition.tsx'
@@ -257,8 +258,20 @@ export function apply(ctx: Context): void {
     installFrames(ctx, sessionId => options => createIframePage(options, sessionId, capture))
   }
   else ctx.inject(['workspaces'], (scope) => {
-    installFrames(scope, sessionId => options => createElectronPage(options, desktop,
-      signal => browserWorkspace(scope.workspaces.list, sessionId, signal), sessionId, capture))
+    installFrames(scope, sessionId => options => {
+      const native = desktop.nativeViews
+      const workspace = (signal: AbortSignal): Promise<string> => browserWorkspace(scope.workspaces.list, sessionId, signal)
+      if (native?.protocolVersion === 1) {
+        const sidebar = scope.sidebarRight as typeof scope.sidebarRight & {
+          nativeSlot?: (session: typeof sessionId, tab: TabId, address: string, viewport: string, signal: AbortSignal) => Promise<SidebarNativeSlot>
+        }
+        return createNativePage(options, native, async (tab, address, viewport, signal) => {
+          if (sidebar.nativeSlot === undefined) throw Object.assign(new Error('BROWSER_NATIVE_SURFACE_UNAVAILABLE'), { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' })
+          return sidebar.nativeSlot(sessionId, tab, address, viewport, signal)
+        }, workspace, sessionId)
+      }
+      return createElectronPage(options, desktop, workspace, sessionId, capture)
+    })
   })
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab.title', key: BROWSER_ID, store,

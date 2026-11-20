@@ -19,7 +19,7 @@ test('main extension starts once, reports host status, replaces a crash endpoint
   const app = new EventEmitter(), webContents = { getAllWebContents: () => [] }
   globalThis.__extensionElectron = { app, webContents }
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'dsh-builtin-browser', version: '0.7.42', type: 'module' }))
-  for (const name of ['main.mjs', 'guest-proxy.mjs', 'plugin-browser-bridge.js']) {
+  for (const name of ['main.mjs', 'guest-proxy.mjs', 'native-guests.mjs', 'plugin-browser-bridge.js']) {
     const source = readFileSync(new URL(`../desktop-bridge/${name}`, import.meta.url), 'utf8')
       .replace("import { app, webContents } from 'electron'", 'const { app, webContents } = globalThis.__extensionElectron')
     writeFileSync(join(directory, name), source)

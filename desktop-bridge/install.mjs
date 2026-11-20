@@ -351,12 +351,15 @@ const bridgeTarget = join(appDir, 'lib', 'plugin-browser-bridge.js')
 const bridgeSource = join(import.meta.dirname, 'plugin-browser-bridge.js')
 const proxyTarget = join(appDir, 'lib', 'guest-proxy.mjs')
 const proxySource = join(import.meta.dirname, 'guest-proxy.mjs')
+const nativeTarget = join(appDir, 'lib', 'native-guests.mjs')
+const nativeSource = join(import.meta.dirname, 'native-guests.mjs')
 const backupPath = `${mainPath}.before-bridge`
 
 /** The bridge imports its pure proxy-policy helper from the same directory. */
 function copyBridgeModules() {
   copyFileSync(bridgeSource, bridgeTarget)
   copyFileSync(proxySource, proxyTarget)
+  copyFileSync(nativeSource, nativeTarget)
 }
 
 // Moving the archive aside breaks two more places that spell `app.asar` out

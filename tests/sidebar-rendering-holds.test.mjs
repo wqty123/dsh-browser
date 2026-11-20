@@ -23,6 +23,7 @@ const source = readFileSync(new URL('../desktop-bridge/plugin-browser-bridge.js'
 writeFileSync(join(directory, 'bridge.mjs'), source)
 writeFileSync(join(directory, 'bridge-copy.mjs'), source)
 writeFileSync(join(directory, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-bridge/guest-proxy.mjs', import.meta.url)))
+writeFileSync(join(directory, 'native-guests.mjs'), readFileSync(new URL('../desktop-bridge/native-guests.mjs', import.meta.url)))
 const bridge = await import(pathToFileURL(join(directory, 'bridge.mjs')))
 
 function mount(t, { supported = true, selected = 'session-reader', marker = true, reader = { protocolVersion: 1, read() {}, wait() {} } } = {}) {

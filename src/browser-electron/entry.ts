@@ -352,7 +352,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       const detail = DesktopBridgeViewHost.refusedIframePanel()
         ? 'the DSH sidebar is an iframe and cannot support CDP tools'
         : 'no controllable DSH sidebar is available'
-      throw new Error(`dsh-builtin-browser: ${detail}. Use a host-provided sidebar/webview carrier or reconnect the existing sidebar, then retry. The Web panel supports manual browsing, not CDP tools. No standalone browser will be opened.`)
+      throw Object.assign(new Error(`dsh-builtin-browser: ${detail}. Use a host-provided sidebar/webview carrier or install the DSH native-view host patch, then retry. The Web panel supports manual browsing, not CDP tools. No standalone browser will be opened.`), { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' })
     })
     host.onLost(reportCarrierLoss)
     return host
