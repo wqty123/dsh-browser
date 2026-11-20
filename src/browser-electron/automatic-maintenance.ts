@@ -1,4 +1,4 @@
-/** User-requested Windows maintenance, coordinated outside the Desktop process tree. */
+/** User-requested Desktop maintenance (Windows and macOS), coordinated outside the Desktop process tree. */
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, open, readFile, rename, stat as statAsync, unlink, writeFile } from 'node:fs/promises'
@@ -8,7 +8,7 @@ import { prepareBridgeMaintenance } from './bridge-maintenance.ts'
 import { launchMaintenanceBroker, type MaintenanceBrokerOptions, type MaintenanceBrokerResult } from './maintenance-broker.ts'
 import { runMaintenanceLifecycle, type MaintenanceState } from './maintenance-lifecycle.ts'
 import { defaultInstallerPath, runBridgeAction, waitForRestartedBridge, type BridgeAction } from './bridge-install.ts'
-import { readDesktopIdentity } from './desktop-identity.ts'
+import { desktopPaths, readDesktopIdentity } from './desktop-identity.ts'
 import { dshHome } from './paths.ts'
 import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.ts'
 
@@ -46,8 +46,16 @@ function inside(base: string, path: string): boolean {
   const part = relative(base, path)
   return part !== '' && !isAbsolute(part) && part !== '..' && !part.startsWith('..\\') && !part.startsWith('../')
 }
-function requireLiveWindows(): void {
-  if (process.platform !== 'win32') throw new Error('automatic bridge maintenance requires Windows Desktop')
+/** Platforms whose Desktop can be quit, patched and reopened by the independent worker. */
+export function automaticMaintenanceSupported(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32' || platform === 'darwin'
+}
+/** Same-path comparison: Windows paths are case-insensitive, a macOS bundle path is not. */
+function samePath(a: string, b: string): boolean {
+  return process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
+}
+function requireLiveDesktop(): void {
+  if (!automaticMaintenanceSupported()) throw new Error('automatic bridge maintenance requires DSH Desktop on Windows or macOS')
   if (process.env.DSH_BROWSER_TEST === '1' || process.env.NODE_TEST_CONTEXT !== undefined) {
     throw new Error('automatic Desktop maintenance is forbidden in a test process')
   }
@@ -60,23 +68,51 @@ async function execute(command: string, args: readonly string[], timeout = 15_00
     })
   })
 }
+/** The Desktop GUI process on macOS: `ps` gives pid, start time, executable path and argv. */
+async function posixDesktopProcesses(root: string): Promise<DesktopProcess[]> {
+  const [started, commands] = await Promise.all([
+    execute('ps', ['-axww', '-o', 'pid=,lstart=,comm=']),
+    execute('ps', ['-axww', '-o', 'pid=,args=']),
+  ])
+  if (started.code !== 0 || commands.code !== 0) throw new Error('cannot inspect running DSH Desktop processes')
+  const argv = new Map<number, string>()
+  for (const line of commands.stdout.split('\n')) {
+    const match = /^\s*(\d+)\s(.*)$/.exec(line)
+    if (match !== null) argv.set(Number(match[1]), match[2] as string)
+  }
+  const expected = desktopPaths(root).executable
+  const rows: DesktopProcess[] = []
+  for (const line of started.stdout.split('\n')) {
+    // lstart is always five fields: "Fri Nov 20 04:10:00 2026".
+    const match = /^\s*(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d{4})\s+(.+)$/.exec(line)
+    if (match === null) continue
+    const path = (match[3] as string).trim()
+    if (!isAbsolute(path) || !samePath(path, expected)) continue
+    const at = Date.parse(match[2] as string)
+    if (!Number.isFinite(at)) throw new Error('cannot identify a running DSH Desktop process')
+    rows.push({ pid: Number(match[1]), path, command: argv.get(Number(match[1])) ?? '', started: new Date(at).toISOString() })
+  }
+  return rows.filter(p => !NODE_MODE.test(p.command))
+}
+// The Desktop also ships a Node-mode CLI under its executable; it is not a GUI to close.
+const NODE_MODE = /(?:^|\s)--expose-internals(?:\s|$)|\.[cm]?js(?:"|\s|$)|(?:^|\s)(?:--eval|--print|--input-type)(?:=|\s|$)|(?:^|\s)-(?:e|p)(?:\s|$)/i
 async function desktopProcesses(root: string): Promise<DesktopProcess[]> {
+  if (process.platform !== 'win32') return await posixDesktopProcesses(root)
   const script = "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $rows = @((Get-CimInstance Win32_Process -Filter \"Name='DeepSeek Harness.exe'\" -ErrorAction Stop) | ForEach-Object { @{pid=[int]$_.ProcessId;path=$_.ExecutablePath;command=$_.CommandLine;started=$_.CreationDate.ToUniversalTime().ToString('o')} }); ConvertTo-Json -InputObject $rows -Compress"
   const r = await execute(windowsPowerShellPath(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePowerShellScript(script)])
   if (r.code !== 0) throw new Error('cannot inspect running DSH Desktop processes')
   let value: unknown
   try { value = JSON.parse(r.stdout.replace(/^\uFEFF/, '').trim()) } catch { throw new Error('Desktop process inspection returned invalid data') }
   const rows = Array.isArray(value) ? value : value === null ? [] : [value]
-  const expected = resolve(root, 'DeepSeek Harness.exe').toLowerCase()
+  const expected = desktopPaths(root).executable
   return rows.filter((row): row is DesktopProcess => {
     if (row === null || typeof row !== 'object') throw new Error('Desktop process inspection was incomplete')
     const p = row as Partial<DesktopProcess>
     if (typeof p.path !== 'string' || p.path === '' || typeof p.command !== 'string' || !Number.isSafeInteger(p.pid) || typeof p.started !== 'string') {
       throw new Error('cannot identify a running DSH Desktop process')
     }
-    if (resolve(p.path).toLowerCase() !== expected) return false
-    // The Desktop also ships a Node-mode CLI under this exe; it is not a GUI to close.
-    return !/(?:^|\s)--expose-internals(?:\s|$)|\.[cm]?js(?:"|\s|$)|(?:^|\s)(?:--eval|--print|--input-type)(?:=|\s|$)|(?:^|\s)-(?:e|p)(?:\s|$)/i.test(p.command)
+    if (!samePath(p.path, expected)) return false
+    return !NODE_MODE.test(p.command)
   })
 }
 async function atomicJson(path: string, value: unknown, exclusive = false): Promise<void> {
@@ -222,7 +258,7 @@ function validatePlan(value: unknown, path: string, now = Date.now()): Automatic
   }
   const target = checked.target
   if (target === null || typeof target !== 'object' || !Number.isSafeInteger(target.pid) || target.pid <= 0
-    || typeof target.path !== 'string' || resolve(target.path).toLowerCase() !== join(checked.root, 'DeepSeek Harness.exe').toLowerCase()
+    || typeof target.path !== 'string' || !samePath(target.path, desktopPaths(checked.root).executable)
     || typeof target.command !== 'string' || /(?:^|\s)--type(?:=|\s)/i.test(target.command)
     || typeof target.started !== 'string' || !Number.isFinite(Date.parse(target.started)) || Date.parse(target.started) > now) {
     throw new Error('invalid automatic maintenance target process')
@@ -258,11 +294,11 @@ export async function commitAutomaticMaintenance(jobId: string, home = homePath(
 
 /** Only the new, authenticated explicit-click endpoint calls this function. */
 export async function startAutomaticMaintenance(action: BridgeAction, root: string, options: AutomaticMaintenanceOptions = {}): Promise<AutomaticMaintenanceJob> {
-  requireLiveWindows()
+  requireLiveDesktop()
   if (!['install', 'uninstall'].includes(action)) throw new Error('invalid bridge maintenance action')
   if (options.locale !== undefined && !['zh', 'en'].includes(options.locale)) throw new Error('invalid bridge maintenance locale')
   if (!readDesktopIdentity(root).ok) throw new Error('the maintenance target is not a verified DSH Desktop installation')
-  if (!existsSync(quitPath)) throw new Error('the packaged Desktop quit helper is missing')
+  if (process.platform === 'win32' && !existsSync(quitPath)) throw new Error('the packaged Desktop quit helper is missing')
   const processes = await desktopProcesses(root)
   const mains = processes.filter(p => !/(?:^|\s)--type(?:=|\s)/i.test(p.command))
   if (mains.length !== 1) throw new Error('automatic maintenance requires one running DSH Desktop window')
@@ -318,8 +354,22 @@ export async function startAutomaticMaintenance(action: BridgeAction, root: stri
   }
 }
 
+/**
+ * Ask the verified macOS Desktop to quit through its own Quit command (Apple event), exactly as
+ * Cmd-Q does: any running-task confirmation stays with the user. The pid and start time are
+ * re-read first, so a reused pid or a second copy of the app is never asked.
+ */
+async function requestPosixQuit(plan: AutomaticPlan): Promise<void> {
+  const current = (await desktopProcesses(plan.root)).filter(p => !/(?:^|\s)--type(?:=|\s)/i.test(p.command))
+  if (current.length !== 1 || current[0]?.pid !== plan.target.pid || current[0].started !== plan.target.started) {
+    throw new Error('the running Desktop is not the one maintenance was requested from; no quit was sent')
+  }
+  const result = await execute('osascript', ['-e', 'on run argv', '-e', 'tell application (item 1 of argv) to quit', '-e', 'end run', plan.root], 25_000)
+  if (result.code !== 0) throw new Error(result.output || 'the Desktop Quit command was not accepted')
+}
+
 async function runWorker(path: string): Promise<void> {
-  requireLiveWindows()
+  requireLiveDesktop()
   const plan = validatePlan(JSON.parse(await readFile(path, 'utf8')), path)
   const checkCancelled = (): void => {
     if (existsSync(join(plan.directory, 'cancel.json'))) throw new Error('bridge maintenance was cancelled before Desktop exited')
@@ -359,6 +409,10 @@ async function runWorker(path: string): Promise<void> {
         if (!committed) throw new Error('the maintenance request was not committed; Desktop remains open')
         checkCancelled()
         await publish({ phase: 'closing', action: plan.action, at: new Date().toISOString() })
+        if (process.platform !== 'win32') {
+          await requestPosixQuit(plan)
+          return
+        }
         await startMaintenanceProgressNotification({ jobId: plan.id, directory: plan.directory, locale: plan.locale ?? 'zh' })
         const result = await execute(windowsPowerShellPath(), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', quitPath,
           '-TargetPid', String(plan.target.pid), '-ExpectedExecutable', plan.target.path,
@@ -391,7 +445,7 @@ async function runWorker(path: string): Promise<void> {
         const environment = { ...process.env }
         for (const key of Object.keys(environment)) if (key.toUpperCase() === 'ELECTRON_RUN_AS_NODE' || key.toUpperCase().startsWith('DSH_BRIDGE_')) delete environment[key]
         return await new Promise<number>((resolve, reject) => {
-          const child = spawn(join(plan.root, 'DeepSeek Harness.exe'), [], { cwd: plan.root, env: environment, stdio: 'ignore', windowsHide: true, detached: true })
+          const child = spawn(desktopPaths(plan.root).executable, [], { cwd: plan.root, env: environment, stdio: 'ignore', windowsHide: true, detached: true })
           child.once('error', reject)
           child.once('spawn', () => { child.unref(); resolve(child.pid as number) })
         })

@@ -10,6 +10,8 @@ import type { AutomaticMaintenanceJob } from './automatic-maintenance.ts'
 export const AUTOMATIC_MAINTENANCE_ROUTE = '/dsh-builtin-browser/bridge-maintenance'
 export interface AutomaticMaintenanceRouteDeps {
   readonly supported: () => boolean
+  /** How Desktop is asked to quit: `menu` waits for the panel to open the native menu, `self` needs nothing from it. */
+  readonly quit?: () => 'menu' | 'self'
   readonly read: () => AutomaticMaintenanceJob | undefined
   readonly start: (action: BridgeAction, options?: { readonly locale?: 'zh' | 'en' }) => Promise<AutomaticMaintenanceJob>
   /** Commit only after the accepted response has been flushed to the client. */
@@ -30,7 +32,7 @@ export function createAutomaticMaintenanceHandler(deps: AutomaticMaintenanceRout
       replyJson(response, 200, { ok: true, protocol: 1, supported: deps.supported(), ...job === undefined ? {} : { job } })
       return
     }
-    if (!deps.supported()) { replyJson(response, 409, { ok: false, error: 'automatic bridge maintenance requires Windows Desktop' }); return }
+    if (!deps.supported()) { replyJson(response, 409, { ok: false, error: 'automatic bridge maintenance requires DSH Desktop on Windows or macOS' }); return }
     let action: BridgeAction
     let locale: 'zh' | 'en' | undefined
     try {
@@ -56,7 +58,7 @@ export function createAutomaticMaintenanceHandler(deps: AutomaticMaintenanceRout
         response.once('finish', commitOnce)
         response.once('close', commitOnce)
       }
-      replyJson(response, 202, { ok: true, accepted: true, protocol: 1, job })
+      replyJson(response, 202, { ok: true, accepted: true, protocol: 1, quit: deps.quit?.() ?? 'menu', job })
     } catch (error) {
       replyJson(response, 409, { ok: false, error: String(error) })
     } finally { starting = false }

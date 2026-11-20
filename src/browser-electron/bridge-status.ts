@@ -15,11 +15,12 @@
  * @module dsh-browser/browser-electron/bridge-status
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
-import { readDesktopIdentity } from './desktop-identity.ts'
+import { desktopPaths, readDesktopIdentity } from './desktop-identity.ts'
 
 // A normal Electron existsSync(app.asar) caches the archive and keeps it locked on Windows.
 // Status inspection must leave maintenance free to rename it after Desktop exits.
@@ -58,13 +59,9 @@ export function findDesktopInstall(localAppData?: string): string | undefined {
       // Not a directory: fall through to the usual roots.
     }
   }
-  const roots = localAppData === undefined
-    ? [process.env.LOCALAPPDATA ?? '', process.env['ProgramFiles'] ?? '', process.env['ProgramFiles(x86)'] ?? '', process.env.APPDATA ?? '', process.env.ProgramData ?? '']
-      .filter(base => base !== '')
-      .map(base => (base === process.env.LOCALAPPDATA ? join(base, 'Programs') : base))
-    : [join(localAppData, 'Programs')]
+  const roots = localAppData === undefined ? desktopInstallRoots() : [join(localAppData, 'Programs')]
   for (const base of roots) {
-    for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
+    for (const named of DESKTOP_INSTALL_NAMES) {
       const candidate = join(base, named)
       if (isDesktop(candidate)) return candidate
     }
@@ -79,6 +76,22 @@ export function findDesktopInstall(localAppData?: string): string | undefined {
     }
   }
   return undefined
+}
+
+/** Directory names an install is given: a plain directory on Windows, an `.app` bundle on macOS. */
+const DESKTOP_INSTALL_NAMES = ['DSH Desktop', 'DeepSeek Harness', 'DSH Desktop.app', 'DeepSeek Harness.app']
+
+/**
+ * Where this OS keeps installed applications, most specific first.
+ * @returns the existing-or-not base directories to probe.
+ */
+function desktopInstallRoots(): string[] {
+  const windows = [process.env.LOCALAPPDATA ?? '', process.env['ProgramFiles'] ?? '', process.env['ProgramFiles(x86)'] ?? '', process.env.APPDATA ?? '', process.env.ProgramData ?? '']
+    .filter(base => base !== '')
+    .map(base => (base === process.env.LOCALAPPDATA ? join(base, 'Programs') : base))
+  // The machine-wide macOS roots cannot be redirected, so a test process never reads them.
+  const testing = process.env.DSH_BROWSER_TEST === '1' || process.env.NODE_TEST_CONTEXT !== undefined
+  return process.platform === 'darwin' && !testing ? [...windows, '/Applications', join(homedir(), 'Applications')] : windows
 }
 
 /** The marker the installer inserts into the shell's main.js. */
@@ -159,7 +172,11 @@ function repairCommand(installRoot: string | undefined): string | undefined {
  * @returns the current state.
  */
 export function readBridgeStatus(installRoot: string): BridgeStatus {
-  const resources = join(installRoot, 'resources')
+  let resources: string
+  try { resources = desktopPaths(installRoot).resources }
+  catch (error) {
+    return { state: 'missing', present: false, installRoot, archivePresent: false, detail: `not a DSH Desktop install: ${String(error)}` }
+  }
   const appDir = join(resources, 'app')
   const mainPath = join(appDir, 'lib', 'main.js')
   const archivePath = join(resources, 'app.asar')

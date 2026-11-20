@@ -201,7 +201,7 @@ const react = require("react")
     "readiness.bridge.working": "正在准备维护…",
     "readiness.bridge.inProgress": "维护进行中…",
     "readiness.bridge.maintenanceHint": "点击后将正常退出并重启 DSH。",
-    "readiness.bridge.progressHint": "维护期间将显示独立进度，完成后自动启动 DSH。",
+    "readiness.bridge.progressHint": "DSH 将退出并完成维护，结束后自动重新启动。",
     "readiness.bridge.localOnly": "请在本机 DSH 桌面的设置中操作。",
     "readiness.bridge.unsupported": "请更新并重启 DSH 后重试。",
     "readiness.bridge.phase.armed": "正在准备退出 DSH…",
@@ -370,7 +370,7 @@ const react = require("react")
     "readiness.bridge.working": "Preparing maintenance…",
     "readiness.bridge.inProgress": "Maintenance in progress…",
     "readiness.bridge.maintenanceHint": "DSH will exit normally and restart after you click.",
-    "readiness.bridge.progressHint": "A separate progress window will appear. DSH starts automatically when maintenance finishes.",
+    "readiness.bridge.progressHint": "DSH quits for maintenance and starts again automatically when it finishes.",
     "readiness.bridge.localOnly": "Use settings in DSH Desktop on this computer.",
     "readiness.bridge.unsupported": "Update and restart DSH, then try again.",
     "readiness.bridge.phase.armed": "Preparing to exit DSH…",
@@ -968,7 +968,9 @@ const react = require("react")
       if (bridgePending.current || busy || bridgeActive) return
       const desktopMenu = () => typeof document.querySelector === "function"
         ? document.querySelector("[data-windows-menu]")?.shadowRoot?.querySelector("button") : null
-      if (typeof desktopMenu()?.click !== "function") {
+      // Windows Desktop draws its own menu; macOS uses the native menu bar, so its Desktop preload is the proof.
+      const inDesktop = typeof desktopMenu()?.click === "function" || typeof globalThis.dshDesktop === "object"
+      if (!inDesktop) {
         setBridgeError({ key: "readiness.bridge.localOnly" })
         return
       }
@@ -994,6 +996,7 @@ const react = require("react")
         accepted = true
         bridgeJobId.current = data.job.id
         if (alive.current) setBridgeJob(data.job)
+        if (data.quit === "self") return
         const menu = desktopMenu()
         if (typeof menu?.click !== "function") throw new Error(t("readiness.bridge.localOnly"))
         // The armed worker selects Exit in this official native menu. This opens that menu only

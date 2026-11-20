@@ -241,3 +241,47 @@ test('a clean uninstall with a CLI launcher still exits 0', () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+/** An unpacked macOS bundle: the same app under Contents/Resources, with the POSIX CLI launcher. */
+function makeBundleInstall() {
+  const { root: plain, body } = makeInstall()
+  const root = join(dirname(plain), 'DeepSeek Harness.app')
+  mkdirSync(join(root, 'Contents', 'MacOS'), { recursive: true })
+  writeFileSync(join(root, 'Contents', 'Info.plist'), '<plist/>')
+  const app = join(root, 'Contents', 'Resources', 'app')
+  mkdirSync(join(app, 'lib'), { recursive: true })
+  writeFileSync(join(app, 'lib', 'main.js'), body)
+  writeFileSync(join(app, 'package.json'), readFileSync(join(plain, 'resources', 'app', 'package.json')))
+  const shim = join(root, 'Contents', 'Resources', 'runtime', 'cli', 'bin', 'dsh')
+  mkdirSync(dirname(shim), { recursive: true })
+  const launcher = [
+    '#!/bin/sh',
+    'resources=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)',
+    'ELECTRON_RUN_AS_NODE=1 exec "$resources/../MacOS/DeepSeek Harness" --expose-internals "$resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js" "$@"',
+    '',
+  ].join('\n')
+  writeFileSync(shim, launcher)
+  return { root, app, body, shim, launcher }
+}
+
+test('a macOS bundle is patched under Contents/Resources and restored by --revert', () => {
+  const { root, app, body, shim, launcher } = makeBundleInstall()
+  const mainPath = join(app, 'lib', 'main.js')
+  try {
+    const installed = run([root])
+    assert.equal(installed.code, 0, installed.out)
+    assert.ok(readFileSync(mainPath, 'utf8').includes('plugin-browser-bridge.js'))
+    assert.ok(existsSync(join(app, 'lib', 'plugin-browser-bridge.js')))
+    const patchedShim = readFileSync(shim, 'utf8')
+    assert.match(patchedShim, /dsh_app=\$resources\/app\n/)
+    assert.match(patchedShim, /"\$dsh_app\/dsh\/node_modules\/@deepseek-ai\/dsh-desktop-host\/lib\/cli\.js"/)
+    assert.doesNotMatch(patchedShim, /"\$resources\/app\.asar\/dsh\//)
+    assert.equal(existsSync(join(root, 'resources')), false, 'nothing is written beside Contents')
+    const reverted = run([root, '--revert'])
+    assert.equal(reverted.code, 0, reverted.out)
+    assert.equal(readFileSync(mainPath, 'utf8'), body)
+    assert.equal(readFileSync(shim, 'utf8'), launcher)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

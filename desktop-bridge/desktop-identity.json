@@ -5,5 +5,21 @@
     "dsh-desktop"
   ],
   "mainEntry": "lib/main.js",
-  "_layoutNote": "resources/app.asar wins over resources/app whenever it exists, so identity is read from the archive in that case and never from the sibling extraction, which the updater leaves behind and which may be a different build."
+  "_layoutNote": "resources/app.asar wins over resources/app whenever it exists, so identity is read from the archive in that case and never from the sibling extraction, which the updater leaves behind and which may be a different build.",
+  "layouts": [
+    {
+      "name": "macos-bundle",
+      "marker": "Contents/Info.plist",
+      "resources": "Contents/Resources",
+      "executable": "Contents/MacOS/DeepSeek Harness",
+      "cliLauncher": "runtime/cli/bin/dsh"
+    },
+    {
+      "name": "directory",
+      "resources": "resources",
+      "executable": "DeepSeek Harness.exe",
+      "cliLauncher": "runtime/cli/bin/dsh.cmd"
+    }
+  ],
+  "_layoutsNote": "Where an install keeps its resources and executable. The first layout whose marker exists under the install root applies; the last one has no marker and is the default. A macOS .app bundle keeps resources in Contents/Resources; Windows keeps them in resources/ beside the .exe."
 }

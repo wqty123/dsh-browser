@@ -89,3 +89,7 @@ test('unsupported progress language is rejected without starting a worker', asyn
   assert.equal(r.statusCode, 400)
   assert.deepEqual(f.calls, [])
 })
+test('the acknowledgement says whether the panel must open the Desktop menu', async () => {
+  assert.equal((await fixture().request()).body.quit, 'menu', 'Windows hosts keep the menu handoff by default')
+  assert.equal((await fixture({ quit: () => 'self' }).request()).body.quit, 'self', 'macOS quits through its own Apple event')
+})
