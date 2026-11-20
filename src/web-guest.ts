@@ -1,7 +1,14 @@
-/** Register only the CSP-sandboxed opaque-origin guest endpoint. */
+/**
+ * 侧栏 guest 代理的路由注册。
+ *
+ * 这条路由原先只在 `browser-electron` 行里注册。web 端没有可用的 Electron 二进制时那行会被关掉，
+ * 结果侧栏 iframe 请求 `/dsh-builtin-browser/browser-view/guest` 直接 404 —— 表现为「搜索后白屏」。
+ * 代理与载体无关，注册放到根行，任何载体组合下侧栏都能打开页面。
+ * @module dsh-builtin-browser/web-guest
+ */
 import type { Context } from '@deepseek-ai/cordis'
 import { overlayScript } from './browser-reference/entry.ts'
-import { GUEST_ROUTE, handleGuest } from './browser-electron/guest-route.ts'
+import { COOKIE_SYNC_ROUTE, GUEST_ROUTE, handleCookieSync, handleGuest } from './browser-electron/guest-route.ts'
 
 /**
  * 浮条安装脚本；链接和表单由 guest runtime 统一处理。
@@ -30,5 +37,10 @@ export function registerWebGuest(ctx: Context): void {
       path: GUEST_ROUTE,
       handler: (request, response) => handleGuest(request as never, response as never, overlayTag(), ''),
     }, 'dsh-builtin-browser: web guest proxy (root row)'))
+    host.effect(() => host.webServer.register({
+      kind: 'exact',
+      path: COOKIE_SYNC_ROUTE,
+      handler: (request, response) => handleCookieSync(request as never, response as never),
+    }, 'dsh-builtin-browser: web guest cookie sync (root row)'))
   })
 }

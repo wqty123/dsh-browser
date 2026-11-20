@@ -52,6 +52,7 @@ function isSelfTarget(url: URL): boolean {
 }
 
 export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/guest'
+export const COOKIE_SYNC_ROUTE = '/dsh-builtin-browser/browser-view/cookie-sync'
 
 class UnsafeGuestTargetError extends Error {}
 
@@ -401,7 +402,7 @@ export async function handleGuest(
       }
       const rendered = await guestEnginePool.fetchRenderedDocument(target, cookieJar)
       if (rendered !== undefined) {
-        const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(rendered.finalUrl.href) + '</script>'
+        const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(rendered.finalUrl.href, cookieJar.getCookieHeader(rendered.finalUrl, { includeHttpOnly: false }) ?? '') + '</script>'
         let body = rewriteDocument(rendered.html, rendered.finalUrl)
         if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
         else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
@@ -525,7 +526,7 @@ export async function handleGuest(
       finalStatus = rendered.status
     }
   }
-  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(finalTarget.href) + '</script>'
+  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(finalTarget.href, cookieJar.getCookieHeader(finalTarget, { includeHttpOnly: false }) ?? '') + '</script>'
   let body = rewriteDocument(raw, finalTarget)
   if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
   else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
@@ -537,4 +538,45 @@ export async function handleGuest(
   out.set('content-type', type)
   response.writeHead(finalStatus, Object.fromEntries(out))
   response.end(body)
+}
+
+/** Sync in-page `document.cookie` writes into the host-isolated GuestCookieJar without touching 127.0.0.1 cookies. */
+export async function handleCookieSync(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if ((request.method ?? 'GET').toUpperCase() !== 'POST') {
+    response.writeHead(405, { 'content-type': 'application/json; charset=utf-8' })
+    response.end(JSON.stringify({ ok: false, error: 'method-not-allowed' }))
+    return
+  }
+  try {
+    const chunks: Buffer[] = []
+    let size = 0
+    for await (const chunk of request) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      size += buf.length
+      if (size > 64 * 1024) {
+        response.writeHead(413, { 'content-type': 'application/json; charset=utf-8' })
+        response.end(JSON.stringify({ ok: false, error: 'payload-too-large' }))
+        return
+      }
+      chunks.push(buf)
+    }
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { url?: unknown; cookie?: unknown }
+    if (typeof parsed.url !== 'string' || typeof parsed.cookie !== 'string') {
+      response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+      response.end(JSON.stringify({ ok: false, error: 'invalid-payload' }))
+      return
+    }
+    const target = new URL(parsed.url)
+    if (!/^https?:$/u.test(target.protocol) || isSelfTarget(target)) {
+      response.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+      response.end(JSON.stringify({ ok: false, error: 'target-not-allowed' }))
+      return
+    }
+    cookieJar.setCookies(target, [parsed.cookie], { fromDocument: true })
+    response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+    response.end(JSON.stringify({ ok: true }))
+  } catch (error) {
+    response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+    response.end(JSON.stringify({ ok: false, error: String((error as Error).message ?? error) }))
+  }
 }

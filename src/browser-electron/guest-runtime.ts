@@ -1,10 +1,13 @@
 /** Early, self-contained interception for documents served from the guest proxy. */
-export function guestRuntimeScript(pageUrl: string): string {
+export function guestRuntimeScript(pageUrl: string, initialCookies: string = ''): string {
   return `(() => {
   if (window.__dshGuestRuntime) return;
   window.__dshGuestRuntime = true;
   let real = ${JSON.stringify(pageUrl).replace(/</gu, '\\u003c')};
-  const route = '/dsh-builtin-browser/browser-view/isolated-guest';
+  const route = '/dsh-builtin-browser/browser-view/guest';
+  const cookieSyncRoute = '/dsh-builtin-browser/browser-view/cookie-sync';
+  const internalPrefix = '/dsh-builtin-browser/';
+  let cookieCache = ${JSON.stringify(initialCookies).replace(/</gu, '\\u003c')};
   const attempt = fn => { try { return fn(); } catch {} };
   const realURL = value => {
     const raw = String(value);
@@ -23,12 +26,23 @@ export function guestRuntimeScript(pageUrl: string): string {
     try {
       const raw = String(value);
       const hostURL = new URL(raw, location.origin + '/');
-      if (hostURL.origin === location.origin && hostURL.pathname === route) return raw;
+      if (hostURL.origin === location.origin && (hostURL.pathname === route || hostURL.pathname.startsWith(internalPrefix))) return raw;
       const url = realURL(raw);
       return /^https?:$/.test(url.protocol) ? route + '?u=' + encodeURIComponent(url.href) : raw;
     } catch { return value; }
   };
+  const fromProxy = value => {
+    try {
+      const u = new URL(String(value), location.origin + '/');
+      if (u.origin === location.origin && u.pathname === route) {
+        const inner = u.searchParams.get('u');
+        if (inner) return inner;
+      }
+      return String(value);
+    } catch { return String(value); }
+  };
   window.__dshGuestToProxy = toProxy;
+  window.__dshGuestFromProxy = fromProxy;
   const nativeFetch = window.fetch && window.fetch.bind(window);
   window.__dshGuestFetch = nativeFetch;
   attempt(() => {
@@ -39,7 +53,7 @@ export function guestRuntimeScript(pageUrl: string): string {
         if (!/^https?:$/.test(new URL(url, location.href).protocol)) return nativeFetch(input, init);
         const headers = new Headers(init && init.headers || (isRequest ? input.headers : undefined));
         headers.set('x-dsh-guest-sub', '1');
-        const options = Object.assign({}, init, { headers, mode: 'cors', credentials: 'omit' });
+        const options = Object.assign({}, init, { headers, mode: 'same-origin' });
         return nativeFetch(isRequest ? new Request(new URL(url, location.href), input) : url, options);
       } catch (error) { return Promise.reject(error); }
     };
@@ -69,25 +83,20 @@ export function guestRuntimeScript(pageUrl: string): string {
       const next = attempt(() => realURL(url));
       const result = original.call(this, state, title, toProxy(url));
       if (next && /^https?:$/.test(next.protocol)) real = next.href;
-      report();
       return result;
     };
   });
-  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length }, '*'));
-  attempt(() => window.addEventListener('message', event => {
-    if (event.source !== parent || !event.data || event.data.type !== 'dsh.browser.guest.history') return;
-    if (event.data.delta === -1) history.back();
-    else if (event.data.delta === 1) history.forward();
-  }));
-  attempt(() => window.addEventListener('DOMContentLoaded', report));
   attempt(() => window.addEventListener('popstate', () => {
     const next = attempt(() => realURL(location.href));
     if (next) real = next.href;
-    report();
   }));
   attempt(() => {
     const set = Element.prototype.setAttribute;
     Element.prototype.setAttribute = function(name, value) {
+      if (/^integrity$/i.test(name)) return;
+      if (/^target$/i.test(name) && /^_(?:blank|new|top|parent)$/i.test(String(value))) {
+        return set.call(this, name, '_self');
+      }
       return set.call(this, name, /^(src|href|action)$/i.test(name) ? toProxy(value) : value);
     };
   });
@@ -188,6 +197,40 @@ export function guestRuntimeScript(pageUrl: string): string {
     HTMLFormElement.prototype.submit = function() {
       if (!attempt(() => prepareForm(this))) return submit.call(this);
     };
+  });
+  attempt(() => {
+    if (typeof EventSource === 'function') {
+      const NativeES = EventSource;
+      window.EventSource = function(url, config) { return new NativeES(toProxy(url), config); };
+      window.EventSource.prototype = NativeES.prototype;
+    }
+  });
+  attempt(() => {
+    if (typeof document !== 'object' || document === null) return;
+    Object.defineProperty(document, 'cookie', {
+      configurable: true,
+      get() { return cookieCache; },
+      set(rawCookie) {
+        const text = String(rawCookie || '');
+        const first = text.split(';')[0] || '';
+        const eq = first.indexOf('=');
+        if (eq > 0) {
+          const key = first.slice(0, eq).trim();
+          const val = first.slice(eq + 1).trim();
+          const parts = cookieCache ? cookieCache.split('; ').filter(p => p !== '' && p.slice(0, p.indexOf('=')).trim() !== key) : [];
+          if (!/max-age\s*=\s*0/i.test(text)) parts.push(key + '=' + val);
+          cookieCache = parts.join('; ');
+        }
+        if (nativeFetch) {
+          nativeFetch(cookieSyncRoute, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ url: real, cookie: text }),
+          }).catch(() => {});
+        }
+      },
+    });
   });
 })();`;
 }
