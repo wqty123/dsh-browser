@@ -1,7 +1,7 @@
 /** Iframe navigation provider with bounded application-known history. */
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { IframePresentation } from '../view/IframePresentation.ts'
-import { emptyBrowserFrame, type BrowserFrame, type BrowserFrameState, type BrowserLoadError, type BrowserSandboxControl } from './BrowserFrame.ts'
+import { emptyBrowserFrame, type BrowserCarrierState, type BrowserFrame, type BrowserFrameState, type BrowserLoadError, type BrowserSandboxControl } from './BrowserFrame.ts'
 import type { BrowserPageOptions } from './BrowserPage.ts'
 import { BrowserNavigation } from './BrowserNavigation.ts'
 import type { BrowserTarget } from './url.ts'
@@ -23,6 +23,8 @@ function toTarget(url: string, title: string): BrowserTarget | undefined {
 
 /** Owns iframe navigation; the view reports loads without reading cross-origin content. */
 export class IframeImpl implements BrowserFrame {
+  private readonly carrier = createSnapshotStore<BrowserCarrierState>({ stage: 'idle' })
+  readonly lifecycle = { getSnapshot: () => this.carrier.getSnapshot(), subscribe: (listener: () => void) => this.carrier.subscribe(listener) }
   readonly sandbox: BrowserSandboxControl = { setEnabled: (enabled) => { this.setSandbox(enabled) } }
   private readonly navigation: BrowserNavigation
   private readonly store: SnapshotStore<BrowserFrameState>
@@ -48,6 +50,17 @@ export class IframeImpl implements BrowserFrame {
     const navigation = this.navigation.snapshot.navigation
     if (navigation.status !== 'empty' && navigation.revision !== revision) return
     this.navigation.frameLoaded(revision)
+    this.publish()
+  }
+
+  handleGuestPending(): void {
+    this.carrier.set({ stage: 'guest' })
+  }
+
+  handleGuestReady(revision: number, pageId: string): void {
+    if (this.disposed || this.navigation.snapshot.navigation.status === 'empty'
+      || this.navigation.snapshot.navigation.revision !== revision) return
+    this.carrier.set({ stage: 'ready', guestId: pageId })
     this.publish()
   }
 
@@ -134,7 +147,8 @@ export class IframeImpl implements BrowserFrame {
   private snapshot(): BrowserFrameState {
     const state = this.navigation.snapshot
     const target = BrowserNavigation.current(state)
-    return { navigationId: this.navigationId, target, address: target === undefined ? 'empty' : state.navigation.status === 'unknown' ? 'unknown' : 'requested',
+    return { navigationId: this.navigationId, target, address: target === undefined ? 'empty' : state.navigation.status === 'unknown' ? 'unknown'
+      : this.carrier.getSnapshot().stage === 'ready' ? 'observed' : 'requested',
       loading: state.navigation.status === 'loading' && this.error === undefined,
       canGoBack: this.navigation.canGoBack || this.presentation.historyDepth() > 1,
       canGoForward: this.navigation.canGoForward || this.frameHistoryForward,

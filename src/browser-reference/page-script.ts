@@ -1356,6 +1356,15 @@ export function highlightScript(): string {
   return script('return JSON.stringify(highlightText(spec))')
 }
 
+export function guestReferenceHandlerScript(): string {
+  return `function (operation, spec) { ${PAGE_LIB}
+    if (operation === 'text') { var map = flatTextMap(spec.maxChars, false, spec.legacy); return { ok: true, text: map.text } }
+    if (operation === 'highlight') return highlightText(spec)
+    if (operation === 'element') return revealElement(spec)
+    throw new Error('unsupported reference operation')
+  }`
+}
+
 /** Locate one image or table by its stored anchor, scroll to it and highlight it. */
 export function revealElementScript(): string {
   return script('return JSON.stringify(revealElement(spec))')

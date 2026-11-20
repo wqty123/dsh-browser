@@ -18,6 +18,7 @@
  */
 import type { KeyValueStorage, OrderedReferenceGroup } from '../types.ts'
 import { referenceOwnerKey } from '../../../../reference-owner.ts'
+import type { ReferenceSourcePage } from '../../../browser/iframe-reference.ts'
 import { createDeliveryQueue, type DeliveryQueue } from '../pending-delivery.ts'
 import type { TextPosition } from '../ordered-submission.ts'
 import {
@@ -209,7 +210,7 @@ export interface ProductionRuntime {
    * another page (or none at all) the only useful answer is to open the stored
    * URL there and try again, not to explain that it could not.
    */
-  setSourceOpener(opener: ((url: string, signal: AbortSignal) => Promise<{ readonly pageId: string }>) | undefined): void
+  setSourceOpener(opener: ((url: string, signal: AbortSignal) => Promise<ReferenceSourcePage>) | undefined): void
   /** 一条引用的可展示详情（消息胶囊悬停卡用）。 */
   referenceDetail(referenceId: string): (StoredReflection & { readonly sessionId: string; readonly card: CardViewModel }) | undefined
   /** Activate a canonical `dsh-browser-ref:` URI (reply-side link bridge). */
@@ -265,7 +266,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
    * the source page: only the outcome the person ends up with is reported.
    */
   let mutedReveal = 0
-  let sourceOpener: ((url: string, signal: AbortSignal) => Promise<{ readonly pageId: string }>) | undefined
+  let sourceOpener: ((url: string, signal: AbortSignal) => Promise<ReferenceSourcePage>) | undefined
   let sourceOpening: AbortController | undefined
   let revealIntent = 0
   let lastIssue: string | undefined
@@ -897,7 +898,11 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       const url = referenceDetail(referenceId)?.snapshot.source.pageUrl
       if (active() && (status === 'session-unavailable' || status === 'page-mismatch') && url && sourceOpener !== undefined) {
         const ready = await sourceOpener(url, opening.signal)
-        status = await attempt(ready.pageId)
+        const detail = referenceDetail(referenceId)
+        if (!active()) return 'superseded'
+        status = ready.reveal !== undefined && detail !== undefined
+          ? await ready.reveal(detail.snapshot, partId, opening.signal)
+          : await attempt(ready.pageId)
       }
     } catch {
       // A tab-open refusal is not a reveal acknowledgement.

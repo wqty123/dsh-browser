@@ -14,9 +14,11 @@ export function createIframePage(options: BrowserPageOptions, sessionId?: string
     loaded: (revision) => { frame.handleLoaded(revision) },
     observed: (revision, observedUrl) => { frame.handleObserved(revision, observedUrl) },
     ...(sessionId === undefined ? {} : { reference: (intent: object) => captureReferenceIntent(intent, sessionId) }),
+    guestReady: (revision, pageId) => { frame.handleGuestReady(revision, pageId) },
+    guestPending: () => { frame.handleGuestPending() },
     failed: (revision) => { frame.handleLoadFailed(revision) },
     remounted: () => { frame.reload() },
-  })
+  }, sessionId)
   const frame = new IframeImpl(options, presentation)
   return { frame, presentation }
 }

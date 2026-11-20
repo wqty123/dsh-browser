@@ -1,6 +1,7 @@
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { BrowserInitializationReader } from '../../../browser/initialization.ts'
 import { sameReferenceDocument } from '../../../../reference-page.ts'
+import { iframeReferenceSource, type ReferenceSourcePage } from '../../../browser/iframe-reference.ts'
 
 export interface SourceSidebar {
   openTabIn(sessionId: string, kind: string, options: { readonly params: { readonly url: string } }): unknown
@@ -8,11 +9,17 @@ export interface SourceSidebar {
 }
 
 export async function openReferenceSource(sidebar: SourceSidebar, reader: BrowserInitializationReader,
-  owner: string, url: string, signal: AbortSignal): Promise<{ readonly pageId: string }> {
+  owner: string, url: string, signal: AbortSignal): Promise<ReferenceSourcePage> {
   if (!owner || typeof sidebar?.openTabIn !== 'function' || typeof sidebar.tabsIn !== 'function'
     || typeof reader?.wait !== 'function') throw new Error('acknowledged sidebar initialization unavailable')
   signal.throwIfAborted()
   const sessionId = owner
+  const sourcePage = (pageId: string): ReferenceSourcePage => {
+    const iframe = iframeReferenceSource(pageId, owner)
+    if (iframe !== undefined) return iframe
+    if (pageId.startsWith('iframe:')) throw new Error('source iframe is no longer owned by this conversation')
+    return { pageId }
+  }
   const previous = new Map(sidebar.tabsIn(sessionId).map(tab => [tab.id,
     reader.read({ sessionId, tabId: tab.id as TabId, url })?.requestId]))
   const existing = sidebar.tabsIn(sessionId).filter(tab => tab.kind === 'browser')
@@ -20,7 +27,7 @@ export async function openReferenceSource(sidebar: SourceSidebar, reader: Browse
     const page = reader.current({ sessionId, tabId: tab.id as TabId })
     if (page !== undefined && sameReferenceDocument(page.url, url)) {
       if (!page.guestId) throw new Error('source highlighting requires a controllable sidebar guest')
-      return { pageId: page.guestId }
+      return sourcePage(page.guestId)
     }
   }
   let tabId: TabId
@@ -38,5 +45,5 @@ export async function openReferenceSource(sidebar: SourceSidebar, reader: Browse
   signal.throwIfAborted()
   const receipt = await reader.wait({ sessionId, tabId, url, afterRequestId }, signal)
   if (!receipt.guestId) throw new Error('source highlighting requires a controllable sidebar guest')
-  return { pageId: receipt.guestId }
+  return sourcePage(receipt.guestId)
 }

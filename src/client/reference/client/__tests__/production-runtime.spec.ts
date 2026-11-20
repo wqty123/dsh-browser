@@ -383,4 +383,20 @@ describe('revealReference — it goes to the source page', () => {
     expect(runtime.snapshot().reveal?.status).toBe('session-unavailable')
     expect(runtime.snapshot().reveal?.message).toContain('标签页')
   })
+
+  it('uses the acknowledged Web source channel instead of retrying the native reveal route', async () => {
+    const { http, runtime, card } = await withCard()
+    http.revealOutcome = { ok: true, status: 'session-unavailable' }
+    let highlighted = false
+    runtime.setSourceOpener(async () => ({ pageId: 'iframe:owned', reveal: async (snapshot, partId, signal) => {
+      expect(snapshot.referenceId).toBe(card.referenceId)
+      expect(partId).toBeUndefined()
+      expect(signal.aborted).toBe(false)
+      highlighted = true
+      return 'revealed'
+    } }))
+    expect(await runtime.revealReference(card.referenceId)).toBe('revealed')
+    expect(highlighted).toBe(true)
+    expect(http.revealCalls).toHaveLength(1)
+  })
 })

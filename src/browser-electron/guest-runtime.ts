@@ -1,3 +1,5 @@
+import { guestReferenceHandlerScript } from '../browser-reference/page-script.ts'
+
 /** Early, self-contained interception for documents served from the guest proxy. */
 export function guestRuntimeScript(pageUrl: string): string {
   return `(() => {
@@ -74,13 +76,35 @@ export function guestRuntimeScript(pageUrl: string): string {
     };
   });
   let loadId;
-  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length, loadId }, '*'));
+  let referenceRequestId = 0;
+  const reference = ${guestReferenceHandlerScript()};
+  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length, loadId, ready: document.readyState !== 'loading' }, '*'));
   attempt(() => window.addEventListener('message', event => {
     if (event.source !== parent || !event.data) return;
     if (event.data.type === 'dsh.browser.guest.navigation.request') {
       if (!Number.isSafeInteger(event.data.loadId) || event.data.loadId <= 0) return;
       loadId = event.data.loadId;
       report();
+    } else if (event.data.type === 'dsh.browser.guest.reference.request') {
+      const data = event.data;
+      if (event.origin !== location.origin || data.loadId !== loadId || loadId === undefined
+        || !Number.isSafeInteger(data.requestId) || data.requestId <= referenceRequestId) return;
+      referenceRequestId = data.requestId;
+      const ack = { type: 'dsh.browser.guest.reference.ack', requestId: data.requestId, loadId, url: real };
+      try {
+        const current = new URL(real), source = new URL(data.url);
+        current.hash = ''; source.hash = '';
+        if (current.href !== source.href || document.readyState === 'loading') throw new Error('source document is not ready');
+        if (!data.spec || typeof data.spec !== 'object' || Array.isArray(data.spec) || !['text', 'highlight', 'element'].includes(data.operation)) throw new Error('invalid reference command');
+        if (data.operation !== 'element' && (!Number.isSafeInteger(data.spec.maxChars) || data.spec.maxChars <= 0
+          || data.spec.maxChars > 2000000 || typeof data.spec.legacy !== 'boolean')) throw new Error('invalid text specification');
+        if (data.operation === 'element' && (!['image', 'table'].includes(data.spec.kind)
+          || !data.spec.anchor || typeof data.spec.anchor !== 'object' || Array.isArray(data.spec.anchor))) throw new Error('invalid element specification');
+        if (data.operation === 'highlight' && (!Number.isSafeInteger(data.spec.start) || !Number.isSafeInteger(data.spec.end)
+          || data.spec.start < 0 || data.spec.end <= data.spec.start)) throw new Error('invalid text positions');
+        const value = reference(data.operation, data.spec);
+        parent.postMessage({ ...ack, ok: true, value }, event.origin);
+      } catch (error) { parent.postMessage({ ...ack, ok: false, reason: String(error).slice(0, 200) }, event.origin); }
     } else if (event.data.type === 'dsh.browser.guest.history') {
       if (event.data.delta === -1) history.back();
       else if (event.data.delta === 1) history.forward();
