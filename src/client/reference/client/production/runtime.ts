@@ -269,6 +269,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
   let sourceOpener: ((url: string, signal: AbortSignal) => Promise<ReferenceSourcePage>) | undefined
   let sourceOpening: AbortController | undefined
   let revealIntent = 0
+  let pendingReveal: { readonly referenceId: string; readonly partId: string | undefined; readonly intent: number; readonly promise: Promise<RevealStatus> } | undefined
   let lastIssue: string | undefined
   // A failed "回到原文" used to stay on screen forever: the hint was only
   // rewritten by the NEXT reveal attempt, so recovering the sidebar never
@@ -879,7 +880,19 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     report: status => { if (mutedReveal === 0) showReveal(status) },
   })
 
-  const revealReference = async (referenceId: string, partId?: string): Promise<RevealStatus> => {
+  const revealReference = (referenceId: string, partId?: string): Promise<RevealStatus> => {
+    if (!disposed && pendingReveal?.intent === revealIntent && pendingReveal.referenceId === referenceId && pendingReveal.partId === partId) {
+      return pendingReveal.promise
+    }
+    const promise = performReveal(referenceId, partId)
+    const pending = { referenceId, partId, intent: revealIntent, promise }
+    pendingReveal = pending
+    const clear = (): void => { if (pendingReveal === pending) pendingReveal = undefined }
+    void promise.then(clear, clear)
+    return promise
+  }
+
+  const performReveal = async (referenceId: string, partId?: string): Promise<RevealStatus> => {
     sourceOpening?.abort()
     const opening = new AbortController()
     sourceOpening = opening

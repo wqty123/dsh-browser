@@ -15,6 +15,8 @@ export interface BrowserFrameState {
   readonly target: BrowserTarget | undefined
   readonly address: 'empty' | 'requested' | 'observed' | 'unknown'
   readonly loading: boolean
+  /** The current document's DOM is ready even if its subresources are still loading. */
+  readonly documentReady?: boolean
   readonly canGoBack: boolean
   readonly canGoForward: boolean
   readonly error: BrowserLoadError | undefined

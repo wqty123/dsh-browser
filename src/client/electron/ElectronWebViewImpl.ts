@@ -71,7 +71,7 @@ export class ElectronWebViewImpl implements BrowserFrame {
     this.carrier.set({ stage: 'idle' })
     this.pending ??= this.store.getSnapshot().target
     if (this.pending !== undefined) {
-      this.store.set({ ...this.store.getSnapshot(), address: 'requested', loading: true,
+      this.store.set({ ...this.store.getSnapshot(), address: 'requested', loading: true, documentReady: false,
         canGoBack: false, canGoForward: false, error: undefined })
       this.initialize()
     }
@@ -91,13 +91,13 @@ export class ElectronWebViewImpl implements BrowserFrame {
     if (this.lifetime.signal.aborted) return
     const current = this.store.getSnapshot()
     if (this.ready && current.address === 'observed' && current.target?.url === target.url) {
-      this.store.set({ ...current, navigationId, loading: true })
+      this.store.set({ ...current, navigationId, loading: true, documentReady: false })
       this.reload()
       return
     }
     this.revision++
     this.pending = target
-    this.store.set({ ...current, navigationId, target, address: 'requested', loading: true, error: undefined })
+    this.store.set({ ...current, navigationId, target, address: 'requested', loading: true, documentReady: false, error: undefined })
     this.persist(target)
     if (this.ready) this.loadPending()
     else this.initialize()
@@ -120,7 +120,7 @@ export class ElectronWebViewImpl implements BrowserFrame {
     if (!this.ready || current.error !== undefined) {
       this.revision++
       this.pending = current.target
-      this.store.set({ ...current, loading: true, error: undefined })
+      this.store.set({ ...current, loading: true, documentReady: false, error: undefined })
       if (this.ready) this.loadPending()
       else this.initialize()
     } else this.navigate('reload')
@@ -149,7 +149,7 @@ export class ElectronWebViewImpl implements BrowserFrame {
     if (this.lifetime.signal.aborted || !this.ready || this.element === undefined) return
     this.revision++
     this.pending = undefined
-    this.store.set({ ...this.store.getSnapshot(), loading: true, error: undefined })
+    this.store.set({ ...this.store.getSnapshot(), loading: true, documentReady: false, error: undefined })
     try { this.element[command]() }
     catch (error) { this.commandFailed(error) }
   }
@@ -233,6 +233,7 @@ export class ElectronWebViewImpl implements BrowserFrame {
       this.ready = true
       const guestId = element.getWebContentsId?.()
       this.carrier.set({ stage: 'ready', ...guestId === undefined ? {} : { guestId: String(guestId) } })
+      this.store.set({ ...this.store.getSnapshot(), documentReady: true })
       this.observe(this.store.getSnapshot().address !== 'requested')
       this.loadPending()
     }, { signal })
@@ -247,7 +248,8 @@ export class ElectronWebViewImpl implements BrowserFrame {
           const guestId = element.getWebContentsId?.()
           this.carrier.set({ stage: 'guest', ...guestId === undefined ? {} : { guestId: String(guestId) } })
         }
-        this.store.set({ ...this.store.getSnapshot(), loading: true, error: undefined })
+        this.store.set({ ...this.store.getSnapshot(), loading: true,
+          ...!(event as NavigationEvent).isInPlace ? { documentReady: false } : {}, error: undefined })
       }
     }, { signal })
     for (const name of ['did-start-loading', 'did-stop-loading', 'page-title-updated']) {

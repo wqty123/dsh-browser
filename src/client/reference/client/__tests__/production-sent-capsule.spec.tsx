@@ -13,26 +13,29 @@ import { encodeBrowserRefUri } from '../scheme.ts'
 import { createBrowserInitializationJournal, createBrowserInitializationReader } from '../../../browser/initialization.ts'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { referenceOwnerKey } from '../../../../reference-owner.ts'
+import { BrowserController, type BrowserControllerOptions } from '../../../browser/BrowserController.ts'
+import { ElectronWebViewImpl } from '../../../electron/ElectronWebViewImpl.ts'
+import type { ElectronWebviewPresentation, WebviewElement } from '../../../electron/ElectronWebviewPresentation.ts'
 import {
   ASSET_MAP, LONG_TEXT, TAIL_TEXT, assetOf, deliveriesResponse,
   fakeHostInput, makeDelivery, manualScheduler, memoryKV,
 } from './production.fixtures.ts'
 
 const roots: Root[] = []
-const cleanups: (() => void)[] = []
+const cleanups: (() => void | Promise<void>)[] = []
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 afterEach(async () => {
   await act(async () => {
     for (const root of roots.splice(0)) root.unmount()
-    for (const cleanup of cleanups.splice(0).reverse()) cleanup()
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
   })
   vi.useRealTimers()
   document.body.innerHTML = ''
 })
 
 async function assembled(storage = memoryKV(), options: {
-  empty?: boolean; client?: boolean; acknowledged?: boolean; hostSessionId?: string; away?: boolean
+  empty?: boolean; client?: boolean; acknowledged?: boolean; hostSessionId?: string; away?: boolean; native?: boolean
 } = {}) {
   const hostSessionId = options.hostSessionId ?? 'sess-A'
   const sessionId = referenceOwnerKey(hostSessionId)
@@ -47,12 +50,16 @@ async function assembled(storage = memoryKV(), options: {
   const listeners = new Set<() => void>()
   const journal = createBrowserInitializationJournal({ onChange: () => { for (const listener of listeners) listener() } })
   const live = { url: 'https://cn.bing.com/', ready: true, highlighted: false }
+  let native: { controller: BrowserController; element: WebviewElement } | undefined
   const navigate = vi.fn((id: string, tabId: TabId, url: string) => {
     expect(id).toBe(hostSessionId)
     live.url = url
     live.ready = false
-    journal.begin({ sessionId: id, tabId, occurrenceId: 'source', navigationRevision: 2, url })
-    journal.advance(tabId, 'navigating')
+    if (native !== undefined) native.controller.navigate(url, 2)
+    else {
+      journal.begin({ sessionId: id, tabId, occurrenceId: 'source', navigationRevision: 2, url })
+      journal.advance(tabId, 'navigating')
+    }
     return true
   })
   if (options.away) {
@@ -60,10 +67,50 @@ async function assembled(storage = memoryKV(), options: {
     journal.begin({ sessionId: hostSessionId, tabId: 'sent-source' as TabId, occurrenceId: 'source', navigationRevision: 1, url: live.url })
     journal.advance('sent-source' as TabId, 'attached', { guestId: '42' })
   }
+  if (options.native) {
+    const element = Object.assign(document.createElement('div'), {
+      getURL: () => live.url, getTitle: () => 'Source', getWebContentsId: () => 42,
+      isLoading: () => true, canGoBack: () => false, canGoForward: () => false, clearHistory() {},
+      executeJavaScript: async (source: string) => source.startsWith('JSON.stringify(') ? '[]' : undefined,
+      loadURL: async (url: string) => {
+        live.url = url
+        live.ready = false
+        element.dispatchEvent(Object.assign(new Event('did-start-navigation'), { isMainFrame: true, isInPlace: false }))
+        element.dispatchEvent(new Event('did-navigate'))
+      },
+    }) as unknown as WebviewElement
+    let frame!: ElectronWebViewImpl
+    const presentation = {
+      mount: () => { frame.attach(); return () => { frame.detach() } },
+      createElement: () => element, present: () => { element.dispatchEvent(new Event('dom-ready')) },
+      show() {}, clear() {}, dispose() {},
+    } as unknown as ElectronWebviewPresentation
+    const controller = new BrowserController({
+      sessionId: hostSessionId, tabId: 'sent-source' as TabId, journal, occurrenceId: 'native-source',
+      signal: new AbortController().signal, applicationOrigin: location.origin, initial: undefined,
+      actions: { replace() {} } as BrowserControllerOptions['actions'], openTab() {},
+      createPage: pageOptions => {
+        frame = new ElectronWebViewImpl(pageOptions, {
+          acquire: async () => ({ lease: 'native-source' as never, partition: 'persist:test' }),
+          release: async () => {}, onOpenRequested: () => () => {},
+        }, async () => 'workspace', presentation, hostSessionId)
+        return { frame, presentation }
+      },
+    })
+    native = { controller, element }
+    cleanups.push(() => controller.dispose())
+    controller.navigate(live.url, 1)
+    controller.mount('native-source')
+    await Promise.resolve()
+    await Promise.resolve()
+    element.dispatchEvent(new Event('dom-ready'))
+    live.ready = true
+  }
   services.sidebarBrowserInitialization = createBrowserInitializationReader((_session, tab) => journal.get(tab), listener => {
     listeners.add(listener)
     return () => { listeners.delete(listener) }
-  }, () => options.away && live.ready ? { url: live.url, guestId: '42' } : undefined, navigate)
+  }, () => native !== undefined ? native.controller.currentPage()
+    : options.away && live.ready ? { url: live.url, guestId: '42' } : undefined, navigate)
   const openTabIn = vi.fn((sessionId: string, _kind: string, options: { params: { url: string } }) => {
     expect(sessionId).toBe(hostSessionId)
     const tabId = 'sent-source' as TabId
@@ -104,8 +151,14 @@ async function assembled(storage = memoryKV(), options: {
     },
   }
   const hostInput = fakeHostInput('')
+  const fetches: { url: string; method?: string; body?: string | Uint8Array; credentials?: RequestCredentials }[] = []
   const config: AssemblyConfig = {
-    initialSessionId: sessionId, storage, request,
+    initialSessionId: sessionId, storage,
+    ...(options.native ? { fetchImpl: async (url, init) => {
+      fetches.push({ url, ...init })
+      const response = await request(url, init)
+      return { ...response, arrayBuffer: async () => new ArrayBuffer(0) }
+    } } satisfies Pick<AssemblyConfig, 'fetchImpl'> : { request }),
     createElement: createElement as AssemblyConfig['createElement'],
     scheduler: manualScheduler(), hostInputFor: () => hostInput,
   }
@@ -115,10 +168,18 @@ async function assembled(storage = memoryKV(), options: {
     else { runtime = apply(ctx, config); await runtime.pollOnce() }
   })
   return {
-    runtime: runtime!, storage, reveals, openTabIn, navigate, live, hostInput,
+    runtime: runtime!, storage, reveals, fetches, openTabIn, navigate, live, hostInput,
+    frame: () => native!.controller.getSnapshot().frame,
+    initialization: () => native!.controller.initialization(),
     ready() {
       live.ready = true
-      journal.advance('sent-source' as TabId, 'attached', { guestId: '42' })
+      if (native !== undefined) native.element.dispatchEvent(new Event('dom-ready'))
+      else journal.advance('sent-source' as TabId, 'attached', { guestId: '42' })
+    },
+    fail() {
+      native!.element.dispatchEvent(Object.assign(new Event('did-fail-load'), {
+        isMainFrame: true, errorCode: -105, errorDescription: 'name not resolved',
+      }))
     },
     outcome(value: RevealResultWire | (() => Promise<RevealResultWire>)) {
       outcome = typeof value === 'function' ? value : async () => value
@@ -325,6 +386,61 @@ describe('production assembly — shared composer and sent capsules', () => {
     ])
     expect(app.live.highlighted).toBe(true)
     expect(app.runtime.snapshot().reveal).toBeUndefined()
+  })
+
+  it.each(['chip', 'dialog'])('completes native %s reveal at DOM-ready while subresources are still loading', async activation => {
+    const first = await assembled()
+    const sourceUrl = first.runtime.cards()[0]!.source.pageUrl
+    await send(first.runtime)
+    first.runtime.dispose()
+    const app = await assembled(first.storage, { client: true, away: true, native: true })
+    app.outcome(async () => {
+      if (!app.reveals.at(-1)?.sourcePageId) return { ok: true, status: 'session-unavailable', pageUrl: sourceUrl }
+      expect(app.live.ready).toBe(true)
+      app.live.highlighted = true
+      return { ok: true, status: 'revealed' }
+    })
+    const sent = await app.sent()
+    if (activation === 'dialog') await act(async () => { pill(sent).focus() })
+    const click = (): void => {
+      if (activation === 'chip') pill(sent).click()
+      else document.querySelector<HTMLButtonElement>(`[role="dialog"] button[title="${sourceUrl}"]`)!.click()
+    }
+    await act(async () => { click(); click() })
+    expect(app.navigate).toHaveBeenCalledOnce()
+    expect(app.reveals).toEqual([{ referenceId: 'ref-mixed-1' }])
+    expect(app.live).toEqual({ url: sourceUrl, ready: false, highlighted: false })
+    await act(async () => { app.ready() })
+    expect(app.frame()).toMatchObject({ loading: true, documentReady: true, address: 'observed' })
+    expect(app.initialization()).toMatchObject({ stage: 'attached', guestId: '42', requestId: app.frame().navigationId })
+    expect(app.reveals).toEqual([{ referenceId: 'ref-mixed-1' }, { referenceId: 'ref-mixed-1', sourcePageId: '42' }])
+    expect(app.fetches.filter(request => request.url.endsWith('/reference/reveal'))).toEqual([
+      expect.objectContaining({ method: 'POST', credentials: 'include', body: JSON.stringify({ referenceId: 'ref-mixed-1' }) }),
+      expect.objectContaining({ method: 'POST', credentials: 'include', body: JSON.stringify({ referenceId: 'ref-mixed-1', sourcePageId: '42' }) }),
+    ])
+    expect(app.live.highlighted).toBe(true)
+    expect(app.openTabIn).not.toHaveBeenCalled()
+    await act(async () => { click() })
+    expect(app.reveals).toHaveLength(4)
+    expect(app.navigate).toHaveBeenCalledOnce()
+  })
+
+  it('does not highlight a failed native navigation, and allows a fresh activation to retry', async () => {
+    const first = await assembled()
+    await send(first.runtime)
+    first.runtime.dispose()
+    const app = await assembled(first.storage, { client: true, away: true, native: true })
+    app.outcome(async () => ({ ok: true, status: 'session-unavailable' }))
+    const sent = await app.sent()
+    await act(async () => { pill(sent).click() })
+    expect(app.reveals).toHaveLength(1)
+    await act(async () => { app.fail(); app.ready() })
+    expect(app.reveals).toHaveLength(1)
+    expect(app.live.highlighted).toBe(false)
+    expect(app.runtime.snapshot().reveal?.status).toBe('session-unavailable')
+    await act(async () => { pill(sent).click() })
+    expect(app.reveals).toHaveLength(2)
+    expect(app.navigate).toHaveBeenCalledTimes(2)
   })
 
   it('uses the shared hover panel and orchestration for the anchor fallback and Enter activation', async () => {
