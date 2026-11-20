@@ -252,36 +252,59 @@ function describe(contents) {
  * Attaching is per-webContents and idempotent; a destroyed guest drops the
  * attachment so a later guest with a recycled id is not mistaken for this one.
  */
+const CDP_COMMAND_TIMEOUT_MS = 15_000
+const timedOutGuests = new WeakSet()
+
 async function sendCdp(id, method, params) {
   const guest = guestById(id)
   if (guest === undefined || guest.isDestroyed()) throw new Error(`guest ${id} is not available`)
   const previous = queues.get(id) ?? Promise.resolve()
-  const next = previous.then(async () => {
+  const guarded = previous.then(async () => {
     const current = guestById(id)
-    if (current === undefined || current.isDestroyed()) throw new Error(`guest ${id} is not available`)
-    // Chromium's CDP keyboard handler can redirect a webview command to the embedder's
-    // focused guest. Send text and keys to this exact guest instead, preserving OS focus.
-    if (current.getType() === 'webview') {
-      if (method === 'Input.insertText') {
-        if (typeof params?.text !== 'string') throw new Error('Input.insertText requires text')
-        await current.insertText(params.text)
-        return {}
-      }
-      if (method === 'Input.dispatchKeyEvent') {
-        const event = nativeKeyEvent(params)
-        current.sendInputEvent(event)
-        if (params.type === 'keyDown' && typeof params.text === 'string' && params.text !== '') {
-          current.sendInputEvent({ ...event, type: 'char', keyCode: params.text })
-        }
-        return {}
-      }
+    if (current !== guest || current.isDestroyed()) throw new Error(`guest ${id} is not available`)
+    if (timedOutGuests.has(current)) throw new Error(`guest ${id} has a timed-out command; close and reopen its page before sending more commands`)
+    let timer
+    try {
+      return await Promise.race([
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            // A renderer command cannot be cancelled reliably, even by detaching its debugger.
+            // Never send another command to this page while its effects remain uncertain.
+            timedOutGuests.add(current)
+            reject(new Error(`cdp command ${method} on guest ${id} did not answer within ${CDP_COMMAND_TIMEOUT_MS}ms; close and reopen its page before sending more commands`))
+          }, CDP_COMMAND_TIMEOUT_MS)
+          timer.unref?.()
+        }),
+        execute(),
+      ])
+    } finally {
+      clearTimeout(timer)
     }
-    if (!current.debugger.isAttached()) current.debugger.attach('1.3')
-    return await current.debugger.sendCommand(method, params ?? {})
+    async function execute() {
+      // Chromium's CDP keyboard handler can redirect a webview command to the embedder's
+      // focused guest. Send text and keys to this exact guest instead, preserving OS focus.
+      if (current.getType() === 'webview') {
+        if (method === 'Input.insertText') {
+          if (typeof params?.text !== 'string') throw new Error('Input.insertText requires text')
+          await current.insertText(params.text)
+          return {}
+        }
+        if (method === 'Input.dispatchKeyEvent') {
+          const event = nativeKeyEvent(params)
+          current.sendInputEvent(event)
+          if (params.type === 'keyDown' && typeof params.text === 'string' && params.text !== '') {
+            current.sendInputEvent({ ...event, type: 'char', keyCode: params.text })
+          }
+          return {}
+        }
+      }
+      if (!current.debugger.isAttached()) current.debugger.attach('1.3')
+      return await current.debugger.sendCommand(method, params ?? {})
+    }
   })
   // Keep the chain alive on failure so one bad command does not wedge the guest.
-  queues.set(id, next.catch(() => undefined))
-  return await next
+  queues.set(id, guarded.catch(() => undefined))
+  return await guarded
 }
 
 /** Convert CDP key data for Electron's per-webContents input channel. */

@@ -6,7 +6,7 @@
 // instead of opening one (this session's first bug), one that opens extra pages (this session's
 // fifth). The correct one must pass; the other two must fail.
 import { createServer } from 'node:net'
-import { writeFileSync, mkdtempSync } from 'node:fs'
+import { writeFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -16,6 +16,12 @@ import assert from 'node:assert/strict'
 /** A fake bridge that answers the ops the acceptance script uses. */
 function makeBridge (broken = '') {
   const guests = []
+  if (broken.startsWith('protected-')) {
+    guests.push({ id: 90, owner: 'session-acceptance', title: 'user page', url: 'https://user.example/' })
+    guests.push({ id: 91, owner: 'session-other', title: 'other user page', url: 'https://other.example/' })
+  }
+  const requests = []
+  const views = new Map()
   let nextId = 2
   const server = createServer(socket => {
     socket.setEncoding('utf8')
@@ -28,16 +34,21 @@ function makeBridge (broken = '') {
         buffer = buffer.slice(cut + 1)
         if (line.trim() === '') continue
         const request = JSON.parse(line)
+        requests.push(request)
         const reply = (body) => socket.write(JSON.stringify({ ...body, bridgeRequestId: request.bridgeRequestId }) + '\n')
         const owner = request.owner ?? 'anonymous'
 
         if (request.op === 'version') {
           // A loadedAt in the future is always newer than the file on disk, which is what the
           // acceptance script's first check compares against.
-          reply({ ok: true, loadedAt: new Date(Date.now() + 60_000).toISOString(), protocol: 2 })
+          reply({ ok: true, loadedAt: new Date(Date.now() + 60_000).toISOString(), protocol: 3 })
           continue
         }
         if (request.op === 'list') {
+          if (broken === 'list-error') {
+            reply({ ok: false, error: 'list unavailable' })
+            continue
+          }
           const mine = guests.filter(g => g.owner === owner)
           // The shell window travels with every list answer, which is what lets a FAILING run read
           // the tab strip back and say what it saw instead of just "FAIL".
@@ -46,11 +57,32 @@ function makeBridge (broken = '') {
           continue
         }
         if (request.op === 'ensureSidebar') {
-          if (request.newTab === true && broken === 'reuse') {
+          if (!/^session-.+/.test(owner) || typeof request.viewId !== 'string') {
+            reply({ ok: false, error: 'a conversation and logical view are required' })
+            continue
+          }
+          if (broken === 'refuse') {
+            reply({ ok: false, error: 'panel unavailable' })
+            continue
+          }
+          const key = JSON.stringify([owner, request.viewId])
+          if ((broken === 'protected-first' && views.size === 0)
+            || (broken === 'protected-second' && views.size === 1)
+            || (broken === 'protected-other' && owner === 'session-other')
+            || (broken === 'protected-reopen' && views.has(key))) {
+            reply({ ok: true, id: owner === 'session-other' ? 91 : 90, reused: true })
+            continue
+          }
+          if (views.has(key)) {
+            reply({ ok: true, id: views.get(key), owner })
+            continue
+          }
+          if (guests.some(g => g.owner === owner) && broken === 'reuse') {
             reply({ ok: true, created: false, id: guests[0]?.id, owner, reused: true })
             continue
           }
           const id = nextId++
+          views.set(key, id)
           guests.push({ id, url: 'about:blank', title: 'page ' + id, owner })
           if (broken === 'spray') {
             const extra = nextId++
@@ -60,31 +92,26 @@ function makeBridge (broken = '') {
           continue
         }
         if (request.op === 'showTab') { reply({ ok: true, verdict: 'CLICKED' }); continue }
-        if (request.op === 'closeSidebarBrowser') {
-          // Actually close: the acceptance script checks the OUTCOME, so a fake that only
-          // pretends would make the close checks meaningless. Only this owner's guests, matching
-          // the bridge's rule, and only those the titles select.
-          const wanted = Array.isArray(request.titles) ? request.titles : undefined
-          let closed = 0
-          for (let i = guests.length - 1; i >= 0; i--) {
-            const guest = guests[i]
-            if (guest.owner !== owner) continue
-            if (wanted !== undefined && !wanted.some(w => String(guest.title).startsWith(w))) continue
-            guests.splice(i, 1)
-            closed += 1
-          }
-          reply({ ok: true, closed })
+        if (request.op === 'closePage') {
+          const index = guests.findIndex(g => g.id === request.id && g.owner === owner)
+          if (index !== -1) guests.splice(index, 1)
+          reply({ ok: index !== -1, closed: index === -1 ? 0 : 1 })
           continue
         }
         if (request.op === 'cdp') {
-          const expression = String(request.params?.expression ?? '')
-          reply({ ok: true, result: { result: { value: expression.includes('settings') ? '200' : 'https://example.com/' } } })
+          if (!guests.some(g => g.id === request.id && g.owner === owner)) {
+            reply({ ok: false, error: 'guest not owned' })
+            continue
+          }
+          reply({ ok: true, result: { result: { value: 'https://example.com/' } } })
           continue
         }
         reply({ ok: true })
       }
     })
   })
+  server.requests = requests
+  server.guests = guests
   return server
 }
 
@@ -97,7 +124,7 @@ async function runAgainst (broken) {
   const endpoint = join(dir, 'endpoint.json')
   writeFileSync(endpoint, JSON.stringify({ pid: process.pid, port, token: 'fake-token' }))
   const child = spawn(process.execPath, ['tools/accept-desktop.mjs'], {
-    env: { ...process.env, DSH_BRIDGE_ENDPOINT: endpoint, NODE_TEST_CONTEXT: undefined },
+    env: { ...process.env, DSH_BRIDGE_ENDPOINT: endpoint, DSH_ACCEPT_SESSION: 'session-acceptance', DSH_ACCEPT_OTHER_SESSION: 'session-other', NODE_TEST_CONTEXT: undefined },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let out = ''
@@ -105,7 +132,8 @@ async function runAgainst (broken) {
   child.stderr.on('data', d => { out += d })
   const code = await new Promise(resolve => child.on('exit', resolve))
   server.close()
-  return { code, out }
+  rmSync(dir, { recursive: true, force: true })
+  return { code, out, requests: server.requests, guests: server.guests }
 }
 
 test('the acceptance script passes against a correct bridge', async () => {
@@ -126,4 +154,34 @@ test('the acceptance script FAILS when newTab reuses an existing page', async ()
 test('the acceptance script FAILS when extra pages appear', async () => {
   const { code, out } = await runAgainst('spray')
   assert.notEqual(code, 0, 'a bridge that sprays tabs must not be reported as working:\n' + out)
+})
+
+test('the acceptance script FAILS when sidebar initialization is refused', async () => {
+  const { code, out } = await runAgainst('refuse')
+  assert.notEqual(code, 0, out)
+  assert.match(out, /\[diag\]/)
+})
+
+test('pre-existing pages are never navigated or closed, even when any ensureSidebar call reuses them', async () => {
+  for (const stage of ['first', 'second', 'other', 'reopen']) {
+    const { code, out, requests, guests } = await runAgainst('protected-' + stage)
+    assert.notEqual(code, 0, out)
+    assert.match(out, /FAIL ensureSidebar reused pre-existing page/)
+    assert.ok(requests.filter(r => r.op === 'ensureSidebar').every(r => r.url === undefined), 'identity must be checked before navigation')
+    assert.deepEqual(requests.filter(r => ['cdp', 'closePage'].includes(r.op) && [90, 91].includes(r.id)), [], 'no mutations or cleanup may target protected pages')
+    assert.deepEqual(guests.map(g => [g.id, g.url]), [[90, 'https://user.example/'], [91, 'https://other.example/']], 'only test-owned pages are cleaned up on failure')
+  }
+})
+
+test('the acceptance script does not open pages when the initial inventory fails', async () => {
+  const { code, out, requests } = await runAgainst('list-error')
+  assert.notEqual(code, 0, out)
+  assert.match(out, /cannot identify pre-existing pages/)
+  assert.deepEqual(requests.filter(r => ['ensureSidebar', 'cdp', 'closePage'].includes(r.op)), [])
+})
+
+test('the acceptance CLI is included in the published package and the export fixup', () => {
+  const read = path => readFileSync(new URL(path, import.meta.url), 'utf8')
+  assert.ok(JSON.parse(read('../package.json')).files.includes('tools/accept-desktop.mjs'))
+  assert.match(read('../scripts/fix-exports.mjs'), /'tools\/accept-desktop\.mjs'/)
 })

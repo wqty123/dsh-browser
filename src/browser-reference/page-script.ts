@@ -235,10 +235,13 @@ const PAGE_LIB = String.raw`
       out.text += value.slice(0, room)
     }
     function boundary(value) {
-      if (legacy || !out.text) return
+      if (legacy || !out.text) return []
       var overlap = 0
       for (var i = 1; i <= value.length; i++) if (out.text.endsWith(value.slice(0, i))) overlap = i
+      var start = out.text.length
       append(value.slice(overlap))
+      var end = out.text.length
+      return structured && end > start ? [{ type: 'text', text: out.text.slice(start, end), start: start, end: end }] : []
     }
     function visit(node, depth) {
       if (out.truncated) return []
@@ -263,8 +266,9 @@ const PAGE_LIB = String.raw`
       }
       var block = /^(P|DIV|MAIN|ASIDE|NAV|SECTION|ARTICLE|HEADER|FOOTER|FIGURE|FIGCAPTION|DL|DT|DD|H[1-6]|UL|OL|PRE|BLOCKQUOTE|TABLE)$/.test(tag)
       if (block) boundary('\n\n')
-      if (tag === 'LI' || tag === 'TR') boundary('\n')
-      if (tag === 'TD' || tag === 'TH') boundary('\t')
+      if (tag === 'LI') boundary('\n')
+      var prefix = tag === 'TR' ? boundary('\n') : []
+      if ((tag === 'TD' || tag === 'TH') && !out.text.endsWith('\n')) prefix = boundary('\t')
       var start = out.text.length
       var children = []
       for (var child = node.firstChild; child; child = child.nextSibling) {
@@ -273,8 +277,9 @@ const PAGE_LIB = String.raw`
       }
       var end = out.text.length
       if (block) boundary('\n\n')
-      if (tag === 'LI' || tag === 'TR') boundary('\n')
-      if (!children.length) return []
+      if (tag === 'LI') boundary('\n')
+      var suffix = tag === 'TR' ? boundary('\n') : []
+      if (!children.length) return prefix.concat(suffix)
       var types = { P: 'paragraph', DIV: 'paragraph', H1: 'paragraph', H2: 'paragraph', H3: 'paragraph', H4: 'paragraph', H5: 'paragraph', H6: 'paragraph', STRONG: 'strong', B: 'strong', EM: 'emphasis', I: 'emphasis', CODE: 'code', PRE: 'pre', BLOCKQUOTE: 'blockquote', LI: 'list-item', UL: 'list', OL: 'list' }
       var type = types[tag] || (block ? 'block' : undefined)
       if (tag === 'DIV') type = 'block'
@@ -286,7 +291,7 @@ const PAGE_LIB = String.raw`
         result.listStart = Number.isSafeInteger(first) && first >= 0 && first <= 1000000 ? first : 1
         result.children = children.filter(function (child) { return child.type === 'list-item' })
       }
-      return result.type ? [result] : children
+      return prefix.concat(result.type ? [result] : children, suffix)
     }
     for (var child = body.firstChild; child && !out.truncated; child = child.nextSibling) {
       var added = visit(child, 0)

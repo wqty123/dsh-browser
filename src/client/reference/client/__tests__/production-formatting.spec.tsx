@@ -88,6 +88,51 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     expect((await submit(raw)).snapshot.parts[0]?.type).toBe('text')
   })
 
+  it.each(['presentation', 'none'])('preserves role=%s cell and row separators through capture, storage, submission and capsules', async role => {
+    const raw = select(`<table role="${role}"><tr><th>Hello</th><td>world</td></tr><tr><td>Again</td><td>friend</td></tr></table>`)
+    const text = 'Hello\tworld\nAgain\tfriend'
+    expect(raw.events!.map(event => event.kind)).toEqual(['text'])
+    expect(raw.events![0]!.exact).toBe(text)
+    expect(renderReferenceText(raw.events![0]!.content!)).toBe(text)
+    const { parts, snapshot, group } = await submit(raw)
+    expect(parts).toEqual([{ type: 'text', text: `${text}\n` }])
+    expect(snapshot.parts[0]).toMatchObject({ type: 'text', text, content: raw.events![0]!.content })
+    expect(group.parts[0]!.content).toEqual(raw.events![0]!.content)
+    const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
+    render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
+    expect(document.querySelector('[data-part-kind="text"]')!.textContent).toBe(text)
+  })
+
+  it('clips layout-cell separators with the same offsets used to highlight the source', async () => {
+    document.body.innerHTML = '<table role="presentation"><tr><td>Hello😀</td><td><strong>world</strong></td></tr><tr><td>Again</td><td>friend</td></tr></table>'
+    const first = document.querySelector('td')!.firstChild!
+    const last = document.querySelectorAll('td')[3]!.firstChild!
+    const range = document.createRange()
+    range.setStart(first, 3)
+    range.setEnd(last, 3)
+    window.getSelection()!.addRange(range)
+    const raw = execute<RawCaptureResult>(captureScript())
+    const exact = 'lo😀\tworld\nAgain\tfri'
+    expect(raw.events![0]!.exact).toBe(exact)
+    const { parts } = await submit(raw)
+    expect(parts).toEqual([{ type: 'text', text: 'lo😀\t**world**\nAgain\tfri\n' }])
+    const page = execute<{ text: string }>(pageTextScript()).text
+    const start = page.indexOf(exact)
+    expect(start).toBeGreaterThanOrEqual(0)
+    const setStart = vi.spyOn(Range.prototype, 'setStart')
+    const setEnd = vi.spyOn(Range.prototype, 'setEnd')
+    expect(execute(highlightScript(), { start, end: start + exact.length })).toMatchObject({ ok: true })
+    expect(setStart).toHaveBeenCalledWith(first, 3)
+    expect(setEnd).toHaveBeenCalledWith(last, 3)
+  })
+
+  it('keeps layout-cell spacing around empty cells and rejects a wholly empty selection', async () => {
+    const { parts } = await submit(select('<table role="presentation"><tr><td>Hello</td><td></td><td>world</td></tr><tr><td></td><td>Again</td></tr></table>'))
+    expect(parts).toEqual([{ type: 'text', text: 'Hello\tworld\nAgain\n' }])
+    const empty = select('<table role="presentation"><tr><td></td><td></td></tr></table>')
+    expect(empty.events ?? []).toEqual([])
+  })
+
   it('keeps a real nested data table without promoting its layout ancestor', async () => {
     const raw = select('<table><tr><td><h3>Article</h3><table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>1</td></tr></table><p>After</p></td></tr></table>')
     expect(raw.events!.map(event => event.kind)).toEqual(['text', 'table', 'text'])
