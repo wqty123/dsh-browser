@@ -46,11 +46,15 @@ function createFakeBrowser(options = {}) {
 
   const server = createServer((request, response) => {
     if (request.url === '/json/version') {
-      response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({
-        Browser: browserName,
-        webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser`,
-      }))
+      const reply = () => {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({
+          Browser: browserName,
+          webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser`,
+        }))
+      }
+      if (options.versionDelayMs) setTimeout(reply, options.versionDelayMs)
+      else reply()
       return
     }
     response.writeHead(404)
