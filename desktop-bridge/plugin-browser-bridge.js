@@ -1196,13 +1196,13 @@ export function start() {
   }
 
   const onGuestCreated = (_event, contents) => {
+    if (contents.getType() === 'webview') contents.setWindowOpenHandler?.(() => ({ action: 'deny' }))
     void applySidebarGuestProxy(contents)
     attachProxyFallback(contents)
   }
   app.on('web-contents-created', onGuestCreated)
   for (const contents of webContents.getAllWebContents()) {
-    void applySidebarGuestProxy(contents)
-    attachProxyFallback(contents)
+    onGuestCreated(undefined, contents)
   }
   // Drop any debugger attachment this process is still holding.
   //

@@ -421,6 +421,7 @@ function windowFor(windowId: string | undefined): HostWindow {
   // (measured: the setting was on and the window still popped up). The first presentation decides:
   // quiet shows it inactive, a normal call shows it normally.
   const w = new BrowserWindow({ width: 1400, height: 900, show: false, title: 'dsh-browser' })
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   w.on('closed', () => {
     const closing = windows.get(key)
     windows.delete(key)
@@ -720,9 +721,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
             }
             return { action: 'deny' }
           }
-          // Non-HTTP popups (OAuth redirects, mailto:, custom schemes):
-          // allow the native window so OAuth flows and deep links work.
-          return { action: 'allow' }
+          return { action: 'deny' }
         })
         // Attach the debugger BEFORE the view can be seen: an attach failure
         // then leaves nothing in the window (no visible ghost view).
