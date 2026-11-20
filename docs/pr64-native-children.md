@@ -22,9 +22,24 @@ Run `DSH_SOURCE_ROOT=<dsh-source> PERSISTENCE_EVIDENCE=<directory> node tools/ch
 
 Run the ordinary Node behavior suite with `TSX_TSCONFIG_PATH=<dsh-source>/tsconfig.base.json node tests/run.mjs`. Source Vitest cases need source aliases rather than published `lib` exports because the plugin lives outside the DSH tsconfig root:
 
-The same Vitest configuration runs `packaged-native-open.spec.ts` against the actual `dist/client.cjs` and the compressed revision-8 rc.3 sidebar bundle. Build the plugin first. Set `DSH_BROWSER_TEST_ARCHIVE=<plugin.tgz>` to exercise an archive's client instead. It covers installed Browser/ReferenceDock stylesheets, native document acknowledgement, repeated opens, independent reserved views, empty identities and failed acquisition/retry without a webview. The Electron boundary is simulated; this does not replace real Desktop acceptance.
+The same Vitest configuration runs `packaged-native-open.spec.ts` against the actual `dist/client.cjs` and the compressed rc.3 sidebar bundle. Build the plugin first. Set `DSH_BROWSER_TEST_ARCHIVE=<plugin.tgz>` to exercise an archive's client instead. It covers installed Browser/ReferenceDock stylesheets, native document acknowledgement, repeated opens, independent reserved views, empty identities and failed acquisition/retry without a webview. The Electron boundary is simulated; this does not replace real Desktop acceptance.
 
-For rc.3/rc.5 archives, compile the client with `DSH_SOURCE_ROOT=<supported-release-source> node --import tsx tools/build-supported-client.mts` after the host TypeScript build. The revision-8 rc.3 source commit is `948d49ac3f9e48e511b71ecbef446745e59e1d05`. Use that release's build preset, not main's newer deferred `meta.stylesheets` format: rc.3 installs styles at factory execution and does not consume stylesheet metadata. The build command rejects a metadata-only preset, and the actual-bundle regression checks that factory loading installs both stylesheets. Then `pnpm --ignore-scripts pack --out <new-file.tgz>` preserves those validated artifacts while applying publish manifest transformations.
+For rc.3/rc.5 archives, compile the client with `DSH_SOURCE_ROOT=<supported-release-source> node --import tsx tools/build-supported-client.mts` after the host TypeScript build. The revision-9 rc.3 source commit is `65791d4dcf`. Use that release's build preset, not main's newer deferred `meta.stylesheets` format: rc.3 installs styles at factory execution and does not consume stylesheet metadata. The build command rejects a metadata-only preset, and the actual-bundle regression checks that factory loading installs both stylesheets. Then `pnpm --ignore-scripts pack --out <new-file.tgz>` preserves those validated artifacts while applying publish manifest transformations.
+
+Revision 9 samples native slot geometry on animation frames until revocation. A transform-only sidebar opening does not trigger ResizeObserver; revision 8 could leave an acknowledged native document attached at zero width, also blocking CDP screenshots. The frame sampler publishes only changed placement and is cancelled on release. Revisions 2–8 upgrade using their exact original backups.
+
+Real Electron acceptance at device scale 1.25:
+
+```sh
+DSH_SOURCE_ROOT=<DSH checkout with Electron and dependencies> \
+DSH_RELEASE_SOURCE=<supported rc.3 source checkout> \
+NATIVE_SLOT_HOST=<patched rc.3 desktop lib directory> \
+DSH_BROWSER_TEST_ARCHIVE=<plugin.tgz> \
+NATIVE_SLOT_EVIDENCE=<persistent output directory> \
+node tools/check-native-slot.mjs
+```
+
+This loads the archive's plugin and the revision-9 rc.3 client fixture through their factories, executes the patched main/preload native APIs in Electron, opens through `dsh_browser_open`, and captures through `dsh_browser_screenshot`. It checks native visibility, attachment, topmost ordering, nonzero bounds matching the animated DOM slot, document acknowledgement, and zero webviews. `display.png` captures the compositor and its native page pixels; `tool.png` is the browser-tool result. `window.png` captures only the shell webContents, not its native child views. The surrounding Cordis shell is a fixture, not a complete installed Desktop. For a negative control set `NATIVE_SLOT_CLIENT` to the revision-8 client; setting `NATIVE_SLOT_STATIC=1` opens without animation and distinguishes stale placement from scale/attachment faults.
 
 ```sh
 DSH_SOURCE_ROOT=<dsh-source> node <dsh-source>/node_modules/vitest/vitest.mjs run --config tools/native-child-vitest.config.mjs

@@ -1,7 +1,7 @@
 {
   "client.after.js": {
-    "bytes": 148618,
-    "sha256": "f397ee7cf88c386838d7aab8547708b3f36e8a892712de3189b5a5cf98278574"
+    "bytes": 148771,
+    "sha256": "800c95a92ac17aabd2f9fe0c3920e49a27ee1038551c59f770a650047e662465"
   },
   "client.before.js": {
     "bytes": 141001,
@@ -24,8 +24,8 @@
     "sha256": "cca56f6da8272f4b78b708a285816fcfd567e701f1248eab777d3943c50e233e"
   },
   "rc5/client.after.js": {
-    "bytes": 148618,
-    "sha256": "f397ee7cf88c386838d7aab8547708b3f36e8a892712de3189b5a5cf98278574"
+    "bytes": 148771,
+    "sha256": "800c95a92ac17aabd2f9fe0c3920e49a27ee1038551c59f770a650047e662465"
   },
   "rc5/client.before.js": {
     "bytes": 141001,

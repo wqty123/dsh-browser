@@ -3,7 +3,7 @@
   "releases": {
     "main": {
       "baseCommit": "2e39e70496aa02986ca6a820c5d497e816b69d7e",
-      "sourceCommit": "ecc1469ffe9edeeb19d1a88c0909a915593adba9",
+      "sourceCommit": "967cfb947afa69b59e269825c022ae49a579c731",
       "patches": [
         {
           "file": "main/0001-feat-sidebar-right-add-session-rendering-holds.patch.gz",
@@ -72,6 +72,10 @@
         {
           "file": "main/0017-fix-desktop-restore-sidebar-cookies-once-before-gues.patch.gz",
           "commit": "ecc1469ffe9edeeb19d1a88c0909a915593adba9"
+        },
+        {
+          "file": "main/0018-fix-sidebar-right-follow-animated-native-slot-placem.patch.gz",
+          "commit": "967cfb947afa69b59e269825c022ae49a579c731"
         }
       ],
       "fixture": {
@@ -80,11 +84,11 @@
         "sha256": "214c7503cd3ed3a6ec760c0dab93308e1035f52c48004f8d19a08489b19f5ca9"
       },
       "baseTree": "4fbe028266d089667f10986bffed8780826f19c6",
-      "sourceTree": "63e8abc95c53e6266ad4631fd8f5fffb78c5b27b"
+      "sourceTree": "ceaee400f94d61e3c1a86af4f585c7847d37185b"
     },
     "rc3": {
       "baseCommit": "38a6a5c965aa99ab525161efb7cc5cf1fe62fced",
-      "sourceCommit": "948d49ac3f9e48e511b71ecbef446745e59e1d05",
+      "sourceCommit": "65791d4dcf3f25c544b3fb433c47e133583a34b6",
       "patches": [
         {
           "file": "rc3/0001-feat-sidebar-right-add-session-rendering-holds.patch.gz",
@@ -153,6 +157,10 @@
         {
           "file": "rc3/0017-fix-desktop-restore-sidebar-cookies-once-before-gues.patch.gz",
           "commit": "948d49ac3f9e48e511b71ecbef446745e59e1d05"
+        },
+        {
+          "file": "rc3/0018-fix-sidebar-right-follow-animated-native-slot-placem.patch.gz",
+          "commit": "65791d4dcf3f25c544b3fb433c47e133583a34b6"
         }
       ],
       "fixture": {
@@ -161,11 +169,11 @@
         "sha256": "bc597312bb8097636604398e866af0869c9feeff2cc808a14b853ffdd4d4a5f1"
       },
       "baseTree": "77ab54bbce37988207baa603b1d39aa9db9aeaaa",
-      "sourceTree": "6a3596f64ca6d7fb8b6d82e286a8cd2db74b637c"
+      "sourceTree": "5d7cbf5effb52a37c57bbeb90a3b39703979df30"
     },
     "rc5": {
       "baseCommit": "9c2670d3bce5275e0d1610272958121af87787bb",
-      "sourceCommit": "c8f8d79aacc07d2f54dda634ff2cc041d165bcf5",
+      "sourceCommit": "0525cbba653769b53a966bbbdc684dab281e4e9e",
       "patches": [
         {
           "file": "rc5/0001-feat-sidebar-right-add-session-rendering-holds.patch.gz",
@@ -234,6 +242,10 @@
         {
           "file": "rc5/0017-fix-desktop-restore-sidebar-cookies-once-before-gues.patch.gz",
           "commit": "c8f8d79aacc07d2f54dda634ff2cc041d165bcf5"
+        },
+        {
+          "file": "rc5/0018-fix-sidebar-right-follow-animated-native-slot-placem.patch.gz",
+          "commit": "0525cbba653769b53a966bbbdc684dab281e4e9e"
         }
       ],
       "fixture": {
@@ -242,7 +254,7 @@
         "sha256": "4d56b235a252f3e877b50ad63d4b3a4f3b6ecb122d6493d531f7747bac7f2da1"
       },
       "baseTree": "6ec0fcdcaf38bdf8ffa6675e30b036dc104a1ece",
-      "sourceTree": "c4d0dd695e041802c61af2cbec8523ddd2287a6b"
+      "sourceTree": "273fc6c7d5c0b5e5f041b172f3744eb83c9ea078"
     }
   }
 }
