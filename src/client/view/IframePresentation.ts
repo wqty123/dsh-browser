@@ -17,6 +17,18 @@ function guestProxyUrl(url: string): string {
   return `${location.origin}/dsh-builtin-browser/browser-view/isolated-guest?u=${encodeURIComponent(url)}`
 }
 
+function capturedSourceUrl(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  try {
+    const proxy = new URL(value)
+    if (proxy.origin === location.origin && proxy.pathname === '/dsh-builtin-browser/browser-view/isolated-guest') {
+      const source = proxy.searchParams.get('u')
+      if (source !== null && /^https?:\/\//iu.test(source)) return new URL(source).href
+    }
+  } catch { /* Invalid source URLs remain subject to capture validation. */ }
+  return value
+}
+
 /** Opaque guest documents cannot access the application's origin or open native windows. */
 export const WEB_BROWSER_SANDBOX = 'allow-scripts allow-forms'
 const RELAXED_BROWSER_SANDBOX = `${WEB_BROWSER_SANDBOX} allow-downloads allow-modals allow-pointer-lock allow-orientation-lock allow-presentation allow-storage-access-by-user-activation`
@@ -143,7 +155,12 @@ export class IframePresentation implements BrowserPresentation {
       catch (error) { this.sourceConnection = undefined; throw error }
       if (this.sourceLifetime.signal.aborted) throw new Error('source iframe was disposed')
     }
-    await this.events.reference?.({ ...data, ...this.owner === undefined ? {} : { sourcePageId: this.pageId } })
+    const frozen = (data as { readonly capture?: Record<string, unknown> }).capture
+    const intent = frozen !== null && typeof frozen === 'object' && !Array.isArray(frozen)
+      ? { ...data, capture: { ...frozen, url: capturedSourceUrl(frozen.url),
+        ...typeof frozen.frameUrl === 'string' ? { frameUrl: capturedSourceUrl(frozen.frameUrl) } : {} } }
+      : data
+    await this.events.reference?.({ ...intent, ...this.owner === undefined ? {} : { sourcePageId: this.pageId } })
   }
 
   /** Request history movement in the guest without reading its cross-origin window. */
