@@ -15,6 +15,8 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { referenceOwnerKey } from '../reference-owner.ts'
+import { WEB_REVEAL_STATUSES, type WebRevealStatus } from '../reference-source.ts'
+import { WebSourceLeaseExpired } from '../browser-reference/web-sources.ts'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { BrowserHttpHandler } from './authenticated-route.ts'
@@ -96,6 +98,7 @@ export interface ReferenceRouteOptions {
 
 /** The handlers, one per registered exact path. */
 export interface ReferenceRouteHandlers {
+  readonly source: BrowserHttpHandler
   readonly list: BrowserHttpHandler
   readonly get: BrowserHttpHandler
   readonly capture: BrowserHttpHandler
@@ -125,6 +128,32 @@ function requireRead(request: IncomingMessage, response: ServerResponse): boolea
 export function createReferenceRouteHandlers(options: ReferenceRouteOptions): ReferenceRouteHandlers {
   const { service, queue } = options
   const carrier = options.carrier ?? (() => 'bundled' as BrowserReferenceCarrier)
+
+  const source: BrowserHttpHandler = async (request, response) => {
+    if (!requireWrite(request, response)) return
+    if (service.webSources === undefined) { replyJson(response, 503, { ok: false, error: 'web source channel unavailable' }); return }
+    try {
+      const body = await readJsonBody<Record<string, unknown>>(request)
+      const lease = stringOf(body.lease, 100)
+      if (body.operation === 'register') {
+        const owner = stringOf(body.sessionId, 200)
+        const pageId = stringOf(body.pageId, 200)
+        const url = stringOf(body.url, 4000)
+        if (!owner || !pageId || !url) throw new Error('source owner, page and URL required')
+        replyJson(response, 200, { ok: true, lease: service.webSources.register(owner, pageId, url) })
+      } else if (body.operation === 'poll' && lease !== undefined && typeof body.url === 'string') {
+        const acks = body.acknowledgements ?? []
+        if (!Array.isArray(acks) || acks.length > 64 || !acks.every(ack => ack !== null && typeof ack === 'object' && typeof ack.id === 'string' && WEB_REVEAL_STATUSES.includes(ack.status))) throw new Error('invalid source acknowledgements')
+        const commands = service.webSources.poll(lease, body.url, acks as { id: string; status: WebRevealStatus }[])
+        replyJson(response, 200, { ok: true, commands })
+      } else if (body.operation === 'remove' && lease !== undefined) {
+        service.webSources.remove(lease)
+        replyJson(response, 200, { ok: true })
+      } else throw new Error('invalid source operation')
+    } catch (error) {
+      replyJson(response, error instanceof WebSourceLeaseExpired ? 410 : 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
 
   const list: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
@@ -172,6 +201,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
       return
     }
     const browserSessionId = stringOf(body.browserSessionId, 200)
+    const sourcePageId = stringOf(body.sourcePageId, 200)
     const tableSelector = stringOf(body.tableSelector, 1000)
     const excerptText = stringOf(body.excerptText, 20_000)
     let frameSelector: string | undefined
@@ -227,6 +257,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
     const outcome = await service.capture({
       sessionId,
       ...browserSessionId !== undefined ? { browserSessionId } : {},
+      ...sourcePageId !== undefined ? { sourcePageId } : {},
       origin,
       entry,
       carrier: entry === 'page-overlay' && frozenCapture !== undefined ? 'sidebar' : oneOf(body.carrier, CARRIERS) ?? carrier(),
@@ -570,7 +601,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
   }
 
   return {
-    list, get, capture, reveal, insert, export: exportBundle, importBundle,
+    source, list, get, capture, reveal, insert, export: exportBundle, importBundle,
     deliveries, ack, removeDelivery, asset,
   }
 }

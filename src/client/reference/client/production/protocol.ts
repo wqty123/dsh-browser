@@ -124,6 +124,7 @@ export interface BrowserReferenceSource {
 export interface BrowserReferenceOwner {
   readonly sessionId?: string
   readonly browserSessionId?: string
+  readonly sourcePageId?: string
 }
 
 export interface BrowserReferenceProvenance {

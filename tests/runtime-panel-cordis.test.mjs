@@ -71,7 +71,8 @@ test('navigation readiness binds and highlights through the live Cordis panel se
     }, { writeHead(status) { assert.equal(status, 200) }, end(body) { payload = JSON.parse(body) } })
     return payload
   }
-  assert.equal((await reveal()).status, 'session-unavailable')
+  assert.equal(reference.owner.browserSessionId, undefined, 'a frozen sidebar quote has no native browser session')
+  assert.equal((await reveal()).status, 'unavailable')
   let acknowledge
   const source = openReferenceSource({
     tabsIn: () => [{ id: 'tab', kind: 'browser' }],

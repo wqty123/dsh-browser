@@ -160,6 +160,8 @@ export interface BrowserReference {
      * outlive the conversation that first asked for the page.
      */
     readonly browserSessionId?: string
+    /** App-owned opaque iframe source, never a native browser session. */
+    readonly sourcePageId?: string
   }
   readonly provenance: {
     readonly origin: BrowserReferenceOrigin
