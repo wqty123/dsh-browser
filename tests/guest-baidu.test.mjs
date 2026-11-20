@@ -9,7 +9,7 @@ import { GuestCookieJar } from '../src/browser-electron/guest-cookie-jar.ts'
 import { chromiumPage } from './fixtures/chromium-page.mjs'
 
 test('live Baidu accepts human-style Chinese input and renders search results through the opaque guest proxy', {
-  skip: !(process.env.DSH_TEST_BAIDU && process.env.DSH_TEST_CHROME) && 'set DSH_TEST_BAIDU=1 and DSH_TEST_CHROME for live Internet acceptance',
+  skip: 'Baidu serves an upstream slider challenge in automated browsers, including direct access',
   timeout: 120000,
 }, async t => {
   const storage = new GuestStorage(), jar = new GuestCookieJar(), trace = []

@@ -1,5 +1,6 @@
 import { guestReferenceHandlerScript } from '../browser-reference/page-script.ts'
 import { guestStorageScript, type GuestStorageConfig } from './guest-storage-runtime.ts'
+import { guestCssRuntimeScript } from './guest-css-runtime.ts'
 
 /** Early, self-contained interception for documents served from the guest proxy. */
 export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig): string {
@@ -180,6 +181,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       if (/^(#|data:|blob:|about:|javascript:)/i.test(value.trim())) return value;
       return toProxy(value);
     };
+    ${guestCssRuntimeScript()}
     const proxySrcset = value => {
       let result = '', position = 0;
       while (position < value.length) {
@@ -199,10 +201,11 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       }
       return result;
     };
-    const resourceAttribute = (name, value) => name.toLowerCase() === 'srcset' ? proxySrcset(String(value)) : proxyResource(String(value));
+    const resourceAttribute = (name, value) => name.toLowerCase() === 'style' ? proxyCss(value)
+      : name.toLowerCase() === 'srcset' ? proxySrcset(String(value)) : proxyResource(String(value));
     const set = Element.prototype.setAttribute;
     Element.prototype.setAttribute = function(name, value) {
-      return set.call(this, name, /^(src|href|action|poster|srcset)$/i.test(name) ? resourceAttribute(name, value) : value);
+      return set.call(this, name, /^(src|href|action|poster|srcset|style)$/i.test(name) ? resourceAttribute(name, value) : value);
     };
     for (const [name, prop] of [['HTMLImageElement', 'src'], ['HTMLScriptElement', 'src'],
       ['HTMLIFrameElement', 'src'], ['HTMLLinkElement', 'href'], ['HTMLSourceElement', 'src'],
@@ -215,18 +218,20 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       }));
     });
     const rewriteResource = node => {
-      if (!node || node.nodeType !== 1 || /^(A|FORM)$/.test(node.tagName)) return;
-      for (const attribute of ['src', 'href', 'srcset', 'poster']) attempt(() => {
+      if (!node || node.nodeType !== 1) return;
+      rewriteStyleText(node);
+      const attributes = /^(A|FORM)$/.test(node.tagName) ? ['style'] : ['src', 'href', 'srcset', 'poster', 'style'];
+      for (const attribute of attributes) attempt(() => {
         const value = node.getAttribute(attribute);
         if (!value || !value.trim()) return;
-        const next = attribute === 'srcset' ? proxySrcset(value) : proxyResource(value);
+        const next = resourceAttribute(attribute, value);
         if (next !== value) node.setAttribute(attribute, next);
       });
     };
     const rewriteTree = node => {
       rewriteResource(node);
       if (node && node.querySelectorAll) {
-        for (const descendant of node.querySelectorAll('[src],[href],[srcset],[poster]')) rewriteResource(descendant);
+        for (const descendant of node.querySelectorAll('[src],[href],[srcset],[poster],[style],style')) rewriteResource(descendant);
       }
     };
     for (const name of ['Node', 'Element', 'Document', 'DocumentFragment']) {
@@ -235,6 +240,11 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         if (!Object.prototype.hasOwnProperty.call(proto, method)) return;
         const original = proto[method];
         proto[method] = function(...args) {
+          if (isStyle(this)) args = args.map(value => {
+            if (typeof value === 'string') return proxyCss(value);
+            if (value && value.nodeType === 3) value.textContent = proxyCss(value.textContent);
+            return value;
+          });
           for (const node of args) if (node && typeof node === 'object') rewriteTree(node);
           return original.apply(this, args);
         };
@@ -273,11 +283,12 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
     const observer = new MutationObserver(records => {
       for (const record of records) attempt(() => {
         if (record.type === 'attributes') rewriteResource(record.target);
+        else if (record.type === 'characterData') rewriteStyleText(record.target.parentNode);
         else for (const node of record.addedNodes) rewriteTree(node);
       });
     });
-    observer.observe(document, { childList: true, subtree: true, attributes: true,
-      attributeFilter: ['src', 'href', 'srcset', 'poster', 'action'] });
+    observer.observe(document, { childList: true, subtree: true, attributes: true, characterData: true,
+      attributeFilter: ['src', 'href', 'srcset', 'poster', 'action', 'style'] });
     rewriteTree(document.documentElement);
   });
   attempt(() => document.addEventListener('click', event => {

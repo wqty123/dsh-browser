@@ -66,6 +66,7 @@ function siteHeader(name: string): boolean {
 const DROP_RESPONSE_HEADERS = new Set([
   'content-security-policy', 'content-security-policy-report-only', 'x-frame-options',
   'content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive',
+  'alt-svc', 'alternate-protocol', 'upgrade', 'http2-settings', 'trailer', 'te',
   'strict-transport-security', 'cross-origin-opener-policy', 'cross-origin-embedder-policy',
   'cross-origin-resource-policy', 'permissions-policy', 'set-cookie', 'refresh',
 ])
@@ -430,72 +431,77 @@ export async function handleGuest(
       }
     }
   } catch (error) {
-    writeHead(error instanceof UnsafeGuestTargetError ? 403 : 502, { 'content-type': 'text/plain; charset=utf-8' })
-    response.end(`guest proxy: cannot reach ${target.host}: ${String((error as Error).message ?? error)}`)
+    writeHead(error instanceof UnsafeGuestTargetError ? 403 : 502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+    response.end(error instanceof UnsafeGuestTargetError ? 'guest proxy: target is not allowed' : 'guest proxy: upstream request failed')
     return
   }
-  cookieJar.setCookies(target, upstream.headers.getSetCookie?.() ?? [])
-  const out = new Headers()
-  for (const [name, value] of upstream.headers) {
-    if (!DROP_RESPONSE_HEADERS.has(name.toLowerCase()) && !name.toLowerCase().startsWith('access-control-')) out.set(name, value)
-  }
-  const location = upstream.headers.get('location')
-  if (location !== null && upstream.status >= 300 && upstream.status < 400) {
-    let next: URL | undefined
-    try {
-      const candidate = new URL(location, target)
-      if (!await blockedResolved(candidate)) next = candidate
-    } catch {}
-    if (next === undefined) {
-      await upstream.body?.cancel()
-      writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
-      response.end('guest proxy: redirect target is not allowed')
+  try {
+    cookieJar.setCookies(target, upstream.headers.getSetCookie?.() ?? [])
+    const out = new Headers()
+    for (const [name, value] of upstream.headers) {
+      if (!DROP_RESPONSE_HEADERS.has(name.toLowerCase()) && !name.toLowerCase().startsWith('access-control-')) out.set(name, value)
+    }
+    const location = upstream.headers.get('location')
+    if (location !== null && upstream.status >= 300 && upstream.status < 400) {
+      let next: URL | undefined
+      try {
+        const candidate = new URL(location, target)
+        if (!await blockedResolved(candidate)) next = candidate
+      } catch {}
+      if (next === undefined) {
+        await upstream.body?.cancel()
+        writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        response.end('guest proxy: redirect target is not allowed')
+        return
+      }
+      out.set('location', guestPath(next.href) + (session === '' ? '' : '&s=' + encodeURIComponent(session)))
+    }
+    const type = upstream.headers.get('content-type') ?? 'application/octet-stream'
+    const length = Number(upstream.headers.get('content-length') ?? '0')
+    if (method === 'HEAD' || upstream.body === null) {
+      writeHead(upstream.status, Object.fromEntries(out))
+      response.end()
       return
     }
-    out.set('location', guestPath(next.href) + (session === '' ? '' : '&s=' + encodeURIComponent(session)))
-  }
-  const type = upstream.headers.get('content-type') ?? 'application/octet-stream'
-  const length = Number(upstream.headers.get('content-length') ?? '0')
-  if (method === 'HEAD' || upstream.body === null) {
-    writeHead(upstream.status, Object.fromEntries(out))
-    response.end()
-    return
-  }
-  if (/^text\/css(?:;|$)/iu.test(type) && !(upstream.status >= 300 && upstream.status < 400)) {
-    const css = rewriteCss(await upstream.text(), value => proxyReference(value, target))
+    if (/^text\/css(?:;|$)/iu.test(type) && !(upstream.status >= 300 && upstream.status < 400)) {
+      const css = rewriteCss(await upstream.text(), value => proxyReference(value, target))
+      out.delete('etag')
+      out.delete('content-md5')
+      out.set('content-type', 'text/css; charset=utf-8')
+      writeHead(upstream.status, Object.fromEntries(out))
+      response.end(css)
+      return
+    }
+    if (subRequest || !REWRITABLE.test(type) || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
+      || length > MAX_REWRITE_BYTES || (upstream.status >= 300 && upstream.status < 400)) {
+      const body = Buffer.from(await upstream.arrayBuffer())
+      writeHead(upstream.status, Object.fromEntries(out))
+      response.end(/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
+        ? Buffer.from(stripDocumentPolicies(body.toString('latin1')), 'latin1') : body)
+      return
+    }
+    const raw = await upstream.text()
+    // Fetch metadata is browser-controlled: scripts must not fetch another site's storage capability.
+    const context = query.get('storage-context') ?? randomUUID()
+    const storageConfig = (destination === 'iframe' || destination === 'document') && request.headers['sec-fetch-mode'] === 'navigate'
+      && /^[\w:-]{16,128}$/u.test(context)
+      ? { token: (storage ?? localGuestStorage()).issue(target.origin, context), context, cookies: cookieJar.getDocumentCookie(target) } : undefined
+    const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig) + '</script>'
+    let body = rewriteDocument(raw, target)
+    if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
+    else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
+    else body = runtime + body
+    const tail = '\n' + overlayScript + '\n' + relayTag(session)
+    body = /<\/body\s*>/iu.test(body) ? body.replace(/<\/body\s*>/iu, match => tail + match) : body + tail
     out.delete('etag')
     out.delete('content-md5')
-    out.set('content-type', 'text/css; charset=utf-8')
+    out.set('content-type', type)
+    out.delete('last-modified')
+    out.set('cache-control', 'no-store')
     writeHead(upstream.status, Object.fromEntries(out))
-    response.end(css)
-    return
+    response.end(body)
+  } catch {
+    writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+    response.end('guest proxy: upstream response failed')
   }
-  if (subRequest || !REWRITABLE.test(type) || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
-    || length > MAX_REWRITE_BYTES || (upstream.status >= 300 && upstream.status < 400)) {
-    writeHead(upstream.status, Object.fromEntries(out))
-    const body = Buffer.from(await upstream.arrayBuffer())
-    response.end(/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
-      ? Buffer.from(stripDocumentPolicies(body.toString('latin1')), 'latin1') : body)
-    return
-  }
-  const raw = await upstream.text()
-  // Fetch metadata is browser-controlled: scripts must not fetch another site's storage capability.
-  const context = query.get('storage-context') ?? randomUUID()
-  const storageConfig = (destination === 'iframe' || destination === 'document') && request.headers['sec-fetch-mode'] === 'navigate'
-    && /^[\w:-]{16,128}$/u.test(context)
-    ? { token: (storage ?? localGuestStorage()).issue(target.origin, context), context, cookies: cookieJar.getDocumentCookie(target) } : undefined
-  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig) + '</script>'
-  let body = rewriteDocument(raw, target)
-  if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
-  else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
-  else body = runtime + body
-  const tail = '\n' + overlayScript + '\n' + relayTag(session)
-  body = /<\/body\s*>/iu.test(body) ? body.replace(/<\/body\s*>/iu, match => tail + match) : body + tail
-  out.delete('etag')
-  out.delete('content-md5')
-  out.set('content-type', type)
-  out.delete('last-modified')
-  out.set('cache-control', 'no-store')
-  writeHead(upstream.status, Object.fromEntries(out))
-  response.end(body)
 }

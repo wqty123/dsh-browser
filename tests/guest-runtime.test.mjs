@@ -285,7 +285,8 @@ test('observer proxies parsed resource subtrees and attribute mutations without 
   assert.equal(observer.options.childList, true)
   assert.equal(observer.options.subtree, true)
   assert.equal(observer.options.attributes, true)
-  assert.deepEqual(Array.from(observer.options.attributeFilter), ['src', 'href', 'srcset', 'poster', 'action'])
+  assert.equal(observer.options.characterData, true)
+  assert.deepEqual(Array.from(observer.options.attributeFilter), ['src', 'href', 'srcset', 'poster', 'action', 'style'])
   const link = new Element()
   link.tagName = 'LINK'
   link.attributes.set('href', '/rp/style.css')

@@ -32,7 +32,10 @@ test('document cookie grammar enforces HttpOnly, expiry, prefixes, path, domains
   jar.setDocumentCookie(url, 'parent=yes; Domain=.example.com; Path=/')
   assert.equal(jar.getDocumentCookie(new URL('https://login.example.com/dir/next')), 'scoped=yes; server=visible; js=one; __Host-good=yes; parent=yes')
   assert.ok(!jar.getDocumentCookie(new URL('https://login.example.com/directory')).includes('scoped='))
-  for (const other of ['https://other.example.com/', 'https://login.example.com:8443/', 'http://login.example.com/']) assert.equal(jar.getDocumentCookie(new URL(other)), '')
+  assert.equal(jar.getDocumentCookie(new URL('https://other.example.com/')), 'parent=yes')
+  assert.equal(jar.getDocumentCookie(new URL('https://login.example.com:8443/')), 'server=visible; js=one; __Host-good=yes; parent=yes')
+  assert.equal(jar.getDocumentCookie(new URL('http://login.example.com/')), 'server=visible; parent=yes')
+  assert.equal(jar.getDocumentCookie(new URL('https://unrelated.test/')), '')
   jar.setDocumentCookie(url, 'js=; Path=/; Max-Age=0')
   assert.ok(!jar.getDocumentCookie(url).includes('js='))
   jar.setDocumentCookie(url, 'past=no; Expires=Tue, 01 Jan 2000 00:00:00 GMT')
@@ -50,6 +53,47 @@ test('document cookie grammar enforces HttpOnly, expiry, prefixes, path, domains
   assert.ok(!jar.getCookieHeader(url, false, { ...context, topLevel: true }).includes('strict=yes'))
   assert.equal(jar.getCookieHeader(url, false, { ...context, topLevel: true, method: 'POST' }), 'none=yes')
   assert.ok(jar.getCookieHeader(url).includes('secret=private'))
+})
+
+test('Domain matching handles public suffix exceptions, host-only replacement, IPs and prefixes', () => {
+  for (const script of [false, true]) {
+    const jar = new GuestCookieJar(), login = new URL('https://passport.example.test/'), www = new URL('https://www.example.test/')
+    jar.setCookies(login, ['login=yes; Domain=.EXAMPLE.test; Secure; Path=/', 'only=host; Path=/',
+      '__Secure-shared=yes; Domain=example.test; Secure; Path=/', '__Host-local=yes; Secure; Path=/',
+      '__Host-bad=no; Secure; Path=/; Domain=example.test', 'foreign=no; Domain=other.test',
+      'suffix=no; Domain=test', 'lookalike=no; Domain=ample.test'], script)
+    assert.equal(jar.getCookieHeader(www), 'login=yes; __Secure-shared=yes')
+    assert.equal(jar.getDocumentCookie(www), 'login=yes; __Secure-shared=yes')
+    jar.setCookies(new URL('http://www.example.test/'), ['__Secure-shared=no; Domain=example.test; Secure; Path=/'], script)
+    assert.equal(jar.getCookieHeader(www), 'login=yes; __Secure-shared=yes')
+    assert.equal(jar.getCookieHeader(new URL('https://example.test.evil/')), undefined)
+    jar.setCookies(www, ['login=gone; Domain=example.test; Path=/; Max-Age=0'], script)
+    assert.equal(jar.getCookieHeader(www), '__Secure-shared=yes')
+    jar.setCookies(login, ['replace=host; Path=/', 'replace=domain; Domain=passport.example.test; Path=/'], script)
+    assert.ok(jar.getDocumentCookie(new URL('https://child.passport.example.test/')).includes('replace=domain'))
+    jar.setCookies(login, ['replace=host-again; Path=/'], script)
+    assert.ok(!jar.getDocumentCookie(new URL('https://child.passport.example.test/')).includes('replace='))
+    jar.setCookies(new URL('https://github.io/'), ['suffix=exact; Domain=github.io; Path=/'], script)
+    assert.equal(jar.getDocumentCookie(new URL('https://github.io:8443/')), 'suffix=exact')
+    assert.equal(jar.getCookieHeader(new URL('https://project.github.io/')), undefined)
+    jar.setCookies(new URL('https://project.github.io/'), ['private=no; Domain=github.io'], script)
+    assert.equal(jar.getCookieHeader(new URL('https://project.github.io/')), undefined)
+    jar.setCookies(new URL('https://127.0.0.1/'), ['ip=exact; Domain=127.0.0.1', 'suffix=no; Domain=0.0.1'], script)
+    assert.equal(jar.getDocumentCookie(new URL('http://127.0.0.1:8080/')), 'ip=exact')
+    jar.setCookies(new URL('https://www.xn--bcher-kva.test/'), ['idn=yes; Domain=bücher.test; Path=/'], script)
+    assert.equal(jar.getDocumentCookie(new URL('https://xn--bcher-kva.test/')), 'idn=yes')
+  }
+  const jar = new GuestCookieJar(), login = new URL('https://passport.example.test/'), www = new URL('https://www.example.test/')
+  jar.setCookies(login, ['secret=private; Domain=example.test; HttpOnly; Secure; Path=/'])
+  for (const value of ['secret=replace; Domain=example.test; Path=/', 'secret=delete; Domain=example.test; Path=/; Max-Age=0']) jar.setDocumentCookie(www, value)
+  assert.equal(jar.getDocumentCookie(www), '')
+  assert.equal(jar.getCookieHeader(www), 'secret=private')
+  const stored = { origin:login.origin, name:'SAVED', value:'yes', path:'/', secure:true }
+  for (const scope of [
+    {domain:'other.test',hostOnly:false}, {domain:'test',hostOnly:false},
+    {domain:'example.test',hostOnly:true}, {domain:'example.test',hostOnly:'false'},
+    {domain:'example.test.'}, {domain:'passport.example.test',hostOnly:false,name:'__Host-invalid'},
+  ]) assert.equal(new GuestCookieJar(undefined, [{...stored,...scope}]).getCookieHeader(login), undefined)
 })
 
 test('Document prototype cookie accessors handle empty jars, writes, snapshots and explicit capability failures', () => {
@@ -95,7 +139,7 @@ test('opaque Chromium documents synchronously share script and server cookies wi
     (async()=>{
       const descriptor=Object.getOwnPropertyDescriptor(Document.prototype,'cookie');
       const initial=document.cookie;
-      document.cookie='script=immediate; Path=/; Secure; Max-Age=3600';
+      document.cookie='script=immediate; Domain=example.test; Path=/; Secure; Max-Age=3600';
       const immediate=document.cookie;
       const cache=await caches.open('site'); await cache.put('/x',new Response('x'));
       const cacheState=[await caches.keys(),await caches.has('site'),await caches.match('/x'),await cache.delete('site')];
@@ -116,15 +160,21 @@ test('opaque Chromium documents synchronously share script and server cookies wi
     const url = new URL(target)
     if (url.pathname === '/echo') {
       const headers = new Headers({ 'content-type': 'application/json' })
-      headers.append('set-cookie', 'server=received; Path=/; Secure; Max-Age=3600')
-      headers.append('set-cookie', 'secret=private; HttpOnly; Secure; Path=/')
+      headers.append('set-cookie', 'server=received; Domain=example.test; Path=/; Secure; Max-Age=3600')
+      headers.append('set-cookie', 'secret=private; Domain=example.test; HttpOnly; Secure; Path=/')
       return new Response(JSON.stringify({ cookie: init.headers.get('cookie'), config: init.headers.get('x-site-config'),
         metadata: init.headers.get('x-dsh-guest-headers'), authorization: init.headers.get('authorization') }), { headers })
     }
+    if (url.hostname === 'www.example.test') return new Response(`<script>(async()=>{
+      const initial=document.cookie;
+      document.cookie='sibling=shared; Domain=example.test; Path=/; Secure';
+      const network=await (await fetch('/echo')).json();
+      parent.postMessage({peer:true,initial,current:document.cookie,network},'*');
+    })()</script>`, { headers: { 'content-type':'text/html' } })
     return new Response(markup, { headers: { 'content-type': 'text/html', 'set-cookie': 'hidden=initial; HttpOnly; Path=/' } })
   }
   const server = createServer((req, res) => {
-    if (req.url === '/') { res.setHeader('content-type','text/html'); res.end(`<!doctype html><script>document.cookie='DSH=private';window.results=[];addEventListener('message',e=>results.push(e.data))</script><iframe sandbox="allow-scripts allow-forms" src="${guestPath('https://site.example/start')}"></iframe>`); return }
+    if (req.url === '/') { res.setHeader('content-type','text/html'); res.end(`<!doctype html><script>document.cookie='DSH=private';window.results=[];addEventListener('message',e=>results.push(e.data))</script><iframe sandbox="allow-scripts allow-forms" src="${guestPath('https://passport.example.test/start')}"></iframe>`); return }
     void handleGuest(req, res, '', '', jar, storage).catch(error => res.destroy(error))
   }).listen(0, '127.0.0.1')
   t.after(async () => {
@@ -147,8 +197,13 @@ test('opaque Chromium documents synchronously share script and server cookies wi
   assert.deepEqual(result.cacheState, [[], false, null, false])
   assert.equal(result.hostAccess, 'SecurityError'); assert.equal(result.forged, 403)
   assert.deepEqual(result.errors, [])
-  const endpoint = `http://127.0.0.1:${server.address().port}` + guestPath('https://site.example/')
-  const token = storage.issue('https://site.example', 'cookie-test-context')
+  await page.evaluate(`document.querySelector('iframe').src=${JSON.stringify(guestPath('https://www.example.test/start'))}`)
+  const peer = await page.evaluate(`new Promise((resolve,reject)=>{const start=Date.now();const poll=setInterval(()=>{const value=results.find(x=>x.peer);if(value){clearInterval(poll);resolve(value)}else if(Date.now()-start>10000){clearInterval(poll);reject(new Error('sibling fixture timed out'))}},20)})`)
+  assert.equal(peer.initial, 'script=immediate; server=received')
+  assert.equal(peer.current, 'script=immediate; server=received; sibling=shared')
+  assert.equal(peer.network.cookie, 'script=immediate; server=received; secret=private; sibling=shared')
+  const endpoint = `http://127.0.0.1:${server.address().port}` + guestPath('https://passport.example.test/')
+  const token = storage.issue('https://passport.example.test', 'cookie-test-context')
   for (const [credential, operation, status] of [['invalid', {area:'cookies',op:'get'}, 403],
     [token, {area:'cookies',op:'invalid'}, 400], [token, {area:'cookies',op:'set',value:42}, 400]]) {
     const response = await oldFetch(endpoint + '&storage-token=' + encodeURIComponent(credential), {
@@ -156,6 +211,6 @@ test('opaque Chromium documents synchronously share script and server cookies wi
     assert.equal(response.status, status)
   }
   const module = new URL('../lib/browser-electron/guest-cookie-store.js', import.meta.url).href
-  const restart = spawnSync(process.execPath,['--input-type=module','-e',`import assert from 'node:assert/strict';import {loadGuestCookies} from ${JSON.stringify(module)};const jar=loadGuestCookies(${JSON.stringify(directory)});assert.equal(jar.getDocumentCookie(new URL('https://site.example/')),'script=immediate; server=received');assert.equal(jar.getDocumentCookie(new URL('https://other.example/')),'');`],{encoding:'utf8'})
+  const restart = spawnSync(process.execPath,['--input-type=module','-e',`import assert from 'node:assert/strict';import {loadGuestCookies} from ${JSON.stringify(module)};const jar=loadGuestCookies(${JSON.stringify(directory)});assert.equal(jar.getDocumentCookie(new URL('https://www.example.test:8443/')),'script=immediate; server=received; sibling=shared');assert.equal(jar.getDocumentCookie(new URL('https://other.example/')),'');`],{encoding:'utf8'})
   assert.equal(restart.status, 0, restart.stderr)
 })
