@@ -56,7 +56,7 @@ test('the launch asks for no startup window, so no tab appears that we never cre
 test('a hand-off is adopted with a bounded retry, not a single attempt', () => {
   // The reporter's measurement: the stub is gone before the port file lands, so one attempt reads
   // too early. The loop must exist, must be bounded, and must stop when the host is disposed.
-  assert.match(source, /const HANDOFF_ADOPT_MS = 8_000/, 'the bound is a named constant')
+  assert.match(source, /const HANDOFF_ADOPT_MS = 1_200/, 'the documented low-latency bound is a named constant')
   const branch = source.slice(source.indexOf("if (clean) {"))
   const body = branch.slice(0, branch.indexOf('throw new Error('))
   assert.match(body, /const deadline = Date\.now\(\) \+ HANDOFF_ADOPT_MS/, 'a deadline is computed')

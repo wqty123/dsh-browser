@@ -69,19 +69,6 @@ const CLOSE_GRACE_MS = 6_000
 const PORT_PROBE_MS = 250
 
 /**
- * How long to keep trying to adopt a browser after a launcher reported a clean exit.
- *
- * Exit code 0 means the launcher handed the request to an instance already holding this profile —
- * but on Windows that stub exits BEFORE the real browser writes `DevToolsActivePort`. Measured on
- * Chrome 156: stub gone at 300 ms, port file present at 441 ms (issue #33). A single attempt read
- * too early and reported a launch failure for a browser that was starting normally, so this is a
- * retry rather than one shot.
- *
- * 8 s is the reporter's measured-working bound and is generous against that ~150 ms gap: an honest
- * hand-off resolves in well under a second, and a launch that genuinely failed still reaches the
- * error within the same budget the CDP loop already allows.
- */
-/**
  * How long a hand-off is given to prove it can be adopted.
  *
  * A hand-off means the human's browser was already running: the launch handed the command line over and
@@ -1033,8 +1020,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // has written its port file: measured 300 ms to exit against 441 ms for DevToolsActivePort.
       // One attempt therefore read too early and reported "exited immediately after launch" for a
       // browser that was starting normally — reported as issue #33, where the reporter's own
-      // retry loop fixed it. 8 s at 250 ms is their measured-working bound and is generous against
-      // the ~150 ms gap, without turning a genuinely failed launch into a slow failure.
+      // retry loop fixed it. Keep the wait within the documented low-latency hand-off budget.
       if (clean) {
         const deadline = Date.now() + HANDOFF_ADOPT_MS
         for (;;) {
