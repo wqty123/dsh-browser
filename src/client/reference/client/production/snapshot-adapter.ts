@@ -91,6 +91,7 @@ function projectPart(part: BrowserReferencePart, referenceId: string): ContractP
         partId: part.partId,
         referenceId,
         text: part.text,
+        ...(part.content === undefined ? {} : { content: part.content }),
         label: part.anchor.exact,
       }
     case 'image':
@@ -110,6 +111,7 @@ function projectPart(part: BrowserReferencePart, referenceId: string): ContractP
         partId: part.partId,
         referenceId,
         text: projectTableText(part.table, part.table.caption ?? part.anchor.caption),
+        table: part.table,
       }
     default: {
       const exhaustive: never = part

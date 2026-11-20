@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createIframePage } from '../client/pages.ts'
-import { WEB_BROWSER_SANDBOX } from '../client/view/IframePresentation.ts'
+import { createIframePage } from '../../pages.ts'
+import { WEB_BROWSER_SANDBOX } from '../../view/IframePresentation.ts'
 
 function sidebar() {
   const frames: { attributes: Map<string, string>; src: string }[] = []

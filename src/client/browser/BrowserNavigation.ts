@@ -144,7 +144,7 @@ export class BrowserNavigation {
       entries,
       index: entries.length - 1,
       request: undefined,
-      navigation: { status: 'known', revision: this.value.navigation.revision },
+      navigation: { status: 'known', revision: this.value.navigation.status === 'empty' ? 0 : this.value.navigation.revision },
       failure: undefined,
     }
   }

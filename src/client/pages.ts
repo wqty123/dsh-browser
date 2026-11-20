@@ -13,8 +13,6 @@ export function createIframePage(options: BrowserPageOptions): BrowserPage {
     loaded: (revision, observedUrl) => { frame.handleLoaded(revision, observedUrl) },
     failed: (revision) => { frame.handleLoadFailed(revision) },
     remounted: () => { frame.reload() },
-    // The proxied guest needs to know which conversation it is quoting into; this panel owns one.
-    sessionId: () => (options as { readonly sessionId?: string }).sessionId ?? '',
   })
   const frame = new IframeImpl(options, presentation)
   return { frame, presentation }

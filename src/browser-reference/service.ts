@@ -18,6 +18,7 @@ const CAPTURE_DEDUPE_MS = 30_000
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { isReferenceText, MAX_REFERENCE_TEXT, referenceTextContent } from '../reference-text.ts'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { manifestHashOf, ReferenceStore, referenceStorePath } from './store.ts'
@@ -280,7 +281,7 @@ interface ResolvedOptions {
 
 const DEFAULTS: ResolvedOptions = {
   context: 32,
-  maxTextPartLength: 20_000,
+  maxTextPartLength: MAX_REFERENCE_TEXT,
   maxParts: 64,
   maxTableCells: 2_000,
   maxPageText: 2_000_000,
@@ -405,7 +406,7 @@ export class BrowserReferenceService {
     this.currentSession = options.currentSession
     this.options = {
       context: integerOf(options.context, DEFAULTS.context, 0, 512),
-      maxTextPartLength: integerOf(options.maxTextPartLength, DEFAULTS.maxTextPartLength, 1, 1_000_000),
+      maxTextPartLength: integerOf(options.maxTextPartLength, DEFAULTS.maxTextPartLength, 1, MAX_REFERENCE_TEXT),
       maxParts: integerOf(options.maxParts, DEFAULTS.maxParts, 1, 1_000),
       maxTableCells: integerOf(options.maxTableCells, DEFAULTS.maxTableCells, 1, 20_000),
       maxPageText: integerOf(options.maxPageText, DEFAULTS.maxPageText, 1_000, 50_000_000),
@@ -547,6 +548,10 @@ export class BrowserReferenceService {
         const framed = validateFrameCapture(
           await this.run<unknown>(browserSessionId, frameCaptureScript(), [{
             frameSelector, context: this.options.context,
+            maxChars: this.options.maxPageText, maxCells: this.options.maxTableCells,
+            ...request.tableSelector !== undefined ? { tableSelector: request.tableSelector } : {},
+            ...request.excerptText !== undefined && request.excerptText !== '' ? { excerptText: request.excerptText } : {},
+            ...request.target !== undefined ? { target: request.target } : {},
           }], signal),
           frameSelector,
         )
@@ -776,7 +781,7 @@ export class BrowserReferenceService {
       if (part.type === 'text') {
         try {
           if (pageText === undefined) {
-            const read = await this.run<RawPageTextResult>(sessionId, pageTextScript(), [{ maxChars: this.options.maxPageText }], signal)
+            const read = await this.run<RawPageTextResult>(sessionId, pageTextScript(), [{ maxChars: this.options.maxPageText, legacy: part.content === undefined }], signal)
             pageText = textOf(read.text, this.options.maxPageText)
           }
           const locate = findTextQuote(pageText, part.anchor)
@@ -785,6 +790,7 @@ export class BrowserReferenceService {
               start: locate.range.start,
               end: locate.range.end,
               maxChars: this.options.maxPageText,
+              legacy: part.content === undefined,
               durationMs: 2500,
             }], signal)
             results.push({
@@ -882,10 +888,15 @@ export class BrowserReferenceService {
     if (exact.length > this.options.maxTextPartLength) {
       return { kind: 'text', reason: 'text-too-long', detail: { characters: exact.length, limit: this.options.maxTextPartLength } }
     }
+    if (event.content !== undefined && (!isReferenceText(event.content)
+      || referenceTextContent(event.content).replace(/\s/gu, '') !== exact.replace(/\s/gu, ''))) {
+      return { kind: 'text', reason: 'invalid-text-content' }
+    }
     return {
       partId: nextPartId(),
       type: 'text',
       text: exact,
+      ...(event.content === undefined ? {} : { content: event.content }),
       anchor: {
         exact,
         prefix: textOf(event.prefix, 512),

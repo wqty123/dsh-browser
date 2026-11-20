@@ -12,12 +12,14 @@
  * reveal agree on what "visible text" means — a map built differently in the two
  * places would make every anchor miss.
  *
- * Text is flattened from visible text nodes in document order. Element
- * boundaries contribute nothing, so a selection spanning `A <b>B</b> C` is
- * `AB C`, exactly the string a later locate searches. Hidden subtrees, script,
+ * Capture and reveal share a text map with semantic block/line separators.
+ * Only actual text nodes carry DOM offsets; separators occupy map offsets.
+ * Hidden subtrees, script,
  * style, template and the plugin's own highlight overlay are excluded.
  * @module dsh-browser/browser-reference/page-script
  */
+
+import type { ReferenceTextNode } from '../reference-text.ts'
 
 /** Options the capture script accepts as its single argument. */
 export interface CaptureScriptOptions {
@@ -40,6 +42,7 @@ export interface CaptureScriptOptions {
 export interface RawCaptureEvent {
   readonly kind?: string
   readonly exact?: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly prefix?: string
   readonly suffix?: string
   readonly src?: string
@@ -221,31 +224,98 @@ const PAGE_LIB = String.raw`
     return false
   }
 
-  function flatTextMap(maxChars) {
+  function flatTextMap(maxChars, structured, legacy) {
     var body = pageBody()
-    var out = { text: '', nodes: [], truncated: false }
+    var out = { text: '', nodes: [], content: [], truncated: false }
     if (!body || typeof document.createTreeWalker !== 'function') return out
     var limit = maxChars && maxChars > 0 ? maxChars : 2000000
-    var walker = document.createTreeWalker(body, 4, null, false)
-    var node = walker.nextNode()
-    while (node) {
-      var value = node.nodeValue || ''
-      if (value !== '' && !skippedText(node) && textVisible(node)) {
-        var room = limit - out.text.length
-        if (value.length > room) {
-          if (room > 0) {
-            out.nodes.push({ node: node, start: out.text.length, end: out.text.length + room })
-            out.text += value.slice(0, room)
-          }
-          out.truncated = true
-          return out
-        }
-        out.nodes.push({ node: node, start: out.text.length, end: out.text.length + value.length })
-        out.text += value
+    function append(value) {
+      var room = Math.max(0, limit - out.text.length)
+      if (value.length > room) out.truncated = true
+      out.text += value.slice(0, room)
+    }
+    function boundary(value) {
+      if (legacy || !out.text) return
+      var overlap = 0
+      for (var i = 1; i <= value.length; i++) if (out.text.endsWith(value.slice(0, i))) overlap = i
+      append(value.slice(overlap))
+    }
+    function visit(node, depth) {
+      if (out.truncated) return []
+      if (depth > 64) { out.truncated = true; return [] }
+      if (node.nodeType === 3) {
+        var value = node.nodeValue || ''
+        if (!value || skippedText(node) || !textVisible(node)) return []
+        var start = out.text.length
+        append(value)
+        var end = out.text.length
+        if (end === start) return []
+        out.nodes.push({ node: node, start: start, end: end })
+        return structured ? [{ type: 'text', text: out.text.slice(start, end), start: start, end: end }] : []
       }
-      node = walker.nextNode()
+      if (node.nodeType !== 1 || SKIP_TAGS[node.tagName] || node.id === HIGHLIGHT_ID || !visibleNode(node)) return []
+      var tag = node.tagName
+      if (tag === 'BR') {
+        if (legacy) return []
+        var at = out.text.length
+        append('\n')
+        return structured ? [{ type: 'break', start: at, end: out.text.length }] : []
+      }
+      var block = /^(P|DIV|MAIN|ASIDE|NAV|SECTION|ARTICLE|HEADER|FOOTER|FIGURE|FIGCAPTION|DL|DT|DD|H[1-6]|UL|OL|PRE|BLOCKQUOTE|TABLE)$/.test(tag)
+      if (block) boundary('\n\n')
+      if (tag === 'LI' || tag === 'TR') boundary('\n')
+      if (tag === 'TD' || tag === 'TH') boundary('\t')
+      var start = out.text.length
+      var children = []
+      for (var child = node.firstChild; child; child = child.nextSibling) {
+        var added = visit(child, depth + 1)
+        for (var a = 0; a < added.length; a++) children.push(added[a])
+      }
+      var end = out.text.length
+      if (block) boundary('\n\n')
+      if (tag === 'LI' || tag === 'TR') boundary('\n')
+      if (!children.length) return []
+      var types = { P: 'paragraph', DIV: 'paragraph', H1: 'paragraph', H2: 'paragraph', H3: 'paragraph', H4: 'paragraph', H5: 'paragraph', H6: 'paragraph', STRONG: 'strong', B: 'strong', EM: 'emphasis', I: 'emphasis', CODE: 'code', PRE: 'pre', BLOCKQUOTE: 'blockquote', LI: 'list-item', UL: 'list', OL: 'list' }
+      var type = types[tag] || (block ? 'block' : undefined)
+      if (tag === 'DIV') type = 'block'
+      var result = { type: type, children: children, start: start, end: end }
+      if (tag === 'A' && /^https?:\/\//i.test(node.href || '')) { result.type = 'link'; result.href = String(node.href).slice(0, 4000) }
+      if (type === 'list') {
+        result.ordered = tag === 'OL'
+        var first = Number(node.getAttribute('start') || 1)
+        result.listStart = Number.isSafeInteger(first) && first >= 0 && first <= 1000000 ? first : 1
+        result.children = children.filter(function (child) { return child.type === 'list-item' })
+      }
+      return result.type ? [result] : children
+    }
+    for (var child = body.firstChild; child && !out.truncated; child = child.nextSibling) {
+      var added = visit(child, 0)
+      for (var a = 0; a < added.length; a++) out.content.push(added[a])
     }
     return out
+  }
+
+  function selectedContent(nodes, start, end) {
+    var result = []
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i]
+      if (node.end <= start || node.start >= end) continue
+      if (node.type === 'text') {
+        result.push({ type: 'text', text: node.text.slice(Math.max(0, start - node.start), Math.min(node.text.length, end - node.start)) })
+      } else if (node.type === 'break') result.push({ type: 'break' })
+      else {
+        var children = selectedContent(node.children, start, end)
+        if (!children.length) continue
+        var part = { type: node.type, children: children }
+        if (node.type === 'link') part.href = node.href
+        if (node.type === 'list') {
+          part.ordered = node.ordered
+          part.start = node.listStart + (node.ordered ? node.children.filter(function (child) { return child.end <= start }).length : 0)
+        }
+        result.push(part)
+      }
+    }
+    return result
   }
 
   function safeStart(text, index) {
@@ -276,7 +346,7 @@ const PAGE_LIB = String.raw`
   function selectedPart(range, entry) {
     var node = entry.node
     var value = node.nodeValue || ''
-    var length = value.length
+    var length = Math.min(value.length, entry.end === undefined ? value.length : entry.end - entry.start)
     var start = 0
     var end = length
     try {
@@ -289,13 +359,13 @@ const PAGE_LIB = String.raw`
     return { start: entry.start + start, end: entry.start + end, node: node }
   }
 
-  function mergeRanges(ranges) {
+  function mergeRanges(ranges, text) {
     ranges.sort(function (a, b) { return a.start - b.start })
     var out = []
     for (var i = 0; i < ranges.length; i++) {
       var run = ranges[i]
       var last = out.length ? out[out.length - 1] : null
-      if (last && run.start <= last.end) last.end = Math.max(last.end, run.end)
+      if (last && (run.start <= last.end || (text !== undefined && /^\s*$/.test(text.slice(last.end, run.start))))) last.end = Math.max(last.end, run.end)
       else out.push({ start: run.start, end: run.end, node: run.node })
     }
     return out
@@ -685,7 +755,7 @@ const PAGE_LIB = String.raw`
       if (!spec.excerptText) return { ok: false, reason: 'no-selection' }
     }
 
-    var map = flatTextMap(spec.maxChars)
+    var map = flatTextMap(spec.maxChars, true)
     if (ranges.length === 0 && !targetTable && !targetImage) {
       excerpt = excerptRun(map, String(spec.excerptText))
       if (!excerpt) return { ok: false, reason: 'excerpt-not-found' }
@@ -699,7 +769,7 @@ const PAGE_LIB = String.raw`
         var part = selectedPart(ranges[r], map.nodes[n])
         if (part) found.push(part)
       }
-      var merged = mergeRanges(found)
+      var merged = mergeRanges(found, map.text)
       for (var m = 0; m < merged.length; m++) textRuns.push(merged[m])
     }
     if (excerpt) textRuns = [{ start: excerpt.start, end: excerpt.end, node: nodeForOffset(map, excerpt.start) }]
@@ -817,6 +887,7 @@ const PAGE_LIB = String.raw`
         payload: {
           kind: 'text',
           exact: exact,
+          content: selectedContent(map.content, start, end),
           prefix: map.text.slice(safeStart(map.text, Math.max(0, start - context)), start),
           suffix: map.text.slice(end, safeEnd(map.text, Math.min(map.text.length, end + context))),
         },
@@ -935,7 +1006,7 @@ const PAGE_LIB = String.raw`
   }
 
   function highlightText(spec) {
-    var map = flatTextMap(spec.maxChars)
+    var map = flatTextMap(spec.maxChars, false, spec.legacy)
     var start = Math.max(0, Math.min(Number(spec.start) || 0, map.text.length))
     var end = Math.max(0, Math.min(Number(spec.end) || 0, map.text.length))
     if (end <= start) return { ok: false, reason: 'range-not-found' }
@@ -1238,7 +1309,7 @@ export function validateFrozenCapture(value: unknown): RawCaptureResult | undefi
 
 /** Read the page's visible text, for a host-side text-quote locate. */
 export function pageTextScript(): string {
-  return script(`var map = flatTextMap(spec.maxChars)
+  return script(`var map = flatTextMap(spec.maxChars, false, spec.legacy)
     return JSON.stringify({ ok: true, url: String(location.href), title: String(document.title || ''), text: map.text, truncated: map.truncated })`)
 }
 

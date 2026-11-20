@@ -1,3 +1,4 @@
+/// <reference path="../css-modules.d.ts" />
 /** Iframe DOM and revision-tagged load observations. */
 import type { BrowserTarget } from '../browser/url.ts'
 import type { BrowserPresentation } from './BrowserPresentation.ts'

@@ -9,6 +9,8 @@
  * @module dsh-browser/browser-reference/types
  */
 
+import type { ReferenceTextNode } from '../reference-text.ts'
+
 /** Where the capture happened; reveal routes back to the same carrier. */
 export type BrowserReferenceCarrier = 'sidebar' | 'bundled' | 'chrome' | 'edge'
 
@@ -33,6 +35,7 @@ export interface TextReferencePart {
   readonly partId: string
   readonly type: 'text'
   readonly text: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly anchor: TextQuoteAnchor
 }
 

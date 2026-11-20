@@ -21,6 +21,7 @@
  *
  * @module dsh-browser-reference/production/production-submission
  */
+import { renderReferenceTable } from '../../../../reference-text.ts'
 import type { OrderedReferenceGroup } from '../types.ts'
 import { createSubmissionProjector, type TextPosition } from '../ordered-submission.ts'
 import { encodeBrowserRefUri } from '../scheme.ts'
@@ -206,7 +207,7 @@ function mapProjected(
     case 'text':
       return { type: 'text', text: part.text }
     case 'table':
-      return { type: 'text', text: part.text }
+      return { type: 'text', text: part.table === undefined ? part.text : renderReferenceTable(part.table) }
     case 'image': {
       const admitted = admitImage(part.assetKey, part.partId ?? part.assetKey)
       return admitted ?? { type: 'text', text: `[image unavailable: ${part.partId ?? part.assetKey}]` }
