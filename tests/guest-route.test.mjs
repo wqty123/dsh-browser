@@ -15,6 +15,16 @@ before(async () => {
     if (req.url === '/login') {
       res.writeHead(303, { location: '/account', 'set-cookie': ['SID=logged-in; HttpOnly; Path=/', 'theme=dark; Path=/'] })
       res.end()
+    } else if (req.url === '/' && req.headers['x-fixture-host'] !== 'empty.example') {
+      res.writeHead(200, { 'set-cookie': 'VISITED=root; Path=/' })
+      res.end('root')
+    } else if (req.url === '/challenge') {
+      res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': 'CHALLENGE=seen; Path=/' })
+      res.end('<html><body>安全验证</body></html>')
+    } else if (req.url === '/large') {
+      const body = '<a href="/raw">' + 'x'.repeat(4 * 1024 * 1024) + '</a>'
+      res.writeHead(200, { 'content-type': 'text/html', 'content-length': Buffer.byteLength(body) })
+      res.end(body)
     } else if (req.url === '/bad-redirect') {
       res.writeHead(307, { location: 'http://127.0.0.1/private' })
       res.end()
@@ -37,10 +47,12 @@ before(async () => {
   upstreamOrigin = `http://127.0.0.1:${upstream.address().port}`
   // Only the transport is redirected to the local fixture. Production guards still see public URLs.
   globalThis.fetch = (target, options) => {
-    forwarded.push({ target: String(target), options })
+    forwarded.push({ target: String(target), options: { ...options, headers: new Headers(options.headers) } })
     const url = new URL(target)
-    if (url.hostname !== 'ordinary.example') throw new Error('unexpected upstream')
-    return nativeFetch(upstreamOrigin + url.pathname + url.search, options)
+    if (!['ordinary.example', 'warm-get.example', 'warm-head.example', 'challenge.example', 'empty.example'].includes(url.hostname)) throw new Error('unexpected upstream')
+    const headers = new Headers(options.headers)
+    headers.set('x-fixture-host', url.hostname)
+    return nativeFetch(upstreamOrigin + url.pathname + url.search, { ...options, headers })
   }
   proxy = createServer((req, res) => {
     void handleGuest(req, res, '<script>overlay()</script>', 'owner').catch(error => res.destroy(error))
@@ -71,7 +83,7 @@ test('forwards POST body, content type and safe headers without app cookies or i
   const result = await call(guestPath('https://ordinary.example/echo'), { method: 'POST', body: 'q=hello&pw=secret',
     headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json',
       'x-requested-with': 'XMLHttpRequest', authorization: 'Bearer site-token',
-      cookie: 'DSH=private; XSRF=app-private', 'x-dsh-private': 'private', 'x-dsh-guest-sub': '1' } })
+      cookie: 'DSH=private; session=app-private', 'x-dsh-private': 'private', 'x-dsh-guest-sub': '1' } })
   assert.equal(result.status, 200)
   const echo = JSON.parse(result.body)
   assert.equal(echo.method, 'POST')
@@ -93,6 +105,85 @@ test('stores redirect cookies and rewrites redirect location for a login round-t
   const account = await call(login.headers.location)
   assert.equal(JSON.parse(account.body).headers.cookie, 'SID=logged-in; theme=dark')
   assert.equal(forwarded.at(-1).options.redirect, 'manual')
+})
+
+test('replays only allowlisted inbound site cookies alongside the existing jar', async () => {
+  const result = await call(guestPath('https://ordinary.example/echo'), {
+    headers: { cookie: 'DSH=private; BAIDUID=baidu; SUB=weibo; XSRF=site-token; session=private' },
+  })
+  assert.equal(JSON.parse(result.body).headers.cookie, 'SID=logged-in; theme=dark; BAIDUID=baidu; SUB=weibo; XSRF=site-token')
+})
+
+test('restores navigation headers and defaults language without overwriting inbound language', async () => {
+  const result = await call(guestPath('https://ordinary.example/echo'), {
+    headers: { referer: 'https://dsh.example' + guestPath('https://other.example/previous') },
+  })
+  const headers = JSON.parse(result.body).headers
+  assert.equal(headers.origin, 'https://ordinary.example')
+  assert.equal(headers.referer, 'https://other.example/previous')
+  assert.equal(headers['accept-language'], 'zh-CN,zh;q=0.9,en;q=0.8')
+  const sent = forwarded.at(-1).options.headers
+  for (const [name, value] of Object.entries({ 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate',
+    'sec-fetch-dest': 'document', 'sec-fetch-user': '?1', 'upgrade-insecure-requests': '1' })) {
+    assert.equal(sent.get(name), value)
+  }
+  const custom = await call(guestPath('https://ordinary.example/echo'), { headers: { 'accept-language': 'en-US' } })
+  assert.equal(JSON.parse(custom.body).headers['accept-language'], 'en-US')
+})
+
+test('sub-requests use cors metadata, origin for POST, and never navigation-only headers', async () => {
+  for (const method of ['GET', 'POST']) {
+    const result = await call(guestPath('https://ordinary.example/echo'), { method, headers: { 'x-dsh-guest-sub': '1' } })
+    const headers = JSON.parse(result.body).headers
+    assert.equal(headers.origin, method === 'POST' ? 'https://ordinary.example' : undefined)
+    assert.equal(headers['sec-fetch-site'], 'same-origin')
+    assert.equal(headers['sec-fetch-mode'], 'cors')
+    assert.equal(headers['sec-fetch-dest'], 'empty')
+    assert.equal(headers['sec-fetch-user'], undefined)
+    assert.equal(headers['upgrade-insecure-requests'], undefined)
+  }
+})
+
+test('GET and HEAD deep links warm the root once and reuse root cookies and referer', async () => {
+  for (const [host, method] of [['warm-get.example', 'GET'], ['warm-head.example', 'HEAD']]) {
+    const before = forwarded.length
+    await call(guestPath('https://' + host + '/echo'), { method })
+    const requests = forwarded.slice(before)
+    assert.deepEqual(requests.map(item => item.target), ['https://' + host + '/', 'https://' + host + '/echo'])
+    assert.equal(requests[0].options.method, 'GET')
+    assert.equal(requests[0].options.redirect, 'manual')
+    assert.equal(requests[1].options.method, method)
+    assert.equal(requests[1].options.headers.get('cookie'), 'VISITED=root')
+    assert.equal(requests[1].options.headers.get('referer'), 'https://' + host + '/')
+  }
+})
+
+test('GET challenge warms once and retries once, merging challenge, root and inbound cookies', async () => {
+  const before = forwarded.length
+  await call(guestPath('https://challenge.example/challenge'), {
+    headers: { referer: 'https://dsh.example' + guestPath('https://challenge.example/previous'), cookie: 'SUB=weibo' },
+  })
+  const requests = forwarded.slice(before)
+  assert.deepEqual(requests.map(item => item.target), [
+    'https://challenge.example/challenge', 'https://challenge.example/', 'https://challenge.example/challenge',
+  ])
+  assert.equal(requests[2].options.headers.get('cookie'), 'CHALLENGE=seen; VISITED=root; SUB=weibo')
+  assert.equal(requests[2].options.headers.get('referer'), 'https://challenge.example/')
+})
+
+test('POST and sub-request challenges are never warmed or retried', async () => {
+  for (const options of [{ method: 'POST', body: 'login=1' }, { headers: { 'x-dsh-guest-sub': '1' } }]) {
+    const before = forwarded.length
+    const result = await call(guestPath('https://challenge.example/challenge'), options)
+    assert.equal(result.status, 200)
+    assert.equal(forwarded.length - before, 1)
+    assert.equal(forwarded.at(-1).target, 'https://challenge.example/challenge')
+  }
+})
+
+test('large HTML responses bypass rewriting and challenge probing', async () => {
+  const result = await call(guestPath('https://ordinary.example/large'))
+  assert.equal(result.body, '<a href="/raw">' + 'x'.repeat(4 * 1024 * 1024) + '</a>')
 })
 
 test('HTML sub-requests stay raw by explicit marker or fetch destination; framing headers are stripped', async () => {
