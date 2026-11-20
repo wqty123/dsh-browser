@@ -20,6 +20,7 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   private readonly state = createSnapshotStore<BrowserFrameState>(emptyBrowserFrame())
   private readonly carrier = createSnapshotStore<BrowserCarrierState>({ stage: 'idle' })
   private attachment: { viewport: string; lifetime: AbortController } | undefined
+  private mounted: { viewport: string } | undefined
   private lease: DesktopNativeLease | undefined
   private unsubscribe: (() => void) | undefined
   private pending: BrowserTarget | undefined
@@ -43,13 +44,13 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   mount(viewport: string): () => void {
     this.detach()
     if (this.disposed) return () => {}
-    const attachment = { viewport, lifetime: new AbortController() }
-    this.attachment = attachment
+    const mounted = { viewport }
+    this.mounted = mounted
     const element = document.getElementById(viewport)
     if (element !== null) element.dataset.sidebarBrowserFrame = 'native'
     this.pending ??= this.state.getSnapshot().target
     this.initialize()
-    return () => { if (this.attachment === attachment) this.detach() }
+    return () => { if (this.mounted === mounted) this.detach() }
   }
 
   loadUrl(target: BrowserTarget, navigationId?: string): void {
@@ -65,7 +66,15 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
 
   goBack(): void { void this.history(-1) }
   goForward(): void { void this.history(1) }
-  reload(): void { void this.command('Page.reload').catch(error => this.fail(error)) }
+  reload(): void {
+    if (this.disposed) return
+    if (this.lease === undefined) {
+      const current = this.state.getSnapshot()
+      if (current.target !== undefined) this.loadUrl(current.target, current.navigationId)
+      return
+    }
+    void this.command('Page.reload').catch(error => this.fail(error))
+  }
 
   dispose(): Promise<void> {
     if (this.disposal !== undefined) return this.disposal
@@ -76,6 +85,11 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   }
 
   private detach(): void {
+    this.mounted = undefined
+    this.releaseAttachment()
+  }
+
+  private releaseAttachment(): void {
     this.documentLifetime?.abort()
     this.documentLifetime = undefined
     this.attachment?.lifetime.abort()
@@ -94,6 +108,8 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   }
 
   private initialize(): void {
+    if (this.mounted === undefined || this.pending === undefined) return
+    this.attachment ??= { viewport: this.mounted.viewport, lifetime: new AbortController() }
     const attachment = this.attachment
     if (attachment === undefined || this.pending === undefined || this.initialization !== undefined || this.lease !== undefined) return
     this.initialization = (async () => {
@@ -182,7 +198,8 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
 
   private fail(error: unknown): void {
     const detail = error instanceof Error ? error.message : String(error)
-    this.detach()
+    this.releaseAttachment()
+    this.pending = undefined
     if (this.disposed) return
     this.carrier.set({ stage: 'failed', reason: 'guest-bootstrap-failed', detail })
     const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : 'BROWSER_NATIVE_SURFACE_UNAVAILABLE'

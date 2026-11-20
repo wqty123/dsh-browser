@@ -81,6 +81,29 @@ test('empty native pages own no lease; attachment errors and late acquire cancel
   } finally { globalThis.document = previous }
 })
 
+for (const retry of ['reload', 'navigate']) test(`native load failure recovers through ${retry} without remounting`, async () => {
+  const previous = globalThis.document
+  globalThis.document = { getElementById: () => ({ dataset: {} }) }
+  const f = fixture()
+  try {
+    f.page.loadUrl(target); const detach = f.page.mount('viewport'); await flush()
+    f.listeners.get('lease-1')({ stage: 'failed', generation: 'failed', code: 'BROWSER_GUEST_CLOSED' })
+    assert.equal(f.page.getSnapshot().error.code, 'BROWSER_GUEST_CLOSED')
+    assert.deepEqual(f.released, ['lease-1'])
+    const next = { ...target, url: 'https://example.test/recovered' }
+    if (retry === 'reload') f.page.reload()
+    else f.page.loadUrl(next)
+    await flush()
+    assert.equal(f.registrations.length, 2)
+    assert.deepEqual(f.calls.at(-1), { lease: 'lease-2', method: 'Page.navigate', params: { url: retry === 'reload' ? target.url : next.url } })
+    f.listeners.get('lease-2')({ stage: 'document', generation: 'recovered', frameId: 'frame', loaderId: 'loader' }); await flush()
+    assert.equal(f.page.getSnapshot().documentReady, true)
+    assert.equal(f.page.getSnapshot().error, undefined)
+    detach(); await f.page.dispose()
+    assert.deepEqual(f.released, ['lease-1', 'lease-2'])
+  } finally { await f.page.dispose(); globalThis.document = previous }
+})
+
 test('native document overlays drain captured references to their Session and stop on navigation or disposal', async () => {
   const previous = globalThis.document
   globalThis.document = { getElementById: () => ({ dataset: {} }) }
