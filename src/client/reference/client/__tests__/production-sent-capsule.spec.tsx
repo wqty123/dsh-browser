@@ -9,6 +9,8 @@ import type { RequestLike } from '../production/http-transport.ts'
 import { ROUTES, type RevealResultWire } from '../production/protocol.ts'
 import { browserSourceRule } from '../production/user-text-rule.ts'
 import { encodeBrowserRefUri } from '../scheme.ts'
+import { createBrowserInitializationJournal, createBrowserInitializationReader } from '../../../browser/initialization.ts'
+import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import {
   ASSET_MAP, LONG_TEXT, TAIL_TEXT, assetOf, deliveriesResponse,
   fakeHostInput, makeDelivery, manualScheduler, memoryKV,
@@ -32,11 +34,23 @@ async function assembled(storage = memoryKV(), options: { empty?: boolean; clien
   const services: Record<string, unknown> = {}
   let sourceRule: typeof browserSourceRule | undefined
   services.uiConversation = { userText: { register(rule: typeof browserSourceRule) { sourceRule = rule; return () => {} } } }
-  const reveals: { referenceId: string; partId?: string; navigate?: boolean }[] = []
+  const reveals: { referenceId: string; partId?: string; navigate?: boolean; sourcePageId?: string }[] = []
   let outcome: () => Promise<RevealResultWire> = async () => ({ ok: true, status: 'revealed' })
   let deliveries = options.empty ? [] : [makeDelivery({ state: 'prepared', sequence: 1 })]
-  const openTabIn = vi.fn()
-  services.sidebarRight = { openTabIn }
+  const tabs: { id: TabId; kind: string }[] = []
+  const listeners = new Set<() => void>()
+  const journal = createBrowserInitializationJournal({ onChange: () => { for (const listener of listeners) listener() } })
+  services.sidebarBrowserInitialization = createBrowserInitializationReader((_session, tab) => journal.get(tab), listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  })
+  const openTabIn = vi.fn((sessionId: string, _kind: string, options: { params: { url: string } }) => {
+    const tabId = 'sent-source' as TabId
+    tabs.push({ id: tabId, kind: 'browser' })
+    journal.begin({ sessionId, tabId, occurrenceId: 'source', navigationRevision: 1, url: options.params.url })
+    journal.advance(tabId, 'attached', { guestId: '42' })
+  })
+  services.sidebarRight = { openTabIn, tabsIn: () => tabs }
   const request: RequestLike = async (url, init) => {
     const parsed = new URL(url, 'https://dsh.test')
     let body: unknown
@@ -192,12 +206,13 @@ describe('production assembly — shared composer and sent capsules', () => {
   it('sent-capsule activation navigates a changed page, preserving a part-specific URI', async () => {
     const app = await assembled()
     await send(app.runtime)
-    app.outcome(async () => ({ ok: true, status: app.reveals.at(-1)?.navigate ? 'revealed' : 'page-mismatch' }))
+    app.outcome(async () => ({ ok: true, status: app.reveals.at(-1)?.sourcePageId ? 'revealed' : 'page-mismatch' }))
+    app.runtime.setSourceOpener(async () => ({ pageId: '42' }))
     const sent = await app.sent(encodeBrowserRefUri({ referenceId: 'ref-mixed-1', partId: 'tb-1' }))
     await act(async () => { pill(sent).click() })
     expect(app.reveals).toEqual([
       { referenceId: 'ref-mixed-1', partId: 'tb-1' },
-      { referenceId: 'ref-mixed-1', partId: 'tb-1', navigate: true },
+      { referenceId: 'ref-mixed-1', partId: 'tb-1', sourcePageId: '42' },
     ])
     expect(app.openTabIn).not.toHaveBeenCalled()
     expect(app.runtime.snapshot().reveal).toBeUndefined()
@@ -209,18 +224,18 @@ describe('production assembly — shared composer and sent capsules', () => {
     await send(first.runtime)
     first.runtime.dispose()
     const app = await assembled(first.storage, { empty: true, client: true })
-    app.outcome({ ok: true, status: 'session-unavailable' })
-    app.openTabIn.mockImplementation(async () => { app.outcome({ ok: true, status: 'revealed' }) })
+    app.outcome(async () => ({ ok: true, status: app.reveals.at(-1)?.sourcePageId ? 'revealed' : 'session-unavailable' }))
     const sent = await app.sent()
     await act(async () => { pill(sent).click() })
-    expect(app.openTabIn).toHaveBeenCalledExactlyOnceWith('sess-A', 'browser', { params: { url: sourceUrl } })
+    expect(app.openTabIn).toHaveBeenCalledExactlyOnceWith('session-sess-A', 'browser', { params: { url: sourceUrl } })
     expect(app.reveals).toHaveLength(2)
   })
 
   it('uses the shared hover panel and orchestration for the anchor fallback and Enter activation', async () => {
     const app = await assembled()
     await send(app.runtime)
-    app.outcome(async () => ({ ok: true, status: app.reveals.at(-1)?.navigate ? 'revealed' : 'page-mismatch' }))
+    app.outcome(async () => ({ ok: true, status: app.reveals.at(-1)?.sourcePageId ? 'revealed' : 'page-mismatch' }))
+    app.runtime.setSourceOpener(async () => ({ pageId: '42' }))
     const anchor = document.createElement('a')
     anchor.href = encodeBrowserRefUri({ referenceId: 'ref-mixed-1' })
     anchor.textContent = '引用来源 1：原文'
@@ -230,7 +245,7 @@ describe('production assembly — shared composer and sent capsules', () => {
     const keyboard = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
     await act(async () => { anchor.dispatchEvent(keyboard) })
     expect(keyboard.defaultPrevented).toBe(true)
-    expect(app.reveals.map(request => request.navigate ?? false)).toEqual([false, true])
+    expect(app.reveals.map(request => request.sourcePageId)).toEqual([undefined, '42'])
     await act(async () => { anchor.remove() })
     expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
@@ -255,7 +270,7 @@ describe('production assembly — shared composer and sent capsules', () => {
     const app = await assembled()
     await send(app.runtime)
     app.outcome({ ok: true, status: 'session-unavailable' })
-    app.runtime.setSourceOpener(async () => {})
+    app.runtime.setSourceOpener(async () => { throw new Error('readiness not acknowledged') })
     vi.useFakeTimers()
     const activation = app.runtime.activateUri(encodeBrowserRefUri({ referenceId: 'ref-mixed-1' }))
     await vi.runAllTimersAsync()
@@ -273,7 +288,7 @@ describe('production assembly — shared composer and sent capsules', () => {
     let resume!: () => void
     const opening = new Promise<void>(resolve => { opened = resolve })
     const pending = new Promise<void>(resolve => { resume = resolve })
-    app.runtime.setSourceOpener(async () => { opened(); await pending })
+    app.runtime.setSourceOpener(async () => { opened(); await pending; return { pageId: '42' } })
     const activation = app.runtime.revealReference('ref-mixed-1')
     await opening
     app.runtime.setSession('sess-B')

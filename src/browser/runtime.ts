@@ -144,6 +144,7 @@ export class BrowserRuntime extends Service {
   private readonly providerId: string | undefined
   private panelProvider: ((label?: string) => Promise<BrowserProvider | undefined>) | undefined
   private readonly panelSessions = new Map<BrowserSessionId, BrowserProvider>()
+  private readonly panelPages = new Map<string, Promise<BrowserSessionId>>()
 
   constructor(ctx: Context, config: BrowserRuntimeConfig = {}) {
     super(ctx, 'browser')
@@ -233,6 +234,7 @@ export class BrowserRuntime extends Service {
         for (const [session, provider] of this.panelSessions) {
           if (owned.has(provider)) this.panelSessions.delete(session)
         }
+        this.panelPages.clear()
         owned.clear()
       }
     }, 'browser.registerPanelProvider()')
@@ -251,6 +253,39 @@ export class BrowserRuntime extends Service {
     }
     this.panelSessions.set(session, provider)
     return session
+  }
+
+  /** Bind a ready sidebar page without launching or navigating another carrier. */
+  async bindPanelPage(owner: string, pageId: string): Promise<BrowserSessionId> {
+    const key = JSON.stringify([owner, pageId])
+    const existing = this.panelPages.get(key)
+    if (existing !== undefined) {
+      const session = await existing
+      if (this.panelSessions.has(session) && this.exists(session)) return session
+      this.panelPages.delete(key)
+    }
+    const binding = this.bindNewPanelPage(owner, pageId)
+    this.panelPages.set(key, binding)
+    try { return await binding }
+    catch (error) {
+      if (this.panelPages.get(key) === binding) this.panelPages.delete(key)
+      throw error
+    }
+  }
+
+  private async bindNewPanelPage(owner: string, pageId: string): Promise<BrowserSessionId> {
+    const session = await this.openPanel(owner)
+    if (session === undefined) throw new BrowserError('sidebar page binding unavailable', 'BROWSER_SURFACE_UNAVAILABLE')
+    const provider = this.resolveProvider(session)
+    try {
+      if (provider.bindPage === undefined) throw new BrowserError('sidebar page binding unsupported', 'BROWSER_SURFACE_UNAVAILABLE')
+      await provider.bindPage(session, pageId)
+      return session
+    } catch (error) {
+      this.panelSessions.delete(session)
+      await provider.close(session)
+      throw error
+    }
   }
 
   /** Open a URL through the selected provider, optionally in a new tab. */

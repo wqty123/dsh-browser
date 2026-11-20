@@ -89,6 +89,24 @@ function makeHost(overrides = {}) {
   return host
 }
 
+test('source binding retains the exact adopted page and destroys only the unused placeholder', async () => {
+  const host = makeHost()
+  let adopted
+  host.adoptPage = async (id, owner) => {
+    assert.equal(id, '42')
+    assert.equal(owner, 'session-owner')
+    adopted = host.createView()
+    return adopted
+  }
+  const provider = new ElectronBrowserProvider(host)
+  const session = await provider.open('session-owner')
+  await provider.bindPage(session, '42')
+  assert.equal(host.views.size, 1)
+  assert.equal(host.views.has(adopted.id), true)
+  assert.equal((await provider.listTabs(session))[0].id, 'page:42')
+  provider.dispose()
+})
+
 /** Poll until fn() is truthy or the budget runs out. */
 async function waitFor(fn, ms = 1000) {
   const deadline = Date.now() + ms

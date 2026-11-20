@@ -209,7 +209,7 @@ export class ElectronWebViewImpl implements BrowserFrame {
       throw error
     }
     this.element = element
-    this.carrier.set({ stage: 'guest', guestId: String(reservation.lease) })
+    this.carrier.set({ stage: 'guest' })
     const unsubscribeOpen = this.bridge.onOpenRequested(reservation.lease, (url) => {
       if (this.element === element && !signal.aborted) this.options.openRequested(url)
     })
@@ -221,7 +221,8 @@ export class ElectronWebViewImpl implements BrowserFrame {
         intent => captureReferenceIntent(intent, this.sessionId),
         AbortSignal.any([signal, this.documentLifetime.signal]))
       this.ready = true
-      this.carrier.set({ stage: 'ready', guestId: String(reservation.lease) })
+      const guestId = element.getWebContentsId?.()
+      this.carrier.set({ stage: 'ready', ...guestId === undefined ? {} : { guestId: String(guestId) } })
       this.observe(this.store.getSnapshot().address !== 'requested')
       this.loadPending()
     }, { signal })
@@ -231,7 +232,11 @@ export class ElectronWebViewImpl implements BrowserFrame {
     }, { signal })
     element.addEventListener('did-start-navigation', (event) => {
       if ((event as NavigationEvent).isMainFrame) {
-        if (!(event as NavigationEvent).isInPlace) this.documentLifetime?.abort()
+        if (!(event as NavigationEvent).isInPlace) {
+          this.documentLifetime?.abort()
+          const guestId = element.getWebContentsId?.()
+          this.carrier.set({ stage: 'guest', ...guestId === undefined ? {} : { guestId: String(guestId) } })
+        }
         this.store.set({ ...this.store.getSnapshot(), loading: true, error: undefined })
       }
     }, { signal })

@@ -1195,7 +1195,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
     return Promise.resolve(id)
   }
 
-  /** Open a URL in the active tab (default) or a new tab. */
+  async bindPage(session: BrowserSessionId, pageId: string): Promise<void> {
+    const s = this.session(session)
+    if (this.host.adoptPage === undefined || !s.label) throw new Error('sidebar page binding unsupported')
+    if (s.tabs.some(tab => tab.url !== '')) throw new Error('source binding requires a fresh browser session')
+    const handle = await this.host.adoptPage(pageId, s.label)
+    const previous = [...s.tabs]
+    s.tabs.splice(0, s.tabs.length, { id: `page:${pageId}`, handle, url: '' })
+    s.activeIndex = 0
+    for (const tab of previous) this.host.destroyView(tab.handle)
+  }
+
   /**
    * The most recent open request, for the Web sidebar.
    *

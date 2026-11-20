@@ -55,7 +55,7 @@ export interface ProductionRevealer {
    * @param options - `navigate` asks the plugin to move its page to the source.
    * @returns an understandable status.
    */
-  activate(uri: string, options?: { readonly navigate?: boolean }): Promise<RevealStatus>
+  activate(uri: string, options?: { readonly navigate?: boolean; readonly sourcePageId?: string }): Promise<RevealStatus>
   /** Build the dedicated button props for a reply-side link. */
   linkSpec(uri: string, label?: string): BrowserRefLinkSpec
   /** Last activation status, for the UI to render a hint. */
@@ -108,7 +108,7 @@ export function createRevealAdapter(options: ProductionRevealerOptions): RevealA
     async locate(request: RevealRequest, _signal: AbortSignal): Promise<RevealLocation> {
       const owner = resolveOwner(request.referenceId)
       if (owner === undefined) throw new RevealUnavailableError('unknown reference')
-      const wire = await http.reveal(request.referenceId, request.partId, request.navigate === true)
+      const wire = await http.reveal(request.referenceId, request.partId, request.navigate === true, request.sourcePageId)
       // A transport-level refusal (ok !== true) has no cause to report; a
       // decoded answer always does, so it travels with the status.
       if (wire.ok !== true) throw new RevealUnavailableError(wire.reason ?? 'reveal was refused')
@@ -141,7 +141,7 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
   const revealer = createRevealer({ adapter: createRevealAdapter(options) })
   let last: RevealStatus | undefined
 
-  const run = async (parsed: ReturnType<typeof parseBrowserRefUri>, navigate = false): Promise<RevealStatus> => {
+  const run = async (parsed: ReturnType<typeof parseBrowserRefUri>, navigate = false, sourcePageId?: string): Promise<RevealStatus> => {
     let status: RevealStatus
     if (parsed === undefined) {
       status = 'unknown-reference'
@@ -150,6 +150,7 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
         referenceId: parsed.referenceId,
         ...(parsed.partId === undefined ? {} : { partId: parsed.partId }),
         sessionId: options.currentSessionId(),
+        ...sourcePageId === undefined ? {} : { sourcePageId },
         ...navigate ? { navigate: true } : {},
       }
       try {
@@ -169,7 +170,7 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
   return {
     revealer,
     async activate(uri, activateOptions) {
-      return run(parseBrowserRefUri(uri), activateOptions?.navigate === true)
+      return run(parseBrowserRefUri(uri), activateOptions?.navigate === true, activateOptions?.sourcePageId)
     },
     linkSpec(uri, label) {
       const owner = (() => {

@@ -126,11 +126,7 @@ export class BrowserController implements HostObservable<BrowserControllerState>
             })
           }
         } else if (carrier.stage === 'ready') {
-          if (current !== undefined && current.stage !== 'failed' && current.stage !== 'attached'
-            && (current.guestId === undefined || carrier.guestId === undefined || current.guestId === carrier.guestId)) {
-            this.journal.advance(this.options.tabId, 'attached',
-              carrier.guestId === undefined ? {} : { guestId: carrier.guestId })
-          }
+          this.advanceFromFrame(this.page.frame.getSnapshot())
         } else if (carrier.stage === 'failed') {
           // `ownReceipt` already scopes this to the current occurrence.
           if (current !== undefined && current.stage !== 'failed') {
@@ -354,8 +350,11 @@ export class BrowserController implements HostObservable<BrowserControllerState>
     if (receipt === undefined || receipt.stage === 'failed' || receipt.stage === 'attached') return
     if (frame.error !== undefined) {
       this.journal.fail(this.options.tabId, 'navigation-failed')
-    } else if (frame.address === 'observed') {
-      this.journal.advance(this.options.tabId, 'attached')
+    } else if (frame.address === 'observed' && !frame.loading && frame.target?.url === receipt.url) {
+      const carrier = this.page.frame.lifecycle?.getSnapshot()
+      if (carrier !== undefined && carrier.stage !== 'ready') return
+      this.journal.advance(this.options.tabId, 'attached',
+        carrier?.guestId === undefined ? {} : { guestId: carrier.guestId })
     }
     this.publishInitialization()
   }

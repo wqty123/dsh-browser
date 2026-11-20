@@ -15,7 +15,7 @@ import { BrowserBody, type BrowserBodyProps } from './view/BrowserBody.tsx'
 import { BrowserTitle } from './view/BrowserTitle.tsx'
 import { createBrowserControllers } from './browser/BrowserController.ts'
 import type { BrowserInjected } from './browser/BrowserController.ts'
-import { createBrowserInitializationReader } from './browser/initialization.ts'
+import { createBrowserInitializationJournal, createBrowserInitializationReader } from './browser/initialization.ts'
 import type { BrowserInitializationReader } from './browser/initialization.ts'
 import { createIframePage } from './pages.ts'
 import { createElectronPage } from './electron/pages.ts'
@@ -141,8 +141,13 @@ export function apply(ctx: Context): void {
   const store = createBrowserStore()
   const startPage = new StartPageBinding()
   const controllers = new Map<BrowserBodyProps['sessionId'], BrowserInjected>()
-  ctx.provide('sidebarBrowserInitialization', createBrowserInitializationReader((sessionId, tabId) => {
+  const initializationListeners = new Set<() => void>()
+  ctx.provide('sidebarBrowserInitialization')
+  ctx.set('sidebarBrowserInitialization', createBrowserInitializationReader((sessionId, tabId) => {
     return controllers.get(sessionId as BrowserBodyProps['sessionId'])?.initialization(tabId)
+  }, listener => {
+    initializationListeners.add(listener)
+    return () => { initializationListeners.delete(listener) }
   }))
   ctx.inject(['shortcuts'], (scope) => {
     scope.effect(() => scope.shortcuts.register({
@@ -237,7 +242,9 @@ export function apply(ctx: Context): void {
         }
         const controller = createBrowserControllers(actions, factory(sessionId), tabId =>
           openTabs.getSnapshot().some(tab => tab.sessionId === sessionId && tab.tabId === tabId), startPage,
-          { sessionId })
+          { sessionId, journal: createBrowserInitializationJournal({
+            onChange: () => { for (const listener of initializationListeners) listener() },
+          }) })
         controllers.set(sessionId, controller)
         return controller
       },

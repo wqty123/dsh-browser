@@ -285,6 +285,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
     // Explicit jump: the caller wants the page moved to the stored URL rather
     // than a report that it is showing something else.
     const outcome = await service.reveal(referenceId, {
+      ...typeof body.sourcePageId === 'string' && body.sourcePageId !== '' ? { sourcePageId: body.sourcePageId } : {},
       ...partId !== undefined ? { partId } : {},
       ...body.navigate === true ? { navigate: true } : {},
     })

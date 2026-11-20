@@ -22,6 +22,9 @@ import { captureReferenceIntent } from '../../reference-intents.ts'
 import { ReferenceCapsules } from '../../reference/client/production/ReferenceCapsules.tsx'
 import { referenceLabels } from '../../reference/client/production/reference-labels.ts'
 import { fakeHostInput, manualScheduler, memoryKV } from '../../reference/client/__tests__/production.fixtures.ts'
+import { openReferenceSource } from '../../reference/client/production/source-opener.ts'
+import { createBrowserInitializationJournal, createBrowserInitializationReader } from '../initialization.ts'
+import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 
 const directories: string[] = []
 afterEach(() => {
@@ -31,19 +34,37 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
-function harness(owner = 'owner-B') {
+function harness(owner = 'owner-B', live?: { url: string; ready: boolean; highlighted: boolean }) {
   const directory = mkdtempSync(join(homedir(), '.dsh-reference-flow-'))
   directories.push(directory)
   const service = new BrowserReferenceService({
     exists: () => false,
-    evaluate: async () => { throw new Error('a frozen sidebar capture must not evaluate the selected external carrier') },
-  }, new ReferenceStore(join(directory, 'references.jsonl')), { assetDir: join(directory, 'assets') })
+    evaluate: async (sessionId, request) => {
+      if (!live) throw new Error('a frozen sidebar capture must not evaluate the selected external carrier')
+      expect(sessionId).toBe('browser:attached')
+      expect(live.ready).toBe(true)
+      if (request.script.includes('text: map.text, truncated: map.truncated')) return JSON.stringify({ text: 'selected words' })
+      if (request.script.includes('return JSON.stringify(highlightText(spec))')) {
+        live.highlighted = true
+        return JSON.stringify({ ok: true, rects: 1, scrolled: true })
+      }
+      if (request.script.includes('String(location.href)')) return JSON.stringify({ url: live.url })
+      throw new Error('unexpected source operation')
+    },
+  }, new ReferenceStore(join(directory, 'references.jsonl')), {
+    assetDir: join(directory, 'assets'),
+    sourceSession: async (boundOwner, pageId) => {
+      expect([boundOwner, pageId]).toEqual([owner, '42'])
+      expect(live?.ready).toBe(true)
+      return 'browser:attached'
+    },
+  })
   const queue = createDeliveryQueue({ path: join(directory, 'deliveries.jsonl') })
   const handlers = createReferenceRouteHandlers({ service, queue, carrier: () => 'edge' })
   const request = vi.fn(async (input: string, init?: { method?: string; body?: unknown }) => {
     const url = new URL(input, 'http://127.0.0.1:3080')
     const route = url.pathname.split('/').slice(3).join('/')
-    const handler = ({ capture: handlers.capture, list: handlers.list, deliveries: handlers.deliveries, 'delivery/ack': handlers.ack })[route]
+    const handler = ({ capture: handlers.capture, reveal: handlers.reveal, list: handlers.list, deliveries: handlers.deliveries, 'delivery/ack': handlers.ack })[route]
     if (handler === undefined) throw new Error(`unexpected route: ${url.pathname}`)
     let status = 0
     let result: unknown
@@ -75,6 +96,50 @@ const intent = {
 
 const firstOwner = '79b4e5bd-5bf4-49f3-b911-5d1a92b7002b'
 const nextOwner = '96092e17-63b5-4f8a-a466-54be10d7daba'
+
+it('returns to and highlights a quoted page in the same sidebar tab after navigating away', async () => {
+  const live = { url: 'https://cn.bing.com/', ready: false, highlighted: false }
+  const { runtime, request, queue } = harness(firstOwner, live)
+  const listeners = new Set<() => void>()
+  const journal = createBrowserInitializationJournal({ onChange: () => { for (const listener of listeners) listener() } })
+  const reader = createBrowserInitializationReader((_session, tab) => journal.get(tab), listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  })
+  const tabId = 'original-sidebar-tab' as TabId
+  const sessionId = `session-${firstOwner}`
+  journal.begin({ sessionId, tabId, occurrenceId: 'original', navigationRevision: 1, url: live.url })
+  journal.advance(tabId, 'attached', { guestId: '42' })
+  let requested!: () => void
+  const navigated = new Promise<void>(resolve => { requested = resolve })
+  const sidebar = {
+    tabsIn: () => [{ id: tabId, kind: 'browser' }],
+    openTabIn() { throw new Error('must reuse the same tab') },
+    navigateTabIn(owner: string, tab: string, options: { params: { url: string } }) {
+      expect([owner, tab]).toEqual([sessionId, tabId])
+      live.url = options.params.url
+      journal.begin({ sessionId, tabId, occurrenceId: 'original', navigationRevision: 2, url: live.url })
+      journal.advance(tabId, 'navigating')
+      requested()
+      return true
+    },
+  }
+  try {
+    await captureReferenceIntent(intent, sessionId)
+    await runtime.pollOnce()
+    runtime.setSourceOpener((url, signal) => openReferenceSource(sidebar, reader, firstOwner, url, signal))
+    const activation = runtime.revealReference(runtime.cards()[0]!.referenceId)
+    await navigated
+    expect(live.highlighted).toBe(false)
+    expect(request.mock.calls.filter(([url]) => url.includes('/reference/reveal'))).toHaveLength(1)
+    live.ready = true
+    journal.advance(tabId, 'attached', { guestId: '42' })
+    expect(await activation).toBe('revealed')
+    expect(live.url).toBe(intent.capture.url)
+    expect(live.highlighted).toBe(true)
+    expect(request.mock.calls.filter(([url]) => url.includes('/reference/reveal'))).toHaveLength(2)
+  } finally { runtime.dispose(); queue.dispose() }
+})
 
 it('binds capture, queue, composer and send to the host Session key before the first send and after a new Session', async () => {
   const { service, queue, request, runtime: unused } = harness()
