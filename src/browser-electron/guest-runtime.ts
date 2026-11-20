@@ -1,13 +1,22 @@
 import { guestReferenceHandlerScript } from '../browser-reference/page-script.ts'
+import { guestStorageScript, type GuestStorageConfig } from './guest-storage-runtime.ts'
 
 /** Early, self-contained interception for documents served from the guest proxy. */
-export function guestRuntimeScript(pageUrl: string): string {
+export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig): string {
   return `(() => {
   if (window.__dshGuestRuntime) return;
   window.__dshGuestRuntime = true;
   let real = ${JSON.stringify(pageUrl).replace(/</gu, '\\u003c')};
   const route = '/dsh-builtin-browser/browser-view/isolated-guest';
   const attempt = fn => { try { return fn(); } catch {} };
+  ${storage === undefined ? '' : 'attempt(() => { ' + guestStorageScript(storage) + ' });'}
+  const storageContext = ${JSON.stringify(storage?.context ?? '')};
+  const contextual = value => {
+    if (!storageContext) return value;
+    const url = new URL(value, location.href);
+    url.searchParams.set('storage-context', storageContext);
+    return value.startsWith('/') ? url.pathname + url.search + url.hash : url.href;
+  };
   const realURL = value => {
     const raw = String(value);
     const proxyURL = new URL(raw, location.origin + '/');
@@ -25,9 +34,9 @@ export function guestRuntimeScript(pageUrl: string): string {
     try {
       const raw = String(value);
       const hostURL = new URL(raw, location.origin + '/');
-      if (hostURL.origin === location.origin && hostURL.pathname === route) return raw;
+      if (hostURL.origin === location.origin && hostURL.pathname === route) return contextual(raw);
       const url = realURL(raw);
-      return /^https?:$/.test(url.protocol) ? route + '?u=' + encodeURIComponent(url.href) : raw;
+      return /^https?:$/.test(url.protocol) ? contextual(route + '?u=' + encodeURIComponent(url.href)) : raw;
     } catch { return value; }
   };
   window.__dshGuestToProxy = toProxy;

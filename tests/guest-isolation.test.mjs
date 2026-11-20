@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerWebGuest } from '../src/web-guest.ts'
 import { GUEST_ROUTE, guestPath, handleGuest } from '../src/browser-electron/guest-route.ts'
+import { GuestStorage } from '../src/browser-electron/guest-storage.ts'
 
 test('the root registers only the isolated endpoint, never the old DSH-origin guest route', () => {
   const routes = []
@@ -28,6 +29,7 @@ test('nested opaque guests execute with isolation, including the documented outs
   const profile = mkdtempSync(join(tmpdir(), 'dsh-nested-isolation-'))
   let origin, apiCalls = 0
   const cookies = []
+  const storage = new GuestStorage()
   dns.lookup = async () => [{ address: '93.184.216.34', family: 4 }]
   globalThis.fetch = async (target, options) => {
     assert.equal(new URL(target).hostname, 'ordinary.example')
@@ -39,7 +41,10 @@ test('nested opaque guests execute with isolation, including the documented outs
     return new Response(`<html><body><script>
       (async () => {
         const result = {};
-        try { localStorage.getItem('DSH_TOKEN'); result.storage = false; } catch { result.storage = true; }
+        try {
+          result.storage = localStorage.getItem('DSH_TOKEN') === null;
+          localStorage.setItem('site-value', 'site'); result.storage &&= localStorage.getItem('site-value') === 'site';
+        } catch { result.storage = false; }
         try { parent.document.body; result.parent = false; } catch { result.parent = true; }
         try { top.localStorage.getItem('DSH_TOKEN'); result.top = false; } catch { result.top = true; }
         try { result.cookie = !document.cookie.includes('DSH_TOKEN'); } catch { result.cookie = true; }
@@ -58,7 +63,7 @@ test('nested opaque guests execute with isolation, including the documented outs
   const server = createServer((req, res) => {
     if (req.url === '/') { res.setHeader('content-type', 'text/html'); res.end(fixture()) }
     else if (req.url === '/api/private') { apiCalls++; res.end('private-app-token') }
-    else void handleGuest(req, res, '', '').catch(error => res.destroy(error))
+    else void handleGuest(req, res, '', '', undefined, storage).catch(error => res.destroy(error))
   }).listen(0, '127.0.0.1')
   const outside = createServer((_req, res) => { res.setHeader('content-type', 'text/html'); res.end(fixture()) }).listen(0, '127.0.0.1')
   t.after(async () => {
@@ -80,7 +85,7 @@ test('nested opaque guests execute with isolation, including the documented outs
   assert.ok(cookies.every(cookie => cookie === null))
 })
 
-test('Chromium enforces opaque storage, API isolation, site networking and reference relay', {
+test('Chromium partitions site storage from DSH and enforces API isolation, site networking and reference relay', {
   skip: !process.env.DSH_TEST_CHROME && 'set DSH_TEST_CHROME to a Chromium executable',
 }, async t => {
   const originalFetch = globalThis.fetch
@@ -88,6 +93,7 @@ test('Chromium enforces opaque storage, API isolation, site networking and refer
   const profile = mkdtempSync(join(tmpdir(), 'dsh-guest-isolation-'))
   let origin, apiCalls = 0
   const upstreamCookies = []
+  const storage = new GuestStorage()
   dns.lookup = async () => [{ address: '93.184.216.34', family: 4 }]
   globalThis.fetch = async (target, options) => {
     assert.equal(new URL(target).hostname, 'ordinary.example')
@@ -96,7 +102,10 @@ test('Chromium enforces opaque storage, API isolation, site networking and refer
     return new Response(`<html><head></head><body><p>Quoted <strong>content</strong></p><script>
       (async () => {
         const result = {};
-        try { localStorage.getItem('DSH_TOKEN'); result.storage = false; } catch { result.storage = true; }
+        try {
+          result.storage = localStorage.getItem('DSH_TOKEN') === null;
+          localStorage.setItem('site-value', 'site'); result.storage &&= localStorage.getItem('site-value') === 'site';
+        } catch { result.storage = false; }
         try { parent.localStorage.getItem('DSH_TOKEN'); result.parent = false; } catch { result.parent = true; }
         try { result.cookie = !document.cookie.includes('DSH_TOKEN'); } catch { result.cookie = true; }
         try { await window.__dshGuestFetch(${JSON.stringify(origin + '/api/private')}, { credentials: 'include' }); result.api = false; } catch { result.api = true; }
@@ -121,7 +130,7 @@ test('Chromium enforces opaque storage, API isolation, site networking and refer
         const frame = document.createElement('iframe'); frame.src = ${JSON.stringify(guestPath('https://ordinary.example/document'))}; document.body.append(frame);
       </script></body></html>`)
     } else if (req.url === '/api/private') { apiCalls++; res.end('private-app-token') }
-    else if (new URL(req.url, 'http://fixture').pathname === GUEST_ROUTE) void handleGuest(req, res, '', '').catch(error => res.destroy(error))
+    else if (new URL(req.url, 'http://fixture').pathname === GUEST_ROUTE) void handleGuest(req, res, '', '', undefined, storage).catch(error => res.destroy(error))
     else { res.writeHead(404); res.end('not found') }
   }).listen(0, '127.0.0.1')
   t.after(async () => {

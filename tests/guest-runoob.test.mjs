@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { Script } from 'node:vm'
 import { guestPath, handleGuest, rewriteDocument } from '../src/browser-electron/guest-route.ts'
 import { GuestCookieJar } from '../src/browser-electron/guest-cookie-jar.ts'
+import { GuestStorage } from '../src/browser-electron/guest-storage.ts'
 import { captureEntrySource } from '../src/browser-reference/page-script.ts'
 
 const source = 'https://www.runoob.com/html/html-tables.html'
@@ -24,14 +25,19 @@ test('the public Runoob fixture keeps every inline script byte-for-byte through 
   for (const script of served) assert.doesNotThrow(() => new Script(script))
 })
 
-test('real Chromium selects the captured Runoob table after proxy navigation away and back, with identity and no SyntaxError', {
+test('real Chromium restores Runoob theme storage without weakening isolation, and selects the table after navigation back', {
   skip: !process.env.DSH_TEST_CHROME && 'set DSH_TEST_CHROME to a Chromium executable',
 }, async t => {
   const originalFetch = globalThis.fetch, originalLookup = dns.lookup
   const profile = mkdtempSync(join(tmpdir(), 'dsh-runoob-'))
   let chrome, socket, exited
   const jar = new GuestCookieJar()
+  const storage = new GuestStorage()
   const observer = `<script>
+    if (location.search.includes('capture=1')) {
+      localStorage.setItem('runoob-theme', 'dark');
+      sessionStorage.setItem('roundtrip', 'retained');
+    }
     addEventListener('error', event => parent.postMessage({ type: 'fixture-error', name: event.error?.name }, '*'));
     addEventListener('message', event => {
       if (event.source === parent && event.data?.type === 'dsh.browser.guest.reference.request') {
@@ -39,8 +45,29 @@ test('real Chromium selects the captured Runoob table after proxy navigation awa
           highlights: document.getElementById('__dsh-ref-highlight')?.children.length || 0 }, '*');
       }
     });
-    addEventListener('DOMContentLoaded', () => {
+    addEventListener('DOMContentLoaded', async () => {
+      localStorage.named = 42;
+      const named = [localStorage.named, localStorage.getItem('named'), 'named' in localStorage];
+      delete localStorage.named;
+      let parentStorage;
+      try { parent.localStorage.getItem('dsh-private'); parentStorage = 'accessible'; } catch (error) { parentStorage = error.name; }
+      parent.postMessage({ type: 'fixture-storage', theme: document.documentElement.getAttribute('data-theme'),
+        darkCss: !!document.getElementById('dark-theme-css'), session: sessionStorage.getItem('roundtrip'),
+        missing: localStorage.getItem('named'), parentStorage, keys: Object.keys(localStorage),
+        length: localStorage.length, key: localStorage.key(0), outOfRange: localStorage.key(999), named }, '*');
       if (location.search.includes('capture=1')) {
+        const runtime = document.querySelector('[data-dsh-guest-runtime]').textContent;
+        const token = runtime.match(/"token":"([^"]+)"/)[1];
+        const other = ${JSON.stringify(guestPath('https://other.example/away'))};
+        const read = await window.__dshGuestFetch(other, { mode: 'cors', credentials: 'omit',
+          headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-mode': 'navigate' } });
+        const fetched = await read.text();
+        const forged = await window.__dshGuestFetch(other + '&storage-token=' + encodeURIComponent(token), {
+          method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'content-type': 'text/plain' },
+          body: JSON.stringify({ area: 'local', op: 'get', key: 'runoob-theme' }) });
+        const denied = await forged.json();
+        parent.postMessage({ type: 'fixture-security', fetchHasRuntime: fetched.includes('data-dsh-guest-runtime'),
+          status: forged.status, name: denied.name }, '*');
         const table = [...document.querySelectorAll('table')].find(table => table.querySelector('th'));
         const range = document.createRange();
         range.setStart(table.rows[0].cells[0], 0);
@@ -62,17 +89,23 @@ test('real Chromium selects the captured Runoob table after proxy navigation awa
     if (/\.js$/iu.test(url.pathname)) return new Response('', { headers: { 'content-type': 'text/javascript' } })
     if (/\.css$/iu.test(url.pathname)) return new Response('', { headers: { 'content-type': 'text/css' } })
     if (/\.(?:png|jpg|gif|jpeg)$/iu.test(url.pathname)) return new Response(null, { status: 204 })
-    if (url.pathname === '/away') return new Response('<!doctype html><p>Away</p>', { headers: { 'content-type': 'text/html' } })
+    if (url.pathname === '/away') return new Response(`<!doctype html><script>
+      const before = [localStorage.getItem('runoob-theme'), sessionStorage.getItem('roundtrip')];
+      localStorage.setItem('runoob-theme', 'other-site'); sessionStorage.setItem('roundtrip', 'other-site');
+      parent.postMessage({ type: 'fixture-away-storage', before }, '*');
+    </script><p>Away</p>`, { headers: { 'content-type': 'text/html' } })
     return new Response('', { headers: { 'content-type': 'text/javascript' } })
   }
   const html = `<!doctype html><meta charset="utf-8"><pre id="result">waiting</pre><pre id="trace"></pre><script>
     const frame = document.createElement('iframe'); frame.style.cssText = 'width:1000px;height:800px';
-    const source = ${JSON.stringify(source)}, path = ${JSON.stringify(guestPath(source))};
+    localStorage.setItem('dsh-private', 'host-only');
+    const context = '&storage-context=fixture-browser-context';
+    const source = ${JSON.stringify(source)}, path = ${JSON.stringify(guestPath(source))} + context;
     let part, expected, phase = 'capture', sent = false, identity, ack, selection;
-    const errors = [], trace = [];
+    const errors = [], trace = [], storages = []; let awayStorage, security;
     function finish() {
-      if (ack && selection) document.getElementById('result').textContent = JSON.stringify({
-        errors, identity, ack, selection, expected, captured: part.kind, phase
+      if (ack && selection && storages.length === 2 && security) document.getElementById('result').textContent = JSON.stringify({
+        errors, identity, ack, selection, expected, captured: part.kind, phase, storages, awayStorage, security
       });
     }
     addEventListener('message', event => {
@@ -81,10 +114,13 @@ test('real Chromium selects the captured Runoob table after proxy navigation awa
       trace.push({ type: data.type, phase, ready: data.ready, loadId: data.loadId, documentId: data.documentId });
       document.getElementById('trace').textContent = JSON.stringify(trace);
       if (data.type === 'fixture-error') errors.push(data.name);
+      if (data.type === 'fixture-storage') storages.push(data);
+      if (data.type === 'fixture-away-storage') awayStorage = data.before;
+      if (data.type === 'fixture-security') security = data;
       if (data.type === 'fixture-capture') {
         if (!data.frozen.ok) throw new Error(data.frozen.reason);
         part = data.frozen.events.find(event => event.kind === 'table'); expected = data.selected;
-        phase = 'away'; frame.src = ${JSON.stringify(guestPath('https://www.runoob.com/away'))};
+        phase = 'away'; frame.src = ${JSON.stringify(guestPath('https://other.example/away'))} + context;
       }
       if (data.type === 'dsh.browser.guest.navigation' && data.ready) {
         if (phase === 'away' && data.url.endsWith('/away')) { phase = 'back'; frame.src = path; }
@@ -102,12 +138,13 @@ test('real Chromium selects the captured Runoob table after proxy navigation awa
       }
       if (data.type === 'dsh.browser.guest.reference.ack') { ack = data; finish(); }
       if (data.type === 'fixture-selection') { selection = data; finish(); }
+      finish();
     });
     frame.src = path + '&capture=1'; document.body.append(frame);
   </script>`
   const server = createServer((req, res) => {
     if (req.url === '/') { res.setHeader('content-type', 'text/html'); res.end(html) }
-    else void handleGuest(req, res, '', '', jar).catch(error => res.destroy(error))
+    else void handleGuest(req, res, '', '', jar, storage).catch(error => res.destroy(error))
   }).listen(0, '127.0.0.1')
   t.after(async () => {
     socket?.close()
@@ -165,6 +202,24 @@ test('real Chromium selects the captured Runoob table after proxy navigation awa
   assert.equal(evaluated.exceptionDetails, undefined, JSON.stringify(evaluated.exceptionDetails))
   const result = evaluated.result.value
   assert.ok(!result.errors.includes('SyntaxError'), JSON.stringify(result.errors))
+  assert.ok(!result.errors.includes('SecurityError'), JSON.stringify(result.errors))
+  assert.deepEqual(result.awayStorage, [null, null])
+  assert.equal(result.security.fetchHasRuntime, false)
+  assert.equal(result.security.status, 403)
+  assert.equal(result.security.name, 'SecurityError')
+  assert.equal(result.storages.length, 2)
+  for (const state of result.storages) {
+    assert.equal(state.theme, 'dark')
+    assert.equal(state.darkCss, true)
+    assert.equal(state.session, 'retained')
+    assert.equal(state.missing, null)
+    assert.equal(state.parentStorage, 'SecurityError')
+    assert.deepEqual(state.keys, ['runoob-theme'])
+    assert.equal(state.length, 1)
+    assert.equal(state.key, 'runoob-theme')
+    assert.equal(state.outOfRange, null)
+    assert.deepEqual(state.named, ['42', '42', true])
+  }
   assert.equal(typeof result.identity, 'string')
   assert.ok(result.identity.length > 0)
   assert.equal(result.captured, 'table')

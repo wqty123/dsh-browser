@@ -11,10 +11,10 @@ import { reportReferenceCaptureFailure } from '../reference-intents.ts'
 import type { BrowserChildTabRequest } from '../../types.ts'
 
 /** Route Web pages through the opaque-origin proxy. */
-function guestProxyUrl(url: string): string {
+function guestProxyUrl(url: string, context: string): string {
   if (!/^https?:\/\//iu.test(url)) return url
   if (url.includes('/dsh-builtin-browser/browser-view/isolated-guest')) return url
-  return `${location.origin}/dsh-builtin-browser/browser-view/isolated-guest?u=${encodeURIComponent(url)}&runtime=2`
+  return `${location.origin}/dsh-builtin-browser/browser-view/isolated-guest?u=${encodeURIComponent(url)}&runtime=3&storage-context=${encodeURIComponent(context)}`
 }
 
 function capturedSourceUrl(value: unknown): unknown {
@@ -300,7 +300,7 @@ export class IframePresentation implements BrowserPresentation {
     this.element?.remove()
     const element = document.createElement('iframe')
     element.className = css.frame as string
-    element.src = guestProxyUrl(current.target.url)
+    element.src = guestProxyUrl(current.target.url, this.pageId)
     element.title = current.target.title
     element.referrerPolicy = 'no-referrer'
     element.dataset.sidebarBrowserFrame = 'iframe'

@@ -6,10 +6,12 @@
  */
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import { promises as dns } from 'node:dns'
+import { randomUUID } from 'node:crypto'
 import { guestRuntimeScript } from './guest-runtime.ts'
 import type { GuestCookieJar } from './guest-cookie-jar.ts'
 import { localGuestCookies } from './guest-cookie-store.ts'
 import { rewriteCss } from './guest-css.ts'
+import { GuestStorage, localGuestStorage } from './guest-storage.ts'
 
 /** Prefix every proxied document and subresource lives under. */
 
@@ -210,6 +212,7 @@ export async function handleGuest(
   overlayScript: string,
   sessionId: string,
   cookies?: GuestCookieJar,
+  storage?: GuestStorage,
 ): Promise<void> {
   const method = request.method ?? 'GET'
   const authority = request.headers.host ?? ''
@@ -266,6 +269,31 @@ export async function handleGuest(
   if (blocked(target)) {
     writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
     response.end('guest proxy: local and DSH host targets are not allowed')
+    return
+  }
+  const storageToken = query.get('storage-token')
+  if (storageToken !== null) {
+    response.setHeader('cache-control', 'no-store')
+    response.setHeader('content-type', 'application/json')
+    if (method !== 'POST') { writeHead(405); response.end(); return }
+    let size = 0
+    const chunks: Buffer[] = []
+    try {
+      for await (const chunk of request) {
+        const bytes = Buffer.from(chunk)
+        size += bytes.length
+        if (size > 32 * 1024 * 1024) throw Object.assign(new Error(), { name: 'QuotaExceededError' })
+        chunks.push(bytes)
+      }
+      const input: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      const value = (storage ?? localGuestStorage()).execute(storageToken, target.origin, input)
+      writeHead(200); response.end(JSON.stringify({ ok: true, value }))
+    } catch (error) {
+      const name = error instanceof Error && ['SecurityError', 'TypeError', 'QuotaExceededError', 'UnknownError'].includes(error.name)
+        ? error.name : 'UnknownError'
+      writeHead(name === 'SecurityError' ? 403 : 400)
+      response.end(JSON.stringify({ ok: false, name }))
+    }
     return
   }
   const destination = request.headers['sec-fetch-dest']
@@ -433,7 +461,12 @@ export async function handleGuest(
     return
   }
   const raw = await upstream.text()
-  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href) + '</script>'
+  // Fetch metadata is browser-controlled: scripts must not fetch another site's storage capability.
+  const context = query.get('storage-context') ?? randomUUID()
+  const storageConfig = (destination === 'iframe' || destination === 'document') && request.headers['sec-fetch-mode'] === 'navigate'
+    && /^[\w:-]{16,128}$/u.test(context)
+    ? { token: (storage ?? localGuestStorage()).issue(target.origin, context), context } : undefined
+  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig) + '</script>'
   let body = rewriteDocument(raw, target)
   if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
   else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')

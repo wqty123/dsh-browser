@@ -4,6 +4,25 @@ import { IframePresentation } from '../../view/IframePresentation.ts'
 
 afterEach(() => { vi.useRealTimers(); document.body.replaceChildren() })
 
+it('keeps one storage context across a tab navigation and separates other tabs', () => {
+  const contexts: string[] = []
+  for (let index = 0; index < 2; index++) {
+    const host = document.createElement('div')
+    host.id = `storage-context-${index}`
+    document.body.append(host)
+    const presentation = new IframePresentation({ loaded: vi.fn(), observed: vi.fn(), failed: vi.fn(), remounted: vi.fn() })
+    presentation.mount(host.id)
+    presentation.show({ target: { kind: 'https', url: 'https://one.example/', title: '' }, revision: 1, sandboxed: true })
+    const context = new URL(host.querySelector('iframe')!.src).searchParams.get('storage-context')!
+    expect(context).toBeTruthy()
+    contexts.push(context)
+    presentation.show({ target: { kind: 'https', url: 'https://two.example/', title: '' }, revision: 2, sandboxed: true })
+    expect(new URL(host.querySelector('iframe')!.src).searchParams.get('storage-context')).toBe(context)
+    presentation.dispose()
+  }
+  expect(contexts[0]).not.toBe(contexts[1])
+})
+
 it('accepts only opaque-origin reference intents from its own mounted frame', () => {
   const host = document.createElement('div')
   host.id = 'owned-reference'
@@ -73,7 +92,8 @@ it.each([undefined, '', 'x'.repeat(101)])('re-requests a missing/invalid identit
   presentation.mount(host.id)
   presentation.show({ target: { kind: 'https', url: 'https://example.test/', title: '' }, revision: 4, sandboxed: true })
   const frame = host.querySelector('iframe')!
-  expect(new URL(frame.src).searchParams.get('runtime')).toBe('2')
+  expect(new URL(frame.src).searchParams.get('runtime')).toBe('3')
+  expect(new URL(frame.src).searchParams.get('storage-context')).toMatch(/^iframe:[\da-f-]+$/u)
   const post = vi.spyOn(frame.contentWindow!, 'postMessage')
   frame.dispatchEvent(new Event('load'))
   const loadId = post.mock.calls.at(-1)![0].loadId
