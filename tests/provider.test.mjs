@@ -31,11 +31,14 @@ function makeHost(overrides = {}) {
     createView() {
       const id = `view${++counter}`
       let url = 'about:blank'
+      let loader = 0
       const handle = {
         id,
         sendCommand: async (method, params) => {
-          if (method === 'Page.navigate') { url = params.url; return {} }
-          if (method === 'Page.reload') { events.reload++; return {} }
+          if (method === 'Page.navigate') { url = params.url; loader++; return { frameId: id, loaderId: String(loader) } }
+          if (method === 'Page.reload') { events.reload++; loader++; return {} }
+          if (method === 'Page.getFrameTree') return { frameTree: { frame: { id, loaderId: String(loader), url } } }
+          if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 }
           if (method === 'Input.dispatchMouseEvent') {
             mouseSequence.push(params.type)
             if (params.type === 'mouseMoved') { events.move++; return {} }
@@ -51,7 +54,11 @@ function makeHost(overrides = {}) {
             return {}
           }
           if (method === 'Page.getNavigationHistory') return { entries: events.history.entries, currentIndex: events.history.currentIndex }
-          if (method === 'Page.navigateToHistoryEntry') { events.navigateHistory++; return {} }
+          if (method === 'Page.navigateToHistoryEntry') {
+            events.navigateHistory++; loader++
+            events.history.currentIndex = events.history.entries.findIndex(entry => entry.id === params.entryId)
+            return {}
+          }
           if (method === 'Runtime.terminateExecution') { events.terminate++; return {} }
           if (method === 'Page.stopLoading') return {}
           if (method === 'Runtime.evaluate') {
@@ -60,6 +67,7 @@ function makeHost(overrides = {}) {
             // the only way to see the blank-tab short-circuit, since its whole effect is the round
             // trip that is never made.
             events.evaluates.push(expr)
+            if (expr === 'document.readyState') return { result: { value: overrides.readyState?.() ?? 'complete' } }
             if (expr.includes('urlOk')) return { result: { value: page.wait } }
             // Only the bare URL probe (currentUrl) is exact; bigger scripts
             // merely CONTAIN location.href and must reach the overrides.
@@ -421,17 +429,9 @@ test('user actions from the host UI route into the session model', async () => {
 test('navigate waits for the new document to be parsed before returning', async () => {
   const probes = []
   const host = makeHost({
-    evaluate: (method, params) => {
-      const expr = params.expression || ''
-      if (!expr.includes('performance.timeOrigin')) return { result: { value: { ok: true } } }
+    readyState: () => {
       probes.push(1)
-      // Probe 1 is the pre-navigation read (the OLD document). From probe 2 on,
-      // the committed document is current but still parsing — the exact window
-      // that used to produce a correct title with zero interactive elements.
-      const n = probes.length
-      if (n === 1) return { result: { value: '100|complete' } }
-      if (n <= 3) return { result: { value: '200|loading' } }
-      return { result: { value: '200|interactive' } }
+      return probes.length < 4 ? 'loading' : 'interactive'
     },
   })
   const p = new ElectronBrowserProvider(host)
@@ -440,6 +440,112 @@ test('navigate waits for the new document to be parsed before returning', async 
   assert.equal(probes.length >= 4, true,
     `navigate returned without waiting for the parse (probes: ${probes.length})`)
   await p.close(sid)
+})
+
+test('navigation rejects an unparsed document at the deadline instead of recording success', async t => {
+  let clock = Date.now()
+  t.mock.method(Date, 'now', () => clock)
+  const host = makeHost({ readyState: () => { clock += 31_000; return 'loading' } })
+  const provider = new ElectronBrowserProvider(host)
+  const session = await provider.open()
+  await assert.rejects(provider.navigate(session, { url: 'https://example.com/' }), { code: 'BROWSER_DOCUMENT_TIMEOUT' })
+  const entries = await provider.history(session)
+  assert.equal(entries.some(entry => entry.action === 'navigate' && entry.ok === true), false)
+  await assert.rejects(provider.snapshot(session), { code: 'BROWSER_GUEST_QUARANTINED' })
+  assert.equal(host.views.size, 1, 'readiness failure does not create a replacement guest')
+  await provider.close(session)
+})
+
+test('navigation rejects a different committed loader instead of acknowledging its page', async () => {
+  const host = makeHost()
+  const provider = new ElectronBrowserProvider(host)
+  const session = await provider.open()
+  const handle = host.views.values().next().value
+  const send = handle.sendCommand
+  let navigated = false
+  handle.sendCommand = async (method, params) => {
+    const result = await send(method, params)
+    if (method === 'Page.navigate') navigated = true
+    if (method === 'Page.getFrameTree' && navigated) result.frameTree.frame.loaderId = 'superseding-document'
+    return result
+  }
+  await assert.rejects(provider.navigate(session, { url: 'https://example.com/' }), { code: 'BROWSER_NAVIGATION_SUPERSEDED' })
+  await provider.close(session)
+})
+
+test('same-document navigation uses the acknowledged existing loader rather than a grace period', async () => {
+  const host = makeHost()
+  const provider = new ElectronBrowserProvider(host)
+  const session = await provider.open()
+  const handle = host.views.values().next().value
+  const send = handle.sendCommand
+  handle.sendCommand = async (method, params) => {
+    if (method === 'Page.navigate') return { frameId: handle.id }
+    return send(method, params)
+  }
+  await provider.navigate(session, { url: 'https://example.com/#quote' })
+  assert.equal((await provider.history(session)).at(-1).ok, true)
+  await provider.close(session)
+})
+
+test('a missing navigation acknowledgement is an error, not an empty successful page', async () => {
+  const host = makeHost()
+  const provider = new ElectronBrowserProvider(host)
+  const session = await provider.open()
+  const handle = host.views.values().next().value
+  const send = handle.sendCommand
+  handle.sendCommand = async (method, params) => method === 'Page.navigate' ? {} : send(method, params)
+  await assert.rejects(provider.navigate(session, { url: 'https://example.com/' }), { code: 'BROWSER_DOCUMENT_UNACKNOWLEDGED' })
+  await provider.close(session)
+})
+
+test('cancellation during readiness is not recorded as a successful navigation', async () => {
+  const controller = new AbortController()
+  const reason = new Error('caller cancelled navigation')
+  const host = makeHost({ readyState: () => { controller.abort(reason); return 'interactive' } })
+  const provider = new ElectronBrowserProvider(host)
+  const session = await provider.open()
+  await assert.rejects(provider.navigate(session, { url: 'https://example.com/' }, controller.signal), error => error === reason)
+  assert.equal((await provider.history(session)).some(entry => entry.action === 'navigate' && entry.ok), false)
+  await provider.navigate(session, { url: 'https://example.com/retry' })
+  await provider.close(session)
+})
+
+test('a closed guest cannot finish a pending readiness acknowledgement', async () => {
+  let provider, session
+  const host = makeHost({ readyState: () => { void provider.close(session); return 'complete' } })
+  provider = new ElectronBrowserProvider(host)
+  session = await provider.open()
+  await assert.rejects(provider.navigate(session, { url: 'https://example.com/' }), { code: 'BROWSER_GUEST_CLOSED' })
+  assert.equal(host.views.size, 0)
+})
+
+test('an older readiness operation cannot acknowledge a newer navigation', async () => {
+  const host = makeHost()
+  const provider = new ElectronBrowserProvider(host)
+  const session = await provider.open()
+  const handle = host.views.values().next().value
+  const send = handle.sendCommand
+  let release
+  let entered
+  const waiting = new Promise(resolve => { entered = resolve })
+  let first = true
+  handle.sendCommand = async (method, params) => {
+    if (first && method === 'Runtime.evaluate' && params.expression === 'document.readyState') {
+      first = false
+      entered()
+      await new Promise(resolve => { release = resolve })
+    }
+    return send(method, params)
+  }
+  const older = provider.navigate(session, { url: 'https://example.com/older' })
+  const refused = assert.rejects(older, { code: 'panel-navigation-superseded' })
+  await waiting
+  await provider.navigate(session, { url: 'https://example.com/newer' })
+  await refused
+  release()
+  assert.equal((await provider.history(session)).filter(entry => entry.action === 'navigate' && entry.ok).length, 1)
+  await provider.close(session)
 })
 
 // Issue #10 (defect 2): Input.* is silently dropped by Chromium for a view
@@ -739,21 +845,21 @@ test('snapshot and a11y answer a blank tab immediately instead of running a coll
   await p.close(sid)
 })
 
-test('a timed-out read is recoverable: the view is replaced, the tab id survives', () => {
-  // The timeout itself is 30s, so what is asserted here is the SHAPE of the recovery rather than
-  // waiting for it: the error carries a routable code, and the replacement path exists and keeps
-  // the public id. Removing either while refactoring is what this catches.
-  const source = readFileSync(new URL('../src/browser-electron/provider.ts', import.meta.url), 'utf8')
-  assert.match(source, /BROWSER_SNAPSHOT_TIMEOUT/, 'snapshot reports its own code')
-  assert.match(source, /BROWSER_A11Y_TIMEOUT/, 'a11y too')
-  assert.match(source, /private replaceTabWithBlank\(s: Session, tab: Tab\): void \{/,
-    'and a wedged view is replaced in place')
-  // The replacement preserves the id, which is what makes the recovery invisible to callers.
-  assert.match(source, /s\.tabs\[index\] = \{ id: tab\.id, handle, url: '' \}/,
-    'the tab keeps the id its caller holds')
-  // And both timeout branches actually call it.
-  const calls = (source.match(/this\.replaceTabWithBlank\(s, tab\)/g) ?? []).length
-  assert.equal(calls, 2, 'snapshot and a11y both recover, not just one')
+test('a timed-out execution quarantines its guest without silently replacing its page', async () => {
+  const host = makeHost({ evaluate: () => new Promise(() => {}) })
+  const provider = new ElectronBrowserProvider(host)
+  const session = await provider.open()
+  await provider.navigate(session, { url: 'https://example.com/' })
+  const before = (await provider.listTabs(session))[0]
+  const handle = host.views.values().next().value
+  await assert.rejects(provider.execute(session, { script: 'while (true) {}', timeoutMs: 5 }), { code: 'BROWSER_EXECUTE_TIMEOUT' })
+  assert.equal(host.views.size, 1)
+  assert.equal(host.views.values().next().value, handle)
+  assert.deepEqual((await provider.listTabs(session))[0], before)
+  await assert.rejects(provider.snapshot(session), { code: 'BROWSER_GUEST_QUARANTINED' })
+  await provider.reset(session)
+  assert.notEqual((await provider.listTabs(session))[0].id, before.id)
+  await provider.close(session)
 })
 
 // Issue #37's other half: a blank page must not read as a successful, empty read.
