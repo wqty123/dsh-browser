@@ -16,6 +16,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ImageBlock } from '@deepseek-ai/dsh-llm'
+import { SCREENSHOT_MAX_WIDTH, SCREENSHOT_MAX_HEIGHT, screenshotDimension, screenshotBytes, screenshotVisionEnabled, saveScreenshotImage } from './screenshot-image.ts'
 import { BrowserTakeovers, installTakeovers } from './takeover.ts'
 import { TAKEOVER_TOOL, type TakeoverDecision, type TakeoverSummary } from '../takeover-protocol.ts'
 import { clearLastOpen, getLastOpen, setLastOpen } from '../browser-electron/open-slot.ts'
@@ -1833,10 +1835,10 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   registerSafely(defineTool({
     name: 'dsh_browser_screenshot',
-    description: 'Screenshot the shared-browser page (PNG default, JPEG optional) for models that can read images: layout, charts, CAPTCHAs, or locating an element before clicking its coordinates. Without image input it gains nothing — dsh_browser_snapshot/a11y/content carry the same page as text, dsh_browser_scrape extracts structured data. Supports fullPage, savePath, JPEG quality, and maxWidth/maxHeight downscaling to cut vision tokens. JPEG needs a carrier whose CDP encoder works (self-hosted, installed Chrome/Edge); the desktop sidebar returns PNG. Downscaling works everywhere.',
+    description: 'Screenshot the Desktop browser (PNG default, JPEG where supported). Vision-capable active models receive the image directly; non-vision or unknown models receive text metadata only. Images are downscaled to at most 1280x960 and limited to 4 MiB; retry with smaller dimensions if encoding exceeds the limit. Supports fullPage and savePath. Web iframe screenshots are unavailable. Never solve CAPTCHAs automatically; request human takeover instead.',
     parameters: {
       fullPage: { type: 'boolean', description: 'Capture the full scrollable page instead of the viewport (default false).' },
-      savePath: { type: 'string', description: 'Absolute file path to also save the image to (e.g. for read_image vision location). Must resolve inside the configured downloadDir (default: the system Downloads folder, localized names such as ~/下载 included); an existing file is never overwritten.' },
+      savePath: { type: 'string', description: 'Absolute file path to also save the image to. Must resolve inside the configured downloadDir (default: the system Downloads folder, localized names such as ~/下载 included); an existing file is never overwritten.' },
       format: { type: 'string', enum: ['png', 'jpeg'], description: 'Image format (default png; jpeg needs the self-hosted browser or an installed Chrome/Edge; the desktop sidebar returns PNG because the Electron CDP JPEG encoder hangs).' },
       quality: { type: 'number', description: 'JPEG quality 1-100 (default 80); ignored for PNG.' },
       maxWidth: { type: 'number', description: 'Downscale to fit within this width (aspect preserved).' },
@@ -1847,35 +1849,58 @@ export function apply(ctx: Context, config: Config = {}): void {
         type: 'object',
         additionalProperties: false,
         properties: {
-          dataUrl: { type: 'string', required: true, description: 'Base64 data URL of the screenshot (PNG, or JPEG when the carrier uses CDP JPEG).' },
+          bytes: { type: 'number', required: true, description: 'Encoded screenshot byte count.' },
+          attachment: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              attachmentId: { type: 'string', required: true },
+              mediaType: { type: 'string', required: true },
+              bytes: { type: 'number', required: true },
+              width: { type: 'number', required: true },
+              height: { type: 'number', required: true },
+            },
+          },
           width: { type: 'number', description: 'Pixel width of the returned image, when the capture was measured (present with maxWidth/maxHeight).' },
           height: { type: 'number', description: 'Pixel height of the returned image, when the capture was measured.' },
           path: { type: 'string', description: 'The file path the screenshot was saved to, when savePath was given.' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: `Screenshot captured (${Math.round(value.dataUrl.length * 3 / 4 / 1024)} KiB${value.width !== undefined && value.height !== undefined ? `, ${value.width}x${value.height}` : ''})${value.path !== undefined ? ` saved to ${value.path}` : ''}.` }],
+      render: (_args, value) => [
+        { type: 'text', text: `Screenshot captured (${Math.round(value.bytes / 1024)} KiB${value.width !== undefined && value.height !== undefined ? `, ${value.width}x${value.height}` : ''})${value.path !== undefined ? ` saved to ${value.path}` : ''}.` },
+        ...value.attachment === undefined ? [] : [{ type: 'image' as const, attachment: value.attachment as ImageBlock['attachment'] }],
+      ],
     },
     timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const key = taskKey(exec)
+      await state.pendingPanelOpens.get(key)
+      const existing = state.sessionsByTask.get(key)
+      if (state.panelUrlByTask.has(key) && (existing === undefined || !browser.exists(existing))) {
+        throw new Error('Web 侧栏暂不支持截图：iframe 无法被网页静默截图 (panel surface unavailable). Use the CDP-backed DSH desktop sidebar with a connected desktop bridge for screenshots.')
+      }
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const vision = await screenshotVisionEnabled(ctx, exec, exec.signal)
+      const maxWidth = screenshotDimension(args.maxWidth, SCREENSHOT_MAX_WIDTH)
+      const maxHeight = screenshotDimension(args.maxHeight, SCREENSHOT_MAX_HEIGHT)
       const shot = await browser.screenshot(session, {
         ...args.fullPage === true ? { fullPage: true } : {},
         ...args.savePath !== undefined ? { savePath: args.savePath } : {},
         ...args.format !== undefined ? { format: args.format } : {},
         ...args.quality !== undefined ? { quality: args.quality } : {},
-        ...args.maxWidth !== undefined ? { maxWidth: args.maxWidth } : {},
-        ...args.maxHeight !== undefined ? { maxHeight: args.maxHeight } : {},
+        maxWidth,
+        maxHeight,
       }, exec.signal)
+      exec.signal?.throwIfAborted()
+      const image = screenshotBytes(shot.dataUrl)
+      const attachment = vision ? await saveScreenshotImage(ctx, image, maxWidth, maxHeight) : undefined
+      exec.signal?.throwIfAborted()
       return {
-        dataUrl: shot.dataUrl,
+        bytes: image.data.length,
+        ...attachment === undefined ? {} : { attachment },
         ...shot.path !== undefined ? { path: shot.path } : {},
-        // The provider measures these when it scales, the schema declares them, and the seam
-        // type carries them — but this mapping is an allow-list, so leaving them out dropped
-        // them silently. Same shape of bug as the a11y selector, found the same way: by
-        // reading the three places that mention a field and noticing this one did not.
         ...shot.width !== undefined ? { width: shot.width } : {},
         ...shot.height !== undefined ? { height: shot.height } : {},
       }
