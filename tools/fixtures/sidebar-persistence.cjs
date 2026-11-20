@@ -65,6 +65,9 @@ app.whenReady().then(async () => {
       secure: true, httpOnly: true, sameSite: 'strict' })
     await ses.cookies.set({ url: 'https://scope.example.test/', domain: '.example.test',
       name: 'sidebar_domain', value: 'domain', secure: true, httpOnly: true, sameSite: 'no_restriction' })
+    await ses.cookies.set({ url: 'https://example.test/', name: 'sidebar_scope', value: 'host-session', secure: true })
+    await ses.cookies.set({ url: 'https://example.test/', domain: '.example.test', name: 'sidebar_scope',
+      value: 'domain-persistent', secure: true, expirationDate: Date.now() / 1000 + 86400 })
     await policy.reconcilePersistent()
     ses.flushStorageData()
     await policy.release(window.webContents, reservation.lease)
@@ -88,6 +91,12 @@ app.whenReady().then(async () => {
     assert.equal(domain.hostOnly, false)
     assert.equal(domain.domain, '.example.test')
     assert.equal(domain.sameSite, 'no_restriction')
+    const scoped = await ses.cookies.get({ name: 'sidebar_scope' })
+    assert.equal(scoped.length, 2)
+    assert.equal(scoped.find(cookie => cookie.hostOnly)?.value, 'host-session')
+    assert.equal(scoped.find(cookie => cookie.hostOnly)?.session, true)
+    assert.equal(scoped.find(cookie => !cookie.hostOnly)?.value, 'domain-persistent')
+    assert.equal(scoped.find(cookie => !cookie.hostOnly)?.session, false)
   }
   if (mode === 'replace') {
     await ses.cookies.set({ url, name: 'sidebar_replaced', value: 'new-persistent', httpOnly: true,
