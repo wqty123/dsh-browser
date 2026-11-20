@@ -12,10 +12,15 @@ import { readDesktopIdentity } from './desktop-identity.ts'
 import { dshHome } from './paths.ts'
 import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.ts'
 import { renameMaintenanceFile } from '../../desktop-bridge/maintenance-files.mjs'
+import { installedProfileExtension, repairProfileExtension, readHostExtensionStatus, MAIN_EXTENSION_UNSUPPORTED, type MainExtensionStatus, type InstalledExtension } from './profile-extension.ts'
 
 interface DesktopProcess { readonly pid: number; readonly path: string; readonly command: string; readonly started: string }
 export interface AutomaticMaintenanceJob extends MaintenanceState { readonly id: string; readonly workerPid?: number; readonly startedAt?: string }
-export interface AutomaticMaintenanceOptions { readonly locale?: 'zh' | 'en' }
+export interface AutomaticMaintenanceOptions {
+  readonly locale?: 'zh' | 'en'
+  readonly mode?: 'profile' | 'bootstrap'
+  readonly hostStatus?: MainExtensionStatus
+}
 interface AutomaticPlan {
   readonly version: 1
   readonly id: string
@@ -28,6 +33,7 @@ interface AutomaticPlan {
   readonly target: DesktopProcess
   readonly createdAt: string
   readonly locale?: 'zh' | 'en'
+  readonly mode?: 'profile' | 'bootstrap'
 }
 
 const terminal = new Set(['completed', 'failed', 'cancelled'])
@@ -251,7 +257,8 @@ function validatePlan(value: unknown, path: string, now = Date.now()): Automatic
     || typeof plan.id !== 'string' || !/^(?:install|uninstall)-[A-Za-z0-9]+$/.test(plan.id)
     || ![plan.root, plan.home, plan.nodePath, plan.directory].every(p => typeof p === 'string' && isAbsolute(p))
     || typeof plan.electronNode !== 'boolean' || !Number.isFinite(created) || created > now || now - created > 30_000
-    || (plan.locale !== undefined && !['zh', 'en'].includes(plan.locale))) {
+    || (plan.locale !== undefined && !['zh', 'en'].includes(plan.locale))
+    || (plan.mode !== undefined && !['profile', 'bootstrap'].includes(plan.mode))) {
     throw new Error('invalid or expired automatic maintenance plan')
   }
   const checked = plan as AutomaticPlan
@@ -301,6 +308,9 @@ export async function startAutomaticMaintenance(action: BridgeAction, root: stri
   requireLiveWindows()
   if (!['install', 'uninstall'].includes(action)) throw new Error('invalid bridge maintenance action')
   if (options.locale !== undefined && !['zh', 'en'].includes(options.locale)) throw new Error('invalid bridge maintenance locale')
+  const mode = options.mode ?? 'profile'
+  if (mode !== 'bootstrap' && mode !== 'profile') throw new Error('invalid bridge maintenance mode')
+  if (mode === 'profile' && options.hostStatus === undefined && await readHostExtensionStatus(homePath()) === undefined) throw new Error(MAIN_EXTENSION_UNSUPPORTED)
   if (!readDesktopIdentity(root).ok) throw new Error('the maintenance target is not a verified DSH Desktop installation')
   if (!existsSync(quitPath)) throw new Error('the packaged Desktop quit helper is missing')
   const processes = await desktopProcesses(root)
@@ -324,7 +334,7 @@ export async function startAutomaticMaintenance(action: BridgeAction, root: stri
     const id = basename(prepared.directory)
     await lock.writeFile(id + '\n')
     await lock.close()
-    plan = { version: 1, id, action, root: resolve(root), nodePath: original.nodePath, electronNode: original.electronNode,
+    plan = { version: 1, id, action, mode, root: resolve(root), nodePath: original.nodePath, electronNode: original.electronNode,
       home, directory: prepared.directory, target: mains[0] as DesktopProcess, createdAt: new Date().toISOString(),
       ...options.locale === undefined ? {} : { locale: options.locale } }
     const path = join(prepared.directory, 'automatic.json')
@@ -361,6 +371,7 @@ export async function startAutomaticMaintenance(action: BridgeAction, root: stri
 async function runWorker(path: string): Promise<void> {
   requireLiveWindows()
   const plan = validatePlan(JSON.parse(await readFile(path, 'utf8')), path)
+  let extension: InstalledExtension | undefined
   const checkCancelled = (): void => {
     if (existsSync(join(plan.directory, 'cancel.json'))) throw new Error('bridge maintenance was cancelled before Desktop exited')
   }
@@ -412,6 +423,12 @@ async function runWorker(path: string): Promise<void> {
       maintain: async () => {
         checkCancelled()
         if ((await desktopProcesses(plan.root)).length > 0) throw new Error('DSH Desktop was reopened during maintenance; refusing to modify its files')
+        if (plan.mode === 'profile') {
+          const result = await repairProfileExtension(plan.action, plan.root, plan.home,
+            async (command, argv, environment) => await execute(command, argv, 180_000, environment))
+          if (result.ok && plan.action === 'install') extension = await installedProfileExtension(plan.home)
+          return result
+        }
         return await runBridgeAction(plan.action, plan.root, {
           node: () => plan.nodePath, installer: defaultInstallerPath, trackResult: true,
           run: async (cmd, args, extra) => await execute(cmd, [...plan.electronNode ? ['--expose-internals'] : [], ...args], 180_000,
@@ -422,7 +439,7 @@ async function runWorker(path: string): Promise<void> {
         if ((await desktopProcesses(plan.root)).length > 0) throw new Error('DSH Desktop is already running; not opening a second instance')
         const identity = readDesktopIdentity(plan.root)
         if (!identity.ok) throw new Error(`Desktop cannot be safely reopened: ${identity.reason}`)
-        const environment = { ...process.env }
+        const environment: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: plan.home }
         for (const key of Object.keys(environment)) if (key.toUpperCase() === 'ELECTRON_RUN_AS_NODE' || key.toUpperCase().startsWith('DSH_BRIDGE_')) delete environment[key]
         return await new Promise<number>((resolve, reject) => {
           const child = spawn(join(plan.root, 'DeepSeek Harness.exe'), [], { cwd: plan.root, env: environment, stdio: 'ignore', windowsHide: true, detached: true })
@@ -431,7 +448,11 @@ async function runWorker(path: string): Promise<void> {
         })
       },
       verify: async (pid, action) => {
-        if (action === 'install') { await waitForRestartedBridge(pid, { timeoutMs: 45_000 }); return }
+        if (action === 'install') {
+          await waitForRestartedBridge(pid, { timeoutMs: 45_000, endpointPath: join(plan.home, 'dsh-builtin-browser-bridge.json'),
+            ...(extension === undefined ? {} : { extension, home: plan.home }) })
+          return
+        }
         await delay(1_500)
         if (!(await desktopProcesses(plan.root)).some(p => p.pid === pid)) throw new Error('the reopened Desktop did not remain running')
       },

@@ -5,13 +5,13 @@ import { isDirectLoopback } from './authenticated-route.ts'
 import { replyJson } from './json-reply.ts'
 import { readJsonBody } from './http-body.ts'
 import type { BridgeAction } from './bridge-install.ts'
-import type { AutomaticMaintenanceJob } from './automatic-maintenance.ts'
+import type { AutomaticMaintenanceJob, AutomaticMaintenanceOptions } from './automatic-maintenance.ts'
 
 export const AUTOMATIC_MAINTENANCE_ROUTE = '/dsh-builtin-browser/bridge-maintenance'
 export interface AutomaticMaintenanceRouteDeps {
   readonly supported: () => boolean
   readonly read: () => AutomaticMaintenanceJob | undefined
-  readonly start: (action: BridgeAction, options?: { readonly locale?: 'zh' | 'en' }) => Promise<AutomaticMaintenanceJob>
+  readonly start: (action: BridgeAction, options?: AutomaticMaintenanceOptions) => Promise<AutomaticMaintenanceJob>
   /** Commit only after the accepted response has been flushed to the client. */
   readonly commit?: (id: string) => Promise<void>
   /** True while the legacy bridge-action route is running an installer. */
@@ -33,17 +33,27 @@ export function createAutomaticMaintenanceHandler(deps: AutomaticMaintenanceRout
     if (!deps.supported()) { replyJson(response, 409, { ok: false, error: 'automatic bridge maintenance requires Windows Desktop' }); return }
     let action: BridgeAction
     let locale: 'zh' | 'en' | undefined
+    let mode: AutomaticMaintenanceOptions['mode']
+    let hostStatus: AutomaticMaintenanceOptions['hostStatus']
     try {
-      const value = await readJsonBody<{ action?: unknown; locale?: unknown }>(request, 4096)
+      const value = await readJsonBody<{ action?: unknown; locale?: unknown; mode?: unknown; hostStatus?: { state?: unknown; version?: unknown } }>(request, 4096)
       if (value?.action !== 'install' && value?.action !== 'uninstall') throw new Error('action must be install or uninstall')
       if (value.locale !== undefined && value.locale !== 'zh' && value.locale !== 'en') throw new Error('locale must be zh or en')
       action = value.action
       locale = value.locale
+      if (value.mode !== undefined && value.mode !== 'profile' && value.mode !== 'bootstrap') throw new Error('invalid maintenance mode')
+      mode = value.mode
+      if (value.hostStatus !== undefined) {
+        const state = value.hostStatus?.state
+        if (state !== 'loaded' && state !== 'failed' && state !== 'not-installed' && state !== 'pending-restart') throw new Error('invalid extension status')
+        hostStatus = { state }
+      }
     } catch (error) { replyJson(response, 400, { ok: false, error: String(error) }); return }
     if (starting || deps.busy?.() === true) { replyJson(response, 409, { ok: false, error: 'bridge maintenance is already starting' }); return }
     starting = true
     try {
-      const job = await deps.start(action, locale === undefined ? undefined : { locale })
+      const options = { ...locale === undefined ? {} : { locale }, ...mode === undefined ? {} : { mode }, ...hostStatus === undefined ? {} : { hostStatus } }
+      const job = await deps.start(action, Object.keys(options).length === 0 ? undefined : options)
       if (deps.commit !== undefined) {
         let fired = false
         const commitOnce = (): void => {

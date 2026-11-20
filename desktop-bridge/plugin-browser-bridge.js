@@ -22,11 +22,11 @@
  * any user configuration.
  */
 import { createServer, connect as netConnect } from 'node:net'
-import { randomBytes } from 'node:crypto'
-import { writeFileSync, mkdirSync, constants } from 'node:fs'
+import { randomBytes, createHash } from 'node:crypto'
+import { writeFileSync, mkdirSync, readFileSync, unlinkSync, constants } from 'node:fs'
 import { open, mkdir, unlink, link, copyFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, dirname, isAbsolute } from 'node:path'
+import { join, dirname, isAbsolute, resolve } from 'node:path'
 import { app, webContents } from 'electron'
 import { sidebarProxyConfig, parseSystemProxy, normalizeGuestUserAgent, shouldFallbackToSystemProxy, DEFAULT_SIDEBAR_PROXY_BYPASS } from './guest-proxy.mjs'
 
@@ -667,7 +667,13 @@ async function dispatch(request, checkCurrent) {
   // Which build is answering. The acceptance script asks this first, because everything else it
   // measures is meaningless if the host is still running the previous bridge.
   if (op === 'version') {
-    return { ok: true, loadedAt: LOADED_AT, protocol: PROTOCOL }
+    const api = globalThis[ACTIVE]?.api
+    const home = resolve(api?.dshHome ?? process.env.DSH_HOME ?? join(homedir(), '.dsh'))
+    return { ok: true, loadedAt: LOADED_AT, protocol: PROTOCOL,
+      bridgeVersion: api?.bridgeVersion, bridgeBuild: api?.bridgeBuild,
+      homeId: createHash('sha256').update(process.platform === 'win32' ? home.toLowerCase() : home).digest('hex'),
+      mainExtension: typeof api?.mainExtensions?.status === 'function'
+        ? await api.mainExtensions.status('dsh-builtin-browser') : { code: 'DESKTOP_MAIN_EXTENSION_UNSUPPORTED' } }
   }
   if (op === 'list') {
     pruneClaims()
@@ -1165,9 +1171,15 @@ export function stop() {
   fallbackHandlers.clear()
   if (!current) return
   try { clearInterval(current.keepalive) } catch { /* ignore */ }
+  for (const socket of current.sockets ?? []) socket.destroy()
   try { current.server.close() } catch { /* already closed */ }
-  try { app.off('will-quit', current.onQuit) } catch { /* ignore */ }
-  try { app.off('web-contents-created', current.onGuestCreated) } catch { /* ignore */ }
+  try { current.application.off('will-quit', current.onQuit) } catch { /* ignore */ }
+  try { current.application.off('web-contents-created', current.onGuestCreated) } catch { /* ignore */ }
+  try {
+    const file = endpointFile(current.api?.dshHome)
+    const endpoint = JSON.parse(readFileSync(file, 'utf8'))
+    if (endpoint.token === current.token && endpoint.pid === process.pid) unlinkSync(file)
+  } catch { /* absent, unreadable, or owned by a replacement instance */ }
 }
 
 /** Start the bridge: loopback listener + published endpoint file + token. */
@@ -1229,7 +1241,7 @@ export function start(api) {
     void applySidebarGuestProxy(contents)
     attachProxyFallback(contents)
   }
-  app.on('web-contents-created', onGuestCreated)
+  application.on('web-contents-created', onGuestCreated)
   for (const contents of webContents.getAllWebContents()) {
     onGuestCreated(undefined, contents)
   }
@@ -1248,7 +1260,9 @@ export function start(api) {
     }
   } catch { /* no webContents at all; nothing to detach */ }
   const token = randomBytes(24).toString('hex')
+  const sockets = new Set()
   const server = createServer(socket => {
+    sockets.add(socket)
     const controller = new AbortController()
     let buffer = ''
     let authed = false
@@ -1256,6 +1270,7 @@ export function start(api) {
     const authenticationDeadline = setTimeout(() => socket.destroy(), 5_000)
     authenticationDeadline.unref?.()
     socket.on('close', () => {
+      sockets.delete(socket)
       clearTimeout(authenticationDeadline)
       controller.abort(codedError('bridge-request-abandoned', 'the bridge client disconnected'))
     })
@@ -1326,6 +1341,7 @@ export function start(api) {
   // Loopback only, port chosen by the OS: the endpoint file is the discovery
   // mechanism, so a fixed port would only add collisions.
   server.listen(0, '127.0.0.1', () => {
+    if (globalThis[ACTIVE]?.server !== server) { server.close(); return }
     const address = server.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
     if (publishEndpoint(port, token, api?.dshHome)) {
@@ -1341,6 +1357,6 @@ export function start(api) {
   keepalive.unref?.()
   const onQuit = () => stop()
   application.on('will-quit', onQuit)
-  globalThis[ACTIVE] = { server, keepalive, onQuit, onGuestCreated, stop }
+  globalThis[ACTIVE] = { server, keepalive, onQuit, onGuestCreated, stop, api, application, token, sockets }
   return server
 }

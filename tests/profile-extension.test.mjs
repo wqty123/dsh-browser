@@ -1,0 +1,128 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { createServer } from 'node:net'
+import { once } from 'node:events'
+import { installedProfileExtension, profileExtensionCommand, repairProfileExtension, extensionHomeId, readHostExtensionStatus } from '../src/browser-electron/profile-extension.ts'
+import { waitForRestartedBridge } from '../src/browser-electron/bridge-install.ts'
+import { readBridgeStatus } from '../src/browser-electron/bridge-status.ts'
+
+function fixture(t) {
+  const root = mkdtempSync(join(tmpdir(), 'profile-extension-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const home = join(root, 'home'), app = join(root, 'desktop'), profile = join(home, 'profiles/desktop')
+  const cli = join(app, 'resources/app/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js')
+  mkdirSync(dirname(cli), { recursive: true }); writeFileSync(cli, 'supported CLI')
+  mkdirSync(profile, { recursive: true })
+  writeFileSync(join(profile, 'package.json'), JSON.stringify({ dependencies: { 'dsh-builtin-browser': 'file:../../plugin.tgz', other: '1.0.0' } }))
+  const resources = ['resources/app/lib/main.js', 'resources/app/lib/preload-app.cjs', 'resources/app.asar', 'resources/cli/dsh.cmd']
+  for (const file of resources) { mkdirSync(dirname(join(app, file)), { recursive: true }); writeFileSync(join(app, file), 'original ' + file) }
+  return { root, home, app, profile, cli, resources }
+}
+
+test('profile repair and removal invoke the trusted CLI and do not change app resources, archive or launchers', async t => {
+  const f = fixture(t)
+  const before = f.resources.map(path => readFileSync(join(f.app, path)))
+  const calls = []
+  for (const action of ['install', 'uninstall']) {
+    const result = await repairProfileExtension(action, f.app, f.home, async (command, argv, env) => {
+      calls.push({ command, argv, env })
+      assert.equal(command, join(f.app, 'DeepSeek Harness.exe'))
+      assert.deepEqual(argv.slice(0, 5), ['--expose-internals', f.cli, 'plugin', '--profile', 'desktop'])
+      assert.equal(env.DSH_HOME, f.home); assert.equal(env.ELECTRON_RUN_AS_NODE, '1')
+      assert.equal(argv[5], action === 'install' ? 'add' : 'remove')
+      assert.equal(argv[6], action === 'install' ? `dsh-builtin-browser@file:${join(f.home, 'plugin.tgz')}` : 'dsh-builtin-browser')
+      return { code: 0, output: 'profile package operation completed' }
+    })
+    assert.equal(result.ok, true); assert.equal(result.restarted, false)
+  }
+  assert.equal(calls.length, 2)
+  f.resources.forEach((path, i) => assert.deepEqual(readFileSync(join(f.app, path)), before[i]))
+  assert.equal(existsSync(join(f.app, 'resources/app/lib/main.js.before-bridge')), false)
+})
+
+test('missing profiles and missing package specs fail before starting any installer; CLI permission failures remain failures', async t => {
+  const f = fixture(t)
+  await assert.rejects(profileExtensionCommand('install', f.app, join(f.root, 'missing-home')), /ENOENT/)
+  writeFileSync(join(f.profile, 'package.json'), '{}')
+  await assert.rejects(profileExtensionCommand('install', f.app, f.home), /EXTENSION_NOT_INSTALLED/)
+  writeFileSync(join(f.profile, 'package.json'), JSON.stringify({ dependencies: { 'dsh-builtin-browser': '^0.7.42' } }))
+  let calls = 0
+  const result = await repairProfileExtension('install', f.app, f.home, async () => {
+    calls++; return { code: 1, output: 'EACCES: profile is read-only' }
+  })
+  assert.equal(calls, 1); assert.equal(result.ok, false); assert.match(result.output, /EACCES/)
+})
+
+test('live package metadata includes same-version bridge replacements and keeps separate homes separate', async t => {
+  const f = fixture(t)
+  const directory = join(f.profile, 'node_modules/dsh-builtin-browser')
+  mkdirSync(join(directory, 'desktop-bridge'), { recursive: true })
+  writeFileSync(join(directory, 'package.json'), JSON.stringify({ name: 'dsh-builtin-browser', version: '1.0.0', dsh: { desktop: { main: './desktop-bridge/main.mjs' } } }))
+  const bridge = join(directory, 'desktop-bridge/plugin-browser-bridge.js')
+  writeFileSync(bridge, 'first')
+  const first = await installedProfileExtension(f.home)
+  writeFileSync(bridge, 'replacement')
+  const second = await installedProfileExtension(f.home)
+  assert.equal(first.version, second.version); assert.notEqual(first.build, second.build)
+  assert.equal(second.build, createHash('sha256').update('replacement').digest('hex'))
+  await assert.rejects(installedProfileExtension(join(f.root, 'other-home')), /ENOENT/)
+  assert.notEqual(extensionHomeId(f.home), extensionHomeId(join(f.root, 'other-home')))
+})
+
+async function endpoint(t, home, answer) {
+  const sockets = new Set()
+  const server = createServer(socket => {
+    sockets.add(socket); socket.on('close', () => sockets.delete(socket))
+    let buffer = ''
+    socket.on('data', data => {
+      buffer += data
+      while (buffer.includes('\n')) {
+        const at = buffer.indexOf('\n'), request = JSON.parse(buffer.slice(0, at)); buffer = buffer.slice(at + 1)
+        if (!request.op) continue
+        const reply = request.op === 'version' ? answer() : { ok: true, guests: [], sidebar: [] }
+        socket.write(JSON.stringify({ ...reply, bridgeRequestId: request.bridgeRequestId }) + '\n')
+      }
+    })
+  })
+  server.listen(0, '127.0.0.1'); await once(server, 'listening')
+  t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)) })
+  const path = join(home, 'dsh-builtin-browser-bridge.json')
+  writeFileSync(path, JSON.stringify({ pid: process.pid, port: server.address().port, token: 'private-test-token' }))
+  return path
+}
+
+test('restart verification requires the host loaded status plus live bridge version/build under the correct home', async t => {
+  const f = fixture(t), extension = { version: '1.0.0', build: 'build-new' }
+  const valid = { ok: true, bridgeVersion: extension.version, bridgeBuild: extension.build, homeId: extensionHomeId(f.home),
+    mainExtension: { state: 'loaded', version: extension.version, loadedAt: new Date().toISOString() } }
+  let answer = valid
+  const path = await endpoint(t, f.home, () => answer)
+  const options = { endpointPath: path, timeoutMs: 40, pollMs: 1, home: f.home, extension }
+  await waitForRestartedBridge(process.pid, options)
+  assert.deepEqual(await readHostExtensionStatus(f.home), valid.mainExtension)
+  for (const wrong of [
+    { ...valid, bridgeVersion: 'old' }, { ...valid, bridgeBuild: 'old' }, { ...valid, homeId: extensionHomeId(join(f.root, 'other')) },
+    ...['not-installed', 'pending-restart', 'failed'].map(state => ({ ...valid, mainExtension: { ...valid.mainExtension, state } })),
+  ]) {
+    answer = wrong
+    await assert.rejects(waitForRestartedBridge(process.pid, options), /did not become ready/)
+  }
+  answer = valid
+  await assert.rejects(waitForRestartedBridge(process.pid + 1, options), /did not become ready/)
+  answer = { ok: true }
+  assert.equal(await readHostExtensionStatus(f.home), undefined)
+})
+
+test('bridge status uses host status instead of file markers and reports unsupported hosts explicitly', () => {
+  const root = join(tmpdir(), 'not-a-desktop')
+  assert.equal(readBridgeStatus(root).code, 'DESKTOP_MAIN_EXTENSION_UNSUPPORTED')
+  for (const [state, bridge] of [['loaded', 'installed'], ['not-installed', 'missing'], ['pending-restart', 'stale'], ['failed', 'stale']]) {
+    const status = readBridgeStatus(root, { state, version: '1.0.0' })
+    assert.equal(status.state, bridge); assert.equal(status.mainExtension.state, state)
+    assert.notEqual(status.code, 'DESKTOP_MAIN_EXTENSION_UNSUPPORTED')
+  }
+})

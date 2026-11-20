@@ -207,6 +207,13 @@ const react = require("react")
     "readiness.bridge.install": "安装并重启",
     "readiness.bridge.repair": "修复并重启",
     "readiness.bridge.reinstall": "重装并重启",
+    "readiness.bridge.bootstrap": "安装或升级宿主补丁并重启",
+    "readiness.bridge.restoreHost": "恢复宿主原文件并重启",
+    "readiness.bridge.extensionUnsupported": "DESKTOP_MAIN_EXTENSION_UNSUPPORTED：请先显式安装宿主补丁。现有兼容桥接不受影响。",
+    "readiness.bridge.extension.not-installed": "主扩展未安装",
+    "readiness.bridge.extension.pending-restart": "主扩展待重启",
+    "readiness.bridge.extension.loaded": "主扩展已加载",
+    "readiness.bridge.extension.failed": "主扩展加载失败",
     "readiness.bridge.uninstall": "卸载并重启",
     "readiness.bridge.working": "正在准备维护…",
     "readiness.bridge.inProgress": "维护进行中…",
@@ -386,6 +393,13 @@ const react = require("react")
     "readiness.bridge.install": "Install and restart",
     "readiness.bridge.repair": "Repair and restart",
     "readiness.bridge.reinstall": "Reinstall and restart",
+    "readiness.bridge.bootstrap": "Install or upgrade host patch and restart",
+    "readiness.bridge.restoreHost": "Restore original host files and restart",
+    "readiness.bridge.extensionUnsupported": "DESKTOP_MAIN_EXTENSION_UNSUPPORTED: explicitly install the host patch first. An existing legacy bridge continues to work.",
+    "readiness.bridge.extension.not-installed": "Main extension not installed",
+    "readiness.bridge.extension.pending-restart": "Main extension pending restart",
+    "readiness.bridge.extension.loaded": "Main extension loaded",
+    "readiness.bridge.extension.failed": "Main extension failed",
     "readiness.bridge.uninstall": "Uninstall and restart",
     "readiness.bridge.working": "Preparing maintenance…",
     "readiness.bridge.inProgress": "Maintenance in progress…",
@@ -985,6 +999,16 @@ const react = require("react")
         }
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const data = await response.json()
+        if (data.runtime?.bridge) {
+          const extensions = typeof window === "undefined" ? undefined : window.dshDesktop?.mainExtensions
+          if (typeof extensions?.status === "function") {
+            const status = await extensions.status("dsh-builtin-browser")
+            data.runtime.bridge = { ...data.runtime.bridge, mainExtension: status, code: status.code, command: undefined,
+              state: status.state === "loaded" ? "installed" : status.state === "not-installed" ? "missing" : "stale" }
+          } else if (!data.runtime.bridge.mainExtension) {
+            data.runtime.bridge = { ...data.runtime.bridge, code: "DESKTOP_MAIN_EXTENSION_UNSUPPORTED" }
+          }
+        }
         if (!alive.current) return null
         setUnsupported(false)
         setRuntime(data && data.runtime ? data.runtime : null)
@@ -1055,7 +1079,7 @@ const react = require("react")
       }
     }
 
-    const bridgeAction = async action => {
+    const bridgeAction = async (action, mode = runtime?.bridge?.mainExtension ? "profile" : "bootstrap") => {
       if (bridgePending.current || busy || bridgeActive) return
       const desktopMenu = () => typeof document.querySelector === "function"
         ? document.querySelector("[data-windows-menu]")?.shadowRoot?.querySelector("button") : null
@@ -1073,7 +1097,8 @@ const react = require("react")
         const response = await fetch("/dsh-builtin-browser/bridge-maintenance", {
           method: "POST",
           headers: { accept: "application/json", "content-type": "application/json" },
-          body: JSON.stringify({ action, locale: currentLocale }),
+          body: JSON.stringify({ action, locale: currentLocale, mode,
+            ...(mode === "profile" ? { hostStatus: runtime.bridge.mainExtension } : {}) }),
         })
         const data = await response.json().catch(() => ({}))
         if (response.status === 404) {
@@ -1143,7 +1168,8 @@ const react = require("react")
             : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
     const controlsBusy = busy || bridgeBusy !== null || bridgeActive
     const canManageBridge = runtime.bridge.present === true && runtime.bridge.state !== "absent"
-    const installLabel = runtime.bridge.state === "installed" ? "readiness.bridge.reinstall"
+    const extensionUnsupported = runtime.bridge.code === "DESKTOP_MAIN_EXTENSION_UNSUPPORTED"
+    const installLabel = extensionUnsupported ? "readiness.bridge.bootstrap" : runtime.bridge.state === "installed" ? "readiness.bridge.reinstall"
       : runtime.bridge.state === "stale" ? "readiness.bridge.repair" : "readiness.bridge.install"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
     const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
@@ -1158,6 +1184,9 @@ const react = require("react")
         h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, stateLabel),
       ]),
       canManageBridge ? h("div", { key: "bridge-controls" }, [
+        extensionUnsupported ? h("p", { key: "extension-unsupported", role: "status", style: styles.hint }, t("readiness.bridge.extensionUnsupported"))
+          : runtime.bridge.mainExtension ? h("p", { key: "extension-status", role: "status", style: styles.hint },
+            `${t("readiness.bridge.extension." + runtime.bridge.mainExtension.state)}${runtime.bridge.mainExtension.version ? " · " + runtime.bridge.mainExtension.version : ""}${runtime.bridge.mainExtension.code ? " · " + runtime.bridge.mainExtension.code : ""}`) : null,
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
           h("button", { key: "install", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: () => bridgeAction("install") }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.inProgress" : installLabel)),
@@ -1165,6 +1194,10 @@ const react = require("react")
             key: "uninstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined,
             onClick: () => bridgeAction("uninstall"),
           }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.inProgress" : "readiness.bridge.uninstall")) : null,
+          runtime.bridge.mainExtension ? h("button", { key: "bootstrap", type: "button", style: bridgeButtonStyle,
+            disabled: controlsBusy || preparing, onClick: () => bridgeAction("install", "bootstrap") }, t("readiness.bridge.bootstrap")) : null,
+          runtime.bridge.mainExtension ? h("button", { key: "restore-host", type: "button", style: bridgeButtonStyle,
+            disabled: controlsBusy || preparing, onClick: () => bridgeAction("uninstall", "bootstrap") }, t("readiness.bridge.restoreHost")) : null,
         ]),
         h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
       ]) : null,
@@ -2815,7 +2848,7 @@ const react = require("react")
       const line = make("div", "dsh-bw-watch-bridge-line",
         status.state === "stale" ? say("watch.bridgeStale") : say("watch.bridgeMissing"))
       notice.appendChild(line)
-      if (typeof status.command === "string" && status.command !== "") {
+      if (typeof status.command === "string" && status.command !== "" && typeof window.dshDesktop?.mainExtensions?.status !== "function") {
         const code = make("code", "dsh-bw-watch-bridge-cmd", status.command)
         notice.appendChild(code)
       }

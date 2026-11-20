@@ -2226,7 +2226,8 @@ function bridgeRuntime(state, present = true) {
     ...failedRuntime,
     channel: 'sidebar',
     carrier: 'sidebar',
-    bridge: { ...failedRuntime.bridge, present, state },
+    bridge: { ...failedRuntime.bridge, present, state,
+      mainExtension: { state: state === 'installed' ? 'loaded' : state === 'stale' ? 'pending-restart' : 'not-installed' } },
   }
 }
 
@@ -2333,6 +2334,61 @@ function maintenanceFixture({ state = 'missing', initialJob, post } = {}) {
     setOffline(next) { offline = next },
   }
 }
+
+test('production settings reads host status even when the bridge endpoint is missing', async () => {
+  for (const state of ['loaded', 'failed', 'pending-restart', 'not-installed']) {
+    const fixture = maintenanceFixture({ state: 'missing' })
+    const runtime = bridgeRuntime('missing')
+    runtime.bridge.command = 'node legacy-injector.mjs'
+    fixture.setRuntime(runtime)
+    const calls = []
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(), timers: maintenanceTimers() })
+    activeSandbox.window.dshDesktop = { mainExtensions: { async status(name) {
+      calls.push(name); return { state, version: '0.7.42', ...(state === 'failed' ? { code: 'EXTENSION_START_FAILED' } : {}) }
+    } } }
+    const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
+    assert.deepEqual([...new Set(calls)], ['dsh-builtin-browser'])
+    assert.match(textOf(tree).join(' '), new RegExp('readiness.bridge.extension.' + state))
+    assert.match(textOf(tree).join(' '), /0\.7\.42/)
+    assert.doesNotMatch(textOf(tree).join(' '), /legacy-injector/)
+    if (state === 'failed') assert.match(textOf(tree).join(' '), /EXTENSION_START_FAILED/)
+    const install = elements(tree).find(node => node.props.key === 'install')
+    await install.props.onClick()
+    const post = fixture.calls.find(call => call.init.method === 'POST')
+    assert.equal(JSON.parse(post.init.body).mode, 'profile')
+    assert.equal(JSON.parse(post.init.body).hostStatus.state, state)
+  }
+})
+
+test('production unsupported settings reports the capability code and makes bootstrap explicit', async () => {
+  const fixture = maintenanceFixture({ state: 'installed' }), runtime = bridgeRuntime('installed')
+  delete runtime.bridge.mainExtension
+  fixture.setRuntime(runtime)
+  const locale = lazyLocale()
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, locale: locale.api, document: maintenanceDocument(), timers: maintenanceTimers() })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
+  assert.match(textOf(tree).join(' '), /DESKTOP_MAIN_EXTENSION_UNSUPPORTED/)
+  const install = elements(tree).find(node => node.props.key === 'install')
+  assert.match(textOf(install).join(' '), /宿主补丁/)
+  await install.props.onClick()
+  const post = fixture.calls.find(call => call.init.method === 'POST')
+  assert.equal(JSON.parse(post.init.body).mode, 'bootstrap')
+  assert.equal('hostStatus' in JSON.parse(post.init.body), false)
+})
+
+test('production settings keeps profile repair and host restore separate', async () => {
+  for (const [key, action, mode] of [['install', 'install', 'profile'], ['uninstall', 'uninstall', 'profile'], ['bootstrap', 'install', 'bootstrap'], ['restore-host', 'uninstall', 'bootstrap']]) {
+    const fixture = maintenanceFixture({ state: 'installed' })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(), timers: maintenanceTimers() })
+    const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
+    const button = elements(tree).find(node => node.props.key === key)
+    assert.ok(button)
+    await button.props.onClick()
+    const post = fixture.calls.find(call => call.init.method === 'POST')
+    assert.equal(JSON.parse(post.init.body).action, action)
+    assert.equal(JSON.parse(post.init.body).mode, mode)
+  }
+})
 
 for (const [action, state, label, success] of [
   ['install', 'missing', 'readiness.bridge.install', 'readiness.bridge.installedDone'],

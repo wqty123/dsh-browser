@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BridgeConnection } from './bridge-connection.ts'
 import { bridgeEndpointPath } from './paths.ts'
+import { extensionHomeId, type InstalledExtension } from './profile-extension.ts'
 
 /** What the panel may ask for. */
 export type BridgeAction = 'install' | 'uninstall'
@@ -75,6 +76,8 @@ export interface BridgeReadyOptions {
   readonly endpointPath?: string
   readonly timeoutMs?: number
   readonly pollMs?: number
+  readonly extension?: InstalledExtension
+  readonly home?: string
 }
 
 /**
@@ -95,6 +98,13 @@ export async function waitForRestartedBridge(pid: number, options: BridgeReadyOp
         if (remaining <= 0) break
         const connection = new BridgeConnection({ port: Number(endpoint.port), token: endpoint.token, pid })
         try {
+          if (options.extension !== undefined) {
+            const version = await connection.call({ op: 'version' }, Math.min(1_000, remaining))
+            const status = version.mainExtension as { state?: unknown; version?: unknown; loadedAt?: unknown } | undefined
+            if (version.ok !== true || version.bridgeVersion !== options.extension.version || version.bridgeBuild !== options.extension.build
+              || version.homeId !== extensionHomeId(options.home ?? '') || status?.state !== 'loaded'
+              || status.version !== options.extension.version || typeof status.loadedAt !== 'string' || !Number.isFinite(Date.parse(status.loadedAt))) throw new Error('EXTENSION_RESTART_REQUIRED')
+          }
           const answer = await connection.call({ op: 'list' }, Math.min(1_000, remaining))
           if (answer.ok === true && Array.isArray(answer.guests) && Array.isArray(answer.sidebar)) return
         } finally { connection.close() }
