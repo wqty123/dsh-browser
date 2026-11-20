@@ -748,7 +748,9 @@ test('rejects loopback, private, DSH-host, non-http targets and unsafe redirects
 test('reports transport errors as 502', async () => {
   const result = await call(guestPath('https://offline.example/'))
   assert.equal(result.status, 502)
-  assert.equal(result.body, 'guest proxy: upstream request failed')
+  assert.match(result.headers['content-type'], /^text\/html/u)
+  assert.ok(result.body.includes('guest proxy: upstream request failed'))
+  assert.ok(result.body.includes('data-dsh-guest-runtime'))
 })
 
 test('static rewriting keeps supported asset forms and special URLs intact', () => {

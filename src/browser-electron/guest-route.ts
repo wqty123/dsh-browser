@@ -44,6 +44,23 @@ class UnsafeGuestTargetError extends Error {}
 const MAX_REWRITE_BYTES = 4 * 1024 * 1024
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
 
+const UPSTREAM_ERROR_CODES = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID',
+  'ERR_SSL_TLSV1_ALERT_NO_APPLICATION_PROTOCOL',
+])
+
+function upstreamErrorCode(error: unknown): string | undefined {
+  const cause = error !== null && typeof error === 'object' && 'cause' in error ? error.cause : undefined
+  for (const value of [error, cause]) {
+    if (value !== null && typeof value === 'object' && 'code' in value
+      && typeof value.code === 'string' && UPSTREAM_ERROR_CODES.has(value.code)) return value.code
+  }
+  return undefined
+}
+
 /** Document content types eligible for rewriting. */
 const REWRITABLE = /^(text\/|application\/(json|javascript|xhtml\+xml|xml|rss\+xml|atom\+xml))/iu
 
@@ -316,6 +333,21 @@ export async function handleGuest(
   const destination = request.headers['sec-fetch-dest']
   const subRequest = request.headers['x-dsh-guest-sub'] === '1'
     || (typeof destination === 'string' && destination !== 'document' && destination !== 'iframe')
+  const failUpstream = (kind: 'request' | 'response' | 'target', error: unknown): void => {
+    const message = kind === 'target' ? 'guest proxy: target is not allowed' : `guest proxy: upstream ${kind} failed`
+    writeHead(kind === 'target' ? 403 : 502, {
+      'content-type': subRequest ? 'text/plain; charset=utf-8' : 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    if (subRequest) { response.end(message); return }
+    const code = upstreamErrorCode(error)
+    response.end('<!doctype html><html><head><meta charset="utf-8"><title>页面加载失败 / Page unavailable</title>'
+      + '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href) + '</script>'
+      + '<style>body{font:16px/1.6 system-ui,sans-serif;margin:48px auto;padding:0 24px;max-width:640px;color:#334155}h1{font-size:24px}code{overflow-wrap:anywhere}button{font:inherit;padding:6px 20px;cursor:pointer}</style>'
+      + '</head><body><h1>页面加载失败 / Page unavailable</h1><p>无法获取上游网页，请检查网络后重试。 / The upstream page could not be loaded. Check your connection and try again.</p>'
+      + '<p><code>' + message + (code === undefined ? '' : ' (' + code + ')') + '</code></p>'
+      + '<button type="button" onclick="location.reload()">重试 / Retry</button></body></html>')
+  }
   const headers = new Headers()
   const siteHeaders = new Set(request.headers['x-dsh-guest-sub'] === '1'
     ? String(request.headers['x-dsh-guest-headers'] ?? '').toLowerCase().split(',').filter(siteHeader) : [])
@@ -431,8 +463,7 @@ export async function handleGuest(
       }
     }
   } catch (error) {
-    writeHead(error instanceof UnsafeGuestTargetError ? 403 : 502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
-    response.end(error instanceof UnsafeGuestTargetError ? 'guest proxy: target is not allowed' : 'guest proxy: upstream request failed')
+    failUpstream(error instanceof UnsafeGuestTargetError ? 'target' : 'request', error)
     return
   }
   try {
@@ -500,8 +531,7 @@ export async function handleGuest(
     out.set('cache-control', 'no-store')
     writeHead(upstream.status, Object.fromEntries(out))
     response.end(body)
-  } catch {
-    writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
-    response.end('guest proxy: upstream response failed')
+  } catch (error) {
+    failUpstream('response', error)
   }
 }
