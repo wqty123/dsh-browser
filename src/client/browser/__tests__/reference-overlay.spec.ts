@@ -42,3 +42,60 @@ it.each(['transport', 'empty', 'unacknowledged'])('surfaces a consumed native in
     expect(document.querySelector('[role="alert"]')).toBeNull()
   } finally { lifetime.abort() }
 })
+
+it('submits every taken intent even when the first failure notice cannot reach the old guest', async () => {
+  vi.useFakeTimers()
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const lifetime = new AbortController()
+  const queue = [{}, intent]
+  const guest = { __dshRefTake: () => queue.shift() }
+  const execute = vi.fn(async (source: string) => {
+    if (source.startsWith('JSON.stringify(')) return Function('window', `return (${source})`)(guest)
+    if (source.includes('__dsh-ref-notice')) throw new Error('guest navigated')
+    return undefined
+  })
+  const request = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  vi.stubGlobal('fetch', request)
+  const capture = createReferenceCapture({ get: () => undefined }, lifetime.signal)
+  try {
+    installReferenceOverlay(execute, item => capture(item, 'session-unsent'), lifetime.signal)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(queue).toHaveLength(0)
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('no captured content')
+  } finally { lifetime.abort() }
+})
+
+it('reports an already taken intent if plugin disposal prevents submission', async () => {
+  vi.useFakeTimers()
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const lifetime = new AbortController()
+  let release!: (result: string) => void
+  const execute = vi.fn(async (source: string) => source.startsWith('JSON.stringify(')
+    ? new Promise<string>(resolve => { release = resolve }) : undefined)
+  const request = vi.fn()
+  vi.stubGlobal('fetch', request)
+  const capture = createReferenceCapture({ get: () => undefined }, lifetime.signal)
+  installReferenceOverlay(execute, item => capture(item, 'session-unsent'), lifetime.signal)
+  await vi.advanceTimersByTimeAsync(0)
+  lifetime.abort(new Error('plugin stopped'))
+  release(JSON.stringify([intent]))
+  await vi.advanceTimersByTimeAsync(0)
+  expect(request).not.toHaveBeenCalled()
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain('plugin stopped')
+})
+
+it.each(['[]', 'invalid JSON', '{}', '[false]'])('keeps polling after an empty or invalid drain: %s', async result => {
+  vi.useFakeTimers()
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const lifetime = new AbortController()
+  const consume = vi.fn()
+  const execute = vi.fn(async (source: string) => source.startsWith('JSON.stringify(') ? result : undefined)
+  try {
+    installReferenceOverlay(execute, consume, lifetime.signal)
+    await vi.advanceTimersByTimeAsync(300)
+    expect(execute.mock.calls.filter(([source]) => source.startsWith('JSON.stringify('))).toHaveLength(2)
+    expect(consume).not.toHaveBeenCalled()
+    expect(document.querySelector('[role="alert"]') !== null).toBe(result !== '[]')
+  } finally { lifetime.abort() }
+})

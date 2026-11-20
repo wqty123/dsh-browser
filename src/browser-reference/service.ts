@@ -146,7 +146,8 @@ export function setReferenceCaptureActionHandler(
 
 /** Called by the provider when the host reports a human reference action. */
 export async function dispatchReferenceCaptureAction(action: ReferenceCaptureAction): Promise<void> {
-  await referenceCaptureActionHandler?.(action)
+  if (referenceCaptureActionHandler === undefined) throw new Error('reference capture handler is unavailable')
+  await referenceCaptureActionHandler(action)
 }
 
 /** One piece of a capture that could not be committed. */

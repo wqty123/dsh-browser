@@ -7,7 +7,7 @@ const takeIntents = `JSON.stringify((function () {
   if (typeof window.__dshRefTake !== 'function') return intents
   for (var i = 0; i < 100; i++) {
     var intent = window.__dshRefTake()
-    if (!intent || typeof intent !== 'object') break
+    if (intent == null) break
     intents.push(intent)
   }
   return intents
@@ -22,16 +22,21 @@ export function installReferenceOverlay(execute: (source: string) => Promise<unk
     if (signal.aborted) return
     try {
       const result = await execute(takeIntents)
-      if (signal.aborted) return
-      const intents: unknown = typeof result === 'string' ? JSON.parse(result) : undefined
-      if (Array.isArray(intents)) {
-        for (const intent of intents) {
-          if (intent !== null && typeof intent === 'object') {
-            try { await consume(intent) }
-            catch (error) {
-              reportReferenceCaptureFailure(error)
-              if (!signal.aborted) await execute(standaloneScript(noticeScript('引用未能加入当前会话，请重试。')))
-            }
+      let intents: unknown[] = []
+      try {
+        const decoded: unknown = typeof result === 'string' ? JSON.parse(result) : undefined
+        if (!Array.isArray(decoded)) throw new Error('reference intent drain was not acknowledged')
+        intents = decoded
+      } catch (error) { reportReferenceCaptureFailure(error) }
+      for (const intent of intents) {
+        try {
+          if (intent === null || typeof intent !== 'object') throw new Error('reference intent is invalid')
+          await consume(intent)
+        } catch (error) {
+          reportReferenceCaptureFailure(error)
+          if (!signal.aborted) {
+            try { await execute(standaloneScript(noticeScript('引用未能加入当前会话，请重试。'))) }
+            catch { /* The app notice survives navigation of the guest. */ }
           }
         }
       }

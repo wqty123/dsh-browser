@@ -295,7 +295,7 @@ it('an empty delivery stream leaves the composer empty without capturing another
   } finally { runtime.dispose(); queue.dispose() }
 })
 
-it.each(['native', 'web', 'native-unmaterialized'] as const)('%s first quote survives home → selected Session → dock → first send', async surface => {
+it.each(['native', 'web', 'native-unmaterialized', 'native-new-document'] as const)('%s first quote survives home → selected Session → dock → first send', async surface => {
   const { service, queue, request, runtime: unused } = harness()
   unused.dispose()
   let dock!: (props: unknown) => unknown
@@ -352,19 +352,32 @@ it.each(['native', 'web', 'native-unmaterialized'] as const)('%s first quote sur
       const element = document.createElement('div') as unknown as WebviewElement
       const intents = [intent]
       const guest = { __dshRefTake: () => intents.shift() }
+      let releaseDrain: (() => void) | undefined
       Object.assign(element, {
         loadURL: async () => {}, getURL: () => intent.capture.url, getTitle: () => intent.capture.title,
         canGoBack: () => false, canGoForward: () => false, isLoading: () => false,
-        executeJavaScript: async (source: string) => source.startsWith('JSON.stringify(') ? Function('window', `return (${source})`)(guest) : undefined,
+        executeJavaScript: async (source: string) => {
+          if (!source.startsWith('JSON.stringify(')) return undefined
+          const result = Function('window', `return (${source})`)(guest)
+          if (surface === 'native-new-document' && result !== '[]') {
+            return new Promise(resolve => { releaseDrain = () => { resolve(result) } })
+          }
+          return result
+        },
       })
       const presentation = { createElement: () => element, present: () => element.dispatchEvent(new Event('dom-ready')), clear() {}, dispose() {} } as unknown as ElectronWebviewPresentation
       const bridge = { acquire: async () => ({ lease: 'lease', partition: 'persist:first' }), release: async () => {}, onOpenRequested: () => () => {} } as unknown as DesktopBrowserBridge
       const frame = new ElectronWebViewImpl({ initial: undefined, persist() {}, openRequested() {} }, bridge, async () => 'workspace', presentation,
-        surface === 'native-unmaterialized' ? `session-${nextOwner}` : `session-${firstOwner}`, capture)
+        surface === 'native-unmaterialized' || surface === 'native-new-document' ? `session-${nextOwner}` : `session-${firstOwner}`, capture)
       frame.attach()
       frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' })
       dispose = () => frame.dispose()
       await vi.waitFor(() => expect(intents).toHaveLength(0))
+      if (surface === 'native-new-document') {
+        expect(releaseDrain).toBeDefined()
+        element.dispatchEvent(new Event('dom-ready'))
+        releaseDrain!()
+      }
     }
     await vi.waitFor(() => expect(request.mock.calls.filter(([url]) => url.endsWith('/capture'))).toHaveLength(1))
     await vi.waitFor(() => expect(queue.list({ sessionId: nextOwner }).deliveries).toHaveLength(1))

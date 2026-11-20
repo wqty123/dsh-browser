@@ -26,33 +26,43 @@ test('installs a standalone overlay and drains the live document queue in order'
   assert.equal(calls, 2)
 })
 
-test('empty queues, navigation errors and malformed results do not deliver intents', async () => {
+test('empty queues and navigation errors do not deliver; malformed results are reported', async () => {
   for (const result of ['[]', 'invalid JSON', '{}', '[null, 3]']) {
     const controller = new AbortController()
     let calls = 0
-    installReferenceOverlay(async () => {
-      if (++calls === 1) throw new Error('document navigated')
-      return result
-    }, () => assert.fail('unexpected intent'), controller.signal)
-    await tick()
-    controller.abort()
-    assert.equal(calls, 2)
+    const notices = []
+    const warnings = []
+    const warn = console.warn
+    console.warn = (...args) => warnings.push(args)
+    try {
+      installReferenceOverlay(async source => {
+        if (++calls === 1) throw new Error('document navigated')
+        if (source.includes('__dsh-ref-notice')) { notices.push(source); return undefined }
+        return result
+      }, () => assert.fail('unexpected intent'), controller.signal)
+      await tick()
+      assert.equal(notices.length, result === '[null, 3]' ? 2 : 0)
+      assert.equal(warnings.length, result === '[]' ? 0 : result === '[null, 3]' ? 2 : 1)
+      assert.equal(calls, 2 + notices.length)
+    } finally { controller.abort(); console.warn = warn }
   }
 })
 
-test('dropping a guest ignores an in-flight drain and stops polling', async () => {
+test('dropping a guest delivers an already taken intent and stops polling', async () => {
   const controller = new AbortController()
   let resolveDrain
   let calls = 0
+  const received = []
   installReferenceOverlay(async () => {
     if (++calls === 1) return undefined
     return new Promise(resolve => { resolveDrain = resolve })
-  }, () => assert.fail('stale document intent'), controller.signal)
+  }, intent => received.push(intent), controller.signal)
   await tick()
   controller.abort()
   resolveDrain('[{"comment":"stale"}]')
   await new Promise(resolve => setTimeout(resolve, 350))
   assert.equal(calls, 2)
+  assert.deepEqual(received, [{ comment: 'stale' }])
 })
 
 test('shared capture uses the owning session and reports missing owners and transport errors', async () => {

@@ -12,7 +12,7 @@ import { dispatchReferenceCaptureAction } from '../browser-reference/service.ts'
 import {
   MAX_REFERENCE_COMMENT, REFERENCE_INTENT_CHANNEL, overlayScript, standaloneScript,
 } from '../browser-reference/entry.ts'
-import { validateFrozenCapture, type RawCaptureResult } from '../browser-reference/page-script.ts'
+import { noticeScript, validateFrozenCapture, type RawCaptureResult } from '../browser-reference/page-script.ts'
 import { randomUUID } from 'node:crypto'
 import { setLastOpen } from './open-slot.ts'
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
@@ -996,29 +996,29 @@ export class ElectronBrowserProvider implements BrowserProvider {
         await this.evaluateInTab(tab, standaloneScript(overlayScript(), {}), 5_000)
         return true
       }
-      if (probe === null || typeof probe !== 'object') return true
-      const record = probe as Record<string, unknown>
-      if (record.type !== REFERENCE_INTENT_CHANNEL) return true
-      const rawComment = typeof record.comment === 'string' ? record.comment.trim() : ''
-      const rawSelection = typeof record.selectionText === 'string' ? record.selectionText.trim() : ''
-      // The bar freezes the whole capture; the page is low-trust, so the
-      // payload is re-validated and bounded before it leaves this process.
-      const capture = validateFrozenCapture(record.capture)
-      // A refused capture used to be swallowed by this method's catch, which
-      // made it indistinguishable from a dead tab: the intent vanished, no card
-      // appeared, and nothing anywhere said why. Record the reason and keep the
-      // tab — the page is alive, our capture is what failed.
+      if (probe === null || probe === undefined) return true
       try {
+        if (typeof probe !== 'object') throw new Error('reference intent is invalid')
+        const record = probe as Record<string, unknown>
+        if (record.type !== REFERENCE_INTENT_CHANNEL) throw new Error('reference intent channel is invalid')
+        const rawComment = typeof record.comment === 'string' ? record.comment.trim() : ''
+        const rawSelection = typeof record.selectionText === 'string' ? record.selectionText.trim() : ''
+        const capture = validateFrozenCapture(record.capture)
+        if (capture === undefined) throw new Error('reference intent has no captured content')
         await this.handleUserAction({
           type: 'capture-reference',
           windowId: session.id,
           entry: 'page-overlay',
           ...rawComment !== '' ? { comment: rawComment.slice(0, MAX_REFERENCE_COMMENT) } : {},
           ...rawSelection !== '' ? { selectionText: rawSelection } : {},
-          ...capture !== undefined ? { capture } : {},
-        })
+          capture,
+        }, true)
       } catch (error) {
         this.referenceScan.lastError = 'capture refused: ' + (error instanceof Error ? error.message : String(error))
+        process.stderr.write(`[dsh-browser] ${this.referenceScan.lastError}\n`)
+        try {
+          await this.evaluateInTab(tab, standaloneScript(noticeScript('引用未能加入当前会话，请重试。')), 3_000)
+        } catch { /* The failure remains in host diagnostics when the guest disappears. */ }
       }
       return true
     } catch {
@@ -4215,7 +4215,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * URL typed into the address bar) must never crash the host UI loop — it
    * is reported to the host (toolbar) when the host supports it, else logged.
    */
-  private async handleUserAction(action: BrowserUserAction): Promise<void> {
+  private async handleUserAction(action: BrowserUserAction, propagate = false): Promise<void> {
     const s = this.sessions.get(action.windowId)
     if (s === undefined) {
       // The window the human clicked in has no live session here (session
@@ -4224,6 +4224,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       const message = `action ${action.type} failed: no live browser session for window "${action.windowId}"`
       process.stderr.write(`[dsh-browser] ${message}\n`)
       this.notifyUserActionError(action, new Error('no live browser session'))
+      if (propagate) throw new Error('no live browser session')
       return
     }
     try {
@@ -4273,6 +4274,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       }
     } catch (error) {
       this.notifyUserActionError(action, error)
+      if (propagate) throw error
     }
   }
 
