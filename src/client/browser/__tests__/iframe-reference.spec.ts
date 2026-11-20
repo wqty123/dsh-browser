@@ -149,6 +149,63 @@ it.each([true, false])('reveals through the actual Web guest runtime after readi
   await expect(source.reveal!({ ...snapshot, owner: { sessionId: 'another-conversation' } }, undefined, new AbortController().signal)).resolves.toBe('session-mismatch')
 })
 
+it.each([
+  { table: '<thead><tr><th>Firstname</th><th>Lastname</th></tr></thead><tbody><tr><td>Peter</td><td>Griffin</td></tr><tr><td>Lois</td><td>Griffin</td></tr></tbody>', cells: 6, selected: 'FirstnameLastnamePeterGriffinLoisGriffin' },
+  { table: '<thead><tr><th colspan="2">Firstname</th></tr></thead><tbody><tr><td rowspan="2">Peter</td><td>Griffin</td></tr><tr><td>Griffin</td></tr></tbody>', cells: 4, selected: 'FirstnamePeterGriffinGriffin' },
+])('captures a dragged Runoob-like table ($cells cells) over HTTP and selects its cells after navigating back', async ({ table, cells, selected }) => {
+  const server = await webReferenceHttp()
+  disposers.push(() => server.close())
+  const sourceUrl = 'https://www.runoob.com/html/html-tables.html'
+  const html = '<div id="content"><h2>HTML 表格</h2><table>' + table + '</table></div>'
+  let captured: { referenceId: string } | undefined
+  let polledUrl: string | undefined
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = vi.fn(async (input, init) => {
+    const path = new URL(String(input), server.baseUrl).pathname
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined
+    const response = await server.call(path, body)
+    if (body?.operation === 'poll') polledUrl = body.url
+    if (path.endsWith('/capture') && response.status === 200) captured = response.json().reference
+    return new Response(response.text, { status: response.status })
+  })
+  disposers.push(() => { globalThis.fetch = previousFetch })
+  const f = fixture(sourceUrl)
+  let guest = f.connect(html)
+  const doc = guest.guest.window.document
+  const range = doc.createRange()
+  range.setStart(doc.querySelector('th')!.firstChild!, 0)
+  range.setEnd(doc.querySelector('tr:last-child td:last-child')!.firstChild!, 'Griffin'.length)
+  guest.guest.window.getSelection()!.addRange(range)
+  const frozen = runInNewContext(`(${captureEntrySource()})({context:32})`, {
+    window: guest.guest.window, document: doc, location: guest.guest.window.location, URL, NodeFilter: guest.guest.window.NodeFilter,
+  })
+  expect(frozen.events.map((event: { kind: string }) => event.kind)).toEqual(['table'])
+  expect(doc.querySelector(frozen.events[0].selector)).toBe(doc.querySelector('table'))
+  guest.receive({ type: 'dsh-browser-ref:intent', origin: 'user-selection', entry: 'page-overlay', hasSelection: true, capture: frozen })
+  await vi.waitFor(() => { expect(captured).toBeDefined() })
+  const reference = server.service.get(captured!.referenceId)
+  expect(reference.parts[0].type).toBe('table')
+  f.controller.navigate('https://cn.bing.com/', 2)
+  f.connect('<p>Another page</p>')
+  await vi.waitFor(() => { expect(polledUrl).toBe('https://cn.bing.com/') })
+  expect((await server.reveal(reference.referenceId, sessionId)).status).toBe('page-mismatch')
+  const opening = openReferenceSource(f.sidebar, f.reader, sessionId, sourceUrl, new AbortController().signal)
+  guest = f.connect(html, true)
+  guest.ready()
+  const source = await opening
+  await vi.waitFor(() => { expect(polledUrl).toBe(sourceUrl) })
+  expect((await server.reveal(reference.referenceId, sessionId)).status).toBe('revealed')
+  expect(await source.reveal!(reference, undefined, new AbortController().signal)).toBe('revealed')
+  const returned = guest.guest.window.document
+  expect(returned.querySelector('#__dsh-ref-highlight')?.children).toHaveLength(cells)
+  expect(guest.guest.window.getSelection()!.toString()).toBe(selected)
+  const command = guest.post.mock.calls.map(([data]) => data).find(data => data.operation === 'element')
+  expect(command.spec.cells).toHaveLength(cells)
+  guest.guest.window.dispatchEvent(new guest.guest.window.Event('resize'))
+  expect(returned.querySelector('#__dsh-ref-highlight')).toBeNull()
+  expect(guest.guest.window.getSelection()!.toString()).toBe(selected)
+})
+
 it('reports missing and ambiguous text and guest operation errors explicitly', async () => {
   const f = fixture()
   const guest = f.connect('<p>selected words selected words</p>')
