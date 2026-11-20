@@ -139,6 +139,42 @@ test('forwards POST body, content type and safe headers without app cookies or i
   assert.equal(echo.headers['x-dsh-guest-sub'], undefined)
 })
 
+test('caps declared and chunked request bodies at 10 MiB without reading or forwarding the remainder', async () => {
+  for (const declared of [true, false]) {
+    const count = forwarded.length
+    let reads = 0, paused = false, status, message, responseHeaders
+    const request = { method: 'POST', url: guestPath('https://ordinary.example/echo'),
+      headers: { host: 'dsh.example', ...(declared ? { 'content-length': String(10 * 1024 * 1024 + 1) } : {}) },
+      pause() { paused = true },
+      async *iterator(options) {
+        assert.equal(options.destroyOnReturn, false)
+        reads++
+        yield Buffer.alloc(10 * 1024 * 1024)
+        reads++
+        yield Buffer.alloc(1)
+        assert.fail('must not read the remainder')
+      } }
+    await handleGuest(request, {
+      writeHead(code, headers) { status = code; responseHeaders = headers },
+      end(body) { message = body },
+    }, '', '')
+    assert.equal(status, 413)
+    assert.equal(responseHeaders.connection, 'close')
+    assert.match(message, /10 MiB/)
+    assert.equal(paused, true)
+    assert.equal(reads, declared ? 0 : 2)
+    assert.equal(forwarded.length, count)
+  }
+})
+
+test('accepts empty bodies and bodies exactly at the request limit', async () => {
+  for (const body of ['', 'x'.repeat(10 * 1024 * 1024)]) {
+    const result = await call(guestPath('https://ordinary.example/echo'), { method: 'POST', body })
+    assert.equal(result.status, 200)
+    assert.equal(JSON.parse(result.body).body, body)
+  }
+})
+
 test('stores redirect cookies and rewrites redirect location for a login round-trip', async () => {
   const login = await call(guestPath('https://ordinary.example/login'), { method: 'POST', body: 'login=1' })
   assert.equal(login.status, 303)
