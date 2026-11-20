@@ -188,6 +188,8 @@ test('a current sidebar loss reconnects the same handles without replacing the p
   await view.sendCommand('Runtime.evaluate')
   sidebar.lost('shell-exited')
   assert.equal(h.current, selected)
+  assert.equal(sidebar.disposed, false)
+  await new Promise(setImmediate)
   assert.equal(sidebar.disposed, true)
   assert.deepEqual(await view.sendCommand('Runtime.evaluate'), { method: 'Runtime.evaluate', owner: 'task' })
   assert.equal(discoveries, 2)
@@ -204,13 +206,13 @@ test('a current sidebar loss reconnects the same handles without replacing the p
 })
 
 for (const channel of ['sidebar', 'bundled', 'auto']) {
-  test(`${channel} stays inert until needed and reports a missing sidebar without a fallback`, async t => {
+  test(`${channel} stays inert until needed and refuses an iframe sidebar without a fallback`, async t => {
     let discoveries = 0
     const h = harness(t, channel, async () => { discoveries++; return undefined })
     t.mock.method(DesktopBridgeViewHost, 'refusedIframePanel', () => true)
     assert.equal(discoveries, 0)
     assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
-    await assert.rejects(h.current.createView('task').sendCommand('Runtime.evaluate'), /no controllable DSH sidebar.*host-provided sidebar\/webview.*No standalone browser/s)
+    await assert.rejects(h.current.createView('task').sendCommand('Runtime.evaluate'), /sidebar is an iframe.*cannot support CDP tools.*host-provided sidebar\/webview.*No standalone browser/s)
     assert.equal(discoveries, 1)
     assert.ok(h.registered.every(host => host.constructor.name === 'SidebarOnlyHost'))
   })

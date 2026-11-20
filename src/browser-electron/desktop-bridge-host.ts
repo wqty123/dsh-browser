@@ -231,6 +231,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
    * @returns the host, or undefined when no bridge is available.
    */
   static async discover(sessionId?: string, isQuiet?: () => boolean): Promise<DesktopBridgeViewHost | undefined> {
+    DesktopBridgeViewHost.refuseIframe = false
     let endpoint: BridgeEndpoint
     try {
       const raw = JSON.parse(readFileSync(bridgeEndpointPath(), 'utf8')) as Partial<BridgeEndpoint>

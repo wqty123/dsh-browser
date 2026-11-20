@@ -216,7 +216,9 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
       view.pending = undefined
     }
     // A command already in flight keeps its original outcome; the next call rediscovers.
-    try { lease.host.dispose?.() } catch { /* The next discovery replaces this failed carrier. */ }
+    setImmediate(() => {
+      try { lease.host.dispose?.() } catch { /* The next discovery replaces this failed carrier. */ }
+    })
     try { this.lostListener?.(reason) } catch { /* Transport recovery must survive a listener failure. */ }
   }
 
