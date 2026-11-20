@@ -5,6 +5,7 @@ import { nativeGuestRegistry } from '../desktop-bridge/native-guests.mjs'
 import { NativeChildPresentation } from '../src/client/electron/NativeChildPresentation.ts'
 import { tabWireId } from '../src/browser/handles.ts'
 import { dispatchChildTab } from '../src/client/browser/child-tabs.ts'
+import { createBrowserControllers } from '../src/client/browser/BrowserController.ts'
 
 const flush = () => new Promise(resolve => setImmediate(resolve))
 const target = { kind: 'https', url: 'https://example.test/', title: 'example.test' }
@@ -90,8 +91,12 @@ for (const rejected of [false, true]) test(`blank native children acknowledge wi
       commands.push(method)
       return method === 'Runtime.evaluate' ? { result: { value: { url: 'about:blank' } } } : { currentIndex: 0, entries: [] }
     } })
+  const controllers = createBrowserControllers({ replace() {} }, () => ({ frame: f.page, presentation: f.page,
+    adoption: { url: 'about:blank', acknowledge: id => f.page.acknowledge(id) } }), () => true, undefined,
+  { sessionId: 'session-native' })
   try {
-    f.page.mount('viewport')
+    controllers.mount({ tabId: 'tab-native', signal: new AbortController().signal, viewportId: 'viewport',
+      applicationOrigin: 'https://dsh.test', initial: undefined, initialUrl: undefined, openTab() {} })
     await flush(); await flush()
     if (rejected) {
       assert.deepEqual(f.released, ['blank-lease'])
@@ -101,9 +106,18 @@ for (const rejected of [false, true]) test(`blank native children acknowledge wi
       await flush()
       assert.equal(f.page.lifecycle.getSnapshot().stage, 'ready')
       assert.equal(f.page.getSnapshot().documentReady, true)
+      assert.equal(f.page.getSnapshot().address, 'observed')
+      assert.equal(f.page.getSnapshot().target.url, 'about:blank')
+      const receipt = controllers.initialization('tab-native')
+      assert.equal(receipt.stage, 'attached')
+      assert.equal(receipt.url, 'about:blank')
+      assert.equal(receipt.guestId, 'blank-lease')
+      assert.equal(receipt.generation, 'g')
+      assert.equal(receipt.frameId, 'f')
+      assert.equal(receipt.loaderId, 'l')
     }
     assert.equal(commands.includes('Page.navigate'), false)
-  } finally { await f.page.dispose(); globalThis.document = previous }
+  } finally { await controllers.dispose(); globalThis.document = previous }
 })
 
 test('native child presentation rejects foreign owners and leaves explicit URL-only behavior separate', () => {

@@ -181,7 +181,9 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
       if (this.lease !== lease || revision !== this.revision || this.carrier.getSnapshot().generation !== event.generation) return
       if (answer.result?.value?.url === 'about:blank' && this.options.tabId !== undefined && this.children?.child(this.options.tabId) !== undefined) {
         this.carrier.set({ stage: 'ready', guestId: lease, generation: event.generation, frameId: event.frameId, loaderId: event.loaderId })
-        this.state.set({ ...this.state.getSnapshot(), address: 'unknown', loading: false, documentReady: true, error: undefined })
+        this.state.set({ ...this.state.getSnapshot(), target: { kind: 'blank', url: 'about:blank', title: answer.result.value.title ?? '' },
+          address: 'observed', loading: false, documentReady: true,
+          canGoBack: history.currentIndex > 0, canGoForward: history.currentIndex < history.entries.length - 1, error: undefined })
         return
       }
       const observed = parseBrowserAddress(answer.result?.value?.url ?? '', undefined)
