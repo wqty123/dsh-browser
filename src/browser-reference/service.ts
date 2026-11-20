@@ -775,7 +775,9 @@ export class BrowserReferenceService {
         }, signal)
         results.push({ partId: part.partId, type: 'image', status: result.status, matches: result.matches })
       } else {
-        const result = await this.revealElement(sessionId, 'table', part.anchor, signal)
+        const cells = part.table.cells.filter(cell => cell.includedAs === 'selection')
+          .map(({ row, column }) => ({ row, column }))
+        const result = await this.revealElement(sessionId, 'table', part.anchor, signal, cells)
         results.push({ partId: part.partId, type: 'table', status: result.status, matches: result.matches })
       }
     }
@@ -792,11 +794,13 @@ export class BrowserReferenceService {
     kind: 'image' | 'table',
     anchor: object,
     signal?: AbortSignal,
+    cells?: readonly { readonly row: number; readonly column: number }[],
   ): Promise<{ status: 'revealed' | 'ambiguous' | 'missing'; matches?: number }> {
     try {
       const result = await this.run<RawElementRevealResult>(sessionId, revealElementScript(), [{
         kind,
         anchor,
+        ...cells === undefined ? {} : { cells },
       }], signal)
       const status = result.status === 'found' ? 'revealed' : result.status === 'ambiguous' ? 'ambiguous' : 'missing'
       return { status, ...typeof result.matches === 'number' ? { matches: result.matches } : {} }

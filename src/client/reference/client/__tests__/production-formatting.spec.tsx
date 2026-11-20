@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -418,6 +418,23 @@ describe('formatted quotations through emitted capture, storage, draft and submi
       { type: 'text', text: 'After\n' },
     ])
     expect(group.parts[1]!.table!.cells[0]).toMatchObject({ role: 'header', columnSpan: 2 })
+  })
+
+  it('keeps the real Runoob table readable beside trailing navigation text in a mixed preview', async () => {
+    const markup = readFileSync(join(process.cwd(), 'tests/fixtures/runoob-html-tables.html'), 'utf8')
+    const upstream = new DOMParser().parseFromString(markup, 'text/html')
+    const table = [...upstream.querySelectorAll('table')].find(table => table.querySelector('th'))!
+    const { snapshot, group } = await submit(select(table.outerHTML + '<p>HTML 图像 / HTML 列表</p>'))
+    expect(snapshot.parts.map(part => part.type)).toEqual(['table', 'text'])
+    const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'mixed', browserSessionId: 'browser:s', group,
+      addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
+    render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
+    const parts = document.querySelectorAll('[role="dialog"] [data-part-kind]')
+    expect([...parts].map(node => node.getAttribute('data-part-kind'))).toEqual(['table', 'text'])
+    expect(parts[0]!.querySelectorAll('tr')).toHaveLength(table.rows.length)
+    expect(parts[0]!.textContent).toContain('<table>定义表格')
+    expect(parts[0]!.textContent).toContain('<tfoot>定义表格的页脚')
+    expect(parts[1]!.textContent).toBe('HTML 图像 / HTML 列表')
   })
 
   it('clips selected inline content and keeps the original ordered-list numbering', async () => {

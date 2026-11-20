@@ -13,7 +13,7 @@ import { createReferenceRouteHandlers } from '../../lib/browser-electron/referen
 import { createReferenceService } from '../../lib/browser-reference/service.js'
 import { ReferenceStore, manifestHashOf } from '../../lib/browser-reference/store.js'
 
-export async function nativeMainReveal(snapshot, live, guestId = 2) {
+export async function nativeMainReveal(snapshot, live, guestId = 2, evaluate) {
   const folder = mkdtempSync(join(process.cwd(), '.native-main-reveal-'))
   const home = join(folder, 'home')
   mkdirSync(home)
@@ -25,7 +25,7 @@ export async function nativeMainReveal(snapshot, live, guestId = 2) {
   const providers = [], hosts = [], commands = [], posts = [], outcomes = []
   const owner = `session-${snapshot.owner.sessionId}`
   const selected = snapshot.parts[0].anchor
-  const pageText = selected.prefix + selected.exact + selected.suffix
+  const pageText = selected === undefined ? '' : selected.prefix + selected.exact + selected.suffix
   const app = new EventEmitter()
   const shell = new EventEmitter()
   Object.assign(shell, {
@@ -46,6 +46,7 @@ export async function nativeMainReveal(snapshot, live, guestId = 2) {
         commands.push({ method, params })
         assert.equal(method, 'Runtime.evaluate', 'binding must not navigate or replace the visible guest')
         assert.equal(live.ready, true, 'the client must await the current document')
+        if (evaluate !== undefined) return evaluate(method, params)
         const expression = params.expression
         let value
         if (expression.includes('return JSON.stringify(highlightText(spec))')) {

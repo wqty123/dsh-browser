@@ -352,6 +352,7 @@ test('reveal of a table part asks the page for an element locator', async t => {
   const call = calls.find(entry => entry.script.includes('return JSON.stringify(revealElement(spec))'))
   assert.equal(call.args[0].kind, 'table')
   assert.deepEqual(call.args[0].anchor.cell, { row: 0, column: 0 })
+  assert.deepEqual(call.args[0].cells, [{ row: 0, column: 0 }])
 })
 
 test('the draft adapter is a reserved seam that answers honestly when absent', async t => {
