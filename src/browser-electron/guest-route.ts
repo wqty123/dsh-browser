@@ -87,6 +87,19 @@ function cookiesFor(host: string): string | undefined {
 /** Responses larger than this pass through without rewriting. */
 const MAX_REWRITE_BYTES = 4 * 1024 * 1024
 
+/** Content types eligible for rewriting; sub-requests and non-HTML still pass through raw. */
+const REWRITABLE = /^(text\/|application\/(json|javascript|xhtml\+xml|xml|rss\+xml|atom\+xml))/iu
+
+/** Only these site-minted cookies on the proxy origin may accompany jar cookies upstream. */
+const FORWARD_COOKIE = /^(BAIDUID|BDUSS|BIDUPSID|PSTM|ZFY|BDSVRTM|H_PS_PSSID|__bsi|ab_sr|sug|sugstore|H_PS_|SUB|SUBP|SSOLoginState|SRF|ALF|XSRF)/iu
+
+function forwardableCookies(header: string | undefined): string | undefined {
+  if (typeof header !== 'string' || header === '') return undefined
+  const pairs = header.split(';').map(part => part.trim()).filter(part => part !== '')
+  const kept = pairs.filter(part => FORWARD_COOKIE.test(part.split('=')[0] ?? ''))
+  return kept.length === 0 ? undefined : kept.join('; ')
+}
+
 /** A desktop Chrome identity; several sites refuse a request without one. */
 const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
@@ -298,18 +311,56 @@ export async function handleGuest(
   }
   headers.set('accept-encoding', 'identity')
   headers.set('user-agent', DESKTOP_UA)
+  if (!headers.has('accept-language')) headers.set('accept-language', 'zh-CN,zh;q=0.9,en;q=0.8')
+  // 页面内跳转的 Referer 会是我们自己的代理地址（iframe 里的上一页），对站点毫无意义；把它还原成
+  // 「上一页的真实地址」，站点才当成站内导航处理。百度对 `/s?wd=…` 直接服务端拉取一律回「安全验证」，
+  // 带上正确的 Referer 与首页 Cookie 后才会给结果页。
   const referer = request.headers.referer
   if (typeof referer === 'string') {
     try {
       const previous = guestTarget(new URL(referer).pathname + new URL(referer).search)
       if (previous !== undefined && !blocked(previous)) {
         headers.set('referer', previous.href)
-        headers.set('origin', previous.origin)
       }
     } catch {}
   }
-  const cookie = cookiesFor(target.host)
-  if (cookie !== undefined) headers.set('cookie', cookie)
+  const jarCookie = cookiesFor(target.host)
+  const replay = forwardableCookies(request.headers.cookie)
+  const refreshCookies = (): void => {
+    const cookie = [cookiesFor(target.host), replay].filter(part => typeof part === 'string' && part !== '').join('; ')
+    if (cookie !== '') headers.set('cookie', cookie)
+    else headers.delete('cookie')
+  }
+  refreshCookies()
+  // 站内导航的伪装头。
+  //
+  // 代理发出去的是「服务端 fetch」：没有 Origin，`sec-fetch-*` 也不存在，站点一眼就能判定这不是
+  // 用户在站内点出来的请求。百度对这类请求一律回「安全验证」，而验证页本身的内容要由它的接口
+  // 再取一次（跨域，取不到），于是侧栏里就是白屏——用户看到的是「点搜索没反应」。
+  // 这几个头全部指向目标站点自己，转发出去与「用户在该站内点了一下」没有区别。
+  headers.set('sec-fetch-site', 'same-origin')
+  headers.set('sec-fetch-mode', subRequest ? 'cors' : 'navigate')
+  headers.set('sec-fetch-dest', subRequest ? 'empty' : 'document')
+  if (!subRequest || method !== 'GET') headers.set('origin', target.origin)
+  if (!subRequest) {
+    headers.set('sec-fetch-user', '?1')
+    headers.set('upgrade-insecure-requests', '1')
+  }
+  const safeNavigation = !subRequest && (method === 'GET' || method === 'HEAD')
+  const warmRoot = async (): Promise<void> => {
+    const origin = new URL('/', target.origin).href
+    const warm = await fetch(origin, { method: 'GET', headers, redirect: 'manual' })
+    rememberCookies(target.host, warm.headers.getSetCookie?.() ?? [])
+    await warm.body?.cancel()
+    headers.set('referer', origin)
+    refreshCookies()
+  }
+  // 深链接预热：直接拉 `https://host/s?…` 这类页面时，站点看到的是「没有站点 Cookie 的首跳」，
+  // 百度会回「安全验证」。先取一次站点根，把服务端种的 Cookie 收进自己的罐子，并把 Referer 指向它，
+  // 这次跳转就变成一次正常的站内导航。只在罐子里还没有该站 Cookie 且目标不是根路径时做一次。
+  if (safeNavigation && !jarCookie && target.pathname !== '/' && !headers.has('referer')) {
+    try { await warmRoot() } catch { /* 预热失败就按原样请求 */ }
+  }
   let upstream: Response
   try {
     let body: Buffer | undefined
@@ -319,6 +370,23 @@ export async function handleGuest(
       body = Buffer.concat(chunks)
     }
     upstream = await fetch(target, { method, headers, body, redirect: 'manual' })
+    rememberCookies(target.host, upstream.headers.getSetCookie?.() ?? [])
+    // 反爬挑战识别 + 一次重试：站点（百度 `/s?wd=…`）在没有「先访问过站点」的痕迹时回「安全验证」。
+    // 罐子里可能已经带着上次挑战页的 Cookie，所以这里不看有没有 Cookie，而是看**内容**：
+    // 命中挑战就先取站点根补一次 Cookie，带上根的 Referer 重试一次。仍失败就把挑战页交给上层。
+    const looksLikeChallenge = /安全验证|wappass|cf-browser-verification|Just a moment/iu
+    if (safeNavigation && target.pathname !== '/' && /^text\/html/iu.test(upstream.headers.get('content-type') ?? '')
+      && Number(upstream.headers.get('content-length') ?? '0') <= MAX_REWRITE_BYTES) {
+      const probe = await upstream.clone().text()
+      if (looksLikeChallenge.test(probe)) {
+        try {
+          await warmRoot()
+          const retried = await fetch(target, { method, headers, redirect: 'manual' })
+          await upstream.body?.cancel()
+          upstream = retried
+        } catch { /* 重试失败就用首次响应 */ }
+      }
+    }
   } catch (error) {
     response.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
     response.end(`guest proxy: cannot reach ${target.host}: ${String((error as Error).message ?? error)}`)
@@ -348,7 +416,7 @@ export async function handleGuest(
     response.end()
     return
   }
-  if (subRequest || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
+  if (subRequest || !REWRITABLE.test(type) || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
     || length > MAX_REWRITE_BYTES || (upstream.status >= 300 && upstream.status < 400)) {
     response.writeHead(upstream.status, Object.fromEntries(out))
     response.end(Buffer.from(await upstream.arrayBuffer()))
