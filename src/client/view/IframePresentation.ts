@@ -6,6 +6,7 @@ import css from './Browser.module.css'
 import { registerIframeReference, type GuestReferenceCommand } from '../browser/iframe-reference.ts'
 import { sameReferenceDocument } from '../../reference-page.ts'
 import { dispatchChildTab } from '../browser/child-tabs.ts'
+import { reportReferenceCaptureFailure } from '../reference-intents.ts'
 import type { BrowserChildTabRequest } from '../../types.ts'
 
 /** Route Web pages through the opaque-origin proxy. */
@@ -76,7 +77,7 @@ export class IframePresentation implements BrowserPresentation {
       return
     }
     if (data?.type === 'dsh-browser-ref:intent') {
-      void this.events.reference?.(data).catch(error => { console.warn('[dsh-browser] reference capture failed', error) })
+      void this.events.reference?.(data).catch(reportReferenceCaptureFailure)
       return
     }
     if (!data || data.type !== 'dsh.browser.guest.navigation' || typeof data.url !== 'string'

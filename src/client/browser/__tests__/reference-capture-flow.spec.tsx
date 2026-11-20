@@ -223,6 +223,7 @@ it.each([503, 200])('reports a Web capture refusal (%s) instead of silently acce
   try {
     window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: host.querySelector('iframe')!.contentWindow, data: intent }))
     await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('[dsh-browser] reference capture failed', expect.any(Error)))
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('引用未能加入当前会话')
     expect(request).toHaveBeenCalledTimes(1)
     expect(JSON.parse(String(request.mock.calls[0]![1]!.body)).sessionId).toBe(firstOwner)
   } finally { await page.frame.dispose() }
@@ -294,7 +295,7 @@ it('an empty delivery stream leaves the composer empty without capturing another
   } finally { runtime.dispose(); queue.dispose() }
 })
 
-it.each(['native', 'web'] as const)('%s first quote survives home → selected Session → dock → first send', async surface => {
+it.each(['native', 'web', 'native-unmaterialized'] as const)('%s first quote survives home → selected Session → dock → first send', async surface => {
   const { service, queue, request, runtime: unused } = harness()
   unused.dispose()
   let dock!: (props: unknown) => unknown
@@ -308,9 +309,9 @@ it.each(['native', 'web'] as const)('%s first quote survives home → selected S
     },
   }
   const runtime = applyClient(ctx, { request, storage: memoryKV(), scheduler: manualScheduler() })
-  let selected: string | undefined = surface === 'native' ? `session-${nextOwner}` : undefined
+  let selected: string | undefined = surface === 'web' ? undefined : `session-${nextOwner}`
   const listeners = new Set<() => void>()
-  const current = { getSnapshot: () => ({ key: selected }), subscribe: (listener: () => void) => {
+  const current = { getSnapshot: () => ({ key: surface === 'native-unmaterialized' ? undefined : selected }), subscribe: (listener: () => void) => {
     listeners.add(listener); return () => { listeners.delete(listener) }
   } }
   const bind = () => dock({ sessionId: selected, useInput: () => ({ draft: '' }), inputActions: {
@@ -329,7 +330,7 @@ it.each(['native', 'web'] as const)('%s first quote survives home → selected S
   const lifetime = new AbortController()
   const services: Record<string, unknown> = {
     uiSession: { adapter: { current } }, uiWorkspace: { openWorkspace },
-    workspaces: { list: { getSnapshot: () => ({ phase: 'ready', state: 'idle', items: [] }), subscribe: () => () => {} },
+    workspaces: { list: { getSnapshot: () => ({ phase: surface === 'native-unmaterialized' ? 'pending' : 'ready', state: 'idle', items: [] }), subscribe: () => () => {} },
       initializeDefault: async () => ({ workspaceId: 'workspace:default' }) },
   }
   const capture = createReferenceCapture({ get: name => services[name] }, lifetime.signal)
@@ -350,21 +351,26 @@ it.each(['native', 'web'] as const)('%s first quote survives home → selected S
     } else {
       const element = document.createElement('div') as unknown as WebviewElement
       const intents = [intent]
+      const guest = { __dshRefTake: () => intents.shift() }
       Object.assign(element, {
         loadURL: async () => {}, getURL: () => intent.capture.url, getTitle: () => intent.capture.title,
         canGoBack: () => false, canGoForward: () => false, isLoading: () => false,
-        executeJavaScript: async (source: string) => source.startsWith('JSON.stringify(') ? JSON.stringify(intents.splice(0)) : undefined,
+        executeJavaScript: async (source: string) => source.startsWith('JSON.stringify(') ? Function('window', `return (${source})`)(guest) : undefined,
       })
       const presentation = { createElement: () => element, present: () => element.dispatchEvent(new Event('dom-ready')), clear() {}, dispose() {} } as unknown as ElectronWebviewPresentation
       const bridge = { acquire: async () => ({ lease: 'lease', partition: 'persist:first' }), release: async () => {}, onOpenRequested: () => () => {} } as unknown as DesktopBrowserBridge
-      const frame = new ElectronWebViewImpl({ initial: undefined, persist() {}, openRequested() {} }, bridge, async () => 'workspace', presentation, `session-${firstOwner}`, capture)
+      const frame = new ElectronWebViewImpl({ initial: undefined, persist() {}, openRequested() {} }, bridge, async () => 'workspace', presentation,
+        surface === 'native-unmaterialized' ? `session-${nextOwner}` : `session-${firstOwner}`, capture)
       frame.attach()
       frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' })
       dispose = () => frame.dispose()
+      await vi.waitFor(() => expect(intents).toHaveLength(0))
     }
+    await vi.waitFor(() => expect(request.mock.calls.filter(([url]) => url.endsWith('/capture'))).toHaveLength(1))
     await vi.waitFor(() => expect(queue.list({ sessionId: nextOwner }).deliveries).toHaveLength(1))
     expect(service.list({ sessionId: firstOwner })).toEqual([])
     expect(service.list({ sessionId: nextOwner })).toHaveLength(1)
+    expect(request.mock.calls.filter(([url]) => url.endsWith('/capture'))).toHaveLength(1)
     expect(openWorkspace).toHaveBeenCalledTimes(surface === 'web' ? 1 : 0)
     await runtime.pollOnce()
     expect(renderToStaticMarkup(bind() as ReturnType<typeof createElement>)).toContain('data-cards="1"')

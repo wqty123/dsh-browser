@@ -1,5 +1,6 @@
 import { overlayScript, standaloneScript } from '../../browser-reference/entry.ts'
 import { noticeScript } from '../../browser-reference/page-script.ts'
+import { reportReferenceCaptureFailure } from '../reference-intents.ts'
 
 const takeIntents = `JSON.stringify((function () {
   var intents = []
@@ -28,7 +29,7 @@ export function installReferenceOverlay(execute: (source: string) => Promise<unk
           if (intent !== null && typeof intent === 'object') {
             try { await consume(intent) }
             catch (error) {
-              console.warn('[dsh-browser] reference capture failed', error)
+              reportReferenceCaptureFailure(error)
               if (!signal.aborted) await execute(standaloneScript(noticeScript('引用未能加入当前会话，请重试。')))
             }
           }

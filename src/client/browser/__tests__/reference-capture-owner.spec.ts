@@ -34,13 +34,43 @@ function host(selected?: string) {
   return { capture, current, list, initializeDefault, openWorkspace, request, lifetime, services }
 }
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 
 it('binds a first unsent quote to the selected host Session, never a stale sidebar owner', async () => {
   const h = host('session-selected')
   await h.capture(intent, 'session-stale')
   expect(h.openWorkspace).not.toHaveBeenCalled()
   expect(JSON.parse(String(h.request.mock.calls[0]![1]!.body))).toMatchObject({ sessionId: 'selected' })
+})
+
+it.each([false, true])('submits to the host-scoped unsent Session without requiring a materialized UI binding (service absent: %s)', async absent => {
+  const h = host()
+  if (absent) delete h.services.uiSession
+  h.list.set({ phase: 'pending', state: 'loading', items: [] })
+  await h.capture(intent, 'session-unsent')
+  expect(h.openWorkspace).not.toHaveBeenCalled()
+  expect(h.initializeDefault).not.toHaveBeenCalled()
+  expect(h.request).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(String(h.request.mock.calls[0]![1]!.body)).sessionId).toBe('unsent')
+})
+
+it('does not block an already selected Session behind another capture opening a Workspace', async () => {
+  const h = host()
+  let complete!: () => void
+  h.openWorkspace.mockImplementation(async (_id, beforeOpen) => {
+    beforeOpen('session-created')
+    await new Promise<void>(resolve => { complete = resolve })
+  })
+  const opening = h.capture(intent)
+  await vi.waitFor(() => expect(h.openWorkspace).toHaveBeenCalledTimes(1))
+  h.current.set({ key: 'session-created' })
+  const selected = h.capture(intent, 'session-stale')
+  expect(h.request).toHaveBeenCalledTimes(1)
+  await selected
+  complete()
+  await opening
+  expect(h.request).toHaveBeenCalledTimes(2)
+  for (const [, init] of h.request.mock.calls) expect(JSON.parse(String(init?.body)).sessionId).toBe('created')
 })
 
 it('shares home capture initialization and waits for the exact selection acknowledgement, without creation events', async () => {
@@ -60,14 +90,14 @@ it('shares home capture initialization and waits for the exact selection acknowl
   expect(h.current.listeners.size).toBe(0)
 })
 
-it.each(['source', 'recent', 'empty'])('uses the host current/recent/default Workspace policy (%s)', async mode => {
+it.each(['recent', 'empty'])('uses the host recent/default Workspace policy only without a Session (%s)', async mode => {
   const h = host()
   h.list.set({ phase: 'ready', state: 'idle', items: mode === 'empty' ? [] : [
     { ...workspace, workspaceId: 'workspace:old', sessionIds: ['session-old'] },
     { ...workspace, workspaceId: 'workspace:recent', sessionIds: ['recent'] },
   ] })
-  await h.capture(intent, mode === 'source' ? 'old' : undefined)
-  expect(h.openWorkspace.mock.calls[0]![0]).toBe(`workspace:${mode === 'empty' ? 'default' : mode === 'source' ? 'old' : 'recent'}`)
+  await h.capture(intent)
+  expect(h.openWorkspace.mock.calls[0]![0]).toBe(`workspace:${mode === 'empty' ? 'default' : 'recent'}`)
   expect(h.initializeDefault).toHaveBeenCalledTimes(mode === 'empty' ? 1 : 0)
 })
 
@@ -113,4 +143,19 @@ it('surfaces capture transport failure after selecting the real Session', async 
   h.request.mockRejectedValue(new Error('capture transport refused'))
   await expect(h.capture(intent)).rejects.toThrow('capture transport refused')
   expect(h.current.getSnapshot().key).toBe('session-created')
+})
+
+it.each(['Workspace loading', 'Workspace navigation', 'selection acknowledgement'])('rejects and cancels a capture with no %s rather than silently consuming it', async phase => {
+  vi.useFakeTimers()
+  const h = host()
+  if (phase === 'Workspace loading') h.list.set({ phase: 'pending', state: 'loading', items: [] })
+  if (phase === 'Workspace navigation') h.openWorkspace.mockImplementation(() => new Promise(() => {}))
+  if (phase === 'selection acknowledgement') h.openWorkspace.mockImplementation(async (_id, beforeOpen) => { beforeOpen('session-created') })
+  const failure = expect(h.capture(intent)).rejects.toThrow('reference capture was not acknowledged within 30 seconds')
+  await vi.advanceTimersByTimeAsync(30_000)
+  await failure
+  expect(h.request).not.toHaveBeenCalled()
+  expect(h.current.listeners.size).toBe(0)
+  expect(h.list.listeners.size).toBe(0)
+  expect(vi.getTimerCount()).toBe(0)
 })

@@ -1,5 +1,4 @@
 import { captureReferenceIntent } from './reference-intents.ts'
-import { referenceOwnerKey } from '../reference-owner.ts'
 
 interface Source<T> {
   getSnapshot(): T
@@ -47,6 +46,30 @@ export interface ReferenceCaptureContext {
   get(name: string): unknown
 }
 
+const CAPTURE_TIMEOUT_MS = 30_000
+
+function captureTransaction(signal: AbortSignal, run: (signal: AbortSignal) => Promise<void>): Promise<void> {
+  const timeout = new AbortController()
+  const transaction = AbortSignal.any([signal, timeout.signal])
+  let abort = (): void => {}
+  const timer = setTimeout(() => {
+    timeout.abort(new Error('reference capture was not acknowledged within 30 seconds; please retry'))
+  }, CAPTURE_TIMEOUT_MS)
+  return new Promise<void>((resolve, reject) => {
+    abort = () => { reject(transaction.reason) }
+    transaction.addEventListener('abort', abort, { once: true })
+    if (transaction.aborted) { abort(); return }
+    run(transaction).then(resolve, reject)
+  }).finally(() => {
+    clearTimeout(timer)
+    transaction.removeEventListener('abort', abort)
+  })
+}
+
+function sessionKey(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
 function waitFor<T, R>(source: Source<T>, read: (value: T) => R | undefined, signal: AbortSignal): Promise<R> {
   return new Promise((resolve, reject) => {
     let stop = (): void => {}
@@ -78,7 +101,7 @@ function waitFor<T, R>(source: Source<T>, read: (value: T) => R | undefined, sig
 export function createReferenceCapture(ctx: ReferenceCaptureContext, signal: AbortSignal):
   (intent: object, owner?: string) => Promise<void> {
   let opening: Promise<string> | undefined
-  return async (intent, owner) => {
+  return (intent, owner) => captureTransaction(signal, async signal => {
     signal.throwIfAborted()
     const capture = (intent as { capture?: { ok?: boolean; events?: readonly unknown[] } }).capture
     if (capture?.ok !== true || !Array.isArray(capture.events) || capture.events.length === 0) {
@@ -86,9 +109,14 @@ export function createReferenceCapture(ctx: ReferenceCaptureContext, signal: Abo
     }
     const uiSession = ctx.get('uiSession') as { adapter?: { current?: Source<{ readonly key: string | undefined }> } } | undefined
     const current = uiSession?.adapter?.current
+    const selected = sessionKey(current?.getSnapshot().key) ?? sessionKey(owner)
+    if (selected !== undefined) {
+      await captureReferenceIntent(intent, selected, signal)
+      return
+    }
     if (current === undefined) throw new Error('reference capture requires the host Session selection service')
-    let sessionId = current.getSnapshot().key
-    if (opening !== undefined || current.getSnapshot().key === undefined) {
+    let sessionId = sessionKey(current.getSnapshot().key)
+    if (opening !== undefined || sessionId === undefined) {
       if (opening === undefined) {
         const open = async (): Promise<string> => {
           const workspaces = ctx.get('workspaces') as Workspaces | undefined
@@ -100,9 +128,8 @@ export function createReferenceCapture(ctx: ReferenceCaptureContext, signal: Abo
             if (value.state === 'error') throw new Error('reference capture could not load Workspaces')
             return value.phase === 'ready' ? value : undefined
           }, signal)
-          let workspace = owner === undefined ? undefined : snapshot.items.find(item =>
-            item.sessionIds.some(id => referenceOwnerKey(id) === referenceOwnerKey(owner)))
-          if (workspace === undefined && snapshot.items.length !== 0) {
+          let workspace: Workspace | undefined
+          if (snapshot.items.length !== 0) {
             const sessions = ctx.get('sessions') as Sessions | undefined
             if (sessions === undefined) throw new Error('reference capture requires the host Session catalog')
             const catalog = await waitFor(sessions.list, value => value.phase === 'ready' ? value : undefined, signal)
@@ -111,7 +138,7 @@ export function createReferenceCapture(ctx: ReferenceCaptureContext, signal: Abo
           const target = workspace ?? await workspaces.initializeDefault(signal)
           signal.throwIfAborted()
           if (target === undefined) throw new Error('reference capture requires a current or default Workspace; select a Workspace first')
-          if (current.getSnapshot().key !== undefined) throw new Error('reference Session selection was superseded')
+          if (sessionKey(current.getSnapshot().key) !== undefined) throw new Error('reference Session selection was superseded')
           let resolved: string | undefined
           await navigation.openWorkspace(target.workspaceId, id => {
             signal.throwIfAborted()
@@ -131,5 +158,5 @@ export function createReferenceCapture(ctx: ReferenceCaptureContext, signal: Abo
     }
     if (current.getSnapshot().key !== sessionId) throw new Error('reference Session selection was superseded')
     await captureReferenceIntent(intent, sessionId ?? '', signal)
-  }
+  })
 }
