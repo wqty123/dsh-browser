@@ -84,7 +84,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
   };
   const nativeChild = url => {
     attempt(() => childRequest('native-opener', url));
-    throw childError('native-child-opener-unavailable');
+    throw childError('BROWSER_NATIVE_CHILD_UNAVAILABLE');
   };
   const detached = features => String(features || '').split(',').some(feature => {
     const [key, value] = feature.trim().toLowerCase().split(/\\s*=\\s*/);

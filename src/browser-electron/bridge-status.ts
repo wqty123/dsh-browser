@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
 import { readDesktopIdentity } from './desktop-identity.ts'
+import { MAIN_EXTENSION_UNSUPPORTED, type MainExtensionStatus } from './profile-extension.ts'
 
 // A normal Electron existsSync(app.asar) caches the archive and keeps it locked on Windows.
 // Status inspection must leave maintenance free to rename it after Desktop exits.
@@ -86,6 +87,8 @@ const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sideb
 
 /** One reading of the install tree. */
 export interface BridgeStatus {
+  readonly mainExtension?: MainExtensionStatus
+  readonly code?: string
   /** `installed`, `missing` or `stale`; see the module comment for what each means. */
   readonly state: 'installed' | 'missing' | 'stale'
   /** Whether the loaded application passed DSH Desktop identity verification. */
@@ -158,7 +161,15 @@ function repairCommand(installRoot: string | undefined): string | undefined {
  * @param installRoot - the desktop install directory.
  * @returns the current state.
  */
-export function readBridgeStatus(installRoot: string): BridgeStatus {
+export function readBridgeStatus(installRoot: string, mainExtension?: MainExtensionStatus): BridgeStatus {
+  const disk = readBridgeInstallStatus(installRoot)
+  if (mainExtension === undefined) return { ...disk, code: MAIN_EXTENSION_UNSUPPORTED }
+  return { ...disk, mainExtension, command: undefined, detail: `desktop main extension: ${mainExtension.state}`,
+    state: mainExtension.state === 'loaded' ? 'installed' : mainExtension.state === 'not-installed' ? 'missing' : 'stale',
+    ...mainExtension.code === undefined ? {} : { code: mainExtension.code } }
+}
+
+function readBridgeInstallStatus(installRoot: string): BridgeStatus {
   const resources = join(installRoot, 'resources')
   const appDir = join(resources, 'app')
   const mainPath = join(appDir, 'lib', 'main.js')
@@ -193,6 +204,16 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
       archivePresent,
       version,
       detail: 'not a DSH Desktop install: no resources/app/lib/main.js and no resources/app.asar',
+    }
+  }
+  if (!rawExistsSync(archivePath)
+    && safeIncludes(mainPath, '//#region lib/types/main-extensions.js')
+    && safeExists(fileURLToPath(new URL('../../desktop-bridge/main.mjs', import.meta.url)))) {
+    return {
+      state: 'installed', present: true, installRoot, archivePresent: false,
+      detail: 'DSH Desktop main extension loads the bridge from the installed profile plugin',
+      ...identity.version === undefined ? {} : { version: identity.version },
+      command: repairCommand(installRoot),
     }
   }
   let backupAt

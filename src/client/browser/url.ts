@@ -5,6 +5,7 @@ export const MAX_BROWSER_URL_LENGTH = 16 * 1024
 
 /** A normalized Browser navigation target. */
 export type BrowserTarget =
+  | { readonly kind: 'blank'; readonly url: 'about:blank'; readonly title: string }
   | { readonly kind: 'https'; readonly url: string; readonly title: string }
   | { readonly kind: 'http'; readonly url: string; readonly title: string }
 

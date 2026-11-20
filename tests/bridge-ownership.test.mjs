@@ -34,7 +34,7 @@ class FakeContents extends EventEmitter {
     }
     // The panel path reaches the shell through `executeJavaScript`; it resolves with the value
     // itself, not a CDP envelope.
-    this.executeJavaScript = code => Promise.resolve(JSON.stringify(String(code).includes('api.panelGuests')
+    this.executeJavaScript = code => Promise.resolve(code.includes('api?.holdRendering') ? false : JSON.stringify(String(code).includes('api.panelGuests')
       ? (String(code).includes('session-A') ? [2] : [3]) : panelVerdict(String(code))))
   }
   getType () { return this.type }
@@ -89,6 +89,7 @@ async function loadBridge () {
   const file = join(folder, 'bridge.mjs')
   writeFileSync(file, src)
   writeFileSync(join(folder, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-bridge/guest-proxy.mjs', import.meta.url)))
+  writeFileSync(join(folder, 'native-guests.mjs'), readFileSync(new URL('../desktop-bridge/native-guests.mjs', import.meta.url)))
   await import('file:///' + file.replace(/\\/g, '/'))
   return { handle: globalThis.__bridge_handle__, handles: globalThis.__bridge_handles__ }
 }

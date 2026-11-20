@@ -26,6 +26,14 @@ test('explicit installation closes normally, installs, restarts and verifies bef
   assert.equal(result.restarted, true)
 })
 
+test('optional host patch results remain separate from successful bridge maintenance', async () => {
+  const hostPatch = { status: 'unsupported version', reason: 'supported: 0.2.2-rc.3' }
+  const f = fixture({ maintain: async () => ({ ok: true, code: 0, output: 'legacy bridge installed', command: 'fixture', hostPatch }) })
+  const result = await runMaintenanceLifecycle('install', f.deps)
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.hostPatch, hostPatch)
+})
+
 test('missing quit capability never installs or restarts', async () => {
   const f = fixture({ requestQuit: async () => { throw new Error('official Quit menu unavailable') } })
   const result = await runMaintenanceLifecycle('install', f.deps)
@@ -67,14 +75,16 @@ test('uninstall is verified as an uninstall after the same safe lifecycle', asyn
   assert.equal(f.calls.at(-1), 'verify:12345:uninstall')
 })
 test('failure to save a post-quit progress update cannot prevent recovery or restart', async () => {
-  for (const phase of ['closing', 'installing', 'restarting', 'verifying']) {
+  for (const phase of ['closing', 'installing', 'restarting', 'verifying', 'completed']) {
     const f = fixture({ publish: async state => { if (state.phase === phase) throw new Error('disk unavailable') } })
     const result = await runMaintenanceLifecycle('install', f.deps)
-    assert.equal(result.phase, 'failed')
+    assert.equal(result.phase, 'completed')
     assert.equal(result.restarted, true)
     assert.ok(f.calls.includes('maintain'))
     assert.ok(f.calls.includes('restart'))
-    assert.match(result.error, /progress could not be saved/)
+    assert.equal(result.ok, true)
+    assert.equal(result.error, undefined)
+    assert.match(result.progressError, /disk unavailable/)
   }
 })
 test('failure to persist armed state prevents all Desktop actions', async () => {

@@ -57,6 +57,16 @@ const react = require("react")
   let refreshWatchLabels = () => {}
 
   const zh = {
+    "readiness.hostPatch": "DSH 宿主补丁",
+    "hostPatch.install": "安装宿主补丁",
+    "hostPatch.restore": "恢复原文件",
+    "hostPatch.working": "正在更新…",
+    "hostPatch.reload": "已更新，请重新加载此页面。无需重启服务器。",
+    "hostPatch.restart": "已更新；请重启 DSH Web 服务器，然后重新加载此页面。",
+    "readiness.hostPatch.applied": "已应用（支持后台页面渲染）",
+    "readiness.hostPatch.absent": "未应用",
+    "readiness.hostPatch.unsupported-version": "不支持此版本；继续使用兼容桥接",
+    "readiness.hostPatch.anchors-mismatch": "文件不匹配；继续使用兼容桥接",
     nav: "浏览器",
     "watch.open": "观看浏览器",
     "watch.title": "实时画面",
@@ -194,10 +204,12 @@ const react = require("react")
     "readiness.bridge.missing": "未安装",
     "readiness.bridge.stale": "已失效(宿主升级后需重装)",
     "readiness.bridge.absent": "本机没有可用的宿主进程",
-    "readiness.bridge.install": "安装并重启",
-    "readiness.bridge.repair": "修复并重启",
-    "readiness.bridge.reinstall": "重装并重启",
-    "readiness.bridge.uninstall": "卸载并重启",
+    "readiness.bridge.reinstall": "卸载并重装",
+    "readiness.bridge.extensionUnsupported": "DESKTOP_MAIN_EXTENSION_UNSUPPORTED：请先显式安装宿主补丁。现有兼容桥接不受影响。",
+    "readiness.bridge.extension.not-installed": "主扩展未安装",
+    "readiness.bridge.extension.pending-restart": "主扩展待重启",
+    "readiness.bridge.extension.loaded": "主扩展已加载",
+    "readiness.bridge.extension.failed": "主扩展加载失败",
     "readiness.bridge.working": "正在准备维护…",
     "readiness.bridge.inProgress": "维护进行中…",
     "readiness.bridge.maintenanceHint": "点击后将正常退出并重启 DSH。",
@@ -226,6 +238,16 @@ const react = require("react")
   }
 
   const en = {
+    "readiness.hostPatch": "DSH host patch",
+    "hostPatch.install": "Install host patch",
+    "hostPatch.restore": "Restore original files",
+    "hostPatch.working": "Updating…",
+    "hostPatch.reload": "Updated. Reload this page; no server restart is needed.",
+    "hostPatch.restart": "Updated. Restart the DSH Web server, then reload this page.",
+    "readiness.hostPatch.applied": "Applied (background page rendering available)",
+    "readiness.hostPatch.absent": "Not applied",
+    "readiness.hostPatch.unsupported-version": "Unsupported version; using the legacy bridge",
+    "readiness.hostPatch.anchors-mismatch": "Files did not match; using the legacy bridge",
     nav: "Browser",
     "watch.open": "Watch browser",
     "watch.title": "Live view",
@@ -363,10 +385,12 @@ const react = require("react")
     "readiness.bridge.missing": "Not installed",
     "readiness.bridge.stale": "Stale (a desktop update needs a reinstall)",
     "readiness.bridge.absent": "No desktop install on this machine",
-    "readiness.bridge.install": "Install and restart",
-    "readiness.bridge.repair": "Repair and restart",
-    "readiness.bridge.reinstall": "Reinstall and restart",
-    "readiness.bridge.uninstall": "Uninstall and restart",
+    "readiness.bridge.reinstall": "Uninstall and reinstall",
+    "readiness.bridge.extensionUnsupported": "DESKTOP_MAIN_EXTENSION_UNSUPPORTED: explicitly install the host patch first. An existing legacy bridge continues to work.",
+    "readiness.bridge.extension.not-installed": "Main extension not installed",
+    "readiness.bridge.extension.pending-restart": "Main extension pending restart",
+    "readiness.bridge.extension.loaded": "Main extension loaded",
+    "readiness.bridge.extension.failed": "Main extension failed",
     "readiness.bridge.working": "Preparing maintenance…",
     "readiness.bridge.inProgress": "Maintenance in progress…",
     "readiness.bridge.maintenanceHint": "DSH will exit normally and restart after you click.",
@@ -864,6 +888,77 @@ const react = require("react")
    * same one background attempt the plugin makes on its own, which is why pressing it is never
    * harmful and never starts a second download.
    */
+  const hostPatchNoticeEvent = "dsh-builtin-browser:host-patch-notice"
+  function readHostPatchNotice() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(hostPatchNoticeEvent))
+      return saved?.page === performance.timeOrigin ? saved.key : ""
+    } catch { return "" /* Storage may be unavailable. */ }
+  }
+  function publishHostPatchNotice(key) {
+    try { sessionStorage.setItem(hostPatchNoticeEvent, JSON.stringify({ page: performance.timeOrigin, key })) }
+    catch { /* An open panel can still show the result without storage. */ }
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(hostPatchNoticeEvent, { detail: key }))
+  }
+
+  function HostPatchControls() {
+    useLocaleVersion()
+    const t = translate
+    const [state, setState] = useState(null)
+    const [busy, setBusy] = useState(false)
+    const [error, setError] = useState("")
+    const [notice, setNotice] = useState(readHostPatchNotice)
+    const alive = useRef(true)
+    const pending = useRef(false)
+    useEffect(() => {
+      if (typeof window === "undefined") return
+      const target = window
+      const update = event => setNotice(event.detail)
+      target.addEventListener(hostPatchNoticeEvent, update)
+      return () => target.removeEventListener(hostPatchNoticeEvent, update)
+    }, [])
+    useEffect(() => {
+      alive.current = true
+      void fetch("/dsh-builtin-browser/host-patch-maintenance", { headers: { accept: "application/json" } })
+        .then(async response => {
+          if (response.status === 404) return
+          const data = await response.json()
+          if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+          if (alive.current && data.hostPatch?.surface === "web") setState(data.hostPatch)
+        }).catch(failure => { if (alive.current) setError(String(failure)) })
+      return () => { alive.current = false }
+    }, [])
+    const change = async action => {
+      if (pending.current) return
+      pending.current = true
+      setBusy(true); setError(""); setNotice(""); publishHostPatchNotice("")
+      try {
+        const response = await fetch("/dsh-builtin-browser/host-patch-maintenance", {
+          method: "POST", headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({ action }),
+        })
+        const data = await response.json()
+        if (alive.current && data.hostPatch) setState(data.hostPatch)
+        if (!response.ok || data.ok !== true) throw new Error(data.error || data.hostPatch?.reason || `HTTP ${response.status}`)
+        const noticeKey = data.hostPatch.restartRequired ? "hostPatch.restart" : "hostPatch.reload"
+        publishHostPatchNotice(noticeKey)
+        if (alive.current) setNotice(noticeKey)
+      } catch (failure) { if (alive.current) setError(String(failure)) }
+      finally { pending.current = false; if (alive.current) setBusy(false) }
+    }
+    if (state === null && error === "") return null
+    return h("div", { key: "web-host-patch", style: styles.group }, [
+      h("p", { key: "state", role: "status" }, t("readiness.hostPatch") + (state ? ": " + t("readiness.hostPatch." + state.status.replaceAll(" ", "-")) : "")),
+      state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
+      h("div", { key: "buttons", style: styles.row }, [
+        h("button", { key: "install", type: "button", style: styles.button, disabled: busy || !state?.canInstall, onClick: () => change("install") }, t(busy ? "hostPatch.working" : "hostPatch.install")),
+        h("button", { key: "restore", type: "button", style: styles.button, disabled: busy || !state?.canRestore, onClick: () => change("restore") }, t("hostPatch.restore")),
+      ]),
+      notice ? h("p", { key: "notice", role: "status", style: styles.hint }, t(notice)) : null,
+      error ? h("p", { key: "error", role: "alert", style: styles.error }, error) : null,
+    ])
+  }
+
   function Readiness({ channel } = {}) {
     useLocaleVersion()
     const t = translate
@@ -894,6 +989,16 @@ const react = require("react")
         }
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const data = await response.json()
+        if (data.runtime?.bridge) {
+          const extensions = typeof window === "undefined" ? undefined : window.dshDesktop?.mainExtensions
+          if (typeof extensions?.status === "function") {
+            const status = await extensions.status("dsh-builtin-browser")
+            data.runtime.bridge = { ...data.runtime.bridge, mainExtension: status, code: status.code, command: undefined,
+              state: status.state === "loaded" ? "installed" : status.state === "not-installed" ? "missing" : "stale" }
+          } else if (!data.runtime.bridge.mainExtension) {
+            data.runtime.bridge = { ...data.runtime.bridge, code: "DESKTOP_MAIN_EXTENSION_UNSUPPORTED" }
+          }
+        }
         if (!alive.current) return null
         setUnsupported(false)
         setRuntime(data && data.runtime ? data.runtime : null)
@@ -964,7 +1069,8 @@ const react = require("react")
       }
     }
 
-    const bridgeAction = async action => {
+    const bridgeAction = async () => {
+      const action = "reinstall"
       if (bridgePending.current || busy || bridgeActive) return
       const desktopMenu = () => typeof document.querySelector === "function"
         ? document.querySelector("[data-windows-menu]")?.shadowRoot?.querySelector("button") : null
@@ -1052,8 +1158,7 @@ const react = require("react")
             : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
     const controlsBusy = busy || bridgeBusy !== null || bridgeActive
     const canManageBridge = runtime.bridge.present === true && runtime.bridge.state !== "absent"
-    const installLabel = runtime.bridge.state === "installed" ? "readiness.bridge.reinstall"
-      : runtime.bridge.state === "stale" ? "readiness.bridge.repair" : "readiness.bridge.install"
+    const extensionUnsupported = runtime.bridge.code === "DESKTOP_MAIN_EXTENSION_UNSUPPORTED"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
     const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
     const bridgeJobError = typeof bridgeJob?.error === "string" ? bridgeJob.error : ""
@@ -1067,14 +1172,19 @@ const react = require("react")
         h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, stateLabel),
       ]),
       canManageBridge ? h("div", { key: "bridge-controls" }, [
+        extensionUnsupported ? h("p", { key: "extension-unsupported", role: "status", style: styles.hint }, t("readiness.bridge.extensionUnsupported"))
+          : runtime.bridge.mainExtension ? h("p", { key: "extension-status", role: "status", style: styles.hint },
+            `${t("readiness.bridge.extension." + runtime.bridge.mainExtension.state)}${runtime.bridge.mainExtension.version ? " · " + runtime.bridge.mainExtension.version : ""}${runtime.bridge.mainExtension.code ? " · " + runtime.bridge.mainExtension.code : ""}`) : null,
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
-          h("button", { key: "install", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: () => bridgeAction("install") }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.inProgress" : installLabel)),
+          h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: bridgeAction }, t("readiness.bridge.reinstall")),
         ]),
         h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
       ]) : null,
       bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase === "installing" && bridgeJob.action === "uninstall" ? "uninstalling" : bridgeJob.phase}`)) : null,
       bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t(bridgeJob.action === "uninstall" ? "readiness.bridge.uninstalledDone" : "readiness.bridge.installedDone")) : null,
+      bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
+        `${t("readiness.hostPatch")}: ${t("readiness.hostPatch." + bridgeJob.hostPatch.status.replaceAll(" ", "-"))}`) : null,
       bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
       bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
@@ -1105,10 +1215,6 @@ const react = require("react")
           disabled: controlsBusy || preparing,
           onClick: () => { void read() },
         }, t("readiness.recheck")),
-        canManageBridge && runtime.bridge.state === "installed" ? h("button", {
-          key: "uninstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined,
-          onClick: () => bridgeAction("uninstall"),
-        }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.inProgress" : "readiness.bridge.uninstall")) : null,
       ]),
       runtime.canProvision || preparing
         ? h("div", { key: "buttons", style: styles.buttons }, [
@@ -1514,6 +1620,7 @@ const react = require("react")
         options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
       h(Readiness, { key: "readiness", channel: settings.browser.channel }),
+      h(HostPatchControls, { key: "host-patch" }),
       section("ui.title", [
         toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
         toggle("ui", "autoExpandOnce"),
@@ -1663,9 +1770,13 @@ const react = require("react")
   }
 
   /** Read this conversation's current guest, preferring the one actually drawn. */
-  function guestStateFor(sessionId, tabId) {
+  function guestStateFor(sessionId, tabId, initializationReader) {
     const roots = panelRootsFor(sessionId)
     if (roots === undefined ? tabStripFor(sessionId) === null : roots.length === 0) return { panel: false, guestId: null, url: "" }
+    if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof tabId === "string") {
+      const page = initializationReader?.current({ sessionId, tabId })
+      return { panel: true, guestId: page?.guestId ?? null, url: page?.url ?? "", ...page?.generation === undefined ? {} : { nativeState: page } }
+    }
     const guests = guestsInPanel(sessionId).filter(view => tabId === undefined
       || tabIdOfElement(view, new Set([tabId]), roots) === tabId)
     if (guests.length === 0) return { panel: true, guestId: null, url: "" }
@@ -1721,6 +1832,19 @@ const react = require("react")
     let sidebarRight = null
     let initializationReader = null
     const pendingTabs = new Map()
+    const renderingHolds = new Map()
+    function releaseRendering(token) {
+      const hold = renderingHolds.get(token)
+      if (hold === undefined) return
+      renderingHolds.delete(token)
+      hold.release()
+    }
+    function releaseAllRendering() {
+      for (const token of renderingHolds.keys()) releaseRendering(token)
+    }
+    function hasRenderingHold(sessionId) {
+      return Array.from(renderingHolds.values()).some(hold => hold.sessionId === sessionId)
+    }
     const initializing = new Map()
     /** The shell's own navigation service: `openSession` is how it is asked to DISPLAY a conversation. */
     let uiWorkspace = null
@@ -1739,10 +1863,14 @@ const react = require("react")
         }, "dsh-builtin-browser: initialization receipt reader")
       })
       ctx.inject(["sidebarRight"], (scope) => {
-        if (sidebarRight !== scope.sidebarRight) pendingTabs.clear()
+        if (sidebarRight !== scope.sidebarRight) {
+          releaseAllRendering()
+          pendingTabs.clear()
+        }
         sidebarRight = scope.sidebarRight
         scope.effect(() => () => {
           if (sidebarRight === scope.sidebarRight) {
+            releaseAllRendering()
             sidebarRight = null
             pendingTabs.clear()
             for (const transaction of initializing.values()) transaction.controller.abort(new Error("the sidebar service was released"))
@@ -1873,6 +2001,7 @@ const react = require("react")
 
     /** Display the owner of an explicit open request, including an already mounted hidden guest. */
     function claimConversation(sessionId) {
+      if (hasRenderingHold(sessionId)) return false
       if (uiWorkspace === null || typeof uiWorkspace.openSession !== "function") return false
       // Already displayed? Then the shell needs no navigation: the panel simply has not been opened
       // yet, and `revealPlacedPanel` opens it. Re-opening the conversation a human is reading would
@@ -1979,6 +2108,11 @@ const react = require("react")
         if (typeof sidebarRight.navigateTabIn === "function") {
           return sidebarRight.navigateTabIn(sessionId, tabId, { params: { url: address } }) === true
         }
+        const tab = Array.from(sidebarRight.tabsIn(sessionId)).find(tab => tab.id === tabId && tab.kind === "browser")
+        if (typeof tab?.contentId === "string" && typeof sidebarRight.tabDomain?.navigate === "function") {
+          sidebarRight.tabDomain.navigate(sessionId, tabId, { address: tab.contentId, params: { url: address } })
+          return true
+        }
       } catch (error) {
         return false
       }
@@ -2008,7 +2142,13 @@ const react = require("react")
         return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native tab for this browser view was closed; close or reset the view before retrying", panel: true, guestId: null }
       }
       const guests = guestsInPanel(sessionId)
-      const hasCachedGuest = Number.isInteger(guestId) && guestId > 0
+      const hasNativeGuest = globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof guestId === "string"
+      const hasCachedGuest = (Number.isInteger(guestId) && guestId > 0) || hasNativeGuest
+      if (binding === undefined && hasNativeGuest) {
+        const cached = browsers.find(tab => initializationReader?.current({ sessionId, tabId: tab.id })?.guestId === guestId)
+        if (cached === undefined || owned.has(cached.id)) return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native guest is not in this conversation", panel: true, guestId: null }
+        binding = { sessionId, id: cached.id, url: address, scoped: true }
+      }
       if (binding === undefined && hasCachedGuest) {
         const cached = guests.find(view => view.getWebContentsId() === guestId)
         if (cached !== undefined) {
@@ -2037,7 +2177,17 @@ const react = require("react")
         // conversation the tab belongs to so a quote can be handed back to the right draft.
         try { globalThis.__dshSidebarSessionId = sessionId } catch { /* non-writable global */ }
         const before = new Set(tabs.map(tab => tab.id))
-        try { sidebarRight.openTabIn(sessionId, "browser", url ? { params: { url } } : {}) }
+        try {
+          if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1
+            && typeof sidebarRight.openReservedTab === "function") {
+            const id = globalThis.crypto.randomUUID()
+            if (!sidebarRight.openReservedTab(sessionId, "browser", id)) return { ok: false, reason: "the shell refused this browser tab reservation" }
+            if (url && !navigatePlacedTab(sessionId, id, url)) {
+              sidebarRight.closeIn?.(sessionId, id)
+              return { ok: false, reason: "the shell refused this browser tab navigation" }
+            }
+          } else sidebarRight.openTabIn(sessionId, "browser", url ? { params: { url } } : {})
+        }
         catch (error) { return { ok: false, reason: String(error?.message ?? error) } }
         let placed
         try { placed = Array.from(sidebarRight.tabsIn(sessionId)) }
@@ -2059,7 +2209,7 @@ const react = require("react")
         created = true
       }
       pendingTabs.set(key, binding)
-      const state = guestStateFor(sessionId, binding.id)
+      const state = guestStateFor(sessionId, binding.id, initializationReader)
       // A bound tab that still shows the start page has no guest to reveal.
       // Revealing it can never produce one, so ask the shell to aim that exact
       // tab at the requested address; the host body turns the new navigation
@@ -2093,6 +2243,19 @@ const react = require("react")
     }
 
     const api = {
+      holdRendering(sessionId, token) {
+        if (typeof sessionId !== "string" || !sessionId.startsWith("session-") || typeof token !== "string") return false
+        if (renderingHolds.has(token)) return true
+        if (onScreenSession() === sessionId || typeof sidebarRight?.holdRendering !== "function") return false
+        const release = sidebarRight.holdRendering(sessionId)
+        renderingHolds.set(token, { sessionId, release })
+        return true
+      },
+      releaseRendering,
+      isBackgroundRendering(sessionId) {
+        return hasRenderingHold(sessionId) && Array.from(document.querySelectorAll("[data-sidebar-right-background-rendering]"))
+          .some(element => element.getAttribute("data-sidebar-right-session") === sessionId)
+      },
       panelProtocol: 5,
       cancelPanelInitialization(sessionId, viewId, transactionId) {
         const pending = initializing.get(viewKey(sessionId, viewId))
@@ -2103,7 +2266,7 @@ const react = require("react")
       async initializePanel(sessionId, url, options) {
         const refuse = (code, reason) => ({ ok: false, code, reason, panel: false, guestId: null })
         if (typeof options?.viewId !== "string" || options.viewId === "") return refuse("panel-initialization-failed", "a logical view identity is required")
-        if (onScreenSession() !== sessionId) return refuse("panel-not-displayed", "the requested conversation is not displayed; select it before opening its browser")
+        if (onScreenSession() !== sessionId && !api.isBackgroundRendering(sessionId)) return refuse("panel-not-displayed", "the requested conversation is not displayed; select it before opening its browser")
         const reader = initializationReader
         if (reader === null || typeof reader.wait !== "function") return refuse("panel-initialization-failed", "the browser initialization subscription is unavailable; reload the plugin client")
         const deadline = options.deadline
@@ -2112,14 +2275,24 @@ const react = require("react")
         const previous = initializing.get(key)
         const controller = new AbortController()
         const transaction = { controller, transactionId: options.transactionId }
+        let placed
+        const closeNative = () => {
+          if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion !== 1 || typeof placed?.tabId !== "string") return
+          sidebarRight.closeIn?.(sessionId, placed.tabId)
+          if (pendingTabs.get(key)?.id === placed.tabId) pendingTabs.delete(key)
+        }
+        controller.signal.addEventListener("abort", closeNative, { once: true })
         initializing.set(key, transaction)
         previous?.controller.abort(Object.assign(new Error("a newer sidebar initialization was requested"), { code: "panel-navigation-superseded" }))
         const timer = setTimeout(() => controller.abort(Object.assign(new Error("sidebar initialization deadline expired"), { code: "BROWSER_DOCUMENT_TIMEOUT" })), deadline - Date.now())
         try {
           const answer = api.openPanel(sessionId, url, options)
+          placed = answer
+          if (controller.signal.aborted) { closeNative(); controller.signal.throwIfAborted() }
           if (!answer.ok) return answer
           const rendererNavigation = url !== "" && (answer.created || answer.navigating)
-          if (!rendererNavigation && answer.guestId !== null) return answer
+          if (!rendererNavigation && answer.guestId !== null) return globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1
+            ? { ...answer, nativeState: reader.current({ sessionId, tabId: answer.tabId }) } : answer
           if (typeof answer.tabId !== "string") return refuse("panel-initialization-failed", "the shell did not acknowledge its native tab identity")
           const receipt = await reader.wait({ sessionId, tabId: answer.tabId, url }, controller.signal)
           controller.signal.throwIfAborted()
@@ -2128,11 +2301,14 @@ const react = require("react")
           if (state.guestId === null || String(state.guestId) !== receipt.guestId || observed?.guestId !== receipt.guestId) {
             return refuse("panel-initialization-failed", "the mounted native guest did not acknowledge its initialization identity")
           }
-          return { ...answer, ...state, url: observed.url, initialization: receipt, rendererNavigation }
+          return { ...answer, ...state, url: observed.url, initialization: receipt, rendererNavigation,
+            ...observed.generation === undefined ? {} : { nativeState: observed } }
         } catch (error) {
+          closeNative()
           return refuse(error?.code ?? "panel-initialization-failed", String(error?.message ?? error))
         } finally {
           clearTimeout(timer)
+          controller.signal.removeEventListener("abort", closeNative)
           if (initializing.get(key) === transaction) initializing.delete(key)
         }
       },
@@ -2159,7 +2335,7 @@ const react = require("react")
           return openViewPanel(wanted, address, options.viewId, options.guestId)
         }
         const pending = pendingTabs.get(wanted)
-        const state = guestStateFor(wanted, pending?.url === address && pending.scoped ? pending.id : undefined)
+        const state = guestStateFor(wanted, pending?.url === address && pending.scoped ? pending.id : undefined, initializationReader)
         // Explicit opening also reveals a guest kept mounted in a collapsed or hidden sidebar.
         // Passive panelGuest/panelGuests reads never call either presentation helper.
         const switched = claimConversation(wanted)
@@ -2276,11 +2452,12 @@ const react = require("react")
             const roots = panelRootsFor(sessionId)
             return { panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0, guestId: null, url: "" }
           }
-          return guestStateFor(sessionId, intended)
+          return guestStateFor(sessionId, intended, initializationReader)
         }
         return guestStateFor(
           typeof sessionId === "string" ? sessionId : "",
           typeof tabId === "string" && tabId !== "" ? tabId : undefined,
+          initializationReader,
         )
       },
       /** All guest ids verified inside this conversation, including shell-created popup tabs. */
@@ -2292,6 +2469,13 @@ const react = require("react")
       closePanelGuest(sessionId, guestId) {
         const refuse = reason => ({ ok: false, reason, closed: 0 })
         if (typeof sessionId !== "string" || !/^session-/.test(sessionId)) return refuse("a conversation id is required")
+        if (typeof guestId === "string" && globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1) {
+          const tabs = sidebarRight.tabsIn(sessionId)
+          const tab = tabs.find(tab => tab.kind === "browser" && initializationReader?.current({ sessionId, tabId: tab.id })?.guestId === guestId)
+          if (tab === undefined || typeof sidebarRight.closeIn !== "function") return refuse("the native guest does not belong to this conversation")
+          sidebarRight.closeIn(sessionId, tab.id)
+          return { ok: true, closed: 1 }
+        }
         const view = guestsInPanel(sessionId).find(candidate => candidate.getWebContentsId() === guestId)
         if (view === undefined) return refuse("the guest does not belong to this conversation panel")
         const roots = panelRootsFor(sessionId)
@@ -2325,6 +2509,9 @@ const react = require("react")
     ctx.effect(() => {
       globalThis.__dshBuiltinBrowser = api
       return () => {
+        for (const transaction of initializing.values()) transaction.controller.abort(new Error("the panel service was disposed"))
+        initializing.clear()
+        releaseAllRendering()
         if (globalThis.__dshBuiltinBrowser === api) delete globalThis.__dshBuiltinBrowser
       }
     }, "dsh-builtin-browser: conversation panel service")
@@ -2687,7 +2874,7 @@ const react = require("react")
       const line = make("div", "dsh-bw-watch-bridge-line",
         status.state === "stale" ? say("watch.bridgeStale") : say("watch.bridgeMissing"))
       notice.appendChild(line)
-      if (typeof status.command === "string" && status.command !== "") {
+      if (typeof status.command === "string" && status.command !== "" && typeof window.dshDesktop?.mainExtensions?.status !== "function") {
         const code = make("code", "dsh-bw-watch-bridge-cmd", status.command)
         notice.appendChild(code)
       }
@@ -2765,6 +2952,7 @@ const react = require("react")
     // on-demand menu, so a harness must be able to render it without driving
     // the popover's own state.
     exports.__references = References
+    exports.__hostPatchSection = HostPatchControls
     ctx.slots.inject("settings.section", () => ctx.slots.register({
       name: "settings.section",
       id: "dsh-builtin-browser",

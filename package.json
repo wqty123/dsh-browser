@@ -23,6 +23,7 @@
     "scripts",
     "tools/accept-desktop.mjs",
     "desktop-bridge",
+    "dsh-host-patch",
     "cordis.patch.yml",
     "CHANGELOG.md",
     "README.md",

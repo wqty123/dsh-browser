@@ -4,14 +4,13 @@ import { sameOrigin } from './settings-route.ts'
 import { isDirectLoopback } from './authenticated-route.ts'
 import { replyJson } from './json-reply.ts'
 import { readJsonBody } from './http-body.ts'
-import type { BridgeAction } from './bridge-install.ts'
-import type { AutomaticMaintenanceJob } from './automatic-maintenance.ts'
+import type { AutomaticMaintenanceJob, AutomaticMaintenanceOptions } from './automatic-maintenance.ts'
 
 export const AUTOMATIC_MAINTENANCE_ROUTE = '/dsh-builtin-browser/bridge-maintenance'
 export interface AutomaticMaintenanceRouteDeps {
   readonly supported: () => boolean
   readonly read: () => AutomaticMaintenanceJob | undefined
-  readonly start: (action: BridgeAction, options?: { readonly locale?: 'zh' | 'en' }) => Promise<AutomaticMaintenanceJob>
+  readonly start: (action: 'reinstall', options?: AutomaticMaintenanceOptions) => Promise<AutomaticMaintenanceJob>
   /** Commit only after the accepted response has been flushed to the client. */
   readonly commit?: (id: string) => Promise<void>
   /** True while the legacy bridge-action route is running an installer. */
@@ -31,11 +30,12 @@ export function createAutomaticMaintenanceHandler(deps: AutomaticMaintenanceRout
       return
     }
     if (!deps.supported()) { replyJson(response, 409, { ok: false, error: 'automatic bridge maintenance requires Windows Desktop' }); return }
-    let action: BridgeAction
+    let action: 'reinstall'
     let locale: 'zh' | 'en' | undefined
     try {
-      const value = await readJsonBody<{ action?: unknown; locale?: unknown }>(request, 4096)
-      if (value?.action !== 'install' && value?.action !== 'uninstall') throw new Error('action must be install or uninstall')
+      const value = await readJsonBody<{ action?: unknown; locale?: unknown; mode?: unknown; hostStatus?: { state?: unknown; version?: unknown } }>(request, 4096)
+      if (value?.action !== 'reinstall') throw new Error('action must be reinstall')
+      if (value.mode !== undefined || value.hostStatus !== undefined) throw new Error('mode and hostStatus are no longer supported')
       if (value.locale !== undefined && value.locale !== 'zh' && value.locale !== 'en') throw new Error('locale must be zh or en')
       action = value.action
       locale = value.locale
@@ -43,7 +43,8 @@ export function createAutomaticMaintenanceHandler(deps: AutomaticMaintenanceRout
     if (starting || deps.busy?.() === true) { replyJson(response, 409, { ok: false, error: 'bridge maintenance is already starting' }); return }
     starting = true
     try {
-      const job = await deps.start(action, locale === undefined ? undefined : { locale })
+      const options = { ...locale === undefined ? {} : { locale } }
+      const job = await deps.start(action, Object.keys(options).length === 0 ? undefined : options)
       if (deps.commit !== undefined) {
         let fired = false
         const commitOnce = (): void => {
@@ -58,7 +59,7 @@ export function createAutomaticMaintenanceHandler(deps: AutomaticMaintenanceRout
       }
       replyJson(response, 202, { ok: true, accepted: true, protocol: 1, job })
     } catch (error) {
-      replyJson(response, 409, { ok: false, error: String(error) })
+      replyJson(response, 409, { ok: false, error: String(error), ...(error instanceof Error && 'code' in error ? { code: error.code } : {}) })
     } finally { starting = false }
   }
 }

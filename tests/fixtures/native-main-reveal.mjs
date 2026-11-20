@@ -102,6 +102,7 @@ export async function nativeMainReveal(snapshot, live, guestId = 2, evaluate) {
       bridge = bridge.replace(/import \{([^}]+)\} from ['"]electron['"]/, 'const {$1} = globalThis.__nativeMainElectron')
       writeFileSync(join(dirname(entry), 'plugin-browser-bridge.js'), bridge)
       writeFileSync(join(dirname(entry), 'guest-proxy.mjs'), readFileSync('desktop-bridge/guest-proxy.mjs'))
+      writeFileSync(join(dirname(entry), 'native-guests.mjs'), readFileSync('desktop-bridge/native-guests.mjs'))
       globalThis.__nativeMainElectron = { app, webContents }
       const extension = await import(pathToFileURL(entry).href)
       // Main's supplied home is authoritative even when its environment differs from Host's.

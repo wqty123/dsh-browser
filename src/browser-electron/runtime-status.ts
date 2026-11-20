@@ -54,6 +54,8 @@ export interface ElectronReadiness {
 
 /** The desktop sidebar bridge, or the honest "there is no desktop here" shape. */
 export interface BridgeReadiness {
+  readonly mainExtension?: BridgeStatus['mainExtension']
+  readonly code?: string
   /** Whether a DSH Desktop install was found at all. */
   readonly present: boolean
   /** `absent` is reported separately from `missing`: nothing to repair versus something to repair. */
@@ -163,6 +165,8 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
       running: endpoint?.alive === true,
       runningDetail: endpoint?.detail ?? 'no desktop shell has published a bridge endpoint',
       ...bridgeStatus.command === undefined ? {} : { command: bridgeStatus.command },
+      ...bridgeStatus.mainExtension === undefined ? {} : { mainExtension: bridgeStatus.mainExtension },
+      ...bridgeStatus.code === undefined ? {} : { code: bridgeStatus.code },
     }
 
   // The sidebar needs BOTH halves: our patch inside the shell it will be driven through, and that

@@ -2,16 +2,19 @@
 import type { BridgeAction, BridgeActionResult } from './bridge-install.ts'
 
 export type MaintenancePhase = 'armed' | 'closing' | 'installing' | 'restarting' | 'verifying' | 'completed' | 'cancelled' | 'failed'
+export type MaintenanceAction = BridgeAction | 'reinstall'
 
 export interface MaintenanceState {
   readonly phase: MaintenancePhase
-  readonly action: BridgeAction
+  readonly action: MaintenanceAction
   readonly at: string
   readonly ok?: boolean
   readonly restarted?: boolean
   readonly pid?: number
   readonly error?: string
+  readonly progressError?: string
   readonly output?: string
+  readonly hostPatch?: BridgeActionResult['hostPatch']
 }
 
 /** Effects are supplied by the independent worker; tests cannot close or start an application. */
@@ -25,7 +28,7 @@ export interface MaintenanceLifecycleDeps {
   /** Reopen exactly the verified installation after it has exited. */
   readonly restart: () => Promise<number>
   /** Installation verifies the new authenticated bridge; uninstall verifies the process. */
-  readonly verify: (pid: number, action: BridgeAction) => Promise<void>
+  readonly verify: (pid: number, action: MaintenanceAction) => Promise<void>
   readonly publish: (state: MaintenanceState) => Promise<void>
 }
 
@@ -33,7 +36,7 @@ export interface MaintenanceLifecycleDeps {
  * A cancelled/failed quit never reaches the installer. After a confirmed exit, reopen Desktop even
  * when maintenance fails, and retain that failure instead of reporting a successful installation.
  */
-export async function runMaintenanceLifecycle(action: BridgeAction, deps: MaintenanceLifecycleDeps): Promise<MaintenanceState> {
+export async function runMaintenanceLifecycle(action: MaintenanceAction, deps: MaintenanceLifecycleDeps): Promise<MaintenanceState> {
   let closed = false
   let restarted = false
   let pid: number | undefined
@@ -46,8 +49,9 @@ export async function runMaintenanceLifecycle(action: BridgeAction, deps: Mainte
       // prevent reopening a Desktop that already exited normally.
       if (phase === 'armed') throw error
       publicationFailure ??= error
+      console.error(`[dsh-browser maintenance] cannot publish ${phase} progress: ${String(error)}`)
     }
-    return state
+    return publicationFailure === undefined ? state : { ...state, progressError: String(publicationFailure) }
   }
   await publish('armed')
   try {
@@ -76,10 +80,9 @@ export async function runMaintenanceLifecycle(action: BridgeAction, deps: Mainte
   } catch (error) {
     failure = failure === undefined ? error : new Error(`${String(failure)}; Desktop recovery: ${String(error)}`)
   }
-  if (failure === undefined && publicationFailure !== undefined) {
-    failure = new Error(`Desktop maintenance finished, but progress could not be saved: ${String(publicationFailure)}`)
-  }
-  const details = { restarted, ...pid === undefined ? {} : { pid }, ...outcome?.output ? { output: outcome.output } : {} }
+  const details = { restarted, ...pid === undefined ? {} : { pid }, ...outcome?.output ? { output: outcome.output } : {},
+    ...publicationFailure === undefined ? {} : { progressError: String(publicationFailure) },
+    ...outcome?.hostPatch === undefined ? {} : { hostPatch: outcome.hostPatch } }
   return failure === undefined
     ? await publish('completed', { ...details, ok: true })
     : await publish('failed', { ...details, ok: false, error: String(failure) })
