@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { stripLegacyBridge } from './legacy-bridge.mjs'
 
 const specs = ['rc3', 'rc5'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8')))
+const previousSpecs = ['rc3', 'rc5'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}-revision1.json`, import.meta.url), 'utf8')))
 const suffix = '.before-dsh-host-patch'
 const digest = value => createHash('sha256').update(value).digest('hex')
 
@@ -52,7 +53,7 @@ function patchSource(text, target, path, io) {
 function plan(packages, restoring, io) {
   const directories = typeof packages === 'string' ? [packages] : packages
   if (!Array.isArray(directories) || directories.length === 0) throw new Error('at least one package directory is required')
-  const entries = directories.map(directory => {
+  const entries = directories.flatMap(directory => {
     const root = io.realpathSync(directory)
     const manifest = JSON.parse(io.readFileSync(join(root, 'package.json'), 'utf8'))
     const spec = specs.find(item => item.version === manifest.version)
@@ -61,35 +62,45 @@ function plan(packages, restoring, io) {
       error.status = 'unsupported version'
       throw error
     }
-    const target = spec.targets.find(item => item.packageName === manifest.name)
-    if (!target) throw new Error(`unsupported package: ${String(manifest.name)}`)
-    const path = join(root, target.file)
-    const real = io.realpathSync(path)
-    const part = relative(root, real)
-    if (part === '..' || part.startsWith('..' + '/') || part.startsWith('..' + '\\') || isAbsolute(part)) {
-      throw new Error('target resolves outside its package')
-    }
-    if (!io.lstatSync(path).isFile() || io.lstatSync(path).isSymbolicLink()) throw new Error('target is not a regular file')
-    const text = io.readFileSync(path, 'utf8')
-    const backup = path + suffix
-    const held = io.existsSync(backup)
-    if (held && (!io.lstatSync(backup).isFile() || io.lstatSync(backup).isSymbolicLink())) throw new Error('backup is not a regular file')
-    const original = held ? io.readFileSync(backup, 'utf8') : undefined
-    const applied = text.includes(target.marker)
-    if (applied) {
-      if (original !== undefined && patchText(patchSource(original, target, path, io), target) !== text) throw new Error('patched file differs from its recorded backup; refusing to overwrite other edits')
-      if (restoring && original === undefined) throw new Error('no backup for this already patched host')
-      return { path, backup, text, output: restoring ? original : text, applied, held, mode: io.statSync(path).mode }
-    }
-    if (restoring) {
-      if (original !== undefined && original !== text) throw new Error('file changed after restore or Desktop update')
-      return { path, backup, text, output: text, applied, held, mode: io.statSync(path).mode }
-    }
-    if (original !== undefined && original !== text) throw new Error('backup belongs to different bytes; refusing to overwrite it')
-    return { path, backup, text, backupText: text, output: patchText(patchSource(text, target, path, io), target), applied, held, mode: io.statSync(path).mode }
+    const targets = spec.targets.filter(item => item.packageName === manifest.name)
+    if (targets.length === 0) throw new Error(`unsupported package: ${String(manifest.name)}`)
+    return targets.map(target => {
+      const path = join(root, target.file)
+      const real = io.realpathSync(path)
+      const part = relative(root, real)
+      if (part === '..' || part.startsWith('..' + '/') || part.startsWith('..' + '\\') || isAbsolute(part)) {
+        throw new Error('target resolves outside its package')
+      }
+      if (!io.lstatSync(path).isFile() || io.lstatSync(path).isSymbolicLink()) throw new Error('target is not a regular file')
+      const text = io.readFileSync(path, 'utf8')
+      const backup = path + suffix
+      const held = io.existsSync(backup)
+      if (held && (!io.lstatSync(backup).isFile() || io.lstatSync(backup).isSymbolicLink())) throw new Error('backup is not a regular file')
+      const original = held ? io.readFileSync(backup, 'utf8') : undefined
+      const applied = text.includes(target.marker)
+      if (applied) {
+        if (original !== undefined && patchText(patchSource(original, target, path, io), target) !== text) throw new Error('patched file differs from its recorded backup; refusing to overwrite other edits')
+        if (restoring && original === undefined) throw new Error('no backup for this already patched host')
+        return { path, backup, text, output: restoring ? original : text, applied, held, mode: io.statSync(path).mode }
+      }
+      const previousTarget = previousSpecs.find(item => item.version === manifest.version)?.targets.find(item => item.id === target.id && item.marker !== target.marker)
+      const previous = previousTarget !== undefined && text.includes(previousTarget.marker)
+      if (previous) {
+        if (original === undefined) throw new Error('no backup for the previous host patch revision')
+        if (patchText(patchSource(original, previousTarget, path, io), previousTarget) !== text) throw new Error('previous patch revision differs from its recorded backup; refusing to overwrite other edits')
+        return { path, backup, text, output: restoring ? original : patchText(patchSource(original, target, path, io), target),
+          applied: false, previous: true, held, mode: io.statSync(path).mode }
+      }
+      if (restoring) {
+        if (original !== undefined && original !== text) throw new Error('file changed after restore or Desktop update')
+        return { path, backup, text, output: text, applied, held, mode: io.statSync(path).mode }
+      }
+      if (original !== undefined && original !== text) throw new Error('backup belongs to different bytes; refusing to overwrite it')
+      return { path, backup, text, backupText: text, output: patchText(patchSource(text, target, path, io), target), applied, held, mode: io.statSync(path).mode }
+    })
   })
   if (new Set(entries.map(entry => entry.path)).size !== entries.length) throw new Error('duplicate package target')
-  if (!restoring && entries.some(entry => entry.applied) && !entries.every(entry => entry.applied)) {
+  if (!restoring && !entries.some(entry => entry.previous) && entries.some(entry => entry.applied) && !entries.every(entry => entry.applied)) {
     throw new Error('only part of the host patch is present; restore before applying')
   }
   return entries
@@ -98,7 +109,8 @@ function plan(packages, restoring, io) {
 function inspect(packages, restoring, io) {
   try {
     const entries = plan(packages, restoring, io)
-    return { status: entries.every(entry => entry.applied) ? 'applied' : 'absent', entries }
+    return { status: entries.every(entry => entry.applied) ? 'applied' : 'absent',
+      ...(entries.some(entry => entry.previous) ? { reason: 'host patch revision 1; explicit bootstrap upgrade to revision 2 required' } : {}), entries }
   } catch (error) {
     return { status: error.status ?? 'anchors mismatch', reason: String(error.message ?? error) }
   }

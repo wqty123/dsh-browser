@@ -1437,8 +1437,8 @@ function resolveDragFileName(request) {
 }
 //#endregion
 //#region lib/types/ipc.js
-/** IPC channel names kept private to the desktop application bundle. */
 const DESKTOP_IPC = {
+	mainExtensionStatus: "dsh-desktop:main-extension-status",
 	fileSave: "dsh-desktop:file-save",
 	clipboardImageRead: "dsh-desktop:clipboard-image-read",
 	shortcutsInput: "dsh-desktop:shortcuts-input",
@@ -7624,6 +7624,29 @@ var __rewriteRelativeImportExtension$2 = function(path, preserveJsx) {
 	});
 	return path;
 };
+async function fingerprint(profile, name, entry) {
+	const directory = await realpath(join(profile, "node_modules", name));
+	const text = await readFile$1(join(directory, "package.json"), "utf8");
+	const pkg = JSON.parse(text);
+	const hash = createHash("sha256").update(entry).update(text);
+	const visit = async (path) => {
+		for (const item of (await readdir(path, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+			if (item.name === "node_modules" || item.name === ".git") continue;
+			const child = join(path, item.name);
+			if (item.isSymbolicLink()) throw new Error("extension package contains a symbolic link");
+			if (item.isDirectory()) await visit(child);
+			else if (item.isFile()) {
+				const content = await readFile$1(child);
+				hash.update(JSON.stringify([relative(directory, child), content.length])).update(content);
+			}
+		}
+	};
+	await visit(directory);
+	return {
+		fingerprint: hash.digest("hex"),
+		...record$5(pkg) && typeof pkg.version === "string" ? { version: pkg.version } : {}
+	};
+}
 function record$5(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -7677,6 +7700,7 @@ async function startDesktopMainExtensions(profile, api) {
 		console.error(`desktop main extension ${name}:`, error);
 	};
 	const disposers = [];
+	const running = /* @__PURE__ */ new Map();
 	let stopped = false;
 	const dispose = () => {
 		stopped = true;
@@ -7691,6 +7715,13 @@ async function startDesktopMainExtensions(profile, api) {
 	const entries = await discoverDesktopMainExtensions(profile, report);
 	for (const { name, entry } of entries) {
 		if (stopped) break;
+		let installed;
+		try {
+			installed = await fingerprint(profile, name, entry);
+		} catch (error) {
+			report(name, error);
+			continue;
+		}
 		try {
 			const extension = await import(__rewriteRelativeImportExtension$2(pathToFileURL(entry).href));
 			if (stopped) break;
@@ -7712,11 +7743,63 @@ async function startDesktopMainExtensions(profile, api) {
 				});
 			}
 			if (stopped) dispose();
+			running.set(name, {
+				fingerprint: installed.fingerprint,
+				status: {
+					state: "loaded",
+					...installed.version === void 0 ? {} : { version: installed.version },
+					loadedAt: (/* @__PURE__ */ new Date()).toISOString()
+				}
+			});
 		} catch (error) {
 			report(name, error);
+			running.set(name, {
+				fingerprint: installed.fingerprint,
+				status: {
+					state: "failed",
+					code: "EXTENSION_START_FAILED",
+					...installed.version === void 0 ? {} : { version: installed.version }
+				}
+			});
 		}
 	}
-	return dispose;
+	return Object.assign(dispose, { status: async (name) => {
+		if (!/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u.test(name)) return {
+			state: "failed",
+			code: "EXTENSION_ENTRY_INVALID"
+		};
+		const errors = /* @__PURE__ */ new Set();
+		const current = (await discoverDesktopMainExtensions(profile, (failed) => {
+			errors.add(failed);
+		})).find((item) => item.name === name);
+		if (errors.has(name) || errors.has("profile")) return {
+			state: "failed",
+			code: "EXTENSION_ENTRY_INVALID"
+		};
+		const loaded = running.get(name);
+		if (current === void 0) return loaded === void 0 ? {
+			state: "not-installed",
+			code: "EXTENSION_NOT_INSTALLED"
+		} : {
+			state: "pending-restart",
+			code: "EXTENSION_RESTART_REQUIRED"
+		};
+		try {
+			const installed = await fingerprint(profile, name, current.entry);
+			if (loaded?.fingerprint === installed.fingerprint) return loaded.status;
+			return {
+				state: "pending-restart",
+				code: "EXTENSION_RESTART_REQUIRED",
+				...installed.version === void 0 ? {} : { version: installed.version }
+			};
+		} catch (error) {
+			report(name, error);
+			return {
+				state: "failed",
+				code: "EXTENSION_ENTRY_INVALID"
+			};
+		}
+	} });
 }
 //#endregion
 //#region lib/types/core-package-set.js
@@ -20489,11 +20572,20 @@ async function main() {
 	let startup;
 	let workspaceRecovery;
 	let mainWindow;
+	let mainExtensions;
+	const mainExtensionStatus = async (name) => mainExtensions === void 0 ? {
+		state: "pending-restart",
+		code: "EXTENSION_RESTART_REQUIRED"
+	} : await mainExtensions.status(name);
 	const mainExtensionApi = {
 		app,
 		webContents,
 		mainWindow: () => mainWindow,
-		dshHome: resolveDshHome()
+		dshHome: resolveDshHome(),
+		mainExtensions: {
+			revision: 2,
+			status: mainExtensionStatus
+		}
 	};
 	let mainExtensionsStarted = false;
 	let welcomeWindow;
@@ -20791,7 +20883,7 @@ async function main() {
 				await Promise.all([manager.applyRelease(), prepareHostEnvironment()]);
 				if (!mainExtensionsStarted) {
 					mainExtensionsStarted = true;
-					await startDesktopMainExtensions(activeProject, mainExtensionApi);
+					mainExtensions = await startDesktopMainExtensions(activeProject, mainExtensionApi);
 				}
 			});
 			if (backend.host !== void 0) await openInitialWindow();
@@ -20941,6 +21033,12 @@ async function main() {
 	ipcMain.handle(DESKTOP_IPC.browserAcquire, (event, workspace) => {
 		assertProductSender(event);
 		return browserGuests.acquire(event.sender, workspace);
+	});
+	ipcMain.handle(DESKTOP_IPC.mainExtensionStatus, async (event, name) => {
+		assertProductSender(event);
+		if (typeof name !== "string") throw new Error("desktop main extension status requires a package name");
+		await startup;
+		return mainExtensionStatus(name);
 	});
 	ipcMain.handle(DESKTOP_IPC.browserRelease, (event, lease) => {
 		assertProductSender(event);

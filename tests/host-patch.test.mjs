@@ -19,9 +19,10 @@ function setup(t, ids = ['client', 'main']) {
     fs.mkdirSync(join(directory, 'lib'), { recursive: true })
     fs.writeFileSync(join(directory, 'package.json'), JSON.stringify({ name: target.packageName, version: spec.version }))
     fs.writeFileSync(join(directory, target.file), fixture(id, 'before'))
+    if (id === 'main') fs.writeFileSync(join(directory, 'lib/preload-app.cjs'), fixture('preload', 'before'))
     return directory
   })
-  return { root, packages, file: id => join(root, id, id === 'client' ? 'lib/client.js' : 'lib/main.js') }
+  return { root, packages, file: id => id === 'preload' ? join(root, 'main/lib/preload-app.cjs') : join(root, id, id === 'client' ? 'lib/client.js' : 'lib/main.js') }
 }
 
 for (const target of spec.targets) {
@@ -52,6 +53,70 @@ test('validate is read-only; apply is idempotent; restore and reapply preserve t
   assert.deepEqual(restoreHostPatch(packages), { status: 'absent', changed: false })
   assert.equal(applyHostPatch(packages).status, 'applied')
   assert.equal(fs.readFileSync(file('main') + backupSuffix, 'utf8'), fixture('main', 'before'))
+})
+
+test('revision 1 upgrades main and preload while retaining the original restore bytes', t => {
+  const { packages, file } = setup(t)
+  const previous = JSON.parse(fs.readFileSync(new URL(`../dsh-host-patch/${release}-revision1.json`, import.meta.url), 'utf8'))
+  for (const target of previous.targets) {
+    fs.writeFileSync(file(target.id) + backupSuffix, fixture(target.id, 'before'))
+    fs.writeFileSync(file(target.id), patchText(fixture(target.id, 'before'), target))
+  }
+  assert.match(hostPatchStatus(packages).reason, /revision 1/)
+  assert.deepEqual(applyHostPatch(packages), { status: 'applied', changed: true })
+  for (const id of ['client', 'main', 'preload']) {
+    assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'after'))
+    assert.equal(fs.readFileSync(file(id) + backupSuffix, 'utf8'), fixture(id, 'before'))
+  }
+  assert.equal(restoreHostPatch(packages).status, 'absent')
+  for (const id of ['client', 'main', 'preload']) assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'before'))
+})
+
+test('a mismatched preload refuses the whole Desktop/sidebar plan without writes', t => {
+  const { packages, file } = setup(t)
+  fs.writeFileSync(file('preload'), 'unknown preload')
+  assert.equal(applyHostPatch(packages).status, 'anchors mismatch')
+  for (const id of ['client', 'main', 'preload']) assert.equal(fs.existsSync(file(id) + backupSuffix), false)
+  for (const id of ['client', 'main']) assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'before'))
+})
+
+for (const extraEdit of [false, true]) test(`revision upgrade preserves a legacy original or refuses unrelated edits (${extraEdit})`, t => {
+  const { packages, file } = setup(t)
+  const previous = JSON.parse(fs.readFileSync(new URL(`../dsh-host-patch/${release}-revision1.json`, import.meta.url), 'utf8'))
+  const pristine = fixture('main', 'before')
+  const legacy = pristine.replace('export {};', legacyBridgeSnippets[0] + 'export {};')
+  fs.writeFileSync(file('main') + '.before-bridge', pristine)
+  for (const target of previous.targets) {
+    fs.writeFileSync(file(target.id) + backupSuffix, target.id === 'main' ? legacy : fixture(target.id, 'before'))
+    fs.writeFileSync(file(target.id), patchText(fixture(target.id, 'before'), target) + (target.id === 'main' && extraEdit ? '\n// unrelated edit' : ''))
+  }
+  const before = ['main', 'client', 'preload'].map(id => fs.readFileSync(file(id), 'utf8'))
+  const result = applyHostPatch(packages)
+  if (extraEdit) {
+    assert.equal(result.status, 'anchors mismatch')
+    for (const [index, id] of ['main', 'client', 'preload'].entries()) assert.equal(fs.readFileSync(file(id), 'utf8'), before[index])
+    assert.equal(fs.existsSync(file('preload') + backupSuffix), false)
+  } else {
+    assert.equal(result.status, 'applied')
+    assert.equal(restoreHostPatch(packages).status, 'absent')
+    assert.equal(fs.readFileSync(file('main'), 'utf8'), legacy)
+    for (const id of ['client', 'preload']) assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'before'))
+    assert.equal(applyHostPatch(packages).status, 'applied')
+  }
+})
+
+test('a third-file commit failure rolls back all Desktop and sidebar bytes', t => {
+  const { packages, file } = setup(t)
+  let commits = 0
+  const io = { ...fs, renameSync: (from, to) => {
+    if (!from.endsWith('.original') && ++commits === 3) throw new Error('preload rename failed')
+    fs.renameSync(from, to)
+  } }
+  assert.match(applyHostPatch(packages, { fs: io }).reason, /preload rename failed/)
+  for (const id of ['client', 'main', 'preload']) {
+    assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'before'))
+    assert.equal(fs.existsSync(file(id) + backupSuffix), false)
+  }
 })
 
 test('web package directory and hardlinked npm content are patched without changing the store inode', t => {
@@ -152,10 +217,10 @@ test('a commit failure rolls back earlier renames and new backups', t => {
   const result = applyHostPatch(packages, { fs: io })
   assert.equal(result.changed, false)
   assert.match(result.reason, /injected rename failure/)
-  for (const id of ['client', 'main']) {
+  for (const id of ['client', 'main', 'preload']) {
     assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'before'))
     assert.equal(fs.existsSync(file(id) + backupSuffix), false)
-    assert.deepEqual(fs.readdirSync(join(file(id), '..')), [id === 'client' ? 'client.js' : 'main.js'])
+    assert.deepEqual(fs.readdirSync(join(file(id), '..')).sort(), id === 'client' ? ['client.js'] : ['main.js', 'preload-app.cjs'])
   }
 })
 

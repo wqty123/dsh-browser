@@ -19,6 +19,7 @@ function setup(t) {
     mkdirSync(join(path, 'lib'), { recursive: true })
     writeFileSync(join(path, 'package.json'), JSON.stringify({ name, version: '0.2.2-rc.3', main: id === 'main' ? 'lib/main.js' : 'lib/index.js' }))
     writeFileSync(join(path, 'lib', id + '.js'), artifact(id, 'before'))
+    if (id === 'main') writeFileSync(join(path, 'lib/preload-app.cjs'), artifact('preload', 'before'))
   }
   const run = (...flags) => {
     const result = spawnSync(process.execPath, [installer, root, ...flags], { env: sandbox.env(), encoding: 'utf8', timeout: 20_000 })
