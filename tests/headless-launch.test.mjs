@@ -115,20 +115,21 @@ test('quiet mode does not override an explicitly headless setting either', async
     `an explicit headless setting still wins while quiet: ${JSON.stringify(args)}`)
 })
 
-test('--no-sandbox is conditional and announced, never silent', () => {
-  // Dropping the sandbox weakens process isolation, so it happens only where the sandbox cannot
-  // start (root, or a container) and is written to stderr — whoever reads the log has to be able
-  // to disagree with the decision.
-  assert.match(systemBrowser, /function needsNoSandbox\(/, 'the check exists')
-  assert.match(systemBrowser, /process\.getuid\(\) === 0/, 'root is one reason')
-  assert.match(systemBrowser, /\.dockerenv|env\.container/, 'a container is the other')
-  assert.match(systemBrowser, /if \(launch\.headless && needsNoSandbox\(\)\)/,
-    'and it only applies to a headless launch')
-  assert.match(systemBrowser, /launching with --no-sandbox/, 'the decision is reported')
-  // Not unconditional: a plain windowed launch on a desktop keeps the sandbox.
-  const windowed = systemBrowser.slice(systemBrowser.indexOf("const launch = resolveLaunchMode"))
-  assert.doesNotMatch(windowed.slice(0, windowed.indexOf('about:blank')), /'--no-sandbox'[^']*,\s*$/,
-    'not appended unconditionally before the URL')
+test('headless and container launches never automatically disable the sandbox', async () => {
+  const previous = process.env.container
+  process.env.container = 'docker'
+  try {
+    for (const mode of ['headless', 'windowed', 'auto']) {
+      const args = await capturedArgs(mode)
+      assert.ok(args.length > 0, 'the launcher was reached')
+      assert.ok(!args.includes('--no-sandbox'), JSON.stringify(args))
+      assert.ok(!args.includes('--disable-setuid-sandbox'), JSON.stringify(args))
+    }
+  } finally {
+    if (previous === undefined) delete process.env.container
+    else process.env.container = previous
+  }
+  assert.doesNotMatch(systemBrowser, /needsNoSandbox|--no-sandbox/)
 })
 
 test('an operator can override the setting without editing it', () => {

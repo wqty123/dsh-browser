@@ -1,10 +1,8 @@
 /**
- * Self-hosted Electron browser host (parent side): an
+ * Legacy standalone Electron browser host (not a supported package export): an
  * {@link ElectronBrowserViewHost} implementation that spawns the plugin's own
  * Electron child process (host-main.js) and drives it over line-delimited
- * JSON-RPC on a loopback TCP socket. This is what makes the plugin work on
- * surfaces without a desktop shell's electronViewHost (plain dsh web):
- * installing the plugin is enough — the browser window appears on first use.
+ * JSON-RPC on a loopback TCP socket.
  *
  * Protocol (one JSON object per line, both directions):
  *   -> { id, op: 'createView' } | { id, op: 'destroyView', viewId } |
@@ -35,6 +33,7 @@ import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { withTimeoutShared } from './timing.ts'
+import { browserHostLogPath } from './paths.ts'
 import { fileURLToPath } from 'node:url'
 import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, PresentOptions, ScreenshotOptions } from './provider.ts'
 import type { ExportedCookie } from '../browser/types.ts'
@@ -1415,11 +1414,9 @@ function hostStamp(): string {
 }
 
 function appendHostLog(text: string): void {
-  const home = process.env.DSH_HOME
-  if (home === undefined || home === '') return
   try {
-    const dir = join(home, 'logs')
-    const file = join(dir, 'dsh-builtin-browser-host.log')
+    const file = browserHostLogPath()
+    const dir = dirname(file)
     try {
       if (statSync(file).size > HOST_LOG_MAX_BYTES) {
         // Discard the old bytes but leave a dated marker: truncating to empty

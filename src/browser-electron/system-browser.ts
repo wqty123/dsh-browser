@@ -222,32 +222,6 @@ function hasDisplay(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
- * Whether Chromium's own sandbox cannot start here.
- *
- * Two cases, both of which make the browser exit at once rather than degrade: running as root
- * (the sandbox refuses), and running inside a container that lacks the namespaces it needs. The
- * check is deliberately conservative — when it is unsure it answers false, so the default is the
- * sandboxed launch and the weaker mode only happens where it is required.
- * @param env - the environment to inspect; defaults to the current process.
- * @returns true when `--no-sandbox` is required for the browser to start at all.
- */
-function needsNoSandbox(env: NodeJS.ProcessEnv = process.env): boolean {
-  if (process.platform === 'win32') return false
-  try {
-    if (typeof process.getuid === 'function' && process.getuid() === 0) return true
-  } catch {
-    // No getuid: not a POSIX process; the container checks below still apply.
-  }
-  if ((env.container ?? '') !== '') return true
-  try {
-    if (existsSync('/.dockerenv')) return true
-  } catch {
-    // An unreadable root is not evidence of a container.
-  }
-  return false
-}
-
-/**
  * Resolve `auto` into a concrete decision, and say why.
  *
  * Chromium refuses to start without a display: with neither `DISPLAY` nor `WAYLAND_DISPLAY` set it
@@ -793,15 +767,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // normally through `Target.createTarget`.
       '--no-startup-window',
     ]
-    // Chromium's own sandbox cannot start in some of these environments — running as root, or
-    // inside a container without the namespaces it needs — and it exits rather than degrading.
-    // Only then is the sandbox dropped, and never silently: a setting that weakens process
-    // isolation must be visible in the log, because whoever reads it has to be able to disagree.
-    if (launch.headless && needsNoSandbox()) {
-      args.splice(args.length - 2, 0, '--no-sandbox')
-      process.stderr.write('[dsh-browser] launching with --no-sandbox: '
-        + 'this process runs as root or in a container, where the Chromium sandbox cannot start\n')
-    }
     if (launch.headless) {
       process.stderr.write(`[dsh-browser] launching headless (${launch.why}); `
         + 'the browser has no window but every tool works the same\n')

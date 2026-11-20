@@ -24,6 +24,14 @@ workspace source exports; do not interpret `skipLibCheck` as isolation in that c
 
 # 开发
 
+The supported package is sidebar-only: neither `./host-main` nor
+`RemoteElectronViewHost` is a public export. Legacy standalone sources remain
+for protocol regression tests, not as a missing-sidebar fallback. Native windows
+are not reopened automatically. Browser launches never add `--no-sandbox`;
+environments that cannot run Chromium sandboxed must fail rather than silently
+weaken isolation. Diagnostics use the same resolved DSH home as plugin state:
+`<DSH_HOME or ~/.dsh>/logs/dsh-builtin-browser-host.log`.
+
 The behavior tests require Node.js 22.13 or later (including 22.20), which provides
 `node:module.stripTypeScriptTypes` for the client-only fixtures. There is no Node
 engine pin or checked-in CI workflow in this package. Tests use the installed

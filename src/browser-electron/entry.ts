@@ -138,7 +138,6 @@ export {
   ElectronBrowserProvider,
 } from './provider.ts'
 export type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
-export { RemoteElectronViewHost, defaultHostMainPath } from './remote-host.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 
