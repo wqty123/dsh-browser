@@ -91,6 +91,55 @@ export function guestRuntimeScript(pageUrl: string): string {
       set(value) { descriptor.set.call(this, toProxy(value)); }
     }));
   });
+  attempt(() => {
+    const proxyResource = value => {
+      if (/^(#|data:|blob:|about:|javascript:)/i.test(value.trim())) return value;
+      return toProxy(value);
+    };
+    const proxySrcset = value => {
+      let result = '', position = 0;
+      while (position < value.length) {
+        const start = position;
+        while (position < value.length && /[\\s,]/.test(value[position])) position++;
+        result += value.slice(start, position);
+        if (position === value.length) break;
+        const urlStart = position;
+        while (position < value.length && !/\\s/.test(value[position])) position++;
+        let urlEnd = position;
+        while (urlEnd > urlStart && value[urlEnd - 1] === ',') urlEnd--;
+        result += proxyResource(value.slice(urlStart, urlEnd)) + value.slice(urlEnd, position);
+        if (urlEnd < position) continue;
+        const descriptors = position;
+        while (position < value.length && value[position] !== ',') position++;
+        result += value.slice(descriptors, position);
+      }
+      return result;
+    };
+    const rewriteResource = node => {
+      if (!node || node.nodeType !== 1 || /^(A|FORM)$/.test(node.tagName)) return;
+      for (const attribute of ['src', 'href', 'srcset', 'poster']) attempt(() => {
+        const value = node.getAttribute(attribute);
+        if (!value || !value.trim()) return;
+        const next = attribute === 'srcset' ? proxySrcset(value) : proxyResource(value);
+        if (next !== value) node.setAttribute(attribute, next);
+      });
+    };
+    const rewriteTree = node => {
+      rewriteResource(node);
+      if (node && node.querySelectorAll) {
+        for (const descendant of node.querySelectorAll('[src],[href],[srcset],[poster]')) rewriteResource(descendant);
+      }
+    };
+    const observer = new MutationObserver(records => {
+      for (const record of records) attempt(() => {
+        if (record.type === 'attributes') rewriteResource(record.target);
+        else for (const node of record.addedNodes) rewriteTree(node);
+      });
+    });
+    observer.observe(document, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ['src', 'href', 'srcset', 'poster', 'action'] });
+    rewriteTree(document.documentElement);
+  });
   attempt(() => document.addEventListener('click', event => {
     attempt(() => {
       let node = event.target;

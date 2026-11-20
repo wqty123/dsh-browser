@@ -5,8 +5,9 @@ import { guestRuntimeScript } from '../src/browser-electron/guest-runtime.ts'
 import { guestPath, relayTag } from '../src/browser-electron/guest-route.ts'
 
 function page() {
-  const requests = [], navigations = [], listeners = new Map()
+  const requests = [], navigations = [], listeners = new Map(), observers = []
   class Element {
+    nodeType = 1
     attributes = new Map()
     getAttribute(name) { return this.attributes.get(name) ?? null }
     hasAttribute(name) { return this.attributes.has(name) }
@@ -31,6 +32,10 @@ function page() {
     FormData: class { constructor(form, submitter) { this.values = [...form.fields]; if (submitter) this.values.push(['button', 'search']) }
       [Symbol.iterator]() { return this.values[Symbol.iterator]() } },
     document: { addEventListener(name, listener) { listeners.set(name, listener) } }, navigator: {},
+    MutationObserver: class {
+      constructor(callback) { this.callback = callback; observers.push(this) }
+      observe(target, options) { this.target = target; this.options = options }
+    },
     fetch: async (input, init) => { requests.push({ input, init }); return new Response('ok') },
     addEventListener(name, listener) { listeners.set(name, listener) },
   }
@@ -43,7 +48,7 @@ function page() {
   context.window = context
   vm.createContext(context)
   vm.runInContext(guestRuntimeScript('https://ordinary.example/dir/page'), context)
-  return { context, requests, navigations, listeners, Element, Form, XHR }
+  return { context, requests, navigations, listeners, Element, Form, XHR, observers }
 }
 
 test('toProxy resolves relative, root-relative, absolute and URL values against the real page', () => {
@@ -152,4 +157,59 @@ test('the reference relay bypasses site request interception', async () => {
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(requests[0].input, '/dsh-builtin-browser/reference/capture')
   assert.equal(JSON.parse(requests[0].init.body).sessionId, 'owner')
+})
+
+test('observer proxies parsed resource subtrees and attribute mutations without rewrite loops', () => {
+  const { context, Element, observers } = page()
+  const observer = observers[0]
+  assert.equal(observer.target, context.document)
+  assert.equal(observer.options.childList, true)
+  assert.equal(observer.options.subtree, true)
+  assert.equal(observer.options.attributes, true)
+  assert.deepEqual(Array.from(observer.options.attributeFilter), ['src', 'href', 'srcset', 'poster', 'action'])
+  const link = new Element()
+  link.tagName = 'LINK'
+  link.attributes.set('href', '/rp/style.css')
+  const image = new Element()
+  image.attributes.set('src', '/rp/image.png')
+  image.attributes.set('srcset', '/rp/a.png 1x,/rp/b.png 2x, data:image/png;base64,AA 3x')
+  const video = new Element()
+  video.attributes.set('poster', '/cdt/dictionary/poster.png')
+  const anchor = new Element()
+  anchor.tagName = 'A'
+  anchor.attributes.set('href', '/search')
+  link.querySelectorAll = () => [image, video, anchor]
+  let writes = 0
+  for (const node of [link, image, video, anchor]) {
+    const set = node.setAttribute
+    node.setAttribute = function(...args) { writes++; return set.apply(this, args) }
+  }
+  observer.callback([{ type: 'childList', addedNodes: [link, { nodeType: 3 }] }])
+  assert.equal(link.getAttribute('href'), guestPath('https://ordinary.example/rp/style.css'))
+  assert.equal(image.getAttribute('src'), guestPath('https://ordinary.example/rp/image.png'))
+  assert.equal(image.getAttribute('srcset'), `${guestPath('https://ordinary.example/rp/a.png')} 1x,${guestPath('https://ordinary.example/rp/b.png')} 2x, data:image/png;base64,AA 3x`)
+  assert.equal(video.getAttribute('poster'), guestPath('https://ordinary.example/cdt/dictionary/poster.png'))
+  assert.equal(anchor.getAttribute('href'), '/search')
+  assert.equal(writes, 4)
+  observer.callback([link, image, video].map(target => ({ type: 'attributes', target })))
+  assert.equal(writes, 4)
+  image.attributes.set('src', '/rp/changed.png')
+  observer.callback([{ type: 'attributes', target: image }])
+  assert.equal(image.getAttribute('src'), guestPath('https://ordinary.example/rp/changed.png'))
+  assert.equal(writes, 5)
+  image.attributes.set('srcset', '/rp/a.png, /rp/b.png,   ')
+  observer.callback([{ type: 'attributes', target: image }])
+  assert.equal(image.getAttribute('srcset'), `${guestPath('https://ordinary.example/rp/a.png')}, ${guestPath('https://ordinary.example/rp/b.png')},   `)
+  assert.equal(writes, 6)
+  for (const value of ['#fragment', 'data:image/png;base64,AA', 'blob:https://ordinary.example/uuid', 'about:blank', 'javascript:void(0)', '']) {
+    image.attributes.set('src', value)
+    observer.callback([{ type: 'attributes', target: image }])
+    assert.equal(image.getAttribute('src'), value)
+  }
+  observer.callback([{ type: 'childList', addedNodes: [] }])
+  assert.doesNotThrow(() => observer.callback([{ type: 'attributes', target: { nodeType: 1 } }]))
+  assert.equal(writes, 6)
+  assert.equal(observers.length, 1)
+  vm.runInContext(guestRuntimeScript('https://ignored.example/'), context)
+  assert.equal(observers.length, 1)
 })
