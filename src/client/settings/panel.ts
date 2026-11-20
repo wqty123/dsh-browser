@@ -884,15 +884,35 @@ const react = require("react")
    * same one background attempt the plugin makes on its own, which is why pressing it is never
    * harmful and never starts a second download.
    */
+  const hostPatchNoticeEvent = "dsh-builtin-browser:host-patch-notice"
+  function readHostPatchNotice() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(hostPatchNoticeEvent))
+      return saved?.page === performance.timeOrigin ? saved.key : ""
+    } catch { return "" /* Storage may be unavailable. */ }
+  }
+  function publishHostPatchNotice(key) {
+    try { sessionStorage.setItem(hostPatchNoticeEvent, JSON.stringify({ page: performance.timeOrigin, key })) }
+    catch { /* An open panel can still show the result without storage. */ }
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(hostPatchNoticeEvent, { detail: key }))
+  }
+
   function HostPatchControls() {
     useLocaleVersion()
     const t = translate
     const [state, setState] = useState(null)
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState("")
-    const [notice, setNotice] = useState("")
+    const [notice, setNotice] = useState(readHostPatchNotice)
     const alive = useRef(true)
     const pending = useRef(false)
+    useEffect(() => {
+      if (typeof window === "undefined") return
+      const target = window
+      const update = event => setNotice(event.detail)
+      target.addEventListener(hostPatchNoticeEvent, update)
+      return () => target.removeEventListener(hostPatchNoticeEvent, update)
+    }, [])
     useEffect(() => {
       alive.current = true
       void fetch("/dsh-builtin-browser/host-patch-maintenance", { headers: { accept: "application/json" } })
@@ -907,7 +927,7 @@ const react = require("react")
     const change = async action => {
       if (pending.current) return
       pending.current = true
-      setBusy(true); setError(""); setNotice("")
+      setBusy(true); setError(""); setNotice(""); publishHostPatchNotice("")
       try {
         const response = await fetch("/dsh-builtin-browser/host-patch-maintenance", {
           method: "POST", headers: { accept: "application/json", "content-type": "application/json" },
@@ -916,7 +936,9 @@ const react = require("react")
         const data = await response.json()
         if (alive.current && data.hostPatch) setState(data.hostPatch)
         if (!response.ok || data.ok !== true) throw new Error(data.error || data.hostPatch?.reason || `HTTP ${response.status}`)
-        if (alive.current) setNotice(t(data.hostPatch.restartRequired ? "hostPatch.restart" : "hostPatch.reload"))
+        const noticeKey = data.hostPatch.restartRequired ? "hostPatch.restart" : "hostPatch.reload"
+        publishHostPatchNotice(noticeKey)
+        if (alive.current) setNotice(noticeKey)
       } catch (failure) { if (alive.current) setError(String(failure)) }
       finally { pending.current = false; if (alive.current) setBusy(false) }
     }
@@ -928,7 +950,7 @@ const react = require("react")
         h("button", { key: "install", type: "button", style: styles.button, disabled: busy || !state?.canInstall, onClick: () => change("install") }, t(busy ? "hostPatch.working" : "hostPatch.install")),
         h("button", { key: "restore", type: "button", style: styles.button, disabled: busy || !state?.canRestore, onClick: () => change("restore") }, t("hostPatch.restore")),
       ]),
-      notice ? h("p", { key: "notice", role: "status", style: styles.hint }, notice) : null,
+      notice ? h("p", { key: "notice", role: "status", style: styles.hint }, t(notice)) : null,
       error ? h("p", { key: "error", role: "alert", style: styles.error }, error) : null,
     ])
   }

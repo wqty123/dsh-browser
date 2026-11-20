@@ -114,7 +114,7 @@ function panel(t, answer) {
   const effects = []; const cleanup = []; const calls = []
   const react = {
     createElement: (type, props, ...children) => ({ type, props, children }),
-    useState: initial => { const i = cursor++; if (!(i in states)) states[i] = initial; return [states[i], value => { states[i] = value }] },
+    useState: initial => { const i = cursor++; if (!(i in states)) states[i] = typeof initial === 'function' ? initial() : initial; return [states[i], value => { states[i] = value }] },
     useRef: initial => refs[refCursor++] ?? (refs[refCursor - 1] = { current: initial }),
     useEffect: effect => { if (!mounted) effects.push(effect) },
     useCallback: fn => fn,
@@ -127,7 +127,7 @@ function panel(t, answer) {
   t.after(() => { for (const end of cleanup.reverse()) end() })
   const render = () => { cursor = 0; refCursor = 0; return exports.__hostPatchSection() }
   const mount = async () => { render(); for (const fn of effects.splice(0)) { const end = fn(); if (typeof end === 'function') cleanup.push(end) }; mounted = true; await new Promise(setImmediate); return render() }
-  return { calls, mount, render }
+  return { calls, mount, render, unmount: () => { for (const end of cleanup.splice(0).reverse()) end() } }
 }
 const elements = node => node == null ? [] : Array.isArray(node) ? node.flatMap(elements) : typeof node === 'object' ? [node, ...elements(node.children)] : []
 const text = node => JSON.stringify(node)
@@ -146,6 +146,56 @@ test('Web settings install and restore buttons send explicit actions and explain
   await elements(p.render()).find(n => n.props?.key === 'restore').props.onClick()
   assert.match(text(p.render()), /hostPatch.restart/)
   assert.deepEqual(p.calls.filter(c => c.method === 'POST').map(c => JSON.parse(c.body)), [{ action: 'install' }, { action: 'restore' }])
+})
+
+test('Web patch guidance survives module remounts before and after both action replies, but not a page reload', async t => {
+  for (const timing of ['before', 'during']) await t.test(timing, async t => {
+    const storage = new Map()
+    for (const [key, value] of Object.entries({ window: new EventTarget(), sessionStorage: {
+      getItem: key => storage.get(key) ?? null,
+      setItem: (key, value) => storage.set(key, value),
+    } })) {
+      const previous = Object.getOwnPropertyDescriptor(globalThis, key)
+      Object.defineProperty(globalThis, key, { configurable: true, value })
+      t.after(() => { if (previous) Object.defineProperty(globalThis, key, previous); else delete globalThis[key] })
+    }
+    let applied = false
+    for (const action of ['install', 'restore']) {
+      let complete
+      const reply = new Promise(resolve => { complete = resolve })
+      const answer = init => {
+        if (init.method === 'POST') applied = action === 'install'
+        return { ok: true, status: 200, json: async () => {
+          if (init.method === 'POST') await reply
+          return { ok: true, hostPatch: { surface: 'web', status: applied ? 'applied' : 'absent',
+            canInstall: !applied, canRestore: applied, restartRequired: false } }
+        } }
+      }
+      const old = panel(t, answer)
+      const tree = await old.mount()
+      const pending = elements(tree).find(n => n.props?.key === action).props.onClick()
+      if (timing === 'before') { complete(); await pending }
+      old.unmount()
+      const replacement = panel(t, answer)
+      await replacement.mount()
+      if (timing === 'during') { complete(); await pending }
+      assert.match(text(replacement.render()), /hostPatch.reload/)
+      replacement.unmount()
+    }
+    for (const [key, value] of storage) storage.set(key, JSON.stringify({ ...JSON.parse(value), page: -1 }))
+    const reloaded = panel(t, () => ({ ok: true, status: 200, json: async () => ({ ok: true,
+      hostPatch: { surface: 'web', status: 'absent', canInstall: true, canRestore: false } }) }))
+    assert.doesNotMatch(text(await reloaded.mount()), /hostPatch.reload/)
+  })
+})
+
+test('a failed Web patch action does not publish successful reload guidance', async t => {
+  const p = panel(t, init => ({ ok: init.method !== 'POST', status: init.method === 'POST' ? 409 : 200,
+    json: async () => ({ ok: init.method !== 'POST', error: 'file changed', hostPatch: {
+      surface: 'web', status: 'absent', canInstall: true, canRestore: false } }) }))
+  await elements(await p.mount()).find(n => n.props?.key === 'install').props.onClick()
+  assert.match(text(p.render()), /file changed/)
+  assert.doesNotMatch(text(p.render()), /hostPatch.reload|hostPatch.restart/)
 })
 
 test('Web settings hide older/desktop hosts and show disabled reasons and errors without breaking the panel', async t => {
