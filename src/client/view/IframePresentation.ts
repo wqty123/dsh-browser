@@ -5,6 +5,8 @@ import type { BrowserPresentation } from './BrowserPresentation.ts'
 import css from './Browser.module.css'
 import { registerIframeReference, type GuestReferenceCommand } from '../browser/iframe-reference.ts'
 import { connectWebReferenceSource } from '../browser/web-reference-source.ts'
+import { registerTakeoverSummary } from '../browser/takeover-channel.ts'
+import type { TakeoverSummary } from '../../takeover-protocol.ts'
 import { sameReferenceDocument } from '../../reference-page.ts'
 import { dispatchChildTab } from '../browser/child-tabs.ts'
 import { reportReferenceCaptureFailure } from '../reference-intents.ts'
@@ -148,6 +150,10 @@ export class IframePresentation implements BrowserPresentation {
 
   /** @param events - provider-owned load and remount callbacks. */
   constructor(private readonly events: IframePresentationEvents, private readonly owner?: string) {
+    if (owner !== undefined) this.sourceLifetime.signal.addEventListener('abort', registerTakeoverSummary(this.pageId, owner, async signal => {
+      const result = await this.command('summary', { maxChars: 1500, legacy: false }, signal, this.observedUrl ?? '', this.loadId)
+      return result as unknown as TakeoverSummary
+    }), { once: true })
     if (owner !== undefined) this.unregisterReference = registerIframeReference(this.pageId, owner, url => {
       const loadId = this.loadId
       return (operation, spec, signal) => this.command(operation, spec, signal, url, loadId)

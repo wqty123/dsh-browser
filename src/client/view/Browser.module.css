@@ -19,6 +19,44 @@
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
 }
 
+.takeover {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+  font-size: 12px;
+}
+
+.takeoverReason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.takeoverDone,
+.takeoverSkip {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  font: inherit;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.takeoverDone {
+  color: white;
+  background: #2563eb;
+}
+
+.takeoverSkip {
+  color: inherit;
+  background: var(--dsw-alias-bg-base);
+}
+
 .tool {
   display: inline-flex;
   flex: 0 0 auto;

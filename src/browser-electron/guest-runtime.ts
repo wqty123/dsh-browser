@@ -155,14 +155,16 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         const current = new URL(real), source = new URL(data.url);
         current.hash = ''; source.hash = '';
         if (current.href !== source.href || document.readyState === 'loading') throw new Error('source document is not ready');
-        if (!data.spec || typeof data.spec !== 'object' || Array.isArray(data.spec) || !['text', 'highlight', 'element'].includes(data.operation)) throw new Error('invalid reference command');
+        if (!data.spec || typeof data.spec !== 'object' || Array.isArray(data.spec) || !['text', 'highlight', 'element', 'summary'].includes(data.operation)) throw new Error('invalid reference command');
         if (data.operation !== 'element' && (!Number.isSafeInteger(data.spec.maxChars) || data.spec.maxChars <= 0
           || data.spec.maxChars > 2000000 || typeof data.spec.legacy !== 'boolean')) throw new Error('invalid text specification');
         if (data.operation === 'element' && (!['image', 'table'].includes(data.spec.kind)
           || !data.spec.anchor || typeof data.spec.anchor !== 'object' || Array.isArray(data.spec.anchor))) throw new Error('invalid element specification');
         if (data.operation === 'highlight' && (!Number.isSafeInteger(data.spec.start) || !Number.isSafeInteger(data.spec.end)
           || data.spec.start < 0 || data.spec.end <= data.spec.start)) throw new Error('invalid text positions');
-        const value = reference(data.operation, data.spec);
+        const value = data.operation === 'summary'
+          ? { url: real, title: String(document.title || '').slice(0, 1000), snapshotHint: reference('text', { maxChars: 1500, legacy: false }).text, fresh: true }
+          : reference(data.operation, data.spec);
         parent.postMessage({ ...ack, ok: true, value }, event.origin);
       } catch (error) { parent.postMessage({ ...ack, ok: false, reason: String(error).slice(0, 200) }, event.origin); }
     } else if (event.data.type === 'dsh.browser.guest.history') {

@@ -15,6 +15,9 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { BrowserTakeovers, installTakeovers } from './takeover.ts'
+import { TAKEOVER_TOOL, type TakeoverDecision, type TakeoverSummary } from '../takeover-protocol.ts'
 import { setLastOpen } from '../browser-electron/open-slot.ts'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -505,10 +508,18 @@ export function apply(ctx: Context, config: Config = {}): void {
   // scoped to THIS plugin apply, so parallel contexts never share sessions
   // or leak restrictions into each other.
   const state = createState()
+  const takeovers = new BrowserTakeovers()
+  installTakeovers(ctx, takeovers)
   liveStates.add(state)
   ctx.effect(() => () => { liveStates.delete(state) })
   // Re-apply resets the restriction: an omitted allowedActions lifts it.
   state.configRestrictedTo = config.allowedActions !== undefined ? [...config.allowedActions] : undefined
+
+  ctx.systemPrompt.section({
+    name: 'tool:browser-human-takeover',
+    order: 152,
+    text: 'For CAPTCHAs, sliders, logins, two-factor authentication (2FA), and payments, call dsh_browser_request_takeover with a clear reason and any instructions. Never attempt automatic CAPTCHA or slider solving. Wait for the human, then re-read the fresh page summary and inspect the page before continuing. A skipped or cancelled takeover is not successful completion; do not bypass it or retry protected actions automatically.',
+  })
 
   ctx.systemPrompt.section({
     name: 'tool:dsh-browser-reference-presentation',
@@ -564,6 +575,24 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   const registerSafely = (definition: ReturnType<typeof defineTool>): void => {
     try {
+      const execute = definition.execute.bind(definition)
+      const name = definition.name
+      definition = { ...definition, execute: async (args, exec) => {
+        const owner = taskKey(exec)
+        if (name !== TAKEOVER_TOOL && takeovers.blocks(owner)
+          && (!READ_ONLY_TOOLS.has(name) || ['dsh_browser_reset', 'dsh_browser_reset_session', 'dsh_browser_reference_reveal'].includes(name))) {
+          const requested = (args as { tabId?: string }).tabId
+          let tab = requested
+          if (requested?.startsWith('dsh-tab:')) {
+            const session = state.sessionsByTask.get(owner)
+            if (session) tab = resolveTabHandle(browserSessionHandle(owner, session), requested).tab
+          }
+          if (tab === undefined || takeovers.blocks(owner, tab)) {
+            throw new Error('Browser tab is awaiting human takeover. Agent browser actions are refused until the human confirms completion or skips the request.')
+          }
+        }
+        return execute(args, exec)
+      } }
       ctx.tools.register(definition)
     } catch (error) {
       ctx.logger?.warn?.(
@@ -573,6 +602,68 @@ export function apply(ctx: Context, config: Config = {}): void {
       )
     }
   }
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_request_takeover',
+    description: 'Hand the active sidebar browser tab to the human for a CAPTCHA/slider, login, 2FA or payment. Never solve CAPTCHAs automatically. Requires an active turn and connected sidebar tab; waits for the native card or sidebar Confirm/Skip. Repeated calls on the same tab share one request. Returns done/skipped/cancelled plus a fresh page summary; inspect it before resuming. Never treat skipped/cancelled as success.',
+    parameters: {
+      reason: { type: 'string', required: true, description: 'Why the human must take over (1–1000 characters).' },
+      instructions: { type: 'string', description: 'Optional concise instructions for the human (up to 2000 characters).' },
+    },
+    output: { schema: { type: 'object', additionalProperties: false, properties: {
+      outcome: { type: 'string', required: true, enum: ['done', 'skipped', 'cancelled'] },
+      page: { type: 'object', required: true, additionalProperties: false, properties: {
+        url: { type: 'string', required: true }, title: { type: 'string', required: true },
+        snapshotHint: { type: 'string', required: true }, fresh: { type: 'boolean', required: true },
+      } },
+    } }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    async execute(args, exec) {
+      if (!exec.agent?.session) throw new Error('Browser takeover requires an active agent turn.')
+      if (!args.reason.trim()) throw new Error('Browser takeover reason must not be empty.')
+      if (args.reason.length > 1000 || (args.instructions?.length ?? 0) > 2000) throw new Error('Browser takeover reason or instructions are too long.')
+      const page = takeovers.target(taskKey(exec))
+      return takeovers.run(page, args.reason.trim(), args.instructions, exec.signal, async pending => {
+        const approval = ctx.get('approval' as never) as unknown as { request(request: {
+          agent: ToolRunContext['agent']; toolName: string; reason: string; displayReason: { en: string; zh: string };
+          callId: ToolRunContext['callId']; signal: AbortSignal;
+        }): Promise<TakeoverDecision> } | undefined
+        let decision: TakeoverDecision = 'unavailable'
+        try {
+          if (approval) decision = await approval.request({ agent: exec.agent, toolName: TAKEOVER_TOOL, callId: exec.callId,
+            reason: pending.reason, displayReason: {
+              en: `Please take over the browser: ${pending.reason}. When finished, click Allow once or Confirm completion in the sidebar.${pending.instructions ? '\n' + pending.instructions : ''}`,
+              zh: `请接管浏览器：${pending.reason}（完成后点「允许一次」或侧栏「确认完成」）${pending.instructions ? '\n' + pending.instructions : ''}`,
+            }, signal: pending.controller.signal })
+        } finally { pending.controller.abort() }
+        const outcome = decision === 'allowed-once' ? 'done' : decision === 'rejected' ? 'skipped' : 'cancelled'
+        const unavailable = (error: unknown): TakeoverSummary => ({ url: page.url, title: '', snapshotHint: `Live page summary unavailable: ${String(error).slice(0, 300)}. Re-read the page before continuing.`, fresh: false })
+        if (exec.signal.aborted) return { outcome: 'cancelled', page: unavailable('turn stopped') }
+        pending.phase = 'summary'
+        let fresh: TakeoverSummary
+        try {
+          if (!page.pageId.startsWith('iframe:')) {
+            const browser = ctx.get('browser')!
+            const session = await browser.bindPanelPage(`session-${page.owner}`, page.pageId)
+            const snapshot = await browser.snapshot(session, AbortSignal.any([exec.signal, AbortSignal.timeout(5000)]))
+            fresh = { url: snapshot.url, title: (snapshot.title ?? '').slice(0, 1000), snapshotHint: formatSnapshot(snapshot, {}).slice(0, 1500), fresh: true }
+          } else {
+            fresh = await new Promise<TakeoverSummary>((resolve, reject) => {
+              const finish = (value?: TakeoverSummary, error?: unknown): void => {
+                clearTimeout(timer); exec.signal.removeEventListener('abort', abort)
+                if (error !== undefined) reject(error); else resolve(value!)
+              }
+              const abort = (): void => { finish(undefined, exec.signal.reason) }
+              const timer = setTimeout(() => { finish(undefined, new Error('sidebar summary timed out')) }, 8000)
+              exec.signal.addEventListener('abort', abort, { once: true })
+              void pending.summary.then(value => { finish(value) })
+              if (exec.signal.aborted) abort()
+            })
+          }
+        } catch (error) { fresh = unavailable(error) }
+        return { outcome: exec.signal.aborted ? 'cancelled' : outcome, page: fresh }
+      })
+    },
+  }))
 
   // The start page's shared shortcut list, reached through the settings section the
   // sidebar edits. Built lazily for the same reason `references()` is: the settings

@@ -46,7 +46,7 @@ export async function chromiumPage(t) {
   })
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' })
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true })
-  const command = (method, params) => send(method, params, sessionId)
+  const command = (method, params, targetSessionId = sessionId) => send(method, params, targetSessionId)
   const evaluate = async expression => {
     const result = await command('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails))

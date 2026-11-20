@@ -21,6 +21,9 @@ import { searchEnginePreferences } from '../startpage/model.ts'
 import type { StartPageFailure } from '../startpage/model.ts'
 import type { BrowserStore } from '../browser/store.ts'
 import { EngineSettingsDialog, SearchEngineMenu, ShortcutDialog, StartPage } from './StartPage.tsx'
+import { TakeoverBanner } from './TakeoverBanner.tsx'
+import { connectBrowserTakeover } from '../browser/takeover-channel.ts'
+import type { TakeoverNotice } from '../../takeover-protocol.ts'
 import css from './Browser.module.css'
 
 const EMPTY_FRAME = emptyBrowserFrame()
@@ -85,6 +88,25 @@ export function BrowserBody(props: BrowserBodyProps): ReactNode {
   const [enginesOpen, setEnginesOpen] = useState(false)
   const [engineFailure, setEngineFailure] = useState<StartPageFailure>()
   const state = useBrowserState(tab.id)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const takeoverCurrent = useRef({ url: '' })
+  const [takeover, setTakeover] = useState<{ notice?: TakeoverNotice; error?: boolean }>({})
+  const takeoverChannel = useRef<ReturnType<typeof connectBrowserTakeover>>()
+  const pageId = props.currentPage?.(tab.id)?.guestId ?? state?.initialization?.guestId
+  takeoverCurrent.current.url = state?.frame.target?.url ?? ''
+  useEffect(() => {
+    if (!pageId) return
+    const lifetime = new AbortController()
+    takeoverChannel.current = connectBrowserTakeover({ owner: sessionId, tabId: tab.id, pageId,
+      current: () => {
+        const node = rootRef.current
+        return { url: takeoverCurrent.current.url, active: node !== null && (node.checkVisibility?.({ checkVisibilityCSS: true })
+          ?? (node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden')) }
+      },
+      changed: (notice, error) => { setTakeover({ notice, error }) },
+    }, lifetime.signal)
+    return () => { lifetime.abort(); takeoverChannel.current = undefined }
+  }, [sessionId, tab.id, pageId])
   const startPage = useStartPage(value => value)
   const frame = state?.frame ?? EMPTY_FRAME
   const restoreTarget = state === undefined ? currentBrowserTarget(initial.current) : state.restoreTarget
@@ -160,7 +182,7 @@ export function BrowserBody(props: BrowserBodyProps): ReactNode {
     : reportedInitFailure
 
   return (
-    <div className={css.root}>
+    <div className={css.root} ref={rootRef}>
       <div
         style={{ display: 'contents' }}
         onBlur={(event) => {
@@ -172,6 +194,10 @@ export function BrowserBody(props: BrowserBodyProps): ReactNode {
           setFocused(false)
         }}
       >
+      <TakeoverBanner notice={takeover.notice} error={takeover.error}
+        label={t('takeover.waiting', { reason: takeover.notice?.reason ?? '' })}
+        done={t('takeover.done')} skip={t('takeover.skip')} failure={t('takeover.failed')}
+        answer={outcome => { void takeoverChannel.current?.answer(outcome) }} />
       <form className={css.toolbar} onSubmit={submit}>
         <button type="button" className={css.tool} aria-label={t('back')} title={t('back')} disabled={!frame.canGoBack} onClick={() => { goBack(tab.id) }}><IconChevronLeftOutlineRegular /></button>
         <button type="button" className={css.tool} aria-label={t('forward')} title={t('forward')} disabled={!frame.canGoForward} onClick={() => { goForward(tab.id) }}><IconChevronRightOutlineRegular /></button>

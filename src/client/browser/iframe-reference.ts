@@ -8,7 +8,7 @@ export interface ReferenceSourcePage {
   readonly reveal?: (snapshot: FrozenSnapshot, partId: string | undefined, signal: AbortSignal) => Promise<RevealStatus>
 }
 
-export type GuestReferenceCommand = (operation: 'text' | 'highlight' | 'element', spec: object, signal: AbortSignal) => Promise<Record<string, unknown>>
+export type GuestReferenceCommand = (operation: 'text' | 'highlight' | 'element' | 'summary', spec: object, signal: AbortSignal) => Promise<Record<string, unknown>>
 
 const sources = new Map<string, { readonly owner: string; readonly reveal: NonNullable<ReferenceSourcePage['reveal']> }>()
 
