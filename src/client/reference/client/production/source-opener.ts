@@ -1,5 +1,6 @@
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { BrowserInitializationReader } from '../../../browser/initialization.ts'
+import { sameReferenceDocument } from '../../../../reference-page.ts'
 
 export interface SourceSidebar {
   openTabIn(sessionId: string, kind: string, options: { readonly params: { readonly url: string } }): unknown
@@ -16,6 +17,13 @@ export async function openReferenceSource(sidebar: SourceSidebar, reader: Browse
   const previous = new Map(sidebar.tabsIn(sessionId).map(tab => [tab.id,
     reader.read({ sessionId, tabId: tab.id as TabId, url })?.requestId]))
   const existing = sidebar.tabsIn(sessionId).filter(tab => tab.kind === 'browser')
+  for (const tab of existing) {
+    const page = reader.current({ sessionId, tabId: tab.id as TabId })
+    if (page !== undefined && sameReferenceDocument(page.url, url)) {
+      if (!page.guestId) throw new Error('source highlighting requires a controllable sidebar guest')
+      return { pageId: page.guestId }
+    }
+  }
   let tabId: TabId
   let afterRequestId: string | undefined
   if (existing.length === 1) {

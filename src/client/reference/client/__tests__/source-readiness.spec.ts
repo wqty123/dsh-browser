@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
-import { createBrowserInitializationJournal, createBrowserInitializationReader } from '../../../browser/initialization.ts'
+import { createBrowserInitializationJournal, createBrowserInitializationReader, type BrowserObservedPage } from '../../../browser/initialization.ts'
 import { openReferenceSource } from '../production/source-opener.ts'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { BrowserController, type BrowserControllerOptions } from '../../../browser/BrowserController.ts'
@@ -11,13 +11,13 @@ const sessionId = `session-${owner}`
 const tabId = 'source-tab' as TabId
 const url = 'https://example.com/article'
 
-function fixture() {
+function fixture(observe?: () => BrowserObservedPage | undefined) {
   const listeners = new Set<() => void>()
   const journal = createBrowserInitializationJournal({ onChange: () => { for (const listener of listeners) listener() } })
   const reader = createBrowserInitializationReader((_session, tab) => journal.get(tab), listener => {
     listeners.add(listener)
     return () => { listeners.delete(listener) }
-  })
+  }, observe)
   const tabs: { id: string; kind: string }[] = []
   const sidebar = {
     tabsIn(id: string) { expect(id).toBe(sessionId); return tabs },
@@ -58,7 +58,18 @@ describe('source page readiness', () => {
       expect(journal.get(tabId)?.stage).toBe('navigating')
       frame.set({ ...frame.getSnapshot(), loading: false })
       expect(journal.get(tabId)).toMatchObject({ stage: 'attached', guestId: '42', url })
+      expect(controller.currentPage()).toEqual({ url: observedUrl, guestId: '42' })
+      frame.set({ ...frame.getSnapshot(), loading: true })
+      expect(controller.currentPage()).toBeUndefined()
     } finally { await controller.dispose() }
+  })
+
+  it.each([url, 'https://EXAMPLE.com:443/article#section'])('keeps an already-visible source document at %s without reloading', async currentUrl => {
+    const { sidebar, reader } = fixture(() => ({ url: currentUrl, guestId: '42' }))
+    sidebar.openTabIn(sessionId)
+    const navigateTabIn = () => { throw new Error('must preserve the visible document') }
+    await expect(openReferenceSource({ ...sidebar, navigateTabIn }, reader, owner, url,
+      new AbortController().signal)).resolves.toEqual({ pageId: '42' })
   })
 
   it('waits for the exact page acknowledgement rather than tab placement or elapsed time', async () => {

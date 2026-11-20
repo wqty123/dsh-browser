@@ -15,6 +15,7 @@ import type {
   BrowserInitFailure,
   BrowserInitReceipt,
   BrowserInitializationJournal,
+  BrowserObservedPage,
 } from './initialization.ts'
 
 /** Live tab state; navigation comes from its provider and draft validation stays local. */
@@ -304,6 +305,14 @@ export class BrowserController implements HostObservable<BrowserControllerState>
     return this.journal.get(this.options.tabId)
   }
 
+  currentPage(): BrowserObservedPage | undefined {
+    const frame = this.page.frame.getSnapshot()
+    const carrier = this.page.frame.lifecycle?.getSnapshot()
+    if (this.disposed || frame.address !== 'observed' || frame.loading || frame.error !== undefined
+      || frame.target === undefined || (carrier !== undefined && carrier.stage !== 'ready')) return undefined
+    return { url: frame.target.url, ...carrier?.guestId === undefined ? {} : { guestId: carrier.guestId } }
+  }
+
   /** Aim this occurrence at a new navigation record revision (plugin/sidebar action). */
   navigate(url: string, navigationRevision: number, requestId?: string): void {
     if (this.disposed) return
@@ -432,6 +441,7 @@ export interface BrowserInjected extends BrowserStartPageInjected {
   }): BrowserNavigationOutcome
   /** @param tabId - owning tab. @returns the latest initialization receipt. */
   initialization(tabId: TabId): BrowserInitReceipt | undefined
+  currentPage(tabId: TabId): BrowserObservedPage | undefined
   /** Newest-first receipts for diagnostics; bounded by the shared journal. */
   initializationLog(): readonly BrowserInitReceipt[]
   /** Capability marker: a caller may rely on receipts only when this is true. */
@@ -572,6 +582,7 @@ export function createBrowserControllers(actions: BoundActions<BrowserStore>, cr
     keyedHooks: { browserState: key => controller(key as TabId) },
     initializationReceipts: true,
     initialization: tabId => journal.get(tabId),
+    currentPage: tabId => controller(tabId)?.currentPage(),
     initializationLog: () => journal.all(),
     mount(request) {
       const { tabId, signal } = request

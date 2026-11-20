@@ -17,6 +17,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { referenceOwnerKey } from '../reference-owner.ts'
+import { sameReferenceDocument as samePage } from '../reference-page.ts'
 import { isReferenceText, MAX_REFERENCE_TEXT, referenceTextContent } from '../reference-text.ts'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -340,21 +341,6 @@ export function sniffImageMime(bytes: Buffer): string | undefined {
   if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) return 'image/svg+xml'
   if (bytes.length >= 4 && bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 1 && bytes[3] === 0) return 'image/x-icon'
   return undefined
-}
-
-/** Ignore a fragment when comparing pages: it is navigation, not content. */
-function samePage(current: string, expected: string): boolean {
-  if (current === expected) return true
-  try {
-    const left = new URL(current)
-    const right = new URL(expected)
-    return left.origin === right.origin
-      && left.pathname === right.pathname
-      && left.search === right.search
-      && (left.hash === right.hash || right.hash === '')
-  } catch {
-    return false
-  }
 }
 
 /** What a stored asset file is, beside the bytes. */

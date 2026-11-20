@@ -97,15 +97,15 @@ const intent = {
 const firstOwner = '79b4e5bd-5bf4-49f3-b911-5d1a92b7002b'
 const nextOwner = '96092e17-63b5-4f8a-a466-54be10d7daba'
 
-it('returns to and highlights a quoted page in the same sidebar tab after navigating away', async () => {
-  const live = { url: 'https://cn.bing.com/', ready: false, highlighted: false }
+it.each([false, true])('highlights the same sidebar tab without unnecessary navigation (already at source: %s)', async alreadyAtSource => {
+  const live = { url: alreadyAtSource ? intent.capture.url : 'https://cn.bing.com/', ready: alreadyAtSource, highlighted: false }
   const { runtime, request, queue } = harness(firstOwner, live)
   const listeners = new Set<() => void>()
   const journal = createBrowserInitializationJournal({ onChange: () => { for (const listener of listeners) listener() } })
   const reader = createBrowserInitializationReader((_session, tab) => journal.get(tab), listener => {
     listeners.add(listener)
     return () => { listeners.delete(listener) }
-  })
+  }, () => live.ready ? { url: live.url, guestId: '42' } : undefined)
   const tabId = 'original-sidebar-tab' as TabId
   const sessionId = `session-${firstOwner}`
   journal.begin({ sessionId, tabId, occurrenceId: 'original', navigationRevision: 1, url: live.url })
@@ -129,11 +129,13 @@ it('returns to and highlights a quoted page in the same sidebar tab after naviga
     await runtime.pollOnce()
     runtime.setSourceOpener((url, signal) => openReferenceSource(sidebar, reader, firstOwner, url, signal))
     const activation = runtime.revealReference(runtime.cards()[0]!.referenceId)
-    await navigated
-    expect(live.highlighted).toBe(false)
-    expect(request.mock.calls.filter(([url]) => url.includes('/reference/reveal'))).toHaveLength(1)
-    live.ready = true
-    journal.advance(tabId, 'attached', { guestId: '42' })
+    if (!alreadyAtSource) {
+      await navigated
+      expect(live.highlighted).toBe(false)
+      expect(request.mock.calls.filter(([url]) => url.includes('/reference/reveal'))).toHaveLength(1)
+      live.ready = true
+      journal.advance(tabId, 'attached', { guestId: '42' })
+    }
     expect(await activation).toBe('revealed')
     expect(live.url).toBe(intent.capture.url)
     expect(live.highlighted).toBe(true)

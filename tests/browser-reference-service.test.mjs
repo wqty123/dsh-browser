@@ -252,6 +252,15 @@ test('reveal locates the first part and highlights its exact text offsets', asyn
   assert.deepEqual({ start: highlight.args[0].start, end: highlight.args[0].end }, { start: 6, end: 20 })
 })
 
+test('reveal recognizes the same document across normalized URLs and fragment changes', async t => {
+  const { page, service } = fixture(t)
+  page.capture = { ok: true, url: 'https://example.com/article#quoted', events: [textEvent('selected words')] }
+  page.text = { ok: true, text: 'alpha selected words omega', truncated: false }
+  const reference = (await service.capture({ sessionId: 'session-1' })).reference
+  page.facts = { ok: true, url: 'https://EXAMPLE.com:443/article#current' }
+  assert.equal((await service.reveal(reference.referenceId)).status, 'revealed')
+})
+
 test('reveal reports ambiguity instead of guessing between equal matches', async t => {
   const { page, service, calls } = fixture(t)
   page.capture = { ok: true, url: 'https://example.com/article', title: 'An article', events: [textEvent('same', '', '')] }
