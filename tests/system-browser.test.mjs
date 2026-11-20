@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { detectBrowser, SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
+import { testScope, tabIn } from './canonical-fixtures.mjs'
 
 /** An env where every candidate path exists. */
 const everything = {
@@ -41,7 +42,8 @@ test('the Edge account confirmation dialog is excluded from web tabs', async () 
       { type: 'page', targetId: 'web', url: 'https://example.com/' },
     ] }),
   })
-  assert.deepEqual((await host.listPages()).map(page => page.id), ['web'])
+  const scope = testScope('session-edge')
+  assert.deepEqual((await host.listPages(scope)).map(page => page.id), [tabIn(scope, 'page:web')])
   host.dispose()
 })
 

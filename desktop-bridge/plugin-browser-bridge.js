@@ -22,7 +22,7 @@
  * any user configuration.
  */
 import { createServer, connect as netConnect } from 'node:net'
-import { randomBytes, createHash } from 'node:crypto'
+import { randomBytes, randomUUID, createHash } from 'node:crypto'
 import { writeFileSync, mkdirSync, readFileSync, unlinkSync, constants } from 'node:fs'
 import { open, mkdir, unlink, link, copyFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -88,7 +88,9 @@ const queues = new Map()
  * place where "who holds what" can be a single shared fact. Owners are per-process ids supplied
  * by the plugin; an entry is dropped when its guest disappears so a closed tab can be reused.
  */
-const claims = new Map()
+const handles = new Map()
+const retiredHandles = new Set()
+const retiredSessions = new Set()
 // Only pending URL opens participate. A passive guest lookup never cancels a navigation.
 const pendingSidebarOpens = new Map()
 const activeRequests = new Set()
@@ -102,7 +104,7 @@ const activeRequests = new Set()
  * acceptance script compares this against the file's mtime and says so before testing anything.
  */
 const LOADED_AT = new Date().toISOString()
-const PROTOCOL = 3
+const PROTOCOL = 4
 
 /**
  * The DOM root of THIS conversation's sidebar, as JavaScript to embed in a page script.
@@ -206,25 +208,6 @@ async function evaluateInPanel(shellId, sessionId, method, params) {
   return { result: { value: text } }
 }
 
-/** Forget claims whose guest no longer exists, so a closed tab's id is not held forever. */
-function pruneClaims() {
-  const live = new Set(webContents.getAllWebContents().filter(c => c.getType() === 'webview').map(c => c.id))
-  for (const id of [...claims.keys()]) if (!live.has(id)) claims.delete(id)
-}
-
-/** The single ownership gate for every op that drives a guest: the ledger is the only proof. */
-async function assertGuestOwner(id, owner) {
-  pruneClaims()
-  if (claims.get(id) === owner) return
-  // A bridge restart, or a host that cached a guest id before the ledger existed, can leave a
-  // legitimate guest unclaimed. Ask the renderer once on this cold path and re-register it.
-  const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-  if (shell !== undefined && /^session-/.test(owner)) {
-    const ids = await panelGuestIds(shell, owner).catch(() => [])
-    if (ids.includes(id)) { claims.set(id, owner); return }
-  }
-  throw new Error(`guest ${id} is not held by this conversation`)
-}
 
 function guestById(id) {
   for (const contents of webContents.getAllWebContents()) {
@@ -561,6 +544,10 @@ async function panelGuestIds(shell, owner) {
 /** Handle one JSON request line; every answer is a JSON line too. */
 async function handle(request, signal) {
   signal?.throwIfAborted()
+  if (['owner', 'id', 'viewId', 'logicalViewId'].some(key => Object.hasOwn(request, key))) {
+    throw codedError('BROWSER_HANDLE_REQUIRED', 'the bridge requires canonical handles, not local ids')
+  }
+  const owner = ['ensureSidebar', 'cdp', 'download'].includes(request?.op) ? wireHandle(request.handle, 'tab').owner : undefined
   const controller = new AbortController()
   const checkCurrent = () => controller.signal.throwIfAborted()
   if (request?.op === 'ensureSidebar') request = { ...request,
@@ -568,7 +555,7 @@ async function handle(request, signal) {
     deadline: Number.isFinite(request.deadline) ? request.deadline : Date.now() + 30_000,
   }
   checkCurrent()
-  const shell = /^session-/.test(request?.owner) && ['ensureSidebar', 'cdp', 'download'].includes(request?.op)
+  const shell = /^session-/.test(owner)
     ? webContents.getAllWebContents().find(contents => contents.getType() === 'window') : undefined
   const token = randomBytes(16).toString('hex')
   let held
@@ -589,7 +576,7 @@ async function handle(request, signal) {
     if (shell !== undefined) {
       void release()
       if (request.op === 'ensureSidebar') {
-        void shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.cancelPanelInitialization?.(${JSON.stringify(request.owner)}, ${JSON.stringify(request.viewId)}, ${JSON.stringify(request.transactionId)})`)
+        void shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.cancelPanelInitialization?.(${JSON.stringify(owner)}, ${JSON.stringify(request.handle)}, ${JSON.stringify(request.transactionId)})`)
           .catch(error => console.error('[dsh-browser-bridge] initialization cancellation failed:', error))
       }
     }
@@ -607,7 +594,7 @@ async function handle(request, signal) {
         held = await shell.executeJavaScript(`(async () => {
           const api = globalThis.__dshBuiltinBrowser;
           if (typeof api?.holdRendering !== 'function') return false;
-          return api.holdRendering(${JSON.stringify(request.owner)}, ${JSON.stringify(token)});
+          return api.holdRendering(${JSON.stringify(owner)}, ${JSON.stringify(token)});
         })()`, true) === true
       }
       checkCurrent()
@@ -630,14 +617,15 @@ async function handle(request, signal) {
 async function handleRequest(request, checkCancelled, controller) {
   const op = String(request?.op ?? '')
   if (op !== 'ensureSidebar' && op !== 'cancelSidebar') return dispatch(request, checkCancelled)
-  const key = JSON.stringify([request.owner, request.viewId ?? null])
+  const scope = wireHandle(request.handle, 'tab')
+  const key = request.handle
   if (op === 'cancelSidebar') {
     const pending = pendingSidebarOpens.get(key)
     if (typeof request.transactionId !== 'string' || pending?.transactionId !== request.transactionId) return { ok: true, cancelled: false }
     pending.cancelled = true
     pending.abort()
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-    if (shell) await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.cancelPanelInitialization?.(${JSON.stringify(request.owner)}, ${JSON.stringify(request.viewId)}, ${JSON.stringify(request.transactionId)})`)
+    if (shell) await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.cancelPanelInitialization?.(${JSON.stringify(scope.owner)}, ${JSON.stringify(key)}, ${JSON.stringify(request.transactionId)})`)
     return { ok: true, cancelled: true }
   }
   const token = { transactionId: request.transactionId, cancelled: false,
@@ -646,24 +634,57 @@ async function handleRequest(request, checkCancelled, controller) {
   const checkCurrent = () => {
     checkCancelled?.()
     if (token.cancelled) throw codedError('BROWSER_NAVIGATION_CANCELLED', 'sidebar initialization was cancelled')
-    if (pendingSidebarOpens.get(key) !== token) {
-      throw codedError('panel-navigation-superseded', 'a newer navigation was requested for this sidebar view')
-    }
+    if (pendingSidebarOpens.get(key) !== token) throw codedError('panel-navigation-superseded', 'a newer navigation was requested for this sidebar view')
   }
+  try { return await dispatch(request, checkCurrent) }
+  finally { if (pendingSidebarOpens.get(key) === token) pendingSidebarOpens.delete(key) }
+}
+
+function wireHandle(wire, kind) {
+  const prefix = kind === 'tab' ? 'dsh-tab:v1:' : 'dsh-session:v1:'
+  let values
   try {
-    return await dispatch(request, checkCurrent)
-  } finally {
-    if (pendingSidebarOpens.get(key) === token) pendingSidebarOpens.delete(key)
+    if (typeof wire !== 'string' || !wire.startsWith(prefix)) throw new Error()
+    values = JSON.parse(decodeURIComponent(wire.slice(prefix.length)))
+    if (!Array.isArray(values) || values.length !== (kind === 'tab' ? 3 : 2)
+      || values.some(value => typeof value !== 'string' || value === '')) throw new Error()
+    if (prefix + encodeURIComponent(JSON.stringify(values)) !== wire) throw new Error()
+  } catch { throw codedError('BROWSER_HANDLE_INVALID', 'invalid or noncanonical browser handle') }
+  const [owner, session, tab] = values
+  const sessionKey = 'dsh-session:v1:' + encodeURIComponent(JSON.stringify([owner, session]))
+  if (retiredHandles.has(wire) || retiredSessions.has(sessionKey)) throw codedError('BROWSER_HANDLE_STALE', 'the browser handle was released')
+  return { owner, session, tab }
+}
+
+function retireHandle(handle) {
+  handles.delete(handle)
+  retiredHandles.add(handle)
+}
+
+function boundGuest(handle) {
+  wireHandle(handle, 'tab')
+  const entry = handles.get(handle)
+  if (!entry || entry.guest.isDestroyed() || guestById(entry.guest.id) !== entry.guest) {
+    retireHandle(handle)
+    throw codedError('BROWSER_HANDLE_STALE', 'the browser tab handle is stale; list tabs again')
   }
+  return entry.guest
+}
+
+function bindGuest(handle, guest) {
+  const scope = wireHandle(handle, 'tab')
+  const held = handles.get(handle)
+  if (held && held.guest !== guest) throw codedError('BROWSER_HANDLE_STALE', 'the browser tab was rebound; list tabs again')
+  for (const [key, entry] of handles) {
+    if (entry.guest === guest && key !== handle
+      && (entry.owner !== scope.owner || entry.session === scope.session)) retireHandle(key)
+  }
+  handles.set(handle, { ...scope, guest })
 }
 
 async function dispatch(request, checkCurrent) {
   checkCurrent?.()
   const op = String(request?.op ?? '')
-  // Who is asking. Declared once, for every op, because the first attempt at this put `owner` in
-  // the allocation path only and the reuse path — which every later call takes — stayed blind,
-  // so one session was handed another's page and counted another's tabs as its own.
-  const owner = typeof request?.owner === 'string' && request.owner !== '' ? request.owner : 'anonymous'
   // Which build is answering. The acceptance script asks this first, because everything else it
   // measures is meaningless if the host is still running the previous bridge.
   if (op === 'version') {
@@ -675,116 +696,63 @@ async function dispatch(request, checkCurrent) {
       mainExtension: typeof api?.mainExtensions?.status === 'function'
         ? await api.mainExtensions.status('dsh-builtin-browser') : { code: 'DESKTOP_MAIN_EXTENSION_UNSUPPORTED' } }
   }
+  const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
   if (op === 'list') {
-    pruneClaims()
-    const all = webContents.getAllWebContents().map(describe)
-    // A guest claimed by another owner is not this caller's to see or to drive. Its id, url and
-    // title are that session's business; handing them over is how a session came to list pages it
-    // never opened. The shell window is always reported: it is what every op drives.
-    const shell = webContents.getAllWebContents().find(g => g.getType() === 'window')
-    const panelIds = shell === undefined ? [] : await panelGuestIds(shell, owner)
-    for (const id of panelIds) {
-      // The host is authoritative about which guest its conversation panel is
-      // showing. Switching conversations reuses the SAME sidebar guest, so a
-      // claim left behind by the previous conversation has to MOVE, not linger.
-      // When it lingered, `list` reported zero pages for the new conversation,
-      // the reference pump never adopted the page, and the in-page cite bar
-      // silently stopped working (no error anywhere).
-      claims.set(id, owner)
-    }
-    const mineOrFree = all.filter(g => g.type !== 'webview'
-      || (claims.get(g.id) === owner && (!/^session-/.test(owner) || panelIds.includes(g.id))))
-    return {
-      ok: true,
-      protocol: PROTOCOL,
-      guests: mineOrFree,
-      sidebar: mineOrFree.filter(g => g.type === 'webview'),
-      frame: await sidebarFrameKind(shell?.id),
-    }
-  }
-  if (op === 'closePage') {
-    const id = Number(request.id)
-    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('closePage requires a numeric guest id')
-    const shell = webContents.getAllWebContents().find(g => g.getType() === 'window')
-    if (shell === undefined) throw new Error('no shell window to drive')
-    if (!(await panelGuestIds(shell, owner)).includes(id)) throw new Error('the page does not belong to this conversation panel')
-    pruneClaims()
-    if (claims.has(id) && claims.get(id) !== owner) throw new Error('the page belongs to another session')
-    const value = await shell.executeJavaScript(`(() => {
-      const api = globalThis.__dshBuiltinBrowser;
-      if (!api || typeof api.closePanelGuest !== 'function') {
-        throw new Error('sidebar close API is unavailable; refresh or upgrade the browser plugin client');
-      }
-      return JSON.stringify(api.closePanelGuest(${JSON.stringify(owner)}, ${id}));
-    })()`, true)
-    let answer
-    try { answer = JSON.parse(value) } catch { throw new Error('invalid sidebar close reply') }
-    if (answer?.ok !== true || answer.closed !== 1) throw new Error(String(answer?.reason ?? 'the sidebar did not close the requested page'))
-    const deadline = Date.now() + 2_000
-    while (Date.now() < deadline) {
+    const frame = await sidebarFrameKind(shell?.id)
+    if (request.handle === undefined) return { ok: true, protocol: PROTOCOL, frame }
+    const scope = wireHandle(request.handle, 'session')
+    const ids = shell === undefined ? [] : await panelGuestIds(shell, scope.owner)
+    const sidebar = []
+    for (const id of ids) {
       const guest = guestById(id)
-      if (guest === undefined || guest.isDestroyed()) {
-        claims.delete(id)
-        return { ok: true, closed: 1 }
+      if (!guest || guest.isDestroyed() || guest.getType() !== 'webview') continue
+      let handle
+      for (const [key, entry] of handles) {
+        if (entry.owner === scope.owner && entry.session === scope.session && entry.guest === guest) { handle = key; break }
       }
-      await new Promise(resolve => setTimeout(resolve, 50))
+      if (handle === undefined) handle = 'dsh-tab:v1:' + encodeURIComponent(JSON.stringify([scope.owner, scope.session, 'page:' + randomUUID()]))
+      bindGuest(handle, guest)
+      sidebar.push({ ...describe(guest), id: handle })
     }
-    throw new Error('the sidebar close action did not remove the requested page')
+    return { ok: true, protocol: PROTOCOL, sidebar, frame }
   }
-  if (op === 'cdp') {
-    const id = Number(request.id)
-    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('cdp requires a positive numeric guest id')
-    await assertGuestOwner(id, owner)
-    const result = await sendCdp(id, String(request.method ?? ''), request.params, checkCurrent)
-    return { ok: true, result, bridgeRequestId: request.bridgeRequestId }
+  const scope = wireHandle(request.handle, op === 'collapseSidebar' || op === 'releaseSession' ? 'session' : 'tab')
+  const owner = scope.owner
+  if (op === 'releaseTab') {
+    retireHandle(request.handle)
+    return { ok: true }
   }
-  if (op === 'download') {
-    const id = Number(request.id)
-    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('download requires a positive numeric guest id')
-    await assertGuestOwner(id, owner)
-    checkCurrent?.()
-    const guest = guestById(id)
-    if (guest === undefined || guest.isDestroyed() || guest.getType() !== 'webview') throw new Error('download guest is not available')
-    await downloadGuest(guest, request.url, request.savePath)
-    return { ok: true, path: request.savePath }
+  if (op === 'releaseSession') {
+    retiredSessions.add(request.handle)
+    for (const [key, entry] of handles) {
+      if (entry.owner === owner && entry.session === scope.session) retireHandle(key)
+    }
+    for (const [key, token] of pendingSidebarOpens) {
+      const values = JSON.parse(decodeURIComponent(key.slice('dsh-tab:v1:'.length)))
+      if (values[0] === owner && values[1] === scope.session) token.cancelled = true
+    }
+    return { ok: true }
   }
   if (op === 'ensureSidebar') {
-    // This conversation's OWN panel, opened through the shell's own navigation — never by
-    // simulating input.
-    //
-    // Every earlier version of this op drove the sidebar the way a human does: Ctrl+T, then a
-    // click on the 「浏览器」guide card, then typing into the address bar. All three land on the
-    // conversation the shell is DISPLAYING, because the shell routes keys and clicks to what it
-    // shows. So a page asked for while the human read another conversation was opened into THAT
-    // one, waiting for the screen to come back cost ten seconds, and when it never came back the
-    // retry loop left a tab per round. Three separate symptoms — "it opened in the wrong place",
-    // "it says it failed", "it opened a dozen browsers" — are one property of that path.
-    //
-    // The renderer can name the conversation instead. `openTabIn(sessionId, …)` is the shell's
-    // own navigation aimed at ONE conversation, and it does not read what is on screen at all —
-    // so this op no longer has an opinion about which conversation is displayed, and there is no
-    // path from here to somebody else's sidebar. DOM is not touched: the call is evaluated on the
-    // global the plugin's own client half published.
+    if (!shell) throw new Error('no shell window to drive')
+    if (!/^session-/.test(owner)) throw new Error('this host supplied no conversation id, so its own panel cannot be identified')
+    if (handles.has(request.handle)) boundGuest(request.handle)
     const url = request.url === undefined ? '' : String(request.url)
-    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-    if (shell === undefined) throw new Error('no shell window to drive')
-    if (!/^session-/.test(owner)) {
-      throw new Error('this host supplied no conversation id, so its own panel cannot be identified')
-    }
-
     const deadline = Number.isFinite(request.deadline) ? request.deadline : Date.now() + 30_000
-    const first = await evaluatePanelService(shell.id, owner, url,
-      typeof request.viewId === 'string' ? request.viewId : undefined, request.guestId, deadline, request.transactionId)
+    if (Date.now() >= deadline) throw codedError('BROWSER_INITIALIZATION_TIMEOUT', 'sidebar initialization deadline expired')
     checkCurrent?.()
-    if (Date.now() >= deadline) throw codedError('BROWSER_DOCUMENT_TIMEOUT', 'sidebar initialization deadline expired')
-    if (first.ok !== true) throw codedError(first.code ?? 'panel-initialization-failed', String(first.reason))
-    if (!Number.isSafeInteger(first.guestId) || first.guestId <= 0) {
-      throw codedError('BROWSER_DOCUMENT_UNACKNOWLEDGED', 'the sidebar did not acknowledge its native guest identity')
+    const first = await evaluatePanelService(shell.id, owner, url, request.handle, undefined, deadline, request.transactionId)
+    checkCurrent?.()
+    if (first.ok !== true) {
+      const error = codedError(first.code || (first.reason === 'panel-not-displayed' ? PANEL_NOT_DISPLAYED : 'panel-initialization-failed'), 'sidebar unavailable (' + String(first.reason ?? 'renderer refused initialization') + ')')
+      if (first.initialization) error.initialization = first.initialization
+      throw error
     }
+    if (first.guestId === null) throw codedError('BROWSER_DOCUMENT_UNACKNOWLEDGED', 'sidebar initialization did not acknowledge a guest')
     const guest = guestById(first.guestId)
-    if (!guest || guest.isDestroyed() || guest.getType() !== 'webview') {
-      throw codedError('BROWSER_GUEST_CLOSED', 'the acknowledged sidebar guest is gone')
-    }
+    if (!guest || guest.isDestroyed() || guest.getType() !== 'webview') throw codedError('BROWSER_GUEST_CLOSED', 'the acknowledged sidebar guest is gone')
+    const existing = handles.get(request.handle)
+    if (existing && existing.guest !== guest) throw codedError('BROWSER_HANDLE_STALE', 'the sidebar returned a replacement guest')
     let navigation
     if (first.rendererNavigation || (url !== '' && (first.created || first.navigating))) {
       if (first.initialization?.stage !== 'attached' || first.initialization.guestId !== String(first.guestId)) {
@@ -795,148 +763,17 @@ async function dispatch(request, checkCurrent) {
       if (!navigation) throw codedError('BROWSER_DOCUMENT_UNACKNOWLEDGED', 'the native guest did not acknowledge the requested document')
     }
     if (Date.now() >= deadline) throw codedError('BROWSER_DOCUMENT_TIMEOUT', 'sidebar initialization deadline expired')
-    claims.set(first.guestId, owner)
-    if (!request.attachOnly && !guestShows(first.guestId, url)) {
-      navigation = await sendCdp(first.guestId, 'Page.navigate', { url }, checkCurrent)
+    bindGuest(request.handle, guest)
+    if (!request.attachOnly && !guestShows(guest.id, url)) {
+      navigation = await sendCdp(guest.id, 'Page.navigate', { url }, checkCurrent)
       checkCurrent?.()
       if (navigation?.errorText) throw codedError('panel-navigation-failed', String(navigation.errorText))
     }
-    return { ok: true, created: first.created, id: first.guestId, via: 'panel', owner, ...navigation ? { navigation } : {} }
-  }
-  if (op === 'showTab') {
-    // Bring one browser guest to the front — the "switch to this tab" half of opening a page.
-    //
-    // Without this the desktop bridge had no way to satisfy `showView`, so its host
-    // implementation was an empty method and a newly opened page stayed behind whatever the
-    // human was looking at. Reported as issue #23; the other two carriers already did this
-    // (the self-hosted window re-adds the view, the system browser calls Page.bringToFront).
-    //
-    // The tab strip belongs to the renderer, so raising one means asking the sidebar to do it. A
-    // tab is matched by the title it shows, which is what the sidebar renders from the guest —
-    // the guest's id is not exposed in the DOM.
-    const viewId = Number(request.viewId)
-    if (!Number.isFinite(viewId)) throw new Error('showTab needs a viewId')
-    const guest = webContents.fromId(viewId)
-    if (guest === undefined) throw new Error(`showTab: no guest with id ${viewId}`)
-    // Only a guest this caller holds may be brought forward. Without the check, one session could
-    // switch the sidebar to another session's page — moving the human's view out from under it.
-    await assertGuestOwner(Number(viewId), owner)
-    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-    if (shell === undefined) throw new Error('no shell window to drive')
-    // Bind by the exact native guest rather than its title: several tabs can have the same title.
-    if (typeof request.logicalViewId === 'string' && request.logicalViewId !== '') {
-      const shown = await evaluatePanelService(shell.id, owner, '', request.logicalViewId, viewId)
-      if (shown.ok !== true || shown.guestId !== viewId) {
-        throw new Error('could not select the requested sidebar tab: ' + String(shown.reason ?? 'the requested guest is not displayed yet'))
-      }
-      return { ok: true, verdict: 'SELECTED' }
-    }
-    const wantTitle = String(guest.getTitle() ?? '').trim()
-    const clicked = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
-      expression: `(() => {
-        const scan = (root, out) => {
-          for (const node of root.querySelectorAll('button,[role=button],[role=tab],a')) {
-            out.push(node);
-            if (node.shadowRoot) scan(node.shadowRoot, out);
-          }
-          return out;
-        };
-        const nodes = scan(document, []);
-        for (const frame of Array.from(document.querySelectorAll('iframe'))) {
-          try { if (frame.contentDocument) scan(frame.contentDocument, nodes) } catch { /* cross-origin */ }
-        }
-        const label = (n) => ((n.getAttribute('aria-label') || '') + ' ' + (n.textContent || '') + ' ' + (n.getAttribute('title') || '')).trim();
-        const want = ${JSON.stringify(wantTitle)};
-        // Exact title first, then the tab-like control whose label contains it: a strip may
-        // decorate the label with a close button, and a prefix match would hit the wrong tab
-        // when one title contains another.
-        let hit = nodes.find(n => want !== '' && label(n) === want);
-        if (hit === undefined) hit = nodes.find(n => want !== '' && label(n).includes(want) && /tab|page|标签/i.test(n.getAttribute('role') || n.className || ''));
-        if (hit === undefined) hit = nodes.find(n => want !== '' && label(n).includes(want));
-        if (hit === undefined) return 'NO_TAB_FOR_TITLE';
-        hit.click();
-        return 'CLICKED';
-      })()`,
-      returnByValue: true,
-    })
-    const verdict = String(clicked?.result?.value ?? '')
-    if (verdict !== 'CLICKED') {
-      throw new Error(`could not bring the page to the front (${verdict}; wanted "${wantTitle}")`)
-    }
-    return { ok: true, verdict }
-  }
-  if (op === 'closeSidebarBrowser') {
-    // Release the sidebar's browser pages by closing the tabs that host them.
-    //
-    // This is the desktop equivalent of "close the browser window": the guests are destroyed, so
-    // that agent's session ends and its next use starts a fresh page. History survives — it is this
-    // plugin's own file on disk.
-    //
-    // Cookies do NOT survive on the shells measured so far, and this comment used to claim they did
-    // (reported as issue #36). The shell allocates the sidebar's partition as
-    // `dsh-sidebar-browser-<uuid>` with no `persist:` prefix, i.e. an in-memory session, so anything
-    // logged in inside the sidebar is logged out again at the next DSH start. That is the shell's
-    // choice, not something this bridge can change; a carrier whose cookies do persist is the
-    // installed Chrome/Edge one, which keeps its own profile.
-    //
-    // `titles` narrows the release to specific pages. It matters as soon as more
-    // than one session is running: each one owns its own tab (requirements §4), and
-    // ending one session must not tear down another's page. With no titles given the
-    // call means "release everything", which is only appropriate when the caller
-    // knows it owns them all.
-    //
-    // The comment above said that; the code below did not enforce it. It closed every webview
-    // whose title matched — and with no filter, EVERY webview — regardless of which session held
-    // it. So one session's `dsh_browser_reset_session` could destroy another session's page, which is
-    // the worst version of the bleed: not merely seeing someone else's tab, but closing it.
-    //
-    // Ownership is now the outer bound: only guests this owner holds are candidates at all, and
-    // the title filter narrows further within them.
-    pruneClaims()
-    const wanted = Array.isArray(request.titles) ? request.titles.map(title => String(title).slice(0, 24)).filter(title => title !== '') : undefined
-    const guests = webContents.getAllWebContents()
-      .filter(contents => contents.getType() === 'webview')
-      .filter(contents => claims.get(contents.id) === owner)
-    const titles = []
-    for (const guest of guests) {
-      try {
-        if (guest.isDestroyed()) continue
-        const title = guest.getTitle()
-        // With a filter, only the guest we intend to close contributes its title —
-        // otherwise a tab belonging to another session could match by accident.
-        if (wanted !== undefined && !wanted.some(w => title.startsWith(w))) continue
-        titles.push(title)
-      } catch { /* gone mid-read */ }
-    }
-    if (guests.length === 0) return { ok: true, closed: 0 }
-    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-    if (shell === undefined) throw new Error('no shell window to drive')
-    if (titles.length === 0 && wanted !== undefined) return { ok: true, closed: 0 }
-    const clicked = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
-      expression: `(() => {
-        const wanted = ${JSON.stringify(titles.map(title => title.slice(0, 24)))};
-        let closed = 0;
-        for (const tab of Array.from(document.querySelectorAll('[role=tab]'))) {
-          const label = (tab.textContent || '').trim();
-          if (!wanted.some(w => label.startsWith(w))) continue;
-          const own = Array.from(tab.querySelectorAll('button')).find(b => /关闭|close/i.test((b.getAttribute('aria-label') || '') + (b.getAttribute('title') || '')));
-          const sibling = Array.from(tab.parentElement ? tab.parentElement.querySelectorAll('button') : []).find(b => /关闭|close/i.test((b.getAttribute('aria-label') || '') + (b.getAttribute('title') || '')));
-          const button = own ?? sibling;
-          if (button !== undefined) { button.click(); closed += 1; }
-        }
-        return closed;
-      })()`,
-      returnByValue: true,
-    })
-    return { ok: true, closed: Number(clicked?.result?.value ?? 0) }
+    return { ok: true, created: first.created, id: request.handle, via: 'panel', ...navigation ? { navigation } : {} }
   }
   if (op === 'collapseSidebar') {
-    // An unscoped owner falls back to sendCdp(shell window), whose debugger attachment hangs.
+    if (!shell) throw new Error('no shell window to drive')
     if (!/^session-/.test(owner)) throw new Error('collapseSidebar requires a conversation id')
-    // Fold the sidebar away so the agent works without occupying the screen. The
-    // guest keeps running — collapsing is presentation, exactly as §3 asks.
-    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-    if (shell === undefined) throw new Error('no shell window to drive')
     const folded = await evaluateInPanel(shell.id, owner, 'Runtime.evaluate', {
       expression: `(() => {
         const button = Array.from(document.querySelectorAll('button')).find(b => /收起右侧边栏/.test((b.getAttribute('aria-label') || '') + (b.textContent || '')));
@@ -946,7 +783,50 @@ async function dispatch(request, checkCurrent) {
       })()`,
       returnByValue: true,
     })
-    return { ok: true, result: folded?.result?.value, bridgeRequestId: request.bridgeRequestId }
+    return { ok: true, result: folded?.result?.value ?? 'NOT_OPEN' }
+  }
+  if (op === 'adoptPage') {
+    if (!handles.has(request.handle)) {
+      const match = /^page:([1-9]\d*)$/.exec(scope.tab)
+      const ids = shell === undefined ? [] : await panelGuestIds(shell, owner)
+      const guest = match && ids.includes(Number(match[1])) ? guestById(Number(match[1])) : undefined
+      if (!guest || guest.isDestroyed() || guest.getType() !== 'webview') throw codedError('BROWSER_HANDLE_STALE', 'the source page is not in this conversation panel')
+      bindGuest(request.handle, guest)
+    }
+    boundGuest(request.handle)
+    return { ok: true, id: request.handle }
+  }
+  const guest = boundGuest(request.handle)
+  if (op === 'cdp') return { ok: true, result: await sendCdp(guest.id, String(request.method ?? ''), request.params, checkCurrent) }
+  if (op === 'download') {
+    await downloadGuest(guest, request.url, request.savePath)
+    return { ok: true, path: request.savePath }
+  }
+  if (op === 'showTab') {
+    if (!shell) throw new Error('no shell window to drive')
+    const shown = await evaluatePanelService(shell.id, owner, '', request.handle, guest.id)
+    if (shown.ok !== true || shown.guestId !== guest.id) throw new Error('could not select the requested sidebar tab: ' + String(shown.reason ?? 'the requested guest is not displayed yet'))
+    return { ok: true, verdict: 'SELECTED' }
+  }
+  if (op === 'closePage') {
+    if (!shell) throw new Error('no shell window to drive')
+    const value = await shell.executeJavaScript(`(() => {
+      const api = globalThis.__dshBuiltinBrowser;
+      if (!api || typeof api.closePanelGuest !== 'function') throw new Error('sidebar close API is unavailable; refresh or upgrade the browser plugin client');
+      return JSON.stringify(api.closePanelGuest(${JSON.stringify(owner)}, ${guest.id}));
+    })()`, true)
+    let answer
+    try { answer = JSON.parse(value) } catch { throw new Error('invalid sidebar close reply') }
+    if (answer?.ok !== true || answer.closed !== 1) throw new Error(String(answer?.reason ?? 'the sidebar did not close the requested page'))
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+      if (guestById(guest.id) !== guest || guest.isDestroyed()) {
+        for (const [key, entry] of handles) if (entry.guest === guest) retireHandle(key)
+        return { ok: true, closed: 1 }
+      }
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    throw new Error('the sidebar close action did not remove the requested page')
   }
   throw new Error(`unknown op ${JSON.stringify(op)}`)
 }

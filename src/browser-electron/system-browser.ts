@@ -87,6 +87,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
 import type { CarrierPage } from '../browser/types.ts'
+import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserSessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 
 /** Which browser the user asked for. */
 export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'auto' | 'sidebar'
@@ -1029,7 +1030,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   async listPages(
     // The installed browser is one shared instance, not a per-conversation
     // panel, so ownership does not scope its listing.
-    _owner?: string,
+    scope: BrowserSessionWireId,
     options: { readonly requireRunning?: boolean } = {},
   ): Promise<readonly CarrierPage[]> {
     // Looking for a page must never START the human's browser. Before this
@@ -1048,7 +1049,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         .filter(entry => !/^edge:\/\/sync-confirmation-dialog(?:\/|$)/.test(entry.url ?? ''))
         .filter(entry => !ours.has(entry.targetId as string))
         .map(entry => ({
-          id: entry.targetId as string,
+          id: tabWireId({ ...resolveSessionHandle(scope), tab: `page:${entry.targetId as string}` }),
           url: typeof entry.url === 'string' ? entry.url : '',
           ...typeof entry.title === 'string' && entry.title !== '' ? { title: entry.title } : {},
         }))
@@ -1066,13 +1067,19 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * asked for it to be closed and it is, so that is not an error.
    * @param id - the CDP target id.
    */
-  async closePage(id: string): Promise<void> {
+  async closePage(id: BrowserTabWireId, scope = sessionWireId(readTabHandle(id))): Promise<void> {
+    const identity = resolveTabHandle(resolveSessionHandle(scope), id)
     const client = await this.ensureClient()
-    await client.send('Target.closeTarget', { targetId: id }).catch(() => undefined)
+    const view = this.views.get(id)
+    const targetId = view === undefined ? identity.tab.replace(/^page:/, '') : this.sessions.get(view.session)
+    if (targetId === undefined) throw new Error('dsh-builtin-browser: browser page is stale')
+    const answer = await client.send('Target.closeTarget', { targetId }) as { success?: boolean }
+    if (answer.success !== true) throw new Error('dsh-builtin-browser: browser close was not acknowledged')
   }
 
-  createView(): ElectronViewHandle {
-    const viewId = randomUUID()
+  createView(identity?: BrowserTabWireId): ElectronViewHandle {
+    const viewId = identity ?? tabWireId({ owner: 'standalone', session: randomUUID(), tab: randomUUID() })
+    readTabHandle(viewId)
     return {
       id: viewId,
       // This is the real browser, not Electron: CDP's JPEG encoder works here, so the
@@ -1369,8 +1376,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * @param targetId - the carrier's page id, which for this carrier IS the CDP target id.
    * @returns a handle for that page, in the same shape {@link createView} returns.
    */
-  async adoptPage(targetId: string): Promise<ElectronViewHandle> {
-    const handle = this.createView()
+  async adoptPage(identity: BrowserTabWireId, scope = sessionWireId(readTabHandle(identity))): Promise<ElectronViewHandle> {
+    const tab = resolveTabHandle(resolveSessionHandle(scope), identity).tab
+    if (!tab.startsWith('page:')) throw new Error('dsh-builtin-browser: invalid carrier page handle')
+    const targetId = tab.slice('page:'.length)
+    const handle = this.createView(identity)
     const client = await this.ensureClient()
     const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
     const sessionId = attached?.sessionId

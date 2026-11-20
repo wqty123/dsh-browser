@@ -57,7 +57,7 @@ test('registered tools round-trip listed tab handles, refuse foreign/stale handl
   assert.deepEqual((await run('session')).tabs, listed.tabs)
   assert.match((await run('session')).session, /^dsh-session:v1:/)
   assert.deepEqual(await run('switch_tab', { tabId: id }), { switched: true })
-  assert.deepEqual(calls, [['switch', 'owner:1', 'page:42']])
+  assert.deepEqual(calls, [['switch', 'owner:1', id]])
   await assert.rejects(run('switch_tab', { tabId: id }, 'other'), /owner\/session/)
   await assert.rejects(run('close_tab', { tabId: 'page:42' }), /invalid tab handle/)
   assert.equal(calls.length, 1, 'refused handles never reach the provider')

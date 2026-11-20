@@ -1,3 +1,4 @@
+import { testTab, testScope, tabIn } from './canonical-fixtures.mjs'
 // A desktop shell that exits leaves its endpoint file behind.
 //
 // The file is the ONLY thing that says where the bridge is, so a tombstone in it names a port
@@ -73,7 +74,7 @@ test('a borrowed carrier reports its loss and reconnects only the sidebar', asyn
   let discoveries = 0
   const h = carrierHarness(t, { discover: async () => ++discoveries === 1 ? first : second })
   const host = h.current
-  const view = host.createView('session-owner')
+  const view = host.createView(testTab('session-owner'))
   await view.sendCommand('Runtime.evaluate')
   first.lose('shell-exited')
   assert.equal(first.disposed, false)

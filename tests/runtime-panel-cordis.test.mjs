@@ -1,3 +1,4 @@
+import { testScope, tabIn } from './canonical-fixtures.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -22,13 +23,14 @@ test('navigation readiness binds and highlights through the live Cordis panel se
   const folder = mkdtempSync(join(tmpdir(), 'dsh-cordis-reveal-'))
   t.after(() => rmSync(folder, { recursive: true, force: true }))
   const owner = '79b4e5bd-5bf4-49f3-b911-5d1a92b7002b'
+  const session = testScope(`session-${owner}`, 'browser:live')
   const url = 'https://www.runoob.com/html/html-lists.html'
   const calls = []
   let ready = false, highlighted = false
   ctx.browser.registerBrowserProvider({ id: 'default', available: () => true, exists: () => false })
   ctx.browser.registerPanelProvider(async () => ({
     id: 'live-sidebar',
-    open: async label => { calls.push(['open', label]); return 'browser:live' },
+    open: async label => { calls.push(['open', label]); return session },
     exists: () => true,
     close: async id => { calls.push(['close', id]) },
     bindPage: async (session, pageId) => {
@@ -36,7 +38,7 @@ test('navigation readiness binds and highlights through the live Cordis panel se
       calls.push(['bind', session, pageId])
     },
     execute: async (session, request) => {
-      assert.equal(session, 'browser:live')
+      assert.equal(session, testScope(`session-${owner}`, 'browser:live'))
       assert.equal(ready, true)
       if (request.script.includes('text: map.text, truncated: map.truncated')) return { ok: true, value: { text: 'before selected words after' } }
       if (!request.script.includes('return JSON.stringify(highlightText(spec))')) {
@@ -87,7 +89,7 @@ test('navigation readiness binds and highlights through the live Cordis panel se
   const outcome = await reveal(page.pageId)
   assert.equal(outcome.status, 'revealed', JSON.stringify(outcome))
   assert.equal(highlighted, true)
-  assert.deepEqual(calls, [['navigate', url], ['open', `session-${owner}`], ['bind', 'browser:live', '2']])
+  assert.deepEqual(calls, [['navigate', url], ['open', `session-${owner}`], ['bind', session, tabIn(session, 'page:2')]])
 })
 
 test('Cordis panel registration may be absent or return no controllable surface', async t => {

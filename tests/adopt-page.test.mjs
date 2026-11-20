@@ -15,7 +15,7 @@ test('opening a URL that is already open binds that page instead of creating ano
   assert.ok(at !== -1, 'the reuse path exists')
   const block = source.slice(at, at + 2200)
 
-  assert.match(block, /this\.host\.adoptPage\(match\.id, s\.label\)/, 'it adopts the carrier page for its owning conversation')
+  assert.match(block, /this\.host\.adoptPage\(this\.carrierTab\(s, match\.id\), this\.carrierScope\(s\)\)/, 'it adopts the canonical carrier page for its session')
   assert.match(block, /s\.tabs\.push\(tab\)/, 'and binds it into the session')
   assert.match(block, /s\.activeIndex = s\.tabs\.length - 1/, 'as the active tab')
   // Both halves of the carrier surface are optional; without either, the old behaviour is correct.

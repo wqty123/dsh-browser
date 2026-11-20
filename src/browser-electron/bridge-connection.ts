@@ -20,6 +20,17 @@ import { readFileSync } from 'node:fs'
  */
 
 import { connect, type Socket } from 'node:net'
+import type { BrowserSessionWireId, BrowserTabWireId } from '../browser/handles.ts'
+
+export type BridgeRequest =
+  | { readonly op: 'version' }
+  | { readonly op: 'list'; readonly handle?: BrowserSessionWireId }
+  | { readonly op: 'collapseSidebar' | 'releaseSession'; readonly handle: BrowserSessionWireId }
+  | { readonly op: 'ensureSidebar'; readonly handle: BrowserTabWireId; readonly deadline: number; readonly transactionId: string; readonly url?: string; readonly attachOnly?: boolean }
+  | { readonly op: 'cancelSidebar'; readonly handle: BrowserTabWireId; readonly transactionId: string }
+  | { readonly op: 'adoptPage' | 'closePage' | 'showTab' | 'releaseTab'; readonly handle: BrowserTabWireId }
+  | { readonly op: 'download'; readonly handle: BrowserTabWireId; readonly url: string; readonly savePath: string }
+  | { readonly op: 'cdp'; readonly handle: BrowserTabWireId; readonly method: string; readonly params?: Record<string, unknown> }
 
 /** Where the shell publishes its bridge endpoint. */
 export interface BridgeEndpoint {
@@ -171,7 +182,7 @@ export class BridgeConnection {
    * @param timeoutMs - how long to wait for the answer before dropping the socket.
    * @returns the bridge's answer.
    */
-  async call(request: Record<string, unknown>, timeoutMs = 20_000): Promise<Record<string, unknown>> {
+  async call(request: BridgeRequest, timeoutMs = 20_000): Promise<Record<string, unknown>> {
     // One re-dial, and only for the case this exists for: a socket that has already carried
     // an id-less answer cannot have a second request in flight, because two outstanding
     // requests would be matched by position — the swap this correlation prevents. It is a

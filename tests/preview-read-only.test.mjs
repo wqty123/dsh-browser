@@ -18,6 +18,7 @@ import { join } from 'node:path'
 import { BrowserPanelNotDisplayedError, DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
 import { DEFAULT_SETTINGS } from '../lib/browser-electron/settings-store.js'
+import { testTab, testScope } from './canonical-fixtures.mjs'
 
 /** A host whose single view records the options each command was sent with. */
 function makeHost() {
@@ -108,13 +109,14 @@ async function startFakeBridge(answers = {}) {
         const answer = (() => {
           if (request.op === 'list') {
             const sidebar = answers.sidebar ?? []
-            return { ok: true, guests: sidebar, sidebar, frame: 'webview' }
+            return { ok: true, protocol: 4, sidebar, frame: 'webview' }
           }
           if (request.op === 'ensureSidebar') {
             // Reaching here for a preview is the bug: this op can drive the shell.
             return { ok: true, id: 7, created: false }
           }
           if (request.op === 'cdp') return { ok: true, result: { data: 'AAAA' } }
+          if (request.op === 'adoptPage') return { ok: true, id: request.handle }
           return { ok: false, error: `unknown op ${String(request.op)}` }
         })()
         socket.write(JSON.stringify(answer) + '\n')
@@ -146,7 +148,8 @@ function withEndpoint(port) {
 test('a non-presenting command reads the page list instead of asking the shell to present', async () => {
   // `list` is a pure read on EVERY bridge version, including the pre-#37 ones that drove the sidebar
   // like a human when asked to ensure it. That is what makes the preview safe on an old install.
-  const bridge = await startFakeBridge({ sidebar: [{ id: 9, type: 'webview', url: 'https://example.com/', title: 'E' }] })
+  const id = testTab('session-a')
+  const bridge = await startFakeBridge({ sidebar: [{ id, url: 'https://example.com/', title: 'E' }] })
   writeFileSync(join(withEndpoint(bridge.port), 'dsh-builtin-browser-bridge.json'),
     JSON.stringify({ port: bridge.port, token: 'test-token', pid: process.pid }))
   let host
@@ -155,15 +158,15 @@ test('a non-presenting command reads the page list instead of asking the shell t
     assert.ok(host !== undefined, 'the bridge is discovered')
     // `discover` itself reads the list once (owner-less liveness probe); count only what follows.
     const baseline = bridge.requests.filter(request => request.op === 'list').length
-    const view = host.createView('session-a')
+    const view = await host.adoptPage(id)
     const result = await view.sendCommand('Page.captureScreenshot', { format: 'jpeg' }, { present: false })
     assert.deepEqual(result, { data: 'AAAA' }, 'the command reached the page')
 
     const lookups = bridge.requests.filter(request => request.op === 'ensureSidebar')
     assert.equal(lookups.length, 0, 'the presenting op is never sent for a read-only command')
     const listed = bridge.requests.filter(request => request.op === 'list')
-    assert.equal(listed.length - baseline, 1, 'one extra read of the page list instead')
-    assert.equal(listed.at(-1).owner, 'session-a', 'scoped to the conversation that asked')
+    assert.equal(listed.length - baseline, 0, 'a bound handle needs no presenting lookup')
+    assert.equal(bridge.requests.find(request => request.op === 'cdp').handle, id)
   } finally {
     host?.dispose()
     await bridge.close()
@@ -178,7 +181,7 @@ test('a conversation with no attached page reports as a display state, without p
   try {
     host = await DesktopBridgeViewHost.discover('session-a')
     assert.ok(host !== undefined)
-    const view = host.createView('session-a')
+    const view = host.createView(testTab('session-a'))
     await assert.rejects(
       view.sendCommand('Page.captureScreenshot', {}, { present: false }),
       error => {

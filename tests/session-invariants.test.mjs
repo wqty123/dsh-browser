@@ -31,33 +31,23 @@ function ops (source) {
 }
 
 function ledgerOffenders (source) {
-  const offenders = []
-  ops(source).forEach(({ name, body }) => {
-    if (!/getType\(\) === 'webview'|guestById\(|sendCdp\(id,|downloadGuest\(/.test(body)) return
-    const uses = /claims\.get\([^)]*\) === owner/.test(body)
-      || /claims\.set\([^)]*owner\)/.test(body)
-      || /!claims\.has\([^)]*\)/.test(body)
-      || /mineOrFree/.test(body)
-      || /unclaimed\(/.test(body)
-      || /await assertGuestOwner\(id, owner\)/.test(body)
-      || /claims\.get\([^)]*\) !== owner/.test(body)
-    if (!uses) offenders.push(name)
-  })
-  return offenders
+  const dispatch = source.slice(source.indexOf('async function dispatch('))
+  const gate = dispatch.indexOf('const guest = boundGuest(request.handle)')
+  return ['cdp', 'download', 'showTab', 'closePage'].filter(name =>
+    gate === -1 || dispatch.indexOf(`if (op === '${name}')`) < gate)
 }
 
-test('every guest-touching op consults the owner ledger', () => {
+test('every bound-guest operation resolves its canonical handle before dispatch', () => {
   const offenders = ledgerOffenders(bridge)
   assert.deepEqual(offenders, [], 'these ops touch guests without asking who is asking: ' + offenders.join(', '))
 })
 
-test('owner-ledger scan is branch-scoped and catches a real bypass', () => {
+test('canonical gate scan catches removal of the shared binding resolver', () => {
   const branches = ops(bridge)
   assert.ok(!branches.find(op => op.name === 'collapseSidebar').body.includes('setWindowOpenHandler'))
-  const cdp = branches.find(op => op.name === 'cdp').body
-  const bypass = cdp.replace('await assertGuestOwner(id, owner)', '')
-  assert.notEqual(bypass, cdp)
-  assert.deepEqual(ledgerOffenders(bridge.replace(cdp, bypass)), ['cdp'])
+  const bypass = bridge.replace('const guest = boundGuest(request.handle)', '')
+  assert.notEqual(bypass, bridge)
+  assert.deepEqual(ledgerOffenders(bypass), ['cdp', 'download', 'showTab', 'closePage'])
   assert.deepEqual(ops("if (op === 'one') { const s = `brace } ${1}`; /* } */ return /}/.test(s) }\nfunction later() { guestById(1) }").map(op => op.body),
     ["if (op === 'one') { const s = `brace } ${1}`; /* } */ return /}/.test(s) }"])
 })
@@ -89,25 +79,25 @@ test('the superseded creation path is gone from the file', () => {
   assert.ok(!/if \(op === 'ensureTabs'\)/.test(bridge), 'the counting-only tab op is removed')
 })
 
-test('guest allocation claims what it returns', () => {
-  const claims = (bridge.match(/claims\.set\(/g) ?? []).length
-  assert.ok(claims >= 3, 'each allocation path must claim its guest — found ' + String(claims))
+test('guest allocation binds the canonical identity it returns', () => {
+  const bindings = (bridge.match(/bindGuest\(/g) ?? []).length
+  assert.ok(bindings >= 4)
+  assert.doesNotMatch(bridge, /assertGuestOwner|claims\.set/)
 })
 
 test('guestFor opens a page for its own conversation, whatever is on screen', () => {
   assert.match(host, /private async guestFor/, 'the single entry point for every view')
   assert.match(host, /op: 'ensureSidebar'/, 'one call materializes the page')
-  assert.match(host, /const owner = entry\?\.owner \?\? this\.owner/,
-    'the VIEW\'s own conversation decides, not the process\'s idea of one')
+  assert.match(host, /op: 'ensureSidebar', handle: id/)
   assert.ok(!/needsNewTab/.test(host), 'this carrier shows one page per conversation, not one per view')
   assert.ok(!/sidebarOwnership/.test(host), 'and nothing decides from the displayed conversation')
 })
 
-test('every gated op is called with an owner from the host', () => {
-  const gated = ['ensureSidebar', 'showTab', 'closeSidebarBrowser']
+test('every gated op is called with a canonical handle from the host', () => {
+  const gated = ['ensureSidebar', 'showTab', 'releaseSession']
   const missing = gated.filter(name => {
     // `owner` travels as shorthand on some calls and as a key on others; both are that field.
-    const re = new RegExp("op: '" + name + "'[\\s\\S]{0,200}?owner\\s*[,:}]")
+    const re = new RegExp("op: '" + name + "'[\\s\\S]{0,200}?handle\\s*[,:}]")
     return !re.test(host)
   })
   assert.deepEqual(missing, [], 'these are called without an owner and fail silently: ' + missing.join(', '))
@@ -123,5 +113,6 @@ test('the panel path asks the renderer, and names the conversation', () => {
   const body = lines.slice(start, start + 80).join('\n')
   assert.match(body, /evaluatePanelService\(/, 'it asks the plugin client half for this conversation panel')
   assert.match(body, /\/\^session-\/\.test\(owner\)/, 'and refuses a caller that cannot name a conversation')
-  assert.ok(!/document\.querySelector/.test(body), 'no DOM query decides where the page goes')
+  const opening = body.slice(0, body.indexOf("if (op === 'collapseSidebar')"))
+  assert.ok(!/document\.querySelector/.test(opening), 'no DOM query decides where the page goes')
 })

@@ -63,6 +63,7 @@ import type {
   ExportedCookie,
 } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
+import { browserSessionHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserTabWireId } from '../browser/handles.ts'
 import type { CarrierPage, CarrierLossReason } from '../browser/types.ts'
 import type { BrowserReferenceTarget } from '../browser-reference/types.ts'
 
@@ -138,6 +139,7 @@ export const ELECTRON_BROWSER_PROVIDER_ID = 'electron'
  */
 export interface ElectronBrowserViewHost {
   readonly referenceOverlayOwner?: 'client'
+  retireSession?(scope: BrowserSessionId): Promise<void>
   /**
    * Create a new browser view and return a handle to its webContents-like
    * surface. The host owns windowing (adding the view to the window, sizing,
@@ -148,7 +150,7 @@ export interface ElectronBrowserViewHost {
    *   single instance that every conversation runs through, so an owner held there would be one
    *   conversation's id applied to all of them.
    */
-  createView(owner?: string): ElectronViewHandle
+  createView(identity: BrowserTabWireId): ElectronViewHandle
   /**
    * Destroy a view created by this host. Called on session close; idempotent
    * for an already-destroyed view.
@@ -207,7 +209,7 @@ export interface ElectronBrowserViewHost {
    *   nobody asked for.
    * @returns every page this conversation's carrier holds that this host did not open.
    */
-  listPages?(owner?: string, options?: { readonly requireRunning?: boolean }): Promise<readonly CarrierPage[]>
+  listPages?(scope: BrowserSessionId, options?: { readonly requireRunning?: boolean }): Promise<readonly CarrierPage[]>
   /**
    * Optional: take over one page reported by {@link listPages}, so it becomes a page this provider
    * drives rather than one it can only see.
@@ -221,9 +223,7 @@ export interface ElectronBrowserViewHost {
    * @param id - the carrier's own page id, as {@link listPages} reported it.
    * @returns a handle for that page, usable for commands like any other view's.
    */
-  adoptPage?(id: string, owner?: string): Promise<ElectronViewHandle>
-  /** Adopt the conversation id when it becomes known after construction. */
-  setOwner?(owner: string): void
+  adoptPage?(id: BrowserTabWireId, scope?: BrowserSessionId): Promise<ElectronViewHandle>
   /**
    * Optional: close one page reported by {@link listPages}.
    *
@@ -233,7 +233,7 @@ export interface ElectronBrowserViewHost {
    * @param id - the carrier's own page id, as {@link listPages} reported it.
    * @param owner - the same task/conversation used for listing; never a global fallback.
    */
-  closePage?(id: string, owner?: string): Promise<void>
+  closePage?(id: BrowserTabWireId, scope?: BrowserSessionId): Promise<void>
   /**
    * Optional cheap usability probe (no network): whether the host can back
    * views at all right now. The self-hosted host checks for a usable Electron
@@ -294,7 +294,7 @@ export interface ElectronBrowserViewHost {
    * @param owner - the conversation whose pages to close. Omit to close every conversation's,
    *   which is only correct from a teardown that is itself global.
    */
-  releasePage?(owner?: string): Promise<void>
+  releasePage?(scope?: BrowserSessionId): Promise<void>
   /**
    * Report that this carrier can no longer serve anything, so its owner may replace it.
    *
@@ -437,7 +437,7 @@ export interface ElectronViewHandle {
  * A failed guest stays attached to its tab until the caller explicitly closes or resets it.
  */
 interface Tab {
-  readonly id: string
+  readonly id: BrowserTabWireId
   readonly handle: ElectronViewHandle
   url: string
   navigation?: symbol
@@ -1061,9 +1061,6 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const label = typeof configured === 'function' ? configured() : configured
     this.referenceScan.label = label
     if (label === undefined || label === '') return
-    // Ownership before anything else: this host may have been built before the
-    // conversation existed, and every bridge command is refused without the right id.
-    this.host.setOwner?.(label)
     if (this.host.listPages === undefined || this.host.adoptPage === undefined) {
       this.referenceScan.lastError = 'this carrier cannot list or adopt a page it did not open'
       return
@@ -1074,11 +1071,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // the next scan adopts it). The listing is a local bridge call, not a
     // network request, so this is cheap.
     this.referenceScanCountdown = 1
+    let session = this.referenceSession === undefined ? undefined : this.sessions.get(this.referenceSession)
+    if (session?.label !== label) session = undefined
+    const candidate: Session = session ?? {
+      id: sessionWireId(browserSessionHandle(label, randomUUID())), label,
+      tabs: [], activeIndex: 0, history: [], nextSeq: 1,
+    }
     let pages: readonly CarrierPage[]
     try {
       // `requireRunning` is what keeps a scan from launching the human's
       // installed browser: only a carrier that is already up can have pages.
-      pages = await this.host.listPages(label, { requireRunning: true })
+      pages = await this.host.listPages(this.carrierScope(candidate), { requireRunning: true })
     } catch (error) {
       this.referenceScan.lastError = error instanceof Error ? error.message : String(error)
       return
@@ -1096,10 +1099,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
       this.referenceScan.lastError = 'no http page is open in this conversation\'s sidebar'
       return
     }
-    let session = this.referenceSession === undefined ? undefined : this.sessions.get(this.referenceSession)
     let refused: string | undefined
     for (const page of live) {
-      const tabId = `page:${page.id}`
+      const tabId = this.carrierTab(candidate, page.id)
       const existing = session?.tabs.find(tab => tab.id === tabId)
       if (existing !== undefined) {
         // A navigation changes the URL of a page we already hold.
@@ -1109,12 +1111,11 @@ export class ElectronBrowserProvider implements BrowserProvider {
       try {
         // The owner is passed so the adopted view is released with THIS
         // conversation and not swept up by, or lost to, another one.
-        const handle = await this.host.adoptPage(page.id, label)
+        const handle = await this.host.adoptPage(this.carrierTab(candidate, page.id), this.carrierScope(candidate))
         if (session === undefined) {
-          const id = `browser:${randomUUID()}` as BrowserSessionId
-          session = { id, label, tabs: [], activeIndex: 0, history: [], nextSeq: 1 }
-          this.sessions.set(id, session)
-          this.referenceSession = id
+          session = candidate
+          this.sessions.set(session.id, session)
+          this.referenceSession = session.id
         }
         // Append only: discovery must never switch the page the human is
         // looking at, nor open a tab they did not ask for.
@@ -1190,23 +1191,25 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // The label is the calling DSH task, and it is handed to the view as its owner: a host shared
     // by several conversations (the desktop's) keeps one conversation's page out of another's on
     // the strength of it, so it is not decoration.
-    const handle = this.host.createView(label)
-    const id = `browser:${randomUUID()}`
+    const id = sessionWireId(browserSessionHandle(label || 'default', randomUUID()))
+    const tabId = tabWireId({ ...resolveSessionHandle(id), tab: randomUUID() })
+    const handle = this.host.createView(tabId)
     // Group the session's views under its own window (one window per
     // session), carrying the label for the window title. Hosts without
     // groupView keep the shared-window behavior.
     this.host.groupView?.(handle, id, label)
-    this.sessions.set(id, { id, label, tabs: [{ id: `tab:${randomUUID()}`, handle, url: '' }], activeIndex: 0, history: [], nextSeq: 1 })
+    this.sessions.set(id, { id, label, tabs: [{ id: tabId, handle, url: '' }], activeIndex: 0, history: [], nextSeq: 1 })
     return Promise.resolve(id)
   }
 
-  async bindPage(session: BrowserSessionId, pageId: string): Promise<void> {
+  async bindPage(session: BrowserSessionId, pageId: BrowserTabWireId): Promise<void> {
     const s = this.session(session)
     if (this.host.adoptPage === undefined || !s.label) throw new Error('sidebar page binding unsupported')
     if (s.tabs.some(tab => tab.url !== '')) throw new Error('source binding requires a fresh browser session')
-    const handle = await this.host.adoptPage(pageId, s.label)
+    const id = tabWireId(resolveTabHandle(resolveSessionHandle(s.id), pageId))
+    const handle = await this.host.adoptPage(id, this.carrierScope(s))
     const previous = [...s.tabs]
-    s.tabs.splice(0, s.tabs.length, { id: `page:${pageId}`, handle, url: '' })
+    s.tabs.splice(0, s.tabs.length, { id: this.carrierTab(s, id), handle, url: '' })
     s.activeIndex = 0
     for (const tab of previous) this.destroyTab(tab)
   }
@@ -1265,7 +1268,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (wanted === undefined) return false
     let pages: readonly CarrierPage[]
     try {
-      pages = await this.host.listPages(s.label)
+      pages = await this.host.listPages(this.carrierScope(s))
     } catch {
       // A listing must not turn "nothing to reuse" into "open failed".
       return false
@@ -1275,7 +1278,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (match === undefined) return false
     let handle: ElectronViewHandle
     try {
-      handle = await this.host.adoptPage(match.id, s.label)
+      handle = await this.host.adoptPage(this.carrierTab(s, match.id), this.carrierScope(s))
     } catch {
       // The page went away between listing and adopting: fall through to an ordinary navigation.
       return false
@@ -1284,7 +1287,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       this.host.destroyView(handle, { keepPage: true })
       this.checkNavigation(target, navigation)
     }
-    const tab: Tab = { id: `page:${match.id}`, handle, url: match.url, navigation, navigationAbort: target.navigationAbort }
+    const tab: Tab = { id: this.carrierTab(s, match.id), handle, url: match.url, navigation, navigationAbort: target.navigationAbort }
     delete target.navigationAbort
     s.tabs.push(tab)
     s.activeIndex = s.tabs.length - 1
@@ -1333,36 +1336,33 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // `dsh_browser_close_tab`, so they accumulated for the life of the browser. Measured on the
     // sidebar carrier: three clicks produced three webview guests while this listed one tab.
     //
-    // `listPages` already excludes the pages it opened the view for — that filtering cannot happen
-    // here, because a tab is known by this provider's own id and a carrier page by the carrier's,
-    // and the two never match. A first version compared them anyway and listed every page twice.
-    //
-    // They are appended under a `page:` prefix so a caller can tell the two kinds apart — the
-    // prefix is also what `closeTab` uses to decide whether to close a view or a carrier page.
-    const pages = await this.host.listPages?.(s.label) ?? []
+    // Hosts exclude pages already attached to provider views.
+    const pages = await this.host.listPages?.(this.carrierScope(s)) ?? []
     for (const page of pages) {
       // A page with no URL is a blank one the carrier opened for itself. Listing it would invite a
       // caller to act on nothing, and the blank normalisation already closes those.
       if (page.url === '' || page.url === 'about:blank') continue
-      result.push({ id: `page:${page.id}`, url: page.url, active: false })
+      result.push({ id: this.carrierTab(s, page.id), url: page.url, active: false })
     }
     return result
   }
 
   /** Switch to a tab by id, making its view visible. */
-  async switchTab(session: BrowserSessionId, tabId: string): Promise<void> {
+  async switchTab(session: BrowserSessionId, tabId: BrowserTabWireId): Promise<void> {
     const s = this.session(session)
     // A page the carrier owns. Before this, switching to one threw "not open in this session" —
     // while `dsh_browser_list_tabs` was happily listing it, so the two tools disagreed and the
     // page the human was looking at could not be reached (reported as a defect).
-    if (tabId.startsWith('page:')) {
+    const carrierId = this.carrierId(s, tabId)
+    if (carrierId !== undefined) {
       const existing = s.tabs.findIndex(tab => tab.id === tabId)
       if (existing !== -1) {
+        await this.host.presentView?.(s.tabs[existing]!.handle, s.label, { quiet: this.isQuiet(), select: true })
         s.activeIndex = existing
         this.showActive(s, true)
         return
       }
-      const id = tabId.slice('page:'.length)
+      const id = carrierId
       if (this.host.adoptPage === undefined) {
         throw new BrowserError(
           'browser: this carrier cannot hand over a page it opened itself, so that page cannot be driven. '
@@ -1370,15 +1370,16 @@ export class ElectronBrowserProvider implements BrowserProvider {
           'BROWSER_TAB_NOT_FOUND',
         )
       }
-      const pages = await this.host.listPages?.(s.label).catch(() => []) ?? []
+      const pages = await this.host.listPages?.(this.carrierScope(s)).catch(() => []) ?? []
       const page = pages.find(candidate => candidate.id === id)
-      const handle = await this.host.adoptPage(id, s.label)
+      const handle = await this.host.adoptPage(id, this.carrierScope(s))
       try {
         // An adopted guest already has a document. Marking it as our never-opened
         // blank view makes the first snapshot/a11y return without reading it.
         const url = page?.url || await this.currentUrl(handle)
         if (url === '') throw new BrowserError('browser: the adopted page did not report its document URL', 'BROWSER_TAB_NOT_FOUND')
         const tab: Tab = { id: tabId, handle, url }
+        await this.host.presentView?.(handle, s.label, { quiet: this.isQuiet(), select: true })
         s.tabs.push(tab)
         s.activeIndex = s.tabs.length - 1
         this.showActive(s, true)
@@ -1394,20 +1395,21 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /** Close one tab; closing the active tab activates the next. */
-  async closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
-    const owner = this.session(session).label
+  async closeTab(session: BrowserSessionId, tabId: BrowserTabWireId): Promise<void> {
+    const current = this.session(session)
+    const carrierId = this.carrierId(current, tabId)
     // A page the carrier owns rather than a view we created. It was reported by `listTabs` under
     // this prefix, so closing it here is what keeps the two tools consistent — a page that can be
     // listed must be closable, or the listing reads as a contradiction.
-    if (tabId.startsWith('page:')) {
-      const id = tabId.slice('page:'.length)
+    if (carrierId !== undefined) {
+      const id = carrierId
       if (this.host.closePage === undefined) {
         return Promise.reject(new BrowserError(
           'browser: this carrier does not expose the pages it opens on its own, so that page cannot be closed',
           'BROWSER_TAB_NOT_FOUND',
         ))
       }
-      await this.host.closePage(id, owner)
+      await this.host.closePage(id, this.carrierScope(current))
       if (!this.session(session).tabs.some(tab => tab.id === tabId)) return
     }
     const found = this.locateTab(session, tabId)
@@ -1416,7 +1418,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const removed = s.tabs[index]
     if (removed !== undefined) {
       s.tabs.splice(index, 1)
-      this.destroyTab(removed, { keepPage: tabId.startsWith('page:') })
+      this.destroyTab(removed, { keepPage: carrierId !== undefined })
     }
     if (s.tabs.length === 0) {
       // Session keeps one blank tab so it stays usable.
@@ -1436,22 +1438,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /**
-   * Find a provider-local tab within the calling session.
+   * Find a canonical tab within the calling session.
    */
   private locateTab(session: BrowserSessionId, tabId: string): { s: Session; index: number } {
     const s = this.session(session)
-    // Accept the bare uuid as well as the "tab:<uuid>" form the tools print:
-    // ids are globally unique, so requiring the printed prefix only produced a
-    // misleading "is not open in this session" error that listed the very tab
-    // the caller had just named.
-    const wanted = stripTabPrefix(tabId)
-    const own = s.tabs.findIndex(tab => stripTabPrefix(tab.id) === wanted)
+    resolveTabHandle(resolveSessionHandle(session), tabId)
+    const own = s.tabs.findIndex(tab => tab.id === tabId)
     if (own >= 0) return { s, index: own }
-    // Deliberately NOT searched across other sessions. Accepting a bare uuid and
-    // searching elsewhere are different things: ids are globally unique, so the first is
-    // harmless convenience, but the second lets a stale id close or switch a tab that
-    // belongs to another task — or to the human — while reporting success, which
-    // contradicts the isolation the tools promise.
     const ownIds = s.tabs.map(t => t.id).join(', ') || '(none)'
     throw new BrowserError(
       `browser: tab "${tabId}" is not open in this session (session tabs: ${ownIds})`,
@@ -4127,7 +4120,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /** Close the session and destroy all its views. Idempotent. */
-  close(session: BrowserSessionId): Promise<void> {
+  async close(session: BrowserSessionId): Promise<void> {
     const existing = this.sessions.get(session)
     if (existing !== undefined) {
       this.sessions.delete(session)
@@ -4136,13 +4129,15 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // (requirements §3). A self-hosted carrier already tore its window down with
       // the views above; the desktop's sidebar does not, so it is asked explicitly
       // — and its cookies plus the browsing history outlive the page either way.
-      if (this.settingsSource !== undefined && this.settingsSource().ui.closeWithSession) {
-        // Named, because one host serves every conversation: an unnamed release would end the
-        // pages of conversations that are still running.
-        void this.host.releasePage?.(existing.label).catch(() => undefined)
+      try {
+        if (this.settingsSource !== undefined && this.settingsSource().ui.closeWithSession) {
+          // Never release another conversation's pages.
+          await this.host.releasePage?.(this.carrierScope(existing))
+        }
+      } finally {
+        await this.host.retireSession?.(session)
       }
     }
-    return Promise.resolve()
   }
 
   /** Look up a session or throw the unknown-session error. */
@@ -4164,12 +4159,28 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Append a fresh tab and make it active. */
   private newTab(s: Session): void {
-    const handle = this.host.createView(s.label)
+    const id = tabWireId({ ...resolveSessionHandle(s.id), tab: randomUUID() })
+    const handle = this.host.createView(id)
     // Same window as the session's other tabs.
     this.host.groupView?.(handle, s.id, s.label)
-    s.tabs.push({ id: `tab:${randomUUID()}`, handle, url: '' })
+    s.tabs.push({ id, handle, url: '' })
     s.activeIndex = s.tabs.length - 1
     this.showActive(s)
+  }
+
+  private carrierScope(s: Session): BrowserSessionId {
+    return s.id
+  }
+
+  private carrierTab(s: Session, id: string): BrowserTabWireId {
+    const scope = resolveSessionHandle(s.id)
+    return tabWireId(resolveTabHandle(scope, id))
+  }
+
+  private carrierId(s: Session, id: BrowserTabWireId): BrowserTabWireId | undefined {
+    const tab = resolveTabHandle(resolveSessionHandle(s.id), id).tab
+    if (!tab.startsWith('page:') && this.host.closePage === undefined) return undefined
+    return id
   }
 
   private destroyTab(tab: Tab, options?: { readonly keepPage?: boolean }): void {
@@ -4239,7 +4250,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * is reported to the host (toolbar) when the host supports it, else logged.
    */
   private async handleUserAction(action: BrowserUserAction, propagate = false): Promise<void> {
-    const s = this.sessions.get(action.windowId)
+    const s = this.sessions.get(action.windowId as BrowserSessionId)
     if (s === undefined) {
       // The window the human clicked in has no live session here (session
       // closed, or a child restart changed identity). Never swallow the click
@@ -4401,10 +4412,6 @@ const SETTLE_POLL_MS = 25
  */
 const TARGET_SCRIPT_GRACE_MS = 2_000
 
-/** `tab:<uuid>` ↔ `<uuid>`: ids accept either form (see locateTab). */
-function stripTabPrefix(id: string): string {
-  return id.startsWith('tab:') ? id.slice(4) : id
-}
 
 /** Abortable sleep used by the settle loop. */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {

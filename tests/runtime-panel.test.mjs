@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BrowserRuntime } from '../lib/browser/runtime.js'
+import { testScope, tabIn } from './canonical-fixtures.mjs'
 
 // Exercise the real registry/dispatch without starting Cordis or a carrier process.
 function runtimeWith(provider) {
@@ -28,11 +29,14 @@ function provider(id, calls) {
 test('source binding targets the sidebar provider and never the selected carrier', async () => {
   const calls = []
   const runtime = runtimeWith(provider('external', calls))
-  runtime.registerPanelProvider(async () => provider('sidebar', calls))
-  assert.equal(await runtime.bindPanelPage('session-owner', '42'), 'browser:sidebar')
-  assert.equal(await runtime.bindPanelPage('session-owner', '42'), 'browser:sidebar')
+  const sidebar = provider('sidebar', calls)
+  const session = testScope('session-owner', 'browser:sidebar')
+  sidebar.open = async label => { calls.push(['sidebar', 'open', label]); return session }
+  runtime.registerPanelProvider(async () => sidebar)
+  assert.equal(await runtime.bindPanelPage('session-owner', '42'), session)
+  assert.equal(await runtime.bindPanelPage('session-owner', '42'), session)
   assert.deepEqual(calls, [
-    ['sidebar', 'open', 'session-owner'], ['sidebar', 'bindPage', 'browser:sidebar', '42'], ['sidebar', 'exists', 'browser:sidebar'],
+    ['sidebar', 'open', 'session-owner'], ['sidebar', 'bindPage', session, tabIn(session, 'page:42')], ['sidebar', 'exists', session],
   ])
 })
 

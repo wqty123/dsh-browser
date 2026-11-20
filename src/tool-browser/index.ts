@@ -26,7 +26,7 @@ import { createReferenceService, summarizeReference, type BrowserReferenceServic
 import type { BrowserReferenceCarrier } from '../browser-reference/types.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { BrowserSessionId, BrowserPageOperationRequest, BrowserProbeMethod } from '../browser/types.ts'
-import { browserSessionHandle, resolveTabHandle, scopedTabs, sessionWireId } from '../browser/handles.ts'
+import { browserSessionHandle, resolveSessionHandle, resolveTabHandle, scopedTabs, sessionWireId, tabWireId } from '../browser/handles.ts'
 import {
   ELEMENT_ITEM_SCHEMA,
   NODE_ITEM_SCHEMA,
@@ -545,7 +545,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // whose source URL cannot be downloaded still become a real reference.
     referenceService = createReferenceService(browser, {
       visibleCapture: async (sessionId, clip, signal) => {
-        const shot = await browser.screenshot(sessionId, { clip, format: 'png' }, signal)
+        const shot = await browser.screenshot(sessionWireId(resolveSessionHandle(sessionId)), { clip, format: 'png' }, signal)
         return { dataUrl: shot.dataUrl, mime: 'image/png' }
       },
     })
@@ -1839,7 +1839,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
         const handle = resolveTabHandle(browserSessionHandle(taskKey(exec), session), args.tabId)
-        await browser.switchTab(handle.session, handle.tab)
+        await browser.switchTab(session, tabWireId(handle))
         return { switched: true }
       },
     }))
@@ -1862,7 +1862,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
         const handle = resolveTabHandle(browserSessionHandle(taskKey(exec), session), args.tabId)
-        await browser.closeTab(handle.session, handle.tab)
+        await browser.closeTab(session, tabWireId(handle))
         return { closed: true }
       },
     }))

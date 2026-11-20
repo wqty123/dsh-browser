@@ -27,7 +27,7 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
@@ -37,6 +37,7 @@ import { browserHostLogPath } from './paths.ts'
 import { fileURLToPath } from 'node:url'
 import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, PresentOptions, ScreenshotOptions } from './provider.ts'
 import type { ExportedCookie } from '../browser/types.ts'
+import { readTabHandle, tabWireId, type BrowserTabWireId } from '../browser/handles.ts'
 
 /** How long to wait for the child to signal readiness before failing. */
 const READY_TIMEOUT_MS = 20_000
@@ -1161,10 +1162,11 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     // of going stale (only the page state is lost).
   }
 
-  createView(): ElectronViewHandle {
+  createView(identity?: BrowserTabWireId): ElectronViewHandle {
     // The seam is synchronous; the provider uses the handle immediately, so
     // commands are deferred until the child is up and the view materialized.
-    const id = `view:${Math.random().toString(36).slice(2, 10)}`
+    const id = identity ?? tabWireId({ owner: 'standalone', session: randomUUID(), tab: randomUUID() })
+    readTabHandle(id)
     const view = new DeferredRemoteView(id, () => this.ensureView(id))
     this.views.set(id, view)
     return view

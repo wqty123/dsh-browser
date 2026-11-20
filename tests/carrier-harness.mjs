@@ -11,7 +11,7 @@ export class Sidebar {
   disposed = false
   onLost(listener) { this.lose = listener }
   dispose() { this.disposed = true }
-  createView(owner) { return { id: 'guest-' + owner, async sendCommand(method) { return { method, owner } } } }
+  createView(identity) { const owner = JSON.parse(decodeURIComponent(identity.slice('dsh-tab:v1:'.length)))[0]; return { id: identity, async sendCommand(method) { return { method, owner } } } }
   destroyView() {}
   showView() {}
 }

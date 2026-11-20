@@ -19,6 +19,8 @@ import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { tabWireId } from '../lib/browser/handles.js'
+const wire = owner => tabWireId({ owner, session: 'browser:test', tab: 'v1' })
 
 class FakeContents extends EventEmitter {
   constructor (id, type, url = '') {
@@ -69,7 +71,7 @@ src = src.replace(
   'async function sendCdp(id, method, params, checkCurrent) { checkCurrent?.(); return globalThis.__answerCdp__(id, method, params) }\n'
   + 'async function __unusedRealSendCdp(id, method, params) {',
 )
-src += '\nglobalThis.__bridge_handle__ = handle;\nglobalThis.__bridge_claims__ = claims;\n'
+src += '\nglobalThis.__bridge_handle__ = handle;\nglobalThis.__bridge_handles__ = handles;\n'
 
 /** Everything the harness observed, reset per scenario. */
 const seen = { evaluates: [], reads: [], placements: [], navigations: [], keys: [], clicks: [] }
@@ -145,13 +147,13 @@ writeFileSync(join(folder, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-
 await import('file:///' + file.replace(/\\/g, '/'))
 
 const handle = globalThis.__bridge_handle__
-const claims = globalThis.__bridge_claims__
+const handles = globalThis.__bridge_handles__
 const shell = new FakeContents(1, 'window', 'dsh-app://app/')
 world.contents = [shell]
 
 /** Reset the harness for one scenario. */
 function reset (script, guest = null) {
-  claims.clear()
+  handles.clear()
   panelScript = script
   panelGuest = guest
   cancelInitialization = () => false
@@ -171,10 +173,10 @@ test('a conversation with no page gets one, and the call carries its own id', as
     return { ok: true, created: true, panel: true, guestId: 7, url: 'https://example.com/', rendererNavigation: true, initialization: { stage: 'attached', guestId: '7' } }
   }, guest)
 
-  const answer = await handle({ op: 'ensureSidebar', owner: 'session-a', url: 'https://example.com/' })
+  const answer = await handle({ op: 'ensureSidebar', handle: wire('session-a'), url: 'https://example.com/' })
 
   assert.equal(answer.ok, true)
-  assert.equal(answer.id, 7, 'the guest the panel produced is the one reported')
+  assert.equal(answer.id, wire('session-a'), 'the guest the panel produced is the one reported')
   assert.equal(answer.created, true, 'and the caller is told a tab was placed')
   assert.equal(answer.navigation.frameId, 'main')
   assert.equal(answer.navigation.loaderId, 'doc-1')
@@ -189,14 +191,14 @@ test('a conversation with no page gets one, and the call carries its own id', as
   }
   assert.deepEqual(seen.keys, [], 'no key is dispatched into the input system')
   assert.deepEqual(seen.clicks, [], 'and no element is clicked')
-  assert.equal(claims.get(7), 'session-a', 'the produced guest is claimed by its conversation')
+  assert.equal(handles.get(wire('session-a'))?.owner, 'session-a', 'the produced guest is claimed by its conversation')
 })
 
 test('a superseded sidebar open cannot navigate the guest attached for its successor', async () => {
   const oldUrl = 'https://example.test/first'
   const newUrl = 'https://example.test/second'
   const guest = new FakeContents(7, 'webview', 'about:blank')
-  const target = { op: 'ensureSidebar', owner: 'session-a', viewId: 'v1' }
+  const target = { op: 'ensureSidebar', handle: wire('session-a') }
   let release
   reset(async placement => {
     if (placement === 1) await new Promise(resolve => { release = resolve })
@@ -209,13 +211,13 @@ test('a superseded sidebar open cannot navigate the guest attached for its succe
   release()
   await old
 
-  assert.equal(latest.id, 7)
+  assert.equal(latest.id, wire('session-a'))
   assert.deepEqual(seen.navigations, [{ id: 7, params: { url: newUrl } }])
 })
 
 test('a cancelled transaction cannot claim or navigate its late guest', async () => {
   let release
-  const target = { owner: 'session-a', viewId: 'v1', transactionId: 'request-one' }
+  const target = { handle: wire('session-a'), transactionId: 'request-one' }
   const guest = new FakeContents(7, 'webview', 'about:blank')
   reset(() => new Promise(resolve => { release = () => resolve({ ok: true, panel: true, guestId: 7 }) }), guest)
   cancelInitialization = code => { assert.ok(code.includes('request-one')); release(); return true }
@@ -223,12 +225,12 @@ test('a cancelled transaction cannot claim or navigate its late guest', async ()
   await new Promise(resolve => setImmediate(resolve))
   const stale = await handle({ op: 'cancelSidebar', ...target, transactionId: 'stale' })
   assert.equal(stale.cancelled, false)
-  const foreign = await handle({ op: 'cancelSidebar', ...target, owner: 'session-other' })
+  const foreign = await handle({ op: 'cancelSidebar', ...target, handle: wire('session-other') })
   assert.equal(foreign.cancelled, false)
   const cancelled = await handle({ op: 'cancelSidebar', ...target })
   assert.equal(cancelled.cancelled, true)
   await rejected
-  assert.equal(claims.has(7), false)
+  assert.equal(handles.has(wire('session-a')), false)
   assert.deepEqual(seen.navigations, [])
 })
 
@@ -236,8 +238,8 @@ for (const receipt of [undefined, {}, { stage: 'attached', guestId: '8' }]) {
   test(`a missing or foreign initialization identity is refused: ${JSON.stringify(receipt)}`, async () => {
     const guest = new FakeContents(7, 'webview', 'https://example.com/')
     reset(() => ({ ok: true, created: true, panel: true, guestId: 7, initialization: receipt }), guest)
-    await assert.rejects(handle({ op: 'ensureSidebar', owner: 'session-a', url: guest.url }), { code: 'BROWSER_DOCUMENT_UNACKNOWLEDGED' })
-    assert.equal(claims.has(7), false)
+    await assert.rejects(handle({ op: 'ensureSidebar', handle: wire('session-a'), url: guest.url }), { code: 'BROWSER_DOCUMENT_UNACKNOWLEDGED' })
+    assert.equal(handles.has(wire('session-a')), false)
     assert.deepEqual(seen.navigations, [])
   })
 }
@@ -246,9 +248,9 @@ test('an existing page is reused without navigating it again', async () => {
   const guest = new FakeContents(7, 'webview', 'https://example.com/')
   reset(() => ({ ok: true, created: false, panel: true, guestId: 7, url: 'https://example.com/' }), guest)
 
-  const answer = await handle({ op: 'ensureSidebar', owner: 'session-a', url: 'https://example.com/' })
+  const answer = await handle({ op: 'ensureSidebar', handle: wire('session-a'), url: 'https://example.com/' })
 
-  assert.equal(answer.id, 7)
+  assert.equal(answer.id, wire('session-a'))
   assert.equal(answer.created, false, 'nothing new was placed')
   assert.equal(seen.evaluates.length, 1, 'one question, one answer — no polling when a page exists')
   assert.deepEqual(seen.navigations, [], 'the page already shows the address, so it is left alone')
@@ -258,9 +260,9 @@ test('a page showing something else is navigated, and only that page', async () 
   const guest = new FakeContents(7, 'webview', 'https://old.example/')
   reset(() => ({ ok: true, created: false, panel: true, guestId: 7, url: 'https://old.example/' }), guest)
 
-  const answer = await handle({ op: 'ensureSidebar', owner: 'session-a', url: 'https://new.example/' })
+  const answer = await handle({ op: 'ensureSidebar', handle: wire('session-a'), url: 'https://new.example/' })
 
-  assert.equal(answer.id, 7)
+  assert.equal(answer.id, wire('session-a'))
   assert.equal(seen.navigations.length, 1, 'exactly one navigation')
   assert.equal(seen.navigations[0].id, 7, 'to the guest this conversation owns')
   assert.equal(seen.navigations[0].params.url, 'https://new.example/')
@@ -270,7 +272,7 @@ test('a renderer refusal is surfaced with its reason, not swallowed', async () =
   reset(() => ({ ok: false, reason: 'this conversation\'s sidebar is not mounted, so a panel cannot be opened in it', panel: false, guestId: null }))
 
   await assert.rejects(
-    () => handle({ op: 'ensureSidebar', owner: 'session-a', url: 'https://example.com/' }),
+    () => handle({ op: 'ensureSidebar', handle: wire('session-a'), url: 'https://example.com/' }),
     /not mounted/,
     'the caller sees why nothing opened',
   )
@@ -283,8 +285,8 @@ test('a host that cannot name its conversation is refused instead of guessed at'
   for (const owner of ['anonymous', 'default', '', undefined]) {
     seen.evaluates.length = 0
     await assert.rejects(
-      () => handle({ op: 'ensureSidebar', owner, url: 'https://example.com/' }),
-      /no conversation id/,
+      () => handle({ op: 'ensureSidebar', handle: owner ? wire(owner) : undefined, url: 'https://example.com/' }),
+      /no conversation id|invalid/,
       `${String(owner)} must not be resolved to some panel`,
     )
     assert.equal(seen.evaluates.length, 0, 'nothing was even asked, because there was nothing to ask about')
@@ -295,7 +297,7 @@ test('the client half missing from the window is a named failure', async () => {
   reset(() => ({ ok: false, reason: 'the plugin client half is not loaded in this window', panel: false, guestId: null }))
 
   await assert.rejects(
-    () => handle({ op: 'ensureSidebar', owner: 'session-a', url: 'https://example.com/' }),
+    () => handle({ op: 'ensureSidebar', handle: wire('session-a'), url: 'https://example.com/' }),
     /client half is not loaded/,
   )
 })
@@ -308,7 +310,7 @@ test('a panel that never produces a page fails within its budget', async () => {
 
   const started = Date.now()
   await assert.rejects(
-    () => handle({ op: 'ensureSidebar', owner: 'session-a' }),
+    () => handle({ op: 'ensureSidebar', handle: wire('session-a') }),
     { code: 'BROWSER_DOCUMENT_UNACKNOWLEDGED' },
   )
   const elapsed = Date.now() - started
@@ -320,7 +322,7 @@ test('a missing guest acknowledgement refuses without a polling fallback', async
   reset(() => ({ ok: true, created: true, panel: true, guestId: null }))
 
   await assert.rejects(
-    () => handle({ op: 'ensureSidebar', owner: 'session-a', url: 'https://example.com/' }),
+    () => handle({ op: 'ensureSidebar', handle: wire('session-a'), url: 'https://example.com/' }),
     { code: 'BROWSER_DOCUMENT_UNACKNOWLEDGED' },
   )
 

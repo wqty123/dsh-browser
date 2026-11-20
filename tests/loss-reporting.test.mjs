@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { testTab } from './canonical-fixtures.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -10,7 +11,7 @@ test('sidebar loss reports the actual cause without selecting a standalone brows
   const sidebar = new Sidebar()
   let current = sidebar
   const h = carrierHarness(t, { discover: async () => current })
-  const view = h.current.createView('session-owner')
+  const view = h.current.createView(testTab('session-owner'))
   await view.sendCommand('Runtime.evaluate')
   sidebar.lose('panel-unusable')
   assert.match(h.warnings[0], /shell is running.*cannot be driven.*panel-unusable/)
@@ -31,10 +32,10 @@ test('a real bridge transport forwards shell loss through the sidebar to the ent
   writeFileSync(file, JSON.stringify({ port: 1, token: 'fixture', pid: 999999, updatedAt: new Date(0).toISOString() }))
   const original = BridgeConnection.prototype.call
   t.mock.method(BridgeConnection.prototype, 'call', function (request, timeout) {
-    if (request.op === 'list') return Promise.resolve({ ok: true, frame: 'webview' })
+    if (request.op === 'list') return Promise.resolve({ ok: true, protocol: 4, frame: 'webview' })
     return original.call(this, request, timeout)
   })
-  await assert.rejects(h.current.createView('session-owner').sendCommand('Page.navigate', { url: 'https://example.com' }), /has exited/)
+  await assert.rejects(h.current.createView(testTab('session-owner')).sendCommand('Page.navigate', { url: 'https://example.com' }), /has exited/)
   assert.match(h.warnings.join('\n'), /shell-exited/)
   assert.equal(h.registered.length, 1)
 })
@@ -49,7 +50,7 @@ test('disposal preserves the in-flight failure and happens on a later turn', asy
   }) })
   sidebar.dispose = () => { sidebar.disposed = true; rejectPending(new Error('bridge closed')) }
   const h = carrierHarness(t, { discover: async () => sidebar })
-  await assert.rejects(h.current.createView('session-owner').sendCommand('Runtime.evaluate'), /sidebar unavailable \(cannot drive this panel\)/)
+  await assert.rejects(h.current.createView(testTab('session-owner')).sendCommand('Runtime.evaluate'), /sidebar unavailable \(cannot drive this panel\)/)
   assert.equal(sidebar.disposed, false)
   await new Promise(setImmediate)
   assert.equal(sidebar.disposed, true)

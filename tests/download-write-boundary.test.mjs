@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import vm from 'node:vm'
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
+import { tabIn } from './canonical-fixtures.mjs'
 
 const source = fs.readFileSync(new URL('../lib/browser-electron/host-main.js', import.meta.url), 'utf8')
 const begin = source.indexOf('async function handle(')
@@ -76,14 +77,14 @@ test('provider passes the calling task to carrier page listing and closing', asy
   const provider = new ElectronBrowserProvider({
     createView: () => ({ id: 'v', sendCommand: async () => ({}) }),
     destroyView() {},
-    async listPages(owner) { calls.push(['list', owner]); return [{ id: 'extra', url: 'https://example.com/' }] },
+    async listPages(owner) { calls.push(['list', owner]); return [{ id: tabIn(owner, 'page:extra'), url: 'https://example.com/' }] },
     async closePage(id, owner) { calls.push(['close', id, owner]) },
   }, { history: { enabled: false } })
   const session = await provider.open('session-audit')
   try {
     await provider.listTabs(session)
-    await provider.closeTab(session, 'page:extra')
-    assert.deepEqual(calls, [['list', 'session-audit'], ['close', 'extra', 'session-audit']])
+    await provider.closeTab(session, tabIn(session, 'page:extra'))
+    assert.deepEqual(calls, [['list', session], ['close', tabIn(session, 'page:extra'), session]])
     await assert.rejects(provider.closeTab('unknown', 'page:extra'), /session "unknown" is not open/)
     assert.equal(calls.length, 2, 'an invalid session cannot close a carrier page')
   } finally { await provider.close(session) }

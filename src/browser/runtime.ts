@@ -8,6 +8,7 @@
  */
 
 import { pageOperationScript } from '../tool-browser/page-probe.ts'
+import { resolveSessionHandle, resolveTabHandle, tabWireId, type BrowserTabWireId } from './handles.ts'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {
@@ -283,7 +284,10 @@ export class BrowserRuntime extends Service {
     const provider = this.resolveProvider(session)
     try {
       if (provider.bindPage === undefined) throw new BrowserError('sidebar page binding unsupported', 'BROWSER_SURFACE_UNAVAILABLE')
-      await provider.bindPage(session, pageId)
+      const scope = resolveSessionHandle(session)
+      if (scope.owner !== owner) throw new Error('browser: source session belongs to another owner')
+      const handle = pageId.startsWith('dsh-tab:') ? resolveTabHandle(scope, pageId) : { ...scope, tab: `page:${pageId}` }
+      await provider.bindPage(session, tabWireId(handle))
       return session
     } catch (error) {
       this.panelSessions.delete(session)
@@ -303,12 +307,12 @@ export class BrowserRuntime extends Service {
   }
 
   /** Switch to a tab through the selected provider. */
-  async switchTab(session: BrowserSessionId, tabId: string): Promise<void> {
+  async switchTab(session: BrowserSessionId, tabId: BrowserTabWireId): Promise<void> {
     return this.resolveProvider(session).switchTab(session, tabId)
   }
 
   /** Close one tab through the selected provider. */
-  async closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
+  async closeTab(session: BrowserSessionId, tabId: BrowserTabWireId): Promise<void> {
     return this.resolveProvider(session).closeTab(session, tabId)
   }
 

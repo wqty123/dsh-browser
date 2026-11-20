@@ -96,13 +96,14 @@ async function endpoint(t, home, answer) {
   const sockets = new Set()
   const server = createServer(socket => {
     sockets.add(socket); socket.on('close', () => sockets.delete(socket))
+    socket.on('error', error => assert.ok(['ECONNRESET', 'EPIPE'].includes(error.code), String(error)))
     let buffer = ''
     socket.on('data', data => {
       buffer += data
       while (buffer.includes('\n')) {
         const at = buffer.indexOf('\n'), request = JSON.parse(buffer.slice(0, at)); buffer = buffer.slice(at + 1)
         if (!request.op) continue
-        const reply = request.op === 'version' ? answer() : { ok: true, guests: [], sidebar: [] }
+        const reply = request.op === 'version' ? answer() : { ok: true, protocol: 5 }
         socket.write(JSON.stringify({ ...reply, bridgeRequestId: request.bridgeRequestId }) + '\n')
       }
     })
