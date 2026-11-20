@@ -1,6 +1,6 @@
 {
   "name": "dsh-builtin-browser",
-  "version": "0.7.36",
+  "version": "0.7.42",
   "description": "Shared real browser for DeepSeek Harness as one install-and-use plugin: the sidebar browser panel (toolbar, omnibox, start page with shortcuts and search engines), web references with the selection bar and composer chips, the dsh_browser_* tools, and carrier selection (installed Chrome/Edge, desktop bridge, self-hosted Electron). No upstream modification, no extra step after install.",
   "keywords": [
     "browser",
