@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createElement, type ReactNode } from 'react'
+import { act, createElement, Fragment, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apply, type HostContext, type AssemblyConfig } from '../production/assembly.ts'
@@ -29,14 +29,14 @@ afterEach(async () => {
   document.body.innerHTML = ''
 })
 
-async function assembled(storage = memoryKV(), options: { empty?: boolean; client?: boolean } = {}) {
+async function assembled(storage = memoryKV(), options: { empty?: boolean; client?: boolean; acknowledged?: boolean } = {}) {
   const components = new Map<string, (props?: unknown) => unknown>()
   const services: Record<string, unknown> = {}
   let sourceRule: typeof browserSourceRule | undefined
   services.uiConversation = { userText: { register(rule: typeof browserSourceRule) { sourceRule = rule; return () => {} } } }
   const reveals: { referenceId: string; partId?: string; navigate?: boolean; sourcePageId?: string }[] = []
   let outcome: () => Promise<RevealResultWire> = async () => ({ ok: true, status: 'revealed' })
-  let deliveries = options.empty ? [] : [makeDelivery({ state: 'prepared', sequence: 1 })]
+  let deliveries = options.empty ? [] : [makeDelivery({ state: options.acknowledged ? 'acknowledged' : 'prepared', sequence: 1 })]
   const tabs: { id: TabId; kind: string }[] = []
   const listeners = new Set<() => void>()
   const journal = createBrowserInitializationJournal({ onChange: () => { for (const listener of listeners) listener() } })
@@ -82,10 +82,11 @@ async function assembled(storage = memoryKV(), options: { empty?: boolean; clien
       },
     },
   }
+  const hostInput = fakeHostInput('')
   const config: AssemblyConfig = {
     initialSessionId: 'sess-A', storage, request,
     createElement: createElement as AssemblyConfig['createElement'],
-    scheduler: manualScheduler(), hostInputFor: () => fakeHostInput(),
+    scheduler: manualScheduler(), hostInputFor: () => hostInput,
   }
   let runtime: ProductionRuntime | undefined
   await act(async () => {
@@ -93,7 +94,7 @@ async function assembled(storage = memoryKV(), options: { empty?: boolean; clien
     else { runtime = apply(ctx, config); await runtime.pollOnce() }
   })
   return {
-    runtime: runtime!, storage, reveals, openTabIn,
+    runtime: runtime!, storage, reveals, openTabIn, hostInput,
     outcome(value: RevealResultWire | (() => Promise<RevealResultWire>)) {
       outcome = typeof value === 'function' ? value : async () => value
     },
@@ -103,9 +104,11 @@ async function assembled(storage = memoryKV(), options: { empty?: boolean; clien
     },
     async sentMessage(text: string) {
       expect(sourceRule).toBe(browserSourceRule)
-      const node = sourceRule!.match(text, 0)
-      expect(node).toMatchObject({ id: 'browser-ref', data: { uri: encodeBrowserRefUri({ referenceId: 'ref-mixed-1' }) } })
-      return mount(() => components.get('conversation.user.text.node')!({ node, raw: text }) as ReactNode)
+      const nodes = []
+      for (let node = sourceRule!.match(text, 0); node !== undefined; node = sourceRule!.match(text, node.end)) nodes.push(node)
+      expect(nodes[0]).toMatchObject({ id: 'browser-ref', data: { uri: encodeBrowserRefUri({ referenceId: 'ref-mixed-1' }) } })
+      return mount(() => createElement(Fragment, null, ...nodes.map(node =>
+        components.get('conversation.user.text.node')!({ node, raw: text }) as ReactNode)))
     },
     async composer() {
       return mount(() => components.get('conversation.input.chips')!() as ReactNode)
@@ -122,9 +125,9 @@ async function mount(component: () => ReactNode): Promise<HTMLElement> {
   return container
 }
 
-async function send(runtime: ProductionRuntime): Promise<string> {
+async function send(runtime: ProductionRuntime, text = 'question'): Promise<string> {
   runtime.setComment('ref-mixed-1', 'My frozen-source comment')
-  const content = runtime.submission.buildContent({ sessionId: 'sess-A', uploaded: [], text: 'question', requestId: 'send-1' })
+  const content = runtime.submission.buildContent({ sessionId: 'sess-A', uploaded: [], text, requestId: 'send-1' })
   await runtime.submission.commit('sess-A', 'send-1')
   expect(runtime.cards()).toHaveLength(0)
   return content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')
@@ -135,6 +138,18 @@ function pill(container: HTMLElement): HTMLButtonElement {
 }
 
 describe('production assembly — shared composer and sent capsules', () => {
+  it('projects an inserted composer source token into exactly one sent capsule', async () => {
+    const h = await assembled(undefined, { acknowledged: true })
+    expect(h.hostInput.text).toContain('dsh-browser-ref:')
+    const message = await send(h.runtime, h.hostInput.text)
+    expect(message.match(/dsh-browser-ref:/gu)).toHaveLength(1)
+    const sent = await h.sentMessage(message)
+    expect(sent.querySelectorAll('button[data-reference-id="ref-mixed-1"]')).toHaveLength(1)
+    await act(async () => { pill(sent).focus() })
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1)
+    h.runtime.dispose()
+  })
+
   it('keeps a sent capsule, with ordered snapshot parts + comment on hover after durable reload', async () => {
     const first = await assembled()
     const before = first.runtime.referenceDetail('ref-mixed-1')!

@@ -40,10 +40,10 @@ import { encodeBrowserRefUri, parseBrowserRefUri } from '../scheme.ts'
 import type { RevealStatus } from '../types.ts'
 import {
   createSubmissionSeam,
-  SOURCE_LINK_LABEL,
   type HostPromptContentPart,
   type SubmissionSeam,
 } from './production-submission.ts'
+import { sourceMarker } from './source-marker.ts'
 import {
   createProductionRevealer,
   type ProductionRevealer,
@@ -508,10 +508,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     //   · 标记行让草稿非空，上游发送闸门因此放行（「只有引用也能发」）；
     //   · 引文内容本身保存在引用快照里，点胶囊可以查看/回到原文。
     const index = (draftStoreFor(sessionId).state().reflections ?? []).length
-    const label = title === undefined || title === ''
-      ? `${SOURCE_LINK_LABEL} ${index}`
-      : `${SOURCE_LINK_LABEL} ${index}：${title}`
-    const marker = `[${label}](${encodeBrowserRefUri({ referenceId: delivery.referenceId })})`
+    const marker = sourceMarker(delivery.referenceId, index - 1, title)
     // 插入需要编辑器里有光标：确认按钮是在侧栏 iframe 里点的，先聚焦编辑器。
     try { host.focusEditor?.() } catch { /* 没有编辑器就交给下面的失败路径 */ }
     try {

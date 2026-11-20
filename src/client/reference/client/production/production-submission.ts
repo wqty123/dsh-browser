@@ -25,7 +25,7 @@ import { renderReferenceTable } from '../../../../reference-text.ts'
 import { referenceOwnerKey } from '../../../../reference-owner.ts'
 import type { OrderedReferenceGroup } from '../types.ts'
 import { createSubmissionProjector, type TextPosition } from '../ordered-submission.ts'
-import { encodeBrowserRefUri } from '../scheme.ts'
+import { composerText, sourceMarker } from './source-marker.ts'
 import type { AssetStore } from './asset-store.ts'
 
 /** Mirror of `session-controller/src/types.ts:78` (no cross-package import). */
@@ -96,39 +96,7 @@ export interface WireSubmissionInput {
 /** The prefix that keeps a note distinguishable from the quoted original. */
 export const COMMENT_LABEL = '引用评论'
 /** Stable visible label for one attached reference's source marker. */
-export const SOURCE_LINK_LABEL = '引用来源'
-
-/**
- * Keep a page title from breaking the markdown link syntax. Titles are display
- * text only: the URI is built from the referenceId alone and never from any
- * user-controlled string.
- */
-function markerTitle(value: string | undefined): string {
-  if (value === undefined) return ''
-  return value
-    .replace(/[\r\n\t]+/gu, ' ')
-    .replace(/[\[\]()\\`<>*_]/gu, '')
-    .replace(/\s+/gu, ' ')
-    .trim()
-    .slice(0, 80)
-    .trim()
-}
-
-/** One `[引用来源 N：标题](dsh-browser-ref:...)` line for a single group. */
-function sourceMarker(
-  group: OrderedReferenceGroup,
-  index: number,
-  titleOf: ((referenceId: string) => string | undefined) | undefined,
-): string {
-  // encodeBrowserRefUri percent-encodes the referenceId and is the exact
-  // inverse of decodeBrowserRefUri. No title, comment or page text is ever
-  // concatenated into the URI.
-  const uri = encodeBrowserRefUri({ referenceId: group.referenceId })
-  const fallback = `${SOURCE_LINK_LABEL} ${index + 1}`
-  const title = markerTitle(titleOf?.(group.referenceId))
-  const label = title === '' ? fallback : `${fallback}：${title}`
-  return `[${label}](${uri})`
-}
+export { SOURCE_LINK_LABEL } from './source-marker.ts'
 
 /**
  * Build the `content` array for `Session.prompt`. With `groups === []` the
@@ -136,6 +104,7 @@ function sourceMarker(
  */
 export function wireSubmissionContent(input: WireSubmissionInput): readonly HostPromptContentPart[] {
   const perGroup = createSubmissionProjector({ mode: 'ordered' })
+  const text = composerText(input.text, new Set(input.groups.map(group => group.referenceId)))
   // The host renders adjacent text blocks as one run, so EVERY projected
   // text/table block (quote, table projection, image placeholder) ends with its
   // own newline. Without it the MOST COMMON path — "quote + user's question" —
@@ -148,8 +117,8 @@ export function wireSubmissionContent(input: WireSubmissionInput): readonly Host
       return mapped.type === 'text' ? { type: 'text', text: `${mapped.text}\n` } : mapped
     })
   const placeUserText = (blocks: HostPromptContentPart[]): void => {
-    if (input.text === '') return
-    const block: HostPromptContentPart = { type: 'text', text: input.text }
+    if (text === '') return
+    const block: HostPromptContentPart = { type: 'text', text }
     if (input.textPosition === 'leading') blocks.unshift(block)
     else blocks.push(block)
   }
@@ -163,7 +132,7 @@ export function wireSubmissionContent(input: WireSubmissionInput): readonly Host
     const markers: string[] = []
     input.groups.forEach((group, index) => {
       try {
-        markers.push(sourceMarker(group, index, input.sourceTitleFor))
+        markers.push(sourceMarker(group.referenceId, index, input.sourceTitleFor?.(group.referenceId)))
       } catch {
         // A referenceId that cannot be canonicalized must not break the whole
         // send: that single group simply has no marker (B20 partial visibility).

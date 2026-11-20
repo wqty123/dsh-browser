@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { browserSourceRule } from '../production/user-text-rule.ts'
+import { sourceMarker } from '../production/source-marker.ts'
 /**
  * Report item 7 — the reply-side `dsh-browser-ref:` link had NO producer: the
  * verification script inserted anchors by hand, which only proved the
@@ -81,6 +82,25 @@ afterEach(() => {
 })
 
 describe('item 7 — the real send path produces a locatable source', () => {
+  it('treats attached composer markers as tokens, not another copy of the submission text', () => {
+    const content = wireSubmissionContent({ ...baseInput(), text: `${sourceMarker(REFERENCE_ID, 0)} question` })
+    expect(urisIn(content)).toEqual([encodeBrowserRefUri({ referenceId: REFERENCE_ID })])
+    expect(content.at(-1)).toEqual({ type: 'text', text: ' question' })
+  })
+
+  it('projects distinct references independently even with identical titles', () => {
+    const second = { ...group, referenceId: 'ref-second' }
+    const text = sourceMarker(group.referenceId, 0, 'same') + sourceMarker(second.referenceId, 1, 'same')
+    const content = wireSubmissionContent({ ...baseInput(), groups: [group, second], text, sourceTitleFor: () => 'same' })
+    expect(urisIn(content)).toEqual([encodeBrowserRefUri({ referenceId: REFERENCE_ID }), encodeBrowserRefUri({ referenceId: second.referenceId })])
+  })
+
+  it('preserves unattached and invalid markers as user text, including with no attachments', () => {
+    const text = `${sourceMarker('other-reference', 0)} [bad](dsh-browser-ref:%broken)`
+    expect(wireSubmissionContent({ ...baseInput(), text }).at(-1)).toEqual({ type: 'text', text })
+    expect(wireSubmissionContent({ ...baseInput(), groups: [], text })).toEqual([...uploaded, { type: 'text', text }])
+  })
+
   it('emits a canonical URI that decodes back to the group referenceId', () => {
     const content = wireSubmissionContent(baseInput())
     const uris = urisIn(content)
