@@ -31,7 +31,7 @@ import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralPro
 import { MissingSystemBrowserHost } from './missing-system-browser.ts'
 import { SettingsStore, settingsPath } from './settings-store.ts'
 import { sameOrigin } from './settings-route.ts'
-import { authenticatedRoute, isDirectLoopback, type BrowserConnection, type BrowserHttpHandler } from './authenticated-route.ts'
+import { authenticatedRoute, pairedRoute, isDirectLoopback, type BrowserConnection, type BrowserPairingConnection, type BrowserHttpHandler } from './authenticated-route.ts'
 import { overlayScript } from '../browser-reference/entry.ts'
 import { getLastOpen } from './open-slot.ts'
 import { GUEST_ROUTE, handleGuest } from './guest-route.ts'
@@ -572,7 +572,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: PREVIEW_ROUTE,
-          handler: authenticated(ctx, (request, response) => handlePreviewFrame(request, response, settings, browser)),
+          handler: paired(ctx, (request, response) => handlePreviewFrame(request, response, settings, browser)),
         }, 'dsh-builtin-browser: live view frame'))
         // The Web sidebar's iframe has no handle into a cross-origin guest, so the guest is served
   // through this prefix instead: same origin, readable, injectable. See guest-route.ts.
@@ -616,7 +616,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: PREVIEW_SESSIONS_ROUTE,
-          handler: authenticated(ctx, (request, response) => handlePreviewSessions(request, response, settings, browser)),
+          handler: paired(ctx, (request, response) => handlePreviewSessions(request, response, settings, browser)),
         }, 'dsh-builtin-browser: live view sessions'))      })
     } catch {
       // No web server on this surface: watching is simply unavailable, and nothing else changes.
@@ -1220,6 +1220,13 @@ interface PreviewBrowser {
 function authenticated(ctx: Context, handler: BrowserHttpHandler): BrowserHttpHandler {
   return authenticatedRoute(() => {
     const surface = ctx as unknown as { get(name: string): BrowserConnection | undefined }
+    return surface.get('connection')
+  }, handler)
+}
+
+function paired(ctx: Context, handler: BrowserHttpHandler): BrowserHttpHandler {
+  return pairedRoute(() => {
+    const surface = ctx as unknown as { get(name: string): BrowserPairingConnection | undefined }
     return surface.get('connection')
   }, handler)
 }
