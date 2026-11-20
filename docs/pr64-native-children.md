@@ -22,6 +22,8 @@ Run `DSH_SOURCE_ROOT=<dsh-source> PERSISTENCE_EVIDENCE=<directory> node tools/ch
 
 Run the ordinary Node behavior suite with `TSX_TSCONFIG_PATH=<dsh-source>/tsconfig.base.json node tests/run.mjs`. Source Vitest cases need source aliases rather than published `lib` exports because the plugin lives outside the DSH tsconfig root:
 
+The same Vitest configuration runs `packaged-native-open.spec.ts` against the actual `dist/client.cjs` and the compressed revision-8 rc.3 sidebar bundle. Build the plugin first. Set `DSH_BROWSER_TEST_ARCHIVE=<plugin.tgz>` to exercise an archive's client instead. It covers native document acknowledgement, repeated opens, independent reserved views, empty identities and failed acquisition/retry without a webview. The Electron boundary is simulated; this does not replace real Desktop acceptance.
+
 ```sh
 DSH_SOURCE_ROOT=<dsh-source> node <dsh-source>/node_modules/vitest/vitest.mjs run --config tools/native-child-vitest.config.mjs
 DSH_SOURCE_ROOT=<dsh-source> NATIVE_CHILD_EVIDENCE=<existing-directory> xvfb-run -a <dsh-source>/apps/desktop/node_modules/electron/dist/electron --no-sandbox tools/fixtures/native-child-acceptance.cjs

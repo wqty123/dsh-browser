@@ -1790,7 +1790,7 @@ const react = require("react")
   }
 
   /** Read this conversation's current guest, preferring the one actually drawn. */
-  function guestStateFor(sessionId, tabId) {
+  function guestStateFor(sessionId, tabId, initializationReader) {
     const roots = panelRootsFor(sessionId)
     if (roots === undefined ? tabStripFor(sessionId) === null : roots.length === 0) return { panel: false, guestId: null, url: "" }
     if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof tabId === "string") {
@@ -2128,6 +2128,11 @@ const react = require("react")
         if (typeof sidebarRight.navigateTabIn === "function") {
           return sidebarRight.navigateTabIn(sessionId, tabId, { params: { url: address } }) === true
         }
+        const tab = Array.from(sidebarRight.tabsIn(sessionId)).find(tab => tab.id === tabId && tab.kind === "browser")
+        if (typeof tab?.contentId === "string" && typeof sidebarRight.tabDomain?.navigate === "function") {
+          sidebarRight.tabDomain.navigate(sessionId, tabId, { address: tab.contentId, params: { url: address } })
+          return true
+        }
       } catch (error) {
         return false
       }
@@ -2192,7 +2197,17 @@ const react = require("react")
         // conversation the tab belongs to so a quote can be handed back to the right draft.
         try { globalThis.__dshSidebarSessionId = sessionId } catch { /* non-writable global */ }
         const before = new Set(tabs.map(tab => tab.id))
-        try { sidebarRight.openTabIn(sessionId, "browser", url ? { params: { url } } : {}) }
+        try {
+          if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1
+            && typeof sidebarRight.openReservedTab === "function") {
+            const id = globalThis.crypto.randomUUID()
+            if (!sidebarRight.openReservedTab(sessionId, "browser", id)) return { ok: false, reason: "the shell refused this browser tab reservation" }
+            if (url && !navigatePlacedTab(sessionId, id, url)) {
+              sidebarRight.closeIn?.(sessionId, id)
+              return { ok: false, reason: "the shell refused this browser tab navigation" }
+            }
+          } else sidebarRight.openTabIn(sessionId, "browser", url ? { params: { url } } : {})
+        }
         catch (error) { return { ok: false, reason: String(error?.message ?? error) } }
         let placed
         try { placed = Array.from(sidebarRight.tabsIn(sessionId)) }
@@ -2214,7 +2229,7 @@ const react = require("react")
         created = true
       }
       pendingTabs.set(key, binding)
-      const state = guestStateFor(sessionId, binding.id)
+      const state = guestStateFor(sessionId, binding.id, initializationReader)
       // A bound tab that still shows the start page has no guest to reveal.
       // Revealing it can never produce one, so ask the shell to aim that exact
       // tab at the requested address; the host body turns the new navigation
@@ -2309,6 +2324,7 @@ const react = require("react")
           return { ...answer, ...state, url: observed.url, initialization: receipt, rendererNavigation,
             ...observed.generation === undefined ? {} : { nativeState: observed } }
         } catch (error) {
+          closeNative()
           return refuse(error?.code ?? "panel-initialization-failed", String(error?.message ?? error))
         } finally {
           clearTimeout(timer)
@@ -2339,7 +2355,7 @@ const react = require("react")
           return openViewPanel(wanted, address, options.viewId, options.guestId)
         }
         const pending = pendingTabs.get(wanted)
-        const state = guestStateFor(wanted, pending?.url === address && pending.scoped ? pending.id : undefined)
+        const state = guestStateFor(wanted, pending?.url === address && pending.scoped ? pending.id : undefined, initializationReader)
         // Explicit opening also reveals a guest kept mounted in a collapsed or hidden sidebar.
         // Passive panelGuest/panelGuests reads never call either presentation helper.
         const switched = claimConversation(wanted)
@@ -2456,11 +2472,12 @@ const react = require("react")
             const roots = panelRootsFor(sessionId)
             return { panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0, guestId: null, url: "" }
           }
-          return guestStateFor(sessionId, intended)
+          return guestStateFor(sessionId, intended, initializationReader)
         }
         return guestStateFor(
           typeof sessionId === "string" ? sessionId : "",
           typeof tabId === "string" && tabId !== "" ? tabId : undefined,
+          initializationReader,
         )
       },
       /** All guest ids verified inside this conversation, including shell-created popup tabs. */
