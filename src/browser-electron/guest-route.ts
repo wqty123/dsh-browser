@@ -291,7 +291,7 @@ export async function handleGuest(
     if (blocked(url)) return true
     const addresses = await addressesFor(url.hostname)
     const hostUrl = host === '' ? undefined : new URL('http://' + host)
-    const hostAddresses = hostUrl === undefined || isSelfTarget(hostUrl) ? [] : await addressesFor(host)
+    const hostAddresses = hostUrl === undefined || isSelfTarget(hostUrl) ? [] : await addressesFor(host).catch(() => [])
     return addresses.length === 0 || addresses.some(address => {
       const literal = new URL('http://' + (address.includes(':') ? '[' + address + ']' : address))
       return isSelfTarget(literal) || hostAddresses.includes(address) || address === request.socket.localAddress

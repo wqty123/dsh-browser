@@ -15,7 +15,7 @@ const forwarded = []
 before(async () => {
   dns.lookup = async (hostname, options) => {
     assert.equal(options.all, true)
-    if (hostname === 'missing.example') throw new Error('getaddrinfo ENOTFOUND')
+    if (hostname === 'missing.example' || hostname === 'client-only.example') throw new Error('getaddrinfo ENOTFOUND')
     return (resolved.get(hostname) ?? [hostname === 'dsh.example' ? '93.184.216.35' : '93.184.216.34'])
       .map(address => ({ address, family: address.includes(':') ? 6 : 4 }))
   }
@@ -126,6 +126,21 @@ test('validates DNS on redirect targets and again when the next hop is requested
   assert.equal((await call(redirect.headers.location)).status, 403)
   assert.equal(forwarded.length, count)
   resolved.delete('redirect.example')
+})
+
+test('unresolvable DSH host falls back to textual self comparison without relaxing target DNS validation', async () => {
+  const options = { headers: { host: 'client-only.example:3102', 'x-dsh-guest-sub': '1' } }
+  const count = forwarded.length
+  const allowed = await call(guestPath('https://ordinary.example/echo'), options)
+  assert.equal(allowed.status, 200)
+  assert.equal(forwarded.length, count + 1)
+  assert.equal((await call(guestPath('https://client-only.example/'), options)).status, 403)
+  assert.equal((await call(guestPath('https://missing.example/'), options)).status, 502)
+  resolved.set('private-alias.example', ['10.0.0.1'])
+  try {
+    assert.equal((await call(guestPath('https://private-alias.example/'), options)).status, 403)
+    assert.equal(forwarded.length, count + 1)
+  } finally { resolved.delete('private-alias.example') }
 })
 
 test('forwards POST body, content type and safe headers without app cookies or internal headers', async () => {
