@@ -2,8 +2,24 @@ import { describe, expect, it } from 'vitest'
 import { UserTextDocument } from '@deepseek-ai/dsh-client-ui-conversation/src/client/conversation/user-text-document.ts'
 import { browserSourceRule } from '../production/user-text-rule.ts'
 import { sourceMarker, submissionQuote } from '../production/source-marker.ts'
+import { quoteRule } from '@deepseek-ai/dsh-message-quotes/src/client/quote-rule.ts'
 
 describe('native browser source text nodes', () => {
+  it.each(['> ', '>', '   >\t'])('owns an atomic browser-source quote before the generic quote rule (%j)', prefix => {
+    const text = prefix + sourceMarker('ref-one', 0) + '\n\nquestion'
+    const rules = [quoteRule, browserSourceRule].sort((a, b) => a.order - b.order)
+    const nodes = new UserTextDocument().evaluate({ text, facts: {} }, rules)
+    expect(nodes[0]).toMatchObject({ id: 'browser-ref', start: 0, data: { uri: 'dsh-browser-ref:ref-one' } })
+    expect(nodes.some(node => node.id === 'quote')).toBe(false)
+    expect(nodes.map(node => text.slice(node.start, node.end)).join('')).toBe(text)
+  })
+
+  it.each(['', '> ordinary quote', '> [bad](dsh-browser-ref:)'])('leaves non-reference quotes to their owner (%j)', text => {
+    const rules = [browserSourceRule, quoteRule].sort((a, b) => a.order - b.order)
+    const nodes = new UserTextDocument().evaluate({ text, facts: {} }, rules)
+    expect(nodes.some(node => node.id === 'browser-ref')).toBe(false)
+    expect(nodes.some(node => node.id === 'quote')).toBe(text !== '')
+  })
   it('preserves surrounding text and identifies only canonical browser references', () => {
     const source = '问题 [网页来源](dsh-browser-ref:ref-one) 以及 [站点](https://example.com/)'
     const document = new UserTextDocument()
