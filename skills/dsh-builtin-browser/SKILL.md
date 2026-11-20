@@ -1,64 +1,59 @@
 ---
 name: dsh-builtin-browser
-description: Use when a task needs a real web page — opening a URL, reading or extracting from it, filling and submitting a form, uploading an attachment, checking whether a result actually happened, or recovering after a page or carrier goes away. Covers which dsh_browser_* tool to reach for, how to batch steps, and how to verify instead of guessing.
+description: Use when a task needs a real web page — opening a URL, reading or extracting from it, filling and submitting a form, uploading an attachment, checking whether a result actually happened, or recovering after a page or carrier goes away. Covers how to drive the browser with dsh_browser_code, how to batch steps, and how to verify instead of guessing.
 ---
 
 # Driving the browser
 
-The browser is a real Chromium the human can watch and take over. Your tools drive it over the
-page itself, so everything here works the same on the desktop sidebar, on an installed Chrome and
-on the plugin's own window.
+The browser is a real Chromium the human can watch and take over. You drive it with one tool,
+`dsh_browser_code`: write an async JavaScript function body that calls the browser helpers, and
+return what you need to see. One call can open a page, act, wait, extract and decide.
 
-## Before acting
+```js
+await open('https://example.com/search')
+await type('input[name=q]', 'wireless headphones', { submit: true })
+await waitFor({ text: 'results' })
+return await js(`[...document.querySelectorAll('.result')].slice(0, 10).map(r => ({
+  title: r.querySelector('h3')?.innerText, price: r.querySelector('.price')?.innerText }))`)
+```
 
-1. `dsh_browser_state` — where am I? URL, load state, requests in flight, what is on the page.
-2. `dsh_browser_snapshot` (numbered interactive elements) or `dsh_browser_a11y` (roles, names,
-   states) — pick the structure map, not a screenshot, unless the page is canvas-only.
-3. Then act with a semantic target: `{by: "text"|"css"|"xpath", value}`. Elements carry a stable
-   CSS selector, so a click re-resolves the element; never trust an index from an older snapshot.
+## Helpers
+
+- `open(url)`, `back()`, `forward()`, `refresh()` — navigate; returns a page summary.
+- `click(target)`, `type(target, text, {submit})` / `type(text)`, `press(key)`, `select(target, optionText)`,
+  `fill(fields)`, `scroll(deltaY | {toBottom, toTop, selector})`.
+- `target` is visible text (`'Sign in'`), a CSS selector (`'#email'`, `'button[type=submit]'`),
+  `{text|css|xpath, index}` or `{x, y}` from a screenshot. A target re-resolves on every call.
+- `read({format, selector, maxChars})` — page text as markdown; `snapshot()` — numbered interactive
+  elements with labels and selectors; `find(text)`; `state()`; `tabs()`.
+- `js(expr)` — evaluate in the page and get the value back (objects and arrays come back as data).
+  Best for lists, tables and attributes: extract exactly the fields you need.
+- `waitFor({text | gone | url | selector, timeoutMs})` waits on a fact; `sleep(ms)` only as a last resort.
+- `screenshot({fullPage})` — for canvas-only pages or to show the human; vision models see the image.
+- `refs.capture({excerptText})`, `refs.list()`, `refs.reveal({referenceId})` — browser references.
+- `call(name, args)` reaches every other action with its structured result: `download`, `upload`,
+  `console`, `network`, `wait_for_response`, `dialog`, `hover`, `drag`, `switch_tab`, `close_tab`,
+  `set_value`, `check`, `get_value`, `scrape`, `a11y`, `assert`, `do`, `doctor`, ... `help()` lists
+  them and `help(name)` describes one.
+- `log(...)` prints; the return value is printed. A failing helper throws — wrap it in try/catch to
+  try another selector or route in the same call.
 
 ## Batch, do not drip
 
-`dsh_browser_do` runs a list of steps in ONE call and stops at the first that cannot proceed.
-"Click search → type the query → press Enter → wait for results" is one call, not five. Steps:
-`open`, `tap`, `field`, `type`, `key`, `scroll`, `sleep_ms`, `wait_text`, `wait_gone`, `wait_url`,
-`wait_idle`, `eval`, `check`. Waits are condition-based; a `tap` whose target is covered by a
-cookie banner dismisses the banner first.
-
-## Wait on facts, not on time
-
-- `dsh_browser_wait` — load complete, an expected URL or a selector.
-- `dsh_browser_wait_for_response` — a server answer arrived **after** this call started. This is
-  the "did the submit reach the server" wait; a screenshot cannot answer it.
-- `dsh_browser_console` / `dsh_browser_network` — what the page actually did when the screen does
-  not explain the failure.
+Put a whole run of steps in one call, and use loops for pagination and lists. Return only what you
+need: a few fields from `js()` beat a whole `read()` of the page. When you do not know the page yet,
+`open()` then `snapshot()` in the first call, then act on what it showed.
 
 ## Verify, then retry
 
-`dsh_browser_assert` checks a selector, text, URL or JS predicate and returns evidence per check.
-"Clicked" and "the form accepted it" are different claims. Before retrying anything that changes
-server state, assert that the previous attempt did not already take effect.
-
-## Files
-
-- `dsh_browser_download` — save a URL through the directory admission gate (never overwrites).
-- `dsh_browser_upload` — put a local file (inside the workspace) into a file input.
-- `dsh_browser_screenshot` — for the human, or when the page has no usable DOM.
-
-## When the page fights you
-
-- Dialogs: native page handling by default. Explicit accept/dismiss enables automatic answers; native restores page handling. `dsh_browser_dialog` reports them and can
-  switch the policy to accept.
-- Menus that appear on hover: use `dsh_browser_hover` before snapshotting. It moves the browser
-  pointer and activates CSS hover styles and mouse handlers.
-- Sliders, sortable lists, drop targets, and canvas strokes: use `dsh_browser_drag` with viewport
-  CSS coordinates, then verify the resulting value, order, dropped data, or canvas state.
-- Runs of canvas clicks: use `dsh_browser_click_sequence`.
-- Something is odd and nothing explains it: `dsh_browser_doctor`, then `dsh_browser_help`.
+"Clicked" and "the form accepted it" are different claims: check the URL, a confirmation text or
+`call('wait_for_response', ...)` before moving on. Before retrying anything that changes server
+state, check that the previous attempt did not already take effect.
 
 ## Never
 
+- Never solve a CAPTCHA, slider, login, 2FA or payment yourself: call `dsh_browser_request_takeover`.
 - Do not re-submit a form whose result you have not verified — a lost reply is not a failed submit.
 - Do not paste cookies, tokens or exported login state into the conversation.
 - Do not assume another task's tabs or navigation are visible to you: each task has its own
-  session, and `dsh_browser_reset_session` ends yours without touching anyone else's.
+  session, and `call('reset_session')` ends yours without touching anyone else's.

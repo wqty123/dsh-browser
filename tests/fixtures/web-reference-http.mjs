@@ -31,7 +31,7 @@ export async function webReferenceHttp() {
   ])
   registerWebGuest({ inject(_names, install) { install({ effect: fn => fn(), webServer: { register(route) { routes.set(route.path, route.handler); return () => {} } } }) } })
   const tools = new Map()
-  apply({ tools: { register: tool => tools.set(tool.name, tool) }, systemPrompt: { section() {} }, effect() {}, get: name => context.get(name) })
+  apply({ tools: { register: tool => tools.set(tool.name, tool) }, systemPrompt: { section() {} }, effect() {}, get: name => context.get(name) }, { surface: 'tools' })
   const server = createServer((req, res) => {
     const handler = routes.get(new URL(req.url, 'http://localhost').pathname)
     if (!handler) { res.writeHead(404); res.end(); return }

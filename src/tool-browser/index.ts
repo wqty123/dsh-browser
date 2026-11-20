@@ -25,6 +25,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { pageOperationScript } from './page-probe.ts'
+import { CODE_TOOL, createCodeTool, type CatalogTool } from './code-tool.ts'
 import { SettingsStore, settingsPath } from '../browser-electron/settings-store.ts'
 import { createShortcutStore, type ShortcutSettings } from '../browser-electron/startpage-shortcuts.ts'
 import { createReferenceService, summarizeReference, type BrowserReferenceService } from '../browser-reference/service.ts'
@@ -152,6 +153,12 @@ export interface Config {
   readonly tabTools?: boolean
   /** Optional initial allow-list of browser tool names; other tools are refused. */
   readonly allowedActions?: readonly string[]
+  /**
+   * What the model sees. "code" (default): one dsh_browser_code tool whose script calls every
+   * browser action as a helper, plus dsh_browser_request_takeover. "tools": every action as its
+   * own tool.
+   */
+  readonly surface?: 'code' | 'tools'
 }
 
 /** Per-apply (per-context) tool state: sessions, in-flight opens, restriction. */
@@ -487,6 +494,7 @@ function formatSnapshot(snapshot: {
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
   const timeoutMs = config.timeoutMs ?? 60_000
+  const surface = config.surface ?? 'code'
   /**
    * Longest wait `dsh_browser_wait` may poll for, leaving room for the tool call itself to
    * finish and report.
@@ -534,7 +542,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Tool guidance band is 100-199; 150 keeps clear of the common 110/120
     // tool sections so ordering does not depend on plugin load sequence.
     order: 150,
-    text: 'Use dsh_browser_* tools to operate the built-in browser. Each task has its own session and window (real toolbar): the human can watch and take over, and other tasks\' pages are not visible to you. Map a page with dsh_browser_a11y (semantic roles/names/states) or dsh_browser_snapshot (numbered elements), then drive it: dsh_browser_click/dsh_browser_type take a target {by: css|text|xpath, value}, or coordinates from dsh_browser_screenshot. Prefer dsh_browser_fill (batch) or dsh_browser_set_value/check/select/clear for forms; verify with dsh_browser_get_value. Use dsh_browser_scrape (not hand-written dsh_browser_execute) for list pages; dsh_browser_wait after slow navigation. Use dsh_browser_do for a run of steps, dsh_browser_assert to check results, and dsh_browser_console/network when the screen is unclear. Say what you are doing on the page. On a CAPTCHA (dsh_browser_challenge), stop retrying and ask the human to solve it in the browser window, then re-check.',
+    text: surface === 'code'
+      ? 'Operate the built-in browser with dsh_browser_code: write a short async JavaScript body that calls the browser helpers (open, click, type, press, read, snapshot, js, waitFor, screenshot, call) and returns what you need. Put a whole run of steps in ONE call (e.g. open, type the query with {submit: true}, waitFor results, then read or extract with js) instead of one call per action, and use loops and try/catch to handle lists, pagination and fallbacks. Each task has its own session and window (real toolbar): the human can watch and take over, and other tasks\' pages are not visible to you. Extract lists and tables with js() returning JSON rather than reading whole pages. Say what you are doing on the page. On a CAPTCHA, login, 2FA or payment, call dsh_browser_request_takeover; never try to solve it.'
+      : 'Use dsh_browser_* tools to operate the built-in browser. Each task has its own session and window (real toolbar): the human can watch and take over, and other tasks\' pages are not visible to you. Map a page with dsh_browser_a11y (semantic roles/names/states) or dsh_browser_snapshot (numbered elements), then drive it: dsh_browser_click/dsh_browser_type take a target {by: css|text|xpath, value}, or coordinates from dsh_browser_screenshot. Prefer dsh_browser_fill (batch) or dsh_browser_set_value/check/select/clear for forms; verify with dsh_browser_get_value. Use dsh_browser_scrape (not hand-written dsh_browser_execute) for list pages; dsh_browser_wait after slow navigation. Use dsh_browser_do for a run of steps, dsh_browser_assert to check results, and dsh_browser_console/network when the screen is unclear. Say what you are doing on the page. On a CAPTCHA (dsh_browser_challenge), stop retrying and ask the human to solve it in the browser window, then re-check.',
   })
 
   /**
@@ -575,6 +585,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     return channel === 'sidebar' || channel === 'chrome' || channel === 'edge' ? channel : 'bundled'
   }
 
+  const catalog = new Map<string, CatalogTool>()
   const registerSafely = (definition: ReturnType<typeof defineTool>): void => {
     try {
       const execute = definition.execute.bind(definition)
@@ -595,7 +606,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         return execute(args, exec)
       } }
-      ctx.tools.register(definition)
+      catalog.set(definition.name, definition as unknown as CatalogTool)
+      if (surface === 'tools' || definition.name === TAKEOVER_TOOL) ctx.tools.register(definition)
     } catch (error) {
       ctx.logger?.warn?.(
         `dsh-builtin-browser: could not register ${definition.name} (${String(error)}). Another `
@@ -3606,6 +3618,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     },
   }))
+
+  if (surface === 'code') {
+    try {
+      ctx.tools.register(createCodeTool(catalog, { timeoutMs }))
+    } catch (error) {
+      ctx.logger?.warn?.(`dsh-builtin-browser: could not register ${CODE_TOOL} (${String(error)}).`)
+    }
+  }
 }
 
 /** Test hook: inspect and reset session mappings across every live plugin apply. */

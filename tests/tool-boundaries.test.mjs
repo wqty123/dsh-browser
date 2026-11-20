@@ -25,7 +25,7 @@ async function mount(browser, extra = {}) {
     tools: { register: tool => tools.set(tool.name, tool) },
     systemPrompt: { section() {} }, effect() {}, logger: console,
   }
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
   const exec = { signal: new AbortController().signal, agent: { id: 'boundary-task', session: { header: { cwd: workspace } } } }
   await tools.get('dsh_browser_open').execute({ url: 'https://fixture.test/page', surface: 'builtin' }, exec)
   return { run: (name, args) => tools.get('dsh_browser_' + name).execute(args, exec) }
