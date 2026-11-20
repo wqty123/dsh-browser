@@ -96,6 +96,6 @@ Web 页面和嵌套 iframe 都受响应级 `sandbox allow-scripts allow-forms` �
 
 ## Electron 运行时
 
-- Electron 包自身在 44+ 使用懒下载。0.4.16 通过**本插件的 `postinstall`**明确准备二进制(约 100MB,需网络);这要求宿主允许构建脚本且下载可用,不保证所有环境自动完成。DSH rc.5 的 pnpm 11.7 `strict-dep-builds` 首次可能需在原生插件管理器批准脚本,插件不会改写 `allowBuilds`。
+- Electron 包自身在 44+ 使用懒下载。本插件没有安装期生命周期脚本,不会在安装过程中下载二进制。需要修复运行时的操作员可显式运行准备命令(约 100MB,需网络);这不启用独立 Electron 窗口作为侧栏回退。
 - `--ignore-scripts` 或显式跳过下载会保留未下载状态。可在正确 profile 目录运行 `npx --no dsh-browser-install-electron`,它也遵守 `ELECTRON_SKIP_BINARY_DOWNLOAD`;需要下载时先撤销跳过设置。运行时探测仍为纯文件系统操作,不自动下载。离线时可用 `ELECTRON_PATH` 指定预装二进制,详见[用户指南](user-guide.md#准备-electron-二进制)。
 - 0.4.16 的依赖为 `^44.10.0`,锁文件解析到 `44.10.0`,安全最低阈值为 `44.9.1`。**已有且有效的 `ELECTRON_PATH` 优先于这份依赖**,升级插件不会更改该覆盖;旧覆盖可能让实际使用的内核继续停在旧版。侧栏使用的是桌面外壳的内核,也不随插件升级。
