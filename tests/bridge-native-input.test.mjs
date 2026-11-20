@@ -75,3 +75,34 @@ test('non-webview targets retain their normal CDP path', async () => {
   assert.deepEqual(seen.text, [])
   assert.equal(seen.cdp[0].method, 'Input.insertText')
 })
+
+test('a hung CDP or native text command times out and releases only its guest queue', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  for (const native of [false, true]) {
+    const id = native ? 71 : 70
+    const { guest, seen } = page(id)
+    const original = guest.debugger.sendCommand
+    if (native) guest.insertText = () => new Promise(() => {})
+    else guest.debugger.sendCommand = () => new Promise(() => {})
+    const method = native ? 'Input.insertText' : 'Runtime.evaluate'
+    const stuck = sendCdp(id, method, { text: 'x' })
+    const rejected = assert.rejects(stuck, new RegExp(`cdp command ${method} on guest ${id} did not answer within 15000ms`))
+    await sendCdp(5, 'Runtime.evaluate', {})
+    t.mock.timers.tick(14_999)
+    assert.deepEqual(seen.cdp, [])
+    t.mock.timers.tick(1)
+    await rejected
+    guest.debugger.sendCommand = original
+    await sendCdp(id, 'Runtime.evaluate', {})
+    assert.equal(seen.cdp.length, 1)
+  }
+})
+
+test('successful and rejected commands clear their timeout timers', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { guest } = page(72)
+  await sendCdp(72, 'Runtime.evaluate', {})
+  guest.debugger.sendCommand = async () => { throw new Error('command failed') }
+  await assert.rejects(sendCdp(72, 'Runtime.evaluate', {}), /command failed/)
+  t.mock.timers.tick(30_000)
+})
