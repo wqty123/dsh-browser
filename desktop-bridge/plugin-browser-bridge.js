@@ -252,6 +252,8 @@ function describe(contents) {
  * Attaching is per-webContents and idempotent; a destroyed guest drops the
  * attachment so a later guest with a recycled id is not mistaken for this one.
  */
+const CDP_COMMAND_TIMEOUT_MS = 15_000
+
 async function sendCdp(id, method, params) {
   const guest = guestById(id)
   if (guest === undefined || guest.isDestroyed()) throw new Error(`guest ${id} is not available`)
@@ -280,8 +282,20 @@ async function sendCdp(id, method, params) {
     return await current.debugger.sendCommand(method, params ?? {})
   })
   // Keep the chain alive on failure so one bad command does not wedge the guest.
-  queues.set(id, next.catch(() => undefined))
-  return await next
+  let timer
+  const guarded = Promise.race([
+    next,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`cdp command ${method} on guest ${id} did not answer within ${CDP_COMMAND_TIMEOUT_MS}ms`)), CDP_COMMAND_TIMEOUT_MS)
+      timer.unref?.()
+    }),
+  ])
+  queues.set(id, guarded.catch(() => undefined))
+  try {
+    return await guarded
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /** Convert CDP key data for Electron's per-webContents input channel. */
