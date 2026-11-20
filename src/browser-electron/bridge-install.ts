@@ -87,7 +87,7 @@ export async function waitForRestartedBridge(pid: number, options: BridgeReadyOp
         const connection = new BridgeConnection({ port: Number(endpoint.port), token: endpoint.token, pid })
         try {
           const answer = await connection.call({ op: 'list' }, Math.min(1_000, remaining))
-          if (answer.ok === true && Array.isArray(answer.guests) && Array.isArray(answer.sidebar)) return
+          if (answer.ok === true && Number(answer.protocol) >= 4) return
         } finally { connection.close() }
       }
     } catch {

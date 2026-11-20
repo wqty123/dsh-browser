@@ -5,6 +5,7 @@ import { connect } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { readTabHandle, resolveSessionHandle, sessionWireId, tabWireId } from '../lib/browser/handles.js'
 
 const owner = process.env.DSH_ACCEPT_SESSION
 const otherOwner = process.env.DSH_ACCEPT_OTHER_SESSION
@@ -18,6 +19,7 @@ const ep = JSON.parse(readFileSync(endpoint, 'utf8'))
 const socket = connect({ host: '127.0.0.1', port: ep.port })
 socket.setEncoding('utf8')
 const pending = new Map(), results = [], opened = [], protectedIds = new Set()
+const scopes = new Map([owner, otherOwner].map(owner => [owner, sessionWireId({ owner, session: randomUUID() })]))
 let seq = 0, buffer = ''
 socket.on('data', chunk => {
   buffer += chunk
@@ -52,7 +54,7 @@ function call(op, extra = {}) {
       reject(new Error(`${op} timed out`))
     }, 30_000)
     pending.set(bridgeRequestId, { resolve, reject, timer })
-    socket.write(JSON.stringify({ op, owner, bridgeRequestId, ...extra, ...seq === 1 ? { token: ep.token } : {} }) + '\n')
+    socket.write(JSON.stringify({ op, ...op === 'list' ? { handle: scopes.get(owner) } : {}, bridgeRequestId, ...extra, ...seq === 1 ? { token: ep.token } : {} }) + '\n')
   })
 }
 async function check(name, ok, detail = '') {
@@ -65,26 +67,29 @@ async function check(name, ok, detail = '') {
   } catch (error) { console.log('[diag] strip unavailable: ' + error.message) }
 }
 async function open(session, viewId, url) {
-  const answer = await call('ensureSidebar', { owner: session, viewId })
+  const handle = tabWireId({ ...resolveSessionHandle(scopes.get(session)), tab: viewId })
+  const answer = await call('ensureSidebar', { handle, attachOnly: true, deadline: Date.now() + 30_000, transactionId: randomUUID() })
   requireTestPage(answer)
-  opened.push({ owner: session, id: answer.id })
-  const navigated = await call('cdp', { owner: session, id: answer.id, method: 'Page.navigate', params: { url } })
+  opened.push({ handle: answer.id })
+  const navigated = await call('cdp', { handle: answer.id, method: 'Page.navigate', params: { url } })
   if (navigated.ok !== true) throw new Error('test page navigation failed: ' + (navigated.error ?? answer.id))
   return answer
 }
 function requireTestPage(answer) {
-  if (answer.ok !== true || !Number.isSafeInteger(answer.id)) throw new Error('ensureSidebar failed: ' + (answer.error ?? 'missing page id'))
+  if (answer.ok !== true) throw new Error('ensureSidebar failed: ' + (answer.error ?? 'missing page id'))
+  readTabHandle(answer.id)
   if (protectedIds.has(answer.id)) throw new Error(`FAIL ensureSidebar reused pre-existing page ${answer.id}; refusing to navigate or close it`)
 }
 async function closeTestPage(page) {
-  if (protectedIds.has(page.id) || !opened.some(p => p.id === page.id && p.owner === page.owner)) throw new Error('refusing to close a page not created by this check')
+  if (protectedIds.has(page.handle) || !opened.some(p => p.handle === page.handle)) throw new Error('refusing to close a page not created by this check')
   return await call('closePage', page)
 }
 async function initialPages(session) {
-  const answer = await call('list', { owner: session })
-  if (answer.ok !== true || !Array.isArray(answer.sidebar) || answer.sidebar.some(page => !Number.isSafeInteger(page.id))) {
+  const answer = await call('list', { handle: scopes.get(session) })
+  if (answer.ok !== true || !Array.isArray(answer.sidebar)) {
     throw new Error('cannot identify pre-existing pages; refusing to open test pages')
   }
+  for (const page of answer.sidebar) readTabHandle(page.id)
   return answer.sidebar
 }
 try {
@@ -94,7 +99,7 @@ try {
     socket.once('error', error => { clearTimeout(timer); reject(error) })
   })
   const version = await call('version')
-  await check('the current bridge build is loaded', version.ok === true && version.protocol >= 3
+  await check('the current bridge build is loaded', version.ok === true && version.protocol >= 4
     && Date.parse(version.loadedAt) >= statSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url)).mtimeMs)
   const before = await initialPages(owner)
   const otherInitial = await initialPages(otherOwner)
@@ -102,30 +107,30 @@ try {
   const prefix = 'accept-' + randomUUID()
   const firstView = prefix + '-first', secondView = prefix + '-second'
   const first = await open(owner, firstView, 'https://example.com/')
-  await check('first open returns a page', first.ok === true && Number.isSafeInteger(first.id))
+  await check('first open returns a page', first.ok === true && typeof first.id === 'string')
   const second = await open(owner, secondView, 'https://example.org/')
-  await check('second logical view creates a DIFFERENT page', second.ok === true && Number.isSafeInteger(second.id) && second.id !== first.id)
+  await check('second logical view creates a DIFFERENT page', second.ok === true && typeof second.id === 'string' && second.id !== first.id)
   const pages = (await call('list')).sidebar ?? []
   await check('exactly two pages were added — no spray', pages.length - before.length === 2)
   let operable = 0
-  for (const [id, logicalViewId] of [[first.id, firstView], [second.id, secondView]]) {
-    const shown = await call('showTab', { viewId: id, logicalViewId })
-    const answer = await call('cdp', { id, method: 'Runtime.evaluate', params: { expression: 'location.href', returnByValue: true } })
+  for (const handle of [first.id, second.id]) {
+    const shown = await call('showTab', { handle })
+    const answer = await call('cdp', { handle, method: 'Runtime.evaluate', params: { expression: 'location.href', returnByValue: true } })
     if (shown.ok === true && answer.ok === true && typeof answer.result?.result?.value === 'string' && answer.result.result.value !== '') operable += 1
   }
   await check('both pages answer after being brought forward', operable === 2)
-  const otherBefore = (await call('list', { owner: otherOwner })).sidebar ?? []
+  const otherBefore = (await call('list', { handle: scopes.get(otherOwner) })).sidebar ?? []
   await check('another session cannot see these pages', otherBefore.every(g => g.id !== first.id && g.id !== second.id))
   const other = await open(otherOwner, prefix + '-other', 'https://example.net/')
-  await check('two sessions get DIFFERENT pages', other.ok === true && Number.isSafeInteger(other.id) && other.id !== first.id && other.id !== second.id)
+  await check('two sessions get DIFFERENT pages', other.ok === true && typeof other.id === 'string' && other.id !== first.id && other.id !== second.id)
   const mine = (await call('list')).sidebar ?? []
-  const theirs = (await call('list', { owner: otherOwner })).sidebar ?? []
+  const theirs = (await call('list', { handle: scopes.get(otherOwner) })).sidebar ?? []
   await check('neither can see the other’s page', mine.some(g => g.id === first.id) && theirs.some(g => g.id === other.id)
     && !mine.some(g => g.id === other.id) && theirs.every(g => g.id !== first.id && g.id !== second.id))
-  const reopened = await call('ensureSidebar', { viewId: firstView, guestId: first.id })
+  const reopened = await call('ensureSidebar', { handle: first.id, deadline: Date.now() + 30_000, transactionId: randomUUID() })
   requireTestPage(reopened)
   await check('reopening a logical view reuses its page', reopened.ok === true && reopened.id === first.id)
-  const closed = await closeTestPage({ owner, id: second.id })
+  const closed = await closeTestPage({ handle: second.id })
   const remaining = (await call('list')).sidebar ?? []
   await check('closing one page actually closes it', closed.ok === true && closed.closed === 1 && remaining.every(g => g.id !== second.id))
   await check('the other page survives', remaining.some(g => g.id === first.id))

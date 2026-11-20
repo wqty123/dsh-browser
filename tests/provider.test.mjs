@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import vm from 'node:vm'
 
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
+import { tabIn, testTab } from './canonical-fixtures.mjs'
+import { readTabHandle, resolveSessionHandle } from '../lib/browser/handles.js'
 
 /**
  * A fake ElectronBrowserViewHost. `sendCommand` simulates the CDP surface the
@@ -28,8 +30,8 @@ function makeHost(overrides = {}) {
     mouseSequence,
     events,
     page,
-    createView() {
-      const id = `view${++counter}`
+    createView(identity) {
+      const id = identity ?? testTab('fixture', `view${++counter}`)
       let url = 'about:blank'
       let loader = 0
       const handle = {
@@ -100,18 +102,18 @@ function makeHost(overrides = {}) {
 test('source binding retains the exact adopted page and destroys only the unused placeholder', async () => {
   const host = makeHost()
   let adopted
-  host.adoptPage = async (id, owner) => {
-    assert.equal(id, '42')
-    assert.equal(owner, 'session-owner')
-    adopted = host.createView()
+  host.adoptPage = async (id, scope) => {
+    assert.equal(readTabHandle(id).tab, 'page:42')
+    assert.equal(resolveSessionHandle(scope).owner, 'session-owner')
+    adopted = host.createView(id)
     return adopted
   }
   const provider = new ElectronBrowserProvider(host)
   const session = await provider.open('session-owner')
-  await provider.bindPage(session, '42')
+  await provider.bindPage(session, tabIn(session, 'page:42'))
   assert.equal(host.views.size, 1)
   assert.equal(host.views.has(adopted.id), true)
-  assert.equal((await provider.listTabs(session))[0].id, 'page:42')
+  assert.equal((await provider.listTabs(session))[0].id, tabIn(session, 'page:42'))
   provider.dispose()
 })
 
@@ -120,21 +122,21 @@ test('closing an adopted carrier page waits for acknowledgement and removes its 
   let exists = true
   let refuse = true
   const closed = []
-  host.listPages = async () => exists ? [{ id: '42', url: 'https://example.test/' }] : []
-  host.adoptPage = async () => host.createView()
+  host.listPages = async scope => exists ? [{ id: tabIn(scope, 'page:42'), url: 'https://example.test/' }] : []
+  host.adoptPage = async id => host.createView(id)
   host.closePage = async (id, owner) => {
-    closed.push([id, owner])
+    closed.push([readTabHandle(id).tab.slice('page:'.length), resolveSessionHandle(owner).owner])
     if (refuse) throw new Error('close refused')
     exists = false
   }
   const provider = new ElectronBrowserProvider(host)
   const session = await provider.open('owner')
-  await provider.switchTab(session, 'page:42')
-  await assert.rejects(provider.closeTab(session, 'page:42'), /close refused/)
-  assert.ok((await provider.listTabs(session)).some(tab => tab.id === 'page:42'))
+  await provider.switchTab(session, tabIn(session, 'page:42'))
+  await assert.rejects(provider.closeTab(session, tabIn(session, 'page:42')), /close refused/)
+  assert.ok((await provider.listTabs(session)).some(tab => tab.id === tabIn(session, 'page:42')))
   refuse = false
-  await provider.closeTab(session, 'page:42')
-  assert.ok((await provider.listTabs(session)).every(tab => tab.id !== 'page:42'))
+  await provider.closeTab(session, tabIn(session, 'page:42'))
+  assert.ok((await provider.listTabs(session)).every(tab => tab.id !== tabIn(session, 'page:42')))
   assert.deepEqual(closed, [['42', 'owner'], ['42', 'owner']])
   provider.dispose()
 })
@@ -182,25 +184,21 @@ test('switchTab/closeTab stay inside their own session and reject unknown ids', 
   const sid = await p.open()
   const tabId = (await p.listTabs(sid))[0].id
 
-  // A second session. Tab ids are globally unique, so a bare uuid is accepted for
-  // convenience — but looking it up in the OTHER session is not: that would let a stale
-  // id close or switch a tab belonging to another task (or to the human) and still report
-  // success, which is the opposite of the isolation these tools promise.
+  // A handle from a different session cannot select or close this tab.
   const other = await p.open()
-  await assert.rejects(async () => { await p.switchTab(other, tabId) }, /not open in this session/)
-  await assert.rejects(async () => { await p.closeTab(other, tabId) }, /not open in this session/)
+  await assert.rejects(async () => { await p.switchTab(other, tabId) }, /not open in this (?:owner\/)?session/)
+  await assert.rejects(async () => { await p.closeTab(other, tabId) }, /not open in this (?:owner\/)?session/)
 
   // The tab is untouched by either refusal, and still reachable from its own session.
   assert.ok((await p.listTabs(sid)).some(t => t.id === tabId), 'the other session could not disturb it')
   assert.equal((await p.listTabs(other)).length, 1, 'nor did it gain anything')
   await p.switchTab(sid, tabId)
 
-  // The bare uuid form still works inside the owning session.
-  await p.switchTab(sid, tabId.replace('tab:', ''))
+  await assert.rejects(p.switchTab(sid, readTabHandle(tabId).tab), /invalid tab handle/)
 
   // An id that exists nowhere must THROW (no silent fake success).
-  await assert.rejects(async () => { await p.closeTab(sid, 'tab:does-not-exist') }, /not open in this session/)
-  await assert.rejects(async () => { await p.switchTab(sid, 'tab:does-not-exist') }, /not open in this session/)
+  await assert.rejects(async () => { await p.closeTab(sid, tabIn(sid, 'does-not-exist')) }, /not open in this (?:owner\/)?session/)
+  await assert.rejects(async () => { await p.switchTab(sid, tabIn(sid, 'does-not-exist')) }, /not open in this (?:owner\/)?session/)
   await p.close(sid)
   await p.close(other)
 })
@@ -428,13 +426,13 @@ test('user actions from the host UI route into the session model', async () => {
   assert.equal(tabs.find(t => t.active).url, 'https://a.example/')
   const firstId = tabs[0].id
 
-  host.userAction({ type: 'activateTab', windowId: sid, viewId: 'view1' })
+  host.userAction({ type: 'activateTab', windowId: sid, viewId: firstId })
   await waitFor(async () => (await p.listTabs(sid)).find(t => t.active).id === firstId)
 
   host.userAction({ type: 'reload', windowId: sid })
   await waitFor(() => host.events.reload >= 1)
 
-  host.userAction({ type: 'closeTab', windowId: sid, viewId: 'view2' })
+  host.userAction({ type: 'closeTab', windowId: sid, viewId: tabs[1].id })
   await waitFor(async () => (await p.listTabs(sid)).length === 1)
 
   // back at the history start is a successful no-op, recorded in history.

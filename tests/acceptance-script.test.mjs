@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readTabHandle, resolveSessionHandle, tabWireId } from '../lib/browser/handles.js'
 
 /** A fake bridge that answers the ops the acceptance script uses. */
 function makeBridge (broken = '') {
@@ -22,6 +23,16 @@ function makeBridge (broken = '') {
   }
   const requests = []
   const views = new Map()
+  const bindings = new Map()
+  const pageHandle = (scope, guest) => {
+    for (const [handle, id] of bindings) {
+      const held = readTabHandle(handle)
+      if (id === guest.id && held.owner === scope.owner && held.session === scope.session) return handle
+    }
+    const handle = tabWireId({ ...scope, tab: `page:${guest.id}` })
+    bindings.set(handle, guest.id)
+    return handle
+  }
   let nextId = 2
   const server = createServer(socket => {
     socket.setEncoding('utf8')
@@ -36,12 +47,14 @@ function makeBridge (broken = '') {
         const request = JSON.parse(line)
         requests.push(request)
         const reply = (body) => socket.write(JSON.stringify({ ...body, bridgeRequestId: request.bridgeRequestId }) + '\n')
-        const owner = request.owner ?? 'anonymous'
+        const scope = request.op === 'version' ? undefined
+          : request.op === 'list' ? resolveSessionHandle(request.handle) : readTabHandle(request.handle)
+        const owner = scope?.owner
 
         if (request.op === 'version') {
           // A loadedAt in the future is always newer than the file on disk, which is what the
           // acceptance script's first check compares against.
-          reply({ ok: true, loadedAt: new Date(Date.now() + 60_000).toISOString(), protocol: 3 })
+          reply({ ok: true, loadedAt: new Date(Date.now() + 60_000).toISOString(), protocol: 4 })
           continue
         }
         if (request.op === 'list') {
@@ -50,14 +63,11 @@ function makeBridge (broken = '') {
             continue
           }
           const mine = guests.filter(g => g.owner === owner)
-          // The shell window travels with every list answer, which is what lets a FAILING run read
-          // the tab strip back and say what it saw instead of just "FAIL".
-          const shell = { id: 1, url: 'dsh-app://app/', title: 'shell', type: 'window' }
-          reply({ ok: true, guests: [shell, ...mine], sidebar: mine.map(g => ({ id: g.id, url: g.url, title: g.title, type: 'webview' })) })
+          reply({ ok: true, sidebar: mine.map(g => ({ id: pageHandle(scope, g), url: g.url, title: g.title, type: 'webview' })) })
           continue
         }
         if (request.op === 'ensureSidebar') {
-          if (!/^session-.+/.test(owner) || typeof request.viewId !== 'string') {
+          if (!/^session-.+/.test(owner) || typeof request.handle !== 'string') {
             reply({ ok: false, error: 'a conversation and logical view are required' })
             continue
           }
@@ -65,44 +75,47 @@ function makeBridge (broken = '') {
             reply({ ok: false, error: 'panel unavailable' })
             continue
           }
-          const key = JSON.stringify([owner, request.viewId])
+          const key = request.handle
           if ((broken === 'protected-first' && views.size === 0)
             || (broken === 'protected-second' && views.size === 1)
             || (broken === 'protected-other' && owner === 'session-other')
             || (broken === 'protected-reopen' && views.has(key))) {
-            reply({ ok: true, id: owner === 'session-other' ? 91 : 90, reused: true })
+            reply({ ok: true, id: pageHandle(scope, guests.find(g => g.owner === owner)), reused: true })
             continue
           }
           if (views.has(key)) {
-            reply({ ok: true, id: views.get(key), owner })
+            reply({ ok: true, id: key })
             continue
           }
           if (guests.some(g => g.owner === owner) && broken === 'reuse') {
-            reply({ ok: true, created: false, id: guests[0]?.id, owner, reused: true })
+            reply({ ok: true, created: false, id: pageHandle(scope, guests[0]), reused: true })
             continue
           }
           const id = nextId++
           views.set(key, id)
+          bindings.set(key, id)
           guests.push({ id, url: 'about:blank', title: 'page ' + id, owner })
           if (broken === 'spray') {
             const extra = nextId++
             guests.push({ id: extra, url: 'about:blank', title: 'page ' + extra, owner })
           }
-          reply({ ok: true, created: true, id, owner })
+          reply({ ok: true, created: true, id: key })
           continue
         }
         if (request.op === 'showTab') { reply({ ok: true, verdict: 'CLICKED' }); continue }
         if (request.op === 'closePage') {
-          const index = guests.findIndex(g => g.id === request.id && g.owner === owner)
+          const index = guests.findIndex(g => g.id === bindings.get(request.handle) && g.owner === owner)
           if (index !== -1) guests.splice(index, 1)
           reply({ ok: index !== -1, closed: index === -1 ? 0 : 1 })
           continue
         }
         if (request.op === 'cdp') {
-          if (!guests.some(g => g.id === request.id && g.owner === owner)) {
+          const guest = guests.find(g => g.id === bindings.get(request.handle) && g.owner === owner)
+          if (!guest) {
             reply({ ok: false, error: 'guest not owned' })
             continue
           }
+          if (request.method === 'Page.navigate') guest.url = request.params.url
           reply({ ok: true, result: { result: { value: 'https://example.com/' } } })
           continue
         }
@@ -168,7 +181,7 @@ test('pre-existing pages are never navigated or closed, even when any ensureSide
     assert.notEqual(code, 0, out)
     assert.match(out, /FAIL ensureSidebar reused pre-existing page/)
     assert.ok(requests.filter(r => r.op === 'ensureSidebar').every(r => r.url === undefined), 'identity must be checked before navigation')
-    assert.deepEqual(requests.filter(r => ['cdp', 'closePage'].includes(r.op) && [90, 91].includes(r.id)), [], 'no mutations or cleanup may target protected pages')
+    assert.deepEqual(requests.filter(r => ['cdp', 'closePage'].includes(r.op) && ['page:90', 'page:91'].includes(readTabHandle(r.handle).tab)), [], 'no mutations or cleanup may target protected pages')
     assert.deepEqual(guests.map(g => [g.id, g.url]), [[90, 'https://user.example/'], [91, 'https://other.example/']], 'only test-owned pages are cleaned up on failure')
   }
 })

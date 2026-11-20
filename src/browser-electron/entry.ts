@@ -35,6 +35,7 @@ import { authenticatedRoute, pairedRoute, isDirectLoopback, type BrowserConnecti
 import { overlayScript } from '../browser-reference/entry.ts'
 import { getLastOpen } from './open-slot.ts'
 import { GUEST_ROUTE, handleGuest } from './guest-route.ts'
+import { resolveSessionHandle, sessionWireId } from '../browser/handles.ts'
 import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.ts'
 import { findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
 import { readBridgeEndpoint } from './bridge-endpoint.ts'
@@ -956,7 +957,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     // A visible-region snapshot is a read: the clipped CDP path never presents
     // the conversation, raises a window or moves the pointer.
     visibleCapture: async (sessionId, clip, signal) => {
-      const shot = await ctx.browser.screenshot(sessionId, { clip, format: 'png' }, signal)
+      const shot = await ctx.browser.screenshot(sessionWireId(resolveSessionHandle(sessionId)), { clip, format: 'png' }, signal)
       return { dataUrl: shot.dataUrl, mime: 'image/png' }
     },
   })

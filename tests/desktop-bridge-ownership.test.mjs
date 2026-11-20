@@ -19,14 +19,15 @@ test('a guest follows the conversation panel that currently shows it', () => {
   const bridge = readFileSync(bridgePath, 'utf8')
   // Every id the host reports for this panel is claimed for this conversation,
   // unconditionally — the previous conversation's claim must move.
-  assert.match(bridge, /for \(const id of panelIds\) \{[\s\S]{0,500}?claims\.set\(id, owner\)/u)
-  assert.doesNotMatch(bridge, /if \(!claims\.has\(id\) \|\| claims\.get\(id\) === owner\) claims\.set\(id, owner\)/u,
-    'a stale claim must be transferred, not kept')
+  assert.match(bridge, /for \(const id of ids\) \{/u)
+  assert.match(bridge, /entry\.owner !== scope\.owner/u)
+  assert.match(bridge, /retireHandle\(key\)/u)
   // `list` still has to agree with the transfer, or the guest stays filtered out.
-  assert.match(bridge, /panelIds\.includes\(g\.id\)/u)
+  assert.match(bridge, /bindGuest\(handle, guest\)/u)
 })
 
 test('driving a guest still re-registers it when the ledger is cold', () => {
   const bridge = readFileSync(bridgePath, 'utf8')
-  assert.match(bridge, /if \(ids\.includes\(id\)\) \{ claims\.set\(id, owner\); return \}/u)
+  assert.match(bridge, /ids\.includes\(Number\(match\[1\]\)\)/u)
+  assert.match(bridge, /bindGuest\(request\.handle, guest\)/u)
 })

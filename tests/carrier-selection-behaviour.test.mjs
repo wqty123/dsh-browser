@@ -1,3 +1,4 @@
+import { testTab, testScope, tabIn } from './canonical-fixtures.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs, { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
@@ -13,7 +14,7 @@ class Sidebar {
   disposed = false
   onLost(listener) { this.lost = listener }
   dispose() { this.disposed = true }
-  createView(owner) { return { id: 'visible-' + owner, async sendCommand(method) { return { method, owner } } } }
+  createView(identity) { const owner = JSON.parse(decodeURIComponent(identity.slice('dsh-tab:v1:'.length)))[0]; return { id: identity, async sendCommand(method) { return { method, owner } } } }
   destroyView() {}
   showView() {}
 }
@@ -114,7 +115,7 @@ test('legacy auto with no installed browser replaces an explicit carrier with th
 test('a stale sidebar discovery cannot overwrite a newer explicit selection', async t => {
   let resolveDiscovery
   const h = harness(t, 'bundled', () => new Promise(resolve => { resolveDiscovery = resolve }))
-  const pending = h.current.createView('task').sendCommand('Runtime.evaluate')
+  const pending = h.current.createView(testTab('task')).sendCommand('Runtime.evaluate')
   const rejected = assert.rejects(pending, /disposed/)
   await new Promise(setImmediate)
   await h.choose('chrome')
@@ -131,7 +132,7 @@ test('a stale sidebar discovery cannot overwrite a newer explicit selection', as
 test('a late loss notification from a replaced sidebar cannot replace the current carrier', async t => {
   const sidebar = new Sidebar()
   const h = harness(t, 'bundled', async () => sidebar)
-  await h.current.createView('task').sendCommand('Runtime.evaluate')
+  await h.current.createView(testTab('task')).sendCommand('Runtime.evaluate')
   assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
   await h.choose('chrome')
   const selected = h.current
@@ -143,7 +144,7 @@ test('a late loss notification from a replaced sidebar cannot replace the curren
 test('disposing the plugin cancels pending discovery and releases the currently selected carrier', async t => {
   let resolveDiscovery
   const h = harness(t, 'bundled', () => new Promise(resolve => { resolveDiscovery = resolve }))
-  const pending = h.current.createView('task').sendCommand('Runtime.evaluate')
+  const pending = h.current.createView(testTab('task')).sendCommand('Runtime.evaluate')
   const rejected = assert.rejects(pending, /disposed/)
   await new Promise(setImmediate)
   h.dispose()
@@ -167,7 +168,7 @@ test('disposing the plugin cancels a scheduled sidebar retry', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   let attempts = 0
   const h = harness(t, 'bundled', async () => { attempts += 1; return undefined })
-  const pending = h.current.createView('task').sendCommand('Runtime.evaluate')
+  const pending = h.current.createView(testTab('task')).sendCommand('Runtime.evaluate')
   const rejected = assert.rejects(pending, /abort/iu)
   await new Promise(setImmediate)
   assert.equal(attempts, 1)
@@ -184,7 +185,7 @@ test('a current sidebar loss reconnects the same handles without replacing the p
   let discoveries = 0
   const h = harness(t, 'bundled', async () => ++discoveries === 1 ? sidebar : recovered)
   const selected = h.current
-  const view = selected.createView('task')
+  const view = selected.createView(testTab('task'))
   await view.sendCommand('Runtime.evaluate')
   sidebar.lost('shell-exited')
   assert.equal(h.current, selected)
@@ -199,7 +200,7 @@ test('a current sidebar loss reconnects the same handles without replacing the p
   sidebar.lost('shell-exited')
   assert.equal(h.registered.length, registrations)
   await assert.rejects(
-    async () => selected.createView().sendCommand('Runtime.evaluate', { expression: '1' }),
+    async () => selected.createView(testTab()).sendCommand('Runtime.evaluate', { expression: '1' }),
     /disposed/,
     'the disposed sidebar cannot discover or start another carrier',
   )
@@ -212,7 +213,7 @@ for (const channel of ['sidebar', 'bundled', 'auto']) {
     t.mock.method(DesktopBridgeViewHost, 'refusedIframePanel', () => true)
     assert.equal(discoveries, 0)
     assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
-    await assert.rejects(h.current.createView('task').sendCommand('Runtime.evaluate'), /sidebar is an iframe.*cannot support CDP tools.*host-provided sidebar\/webview.*No standalone browser/s)
+    await assert.rejects(h.current.createView(testTab('task')).sendCommand('Runtime.evaluate'), /sidebar is an iframe.*cannot support CDP tools.*host-provided sidebar\/webview.*No standalone browser/s)
     assert.equal(discoveries, 1)
     assert.ok(h.registered.every(host => host.constructor.name === 'SidebarOnlyHost'))
   })

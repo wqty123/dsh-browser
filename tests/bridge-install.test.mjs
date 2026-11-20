@@ -209,7 +209,7 @@ test('panel completion rejects a reported restarted Desktop PID', async () => {
 })
 
 /** A real authenticated loopback protocol peer; it implements no mutating operation. */
-async function bridgePeer({ response = { ok: true, guests: [], sidebar: [] } } = {}) {
+async function bridgePeer({ response = { ok: true, protocol: 4 } } = {}) {
   const requests = []
   const sockets = new Set()
   const token = 'isolated-install-readiness-token'
