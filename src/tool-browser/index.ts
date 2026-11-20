@@ -310,6 +310,45 @@ function taskKey(exec: { agent?: { id?: string } } | undefined): string {
   return exec?.agent?.id ?? 'default'
 }
 
+const effectProperties = {
+  verified: { type: 'boolean' as const, description: 'Whether a visible change was observed. Absent when it could not be checked.' },
+  note: { type: 'string' as const, description: 'Why the effect is uncertain.' },
+}
+
+async function pageFingerprint(browser: NonNullable<Context['browser']>, session: BrowserSessionId): Promise<string | undefined> {
+  try {
+    const result = await browser.execute(session, {
+      script: `(() => {
+        const a = document.activeElement
+        return JSON.stringify([
+          location.href, document.title,
+          a ? [a.tagName, a.id || a.getAttribute('name') || a.className || '',
+            typeof a.value === 'string' ? a.value.length : null, a.checked, a.selectedIndex,
+            a.selectionStart, a.selectionEnd, a.scrollLeft, a.scrollTop] : null,
+          window.scrollX, window.scrollY,
+          document.body ? document.body.childElementCount : 0,
+          document.body ? document.body.innerHTML.length : 0,
+        ])
+      })()`,
+    })
+    return result.ok && typeof result.value === 'string' ? result.value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function observedEffect(browser: NonNullable<Context['browser']>, session: BrowserSessionId, before: string | undefined): Promise<{ verified?: boolean; note?: string }> {
+  const after = await pageFingerprint(browser, session)
+  if (before === undefined || after === undefined) return { note: 'The effect could not be checked.' }
+  return before !== after
+    ? { verified: true }
+    : { verified: false, note: 'No visible change observed; the effect is uncertain.' }
+}
+
+function effectText(value: { verified?: boolean; note?: string }): string {
+  return value.verified === true ? ' Visible change observed.' : ` ${value.note ?? 'The effect could not be checked.'}`
+}
+
 function rememberSession(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string, agent: ExecAgent | undefined, session: BrowserSessionId | undefined, panelUrl?: string): void {
   const previous = state.sessionsByTask.get(key)
   const previousPanelUrl = state.panelUrlByTask.get(key)
@@ -1134,8 +1173,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       y: { type: 'number', description: 'Viewport y coordinate (CSS px), taken from the same screenshot as x.' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { clicked: { type: 'boolean', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: value.clicked ? 'Clicked.' : 'Click failed.' }],
+      schema: { type: 'object', additionalProperties: false, properties: { clicked: { type: 'boolean', required: true }, ...effectProperties } },
+      render: (_args, value) => [{ type: 'text', text: value.clicked ? 'Clicked.' + effectText(value) : 'Click failed.' }],
     },
     timeoutMs,
     isConcurrencySafe: () => false,
@@ -1152,6 +1191,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         throw new Error('target.value is empty; pass a css selector, visible text or XPath, or omit target entirely to use x/y')
       }
       const index = targetIndex(target)
+      const before = await pageFingerprint(browser, session)
       if (target !== undefined && typeof target.value === 'string' && target.value !== '') {
         await browser.click(session, {
           target: {
@@ -1166,7 +1206,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         await browser.click(session, { x: args.x, y: args.y }, exec.signal)
       }
-      return { clicked: true }
+      return { clicked: true, ...await observedEffect(browser, session, before) }
     },
   }))
 
@@ -1195,6 +1235,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         additionalProperties: false,
         properties: {
           clicked: { type: 'number', required: true, description: 'How many points landed.' },
+          ...effectProperties,
           failedAt: { type: 'number', description: 'Index of the point that failed, when one did.' },
           error: { type: 'string', description: 'Why that point failed.' },
         },
@@ -1202,7 +1243,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       render: (_args, value) => [{
         type: 'text',
         text: value.failedAt === undefined
-          ? `Clicked ${String(value.clicked)} point(s).`
+          ? `Clicked ${String(value.clicked)} point(s).` + effectText(value)
           : `Clicked ${String(value.clicked)} point(s), then stopped at index ${String(value.failedAt)}: ${String(value.error ?? 'unknown')}`,
       }],
     },
@@ -1215,7 +1256,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const points = Array.isArray(args.points) ? args.points : []
       const intervalMs = typeof args.intervalMs === 'number' ? args.intervalMs : undefined
-      return browser.clickSequence(session, { points, ...intervalMs === undefined ? {} : { intervalMs } })
+      const before = await pageFingerprint(browser, session)
+      const result = await browser.clickSequence(session, { points, ...intervalMs === undefined ? {} : { intervalMs } })
+      return { ...result, ...await observedEffect(browser, session, before) }
     },
   }))
 
@@ -1236,8 +1279,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { typed: { type: 'boolean', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: value.typed ? `Typed ${String(_args.text).length} chars.` : 'Type failed.' }],
+      schema: { type: 'object', additionalProperties: false, properties: { typed: { type: 'boolean', required: true }, ...effectProperties } },
+      render: (_args, value) => [{ type: 'text', text: value.typed ? `Typed ${String(_args.text).length} chars.` + effectText(value) : 'Type failed.' }],
     },
     timeoutMs,
     isConcurrencySafe: () => false,
@@ -1254,6 +1297,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         throw new Error('target.value is empty; pass a css selector, visible text or XPath, or omit target entirely to use x/y')
       }
       const index = targetIndex(target)
+      const before = await pageFingerprint(browser, session)
       if (target !== undefined && typeof target.value === 'string' && target.value !== '') {
         await browser.type(session, {
           text: args.text,
@@ -1266,7 +1310,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       } else {
         await browser.type(session, { text: args.text }, exec.signal)
       }
-      return { typed: true }
+      return { typed: true, ...await observedEffect(browser, session, before) }
     },
   }))
 
@@ -1281,8 +1325,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       toBottom: { type: 'boolean', description: 'Scroll to the bottom of the page.' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { scrolled: { type: 'boolean', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: value.scrolled ? 'Scrolled.' : 'Scroll failed.' }],
+      schema: { type: 'object', additionalProperties: false, properties: { scrolled: { type: 'boolean', required: true }, ...effectProperties } },
+      render: (_args, value) => [{ type: 'text', text: value.scrolled ? 'Scrolled.' + effectText(value) : 'Scroll failed.' }],
     },
     timeoutMs,
     isConcurrencySafe: () => false, // mutates page scroll state; exclusive within a task
@@ -1291,6 +1335,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const before = await pageFingerprint(browser, session)
       await browser.scroll(session, {
         ...args.deltaX !== undefined ? { deltaX: args.deltaX } : {},
         ...args.deltaY !== undefined ? { deltaY: args.deltaY } : {},
@@ -1298,7 +1343,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...args.toTop === true ? { toTop: true } : {},
         ...args.toBottom === true ? { toBottom: true } : {},
       }, exec.signal)
-      return { scrolled: true }
+      return { scrolled: true, ...await observedEffect(browser, session, before) }
     },
   }))
 
@@ -1369,8 +1414,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       key: { type: 'string', required: true, enum: ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Space'], description: 'The key to press.' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { pressed: { type: 'boolean', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: value.pressed ? `Pressed ${String(_args.key)}.` : 'Key press failed.' }],
+      schema: { type: 'object', additionalProperties: false, properties: { pressed: { type: 'boolean', required: true }, ...effectProperties } },
+      render: (_args, value) => [{ type: 'text', text: value.pressed ? `Pressed ${String(_args.key)}.` + effectText(value) : 'Key press failed.' }],
     },
     timeoutMs,
     isConcurrencySafe: () => false, // mutates page state; exclusive within a task
@@ -1379,8 +1424,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const before = await pageFingerprint(browser, session)
       await browser.key(session, { key: args.key }, exec.signal)
-      return { pressed: true }
+      return { pressed: true, ...await observedEffect(browser, session, before) }
     },
   }))
 
