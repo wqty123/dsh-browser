@@ -10,6 +10,7 @@ import { cleanProfileResidue, inspectProfileResidue } from '../src/browser-elect
 import { runReinstallTransaction } from '../lib/browser-electron/automatic-maintenance.js'
 import { runMaintenanceLifecycle } from '../src/browser-electron/maintenance-lifecycle.ts'
 import { writeAsar } from './fake-asar.mjs'
+import { copyFile, symlink } from 'node:fs/promises'
 
 function tree(path) {
   if (lstatSync(path).isSymbolicLink()) return { link: readlinkSync(path) }
@@ -99,12 +100,89 @@ test('failed rollback suppresses recovery restart and retains the checkpoint', a
   })
   assert.equal(result.restarted, false)
   assert.match(result.error, /REINSTALL_ROLLBACK_FAILED/)
-  assert.equal(existsSync(join(f.job, 'profile-before/node_modules/dsh-builtin-browser/package.json')), true)
+  assert.equal(existsSync(join(f.job, 'profile-before/files/node_modules/dsh-builtin-browser/package.json')), true)
 })
 
 test('package runner preserves warnings without failing and reports spawn errors', async () => {
   assert.deepEqual(await runProfileCommand(process.execPath, ['-e', 'console.error("warning only")'], process.env), { code: 0, output: 'warning only' })
   assert.match((await runProfileCommand(join(tmpdir(), 'nonexistent-maintenance-command'), [], process.env)).output, /REINSTALL_COMMAND_START_FAILED/)
+})
+
+for (const linkedPlugin of [false, true]) test(`checkpoint creates no symlinks; Windows-style junction restore works with ${linkedPlugin ? 'linked' : 'copied'} plugin`, async t => {
+  const f = fixture(t)
+  if (linkedPlugin) {
+    const checkout = join(f.root, 'checkout')
+    renameSync(f.plugin, checkout)
+    symlinkSync(checkout, f.plugin, process.platform === 'win32' ? 'junction' : 'dir')
+    writeFileSync(join(f.profile, 'package.json'), JSON.stringify({ dependencies: { 'dsh-builtin-browser': 'link:' + checkout } }))
+  }
+  const before = tree(f.profile), calls = []
+  const windowsSymlink = async (target, path, type) => {
+    calls.push(type)
+    if (type !== 'junction') throw Object.assign(new Error('symlinks require administrator privileges'), { code: 'EPERM' })
+    return symlink(target, path, type)
+  }
+  await assert.rejects(withProfileCheckpoint(f.home, f.job, async () => {
+    assert.deepEqual(calls, [])
+    const checkpoint = join(f.job, 'profile-before')
+    const walk = path => {
+      assert.equal(lstatSync(path).isSymbolicLink(), false)
+      if (lstatSync(path).isDirectory()) for (const name of readdirSync(path)) walk(join(path, name))
+    }
+    walk(checkpoint)
+    const metadata = JSON.parse(readFileSync(join(checkpoint, 'metadata.json'), 'utf8'))
+    assert.ok(metadata.entries.some(entry => entry.kind === 'link' && entry.path.endsWith('linked') && entry.type === 'directory'))
+    const foreign = join('node_modules', '@scope', 'orphan', 'package.json')
+    assert.equal(lstatSync(join(checkpoint, 'files', foreign)).ino, lstatSync(join(f.profile, foreign)).ino)
+    if (!linkedPlugin) assert.notEqual(lstatSync(join(checkpoint, 'files/node_modules/dsh-builtin-browser/package.json')).ino, lstatSync(join(f.plugin, 'package.json')).ino)
+    rmSync(f.plugin, { recursive: true, force: true })
+    rmSync(join(f.profile, 'node_modules/linked'))
+    rmSync(join(f.profile, foreign))
+    writeFileSync(join(f.profile, 'package.json'), '{}')
+    throw new Error('forced remove failure')
+  }, { symlink: windowsSymlink }), /REINSTALL_PROFILE_RESTORED/)
+  assert.ok(calls.length >= 1)
+  assert.ok(calls.every(type => type === 'junction'))
+  assert.deepEqual(tree(f.profile), before)
+})
+
+test('partial checkpoint failure removes its checkpoint without changing the profile or running maintenance', async t => {
+  const f = fixture(t), before = tree(f.profile)
+  let copies = 0
+  await assert.rejects(withProfileCheckpoint(f.home, f.job, async () => assert.fail('must not mutate'), {
+    copyFile: async (...args) => {
+      if (++copies === 2) throw Object.assign(new Error('checkpoint write denied'), { code: 'EPERM' })
+      return copyFile(...args)
+    },
+    symlink: async () => assert.fail('checkpoint must not create a symlink'),
+  }), /REINSTALL_CHECKPOINT_FAILED.*profile unchanged.*checkpoint write denied/)
+  assert.equal(copies, 2)
+  assert.deepEqual(tree(f.profile), before)
+  assert.deepEqual(readdirSync(f.job), [])
+})
+
+test('file symlink restore denial fails cleanly, retaining the checkpoint and suppressing restart', async t => {
+  const f = fixture(t), target = join(f.root, 'file.txt')
+  writeFileSync(target, 'outside file stays intact')
+  try { symlinkSync(target, join(f.plugin, 'file-link'), 'file') } catch (error) {
+    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error
+    t.skip('creating the file-link fixture requires Windows symlink privileges')
+    return
+  }
+  const result = await runMaintenanceLifecycle('reinstall', {
+    requestQuit: async () => {}, waitUntilClosed: async () => {}, publish: async () => {},
+    maintain: () => withProfileCheckpoint(f.home, f.job, async () => { rmSync(join(f.plugin, 'file-link')); throw new Error('forced remove failure') }, {
+      symlink: async (target, path, type) => {
+        if (type !== 'junction') throw Object.assign(new Error('file symlink denied'), { code: 'EPERM' })
+        return symlink(target, path, type)
+      },
+    }),
+    restart: async () => assert.fail('must not restart after failed restore'), verify: async () => {},
+  })
+  assert.equal(result.restarted, false)
+  assert.match(result.error, /REINSTALL_ROLLBACK_FAILED.*REINSTALL_LINK_RESTORE_FAILED: file link.*file symlink denied/)
+  assert.ok(existsSync(join(f.job, 'profile-before/metadata.json')))
+  assert.equal(readFileSync(target, 'utf8'), 'outside file stays intact')
 })
 
 test('preflight detects copied development residue without writes, cleanup precedes remove, and failure restores even the nested ASAR', async t => {
