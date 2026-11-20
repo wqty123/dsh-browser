@@ -48,14 +48,14 @@ export class GuestCookieJar {
   constructor(private readonly changed?: (cookies: readonly StoredCookie[]) => void, saved: readonly StoredCookie[] = []) {
     for (const value of saved) {
       const cookie = normalizeStoredCookie(value)
-      if (cookie !== undefined && cookie.expiresAt !== undefined && cookie.expiresAt > Date.now()) {
+      if (cookie !== undefined && (cookie.expiresAt === undefined || cookie.expiresAt > Date.now())) {
         this.store.set(cookie.origin + '\0' + cookie.path + '\0' + cookie.name, cookie)
       }
     }
   }
 
   private save(): void {
-    this.changed?.([...this.store.values()].filter(cookie => cookie.expiresAt !== undefined && cookie.expiresAt > Date.now()))
+    this.changed?.([...this.store.values()].filter(cookie => cookie.expiresAt === undefined || cookie.expiresAt > Date.now()))
   }
 
   setCookies(target: URL, values: readonly string[]): void {
