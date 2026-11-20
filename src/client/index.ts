@@ -15,7 +15,7 @@ import { BrowserBody, type BrowserBodyProps } from './view/BrowserBody.tsx'
 import { BrowserTitle } from './view/BrowserTitle.tsx'
 import { createBrowserControllers } from './browser/BrowserController.ts'
 import type { BrowserInjected } from './browser/BrowserController.ts'
-import { createBrowserInitializationJournal, createBrowserInitializationReader } from './browser/initialization.ts'
+import { createBrowserInitializationReader } from './browser/initialization.ts'
 import type { BrowserInitializationReader } from './browser/initialization.ts'
 import { createIframePage } from './pages.ts'
 import { createElectronPage } from './electron/pages.ts'
@@ -242,9 +242,7 @@ export function apply(ctx: Context): void {
         }
         const controller = createBrowserControllers(actions, factory(sessionId), tabId =>
           openTabs.getSnapshot().some(tab => tab.sessionId === sessionId && tab.tabId === tabId), startPage,
-          { sessionId, journal: createBrowserInitializationJournal({
-            onChange: () => { for (const listener of initializationListeners) listener() },
-          }) })
+          { sessionId, onInitializationChange: () => { for (const listener of initializationListeners) listener() } })
         controllers.set(sessionId, controller)
         return controller
       },

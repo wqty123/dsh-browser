@@ -481,12 +481,13 @@ export interface BrowserInjected extends BrowserStartPageInjected {
  */
 export function createBrowserControllers(actions: BoundActions<BrowserStore>, createPage: BrowserPageFactory,
   isTabOpen: (tabId: TabId) => boolean, startPage?: BrowserStartPageInjected,
-  options: { readonly sessionId?: string; readonly journal?: BrowserInitializationJournal } = {},
+  options: { readonly sessionId?: string; readonly journal?: BrowserInitializationJournal; readonly onInitializationChange?: () => void } = {},
 ): BrowserInjected {
   const page = startPage ?? new StartPageBinding()
   const sessionId = options.sessionId ?? ''
   const ownsJournal = options.journal === undefined
-  const journal = options.journal ?? createBrowserInitializationJournal()
+  const journal = options.journal ?? createBrowserInitializationJournal({ onChange: options.onInitializationChange })
+  let disposal: Promise<void> | undefined
   const mountRequests = new Map<TabId, BrowserMountRequest>()
   let occurrenceSerial = 0
   let currentActions = actions
@@ -610,18 +611,24 @@ export function createBrowserControllers(actions: BoundActions<BrowserStore>, cr
       held.controller.applyMount(request.initialUrl, request.navigationRevision ?? 0)
       return hide
     },
-    dispose: async () => {
-      const pending = [...controllers.values()].map(({ signal, controller: held, forget }) => {
-        signal.removeEventListener('abort', forget)
-        return held.dispose()
-      })
-      controllers.clear()
-      mountRequests.clear()
-      await Promise.all(pending)
-      if (ownsJournal) {
-        journal.dispose()
-        root.__DSH_BROWSER_INIT_JOURNALS__ = (root.__DSH_BROWSER_INIT_JOURNALS__ ?? []).filter(entry => entry !== journal)
-      }
+    dispose: () => {
+      disposal ??= (async () => {
+        try {
+          const pending = [...controllers.values()].map(({ signal, controller: held, forget }) => {
+            signal.removeEventListener('abort', forget)
+            return held.dispose()
+          })
+          await Promise.all(pending)
+        } finally {
+          controllers.clear()
+          mountRequests.clear()
+          if (ownsJournal) journal.dispose()
+          const registered = root.__DSH_BROWSER_INIT_JOURNALS__ ?? []
+          const index = registered.indexOf(journal)
+          if (index !== -1) registered.splice(index, 1)
+        }
+      })()
+      return disposal
     },
     rebind: (next) => {
       currentActions = next
