@@ -7,6 +7,23 @@ import { nativeMainReveal } from './fixtures/native-main-reveal.mjs'
 import { chromiumPage } from './fixtures/chromium-page.mjs'
 import { captureScript } from '../lib/browser-reference/page-script.js'
 
+test('a protocol-3 native bridge returns an explicit reveal error through the HTTP binding path', async t => {
+  const snapshot = {
+    version: 1, provider: 'dsh-browser', referenceId: 'old-bridge',
+    owner: { sessionId: 'owner' },
+    provenance: { origin: 'user-selection', entry: 'page-overlay' },
+    source: { pageUrl: 'https://example.com/', title: 'Source', carrier: 'sidebar', capturedAt: new Date().toISOString() },
+    parts: [{ partId: 'text', type: 'text', text: 'selected words', anchor: { exact: 'selected words', prefix: '', suffix: '' } }],
+  }
+  const backend = await nativeMainReveal(snapshot, { url: snapshot.source.pageUrl, ready: true, highlighted: false })
+  t.after(() => backend.close())
+  await backend.start(3)
+  const outcome = await backend.post({ referenceId: snapshot.referenceId, sourcePageId: '2' })
+  assert.equal(outcome.status, 'unavailable')
+  assert.equal(outcome.note, '桥接版本过旧，请点击 卸载并重装')
+  assert.equal(backend.commands.length, 0)
+})
+
 test('the shipped Desktop main entry starts the bridge needed for source-bound reveal after restart', async t => {
   const snapshot = {
     version: 1, provider: 'dsh-browser', referenceId: 'native-reveal',

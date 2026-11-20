@@ -885,10 +885,14 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       finally { mutedReveal -= 1 }
     }
     let status = await attempt()
+    const bridgeFailure = (): string | undefined => {
+      const reason = revealer.lastReason()
+      return reason?.includes('桥接版本过旧') ? reason : undefined
+    }
     let sourceFailure: string | undefined
     try {
       const url = referenceDetail(referenceId)?.snapshot.source.pageUrl
-      if (active() && (status === 'session-unavailable' || status === 'page-mismatch' || status === 'unavailable') && url && sourceOpener !== undefined) {
+      if (active() && bridgeFailure() === undefined && (status === 'session-unavailable' || status === 'page-mismatch' || status === 'unavailable') && url && sourceOpener !== undefined) {
         const ready = await sourceOpener(url, opening.signal)
         const detail = referenceDetail(referenceId)
         if (!active()) return 'superseded'
@@ -901,7 +905,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       sourceFailure = errorMessage(error)
     }
     if (!active()) return 'superseded'
-    showReveal(status, sourceFailure)
+    showReveal(status, sourceFailure ?? bridgeFailure())
     return status
   }
 

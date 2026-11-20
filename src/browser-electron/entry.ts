@@ -770,6 +770,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
         hasBinary: hasElectronRuntime,
         provision: provisionSnapshot,
+        bridgeError: () => DesktopBridgeViewHost.compatibilityError(),
         bridge: () => {
           const root = findDesktopInstall()
           return root === undefined ? undefined : readBridgeStatus(root)

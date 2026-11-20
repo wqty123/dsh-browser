@@ -60,6 +60,7 @@ export interface ProductionRevealer {
   linkSpec(uri: string, label?: string): BrowserRefLinkSpec
   /** Last activation status, for the UI to render a hint. */
   lastStatus(): RevealStatus | undefined
+  lastReason(): string | undefined
   dispose(): void
 }
 
@@ -113,7 +114,7 @@ export function createRevealAdapter(options: ProductionRevealerOptions): RevealA
       // decoded answer always does, so it travels with the status.
       if (wire.ok !== true) throw new RevealUnavailableError(wire.reason ?? 'reveal was refused')
       const status = wireStatus(wire.status)
-      if (status !== 'revealed') throw new RevealFailed(status, wire.reason ?? wire.status)
+      if (status !== 'revealed') throw new RevealFailed(status, wire.reason ?? wire.note ?? wire.status)
       // Identity facts (owner.sessionId + browserSessionId + label/frame) are
       // carried for audit; the plugin resolves the actual tab from the frozen
       // reference server-side.
@@ -140,8 +141,10 @@ export function createRevealAdapter(options: ProductionRevealerOptions): RevealA
 export function createProductionRevealer(options: ProductionRevealerOptions): ProductionRevealer {
   const revealer = createRevealer({ adapter: createRevealAdapter(options) })
   let last: RevealStatus | undefined
+  let reason: string | undefined
 
   const run = async (parsed: ReturnType<typeof parseBrowserRefUri>, navigate = false, sourcePageId?: string): Promise<RevealStatus> => {
+    reason = undefined
     let status: RevealStatus
     if (parsed === undefined) {
       status = 'unknown-reference'
@@ -156,6 +159,7 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
       try {
         const result: RevealResult = await revealer.reveal(request)
         status = result.status
+        reason = result.reason
       } catch {
         status = 'unavailable'
       }
@@ -169,6 +173,7 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
 
   return {
     revealer,
+    lastReason: () => reason,
     async activate(uri, activateOptions) {
       return run(parseBrowserRefUri(uri), activateOptions?.navigate === true, activateOptions?.sourcePageId)
     },

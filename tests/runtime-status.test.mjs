@@ -52,6 +52,7 @@ function report(channel, {
   endpointReader = noShell,
   browserReader = () => undefined,
   selectedCarrier,
+  bridgeError,
 } = {}) {
   return readRuntimeStatus({
     channel: () => channel,
@@ -61,8 +62,20 @@ function report(channel, {
     endpoint: endpointReader,
     detectBrowser: browserReader,
     selectedCarrier,
+    bridgeError,
   })
 }
+
+test('a discovery version mismatch overrides installed and running readiness until a compatible discovery', () => {
+  let mismatch = '桥接版本过旧，请点击 卸载并重装'
+  const options = { bridgeReader: bridge('installed'), endpointReader: shellRunning, bridgeError: () => mismatch }
+  const incompatible = report('sidebar', options)
+  assert.equal(incompatible.bridge.state, 'stale')
+  assert.equal(incompatible.bridge.detail, mismatch)
+  assert.notEqual(incompatible.readiness, 'ready')
+  mismatch = undefined
+  assert.equal(report('sidebar', options).bridge.state, 'installed')
+})
 
 test('legacy automatic ignores obsolete standalone fallback reports', () => {
   const status = report('auto', { binary: true, bridgeReader: bridge('installed'), endpointReader: shellRunning,

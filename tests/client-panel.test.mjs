@@ -2235,6 +2235,18 @@ function bridgeButton(tree, label) {
   return elements(tree).find(node => node.type === 'button' && textOf(node).join('') === label)
 }
 
+test('an incompatible bridge displays its reinstall error outside collapsed diagnostics', async () => {
+  const runtime = bridgeRuntime('stale')
+  runtime.bridge.detail = '桥接版本过旧，请点击 卸载并重装'
+  const fetchMock = readinessFetch({ runtime })
+  const mounted = await mount({ production: true, fetch: fetchMock, render: false })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+  const alert = elements(tree).find(node => node.props.key === 'bridge-compatibility-error')
+  assert.equal(alert.props.role, 'alert')
+  assert.ok(textOf(alert).includes(runtime.bridge.detail))
+  assert.ok(bridgeButton(tree, 'readiness.bridge.reinstall'))
+})
+
 test('bridge maintenance names its automatic restart and retains the diagnostic command', async () => {
   const locale = lazyLocale()
   const runtime = bridgeRuntime('installed')

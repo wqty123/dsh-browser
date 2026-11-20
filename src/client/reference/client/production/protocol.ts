@@ -209,6 +209,7 @@ export interface RevealResultWire {
   readonly ok: true
   readonly status?: string
   readonly reason?: string
+  readonly note?: string
   readonly tabId?: string
   readonly frameId?: string
 }

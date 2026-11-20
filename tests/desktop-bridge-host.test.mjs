@@ -48,6 +48,7 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
         requests.push(request)
         const answer = (() => {
           if (request.op === 'list') {
+            if (state.listAnswer) return state.listAnswer
             const sidebar = []
             for (let i = 1; i <= state.tabs; i++) {
               if (state.dead.includes(i)) continue
@@ -266,14 +267,44 @@ test('legacy or invalid protocols are refused before any view can drive a native
     withEndpoint(bridge.port)
     let host
     try {
-      host = await DesktopBridgeViewHost.discover('session-a')
-      assert.equal(host, undefined)
+      await assert.rejects(DesktopBridgeViewHost.discover('session-a'), {
+        name: 'BridgeVersionError', code: 'BROWSER_BRIDGE_VERSION_MISMATCH',
+        message: '桥接版本过旧，请点击 卸载并重装',
+      })
+      assert.equal(DesktopBridgeViewHost.compatibilityError(), '桥接版本过旧，请点击 卸载并重装')
       assert.ok(bridge.requests.every(request => request.op === 'list'))
     } finally {
       host?.dispose()
       await bridge.close()
     }
   }
+})
+
+test('discovery version refusals and missing versions are explicit, while unrelated failures remain distinct', async () => {
+  const state = { tabs: 1, dead: [], listAnswer: undefined }
+  const bridge = await startFakeBridge(state)
+  withEndpoint(bridge.port)
+  try {
+    for (const answer of [
+      { ok: false, code: 'BROWSER_BRIDGE_PROTOCOL_MISMATCH' },
+      { ok: false, error: 'unsupported protocol version' },
+      { ok: false, error: 'bridge version mismatch' },
+      { ok: true },
+    ]) {
+      state.listAnswer = answer
+      await assert.rejects(DesktopBridgeViewHost.discover(), { code: 'BROWSER_BRIDGE_VERSION_MISMATCH' })
+      assert.equal(DesktopBridgeViewHost.compatibilityError(), '桥接版本过旧，请点击 卸载并重装')
+    }
+    state.listAnswer = { ok: false, error: 'sidebar unavailable' }
+    assert.equal(await DesktopBridgeViewHost.discover(), undefined)
+    assert.equal(DesktopBridgeViewHost.compatibilityError(), undefined)
+    state.listAnswer = undefined
+    const host = await DesktopBridgeViewHost.discover()
+    assert.ok(host)
+    assert.equal(DesktopBridgeViewHost.compatibilityError(), undefined)
+    host.dispose()
+    assert.ok(bridge.requests.every(request => request.op === 'list'))
+  } finally { await bridge.close() }
 })
 
 test('a passive preview never assigns another live page to an unopened logical view', async () => {

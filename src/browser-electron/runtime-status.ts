@@ -104,6 +104,7 @@ export interface RuntimeStatusDeps {
   readonly provision: () => ProvisionSnapshot
   /** The desktop install's bridge state, or undefined when there is no desktop install. */
   readonly bridge: () => BridgeStatus | undefined
+  readonly bridgeError?: () => string | undefined
   /** The endpoint the shell publishes while it runs; undefined when nothing published one. */
   readonly endpoint: () => BridgeEndpointState | undefined
   /** The launch path's filesystem-only browser discovery; defaults to the production reader. */
@@ -148,7 +149,7 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
 
   const bridgeStatus = deps.bridge()
   const endpoint = deps.endpoint()
-  const bridge: BridgeReadiness = bridgeStatus === undefined
+  const installedBridge: BridgeReadiness = bridgeStatus === undefined
     ? {
       present: false,
       state: 'absent',
@@ -164,6 +165,10 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
       runningDetail: endpoint?.detail ?? 'no desktop shell has published a bridge endpoint',
       ...bridgeStatus.command === undefined ? {} : { command: bridgeStatus.command },
     }
+
+  const bridgeError = deps.bridgeError?.()
+  const bridge: BridgeReadiness = bridgeError === undefined ? installedBridge
+    : { ...installedBridge, state: 'stale', detail: bridgeError }
 
   // The sidebar needs BOTH halves: our patch inside the shell it will be driven through, and that
   // shell actually running. Either one alone is the false green this report exists to prevent.
