@@ -4,7 +4,7 @@ export type ReferenceTextNode =
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'break' }
   | { readonly type: 'rule' }
-  | { readonly type: 'math'; readonly latex: string; readonly display: boolean }
+  | { readonly type: 'math'; readonly latex: string; readonly display: boolean; readonly mathml?: string }
   | { readonly type: 'heading'; readonly level: number; readonly children: readonly ReferenceTextNode[] }
   | { readonly type: 'pre'; readonly language?: string; readonly children: readonly ReferenceTextNode[] }
   | { readonly type: 'list-item'; readonly value?: number; readonly children: readonly ReferenceTextNode[] }
@@ -26,7 +26,8 @@ export function isReferenceText(value: unknown): value is readonly ReferenceText
     if (node.type === 'break' || node.type === 'rule') return true
     if (node.type === 'math') {
       if (typeof node.latex !== 'string' || node.latex.length === 0 || typeof node.display !== 'boolean') return false
-      characters += node.latex.length
+      if (node.mathml !== undefined && (typeof node.mathml !== 'string' || node.mathml.length > 64_000)) return false
+      characters += node.latex.length + (node.mathml?.length ?? 0)
       return characters <= MAX_REFERENCE_TEXT
     }
     if (!['block', 'paragraph', 'strong', 'emphasis', 'code', 'pre', 'list-item', 'blockquote', 'link', 'list', 'heading', 'definition-list', 'term', 'definition', 'sup', 'sub', 'ruby', 'ruby-text'].includes(node.type)) return false

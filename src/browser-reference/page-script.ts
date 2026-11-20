@@ -252,7 +252,9 @@ const PAGE_LIB = String.raw`
     var sourceScript = next && /^math\/tex/i.test(next.getAttribute('type') || '') ? next : null
     var math = tag === 'MATH' ? node : node.querySelector('math')
     var latex = script ? node.textContent : annotation ? annotation.textContent : data || (sourceScript ? sourceScript.textContent : math ? mathMLText(math) : '[math source unavailable]')
-    return { latex: String(latex || '[math source unavailable]').trim() || '[math source unavailable]', display: matches('.katex-display, .MathJax_Display, .MathJax_SVG_Display, .MathJax_CHTML_Display') || node.getAttribute('display') === 'block' || node.getAttribute('display') === 'true' || /mode\s*=\s*display/i.test((script ? node : sourceScript)?.getAttribute('type') || '') }
+    return { latex: String(latex || '[math source unavailable]').trim() || '[math source unavailable]',
+      mathml: math && !annotation && !data && !sourceScript && !script && String(math.outerHTML || '').length <= 64000 ? String(math.outerHTML) : undefined,
+      display: matches('.katex-display, .MathJax_Display, .MathJax_SVG_Display, .MathJax_CHTML_Display') || node.getAttribute('display') === 'block' || node.getAttribute('display') === 'true' || /mode\s*=\s*display/i.test((script ? node : sourceScript)?.getAttribute('type') || '') }
   }
 
   function flatTextMap(maxChars, structured, legacy, root) {
@@ -295,7 +297,7 @@ const PAGE_LIB = String.raw`
         var at = out.text.length
         append(formula.latex)
         out.nodes.push({ node: node, start: at, end: out.text.length, atomic: true })
-        return structured ? [{ type: 'math', latex: formula.latex, display: Boolean(formula.display), start: at, end: out.text.length }] : []
+        return structured ? [Object.assign({ type: 'math', latex: formula.latex, display: Boolean(formula.display), start: at, end: out.text.length }, formula.mathml === undefined ? {} : { mathml: formula.mathml })] : []
       }
       if (SKIP_TAGS[node.tagName] || !visibleNode(node)) return []
       var tag = node.tagName

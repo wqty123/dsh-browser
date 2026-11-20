@@ -116,6 +116,7 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     const formula = document.body.firstElementChild!
     const { snapshot, group, parts } = await submit(raw)
     expect(parts).toEqual([{ type: 'text', text: display ? `$$\n${latex}\n$$\n` : `$${latex}$\n` }])
+    const mathSelector = raw.events![0]!.content!.some(node => node.type === 'math' && node.mathml) ? 'math' : '.katex'
     const startBefore = vi.spyOn(Range.prototype, 'setStartBefore')
     const endAfter = vi.spyOn(Range.prototype, 'setEndAfter')
     expect(execute(highlightScript(), { start: 0, end: latex.length })).toMatchObject({ ok: true })
@@ -125,11 +126,11 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     const composer = render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels() }))
     expect(document.querySelector('[data-reference-math]')).toBeNull()
     fireEvent.mouseEnter(composer.getByRole('button'))
-    expect(document.querySelector('[data-reference-math]')?.textContent).toBe(latex)
+    expect(document.querySelector('[data-reference-math]')?.querySelector(mathSelector)).not.toBeNull()
     composer.unmount()
     render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
     expect(document.querySelector('[data-reference-math]')?.getAttribute('data-reference-math')).toBe(display ? 'display' : 'inline')
-    expect(document.querySelector('[data-reference-math]')?.textContent).toBe(latex)
+    expect(document.querySelector('[data-reference-math]')?.querySelector(mathSelector)).not.toBeNull()
   })
 
   it('expands a partial rendered-formula selection atomically, without capturing adjacent text', async () => {
@@ -198,7 +199,8 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
     render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
     expect(document.querySelector('[data-part-kind="table"] th[colspan="2"]')).not.toBeNull()
-    expect(document.querySelector('[data-part-kind="table"] td[rowspan="2"] [data-reference-math]')?.textContent).toBe('x^2')
+    expect(document.querySelector('[data-part-kind="table"] td[rowspan="2"] [data-reference-math] .katex')).not.toBeNull()
+    expect(document.querySelector('[data-part-kind="table"] td[rowspan="2"] annotation')?.textContent).toBe('x^2')
   })
 
   it('keeps image alt, caption, source identity and caption model text', async () => {

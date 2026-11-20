@@ -238,7 +238,8 @@ describe('production assembly — shared composer and sent capsules', () => {
     bubble.querySelector('.dsh-browser-reference-capsules')!.remove()
     expect(bubble.textContent?.trim()).toBe('')
     await act(async () => { pill(sent).focus() })
-    expect(document.querySelector('[role="dialog"] [data-reference-math]')?.textContent).toBe('x^2')
+    expect(document.querySelector('[role="dialog"] [data-reference-math] .katex')).not.toBeNull()
+    expect(document.querySelector('[role="dialog"] [data-reference-math] annotation')?.textContent).toBe('x^2')
     app.outcome(async () => {
       if (!app.reveals.at(-1)?.sourcePageId) return { ok: true, status: 'session-unavailable', pageUrl: sourceUrl }
       expect(app.live.ready).toBe(true)
