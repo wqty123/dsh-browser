@@ -21,6 +21,65 @@ test('the root registers only the isolated endpoint, never the old DSH-origin gu
   assert.notEqual(GUEST_ROUTE, '/dsh-builtin-browser/browser-view/guest')
 })
 
+test('nested opaque guests execute with isolation, including the documented outside-framing trade-off', {
+  skip: !process.env.DSH_TEST_CHROME && 'set DSH_TEST_CHROME to a Chromium executable',
+}, async t => {
+  const originalFetch = globalThis.fetch, originalLookup = dns.lookup
+  const profile = mkdtempSync(join(tmpdir(), 'dsh-nested-isolation-'))
+  let origin, apiCalls = 0
+  const cookies = []
+  dns.lookup = async () => [{ address: '93.184.216.34', family: 4 }]
+  globalThis.fetch = async (target, options) => {
+    assert.equal(new URL(target).hostname, 'ordinary.example')
+    cookies.push(new Headers(options.headers).get('cookie'))
+    if (new URL(target).pathname === '/outer') {
+      return new Response('<html><body><iframe src="/nested"></iframe></body></html>', { headers: { 'content-type': 'text/html' } })
+    }
+    assert.equal(new URL(target).pathname, '/nested')
+    return new Response(`<html><body><script>
+      (async () => {
+        const result = {};
+        try { localStorage.getItem('DSH_TOKEN'); result.storage = false; } catch { result.storage = true; }
+        try { parent.document.body; result.parent = false; } catch { result.parent = true; }
+        try { top.localStorage.getItem('DSH_TOKEN'); result.top = false; } catch { result.top = true; }
+        try { result.cookie = !document.cookie.includes('DSH_TOKEN'); } catch { result.cookie = true; }
+        try { await window.__dshGuestFetch(${JSON.stringify(origin + '/api/private')}, { credentials: 'include' }); result.api = false; } catch { result.api = true; }
+        top.postMessage({ type: 'nested-result', result }, '*');
+      })();
+    </script></body></html>`, { headers: { 'content-type': 'text/html' } })
+  }
+  const fixture = () => `<html><body><pre id="result">waiting</pre><script>
+    localStorage.setItem('DSH_TOKEN', 'private-app-token'); document.cookie = 'DSH_TOKEN=private-app-cookie';
+    addEventListener('message', event => {
+      if (event.origin === 'null' && event.data.type === 'nested-result') document.getElementById('result').textContent = JSON.stringify(event.data.result);
+    });
+    const frame = document.createElement('iframe'); frame.src = ${JSON.stringify(origin + guestPath('https://ordinary.example/outer'))}; document.body.append(frame);
+  </script></body></html>`
+  const server = createServer((req, res) => {
+    if (req.url === '/') { res.setHeader('content-type', 'text/html'); res.end(fixture()) }
+    else if (req.url === '/api/private') { apiCalls++; res.end('private-app-token') }
+    else void handleGuest(req, res, '', '').catch(error => res.destroy(error))
+  }).listen(0, '127.0.0.1')
+  const outside = createServer((_req, res) => { res.setHeader('content-type', 'text/html'); res.end(fixture()) }).listen(0, '127.0.0.1')
+  t.after(async () => {
+    globalThis.fetch = originalFetch; dns.lookup = originalLookup
+    await Promise.all([server, outside].map(server => new Promise(resolve => server.close(resolve))))
+    rmSync(profile, { recursive: true, force: true })
+  })
+  await Promise.all([once(server, 'listening'), once(outside, 'listening')])
+  origin = `http://127.0.0.1:${server.address().port}`
+  for (const embeddingOrigin of [origin, `http://127.0.0.1:${outside.address().port}`]) {
+    const { stdout } = await promisify(execFile)(process.env.DSH_TEST_CHROME, [
+      '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run', `--user-data-dir=${profile}`,
+      '--virtual-time-budget=5000', '--dump-dom', embeddingOrigin,
+    ], { timeout: 30000, maxBuffer: 4 * 1024 * 1024 })
+    const json = stdout.match(/<pre id="result">([^<]+)<\/pre>/)?.[1]
+    assert.deepEqual(JSON.parse(json), { storage: true, parent: true, top: true, cookie: true, api: true }, embeddingOrigin)
+  }
+  assert.equal(apiCalls, 0)
+  assert.ok(cookies.every(cookie => cookie === null))
+})
+
 test('Chromium enforces opaque storage, API isolation, site networking and reference relay', {
   skip: !process.env.DSH_TEST_CHROME && 'set DSH_TEST_CHROME to a Chromium executable',
 }, async t => {

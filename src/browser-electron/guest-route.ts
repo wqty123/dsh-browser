@@ -214,7 +214,7 @@ export async function handleGuest(
     + "; script-src " + sources + " 'unsafe-inline' 'unsafe-eval'; style-src " + sources
     + " 'unsafe-inline'; img-src " + sources + " data: blob:; connect-src " + sources
     + "; frame-src " + sources + "; form-action " + sources
-    + "; object-src 'none'; worker-src 'none'; base-uri 'none'; frame-ancestors 'self'")
+    + "; object-src 'none'; worker-src 'none'; base-uri 'none'")
   response.setHeader('referrer-policy', 'no-referrer')
   response.setHeader('x-content-type-options', 'nosniff')
   response.setHeader('access-control-allow-origin', 'null')

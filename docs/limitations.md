@@ -2,6 +2,12 @@
 
 这些是本插件**有意接受**或**受宿主约束**的边界。它们不是待办事项：写在这里是因为"知道为什么"能省掉一次排查。
 
+## Web 代理文档的嵌套与隔离
+
+Web 页面和嵌套 iframe 都受响应级 `sandbox allow-scripts allow-forms` 约束，不带 `allow-same-origin`。代理不转发 DSH cookie/token，CSP 的网络目标仍只允许 guest 路由，不能访问 DSH API 或存储。
+
+**嵌入限制的取舍：** opaque-origin 祖先不匹配 CSP 的 `'self'`，也没有可单独授权的源表达式。因此 guest 路由不设置 `frame-ancestors`，以支持嵌套文档；外部站点也可能嵌入这些隔离页面（包括点击劫持风险），但不会获得 DSH 同源权限。若必须拒绝所有外部嵌入，需要独立 guest origin 或由宿主支持的已认证嵌入协议，不能仅靠给 opaque 祖先添加 CSP 白名单实现。
+
 ## 截图
 
 当前默认与回退载体仅限 DSH 侧栏：`bundled`、`auto` 是 `sidebar` 的旧设置别名，不再启动自托管 Electron 或自动选择本机浏览器。下文自托管实现的描述仅供历史诊断，不代表可选载体。外部 Chrome / Edge 需要显式选择。缺少宿主侧栏 API 时，工具报告能力错误；不要用修改 `app.asar` 的旧 bridge 安装器补齐该能力。
