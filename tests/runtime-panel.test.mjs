@@ -108,3 +108,36 @@ test('an open racing disposal closes the new session and rejects rather than lea
   assert.deepEqual(calls, [['sidebar', 'close', 'browser:sidebar']])
   assert.equal(runtime.panelSessions.size, 0)
 })
+
+for (const channel of ['chrome', 'edge']) {
+  test(`the viewer includes sidebar sessions independently of selected ${channel}`, async () => {
+    const external = { id: channel, available: () => true, capturePassive() {}, watchableSessions: () => ['external', 'sidebar'] }
+    const sidebar = { id: 'sidebar', open: async () => 'sidebar', capturePassive() {}, exists: () => true, close: async () => {} }
+    const runtime = runtimeWith(external)
+    runtime.providerId = channel
+    runtime.registerPanelProvider(async () => sidebar)
+    await runtime.openPanel('task')
+    assert.deepEqual(runtime.watchableSessions(), ['sidebar', 'external'])
+    assert.equal(new Set(runtime.watchableSessions()).size, 2, 'sessions exposed by both providers are deduplicated')
+    external.capturePassive = undefined
+    assert.deepEqual(runtime.watchableSessions(), ['sidebar'])
+    external.available = () => false
+    assert.deepEqual(runtime.watchableSessions(), ['sidebar'], 'an unavailable selected carrier cannot hide a live panel')
+    sidebar.exists = () => false
+    assert.deepEqual(runtime.watchableSessions(), [], 'retired shell sessions are not advertised')
+  })
+}
+
+test('viewer enumeration handles panel-only, closed and non-preview sessions', async () => {
+  const runtime = runtimeWith()
+  assert.deepEqual(runtime.watchableSessions(), [])
+  const sidebar = { id: 'sidebar', open: async () => 'sidebar', capturePassive() {}, close: async () => {} }
+  runtime.registerPanelProvider(async () => sidebar)
+  const session = await runtime.openPanel('task')
+  assert.deepEqual(runtime.watchableSessions(), [session])
+  sidebar.capturePassive = undefined
+  assert.deepEqual(runtime.watchableSessions(), [])
+  sidebar.capturePassive = () => {}
+  await runtime.close(session)
+  assert.deepEqual(runtime.watchableSessions(), [])
+})

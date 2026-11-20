@@ -449,16 +449,25 @@ export class BrowserRuntime extends Service {
   }
 
   /**
-   * The sessions a viewer may watch, through the selected provider.
+   * The sessions a viewer may watch, including independently owned sidebar panels.
    *
    * Empty when the provider cannot preview at all: a viewer then has nothing to offer, which is the
    * honest answer rather than an error.
    * @returns the live session ids.
    */
   watchableSessions(): readonly BrowserSessionId[] {
-    const provider = this.resolveProvider()
-    if (typeof provider.capturePassive !== 'function') return []
-    return provider.watchableSessions?.() ?? []
+    const sessions = new Set<BrowserSessionId>()
+    for (const [session, provider] of this.panelSessions) {
+      if (typeof provider.capturePassive === 'function' && (provider.exists?.(session) ?? true)) sessions.add(session)
+    }
+    let provider: BrowserProvider | undefined
+    try { provider = this.resolveProvider() } catch (error) {
+      if (!(error instanceof BrowserError)) throw error
+    }
+    if (typeof provider?.capturePassive === 'function') {
+      for (const session of provider.watchableSessions?.() ?? []) sessions.add(session)
+    }
+    return [...sessions]
   }
 
   /** Replay one recorded operation by sequence number through the provider. */
