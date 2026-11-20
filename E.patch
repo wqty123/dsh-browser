@@ -1,0 +1,1322 @@
+From 1790512460fcc3ba0ec8506f8da4193d0f086be3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 04:24:35 +0000
+Subject: [PATCH] fix: preserve structured browser quotations through
+ submission
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ src/__tests__/iframe-popup-policy.spec.ts     |  69 -------
+ src/browser-reference/entry.ts                |  44 +---
+ src/browser-reference/page-script.ts          | 129 +++++++++---
+ src/browser-reference/service.ts              |  17 +-
+ src/browser-reference/types.ts                |   3 +
+ src/client/browser/BrowserNavigation.ts       |   2 +-
+ src/client/browser/IframeImpl.ts              |   6 +-
+ .../__tests__/iframe-navigation.spec.ts       |  67 +++++++
+ .../__tests__/iframe-popup-policy.spec.ts     |  69 +++++++
+ src/client/pages.ts                           |   2 -
+ .../__tests__/production-formatting.spec.tsx  | 188 ++++++++++++++++++
+ .../__tests__/production-submission.spec.ts   |  10 +-
+ .../reference/client/draft-reference.ts       |   7 +-
+ .../reference/client/ordered-submission.ts    |   6 +-
+ .../client/production/ReferenceCapsules.tsx   |   5 +-
+ .../client/production/ReferenceText.tsx       |  22 ++
+ .../production/production-submission.ts       |   3 +-
+ .../reference/client/production/protocol.ts   |   3 +
+ .../client/production/reference-card.ts       |   3 +
+ .../client/production/snapshot-adapter.ts     |   2 +
+ src/client/reference/client/types.ts          |   5 +
+ src/client/view/IframePresentation.ts         |   1 +
+ src/reference-text.ts                         | 115 +++++++++++
+ tests/browser-reference-entry.test.mjs        |  10 +-
+ 24 files changed, 638 insertions(+), 150 deletions(-)
+ delete mode 100644 src/__tests__/iframe-popup-policy.spec.ts
+ create mode 100644 src/client/browser/__tests__/iframe-navigation.spec.ts
+ create mode 100644 src/client/browser/__tests__/iframe-popup-policy.spec.ts
+ create mode 100644 src/client/reference/client/__tests__/production-formatting.spec.tsx
+ create mode 100644 src/client/reference/client/production/ReferenceText.tsx
+ create mode 100644 src/reference-text.ts
+
+diff --git a/src/__tests__/iframe-popup-policy.spec.ts b/src/__tests__/iframe-popup-policy.spec.ts
+deleted file mode 100644
+index f993f5b..0000000
+--- a/src/__tests__/iframe-popup-policy.spec.ts
++++ /dev/null
+@@ -1,69 +0,0 @@
+-import { afterEach, describe, expect, it, vi } from 'vitest'
+-import { createIframePage } from '../client/pages.ts'
+-import { WEB_BROWSER_SANDBOX } from '../client/view/IframePresentation.ts'
+-
+-function sidebar() {
+-  const frames: { attributes: Map<string, string>; src: string }[] = []
+-  vi.stubGlobal('location', { origin: 'https://dsh.test' })
+-  vi.stubGlobal('document', {
+-    getElementById: () => ({ append: vi.fn() }),
+-    createElement: () => {
+-      const frame = {
+-        attributes: new Map<string, string>(), src: '', dataset: {},
+-        setAttribute(name: string, value: string) { this.attributes.set(name, value) },
+-        addEventListener: vi.fn(), remove: vi.fn(),
+-      }
+-      frames.push(frame)
+-      return frame
+-    },
+-  })
+-  const page = createIframePage({ initial: undefined, persist: vi.fn(), openRequested: vi.fn() })
+-  page.presentation.mount('viewport')
+-  return { page, frames }
+-}
+-
+-function expectNoPopups(frame: { attributes: Map<string, string> } | undefined) {
+-  expect(frame).toBeDefined()
+-  const policy = frame?.attributes.get('sandbox')
+-  expect(policy).toBeDefined()
+-  const tokens = policy?.split(/\s+/u) ?? []
+-  expect(tokens).not.toContain('allow-popups')
+-  expect(tokens).not.toContain('allow-popups-to-escape-sandbox')
+-  for (const token of ['allow-scripts', 'allow-forms', 'allow-same-origin']) expect(tokens).toContain(token)
+-  return tokens
+-}
+-
+-afterEach(() => { vi.unstubAllGlobals() })
+-
+-describe('Web sidebar popup policy', () => {
+-  it('keeps the default proxy-capable sandbox without popup grants', () => {
+-    const { page, frames } = sidebar()
+-    page.frame.loadUrl({ kind: 'https', url: 'https://example.test/page', title: 'Example' })
+-    expectNoPopups(frames.at(-1))
+-    expect(frames.at(-1)?.attributes.get('sandbox')).toBe(WEB_BROWSER_SANDBOX)
+-    expect(frames.at(-1)?.src).toContain('/browser-view/guest?u=')
+-    void page.frame.dispose()
+-  })
+-
+-  it('never removes the popup restriction when the shield is toggled', () => {
+-    const { page, frames } = sidebar()
+-    page.frame.loadUrl({ kind: 'https', url: 'https://example.test/page', title: 'Example' })
+-    page.frame.sandbox?.setEnabled(false)
+-    const relaxed = expectNoPopups(frames.at(-1))
+-    expect(relaxed).toContain('allow-downloads')
+-    expect(relaxed).toContain('allow-modals')
+-    page.frame.sandbox?.setEnabled(true)
+-    expectNoPopups(frames.at(-1))
+-    expect(frames.at(-1)?.attributes.get('sandbox')).toBe(WEB_BROWSER_SANDBOX)
+-    void page.frame.dispose()
+-  })
+-
+-  it('enforces popup restrictions when the shield is disabled before the first page', () => {
+-    const { page, frames } = sidebar()
+-    page.frame.sandbox?.setEnabled(false)
+-    expect(frames).toHaveLength(0)
+-    page.frame.loadUrl({ kind: 'http', url: 'http://example.test/page', title: 'Example' })
+-    expectNoPopups(frames.at(-1))
+-    void page.frame.dispose()
+-  })
+-})
+diff --git a/src/browser-reference/entry.ts b/src/browser-reference/entry.ts
+index 64d1661..bef2e8c 100644
+--- a/src/browser-reference/entry.ts
++++ b/src/browser-reference/entry.ts
+@@ -16,6 +16,8 @@
+ 
+ import { HIGHLIGHT_HOST_ID, OVERLAY_HOST_ID } from './visible.ts'
+ import { captureEntrySource } from './page-script.ts'
++import { MAX_REFERENCE_TEXT } from '../reference-text.ts'
++export { MAX_REFERENCE_TEXT } from '../reference-text.ts'
+ 
+ /**
+  * The bound the service and the page bar share. The bar trims an over-long
+@@ -23,17 +25,10 @@ import { captureEntrySource } from './page-script.ts'
+  * bound because a page is low-trust.
+  */
+ export const MAX_REFERENCE_COMMENT = 2000
+-/**
+- * Bound for the selection text the page bar freezes before the comment field
+- * takes focus. It is a locator (host re-finds the range from it), so it only
+- * has to hold a realistic selection, not a whole document.
+- */
+-export const MAX_REFERENCE_TEXT = 20000
+-
+ export const REFERENCE_INTENT_CHANNEL = 'dsh-browser-ref:intent'
+ export const MAX_FRAME_SELECTOR = 200
+ export const MAX_FRAME_EVENTS = 24
+-export const MAX_FRAME_TEXT = 20_000
++export const MAX_FRAME_TEXT = MAX_REFERENCE_TEXT
+ 
+ /** One row of the single merged context menu. */
+ /** Which element a right-click action explicitly names. */
+@@ -603,32 +598,13 @@ export function frameCaptureScript(): string {
+     '  frameUrl = String(element.getAttribute("src") || "")',
+     '}',
+     'if (!frameUrl) frameUrl = String(element.getAttribute("src") || "")',
+-    'var events = []',
+-    'var selection = null',
+-    'try { selection = element.contentWindow.getSelection ? element.contentWindow.getSelection() : null } catch (error) { selection = null }',
+-    'if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {',
+-    '  var exact = String(selection.toString()).slice(0, ' + MAX_FRAME_TEXT + ')',
+-    '  if (exact) {',
+-    '    var all = String(frameDoc.body ? frameDoc.body.innerText || frameDoc.body.textContent || "" : "")',
+-    '    var at = all.indexOf(exact)',
+-    '    var prefix = at > 0 ? all.slice(Math.max(0, at - Number(spec.context || 32)), at) : ""',
+-    '    var suffix = at >= 0 ? all.slice(at + exact.length, at + exact.length + Number(spec.context || 32)) : ""',
+-    '    events.push({ kind: "text", exact: exact, prefix: prefix, suffix: suffix })',
+-    '  }',
+-    '}',
+-    'var images = frameDoc.querySelectorAll ? frameDoc.querySelectorAll("img, svg, canvas") : []',
+-    'for (var i = 0; i < images.length && events.length < ' + MAX_FRAME_EVENTS + '; i += 1) {',
+-    '  var node = images[i]',
+-    '  var src = String(node.currentSrc || node.src || node.getAttribute("src") || "")',
+-    '  if (!src) continue',
+-    '  var geometry = null',
+-    '  try { var box = node.getBoundingClientRect(); geometry = { x: Math.round(box.left), y: Math.round(box.top), w: Math.round(box.width), h: Math.round(box.height) } } catch (error) {}',
+-    '  events.push({ kind: "image", src: src, currentSrc: src, attributeSrc: src,',
+-    '    alt: String(node.alt || "").slice(0, 500), geometry: geometry })',
+-    '}',
+-    'return JSON.stringify({ ok: true, url: String(location.href),',
+-    '  frameUrl: frameUrl, title: String(frameDoc.title || location.title || ""),',
+-    '  frameSelector: selector, events: events })',
++    'var result = (function (document, window, location) {',
++    '  return (' + captureEntrySource() + ')(spec)',
++    '})(frameDoc, element.contentWindow, { href: frameUrl })',
++    'result.url = String(location.href)',
++    'result.frameUrl = frameUrl',
++    'result.frameSelector = selector',
++    'return JSON.stringify(result)',
+   ].join('\n')
+   return pageEval(body)
+ }
+diff --git a/src/browser-reference/page-script.ts b/src/browser-reference/page-script.ts
+index 034d826..7caa792 100644
+--- a/src/browser-reference/page-script.ts
++++ b/src/browser-reference/page-script.ts
+@@ -12,13 +12,15 @@
+  * reveal agree on what "visible text" means — a map built differently in the two
+  * places would make every anchor miss.
+  *
+- * Text is flattened from visible text nodes in document order. Element
+- * boundaries contribute nothing, so a selection spanning `A <b>B</b> C` is
+- * `AB C`, exactly the string a later locate searches. Hidden subtrees, script,
++ * Capture and reveal share a text map with semantic block/line separators.
++ * Only actual text nodes carry DOM offsets; separators occupy map offsets.
++ * Hidden subtrees, script,
+  * style, template and the plugin's own highlight overlay are excluded.
+  * @module dsh-browser/browser-reference/page-script
+  */
+ 
++import type { ReferenceTextNode } from '../reference-text.ts'
++
+ /** Options the capture script accepts as its single argument. */
+ export interface CaptureScriptOptions {
+   /** Characters of context kept on each side of a selected run. */
+@@ -40,6 +42,7 @@ export interface CaptureScriptOptions {
+ export interface RawCaptureEvent {
+   readonly kind?: string
+   readonly exact?: string
++  readonly content?: readonly ReferenceTextNode[]
+   readonly prefix?: string
+   readonly suffix?: string
+   readonly src?: string
+@@ -221,33 +224,100 @@ const PAGE_LIB = String.raw`
+     return false
+   }
+ 
+-  function flatTextMap(maxChars) {
++  function flatTextMap(maxChars, structured, legacy) {
+     var body = pageBody()
+-    var out = { text: '', nodes: [], truncated: false }
++    var out = { text: '', nodes: [], content: [], truncated: false }
+     if (!body || typeof document.createTreeWalker !== 'function') return out
+     var limit = maxChars && maxChars > 0 ? maxChars : 2000000
+-    var walker = document.createTreeWalker(body, 4, null, false)
+-    var node = walker.nextNode()
+-    while (node) {
+-      var value = node.nodeValue || ''
+-      if (value !== '' && !skippedText(node) && textVisible(node)) {
+-        var room = limit - out.text.length
+-        if (value.length > room) {
+-          if (room > 0) {
+-            out.nodes.push({ node: node, start: out.text.length, end: out.text.length + room })
+-            out.text += value.slice(0, room)
+-          }
+-          out.truncated = true
+-          return out
+-        }
+-        out.nodes.push({ node: node, start: out.text.length, end: out.text.length + value.length })
+-        out.text += value
++    function append(value) {
++      var room = Math.max(0, limit - out.text.length)
++      if (value.length > room) out.truncated = true
++      out.text += value.slice(0, room)
++    }
++    function boundary(value) {
++      if (legacy || !out.text) return
++      var overlap = 0
++      for (var i = 1; i <= value.length; i++) if (out.text.endsWith(value.slice(0, i))) overlap = i
++      append(value.slice(overlap))
++    }
++    function visit(node, depth) {
++      if (out.truncated) return []
++      if (depth > 64) { out.truncated = true; return [] }
++      if (node.nodeType === 3) {
++        var value = node.nodeValue || ''
++        if (!value || skippedText(node) || !textVisible(node)) return []
++        var start = out.text.length
++        append(value)
++        var end = out.text.length
++        if (end === start) return []
++        out.nodes.push({ node: node, start: start, end: end })
++        return structured ? [{ type: 'text', text: out.text.slice(start, end), start: start, end: end }] : []
+       }
+-      node = walker.nextNode()
++      if (node.nodeType !== 1 || SKIP_TAGS[node.tagName] || node.id === HIGHLIGHT_ID || !visibleNode(node)) return []
++      var tag = node.tagName
++      if (tag === 'BR') {
++        if (legacy) return []
++        var at = out.text.length
++        append('\n')
++        return structured ? [{ type: 'break', start: at, end: out.text.length }] : []
++      }
++      var block = /^(P|DIV|MAIN|ASIDE|NAV|SECTION|ARTICLE|HEADER|FOOTER|FIGURE|FIGCAPTION|DL|DT|DD|H[1-6]|UL|OL|PRE|BLOCKQUOTE|TABLE)$/.test(tag)
++      if (block) boundary('\n\n')
++      if (tag === 'LI' || tag === 'TR') boundary('\n')
++      if (tag === 'TD' || tag === 'TH') boundary('\t')
++      var start = out.text.length
++      var children = []
++      for (var child = node.firstChild; child; child = child.nextSibling) {
++        var added = visit(child, depth + 1)
++        for (var a = 0; a < added.length; a++) children.push(added[a])
++      }
++      var end = out.text.length
++      if (block) boundary('\n\n')
++      if (tag === 'LI' || tag === 'TR') boundary('\n')
++      if (!children.length) return []
++      var types = { P: 'paragraph', DIV: 'paragraph', H1: 'paragraph', H2: 'paragraph', H3: 'paragraph', H4: 'paragraph', H5: 'paragraph', H6: 'paragraph', STRONG: 'strong', B: 'strong', EM: 'emphasis', I: 'emphasis', CODE: 'code', PRE: 'pre', BLOCKQUOTE: 'blockquote', LI: 'list-item', UL: 'list', OL: 'list' }
++      var type = types[tag] || (block ? 'block' : undefined)
++      if (tag === 'DIV') type = 'block'
++      var result = { type: type, children: children, start: start, end: end }
++      if (tag === 'A' && /^https?:\/\//i.test(node.href || '')) { result.type = 'link'; result.href = String(node.href).slice(0, 4000) }
++      if (type === 'list') {
++        result.ordered = tag === 'OL'
++        var first = Number(node.getAttribute('start') || 1)
++        result.listStart = Number.isSafeInteger(first) && first >= 0 && first <= 1000000 ? first : 1
++        result.children = children.filter(function (child) { return child.type === 'list-item' })
++      }
++      return result.type ? [result] : children
++    }
++    for (var child = body.firstChild; child && !out.truncated; child = child.nextSibling) {
++      var added = visit(child, 0)
++      for (var a = 0; a < added.length; a++) out.content.push(added[a])
+     }
+     return out
+   }
+ 
++  function selectedContent(nodes, start, end) {
++    var result = []
++    for (var i = 0; i < nodes.length; i++) {
++      var node = nodes[i]
++      if (node.end <= start || node.start >= end) continue
++      if (node.type === 'text') {
++        result.push({ type: 'text', text: node.text.slice(Math.max(0, start - node.start), Math.min(node.text.length, end - node.start)) })
++      } else if (node.type === 'break') result.push({ type: 'break' })
++      else {
++        var children = selectedContent(node.children, start, end)
++        if (!children.length) continue
++        var part = { type: node.type, children: children }
++        if (node.type === 'link') part.href = node.href
++        if (node.type === 'list') {
++          part.ordered = node.ordered
++          part.start = node.listStart + (node.ordered ? node.children.filter(function (child) { return child.end <= start }).length : 0)
++        }
++        result.push(part)
++      }
++    }
++    return result
++  }
++
+   function safeStart(text, index) {
+     if (index > 0 && index < text.length) {
+       var code = text.charCodeAt(index)
+@@ -276,7 +346,7 @@ const PAGE_LIB = String.raw`
+   function selectedPart(range, entry) {
+     var node = entry.node
+     var value = node.nodeValue || ''
+-    var length = value.length
++    var length = Math.min(value.length, entry.end === undefined ? value.length : entry.end - entry.start)
+     var start = 0
+     var end = length
+     try {
+@@ -289,13 +359,13 @@ const PAGE_LIB = String.raw`
+     return { start: entry.start + start, end: entry.start + end, node: node }
+   }
+ 
+-  function mergeRanges(ranges) {
++  function mergeRanges(ranges, text) {
+     ranges.sort(function (a, b) { return a.start - b.start })
+     var out = []
+     for (var i = 0; i < ranges.length; i++) {
+       var run = ranges[i]
+       var last = out.length ? out[out.length - 1] : null
+-      if (last && run.start <= last.end) last.end = Math.max(last.end, run.end)
++      if (last && (run.start <= last.end || (text !== undefined && /^\s*$/.test(text.slice(last.end, run.start))))) last.end = Math.max(last.end, run.end)
+       else out.push({ start: run.start, end: run.end, node: run.node })
+     }
+     return out
+@@ -685,7 +755,7 @@ const PAGE_LIB = String.raw`
+       if (!spec.excerptText) return { ok: false, reason: 'no-selection' }
+     }
+ 
+-    var map = flatTextMap(spec.maxChars)
++    var map = flatTextMap(spec.maxChars, true)
+     if (ranges.length === 0 && !targetTable && !targetImage) {
+       excerpt = excerptRun(map, String(spec.excerptText))
+       if (!excerpt) return { ok: false, reason: 'excerpt-not-found' }
+@@ -699,7 +769,7 @@ const PAGE_LIB = String.raw`
+         var part = selectedPart(ranges[r], map.nodes[n])
+         if (part) found.push(part)
+       }
+-      var merged = mergeRanges(found)
++      var merged = mergeRanges(found, map.text)
+       for (var m = 0; m < merged.length; m++) textRuns.push(merged[m])
+     }
+     if (excerpt) textRuns = [{ start: excerpt.start, end: excerpt.end, node: nodeForOffset(map, excerpt.start) }]
+@@ -817,6 +887,7 @@ const PAGE_LIB = String.raw`
+         payload: {
+           kind: 'text',
+           exact: exact,
++          content: selectedContent(map.content, start, end),
+           prefix: map.text.slice(safeStart(map.text, Math.max(0, start - context)), start),
+           suffix: map.text.slice(end, safeEnd(map.text, Math.min(map.text.length, end + context))),
+         },
+@@ -935,7 +1006,7 @@ const PAGE_LIB = String.raw`
+   }
+ 
+   function highlightText(spec) {
+-    var map = flatTextMap(spec.maxChars)
++    var map = flatTextMap(spec.maxChars, false, spec.legacy)
+     var start = Math.max(0, Math.min(Number(spec.start) || 0, map.text.length))
+     var end = Math.max(0, Math.min(Number(spec.end) || 0, map.text.length))
+     if (end <= start) return { ok: false, reason: 'range-not-found' }
+@@ -1238,7 +1309,7 @@ export function validateFrozenCapture(value: unknown): RawCaptureResult | undefi
+ 
+ /** Read the page's visible text, for a host-side text-quote locate. */
+ export function pageTextScript(): string {
+-  return script(`var map = flatTextMap(spec.maxChars)
++  return script(`var map = flatTextMap(spec.maxChars, false, spec.legacy)
+     return JSON.stringify({ ok: true, url: String(location.href), title: String(document.title || ''), text: map.text, truncated: map.truncated })`)
+ }
+ 
+diff --git a/src/browser-reference/service.ts b/src/browser-reference/service.ts
+index 782e488..60d3a53 100644
+--- a/src/browser-reference/service.ts
++++ b/src/browser-reference/service.ts
+@@ -18,6 +18,7 @@ const CAPTURE_DEDUPE_MS = 30_000
+  */
+ 
+ import { createHash, randomUUID } from 'node:crypto'
++import { isReferenceText, MAX_REFERENCE_TEXT, referenceTextContent } from '../reference-text.ts'
+ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+ import { dirname, join } from 'node:path'
+ import { manifestHashOf, ReferenceStore, referenceStorePath } from './store.ts'
+@@ -280,7 +281,7 @@ interface ResolvedOptions {
+ 
+ const DEFAULTS: ResolvedOptions = {
+   context: 32,
+-  maxTextPartLength: 20_000,
++  maxTextPartLength: MAX_REFERENCE_TEXT,
+   maxParts: 64,
+   maxTableCells: 2_000,
+   maxPageText: 2_000_000,
+@@ -405,7 +406,7 @@ export class BrowserReferenceService {
+     this.currentSession = options.currentSession
+     this.options = {
+       context: integerOf(options.context, DEFAULTS.context, 0, 512),
+-      maxTextPartLength: integerOf(options.maxTextPartLength, DEFAULTS.maxTextPartLength, 1, 1_000_000),
++      maxTextPartLength: integerOf(options.maxTextPartLength, DEFAULTS.maxTextPartLength, 1, MAX_REFERENCE_TEXT),
+       maxParts: integerOf(options.maxParts, DEFAULTS.maxParts, 1, 1_000),
+       maxTableCells: integerOf(options.maxTableCells, DEFAULTS.maxTableCells, 1, 20_000),
+       maxPageText: integerOf(options.maxPageText, DEFAULTS.maxPageText, 1_000, 50_000_000),
+@@ -547,6 +548,10 @@ export class BrowserReferenceService {
+         const framed = validateFrameCapture(
+           await this.run<unknown>(browserSessionId, frameCaptureScript(), [{
+             frameSelector, context: this.options.context,
++            maxChars: this.options.maxPageText, maxCells: this.options.maxTableCells,
++            ...request.tableSelector !== undefined ? { tableSelector: request.tableSelector } : {},
++            ...request.excerptText !== undefined && request.excerptText !== '' ? { excerptText: request.excerptText } : {},
++            ...request.target !== undefined ? { target: request.target } : {},
+           }], signal),
+           frameSelector,
+         )
+@@ -776,7 +781,7 @@ export class BrowserReferenceService {
+       if (part.type === 'text') {
+         try {
+           if (pageText === undefined) {
+-            const read = await this.run<RawPageTextResult>(sessionId, pageTextScript(), [{ maxChars: this.options.maxPageText }], signal)
++            const read = await this.run<RawPageTextResult>(sessionId, pageTextScript(), [{ maxChars: this.options.maxPageText, legacy: part.content === undefined }], signal)
+             pageText = textOf(read.text, this.options.maxPageText)
+           }
+           const locate = findTextQuote(pageText, part.anchor)
+@@ -785,6 +790,7 @@ export class BrowserReferenceService {
+               start: locate.range.start,
+               end: locate.range.end,
+               maxChars: this.options.maxPageText,
++              legacy: part.content === undefined,
+               durationMs: 2500,
+             }], signal)
+             results.push({
+@@ -882,10 +888,15 @@ export class BrowserReferenceService {
+     if (exact.length > this.options.maxTextPartLength) {
+       return { kind: 'text', reason: 'text-too-long', detail: { characters: exact.length, limit: this.options.maxTextPartLength } }
+     }
++    if (event.content !== undefined && (!isReferenceText(event.content)
++      || referenceTextContent(event.content).replace(/\s/gu, '') !== exact.replace(/\s/gu, ''))) {
++      return { kind: 'text', reason: 'invalid-text-content' }
++    }
+     return {
+       partId: nextPartId(),
+       type: 'text',
+       text: exact,
++      ...(event.content === undefined ? {} : { content: event.content }),
+       anchor: {
+         exact,
+         prefix: textOf(event.prefix, 512),
+diff --git a/src/browser-reference/types.ts b/src/browser-reference/types.ts
+index c224ed6..2a59fb4 100644
+--- a/src/browser-reference/types.ts
++++ b/src/browser-reference/types.ts
+@@ -9,6 +9,8 @@
+  * @module dsh-browser/browser-reference/types
+  */
+ 
++import type { ReferenceTextNode } from '../reference-text.ts'
++
+ /** Where the capture happened; reveal routes back to the same carrier. */
+ export type BrowserReferenceCarrier = 'sidebar' | 'bundled' | 'chrome' | 'edge'
+ 
+@@ -33,6 +35,7 @@ export interface TextReferencePart {
+   readonly partId: string
+   readonly type: 'text'
+   readonly text: string
++  readonly content?: readonly ReferenceTextNode[]
+   readonly anchor: TextQuoteAnchor
+ }
+ 
+diff --git a/src/client/browser/BrowserNavigation.ts b/src/client/browser/BrowserNavigation.ts
+index 5333418..02e7491 100644
+--- a/src/client/browser/BrowserNavigation.ts
++++ b/src/client/browser/BrowserNavigation.ts
+@@ -144,7 +144,7 @@ export class BrowserNavigation {
+       entries,
+       index: entries.length - 1,
+       request: undefined,
+-      navigation: { status: 'known', revision: this.value.navigation.revision },
++      navigation: { status: 'known', revision: this.value.navigation.status === 'empty' ? 0 : this.value.navigation.revision },
+       failure: undefined,
+     }
+   }
+diff --git a/src/client/browser/IframeImpl.ts b/src/client/browser/IframeImpl.ts
+index 7f22b24..396aebe 100644
+--- a/src/client/browser/IframeImpl.ts
++++ b/src/client/browser/IframeImpl.ts
+@@ -27,6 +27,7 @@ export class IframeImpl implements BrowserFrame {
+   private readonly navigation: BrowserNavigation
+   private readonly store: SnapshotStore<BrowserFrameState>
+   private sandboxed = true
++  private frameHistoryForward = false
+   private error: BrowserLoadError | undefined
+   private disposed = false
+   private disposal: Promise<void> | undefined
+@@ -83,13 +84,15 @@ export class IframeImpl implements BrowserFrame {
+     if (this.disposed) return
+     if (this.navigation.canGoBack) { this.load(this.navigation.back()); return }
+     this.frameHistoryForward = this.presentation.historyStep(-1) || this.frameHistoryForward
++    this.publish()
+   }
+ 
+   /** Move forward: app-known history first, then the iframe's own (page-internal) history. */
+   goForward(): void {
+     if (this.disposed) return
+     if (this.navigation.canGoForward) { this.load(this.navigation.forward()); return }
+-    this.presentation.historyStep(1)
++    if (this.presentation.historyStep(1)) this.frameHistoryForward = false
++    this.publish()
+   }
+   /** Reload the last application-known address. */
+   reload(): void { if (!this.disposed) this.load(this.navigation.reload()) }
+@@ -115,6 +118,7 @@ export class IframeImpl implements BrowserFrame {
+ 
+   private load(request: ReturnType<BrowserNavigation['navigate']> | undefined): void {
+     if (request === undefined) return
++    this.frameHistoryForward = false
+     this.error = undefined
+     this.publish()
+     this.presentation.show({ target: request.target, revision: request.revision, sandboxed: this.sandboxed })
+diff --git a/src/client/browser/__tests__/iframe-navigation.spec.ts b/src/client/browser/__tests__/iframe-navigation.spec.ts
+new file mode 100644
+index 0000000..558a3df
+--- /dev/null
++++ b/src/client/browser/__tests__/iframe-navigation.spec.ts
+@@ -0,0 +1,67 @@
++// @vitest-environment jsdom
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { BrowserNavigation } from '../BrowserNavigation.ts'
++import { IframeImpl } from '../IframeImpl.ts'
++import type { IframePresentation } from '../../view/IframePresentation.ts'
++import { createIframePage } from '../../pages.ts'
++import { parseBrowserAddress } from '../url.ts'
++
++vi.mock('@deepseek-ai/dsh-client-store', () => ({
++  createSnapshotStore<T>(initial: T) {
++    let value = initial
++    const listeners = new Set<() => void>()
++    return { getSnapshot: () => value, subscribe: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener) },
++      set: (next: T) => { value = next; for (const listener of listeners) listener() } }
++  },
++}))
++
++afterEach(() => { document.body.replaceChildren() })
++function target(url: string) {
++  const parsed = parseBrowserAddress(url)
++  if (!parsed.ok) throw new Error('invalid test target')
++  return parsed.target
++}
++
++describe('iframe navigation and presentation assembly', () => {
++  it('records a first observed page even from the empty navigation variant', () => {
++    const navigation = new BrowserNavigation()
++    navigation.recordObserved(target('https://example.com/one'))
++    expect(navigation.snapshot.navigation).toEqual({ status: 'known', revision: 0 })
++    const request = navigation.navigate(target('https://example.com/two'))
++    navigation.frameLoaded(request.revision)
++    navigation.recordObserved(target('https://example.com/three'))
++    expect(navigation.snapshot.navigation).toEqual({ status: 'known', revision: request.revision })
++  })
++
++  it('publishes native-history forward availability and clears it on forward or a new document', () => {
++    const presentation = { historyStep: vi.fn(() => true), historyDepth: () => 2, show: vi.fn(), dispose: vi.fn() }
++    const frame = new IframeImpl({ initial: undefined, persist: () => {}, openRequested: () => {} }, presentation as unknown as IframePresentation)
++    expect(frame.getSnapshot().canGoForward).toBe(false)
++    frame.goBack()
++    expect(presentation.historyStep).toHaveBeenCalledWith(-1)
++    expect(frame.getSnapshot().canGoForward).toBe(true)
++    frame.goForward()
++    expect(frame.getSnapshot().canGoForward).toBe(false)
++    presentation.historyStep.mockReturnValue(false)
++    frame.goBack()
++    expect(frame.getSnapshot().canGoForward).toBe(false)
++    presentation.historyStep.mockReturnValue(true)
++    frame.goBack()
++    frame.loadUrl(target('https://example.com/'))
++    expect(frame.getSnapshot().canGoForward).toBe(false)
++  })
++
++  it('assembles the actual Web provider and CSS-backed presentation without a fictitious event', async () => {
++    const page = createIframePage({ initial: undefined, persist: () => {}, openRequested: () => {} })
++    const host = document.createElement('div')
++    host.id = 'browser-viewport'
++    document.body.append(host)
++    const unmount = page.presentation.mount(host.id)
++    page.frame.loadUrl(target('https://example.com/'))
++    const iframe = host.querySelector('iframe')!
++    expect(iframe.className).not.toBe('')
++    expect(iframe.sandbox?.contains('allow-popups') ?? iframe.getAttribute('sandbox')!.includes('allow-popups')).toBe(false)
++    unmount()
++    await page.frame.dispose()
++  })
++})
+diff --git a/src/client/browser/__tests__/iframe-popup-policy.spec.ts b/src/client/browser/__tests__/iframe-popup-policy.spec.ts
+new file mode 100644
+index 0000000..4845a18
+--- /dev/null
++++ b/src/client/browser/__tests__/iframe-popup-policy.spec.ts
+@@ -0,0 +1,69 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { createIframePage } from '../../pages.ts'
++import { WEB_BROWSER_SANDBOX } from '../../view/IframePresentation.ts'
++
++function sidebar() {
++  const frames: { attributes: Map<string, string>; src: string }[] = []
++  vi.stubGlobal('location', { origin: 'https://dsh.test' })
++  vi.stubGlobal('document', {
++    getElementById: () => ({ append: vi.fn() }),
++    createElement: () => {
++      const frame = {
++        attributes: new Map<string, string>(), src: '', dataset: {},
++        setAttribute(name: string, value: string) { this.attributes.set(name, value) },
++        addEventListener: vi.fn(), remove: vi.fn(),
++      }
++      frames.push(frame)
++      return frame
++    },
++  })
++  const page = createIframePage({ initial: undefined, persist: vi.fn(), openRequested: vi.fn() })
++  page.presentation.mount('viewport')
++  return { page, frames }
++}
++
++function expectNoPopups(frame: { attributes: Map<string, string> } | undefined) {
++  expect(frame).toBeDefined()
++  const policy = frame?.attributes.get('sandbox')
++  expect(policy).toBeDefined()
++  const tokens = policy?.split(/\s+/u) ?? []
++  expect(tokens).not.toContain('allow-popups')
++  expect(tokens).not.toContain('allow-popups-to-escape-sandbox')
++  for (const token of ['allow-scripts', 'allow-forms', 'allow-same-origin']) expect(tokens).toContain(token)
++  return tokens
++}
++
++afterEach(() => { vi.unstubAllGlobals() })
++
++describe('Web sidebar popup policy', () => {
++  it('keeps the default proxy-capable sandbox without popup grants', () => {
++    const { page, frames } = sidebar()
++    page.frame.loadUrl({ kind: 'https', url: 'https://example.test/page', title: 'Example' })
++    expectNoPopups(frames.at(-1))
++    expect(frames.at(-1)?.attributes.get('sandbox')).toBe(WEB_BROWSER_SANDBOX)
++    expect(frames.at(-1)?.src).toContain('/browser-view/guest?u=')
++    void page.frame.dispose()
++  })
++
++  it('never removes the popup restriction when the shield is toggled', () => {
++    const { page, frames } = sidebar()
++    page.frame.loadUrl({ kind: 'https', url: 'https://example.test/page', title: 'Example' })
++    page.frame.sandbox?.setEnabled(false)
++    const relaxed = expectNoPopups(frames.at(-1))
++    expect(relaxed).toContain('allow-downloads')
++    expect(relaxed).toContain('allow-modals')
++    page.frame.sandbox?.setEnabled(true)
++    expectNoPopups(frames.at(-1))
++    expect(frames.at(-1)?.attributes.get('sandbox')).toBe(WEB_BROWSER_SANDBOX)
++    void page.frame.dispose()
++  })
++
++  it('enforces popup restrictions when the shield is disabled before the first page', () => {
++    const { page, frames } = sidebar()
++    page.frame.sandbox?.setEnabled(false)
++    expect(frames).toHaveLength(0)
++    page.frame.loadUrl({ kind: 'http', url: 'http://example.test/page', title: 'Example' })
++    expectNoPopups(frames.at(-1))
++    void page.frame.dispose()
++  })
++})
+diff --git a/src/client/pages.ts b/src/client/pages.ts
+index 2c9e97f..6cb05b2 100644
+--- a/src/client/pages.ts
++++ b/src/client/pages.ts
+@@ -13,8 +13,6 @@ export function createIframePage(options: BrowserPageOptions): BrowserPage {
+     loaded: (revision, observedUrl) => { frame.handleLoaded(revision, observedUrl) },
+     failed: (revision) => { frame.handleLoadFailed(revision) },
+     remounted: () => { frame.reload() },
+-    // The proxied guest needs to know which conversation it is quoting into; this panel owns one.
+-    sessionId: () => (options as { readonly sessionId?: string }).sessionId ?? '',
+   })
+   const frame = new IframeImpl(options, presentation)
+   return { frame, presentation }
+diff --git a/src/client/reference/client/__tests__/production-formatting.spec.tsx b/src/client/reference/client/__tests__/production-formatting.spec.tsx
+new file mode 100644
+index 0000000..678bb70
+--- /dev/null
++++ b/src/client/reference/client/__tests__/production-formatting.spec.tsx
+@@ -0,0 +1,188 @@
++// @vitest-environment jsdom
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
++import { createElement } from 'react'
++import { renderToStaticMarkup } from 'react-dom/server'
++import { captureScript, highlightScript, pageTextScript, type RawCaptureResult } from '../../../../browser-reference/page-script.ts'
++import { BrowserReferenceService } from '../../../../browser-reference/service.ts'
++import { frameCaptureScript } from '../../../../browser-reference/entry.ts'
++import { ReferenceStore } from '../../../../browser-reference/store.ts'
++import { isReferenceText, MAX_REFERENCE_TEXT, renderReferenceText } from '../../../../reference-text.ts'
++import { emptyDraftState, insertGroup, isOrderedReferenceGroup } from '../draft-reference.ts'
++import { toOrderedGroup } from '../production/snapshot-adapter.ts'
++import { wireSubmissionContent } from '../production/production-submission.ts'
++import { ReferenceText } from '../production/ReferenceText.tsx'
++
++const directories: string[] = []
++const box = { x: 10, y: 100, left: 10, top: 100, right: 650, bottom: 120, width: 640, height: 20, toJSON: () => ({}) }
++const oldRects = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects')
++beforeAll(() => { Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [box] }) })
++afterAll(() => {
++  if (oldRects) Object.defineProperty(Range.prototype, 'getClientRects', oldRects)
++  else Reflect.deleteProperty(Range.prototype, 'getClientRects')
++})
++beforeEach(() => { vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(box) })
++afterEach(() => {
++  vi.restoreAllMocks()
++  window.getSelection()?.removeAllRanges()
++  document.body.replaceChildren()
++  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
++})
++
++function execute<T>(source: string, spec: unknown = {}): T {
++  return JSON.parse(new Function(`return ${source}`).call(window, spec)) as T
++}
++
++function select(html: string): RawCaptureResult {
++  document.body.innerHTML = html
++  const range = document.createRange()
++  range.selectNodeContents(document.body)
++  window.getSelection()!.addRange(range)
++  return execute(captureScript())
++}
++
++async function stored(raw: RawCaptureResult) {
++  const directory = mkdtempSync(join(tmpdir(), 'reference-format-'))
++  directories.push(directory)
++  const path = join(directory, 'references.jsonl')
++  const service = new BrowserReferenceService({ exists: () => false, evaluate: async () => { throw new Error('frozen capture must not read a browser') } },
++    new ReferenceStore(path), { assetDir: join(directory, 'assets') })
++  const outcome = await service.capture({ sessionId: 's', frozenCapture: raw })
++  return { outcome, path }
++}
++
++async function submit(raw: RawCaptureResult) {
++  const { outcome, path } = await stored(raw)
++  expect(outcome.failures).toEqual([])
++  const snapshot = new ReferenceStore(path).get(outcome.reference!.referenceId)!
++  const group = toOrderedGroup(snapshot)
++  expect(insertGroup(emptyDraftState(), group, 0).ok).toBe(true)
++  return { snapshot, group, parts: wireSubmissionContent({ uploaded: [], text: '', groups: [group], sourceLinks: false, admitImage: () => undefined }) }
++}
++
++describe('formatted quotations through emitted capture, storage, draft and submission', () => {
++  it('preserves paragraphs, nested inline emphasis, links, lists and explicit line breaks', async () => {
++    const raw = select('<p>First <strong>bold <em>nested</em></strong> <a href="https://example.com/a?q=1">link</a>.</p><p>Second<br>line</p><ol start="3"><li>Alpha</li><li>Beta</li></ol><ul><li>Gamma</li></ul>')
++    expect(raw.ok).toBe(true)
++    expect(raw.events).toHaveLength(1)
++    expect(raw.events![0]!.exact).toBe('First bold nested link.\n\nSecond\nline\n\nAlpha\nBeta\n\nGamma')
++    const { parts, group, snapshot } = await submit(raw)
++    expect(parts).toEqual([{ type: 'text', text: 'First **bold *nested*** [link](https://example.com/a?q=1).\n\nSecond  \nline\n\n3. Alpha\n4. Beta\n\n- Gamma\n' }])
++    expect(group.parts[0]!.content).toEqual(raw.events![0]!.content)
++    expect(snapshot.parts[0]).toMatchObject({ content: raw.events![0]!.content })
++    const html = renderToStaticMarkup(createElement(ReferenceText, { content: group.parts[0]!.content! }))
++    expect(html).toContain('<strong>bold <em>nested</em></strong>')
++    expect(html).toContain('<ol start="3"><li>Alpha</li><li>Beta</li></ol>')
++    expect(html).toContain('Second<br/>line')
++    expect(html).not.toContain('target=')
++  })
++
++  it('keeps text/table/text order and submits a structural table with merged cells', async () => {
++    const raw = select('<p>Before</p><table><caption>Scores</caption><tr><th colspan="2">Results</th></tr><tr><td>Ada</td><td>42</td></tr></table><p>After</p>')
++    expect(raw.events!.map(event => event.kind)).toEqual(['text', 'table', 'text'])
++    const { parts, group } = await submit(raw)
++    expect(parts).toEqual([
++      { type: 'text', text: 'Before\n' },
++      { type: 'text', text: '<table>\n<caption>Scores</caption>\n<tr><th rowspan="1" colspan="2">Results</th></tr>\n<tr><td rowspan="1" colspan="1">Ada</td><td rowspan="1" colspan="1">42</td></tr>\n</table>\n' },
++      { type: 'text', text: 'After\n' },
++    ])
++    expect(group.parts[1]!.table!.cells[0]).toMatchObject({ role: 'header', columnSpan: 2 })
++  })
++
++  it('clips selected inline content and keeps the original ordered-list numbering', async () => {
++    select('<ol start="7"><li>Unselected</li><li>prefix <strong>selected</strong> suffix</li></ol>')
++    const range = document.createRange()
++    const node = document.querySelector('strong')!.firstChild!
++    range.setStart(node, 1)
++    range.setEnd(node, 6)
++    window.getSelection()!.removeAllRanges()
++    window.getSelection()!.addRange(range)
++    const { parts } = await submit(execute(captureScript()))
++    expect(parts).toEqual([{ type: 'text', text: '8. **elect**\n' }])
++  })
++
++  it('uses identical map offsets for capture, locate and DOM highlighting across blocks and br', () => {
++    const raw = select('<p>First <b>bold</b></p><p>Second<br>line 🦊</p>')
++    const event = raw.events![0]!
++    const page = execute<{ text: string }>(pageTextScript())
++    expect(page.text).toContain(event.exact)
++    const node = document.querySelectorAll('p')[1]!.lastChild!
++    const start = page.text.indexOf('line')
++    const setStart = vi.spyOn(Range.prototype, 'setStart')
++    const setEnd = vi.spyOn(Range.prototype, 'setEnd')
++    expect(execute(highlightScript(), { start, end: start + 'line 🦊'.length })).toMatchObject({ ok: true })
++    expect(setStart).toHaveBeenCalledWith(node, 0)
++    expect(setEnd).toHaveBeenCalledWith(node, 'line 🦊'.length)
++  })
++
++  it('keeps legacy unstructured snapshots locatable with their original map', () => {
++    select('<p>First</p><p>Second</p>')
++    expect(execute<{ text: string }>(pageTextScript(), { legacy: true }).text).toBe('FirstSecond')
++    const node = document.querySelectorAll('p')[1]!.firstChild!
++    const setStart = vi.spyOn(Range.prototype, 'setStart')
++    expect(execute(highlightScript(), { legacy: true, start: 5, end: 11 })).toMatchObject({ ok: true })
++    expect(setStart).toHaveBeenCalledWith(node, 0)
++  })
++
++  it.each([3000, MAX_REFERENCE_TEXT])('admits %i characters through server and draft validation', async length => {
++    const { group } = await submit(select(`<p>${'x'.repeat(length)}</p>`))
++    expect(group.parts[0]!.text).toHaveLength(length)
++    expect(isOrderedReferenceGroup(JSON.parse(JSON.stringify(group)))).toBe(true)
++  })
++
++  it('refuses content above the shared limit on both sides', async () => {
++    const { outcome } = await stored(select(`<p>${'x'.repeat(MAX_REFERENCE_TEXT + 1)}</p>`))
++    expect(outcome.reference).toBeUndefined()
++    expect(outcome.failures).toContainEqual(expect.objectContaining({ reason: 'text-too-long' }))
++    expect(isOrderedReferenceGroup({ referenceId: 'r', parts: [{ kind: 'text', referenceId: 'r', partId: 't', text: 'x'.repeat(MAX_REFERENCE_TEXT + 1) }] })).toBe(false)
++  })
++
++  it('excludes hidden and executable content and refuses malformed semantic payloads', async () => {
++    const raw = select('<p>safe<script>danger()</script><span style="display:none">hidden</span><a href="javascript:alert(1)"> text</a></p>')
++    const { parts } = await submit(raw)
++    expect(parts).toEqual([{ type: 'text', text: 'safe text\n' }])
++    const event = raw.events![0]!
++    const { outcome } = await stored({ ...raw, events: [{ ...event, content: [{ type: 'link', href: 'javascript:alert(1)', children: [{ type: 'text', text: event.exact! }] }] }] })
++    expect(outcome.failures).toContainEqual({ kind: 'text', reason: 'invalid-text-content' })
++    expect(isReferenceText([{ type: 'html', text: '<script>' }])).toBe(false)
++  })
++
++  it('escapes markup-like text while preserving code and treats an empty selection as empty', async () => {
++    const { parts } = await submit(select('<p>&lt;img src=x&gt; [literal] <code>a*b</code></p><pre>one\n  two</pre>'))
++    expect(parts).toEqual([{ type: 'text', text: '\\<img src=x\\> \\[literal\\] ` a*b `\n\n```\none\n  two\n```\n' }])
++    window.getSelection()!.removeAllRanges()
++    expect(execute(captureScript())).toMatchObject({ ok: false, reason: 'no-selection' })
++    expect(renderReferenceText([])).toBe('')
++    expect(wireSubmissionContent({ uploaded: [], text: '', groups: [], admitImage: () => undefined })).toEqual([])
++  })
++
++  it('preserves nested block boundaries without nesting paragraph elements', async () => {
++    const { parts, group } = await submit(select('<main><section>Before<div><p>Inside</p><p>Next</p></div>After</section></main>'))
++    expect(parts).toEqual([{ type: 'text', text: 'Before\n\nInside\n\nNext\n\nAfter\n' }])
++    const html = renderToStaticMarkup(createElement(ReferenceText, { content: group.parts[0]!.content! }))
++    expect(html).toContain('<div>Before<div><p>Inside</p><p>Next</p></div>After</div>')
++  })
++
++  it('uses the same structured capture in same-origin frames', async () => {
++    const iframe = document.createElement('iframe')
++    iframe.id = 'quote-frame'
++    document.body.append(iframe)
++    const frame = iframe.contentWindow!
++    const frameDocument = iframe.contentDocument!
++    vi.spyOn(frameDocument.body, 'getBoundingClientRect').mockReturnValue(box)
++    frameDocument.body.innerHTML = '<p>Frame <strong>bold</strong></p><p>Next<br>line</p>'
++    for (const element of frameDocument.querySelectorAll('*')) vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(box)
++    const range = frameDocument.createRange()
++    range.selectNodeContents(frameDocument.body)
++    frame.getSelection()!.addRange(range)
++    const raw = execute<RawCaptureResult>(frameCaptureScript(), { frameSelector: '#quote-frame' })
++    expect(raw).toMatchObject({ ok: true, url: window.location.href, frameUrl: frame.location.href })
++    const { parts } = await submit(raw)
++    expect(parts).toEqual([{ type: 'text', text: 'Frame **bold**\n\nNext  \nline\n' }])
++    frame.getSelection()!.removeAllRanges()
++    expect(execute<{ ok: boolean; reason: string }>(frameCaptureScript(), { frameSelector: '#quote-frame' })).toMatchObject({ ok: false, reason: 'no-selection' })
++    expect(execute<{ ok: boolean; reason: string }>(frameCaptureScript(), { frameSelector: '#missing' })).toMatchObject({ ok: false, reason: 'frame-not-found' })
++  })
++})
+diff --git a/src/client/reference/client/__tests__/production-submission.spec.ts b/src/client/reference/client/__tests__/production-submission.spec.ts
+index 7e5fe58..784b0dd 100644
+--- a/src/client/reference/client/__tests__/production-submission.spec.ts
++++ b/src/client/reference/client/__tests__/production-submission.spec.ts
+@@ -71,9 +71,13 @@ describe('wireSubmissionContent — ordered, real blocks for Session.prompt', ()
+     expect(tableText).toContain('姓名 / Name')
+     expect(tableText).toContain('1,234')
+     expect(tableText).toContain('含图片的单元格')
+-    expect(tableText).toContain('completeness=visible-rows')
+-    expect(tableText).toContain(`cell-img@${CELL_IMG_KEY}`)
+-    expect(tableText).toContain('[0,1] (1r x 2c; header,header-context,full-text)')
++    expect(tableText).toContain('<table>')
++    expect(tableText).toContain('<th rowspan="1" colspan="2">Q1 营收(千)</th>')
++    expect(tableText).toContain('<td rowspan="2" colspan="1">爱丽丝 Alice</td>')
++    expect(group.parts[2]?.table).toMatchObject({ completeness: 'visible-rows' })
++    expect(group.parts[2]?.table?.cells).toContainEqual(expect.objectContaining({
++      inlineContent: expect.arrayContaining([expect.objectContaining({ assetKey: CELL_IMG_KEY })]),
++    }))
+   })
+ 
+   it('an uploaded image asset becomes a {type:file,receiptId} block (host admission)', () => {
+diff --git a/src/client/reference/client/draft-reference.ts b/src/client/reference/client/draft-reference.ts
+index 30a78d3..1cd768b 100644
+--- a/src/client/reference/client/draft-reference.ts
++++ b/src/client/reference/client/draft-reference.ts
+@@ -6,6 +6,7 @@
+  * Serialization is strict so an unsent draft survives a restart with every
+  * fragment and asset binding intact.
+  */
++import { isReferenceTable, isReferenceText, MAX_REFERENCE_TEXT } from '../../../reference-text.ts'
+ import type {
+   BrowserReferencePart,
+   OrderedReferenceGroup,
+@@ -55,9 +56,11 @@ export function isBrowserReferencePart(value: unknown): value is BrowserReferenc
+     && isNonEmptyString(value.partId)
+     && isNonEmptyString(value.referenceId)
+     && isOptionalString(value.assetKey)
+-    && isOptionalString(value.text)
++    && isOptionalString(value.text, MAX_REFERENCE_TEXT)
++    && (value.content === undefined || isReferenceText(value.content))
++    && (value.table === undefined || isReferenceTable(value.table))
+     && isOptionalString(value.mimeType)
+-    && isOptionalString(value.label)
++    && isOptionalString(value.label, MAX_REFERENCE_TEXT)
+     && (value.status === undefined || (typeof value.status === 'string' && statuses.includes(value.status)))
+ }
+ 
+diff --git a/src/client/reference/client/ordered-submission.ts b/src/client/reference/client/ordered-submission.ts
+index 7d077b8..7287886 100644
+--- a/src/client/reference/client/ordered-submission.ts
++++ b/src/client/reference/client/ordered-submission.ts
+@@ -9,6 +9,7 @@
+  * Both are pure functions; the host selects one through an injected projector
+  * interface. This module does NOT import or modify the host `service.ts`.
+  */
++import { renderReferenceText } from '../../../reference-text.ts'
+ import type {
+   OrderedReferenceGroup,
+   BrowserReferencePart,
+@@ -33,14 +34,15 @@ export interface OrderedProjectionOptions {
+ function projectPart(part: BrowserReferencePart): PromptContentPart {
+   switch (part.kind) {
+     case 'text':
+-      return { type: 'text', text: part.text ?? '' }
++      return { type: 'text', text: part.content === undefined ? part.text ?? '' : renderReferenceText(part.content) }
+     case 'image':
+       // A failed image keeps its slot instead of being silently dropped (B20).
+       return part.assetKey === undefined
+         ? { type: 'text', text: `[image unavailable: ${part.partId}]` }
+         : { type: 'image', assetKey: part.assetKey, partId: part.partId, referenceId: part.referenceId }
+     case 'table':
+-      return { type: 'table', text: part.text ?? '', partId: part.partId, referenceId: part.referenceId }
++      return { type: 'table', text: part.text ?? '', partId: part.partId, referenceId: part.referenceId,
++        ...(part.table === undefined ? {} : { table: part.table }) }
+     default: {
+       const exhaustive: never = part.kind
+       throw new Error(`unhandled browser reference part kind: ${String(exhaustive)}`)
+diff --git a/src/client/reference/client/production/ReferenceCapsules.tsx b/src/client/reference/client/production/ReferenceCapsules.tsx
+index feac7ca..d80a369 100644
+--- a/src/client/reference/client/production/ReferenceCapsules.tsx
++++ b/src/client/reference/client/production/ReferenceCapsules.tsx
+@@ -21,6 +21,7 @@ import { IconEditOutlineRegular, IconLinkOutlineRegular, IconTrashOutlineRegular
+ import type { CardActions, CardPart, CardViewModel } from './reference-card.ts'
+ import type { ReferenceLabels } from './reference-labels.ts'
+ import css from './ReferenceDock.module.css'
++import { ReferenceText } from './ReferenceText.tsx'
+ 
+ export interface ReferenceCapsulesProps {
+   readonly sessionId: string
+@@ -41,7 +42,9 @@ const PANEL_MAX_HEIGHT_PX = 420
+ 
+ 
+ function Part({ part, labels }: { readonly part: CardPart; readonly labels: ReferenceLabels }): ReactNode {
+-  if (part.kind === 'text') return <p className={css.quote} data-part-kind="text">{part.value.text}</p>
++  if (part.kind === 'text') return part.value.content === undefined
++    ? <p className={css.quote} data-part-kind="text">{part.value.text}</p>
++    : <div className={css.quote} data-part-kind="text"><ReferenceText content={part.value.content} /></div>
+   if (part.kind === 'image') return part.value.bound
+     ? <img className={css.image} data-part-kind="image" src={part.value.thumbnailSrc} alt={part.value.alt ?? labels.image} />
+     : <p className={css.secondary} data-part-kind="image" role="status">{labels.loadingImage}</p>
+diff --git a/src/client/reference/client/production/ReferenceText.tsx b/src/client/reference/client/production/ReferenceText.tsx
+new file mode 100644
+index 0000000..05f2a3a
+--- /dev/null
++++ b/src/client/reference/client/production/ReferenceText.tsx
+@@ -0,0 +1,22 @@
++import type { ReactNode } from 'react'
++import type { ReferenceTextNode } from '../../../../reference-text.ts'
++
++export function ReferenceText({ content }: { readonly content: readonly ReferenceTextNode[] }): ReactNode {
++  return content.map((node, index) => {
++    if (node.type === 'text') return node.text
++    if (node.type === 'break') return <br key={index} />
++    const children = <ReferenceText content={node.children} />
++    switch (node.type) {
++      case 'block': return <div key={index}>{children}</div>
++      case 'paragraph': return <p key={index}>{children}</p>
++      case 'strong': return <strong key={index}>{children}</strong>
++      case 'emphasis': return <em key={index}>{children}</em>
++      case 'code': return <code key={index}>{children}</code>
++      case 'pre': return <pre key={index}>{children}</pre>
++      case 'blockquote': return <blockquote key={index}>{children}</blockquote>
++      case 'list-item': return <li key={index}>{children}</li>
++      case 'list': return node.ordered ? <ol key={index} start={node.start}>{children}</ol> : <ul key={index}>{children}</ul>
++      case 'link': return <span key={index} title={node.href} data-reference-href={node.href}>{children}</span>
++    }
++  })
++}
+diff --git a/src/client/reference/client/production/production-submission.ts b/src/client/reference/client/production/production-submission.ts
+index b600156..4ed79d1 100644
+--- a/src/client/reference/client/production/production-submission.ts
++++ b/src/client/reference/client/production/production-submission.ts
+@@ -21,6 +21,7 @@
+  *
+  * @module dsh-browser-reference/production/production-submission
+  */
++import { renderReferenceTable } from '../../../../reference-text.ts'
+ import type { OrderedReferenceGroup } from '../types.ts'
+ import { createSubmissionProjector, type TextPosition } from '../ordered-submission.ts'
+ import { encodeBrowserRefUri } from '../scheme.ts'
+@@ -206,7 +207,7 @@ function mapProjected(
+     case 'text':
+       return { type: 'text', text: part.text }
+     case 'table':
+-      return { type: 'text', text: part.text }
++      return { type: 'text', text: part.table === undefined ? part.text : renderReferenceTable(part.table) }
+     case 'image': {
+       const admitted = admitImage(part.assetKey, part.partId ?? part.assetKey)
+       return admitted ?? { type: 'text', text: `[image unavailable: ${part.partId ?? part.assetKey}]` }
+diff --git a/src/client/reference/client/production/protocol.ts b/src/client/reference/client/production/protocol.ts
+index c5af194..2012137 100644
+--- a/src/client/reference/client/production/protocol.ts
++++ b/src/client/reference/client/production/protocol.ts
+@@ -13,6 +13,8 @@
+  * @module dsh-browser-reference/production/protocol
+  */
+ 
++import type { ReferenceTextNode } from '../../../../reference-text.ts'
++
+ /** Exact HTTP paths served by the plugin's reference router. */
+ export const ROUTES = {
+   deliveries: '/dsh-builtin-browser/reference/deliveries',
+@@ -53,6 +55,7 @@ export interface TextReferencePart {
+   readonly partId: string
+   readonly type: 'text'
+   readonly text: string
++  readonly content?: readonly ReferenceTextNode[]
+   readonly anchor: TextQuoteAnchor
+ }
+ 
+diff --git a/src/client/reference/client/production/reference-card.ts b/src/client/reference/client/production/reference-card.ts
+index eb9d1a6..d48404a 100644
+--- a/src/client/reference/client/production/reference-card.ts
++++ b/src/client/reference/client/production/reference-card.ts
+@@ -10,6 +10,7 @@
+  *
+  * @module dsh-browser-reference/production/reference-card
+  */
++import { isReferenceText, type ReferenceTextNode } from '../../../../reference-text.ts'
+ import type { AssetBinding, AssetStore } from './asset-store.ts'
+ import type { SourceDescription } from './snapshot-adapter.ts'
+ import {
+@@ -78,6 +79,7 @@ export interface CardTable {
+ export interface CardText {
+   readonly partId: string
+   readonly text: string
++  readonly content?: readonly ReferenceTextNode[]
+   readonly exact: string
+   readonly prefix: string
+   readonly suffix: string
+@@ -186,6 +188,7 @@ export function buildCardViewModel(
+         return { kind: 'text', value: {
+           partId: part.partId,
+           text: part.text,
++          ...(isReferenceText(part.content) ? { content: part.content } : {}),
+           exact: part.anchor.exact,
+           prefix: part.anchor.prefix,
+           suffix: part.anchor.suffix,
+diff --git a/src/client/reference/client/production/snapshot-adapter.ts b/src/client/reference/client/production/snapshot-adapter.ts
+index 6ed5d80..f46fc2b 100644
+--- a/src/client/reference/client/production/snapshot-adapter.ts
++++ b/src/client/reference/client/production/snapshot-adapter.ts
+@@ -91,6 +91,7 @@ function projectPart(part: BrowserReferencePart, referenceId: string): ContractP
+         partId: part.partId,
+         referenceId,
+         text: part.text,
++        ...(part.content === undefined ? {} : { content: part.content }),
+         label: part.anchor.exact,
+       }
+     case 'image':
+@@ -110,6 +111,7 @@ function projectPart(part: BrowserReferencePart, referenceId: string): ContractP
+         partId: part.partId,
+         referenceId,
+         text: projectTableText(part.table, part.table.caption ?? part.anchor.caption),
++        table: part.table,
+       }
+     default: {
+       const exhaustive: never = part
+diff --git a/src/client/reference/client/types.ts b/src/client/reference/client/types.ts
+index 19585ad..ed20b45 100644
+--- a/src/client/reference/client/types.ts
++++ b/src/client/reference/client/types.ts
+@@ -6,6 +6,8 @@
+  * self-contained, additive contract the host may wire in later.
+  */
+ 
++import type { ReferenceTable, ReferenceTextNode } from '../../../reference-text.ts'
++
+ /** Kinds of captured parts that can appear inside one ordered reference group. */
+ export type BrowserReferencePartKind = 'text' | 'image' | 'table'
+ 
+@@ -23,6 +25,8 @@ export interface BrowserReferencePart {
+   readonly assetKey?: string
+   /** Extracted text for text/table parts. */
+   readonly text?: string
++  readonly content?: readonly ReferenceTextNode[]
++  readonly table?: ReferenceTable
+   readonly mimeType?: string
+   readonly label?: string
+   readonly status?: BrowserReferencePartStatus
+@@ -111,6 +115,7 @@ export type PromptContentPart =
+     }
+   | {
+       readonly type: 'table'
++      readonly table?: ReferenceTable
+       readonly text: string
+       readonly partId?: string
+       readonly referenceId?: string
+diff --git a/src/client/view/IframePresentation.ts b/src/client/view/IframePresentation.ts
+index a841da4..0c7010c 100644
+--- a/src/client/view/IframePresentation.ts
++++ b/src/client/view/IframePresentation.ts
+@@ -1,3 +1,4 @@
++/// <reference path="../css-modules.d.ts" />
+ /** Iframe DOM and revision-tagged load observations. */
+ import type { BrowserTarget } from '../browser/url.ts'
+ import type { BrowserPresentation } from './BrowserPresentation.ts'
+diff --git a/src/reference-text.ts b/src/reference-text.ts
+new file mode 100644
+index 0000000..91dae76
+--- /dev/null
++++ b/src/reference-text.ts
+@@ -0,0 +1,115 @@
++export const MAX_REFERENCE_TEXT = 20_000
++
++export type ReferenceTextNode =
++  | { readonly type: 'text'; readonly text: string }
++  | { readonly type: 'break' }
++  | { readonly type: 'block' | 'paragraph' | 'strong' | 'emphasis' | 'code' | 'pre' | 'list-item' | 'blockquote'; readonly children: readonly ReferenceTextNode[] }
++  | { readonly type: 'link'; readonly href: string; readonly children: readonly ReferenceTextNode[] }
++  | { readonly type: 'list'; readonly ordered: boolean; readonly start: number; readonly children: readonly ReferenceTextNode[] }
++
++/** Accept only bounded semantic data, never page HTML or arbitrary attributes. */
++export function isReferenceText(value: unknown): value is readonly ReferenceTextNode[] {
++  let count = 0
++  let characters = 0
++  const visit = (nodes: unknown, depth: number): boolean => Array.isArray(nodes) && depth <= 64 && nodes.every(node => {
++    if (++count > 4096 || typeof node !== 'object' || node === null) return false
++    if (node.type === 'text') {
++      if (typeof node.text !== 'string') return false
++      characters += node.text.length
++      return characters <= MAX_REFERENCE_TEXT
++    }
++    if (node.type === 'break') return true
++    if (!['block', 'paragraph', 'strong', 'emphasis', 'code', 'pre', 'list-item', 'blockquote', 'link', 'list'].includes(node.type)) return false
++    if (node.type === 'link' && (typeof node.href !== 'string' || node.href.length > 4000 || !/^https?:\/\//iu.test(node.href))) return false
++    if (node.type === 'list' && (typeof node.ordered !== 'boolean' || !Number.isSafeInteger(node.start) || node.start < 0 || node.start > 1_000_000)) return false
++    return visit(node.children, depth + 1)
++  })
++  return visit(value, 0)
++}
++
++function escapeMarkdown(text: string): string {
++  return text.replace(/[\\`*_{}[\]<>!|#]/gu, '\\$&')
++}
++
++export function referenceTextContent(nodes: readonly ReferenceTextNode[]): string {
++  return nodes.map(node => node.type === 'text' ? node.text : node.type === 'break' ? '\n' : referenceTextContent(node.children)).join('')
++}
++
++/** The host accepts text content parts; encode the frozen semantics as Markdown. */
++export function renderReferenceText(nodes: readonly ReferenceTextNode[]): string {
++  const render = (items: readonly ReferenceTextNode[]): string => {
++    let result = ''
++    for (const node of items) {
++      const text = renderNode(node)
++      if (['block', 'paragraph', 'pre', 'blockquote', 'list'].includes(node.type)) {
++        if (result && !result.endsWith('\n\n')) result += result.endsWith('\n') ? '\n' : '\n\n'
++        result += `${text}\n\n`
++      } else result += text
++    }
++    return result
++  }
++  const renderNode = (node: ReferenceTextNode): string => {
++    if (node.type === 'text') return escapeMarkdown(node.text)
++    if (node.type === 'break') return '  \n'
++    if (node.type === 'code' || node.type === 'pre') {
++      const text = referenceTextContent(node.children)
++      const size = Math.max(node.type === 'pre' ? 3 : 1, ...[...text.matchAll(/`+/gu)].map(match => match[0].length + 1))
++      const fence = '`'.repeat(size)
++      return node.type === 'pre' ? `${fence}\n${text}\n${fence}` : `${fence} ${text} ${fence}`
++    }
++    const text = render(node.children)
++    switch (node.type) {
++      case 'block':
++      case 'paragraph': return text.trim()
++      case 'strong': return `**${text}**`
++      case 'emphasis': return `*${text}*`
++      case 'link': return `[${text}](${node.href.replace(/[\s()<>\\]/gu, char => encodeURIComponent(char).replace(/[()]/gu, token => `%${token.charCodeAt(0).toString(16).toUpperCase()}`))})`
++      case 'blockquote': return text.trim().split('\n').map(line => `> ${line}`).join('\n')
++      case 'list-item': return text
++      case 'list': return node.children.map((child, index) => {
++        const prefix = node.ordered ? `${node.start + index}. ` : '- '
++        const lines = render([child]).trim().split('\n')
++        return prefix + lines.join(`\n${' '.repeat(prefix.length)}`)
++      }).join('\n')
++    }
++  }
++  return render(nodes).trim()
++}
++
++export interface ReferenceTable {
++  readonly cells: readonly {
++    readonly row: number
++    readonly column: number
++    readonly rowSpan: number
++    readonly columnSpan: number
++    readonly role: 'header' | 'data'
++    readonly text: string
++  }[]
++  readonly caption?: string
++}
++
++export function isReferenceTable(value: unknown): value is ReferenceTable {
++  if (typeof value !== 'object' || value === null) return false
++  const table = value as ReferenceTable
++  return (table.caption === undefined || (typeof table.caption === 'string' && table.caption.length <= MAX_REFERENCE_TEXT))
++    && Array.isArray(table.cells) && table.cells.length <= 20_000
++    && table.cells.every(cell => cell && typeof cell.text === 'string' && cell.text.length <= MAX_REFERENCE_TEXT
++      && (cell.role === 'header' || cell.role === 'data')
++      && [cell.row, cell.column].every(n => Number.isSafeInteger(n) && n >= 0)
++      && [cell.rowSpan, cell.columnSpan].every(n => Number.isSafeInteger(n) && n > 0))
++}
++
++export function renderReferenceTable(table: ReferenceTable): string {
++  const escape = (text: string): string => text.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/\r?\n/gu, '<br>')
++  const rows = new Map<number, ReferenceTable['cells'][number][]>()
++  for (const cell of table.cells) {
++    const row = rows.get(cell.row) ?? []
++    row.push(cell)
++    rows.set(cell.row, row)
++  }
++  const caption = table.caption === undefined ? '' : `<caption>${escape(table.caption)}</caption>\n`
++  return `<table>\n${caption}${[...rows].sort(([a], [b]) => a - b).map(([, cells]) => `<tr>${cells.sort((a, b) => a.column - b.column).map(cell => {
++    const tag = cell.role === 'header' ? 'th' : 'td'
++    return `<${tag} rowspan="${cell.rowSpan}" colspan="${cell.columnSpan}">${escape(cell.text)}</${tag}>`
++  }).join('')}</tr>`).join('\n')}\n</table>`
++}
+diff --git a/tests/browser-reference-entry.test.mjs b/tests/browser-reference-entry.test.mjs
+index 7d96d34..25bf8eb 100644
+--- a/tests/browser-reference-entry.test.mjs
++++ b/tests/browser-reference-entry.test.mjs
+@@ -342,14 +342,19 @@ test('selection entry supports keyboard dismissal and stays hidden after activat
+ 
+ test('B32: frame identity comes from the iframe element, not the page payload', () => {
+   const page = fakePage()
++  const body = { nodeType: 1, tagName: 'BODY', querySelectorAll: () => [] }
++  const text = { nodeType: 3, nodeValue: 'chosen words', parentElement: body }
++  body.firstChild = text
++  const range = { startContainer: text, endContainer: text, startOffset: 0, endOffset: 12, cloneRange() { return this } }
+   const iframe = {
+     tagName: 'IFRAME',
+     contentDocument: {
+-      body: { innerText: 'before chosen words after' },
++      body,
++      createTreeWalker: () => ({ nextNode: () => null }),
+       title: 'A frame',
+       querySelectorAll: () => [],
+     },
+-    contentWindow: { location: { href: 'https://example.com/embed#part' }, getSelection: () => ({ rangeCount: 1, isCollapsed: false, toString: () => 'chosen words' }) },
++    contentWindow: { location: { href: 'https://example.com/embed#part' }, getSelection: () => ({ rangeCount: 1, isCollapsed: false, getRangeAt: () => range }) },
+     getAttribute: key => key === 'src' ? 'https://example.com/embed' : null,
+   }
+   page.document.querySelector = () => iframe
+@@ -360,6 +365,7 @@ test('B32: frame identity comes from the iframe element, not the page payload',
+   assert.equal(answer.frameRoute, undefined, 'the page cannot self-report frameRoute')
+   assert.equal(answer.events[0].kind, 'text')
+   assert.equal(answer.events[0].exact, 'chosen words')
++  assert.equal(answer.events[0].content[0].text, 'chosen words')
+   const valid = validateFrameCapture({ ...answer, frameRoute: 'admin', frameSelector: 'evil' }, '#frame')
+   assert.equal(valid.frameSelector, '#frame', 'host request wins over the payload')
+   assert.equal(valid.frameRoute, undefined)
+-- 
+2.56.0
+
