@@ -580,20 +580,24 @@ async function handle(request, signal) {
   const shell = /^session-/.test(request?.owner) && ['ensureSidebar', 'cdp', 'download'].includes(request?.op)
     ? webContents.getAllWebContents().find(contents => contents.getType() === 'window') : undefined
   const token = randomBytes(16).toString('hex')
+  let held
   let releasePromise
-  const release = () => releasePromise ??= (async () => {
-    try {
-      await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.releaseRendering?.(${JSON.stringify(token)})`, true)
-    } catch (error) { console.error('[dsh-browser-bridge] rendering hold release failed:', error) }
-  })()
+  const release = () => {
+    if (held === false) return Promise.resolve()
+    return releasePromise ??= (async () => {
+      try {
+        await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.releaseRendering?.(${JSON.stringify(token)})`, true)
+      } catch (error) { console.error('[dsh-browser-bridge] rendering hold release failed:', error) }
+    })()
+  }
   try {
     if (shell !== undefined) {
       signal?.addEventListener('abort', release, { once: true })
-      await shell.executeJavaScript(`(async () => {
+      held = await shell.executeJavaScript(`(async () => {
         const api = globalThis.__dshBuiltinBrowser;
         if (typeof api?.holdRendering !== 'function') return false;
         return api.holdRendering(${JSON.stringify(request.owner)}, ${JSON.stringify(token)});
-      })()`, true)
+      })()`, true) === true
     }
     checkCurrent()
     return await handleRequest(request, checkCurrent)
