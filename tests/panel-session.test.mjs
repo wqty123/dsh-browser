@@ -80,18 +80,16 @@ test('default panel open drives every operation on its live sidebar session, wit
   assert.equal(references.references[0].carrier, 'sidebar')
 })
 
-test('Web panel open records a navigation request; unsupported tools name the surface and desktop alternative', async () => {
+test('a manual-only Web panel refuses open without navigation, a task session or a fallback browser', async () => {
   const { run, calls } = mount({ openPanel: async () => undefined })
-  const opened = await run('open', { url: 'https://example.com/' })
-  assert.equal(opened.carrier, 'panel-iframe-navigation-requested')
-  assert.deepEqual(opened.elements, [])
+  await assert.rejects(run('open', { url: 'https://example.com/' }), error => {
+    assert.equal(error.code, 'BROWSER_NATIVE_SURFACE_UNAVAILABLE')
+    assert.match(error.message, /no live CDP session/)
+    assert.match(error.message, /卸载并重装/)
+    return true
+  })
   for (const [name, args] of [...operations, ['state', {}]]) {
-    await assert.rejects(run(name, args), error => {
-      assert.match(error.message, /panel surface/)
-      assert.match(error.message, /CDP-backed DSH desktop sidebar/)
-      assert.doesNotMatch(error.message, /nothing is open/)
-      return true
-    })
+    await assert.rejects(run(name, args), /nothing is open/)
   }
   assert.deepEqual(calls, [], 'neither a static refetch nor another browser was used')
   await run('reset_session')
@@ -102,6 +100,17 @@ test('reading an unopened task never opens any surface', async () => {
   const { run, calls } = mount()
   for (const [name, args] of operations) await assert.rejects(run(name, args), /nothing is open/)
   assert.deepEqual(calls, [])
+})
+
+test('a missing panel capability refuses open and can be retried after a CDP provider connects', async () => {
+  const { run, browser, calls } = mount({ openPanel: undefined })
+  await assert.rejects(run('open', { url: 'https://example.com/' }), { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' })
+  assert.deepEqual(calls, [])
+  browser.openPanel = async () => 'browser:panel'
+  assert.equal((await run('open', { url: 'https://example.com/' })).title, 'Visible page')
+  await run('screenshot')
+  assert.equal(calls.at(-1).session, 'browser:panel')
+  assert.equal(calls.some(call => call.name === 'open'), false)
 })
 
 test('builtin -> CDP panel -> builtin switches sessions instead of driving a stale page', async () => {
@@ -117,14 +126,15 @@ test('builtin -> CDP panel -> builtin switches sessions instead of driving a sta
   assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:panel'))
 })
 
-test('builtin -> Web panel forgets and closes the old controllable session', async () => {
+test('a refused Web panel switch preserves the old controllable session', async () => {
   const { run, calls } = mount({ openPanel: async () => undefined })
   await run('open', { url: 'https://old.example/', surface: 'builtin' })
-  await run('open', { url: 'https://new.example/' })
+  await assert.rejects(run('open', { url: 'https://new.example/' }), { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' })
   const before = calls.length
-  await assert.rejects(run('content', { format: 'txt' }), /panel surface/)
-  assert.equal(calls.length, before)
-  assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:builtin'))
+  await run('content', { format: 'txt' })
+  assert.equal(calls.length, before + 1)
+  assert.equal(calls.at(-1).session, 'browser:builtin')
+  assert.equal(calls.some(call => call.name === 'close'), false)
 })
 
 test('panel navigation errors propagate, close the failed session, and never fall back to builtin', async () => {

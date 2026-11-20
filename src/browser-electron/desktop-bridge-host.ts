@@ -12,6 +12,17 @@ export { bridgeEndpointPath }
 const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
 const PANEL_INITIALIZING = 'panel-initializing'
 
+export class BrowserBridgeVersionError extends Error {
+  readonly code = 'BROWSER_BRIDGE_OUTDATED'
+  readonly bridgeState = 'stale'
+  readonly repairAction = 'reinstall'
+  readonly requiredProtocol = 4
+  constructor(readonly actualProtocol: unknown) {
+    super(`dsh-builtin-browser: 桥接版本过旧 — desktop bridge protocol ${String(actualProtocol ?? 'unknown')} cannot serve this plugin (requires protocol 4 or newer). Use “卸载并重装” in the browser settings, then retry dsh_browser_open. No iframe navigation was queued.`)
+    this.name = 'BrowserBridgeVersionError'
+  }
+}
+
 export class BrowserPanelNotDisplayedError extends Error {
   readonly code: string
   constructor(detail: string, code = PANEL_NOT_DISPLAYED) {
@@ -57,10 +68,13 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     try {
       const answer = await probe.call({ op: 'list' }, 5_000)
       if (answer.ok !== true) return undefined
+      if (typeof answer.protocol !== 'number' || answer.protocol < 4) throw new BrowserBridgeVersionError(answer.protocol)
       if (answer.frame === 'iframe') { this.refuseIframe = true; return undefined }
-      if (typeof answer.protocol !== 'number' || answer.protocol < 4) return undefined
       return new DesktopBridgeViewHost(endpoint, isQuiet)
-    } catch { return undefined }
+    } catch (error) {
+      if (error instanceof BrowserBridgeVersionError) throw error
+      return undefined
+    }
     finally { probe.close() }
   }
 

@@ -646,7 +646,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   registerSafely(defineTool({
     name: 'dsh_browser_open',
-    description: 'Open a URL on the selected surface (default: panel). The CDP-backed desktop sidebar returns a live snapshot and supports subsequent browser tools on that same page. The Web iframe panel only queues sidebar navigation: carrier=panel-iframe-navigation-requested, with no snapshot or live-control capability. Reading tools never start another browser. newTab is optional on CDP surfaces. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
+    description: 'Open a URL on the selected controllable surface (default: panel). Success returns a live snapshot and supports subsequent browser tools on that same page. A Web iframe or unavailable desktop bridge is refused; no manual-only navigation is queued. Reading tools never start another browser. newTab is optional on CDP surfaces. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
     parameters: {
       url: { type: 'string', required: true, description: 'The URL to open (HTTP/HTTPS).' },
       newTab: { type: 'boolean', description: 'Open in a new tab instead of the active one.' },
@@ -715,9 +715,9 @@ export function apply(ctx: Context, config: Config = {}): void {
           if (session === undefined) {
             assertSurfaceCanHost(surface, args.url)
             exec.signal?.throwIfAborted()
-            setLastOpen(args.url, Date.now())
-            rememberSession(browser, state, key, agentOf(exec), undefined, args.url)
-            return { url: args.url, carrier: 'panel-iframe-navigation-requested', title: '', elements: [], truncated: false }
+            throw Object.assign(new Error('dsh_browser_open: the panel surface has no live CDP session. No page was opened or queued. '
+              + 'Use a connected CDP-backed DSH desktop sidebar; on Desktop choose “卸载并重装” in the browser settings, then retry. '
+              + 'The Web iframe panel supports manual browsing only, not browser tools.'), { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' })
           }
           await browser.openUrl(session, { url: args.url, ...args.newTab === true ? { newTab: true } : {} }, exec.signal)
           const snapshot = await browser.snapshot(session, exec.signal)
