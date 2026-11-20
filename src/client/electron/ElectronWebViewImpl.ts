@@ -218,7 +218,7 @@ export class ElectronWebViewImpl implements BrowserFrame {
       this.documentLifetime?.abort()
       this.documentLifetime = new AbortController()
       installReferenceOverlay(source => element.executeJavaScript(source),
-        intent => { void captureReferenceIntent(intent, this.sessionId) },
+        intent => captureReferenceIntent(intent, this.sessionId),
         AbortSignal.any([signal, this.documentLifetime.signal]))
       this.ready = true
       this.carrier.set({ stage: 'ready', guestId: String(reservation.lease) })

@@ -136,6 +136,7 @@ export const ELECTRON_BROWSER_PROVIDER_ID = 'electron'
  * desktop shell with a real `WebContentsView`; a fake implements it in tests.
  */
 export interface ElectronBrowserViewHost {
+  readonly referenceOverlayOwner?: 'client'
   /**
    * Create a new browser view and return a handle to its webContents-like
    * surface. The host owns windowing (adding the view to the window, sizing,
@@ -933,7 +934,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Start the page-bar pump; idempotent, unref'd so it never holds the process. */
   private startReferenceEntryPump(): void {
-    if (this.referencePump !== undefined) return
+    if (this.host.referenceOverlayOwner === 'client' || this.referencePump !== undefined) return
     this.referencePump = setInterval(() => { void this.pumpReferenceEntry() }, 1200)
     this.referencePump.unref?.()
   }
@@ -4501,4 +4502,3 @@ async function handleSendEvaluate(
   }
   return { ok: true, value: (result.result as { value?: unknown } | undefined)?.value ?? null }
 }
-

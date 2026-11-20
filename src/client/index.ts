@@ -243,7 +243,7 @@ export function apply(ctx: Context): void {
       },
     }, BrowserBody)), 'ui-sidebar-browser.body')
   }
-  if (desktop === undefined) installFrames(ctx, () => createIframePage)
+  if (desktop === undefined) installFrames(ctx, sessionId => options => createIframePage(options, sessionId))
   else ctx.inject(['workspaces'], (scope) => {
     installFrames(scope, sessionId => options => createElectronPage(options, desktop,
       signal => browserWorkspace(scope.workspaces.list, sessionId, signal), sessionId))

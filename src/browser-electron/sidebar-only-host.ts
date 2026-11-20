@@ -34,6 +34,7 @@ interface SidebarView {
  * Discovery is deferred until a command needs the bridge; it never selects another carrier.
  */
 export class SidebarOnlyHost implements ElectronBrowserViewHost {
+  readonly referenceOverlayOwner = 'client' as const
   private readonly views = new Map<string, SidebarView>()
   private lease: HostLease | undefined
   /** Conversation id learned after construction; applied to every lease. */

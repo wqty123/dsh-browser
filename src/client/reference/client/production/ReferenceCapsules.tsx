@@ -203,7 +203,7 @@ export function ReferenceCapsules({ sessionId, cards, actions, labels, notice, r
   // reference stayed a pending delivery forever. The empty host is invisible (the stylesheet hides an
   // empty `.dock`), so nothing is drawn until a card exists.
   if (cards.length === 0 && notice === undefined) {
-    return <div className={`dsh-browser-reference-dock ${css.dock}`} data-session={sessionId} data-cards={0} data-dock-build="0.7.15" />
+    return <div className={`dsh-browser-reference-dock ${css.dock}`} data-session={sessionId} data-cards={0} />
   }
 
   return <span className={readOnly ? 'dsh-browser-reference-capsules' : `dsh-browser-reference-dock ${css.dock}`} data-session={sessionId} data-cards={cards.length}>

@@ -4,6 +4,24 @@ import assert from 'node:assert/strict'
 const { ElectronBrowserProvider } = await import(process.env.BROWSER_PROVIDER_UNDER_TEST
   ?? new URL('../lib/browser-electron/provider.js', import.meta.url).href)
 
+test('sidebar overlay queues have one client consumer; external carriers retain their provider pump', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  for (const owner of ['client', undefined]) {
+    let discoveries = 0
+    const provider = new ElectronBrowserProvider({
+      referenceOverlayOwner: owner,
+      createView: () => { throw new Error('unexpected view') }, destroyView() {}, showView() {},
+      listPages: async () => { discoveries++; return [] },
+      adoptPage: async () => { throw new Error('unexpected page') },
+    }, { referenceLabel: () => 'reference-owner', history: { enabled: false } })
+    try {
+      t.mock.timers.tick(1200)
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(discoveries, owner === 'client' ? 0 : 1)
+    } finally { provider.dispose() }
+  }
+})
+
 function fixture({ listing = true, readFails = false } = {}) {
   const calls = { adopted: [], evaluated: [], destroyed: [] }
   const page = { id: 'native-55', url: 'https://example.test/adopted' }

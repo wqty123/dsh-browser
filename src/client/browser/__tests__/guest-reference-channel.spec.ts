@@ -1,27 +1,31 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
-import { receiveGuestReference } from '../../reference-intents.ts'
 import { IframePresentation } from '../../view/IframePresentation.ts'
 
 afterEach(() => document.body.replaceChildren())
 
-it('accepts only opaque-origin intents from the owned frame and uses app-owned identity', () => {
-  const frame = document.createElement('iframe')
-  const foreign = document.createElement('iframe')
-  document.body.append(frame, foreign)
+it('accepts only opaque-origin reference intents from its own mounted frame', () => {
+  const host = document.createElement('div')
+  host.id = 'owned-reference'
+  document.body.append(host)
   const submit = vi.fn(async () => {})
-  const owner = vi.fn(() => 'owned-session')
+  const presentation = new IframePresentation({ loaded: vi.fn(), observed: vi.fn(), failed: vi.fn(), remounted: vi.fn(), reference: submit })
+  presentation.mount(host.id)
+  presentation.show({ target: { kind: 'https', url: 'https://example.test/', title: 'Example' }, revision: 1, sandboxed: true })
+  const frame = host.querySelector('iframe')!
+  const foreign = document.createElement('iframe')
+  document.body.append(foreign)
   const data = { type: 'dsh-browser-ref:intent', comment: 'quote', sessionId: 'forged' }
   const receive = (source: Window | null, origin = 'null', payload: unknown = data) =>
-    receiveGuestReference(new MessageEvent('message', { source, origin, data: payload }), [frame], owner, submit)
+    window.dispatchEvent(new MessageEvent('message', { source, origin, data: payload }))
   receive(foreign.contentWindow)
   receive(null)
   receive(frame.contentWindow, location.origin)
   receive(frame.contentWindow, 'null', { type: 'arbitrary-api-request' })
   expect(submit).not.toHaveBeenCalled()
   receive(frame.contentWindow)
-  expect(submit).toHaveBeenCalledWith(data, 'owned-session')
-  owner.mockReturnValue('')
+  expect(submit).toHaveBeenCalledWith(data)
+  presentation.dispose()
   receive(frame.contentWindow)
   expect(submit).toHaveBeenCalledTimes(1)
 })

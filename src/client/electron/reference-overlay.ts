@@ -1,4 +1,5 @@
 import { overlayScript, standaloneScript } from '../../browser-reference/entry.ts'
+import { noticeScript } from '../../browser-reference/page-script.ts'
 
 const takeIntents = `JSON.stringify((function () {
   var intents = []
@@ -13,7 +14,7 @@ const takeIntents = `JSON.stringify((function () {
 
 /** One document's overlay and serialized polling loop; navigation errors are expected. */
 export function installReferenceOverlay(execute: (source: string) => Promise<unknown>,
-  consume: (intent: object) => void, signal: AbortSignal): void {
+  consume: (intent: object) => void | Promise<void>, signal: AbortSignal): void {
   let timer: ReturnType<typeof setTimeout> | undefined
   signal.addEventListener('abort', () => { clearTimeout(timer) }, { once: true })
   const poll = async (): Promise<void> => {
@@ -24,7 +25,13 @@ export function installReferenceOverlay(execute: (source: string) => Promise<unk
       const intents: unknown = typeof result === 'string' ? JSON.parse(result) : undefined
       if (Array.isArray(intents)) {
         for (const intent of intents) {
-          if (intent !== null && typeof intent === 'object') consume(intent)
+          if (intent !== null && typeof intent === 'object') {
+            try { await consume(intent) }
+            catch (error) {
+              console.warn('[dsh-browser] reference capture failed', error)
+              if (!signal.aborted) await execute(standaloneScript(noticeScript('引用未能加入当前会话，请重试。')))
+            }
+          }
         }
       }
     } catch { /* A document may disappear during executeJavaScript. */ }

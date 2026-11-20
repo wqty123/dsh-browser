@@ -7,7 +7,6 @@
  * 外壳由 `window.__ModuleLoader__.load({factory})` 换成普通导出函数：本仓库的客户端半由
  * tsdown 打成 CJS 工厂，`require` 由模块加载器在运行期注入，语义与旧加载器一致。
  */
-import { receiveGuestReference } from '../reference-intents.ts'
 
 export interface LegacyClientModule {
   readonly name?: string
@@ -1756,24 +1755,6 @@ const react = require("react")
         scope.effect(() => () => {
           if (uiWorkspace === scope.uiWorkspace) uiWorkspace = null
         }, "dsh-builtin-browser: workspace binding")
-      })
-    }
-    /**
-     * The conversation the shell is displaying, as the shell itself reports it.
-     *
-     * `undefined`/`null` means "the shell would not say" — an older shell, or one whose surface was
-     * never minted. Expansion requires a known owner, because it acts on the displayed surface.
-     * @returns the on-screen session id, or null.
-     */
-    if (typeof window !== "undefined" && !window.__dshSidebarSessionBridge) {
-      window.__dshSidebarSessionBridge = true
-      window.addEventListener("message", (event) => {
-        receiveGuestReference(event, document.querySelectorAll('iframe[data-sidebar-browser-frame="iframe"]'), frame => {
-          const owner = frame.closest("[data-sidebar-right-session]")
-          let sessionId = owner?.getAttribute("data-sidebar-right-session")
-          for (let node: Element | null = frame; !sessionId && node; node = node.parentElement) sessionId = sessionIdOfElement(node)
-          return sessionId || undefined
-        })
       })
     }
     /**

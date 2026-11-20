@@ -110,6 +110,7 @@ function isGuestGone(error: unknown): boolean {
  * point is a single page both parties can see.
  */
 export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
+  readonly referenceOverlayOwner = 'client' as const
   private readonly connection: BridgeConnection
   /**
    * One entry per view this host handed out: the conversation it serves, and the guest backing it.

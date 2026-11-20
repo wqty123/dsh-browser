@@ -27,6 +27,7 @@ export interface IframePresentationEvents {
   readonly loaded: (revision: number) => void
   /** @param revision - document generation. @param observedUrl - URL reported by the owned opaque guest. */
   readonly observed: (revision: number, observedUrl: string) => void
+  readonly reference?: (intent: object) => Promise<void>
   readonly failed: (revision: number) => void
   readonly remounted: () => void
 }
@@ -43,6 +44,10 @@ export class IframePresentation implements BrowserPresentation {
   private readonly receive = (event: MessageEvent): void => {
     if (event.origin !== 'null' || event.source !== this.element?.contentWindow) return
     const data = event.data
+    if (data?.type === 'dsh-browser-ref:intent') {
+      void this.events.reference?.(data).catch(error => { console.warn('[dsh-browser] reference capture failed', error) })
+      return
+    }
     if (!data || data.type !== 'dsh.browser.guest.navigation' || typeof data.url !== 'string'
       || !/^https?:\/\//iu.test(data.url) || this.document === undefined) return
     if (this.loadId === undefined) return
