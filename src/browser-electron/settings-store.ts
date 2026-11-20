@@ -1,0 +1,598 @@
+/**
+ * Plugin-owned settings document — the switches the browser settings panel
+ * exposes, stored next to the browsing history so both follow the same rules:
+ * they survive the browser process and DSH restarts.
+ *
+ * Every field is optional on disk and falls back to a default, so a hand-edited
+ * or older file never breaks startup; an unreadable document refuses capability
+ * gates while retaining the defaults for presentation and other conveniences.
+ * @module dsh-browser/browser-electron/settings-store
+ */
+
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { dshHome } from './paths.ts'
+import type { BrowserChannel } from './system-browser.ts'
+
+/** Vision/operation strategy the provider prefers when the model can see. */
+export type VisionStrategy = 'auto' | 'nonVisual'
+
+/**
+ * Whether a launched browser gets a window.
+ *
+ * Split from {@link VisionStrategy} because these answer different questions: that one is how the
+ * agent examines a page, this one is whether the browser has anywhere to draw.
+ */
+export type HeadlessMode = 'auto' | 'headless' | 'windowed'
+
+/** Every value {@link HeadlessMode} accepts, for validation and the settings UI. */
+export const HEADLESS_MODES = ['auto', 'headless', 'windowed'] as const
+
+/**
+ * Which profile the browser runs on.
+ *
+ * `plugin` 是插件自己的目录（默认）：不碰用户的窗口、书签与登录态，也不会因为用户开着浏览器而启动失败。
+ * `user` 复用用户自己的 profile，登录态天然可用，但要求用户的浏览器先关掉——否则 Chromium 以
+ * exit 21（`PROFILE_IN_USE`）退出。
+ */
+export type SystemProfile = 'user' | 'plugin'
+
+/** Every value {@link SystemProfile} accepts, for validation and the settings UI. */
+export const SYSTEM_PROFILES = ['user', 'plugin'] as const
+
+/** The full settings document, with every field resolved. */
+export interface BrowserSettings {
+  /** Persistent browsing history (visited pages). */
+  readonly history: {
+    readonly enabled: boolean
+    readonly maxEntries: number
+    readonly maxAgeDays: number
+  }
+  /** Login-state retention: cookies and the browser profile. */
+  readonly cookies: {
+    readonly persist: boolean
+  }
+  /** Presentation behaviour. */
+  readonly ui: {
+    /** Auto-expand the side panel once per task, then leave the user alone. */
+    readonly autoExpandOnce: boolean
+    /** Release the browser when its session ends, instead of waiting for a close. */
+    readonly closeWithSession: boolean
+    /** Show the synthetic cursor/click feedback while the agent operates. */
+    readonly virtualCursor: boolean
+    /**
+     * Quiet mode: drive the page without taking over the screen.
+     *
+     * Off (the default) keeps the contract this plugin is built on — human and agent share one
+     * window, so an operation raises it and the user can see what is being driven. On, the
+     * carrier never activates the application and never steals keyboard focus:
+     *   - screenshots of a minimized or hidden window go through CDP `Page.captureScreenshot`
+     *     instead of `capturePage()`, so grabbing an image stops being a reason to show a window;
+     *   - navigation and tab switching only change which view is visible INSIDE the window; a
+     *     minimized window stays minimized;
+     *   - synthesized input still needs a display surface (Chromium drops `Input.*` for a view
+     *     without one), so that one barrier may restore a minimized window — with
+     *     `showInactive()`, which shows it without becoming the key window, and without
+     *     `moveTop()`.
+     *
+     * Reported as issue #35: a minimized browser window was restored and focused by the next
+     * screenshot or click, pulling the user out of whatever they were typing in.
+     */
+    readonly quiet: boolean
+  }
+  /** Visual vs non-visual operation strategy. */
+  readonly vision: {
+    readonly strategy: VisionStrategy
+  }
+  /** Which browser binary carries the agent's pages. */
+  readonly browser: {
+    readonly channel: BrowserChannel
+    /**
+     * Whether the browser gets a window.
+     *
+     * `auto` (the default) launches headless when the process has no display — no `DISPLAY` and no
+     * `WAYLAND_DISPLAY` — and with a window otherwise. That combination is what makes the plugin
+     * work under systemd, in a container, or on an SSH-only server while leaving desktop users
+     * with the visible window they expect. `true` forces headless (CI, screenshot-only servers);
+     * `false` forces a window, so a misconfigured display fails loudly instead of silently
+     * degrading into a browser nobody can see.
+     *
+     * Reported as issue #32: as a systemd service there is no display, Chromium exits with
+     * "could not connect to display", and every `dsh_browser_*` call failed with "exited
+     * immediately after launch".
+     */
+    readonly headless: HeadlessMode
+    /**
+     * Which profile the browser runs on: the user's own that `usage` needs.
+     *
+     * `entry.ts` 早就在读这个字段（`systemProfile !== 'plugin'` 就去用用户自己的 profile），但这一层
+     * 从来没有产出它——于是 `settings.get().browser.systemProfile` 恒为 `undefined`，判断永远成立，
+     * 浏览器总是跑在**用户的** Edge profile 上。用户开着 Edge 时，Chromium 直接以 exit 21
+     * （`PROFILE_IN_USE`）退出，表现为"引擎起不来、截图和点击全部失败"，而错误信息指向"残留进程"，
+     * 找遍进程也找不到占用者。
+     *
+     * 默认 `plugin`：插件自己的目录，不碰用户的窗口与登录态，装好就能用。要复用用户的登录态时
+     * 再显式改成 `user`，那时需要用户先把 Edge 关掉。
+     */
+    readonly systemProfile: SystemProfile
+  }
+  /** Whether the agent may read cookies / export login state. */
+  readonly credentials: {
+    readonly allowRead: boolean
+  }
+  /**
+   * Live view of the browser for a remote operator (issue #34).
+   *
+   * OFF by default, and that default is the feature's main safety property: a live browser frame can
+   * contain a CAPTCHA, an account name, or logged-in content, so nobody should be able to watch
+   * without the host having said yes first. The remote side also cannot turn it on: this file is
+   * written through the plugin's own settings route, which admits only same-origin requests from the
+   * host's own UI, and the frame endpoint refuses everything when this is false.
+   */
+  readonly remoteView: {
+    /** Serve browser frames to a remote viewer. */
+    readonly enabled: boolean
+  }
+  /**
+   * What the agent is allowed to DO, as opposed to what it may look at.
+   *
+   * These are OPERATOR switches: the settings panel is not reachable from the model, so a
+   * value here refuses whatever the model asks for, and no tool can lift it. That is what
+   * separates them from `dsh_browser_restrict`, which is the model's own soft guardrail. All
+   * three default to on, which is the documented out-of-the-box behaviour.
+   */
+  readonly actions: {
+    /** Run arbitrary page scripts in the active tab (`dsh_browser_execute`). */
+    readonly allowExecute: boolean
+    /** Download a URL to disk (`dsh_browser_download`). */
+    readonly allowDownload: boolean
+    /** Write cookies — importing login state (`dsh_browser_auth` restore). */
+    readonly allowCredentialWrite: boolean
+  }
+  /**
+   * Where a downloaded file goes after it lands on disk.
+   *
+   * An ATTRIBUTE of a download, not a new concept: an empty `tool` means the behaviour is exactly
+   * what it was before this existed. The user owns the field, can point it at any MCP tool that
+   * takes a path (Feishu drive, Baidu Netdisk), and can empty it again at any time.
+   */
+  /**
+   * Desktop bridge handled without asking.
+   *
+   * Historical automatic-install preference retained when reading existing settings documents.
+   * Runtime automatic installation is disabled; bridge maintenance is an explicit action after
+   * DSH Desktop is closed, even when an older document contains autoInstall=true.
+   */
+  readonly bridge: {
+    /** Legacy preference; it does not trigger installation at runtime. Default false. */
+    readonly autoInstall: boolean
+  }
+  readonly delivery: {
+    /** MCP tool that receives the saved file. Empty = save locally and stop there. */
+    readonly tool: string
+    /** Flat argument template; {path}, {name} and {size} are substituted into string values. */
+    readonly args: Readonly<Record<string, string>>
+    /** `keep-local` reports both outcomes; `stop` reports the handoff failure as the result. */
+    readonly onFail: 'keep-local' | 'stop'
+    /** Per-site override: page host → tool name. */
+    readonly sites: Readonly<Record<string, string>>
+  }
+}
+
+/** Defaults for every switch: the documented out-of-the-box behaviour. */
+export const DEFAULT_SETTINGS: BrowserSettings = {
+  history: { enabled: true, maxEntries: 5_000, maxAgeDays: 90 },
+  cookies: { persist: true },
+  ui: { autoExpandOnce: true, closeWithSession: false, virtualCursor: true, quiet: false },
+  vision: { strategy: 'auto' },
+  // Bundled by default: it needs nothing installed, and on the desktop the carrier
+  // is the sidebar anyway. Choosing a system browser is an explicit opt-in because
+  // it starts a real Chrome/Edge with its own profile.
+  browser: { channel: 'bundled', headless: 'auto', systemProfile: 'plugin' },
+  credentials: { allowRead: true },
+  // Off unless the host turns it on. A frame can show a CAPTCHA, an account name, or logged-in
+  // content, so watching is an explicit decision rather than something a remote client can arrange.
+  remoteView: { enabled: false },
+  bridge: { autoInstall: false },
+  actions: { allowExecute: true, allowDownload: true, allowCredentialWrite: true },
+  // Local by default: the file lands in downloadDir and nothing leaves the machine until the user
+  // names a tool here. {file_path} is the argument name both Feishu's and Netdisk's upload tools use.
+  delivery: { tool: '', args: { file_path: '{path}' }, onFail: 'keep-local', sites: {} },
+}
+
+/**
+ * Absolute path of the settings file, beside the browser profile and the
+ * browsing history.
+ * @returns the settings file path.
+ */
+export function settingsPath(): string {
+  const home = dshHome()
+  return join(home, 'dsh-builtin-browser-host', 'settings.json')
+}
+
+/** Coerce one boolean field, keeping the default when absent or mistyped. */
+function bool(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+/**
+ * Coerce one boolean field that GATES A CAPABILITY.
+ *
+ * The difference from {@link bool} is what a mistyped value means. Absent still takes the
+ * default — a document written before the switch existed is the documented behaviour. But
+ * present-and-not-a-boolean is a document this code cannot read, and for a switch that gates
+ * something the operator chose to limit, unreadable resolves to OFF. `bool`'s fallback made
+ * `"false"` (a string), `null` (a truncated write) and `1` all mean the same as `true`, so a
+ * single dropped byte reopened every capability that had been turned off.
+ * @param value - the raw value from the settings document.
+ * @param fallback - the default, used only when the field is absent.
+ * @returns the value when it is a boolean, `false` when it is anything else.
+ */
+function gate(value: unknown, fallback: boolean): boolean {
+  if (value === undefined) return fallback
+  return value === true
+}
+
+/**
+ * What an unreadable document resolves to.
+ *
+ * Only the capability gates are refused; everything else keeps its default. The distinction is
+ * deliberate: refusing history, presentation or browser choice would punish the user for a
+ * corrupt file without protecting anything, while refusing the gates is the whole point —
+ * "the operator's intent cannot be read" must not resolve to "the operator permits".
+ */
+const SETTINGS_WHEN_UNREADABLE: BrowserSettings = {
+  ...DEFAULT_SETTINGS,
+  credentials: { allowRead: false },
+  actions: { allowExecute: false, allowDownload: false, allowCredentialWrite: false },
+}
+
+/**
+ * The channels a settings document may name.
+ *
+ * Exported so the log line and the error message can quote the same set the parser accepts: a
+ * message that lists a value the code rejects (or omits one it takes) is worse than no message.
+ */
+export const BROWSER_CHANNELS = ['chrome', 'edge', 'auto', 'bundled', 'sidebar'] as const
+
+/**
+ * Coerce the headless mode, keeping `auto` when the value is not one of the known choices.
+ *
+ * Booleans are accepted as a convenience because "headless: true" is what anyone writing this by
+ * hand would try first, and rejecting it over a type difference would be pedantry: `true` maps to
+ * `headless`, `false` to `windowed`. Anything else is reported rather than silently defaulted,
+ * for the same reason as {@link resolveChannel}: a discarded value and an honoured one must not
+ * look alike.
+ * @param value - the raw value from the settings document.
+ * @param warn - where to report a discarded value.
+ * @returns a valid mode.
+ */
+function resolveHeadless(value: unknown, warn?: (message: string) => void): HeadlessMode {
+  if (value === undefined) return DEFAULT_SETTINGS.browser.headless
+  if (value === true) return 'headless'
+  if (value === false) return 'windowed'
+  if (typeof value === 'string' && (HEADLESS_MODES as readonly string[]).includes(value)) {
+    return value as HeadlessMode
+  }
+  warn?.(
+    `dsh-builtin-browser: browser.headless ${JSON.stringify(value)} is not a known mode, so the `
+    + `default "${DEFAULT_SETTINGS.browser.headless}" was used instead. Expected one of: `
+    + `${HEADLESS_MODES.join(', ')} (or a boolean).`,
+  )
+  return DEFAULT_SETTINGS.browser.headless
+}
+
+/**
+ * Coerce the browser channel, keeping the default when it is not one of the
+ * known choices. A hand-edited typo must not silently select a different browser.
+ *
+ * Coercing is right; coercing QUIETLY is not. A typo and "the setting did nothing" look exactly
+ * the same to whoever typed it, which is why every discarded value is reported.
+ * @param value - the raw value from the settings document.
+ * @param warn - where to report a discarded value, when the caller has somewhere to put it.
+ * @returns a valid channel.
+ */
+function resolveChannel(value: unknown, warn?: (message: string) => void): BrowserChannel {
+  // Absent is the ordinary case, not a mistake: a document that never mentioned the channel gets
+  // the default without a word.
+  if (value === undefined) return DEFAULT_SETTINGS.browser.channel
+  if ((BROWSER_CHANNELS as readonly unknown[]).includes(value)) return value as BrowserChannel
+  warn?.(
+    `dsh-builtin-browser: browser.channel ${JSON.stringify(value)} is not a known channel, so the `
+    + `default "${DEFAULT_SETTINGS.browser.channel}" was used instead. Expected one of: `
+    + `${BROWSER_CHANNELS.join(', ')}.`,
+  )
+  return DEFAULT_SETTINGS.browser.channel
+}
+
+/** Coerce one positive-integer field, keeping the default when invalid. */
+function count(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  const floored = Math.floor(value)
+  // A fractional value below 1 floors to 0, and 0 is not "very few" in either place these are
+  // used: as a history entry cap it means `slice(len - 0)`, i.e. keep nothing, so a hand-typed
+  // `0.5` silently wiped the history file on the next rewrite. Anything that survives the
+  // floor has to still be a usable limit.
+  return floored > 0 ? floored : fallback
+}
+
+/** Read one nested section of an unknown document, or an empty object. */
+/**
+ * Read one section of the document, distinguishing ABSENT from UNREADABLE.
+ *
+ * Absent (the key is not there at all) is a document written before the section existed, and
+ * the defaults apply — that is the documented behaviour. Present-but-not-an-object
+ * (`"actions": false`, `null` from a truncated write, a stray string) is a document this code
+ * cannot read, and returning `{}` for it made every gate inside look absent, so each one took
+ * its permissive default. A whole section mistyped is exactly the shape a careless hand edit
+ * produces, and it opened every capability the section was there to bound.
+ * @param source - the parsed document.
+ * @param key - the section name.
+ * @returns the section, or undefined when it is present but not an object.
+ */
+function section(source: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = source[key]
+  if (value === undefined) return {}
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/**
+ * Resolve a raw settings document (already parsed, shape unknown) into the full
+ * document, field by field. Unknown keys are dropped: the file is not a place to
+ * smuggle configuration.
+ * @param raw - the parsed file contents.
+ * @returns the resolved settings.
+ */
+export function resolveSettings(raw: unknown, warn?: (message: string) => void): BrowserSettings {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return SETTINGS_WHEN_UNREADABLE
+  const source = raw as Record<string, unknown>
+  const history = section(source, 'history')
+  const cookies = section(source, 'cookies')
+  const ui = section(source, 'ui')
+  const vision = section(source, 'vision')
+  const credentials = section(source, 'credentials')
+  const browser = section(source, 'browser')
+  const actions = section(source, 'actions')
+  const remoteView = section(source, 'remoteView')
+  // Read defensively: this section is hand-editable, and a bad value must fall back to "local only"
+  // rather than fail the whole document.
+  const deliverySection = (section(source, 'delivery') ?? {}) as { tool?: unknown; args?: unknown; onFail?: unknown; sites?: unknown }
+  const strings = (value: unknown, fallback: Record<string, string>): Record<string, string> => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return { ...fallback }
+    const out: Record<string, string> = {}
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof entry === 'string') out[key] = entry
+    }
+    return Object.keys(out).length === 0 ? { ...fallback } : out
+  }
+  // A section that is present but unreadable refuses its gates rather than defaulting them
+  // open. The rest of a broken section keeps its defaults: refusing history or presentation
+  // would punish the user for a bad file without protecting anything.
+  const credentialsUsable = credentials ?? {}
+  const actionsUsable = actions ?? {}
+  return {
+    history: {
+      enabled: bool(history?.enabled, DEFAULT_SETTINGS.history.enabled),
+      maxEntries: count(history?.maxEntries, DEFAULT_SETTINGS.history.maxEntries),
+      maxAgeDays: count(history?.maxAgeDays, DEFAULT_SETTINGS.history.maxAgeDays),
+    },
+    cookies: { persist: bool(cookies?.persist, DEFAULT_SETTINGS.cookies.persist) },
+    ui: {
+      autoExpandOnce: bool(ui?.autoExpandOnce, DEFAULT_SETTINGS.ui.autoExpandOnce),
+      closeWithSession: bool(ui?.closeWithSession, DEFAULT_SETTINGS.ui.closeWithSession),
+      virtualCursor: bool(ui?.virtualCursor, DEFAULT_SETTINGS.ui.virtualCursor),
+      // Presentation preference, not a capability gate: a mistyped value keeps the documented
+      // default (off) instead of being read as "on", because quiet mode changes how every
+      // operation presents itself and should never be the accidental result of a bad edit.
+      quiet: bool(ui?.quiet, DEFAULT_SETTINGS.ui.quiet),
+    },
+    vision: { strategy: vision?.strategy === 'nonVisual' ? 'nonVisual' : DEFAULT_SETTINGS.vision.strategy },
+    browser: {
+      channel: resolveChannel(browser?.channel, warn),
+      headless: resolveHeadless(browser?.headless, warn),
+      // 不认识的值退回 `plugin`：这一侧不会与用户正在运行的浏览器抢 profile，是"装好即用"的前提。
+      // 之前这一层不产出该字段，`entry.ts` 的 `systemProfile !== 'plugin'` 恒成立，浏览器总是跑在用户
+      // profile 上——用户开着 Edge 时 Chromium 以 exit 21 退出，插件报"引擎起不来"。
+      systemProfile: (browser as { systemProfile?: unknown } | undefined)?.systemProfile === 'user' ? 'user' : 'plugin',
+    },
+    credentials: {
+      // `gate` returns false for anything present-and-not-a-boolean, so an unreadable section
+      // is refused here for free: the section itself is the "present but wrong" value.
+      allowRead: credentials === undefined
+        ? false
+        : gate(credentialsUsable.allowRead, DEFAULT_SETTINGS.credentials.allowRead),
+    },
+    actions: {
+      allowExecute: actions === undefined
+        ? false
+        : gate(actionsUsable.allowExecute, DEFAULT_SETTINGS.actions.allowExecute),
+      allowDownload: actions === undefined
+        ? false
+        : gate(actionsUsable.allowDownload, DEFAULT_SETTINGS.actions.allowDownload),
+      allowCredentialWrite: actions === undefined
+        ? false
+        : gate(actionsUsable.allowCredentialWrite, DEFAULT_SETTINGS.actions.allowCredentialWrite),
+    },
+    // Fail-closed, and stated separately from `gate`'s fallback so the intent is visible: an
+    // unreadable or absent section means nobody watches. Unlike the other switches, whose defaults
+    // are "on", this one has no safe default other than off.
+    bridge: {
+      autoInstall: section(source, 'bridge') === undefined
+        ? DEFAULT_SETTINGS.bridge.autoInstall
+        : gate((section(source, 'bridge') as { autoInstall?: unknown }).autoInstall, DEFAULT_SETTINGS.bridge.autoInstall),
+    },
+    remoteView: {
+      enabled: remoteView === undefined
+        ? false
+        : gate((remoteView as { enabled?: unknown }).enabled, false),
+    },
+    delivery: {
+      tool: typeof deliverySection.tool === 'string' && /^[A-Za-z0-9_.-]+$/.test(deliverySection.tool)
+        ? deliverySection.tool
+        : '',
+      args: strings(deliverySection.args, DEFAULT_SETTINGS.delivery.args),
+      onFail: deliverySection.onFail === 'stop' ? 'stop' : 'keep-local',
+      sites: strings(deliverySection.sites, {}),
+    },
+  }
+}
+
+/**
+ * File-backed settings with an in-memory snapshot. Reads re-stat the file so an
+ * edit from another process (or the settings panel writing through a second
+ * code path) is picked up without a restart; writes are atomic enough for a
+ * single-writer plugin and never throw at the caller.
+ */
+export class SettingsStore {
+  private cached: BrowserSettings | undefined
+  /** Last observed mtime, used to invalidate the cache on external edits. */
+  private cachedMtimeMs = -1
+
+  /**
+   * @param file - settings file path (defaults beside the browser profile).
+   */
+  constructor(private readonly file: string = settingsPath(), private readonly log?: (message: string) => void) {}
+
+  /** Path this store reads and writes. */
+  path(): string {
+    return this.file
+  }
+
+  /**
+   * Current settings, re-read when the file changed on disk.
+   * @returns the resolved settings document.
+   */
+  get(): BrowserSettings {
+    let mtimeMs = -1
+    try {
+      // stat directly: existsSync costs about thirteen times what the stat does, and the
+      // stat already throws when the file is missing — which the catch below handles.
+      mtimeMs = statSync(this.file).mtimeMs
+    } catch (error) {
+      // Only an absent document means first-run defaults. Access/storage errors do not
+      // erase the operator's decisions, even when an earlier read was cached.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.cached = undefined
+        this.cachedMtimeMs = -1
+        return SETTINGS_WHEN_UNREADABLE
+      }
+      mtimeMs = -1
+    }
+    // Return the cache BEFORE reading. The read used to happen first "just in case", which
+    // made the cache pointless: every call paid for a synchronous read of the whole file and
+    // then discarded it. This is on the path of every tool call that consults a setting, so
+    // it was a stat plus a read per call where a single stat will do.
+    if (this.cached !== undefined && mtimeMs === this.cachedMtimeMs) return this.cached
+
+    let text: string | undefined
+    if (mtimeMs !== -1) {
+      try {
+        text = readFileSync(this.file, 'utf8')
+      } catch {
+        // It was there a moment ago (the stat above) and cannot be read now: permissions, a
+        // lock, a directory in the way. That is not "no document" — the file is not absent, so
+        // what it said is unknown, and unknown resolves to the refusing document.
+        this.cached = SETTINGS_WHEN_UNREADABLE
+        this.cachedMtimeMs = mtimeMs
+        return this.cached
+      }
+    }
+    try {
+      // A leading BOM is what ordinary Windows editors (Notepad, PowerShell's
+      // `Set-Content -Encoding utf8`) leave behind, and `JSON.parse` rejects it.
+      // Without this strip, hand-editing the settings file silently discarded every
+      // value in it: the document looked correct, and the plugin quietly ran on
+      // defaults — including switches the user had just turned off.
+      const body = text?.replace(/^\uFEFF/, '')
+      this.cached = body === undefined ? DEFAULT_SETTINGS : resolveSettings(JSON.parse(body), m => this.log?.(m))
+    } catch {
+      // A document that EXISTS but cannot be parsed is not the same as no document at all: the
+      // first is a corrupted or half-written file whose contents were the operator's decisions,
+      // the second is a first run. Resolving both to the defaults meant a kill during the write,
+      // or one stray character, silently reopened the capabilities that had been switched off —
+      // so this side refuses them instead (see SETTINGS_WHEN_UNREADABLE).
+      this.cached = SETTINGS_WHEN_UNREADABLE
+    }
+    this.cachedMtimeMs = mtimeMs
+    return this.cached
+  }
+
+  /**
+   * Merge a partial patch into the stored document and persist it.
+   * @param patch - the fields to change (unknown keys are ignored).
+   * @returns the settings after the merge.
+   */
+  update(patch: unknown): BrowserSettings {
+    const current = this.get()
+    const merged = resolveSettings(deepMerge(current as unknown as Record<string, unknown>, patch), m => this.log?.(m))
+    try {
+      mkdirSync(dirname(this.file), { recursive: true })
+      writeFileAtomic(this.file, `${JSON.stringify(merged, null, 2)}\n`)
+    } catch (error) {
+      // Do NOT publish the new value as cached, and do not pretend the file changed: a
+      // reader compares the file's mtime against this stamp, so stamping "now" on a failed
+      // write made the next get() re-read the file and silently revert the user's change.
+      // Clear the cache before failing: the value on disk is still the old one, so leaving
+      // the merged document cached would hand the next reader something that does not exist —
+      // and the stamp would make it look fresh until the mtime comparison rolled it back.
+      this.cached = undefined
+      this.cachedMtimeMs = -1
+      throw new Error(`dsh-builtin-browser: settings could not be saved: ${error instanceof Error ? error.message : String(error)}`)
+
+    }
+    return merged
+  }
+}
+
+/**
+ * Replace a file's contents atomically: write a sibling temporary file, then rename it over
+ * the target.
+ *
+ * `writeFileSync(target, …)` truncates and rewrites in place, so a crash, a full disk or an
+ * antivirus lock in the middle leaves HALF a JSON document. That used to be silent: the reader
+ * resolved an unparseable file to the defaults, so a torn write flipped `credentials.allowRead`
+ * and the action switches back ON, and the next successful update wrote those defaults to disk
+ * for good. The read side no longer does that (see {@link SETTINGS_WHEN_UNREADABLE}) — but the
+ * write side still has to stop producing torn files at all, because half a document is not
+ * something this plugin should ever leave behind.
+ *
+ * The rename is the commit point: a reader sees either the old document or the new one,
+ * never a partial one. It stays in the same directory so the rename is atomic on Windows
+ * as well as POSIX (`renameSync` maps to MoveFileEx there: same-volume replaces are
+ * atomic, cross-volume ones are not supported at all).
+ *
+ * The temporary is written with a unique suffix rather than a fixed `.tmp`, so two writers
+ * (the settings panel and a second DSH process) cannot rename each other's half-written
+ * file into place. Shared with the history store, which had the same hole.
+ * @param file - the target path.
+ * @param contents - the complete new document.
+ */
+export function writeFileAtomic(file: string, contents: string): void {
+  const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
+  try {
+    writeFileSync(temporary, contents)
+    renameSync(temporary, file)
+  } catch (error) {
+    // The rename is the commit point, so a failure before it leaves the target untouched —
+    // only the temporary has to go, and it must not be left behind as garbage.
+    try { rmSync(temporary, { force: true }) } catch { /* the temp is already the least of it */ }
+    throw error
+  }
+}
+
+/** One-level-deep merge over the settings sections (patch wins). */
+function deepMerge(base: Record<string, unknown>, patch: unknown): Record<string, unknown> {
+  if (typeof patch !== 'object' || patch === null) return base
+  const result: Record<string, unknown> = { ...base }
+  for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
+    const existing = result[key]
+    if (typeof value === 'object' && value !== null && typeof existing === 'object' && existing !== null) {
+      result[key] = { ...existing as Record<string, unknown>, ...value as Record<string, unknown> }
+    } else {
+      result[key] = value
+    }
+  }
+  return result
+}

@@ -1,0 +1,1050 @@
+/**
+ * Install the plugin browser bridge into an installed DSH Desktop.
+ *
+ * WHY A SCRIPT
+ * The bridge has to live inside the desktop app (it is the only process with
+ * Electron access), and the desktop app is somebody else's installed artifact:
+ * a desktop update replaces everything this script touches. So the change is
+ * expressed as something replayable rather than as a one-off edit — re-run this
+ * after every desktop upgrade.
+ *
+ * TWO LAYOUTS
+ * DSH Desktop ships in two shapes, and they need different work:
+ *
+ *   unpacked  `<install>/resources/app/lib/main.js` is a real file. The
+ *             long-standing path: copy the module next to main.js and append a
+ *             guarded import to it.
+ *
+ *   packed    `<install>/resources/app.asar` holds the whole app (main.js is
+ *             inside the archive) and `resources/app.asar.unpacked` holds the
+ *             entries marked `unpacked`, i.e. the native modules. The official
+ *             Windows build is packed — where this script used to fail with
+ *             "not a DSH Desktop install" on a perfectly good installation,
+ *             because it only ever looked for the unpacked main.js.
+ *
+ * HOW THE PACKED LAYOUT IS HANDLED
+ * Electron loads `app.asar` in preference to `app/`, and a directory only wins
+ * once the archive is not there. Rewriting the archive in place is not an
+ * option either: the official build enables the
+ * `EnableEmbeddedAsarIntegrityValidation` fuse (measured: enabled), so a
+ * modified app.asar is a broken app. The archive is therefore never touched:
+ *
+ *   1. extract `app.asar` into `resources/app`, taking the real bytes of
+ *      `unpacked` entries from `resources/app.asar.unpacked` (a straight
+ *      archive walk would leave the native modules as empty stubs);
+ *   2. install the bridge into that tree exactly as in the unpacked layout;
+ *   3. rename `app.asar` to `app.asar.before-bridge`, so Electron falls back to
+ *      the directory that was just built.
+ *
+ * The trigger is the ARCHIVE's presence, not the directory's absence. A desktop
+ * update writes a new `app.asar` and leaves any earlier extraction lying around
+ * (the updater does not know about that directory), so keying off "the tree is
+ * missing" would patch the stale tree while Electron keeps loading the archive —
+ * a run that reports success with the bridge dead. Whenever the archive is
+ * there it is the app, so the tree is rebuilt from it.
+ *
+ * `--revert` moves the archive back and restores the pristine main.js. The
+ * extracted tree then becomes inert (the archive wins again) and can be deleted.
+ *
+ * WHAT IT DOES (idempotent)
+ *   1. copies `plugin-browser-bridge.js` next to the app's main bundle;
+ *   2. appends a guarded import to `lib/main.js` that starts it after `whenReady`,
+ *      keeping a pristine `main.js.before-bridge` backup the first time;
+ *   3. does nothing if the import is already present;
+ *   4. keeps `dsh <args>` working: the Desktop CLI launcher and the CLI's own
+ *      runtime lookup both spell `app.asar` out loud and both break once the
+ *      archive is moved aside, so both are patched (each with its own
+ *      `.before-bridge` backup) and `--revert` restores them.
+ *
+ * USAGE
+ *   node desktop-bridge/install.mjs [path-to-DeepSeek-Harness-install]
+ * Default path: probed under %LOCALAPPDATA%\Programs (see findDefaultInstall)
+ * Pass --revert to restore the pre-bridge state instead.
+ *
+ * Exit DSH Desktop normally before maintenance. --restart is an external-terminal opt-in to
+ * start the already-closed app after maintenance; it never closes a running application.
+ */
+import * as nodeFs from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
+
+/**
+ * The filesystem used for every installer operation.
+ *
+ * Electron patches `fs` so that a `*.asar` path answers from the archive's virtual tree; opening the
+ * archive to read its header then fails with ENOENT (measured when the panel's button ran this file
+ * from the desktop shell). Even a patched existsSync(app.asar) creates Electron's archive cache
+ * and keeps a Windows handle open until process exit. A raw rename cannot release that cache.
+ * Use the same untouched module for discovery, validation, extraction and rename, so no earlier
+ * probe can lock the file this process later moves. Plain Node uses its ordinary filesystem.
+ */
+const archiveFs = (() => {
+  try {
+    return createRequire(import.meta.url)('original-fs')
+  } catch {
+    return nodeFs
+  }
+})()
+const { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync,
+  readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } = archiveFs
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+
+function isWithin(root, path) {
+  const part = relative(root, path)
+  return part !== '' && part !== '..' && !part.startsWith('..\\') && !part.startsWith('../') && !isAbsolute(part)
+}
+
+/** Tests may inspect or modify only an explicitly marked, canonical sandbox. */
+function testBoundary() {
+  if (process.env.DSH_BROWSER_TEST !== '1' && process.env.NODE_TEST_CONTEXT === undefined) return undefined
+  const configured = process.env.DSH_BRIDGE_TEST_ROOT
+  if (!configured || !isAbsolute(configured) || lstatSync(configured).isSymbolicLink()) {
+    throw new Error('installer test isolation requires an absolute, non-linked DSH_BRIDGE_TEST_ROOT')
+  }
+  const root = realpathSync(configured)
+  const marker = join(root, '.dsh-bridge-test-root')
+  if (!lstatSync(marker).isFile() || lstatSync(marker).isSymbolicLink()
+    || readFileSync(marker, 'utf8') !== 'dsh-browser-installer-test-root-v1\n') {
+    throw new Error('installer test isolation marker is missing or invalid')
+  }
+  return root
+}
+
+function assertTestTarget(root, path) {
+  if (root === undefined) return
+  if (!isWithin(root, resolve(path)) || !isWithin(root, realpathSync(path))) {
+    throw new Error('installer test target must stay strictly inside DSH_BRIDGE_TEST_ROOT')
+  }
+  const inspect = directory => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) throw new Error('installer test targets cannot contain linked files or directories')
+      if (entry.isDirectory()) inspect(join(directory, entry.name))
+    }
+  }
+  inspect(path)
+  for (const key of ['DSH_BRIDGE_ACTION_RESULT_FILE', 'DSH_BRIDGE_ACTION_LOG_FILE']) {
+    const output = process.env[key]
+    if (output !== undefined && (!isWithin(root, resolve(output))
+      || !isWithin(root, realpathSync(dirname(output)))
+      || (existsSync(output) && !isWithin(root, realpathSync(output))))) {
+      throw new Error('installer test result and log files must stay inside DSH_BRIDGE_TEST_ROOT')
+    }
+  }
+}
+/**
+ * The desktop install to patch when none is given on the command line.
+ *
+ * Not a fixed name: the product directory is `DeepSeek Harness` on some builds and `DSH Desktop`
+ * on others, and the README's bare `node desktop-bridge/install.mjs` therefore fails outright
+ * when the guess is wrong. The shape that identifies an install — `resources/app/lib/main.js` or
+ * `resources/app.asar` — is stable across both, so that is what is probed.
+ * @returns the install directory, or the historical default when nothing matches.
+ */
+function findDefaultInstall(testRoot) {
+  const permitted = candidate => {
+    if (testRoot === undefined) return true
+    if (!isWithin(testRoot, resolve(candidate))) return false
+    try { return isWithin(testRoot, realpathSync(candidate)) } catch { return false }
+  }
+  const looksInstalled = candidate => permitted(candidate) && (existsSync(join(candidate, 'resources', 'app', 'lib', 'main.js'))
+    || existsSync(join(candidate, 'resources', 'app.asar')))
+  const probe = (base) => {
+    if (!permitted(base)) return undefined
+    for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
+      const candidate = join(base, named)
+      if (looksInstalled(candidate)) return candidate
+    }
+    try {
+      for (const entry of readdirSync(base, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const candidate = join(base, entry.name)
+        if (looksInstalled(candidate)) return candidate
+      }
+    } catch {
+      // A root that does not exist is a state, not an error.
+    }
+    return undefined
+  }
+  // Same roots the panel probes: an explicit DSH_DESKTOP_PATH, then the places people actually install
+  // to. An install on another drive used to be invisible to both the panel and this default.
+  const explicit = process.env.DSH_DESKTOP_PATH
+  if (explicit !== undefined && explicit !== '') {
+    if (looksInstalled(explicit)) return explicit
+    const below = probe(explicit)
+    if (below !== undefined) return below
+  }
+  const localAppData = process.env.LOCALAPPDATA ?? ''
+  const roots = [
+    ...(localAppData === '' ? [] : [join(localAppData, 'Programs')]),
+    process.env['ProgramFiles'], process.env['ProgramFiles(x86)'], process.env.APPDATA, process.env.ProgramData,
+  ].filter(base => typeof base === 'string' && base !== '')
+  for (const base of roots) {
+    const found = probe(base)
+    if (found !== undefined) return found
+  }
+  return testRoot === undefined
+    ? join(localAppData === '' ? '.' : join(localAppData, 'Programs'), 'DeepSeek Harness')
+    : join(testRoot, 'no-test-desktop-found')
+}
+
+/**
+ * Remove our patch from a main.js body, or undefined when it is not present verbatim.
+ *
+ * Exact rather than heuristic: installation inserts SNIPPET immediately before the trailing
+ * `export {};`, so removing that same string reproduces the original byte-for-byte. A snippet
+ * from a different version therefore reads as "not cleanly ours" and reaches the branch that asks
+ * a human — the correct outcome for a file this script did not patch.
+ * @param text - the current main.js body.
+ * @returns the body with our snippet cut out, or undefined when the snippet is absent.
+ */
+function withoutOurSnippet(text) {
+  const at = text.indexOf(SNIPPET)
+  if (at === -1) return undefined
+  return text.slice(0, at) + text.slice(at + SNIPPET.length)
+}
+
+/**
+ * Select only the GUI processes owned by this installation.
+ * Native DSH CLI processes share the same executable but run JavaScript in Node mode.
+ * @param rows - the process table, including parent ids for the installer's ancestry.
+ * @param root - verified Desktop installation directory.
+ * @param selfPid - the installer process.
+ * @returns GUI and Chromium helper process ids.
+ */
+function selectShellProcesses(rows, root, selfPid) {
+  const byPid = new Map(rows.map(row => [row.ProcessId, row]))
+  const ancestors = new Set()
+  let cursor = selfPid
+  while (typeof cursor === 'number' && cursor > 0 && !ancestors.has(cursor)) {
+    ancestors.add(cursor)
+    cursor = byPid.get(cursor)?.ParentProcessId
+  }
+  const expectedExe = resolve(root, 'DeepSeek Harness.exe').toLowerCase()
+  const selected = []
+  for (const row of rows) {
+    if (String(row.Name ?? '').toLowerCase() !== 'deepseek harness.exe') continue
+    if (typeof row.ExecutablePath !== 'string' || row.ExecutablePath === '') {
+      throw new Error('could not identify a running DeepSeek Harness process; refusing to close or patch the application')
+    }
+    if (resolve(row.ExecutablePath).toLowerCase() !== expectedExe) continue
+    if (!Number.isSafeInteger(row.ProcessId) || row.ProcessId <= 0 || typeof row.CommandLine !== 'string') {
+      throw new Error('the Desktop process table is incomplete; refusing to close or patch the application')
+    }
+    if (row.ProcessId === selfPid) continue
+    const nodeMode = /(?:^|\s)--expose-internals(?:\s|$)|\.[cm]?js(?:"|\s|$)|(?:^|\s)(?:--eval|--print|--input-type)(?:=|\s|$)|(?:^|\s)-(?:e|p)(?:\s|$)/i.test(row.CommandLine)
+    if (nodeMode) continue
+    if (ancestors.has(row.ProcessId)) {
+      const error = new Error('the installer is a child of DSH Desktop; run this command from a separate terminal with Node.js')
+      error.code = 'DSH_CHILD_OF_SHELL'
+      throw error
+    }
+    selected.push(row.ProcessId)
+  }
+  return selected
+}
+
+/**
+ * Read the complete process table so ancestry is available before any process is closed.
+ * Enumeration failure refuses the install rather than treating the shell as stopped.
+ * @param root - verified Desktop installation directory.
+ * @returns GUI and Chromium helper process ids.
+ */
+function shellProcesses(root) {
+  const text = runCapture('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
+    + 'Get-CimInstance Win32_Process -ErrorAction Stop | '
+    + 'Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress',
+  ])
+  if (text === undefined || text.trim() === '') throw new Error('could not enumerate Desktop processes')
+  let parsed
+  try { parsed = JSON.parse(text) } catch { throw new Error('could not parse the Desktop process table') }
+  const rows = Array.isArray(parsed) ? parsed : [parsed]
+  if (rows.length === 0 || rows.some(row => row === null || typeof row !== 'object'
+    || !Number.isSafeInteger(row.ProcessId) || !Number.isSafeInteger(row.ParentProcessId)
+    || typeof row.Name !== 'string')) throw new Error('the Desktop process table is invalid')
+  return selectShellProcesses(rows, root, process.pid)
+}
+
+/**
+ * Run a command and return its stdout, or undefined when it could not run.
+ * @param command - the executable.
+ * @param argv - its arguments.
+ * @returns stdout text, or undefined.
+ */
+function runCapture(command, argv) {
+  try {
+    return execFileSync(command, argv, { encoding: 'utf8', stdio: 'pipe', windowsHide: true, timeout: 30_000 })
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Start the desktop shell again, detached from this process.
+ *
+ * Detached on purpose: the installer exits immediately afterwards, and a child that dies with its
+ * parent would take the shell with it — the same trap the wait-for-exit daemons fell into.
+ * @param root - the install directory.
+ * @returns whether the executable was spawned.
+ */
+let lastStartedPid
+function startShell(root) {
+  const exe = join(root, 'DeepSeek Harness.exe')
+  if (!existsSync(exe)) {
+    console.error(`could not start DSH Desktop: ${exe} does not exist; start it yourself.`)
+    return false
+  }
+  if (process.env.DSH_BROWSER_TEST === '1' || process.env.NODE_TEST_CONTEXT !== undefined) {
+    console.error('test mode forbids launching DSH Desktop')
+    return false
+  }
+  try {
+    const env = { ...process.env }
+    for (const key of Object.keys(env)) {
+      if (key.toUpperCase() === 'ELECTRON_RUN_AS_NODE' || key.toUpperCase().startsWith('DSH_BRIDGE_')) delete env[key]
+    }
+    const child = spawn(exe, [], { detached: true, stdio: 'ignore', cwd: root, env })
+    child.on('error', error => { console.error('could not start DSH Desktop: ' + String(error)) })
+    if (child.pid === undefined) return false
+    lastStartedPid = child.pid
+    child.unref()
+    console.log(`  started ${exe}`)
+    return true
+  } catch (error) {
+    console.error(`could not start DSH Desktop: ${String(error)}; start it yourself.`)
+    return false
+  }
+}
+
+const args = process.argv.slice(2)
+let installRoot
+try {
+  const boundary = testBoundary()
+  installRoot = args.find(arg => !arg.startsWith('--')) ?? findDefaultInstall(boundary)
+  assertTestTarget(boundary, installRoot)
+} catch (error) {
+  console.error('bridge installer test isolation refused the operation: ' + String(error))
+  process.exit(1)
+}
+// Identity only, no side effects: the panel and a human both need a way to ask "would this work"
+// without closing the shell first.
+if (args.includes('--preflight')) {
+  const target = installRoot
+  const verdict = verifyDesktopIdentity(target)
+  console.log(JSON.stringify({ target, ...verdict }))
+  process.exit(verdict.ok ? 0 : 1)
+}
+const revert = args.includes('--revert')
+/** Start after maintenance only when the target was already closed; never close a running shell. */
+const restart = args.includes('--restart')
+
+const resourcesDir = join(installRoot, 'resources')
+const appDir = join(resourcesDir, 'app')
+const asarPath = join(resourcesDir, 'app.asar')
+const asarMoved = `${asarPath}.before-bridge`
+const mainPath = join(appDir, 'lib', 'main.js')
+const bridgeTarget = join(appDir, 'lib', 'plugin-browser-bridge.js')
+const bridgeSource = join(import.meta.dirname, 'plugin-browser-bridge.js')
+const proxyTarget = join(appDir, 'lib', 'guest-proxy.mjs')
+const proxySource = join(import.meta.dirname, 'guest-proxy.mjs')
+const backupPath = `${mainPath}.before-bridge`
+
+/** The bridge imports its pure proxy-policy helper from the same directory. */
+function copyBridgeModules() {
+  copyFileSync(bridgeSource, bridgeTarget)
+  copyFileSync(proxySource, proxyTarget)
+}
+
+// Moving the archive aside breaks two more places that spell `app.asar` out
+// loud, and both are used by `dsh <args>` (the Desktop CLI launcher and the
+// plugin manager behind it), so they are patched here and restored by --revert:
+//
+//   runtime/cli/bin/dsh.cmd                    launches the CLI by that path
+//   dsh/.../dsh-desktop-host/lib/cli.js        locates `runtime` by that name
+//
+// Without them the CLI dies with MODULE_NOT_FOUND even though the app itself
+// runs fine (the shell resolves everything through app.getAppPath()).
+const cliShimPath = join(resourcesDir, 'runtime', 'cli', 'bin', 'dsh.cmd')
+const cliShimBackup = `${cliShimPath}.before-bridge`
+const hostCliPath = join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js')
+const hostCliBackup = `${hostCliPath}.before-bridge`
+const CLI_SHIM_MARKER = 'dsh-builtin-browser: resolve the app directory'
+const HOST_CLI_MARKER = 'dsh-builtin-browser: recognize an unpacked `app` directory'
+
+let targetWasClosed = false
+const resultFile = process.env.DSH_BRIDGE_ACTION_RESULT_FILE
+const installErrors = []
+if (resultFile !== undefined) {
+  const originalError = console.error
+  console.error = (...values) => {
+    installErrors.push(values.map(String).join(' '))
+    if (installErrors.length > 12) installErrors.shift()
+    originalError(...values)
+  }
+}
+
+// Report maintenance only after its file operations complete. Starting the app is an external
+// command-line opt-in and cannot happen after a running-target or ancestry refusal.
+process.once('exit', code => {
+  let restarted = false
+  if (restart && targetWasClosed && code === 0) {
+    restarted = startShell(installRoot)
+    if (restarted) console.log('DSH Desktop was restarted.')
+  }
+  const finalCode = code === 0 && (!restart || restarted) ? 0 : code || 1
+  process.exitCode = finalCode
+  if (resultFile !== undefined) {
+    const result = {
+      ok: finalCode === 0, code: finalCode, action: revert ? 'uninstall' : 'install', restarted,
+      ...lastStartedPid === undefined ? {} : { pid: lastStartedPid },
+      ...installErrors.length === 0 ? {} : { error: installErrors.join('\n').slice(-2400) },
+      completedAt: new Date().toISOString(),
+    }
+    try {
+      const temporary = `${resultFile}.${process.pid}.tmp`
+      writeFileSync(temporary, JSON.stringify(result))
+      renameSync(temporary, resultFile)
+    } catch (error) {
+      originalResultError(error)
+    }
+  }
+})
+
+function originalResultError(error) {
+  console.error('could not record the bridge installer result: ' + String(error))
+  process.exitCode = 1
+}
+
+/** The exact block appended to main.js. Keep it recognisable: idempotence and
+ *  reverting both key off this marker. */
+const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sidebar'
+const SNIPPET = `
+${MARKER} pages.
+// The plugin runs inside the Node-mode host, where there is no Electron API, so the
+// shell is the only process that can own a view. Exposing the existing webview
+// guests (and their CDP) is what lets the agent work on the page the human is
+// looking at, instead of spawning a second, parallel browser window.
+// Installed by apps/desktop/bridge/install.mjs — re-run it after a desktop upgrade.
+// A bridge failure is never fatal to the shell.
+app.whenReady().then(async () => {
+	const bridgeUrl = new URL("./plugin-browser-bridge.js", import.meta.url);
+	const loadBridge = async (why) => {
+		try {
+			// A plain import is cached for the process lifetime, so an edited bridge
+			// would need a shell restart. The stamp makes every load read the current
+			// bytes; start() itself stops the previous instance, so this reloads in place.
+			const bridge = await import(bridgeUrl.href + "?v=" + Date.now());
+			bridge.start();
+			console.log("[dsh-browser-bridge] started" + (why ? " (" + why + ")" : ""));
+		} catch (error) {
+			console.error("[dsh-browser-bridge] start failed:", error);
+		}
+	};
+	await loadBridge();
+	// Watch the module so an edit reloads it in place instead of forcing a shell
+	// restart. Debounced; a failure here is never fatal to the shell.
+	try {
+		const { watch } = await import("node:fs");
+		let timer = null;
+		watch(bridgeUrl, { persistent: false }, () => {
+			if (timer) clearTimeout(timer);
+			timer = setTimeout(() => void loadBridge("file changed"), 300);
+		});
+	} catch (error) {
+		console.error("[dsh-browser-bridge] watch failed:", error);
+	}
+});
+`
+
+/**
+ * Parse an asar header — a Chromium pickle holding
+ * `[payloadSize][jsonLength][json…]`, preceded by an 8-byte outer pickle.
+ * @param file - the archive path.
+ * @returns the parsed header tree plus the offset where file content starts.
+ */
+function readAsarHeader(file) {
+  const fd = archiveFs.openSync(file, 'r')
+  try {
+    const sizeBuf = Buffer.alloc(8)
+    if (archiveFs.readSync(fd, sizeBuf, 0, 8, 0) !== 8) throw new Error('the archive header is truncated')
+    const headerSize = sizeBuf.readUInt32LE(4)
+    if (headerSize < 8 || headerSize > 64 * 1024 * 1024) throw new Error('the archive header size is invalid')
+    const headerBuf = Buffer.alloc(headerSize)
+    if (archiveFs.readSync(fd, headerBuf, 0, headerSize, 8) !== headerSize) throw new Error('the archive header is truncated')
+    const jsonLength = headerBuf.readUInt32LE(4)
+    if (jsonLength <= 0 || jsonLength > headerSize - 8) throw new Error('the archive JSON length is invalid')
+    const header = JSON.parse(headerBuf.toString('utf8', 8, 8 + jsonLength))
+    return { fd, header, contentBase: 8 + headerSize }
+  } catch (error) {
+    archiveFs.closeSync(fd)
+    throw error
+  }
+}
+
+/**
+ * Write one asar tree to disk, taking `unpacked` entries from the sibling
+ * `.unpacked` directory — their bytes are not in the archive.
+ * @param asar - the archive path.
+ * @param outDir - directory to extract into.
+ * @returns file and byte counts, and how many entries came from `.unpacked`.
+ */
+function extractAsar(asar, outDir) {
+  const { fd, header, contentBase } = readAsarHeader(asar)
+  const unpackedRoot = `${asar}.unpacked`
+  let files = 0
+  let bytes = 0
+  let unpackedFiles = 0
+  const walk = (node, prefix) => {
+    for (const [name, entry] of Object.entries(node.files ?? {})) {
+      const relativePath = prefix === '' ? name : `${prefix}/${name}`
+      const target = join(outDir, ...relativePath.split('/'))
+      if (entry.files) {
+        mkdirSync(target, { recursive: true })
+        walk(entry, relativePath)
+        continue
+      }
+      mkdirSync(dirname(target), { recursive: true })
+      if (entry.unpacked) {
+        const source = join(unpackedRoot, ...relativePath.split('/'))
+        if (!existsSync(source)) throw new Error(`unpacked entry is missing: ${source}`)
+        copyFileSync(source, target)
+        unpackedFiles += 1
+      } else {
+        const buffer = Buffer.alloc(entry.size)
+        archiveFs.readSync(fd, buffer, 0, entry.size, contentBase + Number(entry.offset))
+        writeFileSync(target, buffer)
+      }
+      const actual = statSync(target).size
+      if (actual !== entry.size) throw new Error(`size mismatch for ${relativePath}: header ${entry.size}, wrote ${actual}`)
+      files += 1
+      bytes += actual
+    }
+  }
+  try {
+    mkdirSync(outDir, { recursive: true })
+    walk(header, '')
+    return { files, bytes, unpackedFiles }
+  } finally { archiveFs.closeSync(fd) }
+}
+
+/**
+ * Make the Desktop CLI launcher resolve the app directory instead of spelling
+ * `app.asar` out loud.
+ *
+ * `resources/runtime/cli/bin/dsh.cmd` is what the `dsh` command on PATH calls,
+ * and it launches the CLI through an `app.asar\…` path. Once the archive is
+ * moved aside that path is gone, so `dsh <args>` dies with MODULE_NOT_FOUND
+ * while the app itself keeps working (the shell resolves everything through
+ * `app.getAppPath()`). The patch touches only the app-directory fragment: the
+ * launcher keeps its own spelling of everything else, including the executable
+ * name, so a build whose binary is named differently still works.
+ *
+ * @returns what happened, for the install log.
+ */
+function patchCliShim() {
+  if (!existsSync(cliShimPath)) return 'launcher not present (skipped)'
+  const text = readFileSync(cliShimPath, 'utf8')
+  if (text.includes(CLI_SHIM_MARKER)) return 'already patched'
+  if (!/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/.test(text)) return 'unexpected launcher shape (skipped)'
+  if (!existsSync(cliShimBackup)) copyFileSync(cliShimPath, cliShimBackup)
+  const eol = text.includes('\r\n') ? '\r\n' : '\n'
+  const setLocal = /^.*setlocal.*$/m.exec(text)
+  const injection = [
+    `rem ${CLI_SHIM_MARKER} (resources\\app when the bridge is installed,`,
+    'rem resources\\app.asar on a stock installation).',
+    'set "DSH_APP=%~dp0..\\..\\..\\app"',
+    'if not exist "%DSH_APP%\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js" set "DSH_APP=%~dp0..\\..\\..\\app.asar"',
+  ].join(eol)
+  const withVariables = setLocal === null
+    ? `${injection}${eol}${text}`
+    : text.replace(setLocal[0], `${setLocal[0]}${eol}${injection}`)
+  writeFileSync(cliShimPath, withVariables.replace(/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/, '%DSH_APP%\\dsh\\'))
+  return 'patched'
+}
+
+/**
+ * Teach the Desktop CLI where its `runtime` directory is when the app is an
+ * unpacked `app` directory rather than `app.asar`.
+ *
+ * `dsh-desktop-host/lib/cli.js` derives the directory that holds pnpm as
+ * `dirname(runtimeArchivePath(runtimeDir) ?? runtimeDir)`, and
+ * `runtimeArchivePath` only recognises a parent literally named `app.asar`.
+ * With the app at `resources/app` that falls back to one level too few and
+ * resolves `resources/app/runtime`, which does not exist — so the plugin
+ * manager behind `dsh plugin …` cannot start.
+ *
+ * @returns what happened, for the install log.
+ */
+function patchHostCli() {
+  if (!existsSync(hostCliPath)) return 'cli.js not present (skipped)'
+  const text = readFileSync(hostCliPath, 'utf8')
+  if (text.includes(HOST_CLI_MARKER)) return 'already patched'
+  const before = '\tawait runDesktopCli(runtimeDir, join(dirname(runtimeArchivePath(runtimeDir) ?? runtimeDir), "runtime"));'
+  if (!text.includes(before)) return 'unexpected cli.js shape (skipped)'
+  if (!existsSync(hostCliBackup)) copyFileSync(hostCliPath, hostCliBackup)
+  const eol = text.includes('\r\n') ? '\r\n' : '\n'
+  const after = [
+    `\t// ${HOST_CLI_MARKER} as the app root,`,
+    '\t// so an installation whose app.asar was moved aside still finds its runtime.',
+    '\tconst cliOwnerDir = dirname(runtimeDir);',
+    '\tconst cliSupportRoot = basename(cliOwnerDir) === "app" || basename(cliOwnerDir) === "app.asar" ? dirname(cliOwnerDir) : cliOwnerDir;',
+    '\tawait runDesktopCli(runtimeDir, join(cliSupportRoot, "runtime"));',
+  ].join(eol)
+  writeFileSync(hostCliPath, text.replace(before, after))
+  return 'patched'
+}
+
+/** Apply both CLI compatibility patches and report them. */
+function installCliCompatibility() {
+  console.log(`  cli launcher:           ${patchCliShim()}`)
+  console.log(`  cli runtime resolution: ${patchHostCli()}`)
+}
+
+// ---------------------------------------------------------------------------
+// Identity — before anything is stopped, deleted, extracted, renamed or written.
+//
+// Reported as issue #40. The check used to be "resources/app/lib/main.js or resources/app.asar
+// exists", which is the shape of EVERY Electron app. Measured: a throwaway app whose package.json
+// said `unrelated-meeting-app` was accepted, had its entry file rewritten and the bridge copied in;
+// and a second sample lost its `resources/app` directory to the packed-layout rebuild before the
+// archive was found to be invalid.
+//
+// The rule now lives in `desktop-identity.json`, shared with the plugin's status reader, and the
+// order is the point: identity first, then the archive is VALIDATED, and only then may this script
+// close the app or delete a tree.
+// ---------------------------------------------------------------------------
+
+/**
+ * The identity rule (accepted package names and the main entry), from the JSON next to this file.
+ * @returns the rule, or undefined after printing why it cannot be trusted.
+ */
+function readIdentityRule() {
+  try {
+    const raw = JSON.parse(readFileSync(new URL('./desktop-identity.json', import.meta.url), 'utf8'))
+    const names = raw.packageNames
+    const mainEntry = raw.mainEntry
+    if (!Array.isArray(names) || names.length === 0 || names.some(name => typeof name !== 'string')
+      || typeof mainEntry !== 'string' || mainEntry === '') {
+      console.error('desktop-identity.json is malformed: expected packageNames[] and mainEntry')
+      return undefined
+    }
+    return { packageNames: names, mainEntry }
+  } catch (error) {
+    console.error(`desktop-identity.json could not be read: ${String(error)}`)
+    return undefined
+  }
+}
+
+/**
+ * Read one file out of an asar archive without extracting anything.
+ *
+ * Identity has to come from the archive when one exists: Electron loads it in preference to the
+ * sibling directory, and a desktop update leaves that older extraction behind, so verifying the
+ * directory would verify bytes nobody runs.
+ * @param archive - the archive path.
+ * @param entryPath - slash-separated path inside the archive.
+ * @returns the bytes, or undefined when the entry is missing or unreadable.
+ */
+function readAsarEntry(archive, entryPath) {
+  let fd
+  try {
+    const parsed = readAsarHeader(archive)
+    fd = parsed.fd
+    let node
+    let files = parsed.header.files
+    for (const part of entryPath.split('/')) {
+      if (files === undefined) return undefined
+      node = files[part]
+      if (node === undefined) return undefined
+      files = node.files
+    }
+    if (node.files !== undefined || node.unpacked === true) return undefined
+    const size = Number(node.size)
+    const offset = Number(node.offset)
+    if (!Number.isFinite(size) || !Number.isFinite(offset) || size < 0) return undefined
+    const buffer = Buffer.alloc(size)
+    const read = archiveFs.readSync(fd, buffer, 0, size, parsed.contentBase + offset)
+    return read === size ? buffer : undefined
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd) } catch { /* already closed */ }
+    }
+  }
+}
+
+/**
+ * Validate the archive the shell will actually load: it must parse, carry a DSH Desktop manifest and
+ * the declared main entry, and every `unpacked` entry must exist beside it with the size the header
+ * claims. Read-only.
+ * @param archive - the archive path.
+ * @returns `{ ok: true }`, or `{ ok: false, reason }`.
+ */
+function validateArchive(archive) {
+  let parsed
+  try {
+    parsed = readAsarHeader(archive)
+  } catch (error) {
+    return { ok: false, reason: `the archive header cannot be read: ${String(error)}` }
+  }
+  const { fd, header, contentBase } = parsed
+  try {
+    // Statistics go through the same unpatched module as the raw archive reads.
+    const fileSize = archiveFs.statSync(archive).size
+    const problems = []
+    const walk = (node, prefix) => {
+      for (const [name, entry] of Object.entries(node.files ?? {})) {
+        const relativePath = prefix === '' ? name : `${prefix}/${name}`
+        if (entry.files !== undefined) {
+          walk(entry, relativePath)
+          continue
+        }
+        const size = Number(entry.size)
+        if (!Number.isFinite(size) || size < 0) {
+          problems.push(`${relativePath}: implausible size ${String(entry.size)}`)
+          continue
+        }
+        if (entry.unpacked === true) {
+          const source = join(`${archive}.unpacked`, ...relativePath.split('/'))
+          if (!existsSync(source)) {
+            problems.push(`${relativePath}: listed as unpacked but ${source} is missing`)
+            continue
+          }
+          if (statSync(source).size !== size) problems.push(`${relativePath}: unpacked size does not match the header`)
+          continue
+        }
+        const offset = Number(entry.offset)
+        if (!Number.isFinite(offset) || contentBase + offset + size > fileSize) {
+          problems.push(`${relativePath}: content lies outside the archive`)
+        }
+      }
+    }
+    walk(header, '')
+    if (problems.length > 0) {
+      return { ok: false, reason: `the archive is not usable: ${problems.slice(0, 5).join('; ')}` }
+    }
+    const rule = readIdentityRule()
+    if (rule === undefined) return { ok: false, reason: 'the identity rule is unavailable' }
+    let node
+    let files = header.files
+    for (const part of rule.mainEntry.split('/')) {
+      if (files === undefined) { node = undefined; break }
+      node = files[part]
+      files = node?.files
+    }
+    if (node === undefined) return { ok: false, reason: `the archive has no ${rule.mainEntry}` }
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, reason: `the archive cannot be validated: ${String(error)}` }
+  } finally {
+    try { closeSync(fd) } catch { /* already closed */ }
+  }
+}
+
+/**
+ * Whether a directory is a DSH Desktop install, by the shared identity rule.
+ *
+ * Every uncertainty refuses: this answer gates stopping the app, deleting a tree and writing files.
+ * @param root - the install directory to verify.
+ * @returns `{ ok: true, layout, packageName, version }`, or `{ ok: false, reason }`.
+ */
+function verifyDesktopIdentity(root) {
+  const rule = readIdentityRule()
+  if (rule === undefined) return { ok: false, reason: 'the identity rule is unavailable' }
+  const resources = join(root, 'resources')
+  const archive = join(resources, 'app.asar')
+  const appDir = join(resources, 'app')
+  const archivePresent = existsSync(archive)
+  const layout = archivePresent ? 'packed' : 'unpacked'
+
+  let manifestText
+  if (archivePresent) {
+    let bytes = readAsarEntry(archive, 'package.json')
+    if (bytes === undefined) {
+      // Some builds ship package.json OUTSIDE the archive (marked `unpacked`): the real file is
+      // then beside it, and reading it there is the honest answer rather than "cannot be read".
+      try { bytes = readFileSync(join(resources, 'app.asar.unpacked', 'package.json')) } catch { bytes = undefined }
+    }
+    if (bytes === undefined) {
+      return { ok: false, reason: `${archive}: the package manifest could not be read; executable names and archive text are not proof of DSH identity` }
+    }
+    manifestText = bytes.toString('utf8')
+  } else {
+    const manifestPath = join(appDir, 'package.json')
+    if (!existsSync(manifestPath)) {
+      return { ok: false, reason: `neither ${manifestPath} nor ${archive} exists` }
+    }
+    manifestText = readFileSync(manifestPath, 'utf8')
+  }
+
+  let manifest
+  try {
+    manifest = JSON.parse(manifestText)
+  } catch {
+    return { ok: false, reason: 'the package manifest is not valid JSON' }
+  }
+  const name = typeof manifest.name === 'string' ? manifest.name : ''
+  if (!rule.packageNames.includes(name)) {
+    return {
+      ok: false,
+      reason: `the app calls itself ${name === '' ? '(no name)' : JSON.stringify(name)}, which is not one of `
+        + `${rule.packageNames.join(' / ')} — a generic Electron layout is not proof of identity`,
+    }
+  }
+  const mainPresent = archivePresent
+    ? readAsarEntry(archive, rule.mainEntry) !== undefined
+    : existsSync(join(appDir, ...rule.mainEntry.split('/')))
+  if (!mainPresent) {
+    return { ok: false, reason: `${rule.mainEntry} is not present under ${archivePresent ? archive : appDir}` }
+  }
+  return {
+    ok: true,
+    layout,
+    packageName: name,
+    version: typeof manifest.version === 'string' ? manifest.version : undefined,
+  }
+}
+
+const identity = verifyDesktopIdentity(installRoot)
+if (!identity.ok) {
+  console.error(`refusing to touch ${installRoot}`)
+  console.error(`  ${identity.reason}`)
+  console.error('Pass the installation directory of DSH Desktop as the first argument.')
+  console.error('Nothing was stopped, deleted, extracted or written.')
+  process.exit(1)
+}
+
+// Refuse before any write whenever the target is running. A window close can mean "hide to tray",
+// so maintenance cannot infer consent to terminate the host or its tools.
+try {
+  if (shellProcesses(installRoot).length !== 0) {
+    console.error('DSH Desktop is running. Exit it normally, then run bridge maintenance from an external terminal.')
+    process.exit(1)
+  }
+  targetWasClosed = true
+} catch (error) {
+  console.error('bridge maintenance refused: ' + String(error))
+  process.exit(1)
+}
+if (!revert && existsSync(asarPath)) {
+  const checked = validateArchive(asarPath)
+  if (!checked.ok) {
+    console.error(`refusing to rebuild from an archive that cannot be verified: ${checked.reason}`)
+    process.exit(1)
+  }
+}
+// The archive wins whenever it exists, so ITS presence — not the absence of the
+// directory — decides the layout. After a desktop update the archive is back
+// (a new build) while an older extraction is still lying around, and keying off
+// the directory would patch a tree that Electron never loads.
+const packedLayout = existsSync(asarPath)
+if (!existsSync(mainPath) && !existsSync(asarPath)) {
+  console.error('not a DSH Desktop install: neither')
+  console.error(`  ${mainPath}`)
+  console.error('nor')
+  console.error(`  ${asarPath}`)
+  console.error('exists. Pass the installation directory as the first argument.')
+  process.exit(1)
+}
+
+if (revert) {
+  // Tracked separately: restoring a CLI launcher or the runtime resolution is NOT an
+  // uninstall. `reverted` only means some component was restored; whether the bridge is
+  // actually gone is decided from the entry Electron loads, at the end of this branch.
+  let reverted = false
+  let mainEntrySkipped = false
+  if (existsSync(asarMoved)) {
+    if (existsSync(asarPath)) {
+      console.error('refusing to replace an app archive that already exists: a desktop upgrade may have installed a newer build')
+      console.error(`  current archive: ${asarPath}`)
+      console.error(`  preserved backup: ${asarMoved}`)
+      process.exit(1)
+    }
+    renameSync(asarMoved, asarPath)
+    console.log(`restored the app archive: app.asar.before-bridge -> app.asar`)
+    reverted = true
+  }
+  if (existsSync(backupPath)) {
+    // Refuse when the backup no longer matches the tree it would overwrite.
+    //
+    // The backup is taken once and then kept, so after a desktop upgrade it holds the PREVIOUS
+    // build's main.js. Restoring it would silently roll the app back to that build's code — and
+    // it would also discard any patch another tool applied in the meantime, which is not a
+    // hypothetical here: `dsh-purge` patches this same file, so a blind revert erases its work
+    // while reporting success. A matching current file is the only case where the restore is
+    // unambiguously right; anything else needs a human to decide.
+    let backedUp
+    let current
+    try {
+      backedUp = readFileSync(backupPath)
+      current = readFileSync(mainPath)
+    } catch {
+      backedUp = undefined
+      current = undefined
+    }
+    const identical = backedUp !== undefined && current !== undefined && backedUp.equals(current)
+    // The unambiguous test for "this file is the backup plus our patch and nothing else": remove
+    // our snippet and see whether what remains IS the backup.
+    //
+    // The test this replaces asked whether the current file carries our marker while the backup
+    // does not — which is true of EVERY freshly installed file, because the backup is taken before
+    // patching. So a normal `--revert` took the "something else patched this" branch, refreshed
+    // the backup from the patched file, and destroyed the restore point it had just declined to
+    // use — while setting `reverted`, so the script exited 0 and said nothing was wrong.
+    const pristine = current === undefined ? undefined : withoutOurSnippet(current.toString('utf8'))
+    const isCleanlyOurs = pristine !== undefined && backedUp !== undefined
+      && pristine === backedUp.toString('utf8')
+    if (isCleanlyOurs) {
+      copyFileSync(backupPath, mainPath)
+      console.log(`restored ${mainPath} from ${backupPath}`)
+      reverted = true
+    } else if (!identical && current !== undefined && !current.includes(MARKER)) {
+      console.error(`WARNING: ${mainPath} has changed since the backup was taken, and it does`)
+      console.error('  not contain the bridge import either — something else has edited it')
+      console.error('  (a desktop upgrade, or another patch tool). Restoring the backup would')
+      console.error(`  discard that. The backup is at ${backupPath}; restore it by hand if that`)
+      console.error('  is what you want. Skipping this file.')
+    } else if (!identical) {
+      // It carries our marker but does not reduce to the backup: something was patched around
+      // our snippet. The backup is left untouched, because guessing here is what destroyed it.
+      mainEntrySkipped = true
+      console.error(`WARNING: ${mainPath} carries the bridge import, but removing it does not`)
+      console.error(`  reproduce ${backupPath} — another tool has patched this file too`)
+      console.error('  (dsh-purge patches it). Reverting would discard those changes, so nothing')
+      console.error('  was written. Restore by hand from the backup if that is what you want.')
+    } else {
+      console.log(`${mainPath} already matches the backup; nothing to restore`)
+      reverted = true
+    }
+  }
+  if (existsSync(cliShimBackup)) {
+    copyFileSync(cliShimBackup, cliShimPath)
+    console.log(`restored the CLI launcher: ${cliShimPath}`)
+    reverted = true
+  }
+  if (existsSync(hostCliBackup) && existsSync(dirname(hostCliPath))) {
+    copyFileSync(hostCliBackup, hostCliPath)
+    console.log(`restored the CLI runtime resolution: ${hostCliPath}`)
+    reverted = true
+  }
+  if (!reverted) {
+    console.error(`nothing to revert in ${installRoot}`)
+    process.exit(1)
+  }
+  // Verify the OUTCOME, not the actions. `reverted` only says a component was restored, and
+  // the CLI launcher used to set it while `main.js` still imported the bridge — so `--revert`
+  // exited 0 and reported success even though a fresh check still said "installed".
+  // The bridge is gone only when the entry Electron will actually load no longer carries our
+  // marker: in the unpacked layout that is resources/app/lib/main.js; when app.asar is back
+  // the archive wins and the unpacked tree is inert.
+  const archiveBack = existsSync(asarPath)
+  let bridgeStillLoaded = false
+  if (!archiveBack && existsSync(mainPath)) {
+    try {
+      bridgeStillLoaded = readFileSync(mainPath, 'utf8').includes(MARKER)
+    } catch (error) {
+      // An entry we cannot read cannot be certified clean; never claim success on it.
+      console.error(`WARNING: cannot read ${mainPath} to verify the uninstall: ${String(error)}`)
+      bridgeStillLoaded = true
+    }
+  }
+  if (bridgeStillLoaded) {
+    console.error('bridge uninstall is INCOMPLETE: the loaded main entry still imports the bridge.')
+    console.error(`  main entry:   ${mainPath} (still patched)`)
+    console.error(`  backup:       ${backupPath}`)
+    if (mainEntrySkipped) {
+      console.error('  Another tool patched main.js around our snippet. That patch was preserved on')
+      console.error('  purpose, so our snippet could not be removed without discarding their work.')
+    }
+    console.error('  The CLI launcher / runtime resolution may already be restored — that is not')
+    console.error('  an uninstall. Restore the main entry by hand, or run --revert again after the')
+    console.error('  other patch is reconciled, then re-check the bridge status.')
+    process.exit(1)
+  }
+  // Only where an archive actually exists. In the unpacked layout `resources/app` IS what Electron
+  // loads, so telling the user it is inert and safe to delete would invite them to remove the
+  // application.
+  if (packedLayout) {
+    console.log(`note: ${appDir} is inert while app.asar exists; delete it to reclaim ~350 MB`)
+  }
+  process.exit(0)
+}
+
+if (packedLayout) {
+  // Validate BEFORE the tree is deleted. Reported as issue #40: with an invalid archive and an
+  // existing extraction, this script removed `resources/app` and only then discovered the archive
+  // was unusable — leaving the app directory gone for no gain. The check is read-only and cheap
+  // (header walk plus a stat per unpacked entry), so it belongs on this side of the deletion.
+  const checked = validateArchive(asarPath)
+  if (!checked.ok) {
+    console.error(`refusing to rebuild from an archive that cannot be verified: ${checked.reason}`)
+    console.error('Nothing was deleted; the archive and the existing directory are untouched.')
+    process.exit(1)
+  }
+  const stale = existsSync(appDir)
+  const started = Date.now()
+  console.log(stale
+    ? `packed layout detected (${asarPath}); an earlier extraction is present and will be rebuilt`
+    : `packed layout detected (${asarPath})`)
+  if (stale) {
+    // Rebuild rather than merge: the tree has to describe THIS archive, and a
+    // merge would keep files the new build no longer ships. Removing it is safe
+    // here — the archive is present, so the app is not running from this
+    // directory, and a failure below leaves the archive in place and the
+    // installation working.
+    rmSync(appDir, { recursive: true, force: true })
+  }
+  console.log(`extracting into ${appDir} — large desktop packages can take several minutes...`)
+  const result = extractAsar(asarPath, appDir)
+  const megabytes = (result.bytes / 1024 / 1024).toFixed(1)
+  const seconds = ((Date.now() - started) / 1000).toFixed(1)
+  console.log(`  extracted ${result.files} files / ${megabytes} MB` +
+    ` (${result.unpackedFiles} from app.asar.unpacked) in ${seconds}s`)
+  // A fresh extraction invalidates any earlier pristine copy: --revert has to be
+  // able to restore the main.js that belongs to THIS build.
+  copyFileSync(mainPath, backupPath)
+  try {
+    renameSync(asarPath, asarMoved)
+    console.log('moved the archive aside: app.asar -> app.asar.before-bridge')
+    console.log(`  Electron now loads ${appDir}; the archive is untouched, so the asar integrity fuse cannot trip`)
+  } catch (error) {
+    console.error(`could not move app.asar aside: ${String(error)}`)
+    console.error('the original archive is still active and unchanged; the extracted files were not activated. Check the process holding the archive before retrying.')
+    process.exit(1)
+  }
+}
+
+const current = readFileSync(mainPath, 'utf8')
+if (current.includes(MARKER)) {
+  console.log('bridge already installed (main.js carries the marker); refreshing the module copy')
+  copyBridgeModules()
+  installCliCompatibility()
+  process.exit(0)
+}
+
+if (!existsSync(backupPath)) {
+  copyFileSync(mainPath, backupPath)
+  console.log(`backed up main.js -> ${backupPath}`)
+}
+
+// Append before the trailing `export {};` so the import stays inside the module.
+const exportTail = 'export {};'
+const insertAt = current.lastIndexOf(exportTail)
+if (insertAt === -1) {
+  console.error('unexpected main.js shape: no trailing `export {};` to insert before')
+  process.exit(1)
+}
+const patched = `${current.slice(0, insertAt)}${SNIPPET}${current.slice(insertAt)}`
+writeFileSync(mainPath, patched)
+
+copyBridgeModules()
+console.log(`installed bridge into ${appDir}`)
+console.log(`  module: ${bridgeTarget}`)
+console.log(`  proxy policy: ${proxyTarget}`)
+console.log(`  patch:  ${mainPath} (+${SNIPPET.split('\n').length} lines)`)
+installCliCompatibility()
+if (!restart) {
+  console.log('restart DSH Desktop to activate it.')
+}

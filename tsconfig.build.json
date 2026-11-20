@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "lib",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "declaration": false,
+    "noEmitOnError": false,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "types": ["node"],
+    "paths": {
+      "electron": ["./src/types/electron-shim.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": [
+    "src/client/**",
+    "src/reference/**",
+    "src/tool-browser/page-probe.ts"
+  ]
+}

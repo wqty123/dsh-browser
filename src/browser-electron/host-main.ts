@@ -1,0 +1,1379 @@
+/**
+ * Self-hosted Electron browser host (child side): the Electron main process
+ * spawned by {@link RemoteElectronViewHost}. Owns one `BrowserWindow` PER
+ * SESSION (each session's views live in their own window) plus a browser
+ * toolbar (address bar, back/forward/reload, tab strip) that makes the
+ * built-in browser usable as a real browser by the human — every window has
+ * its own toolbar. Views are `WebContentsView`s driven over
+ * `webContents.debugger` (CDP); user toolbar actions are routed back to the
+ * parent so the agent and the human always share one tab/navigation model.
+ *
+ * Protocol (one JSON object per line, both directions):
+ *   <- { id, op: 'ping' } | { id, op: 'createView', viewId } |
+ *      { id, op: 'destroyView', viewId } | { id, op: 'showView', viewId } |
+ *      { id, op: 'groupView', viewId, windowId, label? } |
+ *      { id, op: 'command', viewId, method, params } |
+ *      { id, op: 'focus', viewId } |
+ *      { id, op: 'userActionError', windowId, message }
+ *   -> { id: 0, op: 'hello', token } (our FIRST message — proves we know the
+ *      parent's stdin token; the parent refuses the connection otherwise)
+ *   -> { id, ok: true, result? } | { id, ok: false, err }
+ *   -> { id: 0, op: 'userAction', action } (fire-and-forget; no reply)
+ *
+ * The parent never parses stderr, so diagnostics may go there freely.
+ * @module dsh-browser/browser-electron/host-main
+ */
+
+import { app, BrowserWindow, Menu, session, WebContentsView } from 'electron'
+import {
+  overlayScript,
+  overlayDisposeScript,
+  referenceMenuTemplate,
+  standaloneScript,
+  REFERENCE_INTENT_CHANNEL,
+  MAX_REFERENCE_COMMENT,
+  MAX_REFERENCE_TEXT,
+} from '../browser-reference/entry.ts'
+import { validateFrozenCapture } from '../browser-reference/page-script.ts'
+import { createInterface } from 'node:readline'
+import { createConnection } from 'node:net'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { writeFileNoReplace } from './file-write.ts'
+import { electronRuntimeDiagnosticLines } from './runtime-diagnostics.ts'
+import { createRpcLineReader } from './rpc-input.ts'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { withTimeoutShared } from './timing.ts'
+
+// Report the binary actually running this child, even when ELECTRON_PATH
+// intentionally selects a different version from the plugin's dependency.
+// The parent mirrors stderr to the host log; discovery stays filesystem-only.
+for (const line of electronRuntimeDiagnosticLines(process.versions)) {
+  process.stderr.write(line + '\n')
+}
+
+/**
+ * The spawn token the parent sent via stdin (first line). Must be echoed in
+ * our hello. Read from stdin so the token never appears in argv (WMI /
+ * Process Explorer / /proc/*).
+ */
+
+// Isolate this host's profile from the DSH app's default Electron userData:
+// several Electron instances sharing Roaming\Electron fight over the GPU
+// cache/session locks, which can leave the window without a display surface
+// (capturePage then fails). A dedicated userData also persists cookies across
+// host restarts (on top of dsh_browser_auth). Must run before app is ready.
+try {
+  const base = process.env.DSH_HOME ?? app.getPath('appData')
+  app.setPath('userData', join(base, 'dsh-builtin-browser-host'))
+} catch (error) {
+  process.stderr.write(`[dsh-browser host] userData setup failed: ${String(error)}\n`)
+}
+
+/**
+ * Read the spawn token. The parent sends it two ways:
+ *   1. stdin (first line) — the secure channel on Unix/macOS;
+ *   2. DSH_BROWSER_RPC_TOKEN env — the fallback on Windows, where Electron is
+ *      a GUI-subsystem process and never receives piped stdin (the parent
+ *      sets it in the spawn env for exactly this reason).
+ *
+ * stdin WINS over env, which is what the ordering here has to express. It used to read env
+ * first and only consult stdin when that came up empty, so the stdin branch never ran while
+ * env was set — every spawn was told both ways, so the documented preference was silently
+ * the other way round. The env value is kept as the default for the common case where stdin
+ * delivers nothing; the interface below overwrites it when a line arrives.
+ */
+let RPC_TOKEN = process.env.DSH_BROWSER_RPC_TOKEN ?? ''
+/** True once a line actually arrived on stdin (as opposed to env being present). */
+let tokenFromStdin = false
+/**
+ * The one and only stdin reader.
+ *
+ * It is created here and reused by the hello path inside `whenReady` below: two
+ * `createInterface` calls on the same stream both consume its lines, so the second one saw
+ * nothing at all. A single reader means whoever needs the token from stdin waits on it.
+ */
+const stdinLines = process.stdin !== null && process.stdin.readable
+  ? createInterface({ input: process.stdin, terminal: false })
+  : undefined
+if (stdinLines !== undefined) {
+  stdinLines.on('line', (line) => {
+    if (tokenFromStdin) return
+    tokenFromStdin = true
+    const token = line.trim()
+    if (token !== '') RPC_TOKEN = token
+  })
+  stdinLines.on('close', () => {
+    if (RPC_TOKEN === '') {
+      process.stderr.write('[dsh-browser host] warning: no token received on stdin or env\n')
+    }
+  })
+}
+
+/** CDP protocol version attached to every view's debugger. */
+const CDP_VERSION = '1.3'
+
+/** Download cap: the body is shipped base64 as one JSON line; bound the memory. */
+const MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024
+
+/** Toolbar height in CSS px: nav row + tab strip. Page views sit below it. */
+const TOOLBAR_HEIGHT = 64
+
+/** One view: the Electron object plus its CDP-backed surface. */
+interface HostView {
+  readonly webContentsView: WebContentsView
+  /**
+   * Set when the view's renderer process was replaced by a navigation. The
+   * fresh renderer has no display surface, and Chromium silently drops CDP
+   * synthesized input for a view without one — so the next show/input must
+   * force the visible-again dance even if this view is already the visible
+   * one. Cleared once the surface has been re-established.
+   */
+  needsRepresent: boolean
+}
+
+/** One window: a session's views + its toolbar. */
+interface HostWindow {
+  /** The group key (session id), or the shared fallback. */
+  readonly windowId: string
+  readonly window: BrowserWindow
+  /** The toolbar view (address bar + tab strip); undefined when it failed. */
+  toolbarView: WebContentsView | undefined
+  /** Views by viewId, in creation order (the tab strip's order). */
+  readonly views: Map<string, HostView>
+  /** The visible (topmost) view id within this window. */
+  visibleViewId: string | undefined
+  /** The last view the human clicked (focus steering target on refocus). */
+  lastFocusedViewId: string | undefined
+  /** Deferred close: the last view may be re-created immediately (closeTab keeps one blank tab). */
+  closeTimer: ReturnType<typeof setTimeout> | undefined
+}
+
+/** Fallback group for views whose groupView never arrived (defensive only). */
+const SHARED_WINDOW_ID = 'shared'
+
+/** Focus key for the toolbar view (it is not in win.views). */
+const TOOLBAR_FOCUS = '\u0000toolbar'
+
+/** Windows by group key (session id). */
+const windows = new Map<string, HostWindow>()
+
+/**
+ * Window assignments received via groupView BEFORE the view's createView:
+ * the parent sends groupView right after createView (both deferred until the
+ * child is ready), so either order may arrive first.
+ */
+const assignments = new Map<string, { windowId: string; label?: string }>()
+
+/** The RPC socket to the parent; set when the connection is established. */
+let rpcSocket: import('node:net').Socket | undefined
+
+// ---------------------------------------------------------------------------
+// Toolbar: a small HTML strip (address bar, back/forward/reload, tab strip)
+// rendered in its own WebContentsView on top of every window. It talks to
+// this main process over IPC; user actions go to the PARENT (which owns the
+// session/tab model) as fire-and-forget `userAction` messages.
+// ---------------------------------------------------------------------------
+
+const TOOLBAR_PRELOAD = `const { contextBridge, ipcRenderer } = require('electron')
+contextBridge.exposeInMainWorld('bridge', {
+  post: (action, payload) => ipcRenderer.send('toolbar-action', action, payload),
+  onTabs: cb => ipcRenderer.on('tabs', (_e, payload) => cb(payload)),
+  onError: cb => ipcRenderer.on('user-action-error', (_e, text) => cb(text)),
+})
+`
+
+const TOOLBAR_HTML = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; font-family: system-ui, "Segoe UI", sans-serif; font-size: 12px; }
+body { display: flex; flex-direction: column; background: #2b2d31; color: #e8e8e8; }
+.nav { display: flex; align-items: center; gap: 4px; padding: 4px 6px; height: 32px; }
+button.tool { background: transparent; border: none; color: inherit; width: 28px; height: 24px; border-radius: 4px; cursor: pointer; font-size: 13px; line-height: 1; flex: 0 0 auto; }
+button.tool:hover { background: rgba(255,255,255,.12); }
+#addr { flex: 1; min-width: 0; height: 24px; border: 1px solid rgba(255,255,255,.18); border-radius: 12px; background: rgba(255,255,255,.08); color: inherit; padding: 0 12px; font-size: 12px; outline: none; }
+#addr:focus { border-color: #4a90d9; background: rgba(255,255,255,.14); }
+#newtab { font-size: 15px; }
+.strip { display: flex; align-items: stretch; gap: 2px; padding: 0 6px 4px; height: 30px; overflow-x: auto; }
+.strip::-webkit-scrollbar { height: 4px; }
+.tab { display: flex; align-items: center; gap: 6px; max-width: 180px; min-width: 90px; height: 24px; padding: 0 4px 0 10px; border-radius: 6px; background: rgba(255,255,255,.06); cursor: pointer; white-space: nowrap; flex: 0 0 auto; }
+.tab:hover { background: rgba(255,255,255,.12); }
+.tab.active { background: #3d4148; }
+.tab .tt { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.tab .x { width: 15px; height: 15px; border-radius: 3px; text-align: center; line-height: 15px; font-size: 10px; flex: 0 0 auto; }
+.tab .x:hover { background: rgba(255,255,255,.25); }
+#err { height: 0; overflow: hidden; font-size: 11px; color: #ff9090; padding: 0 8px; transition: height .15s; }
+#err.show { height: 17px; }
+</style>
+</head>
+<body>
+  <div class="nav">
+    <button class="tool" id="back" title="Back">&#9664;</button>
+    <button class="tool" id="fwd" title="Forward">&#9654;</button>
+    <button class="tool" id="reload" title="Reload">&#10227;</button>
+    <input id="addr" placeholder="Search or enter address" spellcheck="false">
+    <button class="tool" id="newtab" title="New tab">&#43;</button>
+  </div>
+  <div class="strip" id="strip"></div>
+  <div id="err"></div>
+<script>
+// The body runs inside an IIFE on purpose. The preload above exposes
+// window.bridge via contextBridge.exposeInMainWorld(), which installs a
+// NON-CONFIGURABLE global property. A top-level const/let named bridge here
+// would hit HasRestrictedGlobalProperty and throw a SyntaxError at PARSE time
+// — an early error, so the whole script is discarded: nothing gets bound, the
+// address bar and nav buttons go silently dead, and the user sees no error.
+// Function scope sidesteps that check (the tb name below stops the collision
+// from returning by habit) and keeps these bindings off the page global.
+// Keep this block free of backticks — it lives inside a TS template literal.
+(() => {
+const tb = window.bridge
+const addr = document.getElementById('addr')
+const strip = document.getElementById('strip')
+const errBox = document.getElementById('err')
+let showErrT = 0
+function showErr(text) {
+  errBox.textContent = String(text)
+  errBox.classList.add('show')
+  clearTimeout(showErrT)
+  showErrT = setTimeout(() => errBox.classList.remove('show'), 5000)
+}
+function post(action, payload) { tb.post(action, payload || {}) }
+document.getElementById('back').onclick = () => post('back')
+document.getElementById('fwd').onclick = () => post('forward')
+document.getElementById('reload').onclick = () => post('reload')
+document.getElementById('newtab').onclick = () => {
+  const v = addr.value.trim()
+  post('new-tab', v !== '' ? { url: v } : {})
+  addr.value = ''
+}
+addr.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const v = addr.value.trim()
+    if (v !== '') { post('navigate', { url: v }); addr.blur() }
+  }
+})
+tb.onTabs(payload => {
+  const tabs = (payload && payload.tabs) || []
+  strip.textContent = ''
+  for (const t of tabs) {
+    const el = document.createElement('div')
+    el.className = 'tab' + (t.active ? ' active' : '')
+    const tt = document.createElement('span')
+    tt.className = 'tt'
+    tt.textContent = (t.title && t.title !== '') ? t.title : ((t.url && t.url !== '' && t.url !== 'about:blank') ? t.url : 'New tab')
+    tt.title = t.url || ''
+    el.appendChild(tt)
+    const x = document.createElement('span')
+    x.className = 'x'
+    x.textContent = '\\u2715'
+    x.onclick = e => { e.stopPropagation(); post('close', { viewId: t.viewId }) }
+    el.appendChild(x)
+    el.onclick = () => post('activate', { viewId: t.viewId })
+    strip.appendChild(el)
+  }
+  const act = tabs.find(t => t.active)
+  if (act && document.activeElement !== addr) addr.value = act.url || ''
+})
+tb.onError(text => showErr(text))
+})()
+</script>
+</body>
+</html>
+`
+
+/** Temp dir for the toolbar files; written once per process. */
+const TOOLBAR_DIR = join(tmpdir(), `dsh-browser-toolbar-${process.pid}`)
+let toolbarFilesReady = false
+
+/** Write the toolbar's html + preload to disk once. */
+function ensureToolbarFiles(): void {
+  if (toolbarFilesReady) return
+  toolbarFilesReady = true
+  mkdirSync(TOOLBAR_DIR, { recursive: true })
+  writeFileSync(join(TOOLBAR_DIR, 'preload.js'), TOOLBAR_PRELOAD)
+  writeFileSync(join(TOOLBAR_DIR, 'toolbar.html'), TOOLBAR_HTML)
+}
+
+/**
+ * Bound an await with a timeout. Used so a wedged renderer surfaces as an
+ * explicit error instead of a command that never settles.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return withTimeoutShared(promise, ms, () => new Error(`${label} timed out after ${ms}ms`))
+}
+
+/**
+ * CDP commands are bounded here as well as in the parent: a view whose
+ * renderer stopped responding must produce a clear error, not a hang that
+ * only the tool layer's 10–30s timeout eventually cuts off.
+ */
+const COMMAND_TIMEOUT_MS = 20000
+
+/**
+ * How long to let a `focus` request land before answering it. Focus moves
+ * asynchronously and a key dispatched in the same turn as the request is still
+ * dropped, so the caller needs this settle — but only on the call where focus
+ * actually had to move.
+ */
+const FOCUS_SETTLE_MS = 80
+
+/**
+ * A brand-new WebContentsView has no renderer process until something loads,
+ * and CDP commands (Runtime.evaluate …) sent to a renderer-less view never
+ * settle. That is what made a host restart unrecoverable: the provider
+ * rebuilds the session with a fresh blank view whose very first action is a
+ * location.href read, which hung until the tool timeout.
+ *
+ * Loading about:blank spawns the renderer, so the view answers the moment it
+ * exists; a real navigation replaces it right after. Bounded + best-effort —
+ * the caller still gets its reply if this fails.
+ */
+const RENDERER_PRIME_TIMEOUT_MS = 3000
+
+async function primeRenderer(view: WebContentsView): Promise<void> {
+  try {
+    await withTimeout(view.webContents.loadURL('about:blank'), RENDERER_PRIME_TIMEOUT_MS, 'renderer prime')
+  } catch { /* best effort: the first real navigation creates the renderer */ }
+}
+
+/** Reply to the parent over the RPC socket. */
+function reply(id: number, payload: Record<string, unknown>): void {
+  if (rpcSocket === undefined) {
+    process.stderr.write(`[dsh-browser host] reply without socket (id=${id})\n`)
+    return
+  }
+  rpcSocket.write(JSON.stringify({ id, ...payload }) + '\n')
+}
+
+/** Send a fire-and-forget user action to the parent (no reply expected). */
+function sendUserAction(action: Record<string, unknown>): void {
+  if (rpcSocket === undefined) return
+  try {
+    rpcSocket.write(JSON.stringify({ id: 0, op: 'userAction', action }) + '\n')
+  } catch { /* socket closed */ }
+}
+
+/** Turn a typed-in address into a URL (add https:// when no scheme is given). */
+function normalizeUrl(raw: string): string {
+  const trimmed = raw.trim()
+  if (trimmed === '') return ''
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) return trimmed
+  return 'https://' + trimmed
+}
+
+/** Route one toolbar interaction to the parent (which owns the session model). */
+function handleToolbarAction(win: HostWindow, action: string, payload: Record<string, unknown>): void {
+  const windowId = win.windowId
+  switch (action) {
+    case 'navigate': {
+      const url = normalizeUrl(String(payload.url ?? ''))
+      if (url === '') return
+      sendUserAction({ type: 'navigate', windowId, url })
+      return
+    }
+    case 'new-tab': {
+      const raw = String(payload.url ?? '').trim()
+      const url = raw !== '' ? normalizeUrl(raw) : undefined
+      sendUserAction({ type: 'newTab', windowId, ...url !== undefined ? { url } : {} })
+      return
+    }
+    case 'activate':
+      sendUserAction({ type: 'activateTab', windowId, viewId: String(payload.viewId ?? '') })
+      return
+    case 'close':
+      sendUserAction({ type: 'closeTab', windowId, viewId: String(payload.viewId ?? '') })
+      return
+    case 'back':
+      sendUserAction({ type: 'back', windowId })
+      return
+    case 'forward':
+      sendUserAction({ type: 'forward', windowId })
+      return
+    case 'reload':
+      sendUserAction({ type: 'reload', windowId })
+      return
+    default:
+      process.stderr.write(`[dsh-browser host] unknown toolbar action: ${action}\n`)
+  }
+}
+
+/** Find the window holding a view, if any. */
+function windowOfView(viewId: string): HostWindow | undefined {
+  for (const win of windows.values()) {
+    if (win.views.has(viewId)) return win
+  }
+  return undefined
+}
+
+/** Get (or lazily create) the window for a group key. */
+function windowFor(windowId: string | undefined): HostWindow {
+  const key = windowId === undefined || windowId === '' ? SHARED_WINDOW_ID : windowId
+  const existing = windows.get(key)
+  if (existing !== undefined) return existing
+  // `show: false` on purpose: creating a window must not be a presentation decision. With `show: true`
+  // the window appeared and took the screen the moment the first tool call created it — before any
+  // `showView` message could carry `ui.quiet`, so quiet mode had no effect at all on this carrier
+  // (measured: the setting was on and the window still popped up). The first presentation decides:
+  // quiet shows it inactive, a normal call shows it normally.
+  const w = new BrowserWindow({ width: 1400, height: 900, show: false, title: 'dsh-browser' })
+  w.on('closed', () => {
+    const closing = windows.get(key)
+    windows.delete(key)
+    // A BrowserWindow does not destroy its child views: their webContents (the
+    // renderer process, its timers and audio) outlive the window unless closed
+    // explicitly, so release them here instead of leaking a renderer per window.
+    if (closing !== undefined) {
+      for (const view of closing.views.values()) {
+        try {
+          view.webContentsView.webContents.close()
+        } catch {
+          // Already destroyed along with the window.
+        }
+      }
+      closing.views.clear()
+    }
+    // The interface is gone for good. Report it, so the plugin ends that session
+    // instead of holding one whose window the human already closed. Browsing
+    // history and login state live on disk, so the next open starts a clean
+    // session rather than resurrecting this one.
+    try {
+      rpcSocket?.write(JSON.stringify({ id: 0, op: 'viewClosed', windowId: key }) + '\n')
+    } catch {
+      // Socket already gone (parent shutting down): nothing left to report to.
+    }
+  })
+  const win: HostWindow = { windowId: key, window: w, toolbarView: undefined, views: new Map(), visibleViewId: undefined, lastFocusedViewId: undefined, closeTimer: undefined }
+  // Keep every view (and the toolbar) filling the window as the human
+  // resizes it; otherwise pages stay at their original size and break.
+  w.on('resize', () => layoutWindow(win))
+  // Windows: keyboard input goes only to the FOCUSED webContents, and a window
+  // regaining focus (alt-tab, click) does not automatically refocus any view
+  // (electron#28163) — the last addChildView keeps the focus. Restore the view
+  // the human was last using (click steering via wireFocusRouting), falling
+  // back to the visible page view. Windows-only: on macOS/Linux the OS routes
+  // keyboard input to the clicked view natively, and forcing focus() on window
+  // focus fights the platform — it can leave page inputs untypeable (issue #7).
+  w.on('focus', () => {
+    if (process.platform !== 'win32') return
+    const last = win.lastFocusedViewId
+    const wc = last === TOOLBAR_FOCUS ? win.toolbarView?.webContents
+      : last !== undefined ? win.views.get(last)?.webContentsView.webContents
+      : undefined
+    const fallback = win.visibleViewId !== undefined ? win.views.get(win.visibleViewId)?.webContentsView.webContents : undefined
+    try { (wc ?? fallback)?.focus() } catch { /* destroyed */ }
+  })
+  windows.set(key, win)
+  win.toolbarView = createToolbar(win)
+  layoutWindow(win)
+  return win
+}
+
+/** Position the toolbar and every page view within a window. */
+function layoutWindow(win: HostWindow): void {
+  try {
+    const size = win.window.getContentSize() ?? [0, 0]
+    const width = size[0] ?? 0
+    const height = size[1] ?? 0
+    try { win.toolbarView?.setBounds({ x: 0, y: 0, width, height: TOOLBAR_HEIGHT }) } catch { /* destroyed */ }
+    for (const v of win.views.values()) {
+      try { v.webContentsView.setBounds({ x: 0, y: TOOLBAR_HEIGHT, width, height: Math.max(0, height - TOOLBAR_HEIGHT) }) } catch { /* destroyed */ }
+    }
+  } catch { /* window gone */ }
+}
+
+/**
+ * Route keyboard focus on Windows. Mouse clicks reach any view regardless of
+ * focus, but keyboard events go only to the FOCUSED webContents (and a window
+ * regaining focus does not refocus any view, electron#28163). Focusing the
+ * clicked view on mousedown makes the toolbar and pages behave like a real
+ * browser: click the URL bar and type, click the page and type/scroll.
+ *
+ * Windows-only by design (issue #7): macOS/Linux already route keyboard input
+ * to the clicked view natively; calling webContents.focus() from inside the
+ * mousedown input-event there interferes with native click-to-focus and can
+ * leave login/page inputs unable to receive typed characters.
+ */
+function wireFocusRouting(win: HostWindow, view: WebContentsView, focusKey: string): void {
+  if (process.platform !== 'win32') return
+  view.webContents.on('input-event', (_event, input) => {
+    if (input.type !== 'mouseDown') return
+    win.lastFocusedViewId = focusKey
+    if (win.window.isFocused()) {
+      try { view.webContents.focus() } catch { /* destroyed */ }
+    }
+  })
+}
+
+/** Create the toolbar view for a window (best-effort; never fatal). */
+function createToolbar(win: HostWindow): WebContentsView | undefined {
+  try {
+    ensureToolbarFiles()
+    const view = new WebContentsView({
+      webPreferences: {
+        preload: join(TOOLBAR_DIR, 'preload.js'),
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    })
+    void view.webContents.loadFile(join(TOOLBAR_DIR, 'toolbar.html')).catch(() => { /* toolbar loads async */ })
+    view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    view.webContents.on('ipc-message', (_event, channel, ...args) => {
+      if (channel !== 'toolbar-action') return
+      // Diagnostics only; the parent never parses stderr.
+      process.stderr.write(`[dsh-browser host] toolbar action: ${String(args[0] ?? '')}\n`)
+      handleToolbarAction(win, String(args[0] ?? ''), (args[1] ?? {}) as Record<string, unknown>)
+    })
+    // Once the toolbar page is up, push the current tab strip so it is not
+    // empty until the first navigation event.
+    view.webContents.on('dom-ready', () => syncToolbar(win))
+    wireFocusRouting(win, view, TOOLBAR_FOCUS)
+    win.window.contentView.addChildView(view)
+    return view
+  } catch (error) {
+    process.stderr.write(`[dsh-browser host] toolbar creation failed: ${String(error)}\n`)
+    return undefined
+  }
+}
+
+/** Push the window's tab strip state to its toolbar. */
+function syncToolbar(win: HostWindow): void {
+  if (win.toolbarView === undefined) return
+  const tabs: Array<{ viewId: string; title: string; url: string; active: boolean }> = []
+  for (const [viewId, v] of win.views) {
+    let title = ''
+    let url = ''
+    try {
+      title = v.webContentsView.webContents.getTitle()
+      url = v.webContentsView.webContents.getURL()
+    } catch { /* destroyed */ }
+    tabs.push({ viewId, title, url, active: viewId === win.visibleViewId })
+  }
+  try {
+    win.toolbarView.webContents.send('tabs', { tabs })
+  } catch { /* toolbar not loaded yet */ }
+}
+
+/** Set a window's title: dsh-browser [label] — page title — url. */
+function updateWindowTitle(win: HostWindow, viewId: string | undefined, label: string | undefined): void {
+  try {
+    let title = 'dsh-browser'
+    if (label !== undefined && label !== '') title += ` [${label.slice(0, 48)}]`
+    const entry = viewId !== undefined ? win.views.get(viewId) : undefined
+    if (entry !== undefined) {
+      const pageTitle = entry.webContentsView.webContents.getTitle()
+      const url = entry.webContentsView.webContents.getURL()
+      if (pageTitle !== '') title += ` — ${pageTitle}`
+      if (url !== '' && url !== 'about:blank') title += ` — ${url}`
+    }
+    win.window.setTitle(title)
+  } catch { /* destroyed */ }
+}
+
+/**
+ * Make one view the visible (topmost) one WITHIN its window, leaving the window itself alone.
+ *
+ * Split out of {@link showViewInWindow} for quiet-mode capture: a screenshot still has to look
+ * at the active tab rather than another tab of the same window, but it must not show, restore,
+ * raise or focus the window to do it. Everything here is contentView-local.
+ * @param win - the window holding the view.
+ * @param viewId - the view to reveal.
+ * @param label - session/task label, when known, for the window title.
+ */
+function revealViewInWindow(win: HostWindow, viewId: string, label?: string): void {
+  const entry = win.views.get(viewId)
+  if (entry === undefined) return
+  // A navigation replaced this view's renderer, and the new one has no
+  // display surface yet. Chromium drops CDP synthesized input (Input.*) for a
+  // view without a surface, which silently swallowed the FIRST click/keystroke
+  // after every navigation — and because the view was already the visible one,
+  // the dance below used to be skipped entirely. Force it once.
+  const mustRepresent = entry.needsRepresent
+  if (mustRepresent) {
+    try { entry.webContentsView.setVisible(false) } catch { /* destroyed */ }
+  }
+  if (win.visibleViewId !== viewId || mustRepresent) {
+    // Hide every other view in THIS window, then show and RAISE the target
+    // (topmost child wins). When the target is already visible, skip the
+    // remove/re-add dance — doing it on every operation flickered.
+    for (const v of win.views.values()) {
+      if (v === entry) continue
+      try { v.webContentsView.setVisible(false) } catch { /* destroyed */ }
+    }
+    entry.webContentsView.setVisible(true)
+    try {
+      win.window.contentView.removeChildView(entry.webContentsView)
+      win.window.contentView.addChildView(entry.webContentsView)
+    } catch { /* window closing */ }
+    win.visibleViewId = viewId
+    entry.needsRepresent = false
+    syncToolbar(win)
+  }
+  // Always refresh the title: it reflects the CURRENT page of the visible
+  // view, which changes as the agent navigates.
+  updateWindowTitle(win, viewId, label)
+}
+
+/**
+ * Make one view the visible one within its window, and — outside quiet mode — raise the window.
+ * @param win - the window holding the view.
+ * @param viewId - the view to present.
+ * @param label - session/task label, when known, for the window title.
+ * @param quiet - `ui.quiet`: present without taking the screen over.
+ * @param _needSurface - pre-input barrier flag retained by the RPC protocol. Quiet presentation
+ *   opens a new visible window without activation and preserves an existing foreground page.
+ */
+function showViewInWindow(win: HostWindow, viewId: string, label?: string, quiet = false, _needSurface = false): void {
+  if (quiet) {
+    if (win.window.isMinimized()) return
+    // Preserve the page the operator is actively reading. Other views remain addressable by
+    // their own CDP session, without switching the foreground window's selected page.
+    if (win.window.isFocused() && win.visibleViewId !== viewId) return
+    revealViewInWindow(win, viewId, label)
+    // Quiet means a normal usable window without activation, including on the first open.
+    // An invisible surface made the browser look broken even after navigation succeeded.
+    if (win.window.getOpacity() === 0) {
+      win.window.setOpacity(1)
+      win.window.setSkipTaskbar(false)
+      win.window.setFocusable(true)
+    }
+    if (!win.window.isVisible()) win.window.showInactive()
+    return
+  }
+  revealViewInWindow(win, viewId, label)
+  try {
+    if (win.window.getOpacity() === 0) {
+      win.window.setFocusable(true)
+      win.window.setOpacity(1)
+      win.window.setSkipTaskbar(false)
+    }
+    if (!win.window.isVisible()) win.window.show()
+    win.window.moveTop()
+  } catch { /* closing */ }
+}
+
+/** Close a session window once its last view is gone (deferred, flicker-free). */
+function scheduleWindowClose(win: HostWindow): void {
+  if (win.windowId === SHARED_WINDOW_ID) return // shared fallback persists
+  if (win.closeTimer !== undefined) clearTimeout(win.closeTimer)
+  win.closeTimer = setTimeout(() => {
+    win.closeTimer = undefined
+    if (win.views.size > 0) return // a new tab arrived; keep the window
+    try { win.toolbarView?.webContents.close() } catch { /* already gone */ }
+    try { win.window.close() } catch { /* already gone */ }
+  }, 250)
+}
+
+/** Handle one command. */
+async function handle(op: string, msg: { id: number; viewId?: string; windowId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; label?: string; format?: string; quality?: number; maxWidth?: number; maxHeight?: number; message?: string; quiet?: boolean; needSurface?: boolean }): Promise<void> {
+  try {
+    switch (op) {
+      case 'ping':
+        reply(msg.id, { ok: true })
+        return
+      case 'groupView': {
+        const viewId = msg.viewId
+        const windowId = msg.windowId
+        if (viewId === undefined || typeof windowId !== 'string') throw new Error('groupView missing viewId/windowId')
+        // May arrive before or after createView; createView consumes it.
+        assignments.set(viewId, { windowId, ...typeof msg.label === 'string' ? { label: msg.label } : {} })
+        reply(msg.id, { ok: true })
+        return
+      }
+      case 'createView': {
+        const viewId = msg.viewId
+        if (viewId === undefined) throw new Error('createView missing viewId')
+        // Idempotent against a duplicate createView for the same id (e.g. two
+        // concurrent parent-side recoveries after a host death): re-creating
+        // would stack a second WebContentsView in the window and leak the
+        // first — the duplicate call simply confirms the existing view.
+        if (windowOfView(viewId) !== undefined) {
+          reply(msg.id, { ok: true })
+          return
+        }
+        const assignment = assignments.get(viewId)
+        const win = windowFor(assignment?.windowId)
+        const view = new WebContentsView()
+        // Route popups (window.open / target=_blank) into the session/tab
+        // model instead of letting Electron open untracked native windows.
+        view.webContents.setWindowOpenHandler(({ url }) => {
+          // HTTP(S) popups open as a NEW TAB of this view's session: the
+          // parent (provider) owns the session model and its newTab action
+          // creates the tab in the same window, navigates it, and records it
+          // in the session history. Overriding THIS view with loadURL()
+          // destroyed the opener page — pages that need their opener context
+          // (portal dashboards carrying token/referer to the new window)
+          // lost it and the target page then 403'd (issue #8); the tab strip
+          // now keeps the original page alive like a real browser.
+          if (/^https?:/i.test(url)) {
+            if (win.windowId !== SHARED_WINDOW_ID) {
+              sendUserAction({ type: 'newTab', windowId: win.windowId, url })
+            } else {
+              // Ungrouped view (no live session to attach a tab to,
+              // defensive only): fall back to navigating this view.
+              void view.webContents.loadURL(url).catch(() => { /* navigation failures surface on the next snapshot */ })
+            }
+            return { action: 'deny' }
+          }
+          // Non-HTTP popups (OAuth redirects, mailto:, custom schemes):
+          // allow the native window so OAuth flows and deep links work.
+          return { action: 'allow' }
+        })
+        // Attach the debugger BEFORE the view can be seen: an attach failure
+        // then leaves nothing in the window (no visible ghost view).
+        view.webContents.debugger.attach(CDP_VERSION)
+        // New views start hidden: only the shown one may be visible.
+        view.setVisible(false)
+        win.window.contentView.addChildView(view)
+        win.views.set(viewId, { webContentsView: view, needsRepresent: false })
+        // Keep the window title and the toolbar tab strip live as the page
+        // changes (navigations, title updates).
+        view.webContents.on('page-title-updated', () => { updateWindowTitle(win, viewId, undefined); syncToolbar(win) })
+        view.webContents.on('did-navigate', () => {
+          // The renderer process was just replaced: mark the view so the next
+          // show forces a fresh display surface (see showViewInWindow).
+          const current = win.views.get(viewId)
+          if (current !== undefined) current.needsRepresent = true
+          updateWindowTitle(win, viewId, undefined)
+          syncToolbar(win)
+        })
+        view.webContents.on('did-navigate-in-page', () => syncToolbar(win))
+        wireFocusRouting(win, view, viewId)
+        const first = win.views.size === 1
+        if (first) {
+          view.setVisible(true)
+          win.visibleViewId = viewId
+        }
+        layoutWindow(win)
+        if (first) updateWindowTitle(win, viewId, undefined)
+        syncToolbar(win)
+        // Prime the renderer BEFORE replying: the parent's next command
+        // (a location.href read) would otherwise hang on a view that has no
+        // renderer yet — the root of "host restarted and never recovers".
+        await primeRenderer(view)
+        reply(msg.id, { ok: true })
+        return
+      }
+      case 'destroyView': {
+        const viewId = msg.viewId
+        if (viewId === undefined) throw new Error('destroyView missing viewId')
+        const win = windowOfView(viewId)
+        if (win !== undefined) {
+          const entry = win.views.get(viewId)
+          win.views.delete(viewId)
+          if (win.visibleViewId === viewId) win.visibleViewId = undefined
+          try { entry?.webContentsView.webContents.debugger.detach() } catch { /* already detached */ }
+          try { entry?.webContentsView.webContents.close() } catch { /* destroyed */ }
+          try { if (entry !== undefined) win.window.contentView.removeChildView(entry.webContentsView) } catch { /* destroyed */ }
+          // The visible tab was destroyed: show the next one in this window.
+          if (win.visibleViewId === undefined && win.views.size > 0) {
+            const next = win.views.keys().next().value as string | undefined
+            if (next !== undefined) showViewInWindow(win, next)
+          } else if (win.visibleViewId === undefined) {
+            // No views left — reset the window title so it doesn't
+            // retain the old page's title.
+            updateWindowTitle(win, undefined, undefined)
+          }
+          syncToolbar(win)
+          // Close the window with its last view — deferred because the
+          // provider re-creates a blank tab right after closing the last one.
+          scheduleWindowClose(win)
+        }
+        assignments.delete(viewId)
+        reply(msg.id, { ok: true })
+        return
+      }
+      case 'showView': {
+        const viewId = msg.viewId
+        if (viewId === undefined) throw new Error('showView missing viewId')
+        const win = windowOfView(viewId)
+        if (win !== undefined) showViewInWindow(win, viewId, typeof msg.label === 'string' ? msg.label : undefined, msg.quiet === true, msg.needSurface === true)
+        reply(msg.id, { ok: true })
+        return
+      }
+      case 'userActionError': {
+        const windowId = msg.windowId
+        const message = msg.message
+        if (typeof windowId !== 'string' || typeof message !== 'string') throw new Error('userActionError missing windowId/message')
+        const win = windows.get(windowId)
+        if (win !== undefined) {
+          try { win.toolbarView?.webContents.send('user-action-error', message) } catch { /* toolbar not loaded */ }
+        }
+        reply(msg.id, { ok: true })
+        return
+      }
+      case 'command': {
+        const viewId = msg.viewId
+        if (viewId === undefined) throw new Error('command missing viewId')
+        const win = windowOfView(viewId)
+        const entry = win?.views.get(viewId)
+        if (win === undefined || entry === undefined) throw new Error(`command: unknown view ${viewId}`)
+        const method = msg.method
+        if (typeof method !== 'string') throw new Error('command missing method')
+        const result = await withTimeout(
+          entry.webContentsView.webContents.debugger.sendCommand(method, msg.params ?? {}),
+          COMMAND_TIMEOUT_MS,
+          `CDP ${method}`,
+        )
+        reply(msg.id, { ok: true, result })
+        return
+      }
+      case 'focus': {
+        const viewId = msg.viewId
+        if (viewId === undefined) throw new Error('focus missing viewId')
+        const win = windowOfView(viewId)
+        const entry = win?.views.get(viewId)
+        if (win === undefined || entry === undefined) throw new Error(`focus: unknown view ${viewId}`)
+        // Keys go to the view that holds web focus. A view that was never
+        // clicked holds none, so the FIRST dsh_browser_key of a session was dropped
+        // by the renderer while CDP still answered the dispatch with success —
+        // and `document.hasFocus()` inside the page even read true.
+        const contents = entry.webContentsView.webContents
+        const hadWebFocus = contents.isFocused()
+        // Electron webContents.focus() can activate its BrowserWindow. CDP input uses the
+        // target page's DOM focus and does not require that operating-system activation.
+        if (msg.quiet !== true) contents.focus()
+        // Focus lands asynchronously, and a key dispatched in the same turn as
+        // the request is still dropped, so hold the reply until the renderer can
+        // take input. Only on the call where focus actually had to move.
+        if (!hadWebFocus) await new Promise(resolve => setTimeout(resolve, FOCUS_SETTLE_MS))
+        reply(msg.id, { ok: true, focused: contents.isFocused() })
+        return
+      }
+      case 'capture': {
+        const viewId = msg.viewId
+        if (viewId === undefined) throw new Error('capture missing viewId')
+        const win = windowOfView(viewId)
+        const entry = win?.views.get(viewId)
+        if (win === undefined || entry === undefined) throw new Error(`capture: unknown view ${viewId}`)
+        // Two complementary paths, because each has a failure mode:
+        //  - capturePage: fast and reliable with several WebContentsViews in
+        //    the window, but needs a live display surface (fails when the
+        //    window is minimized/occluded/unpainted).
+        //  - CDP Page.captureScreenshot: works without a display surface, but
+        //    can hang when another hidden WebContentsView exists in the window.
+        // Try capturePage first (show/focus/restore + one retry), then CDP.
+        // PNG/JPEG + downscale are applied on the NativeImage here, so the
+        // body never needs a second round-trip.
+        const wantFormat = msg.format === 'jpeg' ? 'jpeg' : 'png'
+        const wantQuality = typeof msg.quality === 'number' ? msg.quality : 80
+        const maxW = typeof msg.maxWidth === 'number' ? msg.maxWidth : 0
+        const maxH = typeof msg.maxHeight === 'number' ? msg.maxHeight : 0
+        // Quiet mode: a screenshot is not a reason to take the screen over. Skipping the
+        // raise below is what makes a minimized window survive a screenshot: capturePage on
+        // a hidden view returns an empty image, and the CDP fallback captures without needing
+        // a display surface. The default path keeps the raise, because there a screenshot is
+        // how the human follows what the agent is doing.
+        const quiet = msg.quiet === true
+        let mime = 'image/png'
+        if (quiet) {
+          // The active tab has to be the visible one INSIDE the window, or the capture may read
+          // another tab. Keep that switch contentView-local: show/restore/focus are precisely
+          // what quiet mode forbids.
+          if (!win.window.isVisible() || win.window.getOpacity() === 0) revealViewInWindow(win, viewId)
+        } else {
+          try {
+            if (!win.window.isVisible()) win.window.show()
+          } catch { /* closing */ }
+          try { win.window.restore() } catch { /* not minimized */ }
+          win.window.focus()
+        }
+        let base64 = ''
+        let renderedSize: { width: number; height: number } | undefined
+        try {
+          let image
+          try {
+            image = await withTimeout(
+              entry.webContentsView.webContents.capturePage(),
+              COMMAND_TIMEOUT_MS,
+              'capturePage',
+            )
+          } catch (error) {
+            process.stderr.write(`[dsh-browser host] capturePage failed: ${String(error)}\n`)
+            await new Promise(resolve => setTimeout(resolve, 400))
+            image = await withTimeout(
+              entry.webContentsView.webContents.capturePage(),
+              COMMAND_TIMEOUT_MS,
+              'capturePage',
+            )
+          }
+          // Downscale to fit the requested box, preserving aspect ratio.
+          const size = image.getSize()
+          let w = size.width ?? 0
+          let h = size.height ?? 0
+          if (maxW > 0 && w > maxW) { h = Math.round(h * maxW / w); w = maxW }
+          if (maxH > 0 && h > maxH) { w = Math.round(w * maxH / h); h = maxH }
+          if (w > 0 && h > 0 && (w !== size.width || h !== size.height)) image = image.resize({ width: w, height: h })
+          // What the caller actually receives: after the downscale, not the captured size.
+          // Recorded here because this is the last point that knows both.
+          if (w > 0 && h > 0) renderedSize = { width: w, height: h }
+          const buf = wantFormat === 'jpeg' ? image.toJPEG(wantQuality) : image.toPNG()
+          if (wantFormat === 'jpeg') mime = 'image/jpeg'
+          if (buf.length > 0) base64 = buf.toString('base64')
+        } catch (error) {
+          process.stderr.write(`[dsh-browser host] capturePage retry failed: ${String(error)}\n`)
+          base64 = ''
+        }
+        if (base64 === '') {
+          // CDP fallback. Page.captureScreenshot can hang when OTHER views
+          // (especially hidden attach-first ones) are in the window, so
+          // temporarily detach the siblings AND the toolbar, capture in
+          // single-view state, then restore them (target stays on top).
+          const siblings = [...win.views.values()].filter(v => v !== entry)
+          const toolbar = win.toolbarView
+          for (const v of siblings) {
+            try { win.window.contentView.removeChildView(v.webContentsView) } catch { /* already gone */ }
+          }
+          if (toolbar !== undefined) {
+            try { win.window.contentView.removeChildView(toolbar) } catch { /* already gone */ }
+          }
+          try {
+            const shot = await withTimeout(
+              entry.webContentsView.webContents.debugger.sendCommand('Page.captureScreenshot', {}),
+              COMMAND_TIMEOUT_MS,
+              'Page.captureScreenshot',
+            )
+            const data = (shot as { data?: unknown }).data
+            if (typeof data === 'string' && data.length > 0) base64 = data
+          } finally {
+            if (toolbar !== undefined) {
+              try { win.window.contentView.addChildView(toolbar) } catch { /* destroyed */ }
+            }
+            for (const v of siblings) {
+              try { win.window.contentView.addChildView(v.webContentsView) } catch { /* destroyed */ }
+            }
+            try {
+              win.window.contentView.removeChildView(entry.webContentsView)
+              win.window.contentView.addChildView(entry.webContentsView)
+            } catch { /* closing */ }
+          }
+        }
+        if (base64 === '') {
+          throw new Error('capture produced no image (view not painted)')
+        }
+        // The measured size travels with the image. Without it the native path — which is the
+        // default self-hosted one — could never answer `dsh_browser_screenshot`'s width/height,
+        // because the seam's only channel was {base64, mime} and the provider had nothing to
+        // forward. The caller's `maxWidth`/`maxHeight` are applied here, so this is the only
+        // place that knows what came back.
+        reply(msg.id, { ok: true, result: { base64, mime, width: renderedSize?.width, height: renderedSize?.height } })
+        return
+      }
+      case 'download': {
+        const viewId = msg.viewId
+        const url = msg.url
+        const savePath = msg.savePath
+        if (viewId === undefined || typeof url !== 'string' || typeof savePath !== 'string') {
+          throw new Error('download missing viewId/url/savePath')
+        }
+        const win = windowOfView(viewId)
+        const entry = win?.views.get(viewId)
+        if (win === undefined || entry === undefined) throw new Error(`download: unknown view ${viewId}`)
+        // Fetch the URL inside the page context (keeps cookies/login), read
+        // the body as base64, and write the file HERE — the body never
+        // crosses the RPC line protocol, so large downloads cannot balloon
+        // the parent's memory or hit the single-line cap. This also avoids
+        // Electron's download pipeline entirely (CDP debugger attach can
+        // interfere with will-download).
+        // Bounded like every other op. The evaluate awaits a page-side fetch, so a slow or
+        // unresponsive server held the serial queue open forever: handle() never settled,
+        // every later op queued behind it, and the parent's plain timeout does not restart
+        // the host.
+        const result = await withTimeout(
+          entry.webContentsView.webContents.debugger.sendCommand('Runtime.evaluate', {
+          // Stream the body through a reader so the size cap is enforced as
+          // bytes arrive — never buffer an unbounded download into memory
+          // before checking the limit (a huge URL would otherwise OOM the
+          // renderer). The declared Content-Length short-circuits large files
+          // before any body is read.
+          expression: `(async () => {
+            const r = await fetch(${JSON.stringify(url)}, { credentials: 'include' })
+            if (!r.ok) throw new Error('HTTP ' + r.status)
+            const declared = Number(r.headers.get('content-length') || 0)
+            if (declared > ${String(MAX_DOWNLOAD_BYTES)}) throw new Error('download too large (limit ' + ${String(MAX_DOWNLOAD_BYTES)} + ' bytes, declared ' + declared + ')')
+            if (!r.body || typeof r.body.getReader !== 'function') {
+              const b = await r.arrayBuffer()
+              const bytes = new Uint8Array(b)
+              if (bytes.length > ${String(MAX_DOWNLOAD_BYTES)}) throw new Error('download too large (limit ' + ${String(MAX_DOWNLOAD_BYTES)} + ' bytes, got ' + bytes.length + ')')
+              let bin = ''
+              for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+              return btoa(bin)
+            }
+            const reader = r.body.getReader()
+            const chunks = []
+            let total = 0
+            for (;;) {
+              const { done, value } = await reader.read()
+              if (done) break
+              total += value.length
+              if (total > ${String(MAX_DOWNLOAD_BYTES)}) {
+                await reader.cancel()
+                throw new Error('download too large (limit ' + ${String(MAX_DOWNLOAD_BYTES)} + ' bytes, got ' + total + ')')
+              }
+              chunks.push(value)
+            }
+            const bytes = new Uint8Array(total)
+            let off = 0
+            for (const c of chunks) { bytes.set(c, off); off += c.length }
+            let bin = ''
+            for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+            return btoa(bin)
+          })()`,
+          awaitPromise: true,
+          returnByValue: true,
+          }) as Promise<{ result?: { value?: unknown }; exceptionDetails?: { exception?: { description?: string } } }>,
+          COMMAND_TIMEOUT_MS,
+          'download evaluate',
+        )
+        const value = (result as { result?: { value?: unknown } }).result?.value
+        if (typeof value !== 'string') {
+          const detail = (result as { exceptionDetails?: { exception?: { description?: string } } }).exceptionDetails
+          throw new Error(`download failed: ${detail?.exception?.description ?? 'no data'}`)
+        }
+        writeFileNoReplace(savePath, Buffer.from(value, 'base64'))
+        reply(msg.id, { ok: true, result: { path: savePath } })
+        return
+      }
+      case 'flushAuth': {
+        const viewId = msg.viewId
+        if (viewId === undefined) throw new Error('flushAuth missing viewId')
+        const win = windowOfView(viewId)
+        const entry = win?.views.get(viewId)
+        if (win === undefined || entry === undefined) throw new Error(`flushAuth: unknown view ${viewId}`)
+        // Export the session's cookies so login state can be saved/restored
+        // across browser hosts (or shared with another machine).
+        //
+        // Scoped to this view's own page. The jar is SHARED on purpose: views here are built
+        // without a partition and every window drives the same browser, so signing in once
+        // works everywhere. What must not be shared is the HANDING OVER — an unfiltered read
+        // would put every domain every task has visited, plus whatever the human is signed
+        // into, in front of one task's caller. Least exposure, not isolation. An unknown page
+        // refuses rather than widening.
+        //
+        // Bounded like every other op: a renderer that stops answering here would hold the
+        // serial queue forever, and the parent's plain timeout does not restart the host.
+        const pageUrl = entry.webContentsView.webContents.getURL()
+        if (pageUrl === '' || pageUrl === 'about:blank') {
+          throw new Error('flushAuth: this view has no page loaded, so the cookie scope is unknown — reading everything would expose other sessions')
+        }
+        const cookies = await withTimeout(
+          entry.webContentsView.webContents.session.cookies.get({ url: pageUrl }),
+          COMMAND_TIMEOUT_MS,
+          'cookies.get',
+        )
+        const exported = cookies.map(c => {
+          // Electron types the cookie domain as optional; a missing domain
+          // cannot be exported meaningfully, so default to '' (matches the
+          // shim's string typing and keeps the export shape stable).
+          const domain = c.domain ?? ''
+          const host = domain.startsWith('.') ? domain.slice(1) : domain
+          // IPv6 literal domains need brackets in a URL (e.g. http://[::1]/).
+          const hostPart = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+          return {
+            url: `http${c.secure ? 's' : ''}://${hostPart}${c.path}`,
+            name: c.name,
+            value: c.value,
+            domain,
+            path: c.path,
+            secure: c.secure,
+            httpOnly: c.httpOnly,
+            expirationDate: c.expirationDate,
+          }
+        })
+        reply(msg.id, { ok: true, result: { cookies: exported } })
+        return
+      }
+      case 'restoreAuth': {
+        const viewId = msg.viewId
+        const cookies = msg.cookies
+        if (viewId === undefined) throw new Error('restoreAuth missing viewId')
+        const win = windowOfView(viewId)
+        const entry = win?.views.get(viewId)
+        if (win === undefined || entry === undefined) throw new Error(`restoreAuth: unknown view ${viewId}`)
+        if (!Array.isArray(cookies)) throw new Error('restoreAuth missing cookies array')
+        let restored = 0
+        for (const c of cookies as Array<{ url?: string; name?: string; value?: string; domain?: string; path?: string; secure?: boolean; httpOnly?: boolean; expirationDate?: number }>) {
+          if (typeof c.url !== 'string' || typeof c.name !== 'string' || typeof c.value !== 'string') continue
+          // Bounded per cookie: this runs once for every cookie, so a single hang held the
+          // serial queue open forever with no path to recovery.
+          await withTimeout(
+            entry.webContentsView.webContents.session.cookies.set({
+              url: c.url,
+              name: c.name,
+              value: c.value,
+              ...typeof c.domain === 'string' ? { domain: c.domain } : {},
+              ...typeof c.path === 'string' ? { path: c.path } : {},
+              ...typeof c.secure === 'boolean' ? { secure: c.secure } : {},
+              ...typeof c.httpOnly === 'boolean' ? { httpOnly: c.httpOnly } : {},
+              ...typeof c.expirationDate === 'number' ? { expirationDate: c.expirationDate } : {},
+            }),
+            COMMAND_TIMEOUT_MS,
+            'cookies.set',
+          )
+          restored++
+        }
+        reply(msg.id, { ok: true, result: { restored } })
+        return
+      }
+      default:
+        throw new Error(`unknown op ${op}`)
+    }
+  } catch (error) {
+    reply(msg.id, { ok: false, err: String(error) })
+  }
+}
+
+/**
+ * Chromium's native-window occlusion tracker (Windows only) asks DWM whether a
+ * window is covered by another window and, when it is, moves the WebContents to
+ * `Visibility::HIDDEN`. That is the wrong model for this host: the shared
+ * browser window normally sits *behind* whatever the human is working in, and
+ * that is exactly the state the agent drives it from. A hidden WebContents
+ * produces no frames at all (`requestAnimationFrame` never fires) and
+ * `RenderWidgetHostImpl::CanReceiveInput()` returns false, so every
+ * `Input.dispatchMouseEvent`/`dispatchKeyEvent` sent over CDP is dropped on the
+ * floor while the CDP call itself still answers `{}` — clicks and keys that
+ * silently do nothing, with no error anywhere. Keep the window's visibility
+ * state application-controlled instead; the parent already shows/raises views
+ * explicitly, and `webContentsView.setVisible()` remains the single source of
+ * truth for whether a view renders.
+ */
+function keepWindowsNonOccluding(): void {
+  if (process.platform !== 'win32') return
+  const DISABLED = 'CalculateNativeWinOcclusion'
+  const current = app.commandLine.getSwitchValue('disable-features') ?? ''
+  const features = current
+    .split(',')
+    .map(part => part.trim())
+    .filter(part => part !== '')
+  if (!features.includes(DISABLED)) features.push(DISABLED)
+  app.commandLine.appendSwitch('disable-features', features.join(','))
+}
+keepWindowsNonOccluding()
+
+
+// ---------------------------------------------------------------------------
+// Human reference entries (design §3.1 / §11.3): ONE owner per page.
+// A typed preload gives the page a narrow intent channel; the page-side
+// overlay is low-trust and never receives activeTab/screenshot authority.
+// ---------------------------------------------------------------------------
+const REFERENCE_PRELOAD = `const { contextBridge, ipcRenderer } = require('electron')
+try {
+  contextBridge.exposeInMainWorld('__dshRef', {
+    intent: payload => ipcRenderer.send('dsh-reference-intent', payload),
+  })
+} catch (error) { /* another preload already owns this name */ }
+`
+const REFERENCE_PRELOAD_PATH = join(TOOLBAR_DIR, 'reference-preload.js')
+
+function isToolbarContents(contents: import('electron').WebContents): boolean {
+  try { return contents.getURL().endsWith('/toolbar.html') } catch { return false }
+}
+
+/** Find the session/window id whose view owns these webContents. */
+function windowIdForContents(contents: import('electron').WebContents): string | undefined {
+  for (const [key, win] of windows) {
+    for (const entry of win.views.values()) {
+      try {
+        if (entry.webContentsView.webContents === contents) return key
+      } catch { /* view was destroyed mid-iteration */ }
+    }
+  }
+  return undefined
+}
+
+/** Install the single merged context menu and the resident selection entry. */
+function attachReferenceEntry(contents: import('electron').WebContents): void {
+  if (isToolbarContents(contents)) return
+  contents.on('context-menu', (_event, params) => {
+    const windowId = windowIdForContents(contents)
+    if (windowId === undefined) return
+    // The browser's ordinary edit items are kept in the SAME menu, so no second
+    // adapter can pop another one over it (design §3.1:59). The real params
+    // decide which reference actions exist, and the target travels with the
+    // action so a collapsed selection cannot change what was clicked (§3.2/§3.3).
+    const hasSelection = typeof params.selectionText === 'string' && params.selectionText.trim() !== ''
+    const mediaType = typeof params.mediaType === 'string' ? params.mediaType : undefined
+    const template = referenceMenuTemplate({
+      hasSelection,
+      ...mediaType !== undefined ? { mediaType } : {},
+    }).map(item => {
+      if (item.kind === 'separator') return { type: 'separator' as const }
+      if (item.kind === 'role') {
+        if (item.role === undefined) return { type: 'separator' as const }
+        return { role: item.role, label: item.label }
+      }
+      const target = item.target === undefined ? undefined : {
+        kind: item.target,
+        ...item.target === 'image' && typeof params.srcURL === 'string' && params.srcURL !== ''
+          ? { srcUrl: params.srcURL } : {},
+        ...Number.isFinite(params.x) ? { x: params.x } : {},
+        ...Number.isFinite(params.y) ? { y: params.y } : {},
+      }
+      return {
+        id: item.id,
+        label: item.label,
+        click: () => sendUserAction({
+          type: 'capture-reference', windowId, entry: 'native-menu',
+          ...target !== undefined ? { target } : {},
+        }),
+      }
+    })
+    try { Menu.buildFromTemplate(template).popup() } catch (error) {
+      process.stderr.write(`[dsh-browser host] reference menu failed: ${String(error)}\n`)
+    }
+  })
+  contents.on('ipc-message', (_event, channel, ...args) => {
+    if (channel !== 'dsh-reference-intent') return
+    const intent = args[0] as Record<string, unknown> | undefined
+    if (intent === undefined || intent.type !== REFERENCE_INTENT_CHANNEL) return
+    // isTrusted is deliberately NOT read: a page overlay is a low-trust entry.
+    const windowId = windowIdForContents(contents)
+    if (windowId === undefined) return
+    // The page trims its own note; the host re-bounds it because a page is
+    // low-trust, and ignores anything that is not a string.
+    const rawComment = typeof intent.comment === 'string' ? intent.comment.trim() : ''
+    const comment = rawComment.slice(0, MAX_REFERENCE_COMMENT)
+    // The bar freezes the selection text before the comment field takes focus
+    // (focusing it collapses the page selection). Re-bound here: a page is
+    // low-trust, and this string becomes the locator when the live selection is
+    // already gone.
+    const rawSelection = typeof intent.selectionText === 'string' ? intent.selectionText : ''
+    const selectionText = rawSelection.trim().slice(0, MAX_REFERENCE_TEXT)
+    // The bar freezes the complete ordered capture before its comment field
+    // takes focus. Bound and shape-check it here: a page is low-trust.
+    const capture = validateFrozenCapture(intent.capture)
+    sendUserAction({
+      type: 'capture-reference', windowId, entry: 'page-overlay',
+      ...comment !== '' ? { comment } : {},
+      ...selectionText !== '' ? { selectionText } : {},
+      ...capture !== undefined ? { capture } : {},
+    })
+  })
+  contents.on('dom-ready', () => {
+    if (isToolbarContents(contents)) return
+    void contents.executeJavaScript(standaloneScript(overlayScript(), { label: '引用到 DSH' }))
+      .catch(() => { /* an extension-managed page owns its own entry */ })
+  })
+}
+
+app.on('web-contents-created', (_event, contents) => {
+  try { attachReferenceEntry(contents) } catch (error) {
+    process.stderr.write(`[dsh-browser host] reference entry failed: ${String(error)}\n`)
+  }
+})
+
+/** Remove the overlay on plugin shutdown; the disposer clears every listener. */
+export function disposeReferenceEntries(views: Iterable<import('electron').WebContents>): void {
+  for (const contents of views) {
+    try { void contents.executeJavaScript(standaloneScript(overlayDisposeScript())) } catch { /* gone */ }
+  }
+}
+
+/**
+ * Electron entry: connect back to the parent's RPC server (port from
+ * `--rpc-port`) and serve line-delimited JSON-RPC. `ELECTRON_RUN_AS_NODE` is
+ * cleared by the parent so `require('electron')` works; this file is loaded as
+ * the app entry so `app` is available immediately.
+ */
+void app.whenReady().then(() => {
+  // One narrow preload for every webContents in this session. It only exposes
+  // an intent sender; no file, command or CDP capability crosses the boundary.
+  try {
+    mkdirSync(TOOLBAR_DIR, { recursive: true })
+    writeFileSync(REFERENCE_PRELOAD_PATH, REFERENCE_PRELOAD)
+    // APPEND, never replace: another part of the shell may already own a
+    // preload, and `setPreloads` takes the whole list.
+    const existing = session.defaultSession.getPreloads()
+    if (!existing.includes(REFERENCE_PRELOAD_PATH)) {
+      session.defaultSession.setPreloads([...existing, REFERENCE_PRELOAD_PATH])
+    }
+  } catch (error) {
+    process.stderr.write(`[dsh-browser host] reference preload unavailable: ${String(error)}\n`)
+  }
+  const portArg = process.argv.indexOf('--rpc-port')
+  const port = portArg >= 0 ? Number(process.argv[portArg + 1]) : NaN
+  if (!Number.isFinite(port)) {
+    process.stderr.write('[dsh-browser host] missing --rpc-port\n')
+    app.exit(1)
+    return
+  }
+  const socket = createConnection({ host: '127.0.0.1', port })
+  rpcSocket = socket
+  socket.setEncoding('utf8')
+  // Prove we know the parent's spawn token before anything else; the parent
+  // refuses a connection whose first line is not this hello. The token is
+  // written to stdin at spawn (moments after process start, long before
+  // Electron's whenReady resolves), but guard the ordering anyway: sending an
+  // empty hello would read as a spoofed connection and tear the session down.
+  const writeHello = (): void => {
+    socket.write(JSON.stringify({ id: 0, op: 'hello', token: RPC_TOKEN }) + '\n')
+  }
+  if (RPC_TOKEN !== '') {
+    // Either stdin already delivered a line (it wins) or env supplied the fallback.
+    writeHello()
+  } else {
+    // Neither yet: wait for stdin's first line with a bounded fallback, then send whatever
+    // we have — an empty hello is refused by the parent, which then fails cleanly. The
+    // reader is the module-level one, NOT a second createInterface on the same stream: two
+    // readers of one stdin both consume its lines, so the second one never saw the token.
+    const fallback = setTimeout(() => writeHello(), 2_000)
+    if (stdinLines !== undefined) {
+      const send = (): void => { clearTimeout(fallback); writeHello() }
+      stdinLines.once('line', send)
+      stdinLines.once('close', send)
+    }
+  }
+  const rl = createRpcLineReader(socket, error => {
+    process.stderr.write(`[dsh-browser host] socket error: ${String(error)}\n`)
+  })
+  // Handle messages STRICTLY in order. Ops depend on each other completing:
+  // a `command` for a view must not overtake the `createView` that makes it,
+  // and the parent's present-barrier (`showView` then `ping`) is only
+  // meaningful if the child cannot answer the ping mid-show. The previous
+  // fire-and-forget loop let all of them race, which is how a fresh tab's
+  // first click could be dispatched before its view was ever on screen.
+  let queue: Promise<void> = Promise.resolve()
+  rl.on('line', line => {
+    const text = line.trim()
+    if (text === '') return
+    let msg: { id: number; op?: string; viewId?: string; windowId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; label?: string; format?: string; quality?: number; maxWidth?: number; maxHeight?: number; message?: string; quiet?: boolean; needSurface?: boolean }
+    try {
+      msg = JSON.parse(text) as typeof msg
+    } catch {
+      return // non-protocol noise
+    }
+    if (typeof msg.id !== 'number' || typeof msg.op !== 'string') return
+    // Bind the narrowed op now: the check above does not survive into the
+    // deferred callback (msg is a mutable binding).
+    const op = msg.op
+    queue = queue.then(() => handle(op, msg)).catch(() => { /* reply already sent inside handle */ })
+  })
+  // The parent owns our lifetime: when it closes the socket (dispose) or dies
+  // without cleanup, exit so no zombie Electron window is left behind.
+  socket.on('close', () => {
+    process.stderr.write('[dsh-browser host] parent connection closed, exiting\n')
+    // A normal quit, not `app.exit(0)`. exit() skips before-quit/will-quit and does not wait
+    // for Chromium to finish writing the profile — the leveldb files holding cookies and site
+    // data. This path runs on every dispose, and a session that has just logged in is exactly
+    // when the profile holds unwritten state, so a hard exit could leave a half-written leveldb
+    // behind, which is what makes a browser profile fail to open on the next launch.
+    app.quit()
+    // Belt and braces: the parent is already gone, so there is nothing left to serve. If a
+    // listener or a window blocks the quit, forcing the exit after a grace period is still
+    // strictly better than an orphaned Electron window the user has to close by hand.
+    const force = setTimeout(() => app.exit(0), 5000)
+    force.unref()
+  })
+  // Keep the process alive until the parent closes the socket or kills us.
+})
+
+// Diagnostics go to stderr, which the parent never parses as protocol.
+process.on('uncaughtException', error => {
+  process.stderr.write(`[dsh-browser host] uncaught: ${String(error)}\n`)
+})

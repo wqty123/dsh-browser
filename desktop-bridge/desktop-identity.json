@@ -1,0 +1,9 @@
+{
+  "_comment": "What proves a directory is DSH Desktop, in one place: the installer (desktop-bridge/install.mjs) and the plugin's status reader (src/browser-electron/bridge-status.ts) both read this file, and a test asserts neither hard-codes a second copy. A generic Electron layout — resources/app/lib/main.js or resources/app.asar — is NOT proof: any Electron app has that shape.",
+  "packageNames": [
+    "@deepseek-ai/dsh-desktop",
+    "dsh-desktop"
+  ],
+  "mainEntry": "lib/main.js",
+  "_layoutNote": "resources/app.asar wins over resources/app whenever it exists, so identity is read from the archive in that case and never from the sibling extraction, which the updater leaves behind and which may be a different build."
+}

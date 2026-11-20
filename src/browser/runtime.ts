@@ -1,0 +1,464 @@
+/**
+ * Service Definition for the browser capability seam (`ctx.browser`): the
+ * provider registry and provider-selecting execution for browser sessions.
+ * Duplicate ids are rejected. At execution time, a configured provider must
+ * exist and be usable; without one, exactly one usable provider is required,
+ * so selection never depends on registration order.
+ * @module dsh-browser/browser
+ */
+
+import { pageOperationScript } from '../tool-browser/page-probe.ts'
+import { Context, Service } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import type {
+  BrowserA11yRequest,
+  BrowserA11yResult,
+  BrowserCheckRequest,
+  BrowserClearRequest,
+  BrowserClickRequest,
+  BrowserClickSequenceRequest,
+  BrowserClickSequenceResult,
+  BrowserContentRequest,
+  BrowserContentResult,
+  BrowserDownloadRequest,
+  BrowserElementTarget,
+  BrowserExecuteRequest,
+  BrowserPageOperationRequest,
+  BrowserExecuteResult,
+  BrowserFillRequest,
+  BrowserFillResult,
+  BrowserGetValueRequest,
+  BrowserGetValueResult,
+  BrowserHistoryEntry,
+  BrowserNavigateRequest,
+  BrowserOpenRequest,
+  BrowserPreviewFrame,
+  BrowserProvider,
+  BrowserScrapeRequest,
+  BrowserScrapeResult,
+  BrowserScreenshotRequest,
+  BrowserScreenshotResult,
+  BrowserSelectRequest,
+  BrowserSelectResult,
+  BrowserSessionId,
+  BrowserSetValueRequest,
+  BrowserSetValueResult,
+  BrowserSnapshotResult,
+  BrowserTab,
+  BrowserTypeRequest,
+  BrowserWaitRequest,
+  BrowserWaitResult,
+  BrowserScrollRequest,
+  BrowserKeyRequest,
+  BrowserChallenge,
+  ExportedCookie,
+  VisitedPage,
+} from './types.ts'
+import { BrowserError } from './types.ts'
+
+export {
+  BrowserError,
+} from './types.ts'
+export type {
+  BrowserA11yNode,
+  BrowserA11yRequest,
+  BrowserA11yResult,
+  BrowserChallenge,
+  BrowserCheckRequest,
+  BrowserClearRequest,
+  BrowserClickRequest,
+  BrowserClickSequenceRequest,
+  BrowserClickSequenceResult,
+  BrowserContentFormat,
+  BrowserElementTarget,
+  BrowserGetValueRequest,
+  BrowserGetValueResult,
+  BrowserScrapeField,
+  BrowserScrapeRequest,
+  BrowserScrapeResult,
+  BrowserSelectRequest,
+  BrowserSelectResult,
+  BrowserSetValueRequest,
+  BrowserSetValueResult,
+  BrowserWaitRequest,
+  BrowserWaitResult,
+  BrowserScrollRequest,
+  BrowserKeyRequest,
+  BrowserContentRequest,
+  BrowserContentResult,
+  BrowserDownloadRequest,
+  BrowserExecuteRequest,
+  BrowserExecuteResult,
+  BrowserFillField,
+  BrowserFillRequest,
+  BrowserFillResult,
+  BrowserHistoryEntry,
+  BrowserNavigateRequest,
+  BrowserOpenRequest,
+  BrowserPreviewFrame,
+  BrowserProvider,
+  BrowserScreenshotRequest,
+  BrowserScreenshotResult,
+  BrowserSessionId,
+  BrowserSnapshotElement,
+  BrowserSnapshotResult,
+  BrowserTab,
+  BrowserTypeRequest,
+  ExportedCookie,
+} from './types.ts'
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    browser: BrowserRuntime
+  }
+}
+
+/**
+ * Config for the browser seam. `browserProvider` pins which provider wins;
+ * it is optional (a single registered usable provider auto-selects).
+ */
+export interface BrowserRuntimeConfig {
+  /** Explicit browser provider id. Omitted = auto-select when exactly one usable. */
+  readonly browserProvider?: string
+}
+
+/**
+ * The browser access service. Registered as `ctx.browser` (one instance per
+ * context).
+ *
+ * Selection semantics (resolved at execution time, never order-dependent):
+ * - A configured id that is registered and `available()` → that provider.
+ * - A configured id not registered → `BROWSER_PROVIDER_CONFIGURED_MISSING`.
+ * - A configured id registered but unavailable → `BROWSER_PROVIDER_CONFIGURED_UNAVAILABLE`.
+ * - No id configured, exactly one registered usable provider → that provider.
+ * - No id configured, multiple usable providers → `BROWSER_PROVIDER_AMBIGUOUS`.
+ * - No id configured, no usable provider → `BROWSER_PROVIDER_UNAVAILABLE`.
+ */
+export class BrowserRuntime extends Service {
+  /** Provider selection config. */
+  static Config: z<BrowserRuntimeConfig> = z.object({
+    browserProvider: z.string(),
+  })
+
+  private providers = new Map<string, BrowserProvider>()
+  private readonly providerId: string | undefined
+
+  constructor(ctx: Context, config: BrowserRuntimeConfig = {}) {
+    super(ctx, 'browser')
+    this.providerId = config.browserProvider
+  }
+
+  /**
+   * Register a browser provider. Throws {@link BrowserError}
+   * `BROWSER_DUPLICATE_PROVIDER` if its id is already registered. Returns a
+   * disposer; disposed with the calling fiber.
+   * @param provider - the provider; its `id` is the registry key.
+   * @returns the disposer that unregisters the provider.
+   */
+  registerBrowserProvider(provider: BrowserProvider): () => void {
+    if (this.providers.has(provider.id)) {
+      throw new BrowserError(`a browser provider with id "${provider.id}" is already registered`, 'BROWSER_DUPLICATE_PROVIDER')
+    }
+    // Bind the generator to this instance instead of aliasing `this` to a
+    // local (no-this-alias): the effect body mutates the instance registry.
+    const dispose = this.ctx.effect(function* (this: BrowserRuntime) {
+      this.providers.set(provider.id, provider)
+      yield () => this.providers.delete(provider.id)
+    }.bind(this), 'browser.registerProvider()')
+    // ctx.effect's disposer returns Promise<void>; our disposer API is
+    // synchronous fire-and-forget — discard the (always-resolved) promise.
+    return () => void dispose()
+  }
+
+  /** Resolve the selected provider or throw the matching {@link BrowserError}. */
+  private resolveProvider(): BrowserProvider {
+    const { providerId, providers } = this
+    if (providerId !== undefined) {
+      const provider = providers.get(providerId)
+      if (!provider) {
+        throw new BrowserError(`configured browser provider "${providerId}" is not registered`, 'BROWSER_PROVIDER_CONFIGURED_MISSING')
+      }
+      if (!provider.available()) {
+        throw new BrowserError(`configured browser provider "${providerId}" is registered but unavailable`, 'BROWSER_PROVIDER_CONFIGURED_UNAVAILABLE')
+      }
+      return provider
+    }
+    const usable = [...providers.values()].filter(provider => provider.available())
+    const [single] = usable
+    if (single === undefined) {
+      // Two very different causes used to read identically here — nothing is
+      // registered, or something is registered but cannot run — and only the
+      // second one has a fix the user can apply without reinstalling.
+      const registered = [...providers.values()].map(provider => provider.id)
+      if (registered.length === 0) {
+        throw new BrowserError(
+          'no browser provider is registered — install a browser plugin (e.g. dsh-builtin-browser) and enable it in this profile',
+          'BROWSER_PROVIDER_UNAVAILABLE',
+        )
+      }
+      throw new BrowserError(
+        `browser provider(s) ${registered.join(', ')} are registered but report themselves unavailable — `
+        + 'for dsh-builtin-browser this means no spawnable Electron binary was found; run `npx install-electron` in the active profile or set ELECTRON_PATH',
+        'BROWSER_PROVIDER_UNAVAILABLE',
+      )
+    }
+    if (usable.length > 1) {
+      const ids = usable.map(provider => provider.id).join(', ')
+      throw new BrowserError(`multiple usable browser providers are registered (${ids}); configure one explicitly`, 'BROWSER_PROVIDER_AMBIGUOUS')
+    }
+    return single
+  }
+
+  /** Open a new browser session through the selected provider. */
+  async open(label?: string): Promise<BrowserSessionId> {
+    return this.resolveProvider().open(label)
+  }
+
+  /** Open a URL through the selected provider, optionally in a new tab. */
+  async openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().openUrl(session, request, signal)
+  }
+
+  /** List the session's tabs through the selected provider. */
+  async listTabs(session: BrowserSessionId): Promise<readonly BrowserTab[]> {
+    return this.resolveProvider().listTabs(session)
+  }
+
+  /** Switch to a tab through the selected provider. */
+  async switchTab(session: BrowserSessionId, tabId: string): Promise<void> {
+    return this.resolveProvider().switchTab(session, tabId)
+  }
+
+  /** Close one tab through the selected provider. */
+  async closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
+    return this.resolveProvider().closeTab(session, tabId)
+  }
+
+  /** Close every tab and reset the session through the selected provider. */
+  async reset(session: BrowserSessionId): Promise<void> {
+    return this.resolveProvider().reset(session)
+  }
+
+  /** Navigate the session's page through the selected provider. */
+  async navigate(session: BrowserSessionId, request: BrowserNavigateRequest, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().navigate(session, request, signal)
+  }
+
+  /** Execute JS in the session's page context through the selected provider. */
+  async execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
+    return this.resolveProvider().execute(session, request, signal)
+  }
+
+  /** Execute one provider-owned page operation with validated operation names. */
+  async pageOperation(session: BrowserSessionId, request: BrowserPageOperationRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
+    const provider = this.resolveProvider()
+    // Legacy providers retain their execute permission checks.
+    return provider.pageOperation
+      ? provider.pageOperation(session, request, signal)
+      : provider.execute(session, { script: pageOperationScript(request) }, signal)
+  }
+
+  /** Wait until the session's page is ready (and optional URL/selector match). */
+  async waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult> {
+    return this.resolveProvider().waitFor(session, request, signal)
+  }
+
+  /** Produce an AI-friendly snapshot of the session's page. */
+  async snapshot(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserSnapshotResult> {
+    return this.resolveProvider().snapshot(session, signal)
+  }
+
+  /** Read the session's page accessibility tree through the selected provider. */
+  async a11y(session: BrowserSessionId, request: BrowserA11yRequest, signal?: AbortSignal): Promise<BrowserA11yResult> {
+    return this.resolveProvider().a11y(session, request, signal)
+  }
+
+  /** Reload the session's active tab through the selected provider. */
+  async reload(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().reload(session, signal)
+  }
+
+  /** Fetch page content in a requested format. */
+  async content(session: BrowserSessionId, request: BrowserContentRequest, signal?: AbortSignal): Promise<BrowserContentResult> {
+    return this.resolveProvider().content(session, request, signal)
+  }
+
+  /** Click at viewport coordinates (or a located element) through the selected provider. */
+  async click(session: BrowserSessionId, request: BrowserClickRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().click(session, request, signal)
+  }
+
+  /** Click several points in order through the selected provider. */
+  async clickSequence(session: BrowserSessionId, request: BrowserClickSequenceRequest, signal?: AbortSignal): Promise<BrowserClickSequenceResult> {
+    return this.resolveProvider().clickSequence(session, request, signal)
+  }
+  /** Type into the focused element (or a located one) through the selected provider. */
+  async type(session: BrowserSessionId, request: BrowserTypeRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().type(session, request, signal)
+  }
+
+  /** Scroll the session's page through the selected provider. */
+  async scroll(session: BrowserSessionId, request: BrowserScrollRequest, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().scroll(session, request, signal)
+  }
+
+  /** Go back in the session's page history through the selected provider. */
+  async back(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().back(session, signal)
+  }
+
+  /** Go forward in the session's page history through the selected provider. */
+  async forward(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().forward(session, signal)
+  }
+
+  /** Press one named key through the selected provider. */
+  async key(session: BrowserSessionId, request: BrowserKeyRequest, signal?: AbortSignal): Promise<void> {
+    return this.resolveProvider().key(session, request, signal)
+  }
+
+  /** Fill a form's fields in one batch through the selected provider. */
+  async fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult> {
+    return this.resolveProvider().fillForm(session, request, signal)
+  }
+
+  /** Set one element's value through the selected provider. */
+  async setValue(session: BrowserSessionId, request: BrowserSetValueRequest, signal?: AbortSignal): Promise<BrowserSetValueResult> {
+    return this.resolveProvider().setValue(session, request, signal)
+  }
+
+  /** Check or uncheck one checkbox/radio through the selected provider. */
+  async check(session: BrowserSessionId, request: BrowserCheckRequest, signal?: AbortSignal): Promise<{ readonly checked: boolean }> {
+    return this.resolveProvider().check(session, request, signal)
+  }
+
+  /** Select one option of a `<select>` through the selected provider. */
+  async selectOption(session: BrowserSessionId, request: BrowserSelectRequest, signal?: AbortSignal): Promise<BrowserSelectResult> {
+    return this.resolveProvider().selectOption(session, request, signal)
+  }
+
+  /** Clear one element through the selected provider. */
+  async clearField(session: BrowserSessionId, request: BrowserClearRequest, signal?: AbortSignal): Promise<{ readonly cleared: boolean }> {
+    return this.resolveProvider().clearField(session, request, signal)
+  }
+
+  /** Read one element's value through the selected provider. */
+  async getValue(session: BrowserSessionId, request: BrowserGetValueRequest, signal?: AbortSignal): Promise<BrowserGetValueResult> {
+    return this.resolveProvider().getValue(session, request, signal)
+  }
+
+  /** Extract structured data through the selected provider. */
+  async scrape(session: BrowserSessionId, request: BrowserScrapeRequest, signal?: AbortSignal): Promise<BrowserScrapeResult> {
+    return this.resolveProvider().scrape(session, request, signal)
+  }
+
+  /** Capture the current page through the selected provider. */
+  async screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult> {
+    return this.resolveProvider().screenshot(session, request, signal)
+  }
+
+  /**
+   * Capture the active page without presenting it, through the selected provider.
+   *
+   * Optional throughout: a provider that cannot do this keeps working for every other tool, and the
+   * caller gets exactly one error code meaning "watching is not available here" — which the viewer
+   * renders as paused rather than as a failure of the browser.
+   * @param session - the session whose active page to capture.
+   * @param signal - cancellation for the wait, never for the capture itself.
+   * @returns the encoded frame.
+   */
+  async capturePassive(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserPreviewFrame> {
+    const provider = this.resolveProvider()
+    if (typeof provider.capturePassive !== 'function') {
+      throw new BrowserError(
+        'browser: this carrier cannot provide a passive preview (watching is unavailable here)',
+        'BROWSER_PREVIEW_UNAVAILABLE',
+      )
+    }
+    return provider.capturePassive(session, signal)
+  }
+
+  /** Check for a human-verification challenge on the active tab. */
+  async detectChallenge(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserChallenge> {
+    return this.resolveProvider().detectChallenge(session, signal)
+  }
+
+  /** Return the session's chronological operation log through the provider. */
+  async history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]> {
+    return this.resolveProvider().history(session)
+  }
+
+  /**
+   * Persisted visits, newest first — the record that outlives the browser
+   * process, as opposed to {@link history}'s session-scoped operation log.
+   * @param options - result cap and an optional hostname filter.
+   * @returns the retained visits (empty when history recording is disabled).
+   */
+  visited(options?: { readonly limit?: number; readonly domain?: string }): readonly VisitedPage[] {
+    return this.resolveProvider().visited(options)
+  }
+
+  /**
+   * Whether a session is still live. Sessions can end outside the tool layer
+   * (the human closed its window), so a cached id must be re-checked before
+   * reuse; a provider that does not implement the check counts as live.
+   * @param session - the session id to test.
+   */
+  exists(session: BrowserSessionId): boolean {
+    const provider = this.resolveProvider()
+    return provider.exists === undefined ? true : provider.exists(session)
+  }
+
+  /**
+   * The sessions a viewer may watch, through the selected provider.
+   *
+   * Empty when the provider cannot preview at all: a viewer then has nothing to offer, which is the
+   * honest answer rather than an error.
+   * @returns the live session ids.
+   */
+  watchableSessions(): readonly BrowserSessionId[] {
+    const provider = this.resolveProvider()
+    if (typeof provider.capturePassive !== 'function') return []
+    return provider.watchableSessions?.() ?? []
+  }
+
+  /** Replay one recorded operation by sequence number through the provider. */
+  async replay(session: BrowserSessionId, seq: number): Promise<void> {
+    return this.resolveProvider().replay(session, seq)
+  }
+
+  /** Download a URL to a local file through the provider. */
+  async download(session: BrowserSessionId, request: BrowserDownloadRequest, signal?: AbortSignal): Promise<{ readonly path: string }> {
+    return this.resolveProvider().download(session, request, signal)
+  }
+
+  /** Export the session's cookies through the provider. */
+  async flushAuth(session: BrowserSessionId): Promise<readonly ExportedCookie[]> {
+    return this.resolveProvider().flushAuth(session)
+  }
+
+  /** Import cookies into the session through the provider. */
+  async restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number> {
+    return this.resolveProvider().restoreAuth(session, cookies)
+  }
+
+  /** Close the session through the selected provider. Idempotent; a missing
+   *  provider is treated as already-closed so teardown paths stay no-ops. */
+  async close(session: BrowserSessionId): Promise<void> {
+    try {
+      await this.resolveProvider().close(session)
+    } catch (error) {
+      const code = error instanceof BrowserError ? (error as { code?: string }).code : undefined
+      if (code === 'BROWSER_PROVIDER_UNAVAILABLE'
+        || code === 'BROWSER_PROVIDER_CONFIGURED_MISSING'
+        || code === 'BROWSER_PROVIDER_CONFIGURED_UNAVAILABLE'
+        || code === 'BROWSER_PROVIDER_AMBIGUOUS') {
+        return // provider gone; nothing to close
+      }
+      throw error
+    }
+  }
+}
+
+export default BrowserRuntime
+
