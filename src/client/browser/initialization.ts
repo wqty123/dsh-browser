@@ -128,21 +128,38 @@ export function createBrowserInitializationReader(
     wait(query, signal) {
       if (subscribe === undefined) return Promise.reject(new Error('initialization subscriptions unavailable'))
       return new Promise((resolve, reject) => {
+        let done = false
+        let requestId = query.requestId
         let unsubscribe = (): void => {}
         const finish = (error?: Error, receipt?: BrowserInitReceipt): void => {
+          if (done) return
+          done = true
           unsubscribe()
           signal.removeEventListener('abort', abort)
           if (error !== undefined) reject(error)
           else resolve(receipt!)
         }
-        const abort = (): void => finish(new Error('source initialization aborted'))
+        const abort = (): void => finish(signal.reason ?? new Error('source initialization aborted'))
         const check = (): void => {
           if (signal.aborted) { abort(); return }
+          const latest = lookup(query.sessionId, query.tabId)
+          if (requestId !== undefined && latest !== undefined && latest.requestId !== requestId) {
+            finish(Object.assign(new Error('source initialization superseded'), { code: 'panel-navigation-superseded' }))
+            return
+          }
           const receipt = reader.read(query)
-          if (receipt?.stage === 'failed') finish(new Error(receipt.detail ?? receipt.reason ?? 'source initialization failed'))
+          if (receipt !== undefined) requestId ??= receipt.requestId
+          if (receipt?.stage === 'failed') {
+            const code = receipt.reason === 'timeout' ? 'BROWSER_DOCUMENT_TIMEOUT'
+              : receipt.reason === 'occurrence-aborted' ? 'BROWSER_NAVIGATION_CANCELLED'
+              : receipt.reason === 'navigation-failed' || receipt.reason === 'navigation-rejected' ? 'BROWSER_NAVIGATION_FAILED'
+              : 'panel-initialization-failed'
+            finish(Object.assign(new Error(receipt.detail ?? receipt.reason ?? 'source initialization failed'), { code }))
+          }
           else if (receipt?.stage === 'attached') finish(undefined, receipt)
         }
         unsubscribe = subscribe(check)
+        if (done) { unsubscribe(); return }
         signal.addEventListener('abort', abort, { once: true })
         check()
       })

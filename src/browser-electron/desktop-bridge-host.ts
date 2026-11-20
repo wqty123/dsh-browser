@@ -47,26 +47,7 @@ export { bridgeEndpointPath }
 const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
 const PANEL_INITIALIZING = 'panel-initializing'
 
-/**
- * How many times a display-state refusal is retried, and how long each retry waits.
- *
- * The retry exists because the same call now asks the shell to SHOW the conversation (the client
- * half's `openSession` step). React renders that on the next pass, so the refusal the first call
- * sees is true-but-stale. 4 x 400 ms is ~1.6 s: long enough for a render on a busy conversation,
- * short enough that a shell which genuinely cannot render a panel still fails inside one tool call
- * instead of stalling for the bridge's own 20 s budget.
- */
-const PANEL_DISPLAY_RETRIES = 4
-const PANEL_DISPLAY_RETRY_MS = 400
-
-/**
- * A failure worth showing as-is: the carrier is alive and this is a condition the shell can change.
- *
- * Thrown instead of a plain Error so callers can distinguish "the panel did not render" from "the
- * browser broke", which is exactly the distinction issue #37 says was missing. The plugin no longer
- * waits for a human to show the conversation — the client half asks the shell to (`openSession`) and
- * this host retries while it renders — so reaching here means the shell did not render it at all.
- */
+/** The requested conversation has no displayed sidebar guest. */
 export class BrowserPanelNotDisplayedError extends Error {
   readonly code: string
 
@@ -405,14 +386,11 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     const entry = this.views.get(viewId)
     if (entry === undefined) throw new Error('dsh-builtin-browser: sidebar view was released')
     const stillOwned = (): void => {
+      options?.signal?.throwIfAborted()
       checkNavigation?.()
       if (this.views.get(viewId) !== entry) throw new Error('dsh-builtin-browser: sidebar view was released')
     }
-    // No liveness check here: verifying the cached guest cost a round-trip on every
-    // command. A guest that has gone away is detected by the command itself failing,
-    // and `createView`'s sendCommand then discards the cache and calls back in here.
-    // Explicit navigation also reopens a folded panel. Cached guests are sufficient for reads
-    // and input, but not for the user's request to open an address in this conversation's sidebar.
+    // A cached guest is pinned: a missing page fails without replacing its document.
     if (entry?.guest !== undefined && url === undefined) return { id: entry.guest }
     if (options?.initialize === false) {
       throw new BrowserPanelNotDisplayedError('this view has no attached guest yet', PANEL_INITIALIZING)
@@ -440,10 +418,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       && [...this.views.entries()].some(([id, view]) => id !== viewId && view.owner === owner && view.guest !== undefined)) {
       throw new Error('dsh-builtin-browser: this desktop bridge needs an update for separate sidebar tabs; use Repair and restart in Browser settings')
     }
-    // A command that must not present anything (issue #46: the live preview) takes a read-only path.
-    // It asks the bridge what this conversation ALREADY has and never enters the retry loop below —     // that loop is what asks the shell to display the conversation, which is right for a tool call
-    // and wrong for "let me look at it". A page that is not on screen therefore reports as a display
-    // state, and the preview route turns that into the panel's paused state.
+
     if (options?.present === false) {
       // A logical view without a binding cannot borrow a neighbouring tab for a preview.
       if (this.protocol >= 3) {
@@ -474,46 +449,25 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       return { id }
     }
     const hintGuest = url !== undefined && url !== '' ? entry?.guest : undefined
-    const ask = (): Promise<Record<string, unknown>> => this.connection.call({
-      op: 'ensureSidebar',
-      owner,
-      viewId,
-      ...hintGuest === undefined ? {} : { guestId: hintGuest },
-      ...url !== undefined && url !== '' ? { url, attachOnly: true } : {},
-    }, 30_000)
-    let answer = await ask()
-    // A refusal is retried when it describes a DISPLAY state rather than a dead carrier, because the
-    // plugin's client half asks the shell to show this conversation inside the very call that
-    // produced it. Two shapes come back from that first round:
-    //   panel-not-displayed  - the conversation exists but is not the one on screen;
-    //   "is not mounted"     - its surface store was not minted when the tab was placed.
-    // Both are gone one render later. Measured, this is the whole difference between "the sidebar
-    // works once I click over to that conversation" and "it works" — the page is real either way,
-    // and failing the call while the shell is already switching away from it just reported a
-    // problem the plugin had already fixed.
-    const displayRefusal = (value: Record<string, unknown>): boolean =>
-      value.ok !== true
-      && (String(value.code ?? '') === PANEL_NOT_DISPLAYED
-        || String(value.error ?? '').includes('not mounted')
-        // Bridges installed before issue #37 send the same refusal with NO code — the installed copy
-        // on this machine is one of them (`panel-not-displayed` appears nowhere in it). Reading only
-        // the code therefore turned a retryable display state into a hard failure for exactly the
-        // users who had the old bridge, which is the majority until it is reinstalled. The wording
-        // is stable across both versions; the code is not.
-        || String(value.error ?? '').includes('can only attach'))
-    for (let attempt = 0; attempt < PANEL_DISPLAY_RETRIES && displayRefusal(answer); attempt += 1) {
-      await new Promise(resolve => setTimeout(resolve, PANEL_DISPLAY_RETRY_MS))
-      stillOwned()
-      answer = await ask()
+    const deadline = options?.deadline ?? Date.now() + 30_000
+    const transactionId = randomUUID()
+    const cancel = (): void => {
+      void this.connection.call({ op: 'cancelSidebar', owner, viewId, transactionId }, 2_000).catch(() => {})
+    }
+    options?.signal?.throwIfAborted()
+    options?.signal?.addEventListener('abort', cancel, { once: true })
+    let answer: Record<string, unknown>
+    try {
+      answer = await this.connection.call({
+        op: 'ensureSidebar', owner, viewId, deadline, transactionId,
+        ...hintGuest === undefined ? {} : { guestId: hintGuest },
+        ...url !== undefined && url !== '' ? { url, attachOnly: true } : {},
+      }, Math.max(1, deadline - Date.now()))
+    } finally {
+      options?.signal?.removeEventListener('abort', cancel)
     }
     stillOwned()
     if (answer.ok !== true) {
-      // Reachable only after the retries above have run out, and the code still decides — not the
-      // wording:
-      //   panel-not-displayed -> the shell was asked to show the conversation (client half's
-      //                          `openSession`) and did not render it in ~1.6 s: no loss, no swap.
-      // A missing guest within a time budget is still initialization, including on old bridges
-      // that only returned text. It is not evidence that this shell uses an undrivable iframe.
       const code = String(answer.code ?? '')
       const detail = String(answer.error ?? answer.code ?? 'unknown sidebar failure')
       if (code === 'panel-initialization-failed' || code === 'panel-navigation-superseded' || code === 'panel-navigation-failed') {
@@ -526,7 +480,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
         throw new BrowserPanelNotDisplayedError(detail, PANEL_INITIALIZING)
       }
       if (code === 'panel-unusable') this.reportLost('panel-unusable')
-      throw new Error(`dsh-builtin-browser: sidebar unavailable (${detail})`)
+      throw Object.assign(new Error(`dsh-builtin-browser: sidebar unavailable (${detail})`), { code: code || 'panel-initialization-failed' })
     }
     const id = Number(answer.id)
     if (!Number.isFinite(id) || id <= 0) {
@@ -565,10 +519,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
         if (answer.ok !== true) throw new Error(`dsh-builtin-browser: sidebar download failed: ${String(answer.error)}`)
       },
       sendCommand: async (method: string, params?: Record<string, unknown>, options?: CommandOptions) => {
-        // No liveness probe up front. Checking first cost a whole round-trip on
-        // every command; instead the command runs and its failure is what triggers
-        // recovery. Only a genuinely missing guest is retried, so a real error (a
-        // bad selector, a timeout) still surfaces unchanged.
+        options?.signal?.throwIfAborted()
         const url = navigateUrl(method, params)
         const sequence = url === undefined ? undefined : ++latestNavigation
         const checkNavigation = (): void => {
@@ -576,23 +527,14 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
             throw Object.assign(new Error('a newer navigation was requested for this sidebar view'), { code: 'panel-navigation-superseded' })
           }
         }
-        let guest = await this.guestFor(viewId, url, options, checkNavigation)
+        const guest = await this.guestFor(viewId, url, options, checkNavigation)
         checkNavigation()
         try {
           return guest.navigation ?? await run(guest.id, method, params)
         } catch (error) {
           checkNavigation()
           if (!isGuestGone(error)) throw error
-          // The human closed the tab: the page is gone, so take a fresh one and
-          // replay the command once. This is the "closing the interface ends the
-          // session" rule, now paid for only when it actually happens.
-          // Drop the guest but keep the entry: the conversation it serves is what the retry needs,
-          // and removing the entry would lose it back to the process-wide fallback owner.
-          const lost = this.views.get(viewId)
-          if (lost?.guest === guest.id) delete lost.guest
-          guest = await this.guestFor(viewId, url, options, checkNavigation)
-          checkNavigation()
-          return guest.navigation ?? await run(guest.id, method, params)
+          throw Object.assign(new Error('dsh-builtin-browser: the bound sidebar guest is gone; close or reset this view'), { code: 'BROWSER_GUEST_CLOSED' })
         }
       },
     }

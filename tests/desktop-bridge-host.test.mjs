@@ -1,8 +1,7 @@
 // The desktop sidebar host talks to the shell over a loopback bridge. These tests
 // stand up a fake bridge (same protocol) so the host's behaviour is pinned without
 // a desktop app: discovery rejects dead endpoints, commands are forwarded, each
-// view takes its own tab, and a tab the human closed is replaced rather than
-// reused.
+// view takes its own tab, and a tab the human closed fails without replacement.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
@@ -120,6 +119,7 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
             }
             return { ok: true, ids }
           }
+          if (request.op === 'cancelSidebar') return { ok: true, cancelled: true }
           if (request.op === 'cdp') {
             // A closed tab makes the real bridge answer exactly like this; the host
             // must treat it as "the page is gone", not as a command failure.
@@ -307,6 +307,33 @@ test('protocol 3 passive preview never assigns another live page to an unopened 
   }
 })
 
+test('aborting initialization cancels exactly its transaction without publishing a late guest', async () => {
+  const bridge = await startFakeBridge({ tabs: 0, dead: [], protocol: 3, holdEnsure: true })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a')
+    const view = host.createView('session-a'), controller = new AbortController()
+    const pending = view.sendCommand('Page.navigate', { url: 'https://pending.example/' }, { signal: controller.signal })
+    const rejected = assert.rejects(pending, /cancelled by caller/)
+    const deadline = Date.now() + 1000
+    while ((bridge.state.heldReplies?.length ?? 0) === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(bridge.state.heldReplies?.length, 1)
+    controller.abort(new Error('cancelled by caller'))
+    bridge.state.heldReplies[0]()
+    await rejected
+    const opening = bridge.requests.find(request => request.op === 'ensureSidebar')
+    const cancellation = bridge.requests.find(request => request.op === 'cancelSidebar')
+    assert.equal(cancellation.transactionId, opening.transactionId)
+    assert.equal(cancellation.viewId, opening.viewId)
+    assert.equal(cancellation.owner, opening.owner)
+    assert.equal(bridge.requests.some(request => request.op === 'cdp'), false)
+  } finally {
+    host?.dispose()
+    await bridge.close()
+  }
+})
+
 test('destroying a view while initialization is pending prevents the late reply from restoring or driving it', async () => {
   const bridge = await startFakeBridge({ tabs: 0, dead: [], protocol: 3, holdEnsure: true })
   withEndpoint(bridge.port)
@@ -335,38 +362,20 @@ test('destroying a view while initialization is pending prevents the late reply 
   }
 })
 
-test('a tab the human closed is replaced instead of reused', async () => {
+test('a closed guest fails without replaying the command in a new page', async () => {
   const bridge = await startFakeBridge({ tabs: 1, dead: [] })
   withEndpoint(bridge.port)
+  let host
   try {
-    const host = await DesktopBridgeViewHost.discover()
+    host = await DesktopBridgeViewHost.discover()
     const view = host.createView()
     await view.sendCommand('Runtime.evaluate', { expression: '1' })
-
-    // The human closes the tab: commands to that guest now fail the way the bridge
-    // reports a missing guest.
     bridge.state.dead = [1]
-    bridge.state.tabs = 1
-
-    const answer = await view.sendCommand('Runtime.evaluate', { expression: '2' })
-    assert.ok(answer !== undefined, 'the view recovered instead of surfacing a dead guest')
-
-    // Recovery is driven by the failure itself — no liveness probe before every
-    // command. The exact number of attempts is not the contract (the provider layer
-    // retries too); what matters is that the dead guest is abandoned for a live one,
-    // and never returned to.
-    const attempts = bridge.requests.filter(r => r.op === 'cdp').map(r => r.id)
-    assert.equal(attempts[0], 1, 'the first attempt went to the cached guest')
-    assert.ok(attempts.includes(2), 'recovery moved to a replacement guest')
-    assert.equal(attempts.lastIndexOf(1) < attempts.indexOf(2), true, 'the dead guest is never retried afterwards')
-  } finally {
-    bridge.close()
-  }
+    await assert.rejects(view.sendCommand('Runtime.evaluate', { expression: '2' }), { code: 'BROWSER_GUEST_CLOSED' })
+    assert.equal(bridge.requests.filter(r => r.op === 'ensureSidebar').length, 1)
+    assert.ok(bridge.requests.filter(r => r.op === 'cdp').every(r => r.id === 1))
+  } finally { host?.dispose(); await bridge.close() }
 })
-
-// Requirements §3: on this carrier our own view handles are not enough — the
-// sidebar is the shell's and would keep the page alive. Releasing has to be asked
-// for, and folding has to be asked for separately (it must not end the page).
 test('releasePage asks the shell to close the sidebar pages', async () => {
   const bridge = await startFakeBridge({ tabs: 1, dead: [] })
   withEndpoint(bridge.port)
@@ -645,51 +654,29 @@ test('explicit unusable evidence takes precedence over legacy no-page wording', 
   }
 })
 
-test('a display refusal is retried while the shell renders the conversation it was asked to show', async () => {
-  // The client half asks the shell to display the conversation a page was requested for
-  // (`openSession`), and React renders that one pass later. Failing the tool call on the first
-  // refusal reported a problem the plugin had already fixed, and left the page — which IS there —
-  // reachable only by a second call. The retry is what makes one call enough.
+test('an undisplayed sidebar refuses once without activating another conversation', async () => {
   const bridge = await startFakeBridge({ tabs: 1, dead: [], panelNotDisplayedLeft: 2 })
   withEndpoint(bridge.port)
   let host
   const losses = []
   try {
     host = await DesktopBridgeViewHost.discover()
-    assert.ok(host !== undefined)
     host.onLost(reason => losses.push(reason))
     const view = host.createView('session-a')
-    const answer = await view.sendCommand('Page.navigate', { url: 'https://example.com/' })
-    assert.equal(answer.echo, 'Page.navigate', 'the command reached the page that had just appeared')
-    const attempts = bridge.requests.filter(request => request.op === 'ensureSidebar').length
-    assert.equal(attempts, 3, 'two refusals were retried; the third landed — no more, no fewer')
-    assert.deepEqual(losses, [], 'a transient display state still never reports the carrier as lost')
-  } finally {
-    host?.dispose()
-    await bridge.close()
-  }
+    await assert.rejects(view.sendCommand('Page.navigate', { url: 'https://example.com/' }), { code: 'panel-not-displayed' })
+    assert.equal(bridge.requests.filter(r => r.op === 'ensureSidebar').length, 1)
+    assert.deepEqual(losses, [])
+  } finally { host?.dispose(); await bridge.close() }
 })
 
-test('a bridge from before the display-state code is recognised by its wording', async () => {
-  // The installed bridge on a machine that never reinstalled it answers the SAME refusal without a
-  // code. Reading only the code made that refusal a hard failure — the exact opposite of the
-  // behaviour the code was added for — so the wording is matched too.
+test('an uncoded legacy refusal surfaces without a wording-based retry', async () => {
   const bridge = await startFakeBridge({ tabs: 1, dead: [], panelUncodedLeft: 1 })
   withEndpoint(bridge.port)
   let host
-  const losses = []
   try {
     host = await DesktopBridgeViewHost.discover()
-    assert.ok(host !== undefined)
-    host.onLost(reason => losses.push(reason))
     const view = host.createView('session-a')
-    const answer = await view.sendCommand('Page.navigate', { url: 'https://example.com/' })
-    assert.equal(answer.echo, 'Page.navigate', 'the uncoded refusal was retried, not fatal')
-    const attempts = bridge.requests.filter(request => request.op === 'ensureSidebar').length
-    assert.equal(attempts, 2, 'exactly one retry was needed')
-    assert.deepEqual(losses, [])
-  } finally {
-    host?.dispose()
-    await bridge.close()
-  }
+    await assert.rejects(view.sendCommand('Page.navigate', { url: 'https://example.com/' }), /show it and the page appears/)
+    assert.equal(bridge.requests.filter(r => r.op === 'ensureSidebar').length, 1)
+  } finally { host?.dispose(); await bridge.close() }
 })

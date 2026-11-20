@@ -708,6 +708,8 @@ export interface PresentOptions {
  * to fix.
  */
 export interface CommandOptions {
+  readonly deadline?: number
+  readonly signal?: AbortSignal
   /** Present the view first (default), or only use a page that is already there. */
   readonly present?: boolean
   /** Only use a guest already attached to this handle, without sidebar initialization. */
@@ -1528,13 +1530,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
       this.checkNavigation(tab, navigation)
       signal?.throwIfAborted()
       const result = await withTimeout(
-        handle.sendCommand(CDP_PAGE_NAVIGATE, { url } satisfies CdpNavigateParams),
+        handle.sendCommand(CDP_PAGE_NAVIGATE, { url } satisfies CdpNavigateParams, { deadline, signal }),
         Math.max(1, deadline - Date.now()),
         signal,
         `browser: navigation timed out after ${timeoutMs}ms`,
         // Best-effort: cancel the in-flight navigation so a wedged load does
         // not leave the debugger queue busy.
-        () => { if (tab.navigation === navigation) void handle.sendCommand('Page.stopLoading').catch(() => {}) },
+        timedOut => { if (tab.navigation === navigation) this.interrupt(handle, timedOut) },
       )
       // Page.navigate resolves even when the navigation fails; surface the
       // failure instead of leaving a silent white screen.
@@ -1559,6 +1561,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
       this.recordVisit(s, handle)
       this.showActive(s, true)
     } catch (error) {
+      const code = (error as { code?: string })?.code
+      if (tab.navigation === navigation && (code === 'BROWSER_DOCUMENT_TIMEOUT' || code === 'BROWSER_DOCUMENT_UNACKNOWLEDGED')) {
+        this.quarantine(handle)
+      }
       if (!(error instanceof BrowserError && (error as { code?: string }).code === 'BROWSER_NAVIGATION_BLOCKED')) {
         this.record(s, 'navigate', { url }, false, { error: String(error) })
       }
@@ -4486,7 +4492,7 @@ function terminatePage(handle: ElectronViewHandle): void {
   const count = pendingTerminations.get(handle) ?? 0
   if (count >= MAX_PENDING_TERMINATIONS) return
   pendingTerminations.set(handle, count + 1)
-  void handle.sendCommand('Runtime.terminateExecution').finally(() => {
+  void handle.sendCommand('Runtime.terminateExecution', undefined, { present: false, initialize: false }).finally(() => {
     pendingTerminations.set(handle, Math.max(0, (pendingTerminations.get(handle) ?? 1) - 1))
   }).catch(() => {})
 }

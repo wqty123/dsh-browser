@@ -189,25 +189,19 @@ test('closeSidebarBrowser never considers another session’s guest', async () =
   assert.equal(claims.get(2), 'sessionA', 'A still holds its guest')
 })
 
-test('a waiting call keeps asking about its own conversation, and nothing else', async () => {
-  // The wait exists because a guest attaches asynchronously once the renderer creates the
-  // webview. Every round asks the SAME question — this conversation's panel — so a guest
-  // appearing in any other conversation cannot satisfy it. The old wait compared sets of every
-  // webview in the process, which is exactly how it could.
-  let reads = 0
+test('an attached first-panel transaction only names its own conversation', async () => {
+  world.contents = [shell, new FakeContents(9, 'webview', 'about:blank')]
+  claims.clear()
   const asked = []
   panelVerdict = (expression) => {
     asked.push(expression)
-    reads += 1
-    return reads === 1
-      ? { ok: true, created: true, panel: true, guestId: null }
-      : { ok: true, created: false, panel: true, guestId: 9, url: '' }
+    return { ok: true, created: true, panel: true, guestId: 9, url: '', initialization: { stage: 'attached', guestId: '9' } }
   }
 
   const answer = await handle({ op: 'ensureSidebar', owner: 'session-ccc' })
   assert.equal(answer.id, 9, 'the page that eventually appeared is the one returned')
   assert.equal(answer.created, true, 'and the caller is told a tab was placed')
-  assert.ok(asked.length >= 2, 'it polled rather than giving up after one read')
+  assert.equal(asked.length, 1, 'the renderer owns one attachment transaction, without bridge polling')
   for (const expression of asked) {
     assert.ok(expression.includes('session-ccc'), 'every round asked about this conversation only')
   }

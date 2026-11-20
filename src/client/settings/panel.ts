@@ -1721,6 +1721,7 @@ const react = require("react")
     let sidebarRight = null
     let initializationReader = null
     const pendingTabs = new Map()
+    const initializing = new Map()
     /** The shell's own navigation service: `openSession` is how it is asked to DISPLAY a conversation. */
     let uiWorkspace = null
     // `inject` is how a client plugin waits for a service to appear. A host that does not offer it
@@ -1744,6 +1745,8 @@ const react = require("react")
           if (sidebarRight === scope.sidebarRight) {
             sidebarRight = null
             pendingTabs.clear()
+            for (const transaction of initializing.values()) transaction.controller.abort(new Error("the sidebar service was released"))
+            initializing.clear()
           }
         }, "dsh-builtin-browser: conversation panel binding")
       })
@@ -2002,8 +2005,7 @@ const react = require("react")
         if (tabs.length === 0 && onScreenSession() !== sessionId) {
           return { ok: false, reason: "this conversation's sidebar is not mounted", panel: false, guestId: null, ...switched ? { switched: true } : {} }
         }
-        pendingTabs.delete(key)
-        binding = undefined
+        return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native tab for this browser view was closed; close or reset the view before retrying", panel: true, guestId: null }
       }
       const guests = guestsInPanel(sessionId)
       const hasCachedGuest = Number.isInteger(guestId) && guestId > 0
@@ -2016,6 +2018,7 @@ const react = require("react")
           }
           binding = { sessionId, id, url: address, scoped: true }
         }
+        if (binding === undefined) return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native guest for this browser view is gone", panel: true, guestId: null }
       }
       if (binding === undefined && !hasCachedGuest) {
         // Adopt only an unclaimed guest whose native tab can be proved. Multiple visible guests
@@ -2029,9 +2032,6 @@ const react = require("react")
         const candidate = drawn.length === 1 ? drawn[0] : candidates.length === 1 ? candidates[0] : undefined
         if (candidate !== undefined) binding = { sessionId, id: candidate.id, url: address, scoped: true }
       }
-      // One place that asks the shell for a browser tab and identifies the one it added. Shared by
-      // the first placement and by the repair below, so both go through the same proof.
-
       const placeTab = (url) => {
         // The Web panel serves pages through the same-origin guest proxy; it needs to know which
         // conversation the tab belongs to so a quote can be handed back to the right draft.
@@ -2069,33 +2069,13 @@ const react = require("react")
       if (!created && state.guestId === null && address !== "") {
         navigating = navigatePlacedTab(sessionId, binding.id, address)
         if (!navigating) {
-          // `navigateTabIn` also answers false when the shell merely declines this navigation (a body
-          // that has not attached yet), so the identity is checked before anything is replaced: only a
-          // tab id that is GONE from this session's layout is a stale binding. That case is what made
-          // the start page — and with it the reference capture — look broken after the DSH
-          // 0.2.2-rc.3 upgrade, where a restart replaced every tab.
-          let stillListed = false
-          try { stillListed = Array.from(sidebarRight.tabsIn(sessionId)).some(tab => tab !== null && typeof tab === "object" && tab.id === binding.id) }
-          catch { stillListed = true }
-          if (!stillListed) {
-            pendingTabs.delete(key)
-            const replaced = placeTab(address)
-            if (replaced.ok) {
-              binding = { sessionId, id: replaced.id, url: address, scoped: true }
-              created = true
-              pendingTabs.set(key, binding)
-            }
-          }
-          const repaired = created
-          if (!repaired) {
-            return {
-              ok: false,
-              reason: "this DSH shell cannot initialize a bound start-page tab; update DSH and retry",
-              panel: state.panel,
-              guestId: null,
-              tabId: binding.id,
-              ...switched ? { switched: true } : {},
-            }
+          return {
+            ok: false,
+            reason: "this DSH shell cannot initialize a bound start-page tab; update DSH and retry",
+            panel: state.panel,
+            guestId: null,
+            tabId: binding.id,
+            ...switched ? { switched: true } : {},
           }
         }
       }
@@ -2113,7 +2093,49 @@ const react = require("react")
     }
 
     const api = {
-      panelProtocol: 4,
+      panelProtocol: 5,
+      cancelPanelInitialization(sessionId, viewId, transactionId) {
+        const pending = initializing.get(viewKey(sessionId, viewId))
+        if (!pending || pending.transactionId !== transactionId) return false
+        pending.controller.abort(Object.assign(new Error("sidebar initialization was cancelled"), { code: "BROWSER_NAVIGATION_CANCELLED" }))
+        return true
+      },
+      async initializePanel(sessionId, url, options) {
+        const refuse = (code, reason) => ({ ok: false, code, reason, panel: false, guestId: null })
+        if (typeof options?.viewId !== "string" || options.viewId === "") return refuse("panel-initialization-failed", "a logical view identity is required")
+        if (onScreenSession() !== sessionId) return refuse("panel-not-displayed", "the requested conversation is not displayed; select it before opening its browser")
+        const reader = initializationReader
+        if (reader === null || typeof reader.wait !== "function") return refuse("panel-initialization-failed", "the browser initialization subscription is unavailable; reload the plugin client")
+        const deadline = options.deadline
+        if (!Number.isFinite(deadline) || deadline <= Date.now()) return refuse("BROWSER_DOCUMENT_TIMEOUT", "sidebar initialization deadline expired")
+        const key = viewKey(sessionId, options.viewId)
+        const previous = initializing.get(key)
+        const controller = new AbortController()
+        const transaction = { controller, transactionId: options.transactionId }
+        initializing.set(key, transaction)
+        previous?.controller.abort(Object.assign(new Error("a newer sidebar initialization was requested"), { code: "panel-navigation-superseded" }))
+        const timer = setTimeout(() => controller.abort(Object.assign(new Error("sidebar initialization deadline expired"), { code: "BROWSER_DOCUMENT_TIMEOUT" })), deadline - Date.now())
+        try {
+          const answer = api.openPanel(sessionId, url, options)
+          if (!answer.ok) return answer
+          const rendererNavigation = url !== "" && (answer.created || answer.navigating)
+          if (!rendererNavigation && answer.guestId !== null) return answer
+          if (typeof answer.tabId !== "string") return refuse("panel-initialization-failed", "the shell did not acknowledge its native tab identity")
+          const receipt = await reader.wait({ sessionId, tabId: answer.tabId, url }, controller.signal)
+          controller.signal.throwIfAborted()
+          const state = api.panelGuest(sessionId, answer.tabId, options)
+          const observed = reader.current({ sessionId, tabId: answer.tabId })
+          if (state.guestId === null || String(state.guestId) !== receipt.guestId || observed?.guestId !== receipt.guestId) {
+            return refuse("panel-initialization-failed", "the mounted native guest did not acknowledge its initialization identity")
+          }
+          return { ...answer, ...state, url: observed.url, initialization: receipt, rendererNavigation }
+        } catch (error) {
+          return refuse(error?.code ?? "panel-initialization-failed", String(error?.message ?? error))
+        } finally {
+          clearTimeout(timer)
+          if (initializing.get(key) === transaction) initializing.delete(key)
+        }
+      },
       get initializationProtocol() { return initializationReader?.protocolVersion ?? 0 },
       panelInitialization(sessionId, tabId, url, requestId) {
         if (initializationReader === null || typeof sessionId !== "string" || !sessionId.startsWith("session-")

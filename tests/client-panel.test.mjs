@@ -17,10 +17,17 @@ const proxied = (url, sessionId) =>
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
+import ts from 'typescript'
+import { createBrowserInitializationJournal, createBrowserInitializationReader } from '../lib/client/browser/initialization.js'
 
 const { DEFAULT_SETTINGS } = await import('../lib/browser-electron/settings-store.js')
 
-const SOURCE = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+const panelSource = ts.transpileModule(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+const SOURCE = `window.__ModuleLoader__.load({ factory(require) {
+  const module = { exports: {} }, exports = module.exports;
+  ${panelSource}
+  return exports.loadSettingsPanel(require);
+} })`
 const ROUTE = '/dsh-builtin-browser/settings'
 
 /**
@@ -120,12 +127,13 @@ let activeDocument = makeDocument()
 let activeSandbox = null
 
 /** Load the bundle the way the host's ModuleLoader does, and return its factory. */
-function bundleFactory(timers) {
+function bundleFactory(timers, production = false) {
   let factory
   const sandbox = {
     window: { __ModuleLoader__: { load: (spec) => { factory = spec.factory } } },
     console,
     URL,
+    AbortController,
     setTimeout: timers?.setTimeout ?? setTimeout,
     clearTimeout: timers?.clearTimeout ?? clearTimeout,
     queueMicrotask,
@@ -146,7 +154,7 @@ function bundleFactory(timers) {
     },
   }
   activeSandbox = sandbox
-  vm.runInNewContext(SOURCE, sandbox, { filename: 'client.js' })
+  vm.runInNewContext(production ? SOURCE : readFileSync(new URL('../client.js', import.meta.url), 'utf8'), sandbox, { filename: 'client.js' })
   assert.ok(typeof factory === 'function', 'the bundle registered a factory')
   return factory
 }
@@ -258,7 +266,7 @@ async function mount(options = {}) {
   if (options.document !== undefined) activeDocument = options.document
   if (options.fetch !== undefined) activeFetch = options.fetch
   const host = makeHost(settings)
-  const exports = bundleFactory(options.timers)(host.requireFn)
+  const exports = bundleFactory(options.timers, options.production)(host.requireFn)
 
   let registration
   // The bundle now registers TWO slots: the settings section and the on-demand
@@ -285,6 +293,10 @@ async function mount(options = {}) {
     inject: (names, fn) => {
       const scope = { effect: (run) => { run() } }
       let bound = false
+      if (names.includes('sidebarBrowserInitialization') && options.initializationReader !== undefined) {
+        scope.sidebarBrowserInitialization = options.initializationReader
+        bound = true
+      }
       if (names.includes('sidebarRight') && options.sidebarRight !== undefined) {
         scope.sidebarRight = options.sidebarRight
         bound = true
@@ -1363,6 +1375,118 @@ test('a shell without the expansion API is still driven, and only placed', async
 })
 
 /** Native sidebar tabs with independent guest ids and URLs, including delayed guest attachment. */
+function transactionFixture() {
+  const fixture = managedSidebar({ attach: false })
+  const listeners = new Set()
+  const journal = createBrowserInitializationJournal({ onChange: () => { for (const listener of listeners) listener() } })
+  const reader = createBrowserInitializationReader(
+    (_owner, tab) => journal.get(tab),
+    listener => { listeners.add(listener); return () => listeners.delete(listener) },
+    (_owner, tab) => {
+      const page = fixture.pages.get(tab)
+      return page?.ready ? { url: page.url, guestId: String(page.guestId) } : undefined
+    },
+  )
+  const open = fixture.service.openTabIn
+  fixture.service.openTabIn = (...args) => {
+    open(...args)
+    const tab = fixture.tabs.at(-1)
+    journal.begin({ sessionId: args[0], tabId: tab.id, occurrenceId: 'mount-1', navigationRevision: 1, url: tab.params.url })
+  }
+  return { ...fixture, journal, reader, listeners }
+}
+
+test('one first-panel transaction awaits mount and the exact guest acknowledgement', async () => {
+  const f = transactionFixture()
+  const { panel } = await mount({ production: true, render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
+  let settled = false
+  const pending = panel.initializePanel('session-a', 'https://page.example/', { viewId: 'v', deadline: Date.now() + 1000 })
+    .then(value => { settled = true; return value })
+  const tab = f.tabs[0]
+  assert.equal(f.calls.opened.length, 1)
+  f.journal.advance(tab.id, 'mounted')
+  await Promise.resolve()
+  assert.equal(settled, false)
+  f.journal.advance(tab.id, 'navigating')
+  const page = f.pages.get(tab.id)
+  page.ready = true
+  f.journal.advance(tab.id, 'attached', { guestId: String(page.guestId) })
+  const result = await pending
+  assert.equal(result.ok, true)
+  assert.equal(result.rendererNavigation, true)
+  assert.equal(result.guestId, page.guestId)
+  assert.equal(result.initialization.stage, 'attached')
+  assert.equal(f.listeners.size, 0)
+  assert.equal(f.calls.opened.length, 1)
+})
+
+for (const mode of ['timeout', 'failed', 'missing-identity', 'foreign-identity', 'superseded']) {
+  test(`first-panel initialization refuses ${mode} without a substitute page`, async () => {
+    const f = transactionFixture()
+    const { panel } = await mount({ production: true, render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
+    const pending = panel.initializePanel('session-a', 'https://page.example/', { viewId: 'v', deadline: Date.now() + (mode === 'timeout' ? 30 : 1000) })
+    const tab = f.tabs[0], page = f.pages.get(tab.id)
+    if (mode === 'failed') f.journal.fail(tab.id, 'navigation-failed')
+    else if (mode === 'superseded') f.journal.begin({ sessionId: 'session-a', tabId: tab.id, occurrenceId: 'mount-2', navigationRevision: 2, url: 'https://other.example/' })
+    else if (mode !== 'timeout') {
+      page.ready = true
+      f.journal.advance(tab.id, 'mounted')
+      f.journal.advance(tab.id, 'navigating')
+      f.journal.advance(tab.id, 'attached', mode === 'foreign-identity' ? { guestId: '999' } : {})
+    }
+    const result = await pending
+    assert.equal(result.ok, false)
+    assert.equal(result.code, mode === 'timeout' ? 'BROWSER_DOCUMENT_TIMEOUT' : mode === 'superseded' ? 'panel-navigation-superseded' : mode === 'failed' ? 'BROWSER_NAVIGATION_FAILED' : 'panel-initialization-failed')
+    assert.equal(f.calls.opened.length, 1)
+    assert.equal(f.listeners.size, 0)
+  })
+}
+
+test('a successor cancels the pending transaction and keeps the same native tab', async () => {
+  const f = transactionFixture()
+  f.service.navigateTabIn = (owner, tabId, options) => {
+    const page = f.pages.get(tabId)
+    page.url = options.params.url
+    f.journal.begin({ sessionId: owner, tabId, occurrenceId: 'mount-1', navigationRevision: 2, url: page.url })
+    return true
+  }
+  const { panel } = await mount({ production: true, render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
+  const first = panel.initializePanel('session-a', 'https://first.example/', { viewId: 'v', deadline: Date.now() + 1000 })
+  const next = panel.initializePanel('session-a', 'https://second.example/', { viewId: 'v', deadline: Date.now() + 1000 })
+  const page = f.pages.get(f.tabs[0].id)
+  page.ready = true
+  f.journal.advance(page.id, 'mounted')
+  f.journal.advance(page.id, 'navigating')
+  f.journal.advance(page.id, 'attached', { guestId: String(page.guestId) })
+  assert.equal((await first).code, 'panel-navigation-superseded')
+  const result = await next
+  assert.equal(result.ok, true)
+  assert.equal(result.url, 'https://second.example/')
+  assert.equal(f.calls.opened.length, 1)
+  assert.equal(f.listeners.size, 0)
+})
+
+test('cancellation removes the subscription without replacing or publishing the pending guest', async () => {
+  const f = transactionFixture()
+  const { panel } = await mount({ production: true, render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
+  const pending = panel.initializePanel('session-a', 'https://page.example/', { viewId: 'v', transactionId: 'one', deadline: Date.now() + 1000 })
+  assert.equal(panel.cancelPanelInitialization('session-other', 'v', 'one'), false)
+  assert.equal(panel.cancelPanelInitialization('session-a', 'v', 'old'), false)
+  assert.equal(panel.cancelPanelInitialization('session-a', 'v', 'one'), true)
+  assert.equal((await pending).code, 'BROWSER_NAVIGATION_CANCELLED')
+  assert.equal(f.listeners.size, 0)
+  assert.equal(f.calls.opened.length, 1)
+})
+
+test('an initialization for an undisplayed conversation never changes the selected Session', async () => {
+  const f = transactionFixture(), switched = []
+  const { panel } = await mount({ production: true, render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader, uiWorkspace: { openSession: id => switched.push(id) } })
+  const result = await panel.initializePanel('session-other', 'https://page.example/', { viewId: 'v', deadline: Date.now() + 1000 })
+  assert.equal(result.code, 'panel-not-displayed')
+  assert.deepEqual(switched, [])
+  assert.equal(f.calls.opened.length, 0)
+})
+
 function managedSidebar({ existing = [], attach = true } = {}) {
   const fixture = rc5Tree()
   fixture.ownPanel.children = []
@@ -1488,15 +1612,15 @@ test('a logical view cannot claim a guest already bound to another view', async 
   assert.equal(panel.panelGuest('session-a', undefined, { viewId: 'view-a' }).guestId, first.guestId)
 })
 
-test('a missing cached guest creates a replacement instead of adopting an unrelated visible page', async () => {
+test('a missing cached guest is refused instead of replacing the page', async () => {
   const fixture = managedSidebar({ existing: [{ id: 'human-page', guestId: 11, url: 'https://human.example/' }] })
-  const { panel } = await mount({ sidebarRight: fixture.service, document: fixture.fixture.document })
+  const { panel } = await mount({ production: true, sidebarRight: fixture.service, document: fixture.fixture.document })
   const result = panel.openPanel('session-a', 'https://replacement.example/', { viewId: 'lost-view', guestId: 88 })
-  assert.equal(result.ok, true)
-  assert.equal(result.created, true)
-  assert.notEqual(result.guestId, 11)
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'BROWSER_GUEST_CLOSED')
+  assert.equal(result.guestId, null)
   assert.equal(fixture.pages.get('human-page').url, 'https://human.example/')
-  assert.equal(fixture.calls.opened.length, 1)
+  assert.equal(fixture.calls.opened.length, 0)
 })
 
 test('a pending native tab remains bound while its guest attaches and the requested URL changes', async () => {
@@ -1515,20 +1639,19 @@ test('a pending native tab remains bound while its guest attaches and the reques
   assert.equal(attached.created, false)
 })
 
-test('a closed native tab is replaced only for its owning logical view', async () => {
+test('a closed native tab fails without replacing either logical view', async () => {
   const fixture = managedSidebar()
-  const { panel } = await mount({ sidebarRight: fixture.service, document: fixture.fixture.document })
+  const { panel } = await mount({ production: true, sidebarRight: fixture.service, document: fixture.fixture.document })
   const first = panel.openPanel('session-a', 'https://first.example/', { viewId: 'view-a' })
   const second = panel.openPanel('session-a', 'https://second.example/', { viewId: 'view-b' })
   const closed = fixture.pages.get(first.tabId)
   closed.ready = false
   fixture.tabs.splice(fixture.tabs.findIndex(tab => tab.id === first.tabId), 1)
   const replacement = panel.openPanel('session-a', 'https://replacement.example/', { viewId: 'view-a', guestId: first.guestId })
-  assert.equal(replacement.ok, true)
-  assert.notEqual(replacement.tabId, first.tabId)
-  assert.notEqual(replacement.tabId, second.tabId)
+  assert.equal(replacement.ok, false)
+  assert.equal(replacement.code, 'BROWSER_GUEST_CLOSED')
   assert.equal(fixture.pages.get(second.tabId).url, 'https://second.example/')
-  assert.equal(fixture.calls.opened.length, 3)
+  assert.equal(fixture.calls.opened.length, 2)
 })
 
 test('split panes with several visible unclaimed guests create a tab instead of guessing by list order', async () => {

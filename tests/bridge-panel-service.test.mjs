@@ -83,6 +83,7 @@ const seen = { evaluates: [], reads: [], placements: [], navigations: [], keys: 
  */
 let panelScript = () => ({ ok: true, created: true, panel: true, guestId: null })
 let panelGuest = null
+let cancelInitialization = () => false
 
 /**
  * The shell answering a page script.
@@ -93,6 +94,7 @@ let panelGuest = null
  */
 globalThis.__evalInShell__ = async (id, code) => {
   seen.evaluates.push({ id, expression: code })
+  if (code.includes('cancelPanelInitialization')) return cancelInitialization(code)
   if (code.includes('.click(')) seen.clicks.push(code)
   // `panelGuest` is the READ form and `openPanel` the one that CREATES. Keeping them apart here is
   // what lets the suite assert that a wait never places anything.
@@ -110,7 +112,7 @@ globalThis.__evalInShell__ = async (id, code) => {
     })
   }
   seen.placements.push(code)
-  const verdict = panelScript(seen.placements.length)
+  const verdict = await panelScript(seen.placements.length)
   if (panelGuest !== null && !world.contents.includes(panelGuest)) world.contents.push(panelGuest)
   return JSON.stringify(verdict)
 }
@@ -130,6 +132,8 @@ globalThis.__answerCdp__ = async (id, method, params) => {
     seen.navigations.push({ id, params })
     return { result: { value: 'OK' } }
   }
+  if (method === 'Page.getNavigationHistory') return { entries: [{ url: panelGuest.url, userTypedURL: panelGuest.url }], currentIndex: 0 }
+  if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main', loaderId: 'doc-1', url: panelGuest.url } } }
   return { result: { value: 'OK' } }
 }
 
@@ -149,6 +153,7 @@ function reset (script, guest = null) {
   claims.clear()
   panelScript = script
   panelGuest = guest
+  cancelInitialization = () => false
   seen.evaluates.length = 0
   seen.reads.length = 0
   seen.placements.length = 0
@@ -160,15 +165,20 @@ function reset (script, guest = null) {
 
 test('a conversation with no page gets one, and the call carries its own id', async () => {
   const guest = new FakeContents(7, 'webview', 'https://example.com/')
-  reset((read) => (read === 1
-    ? { ok: true, created: true, panel: true, guestId: null }
-    : { ok: true, created: false, panel: true, guestId: 7, url: 'https://example.com/' }), guest)
+  reset(async () => {
+    await new Promise(resolve => setImmediate(resolve))
+    return { ok: true, created: true, panel: true, guestId: 7, url: 'https://example.com/', rendererNavigation: true, initialization: { stage: 'attached', guestId: '7' } }
+  }, guest)
 
   const answer = await handle({ op: 'ensureSidebar', owner: 'session-a', url: 'https://example.com/' })
 
   assert.equal(answer.ok, true)
   assert.equal(answer.id, 7, 'the guest the panel produced is the one reported')
   assert.equal(answer.created, true, 'and the caller is told a tab was placed')
+  assert.equal(answer.navigation.frameId, 'main')
+  assert.equal(answer.navigation.loaderId, 'doc-1')
+  assert.equal(seen.placements.length, 1)
+  assert.equal(seen.navigations.length, 0, 'the acknowledged native navigation is not replayed')
 
   assert.ok(seen.evaluates.length >= 1, 'the renderer was asked for this conversation panel')
   for (const read of seen.evaluates) {
@@ -186,16 +196,50 @@ test('a superseded sidebar open cannot navigate the guest attached for its succe
   const newUrl = 'https://example.test/second'
   const guest = new FakeContents(7, 'webview', 'about:blank')
   const target = { op: 'ensureSidebar', owner: 'session-a', viewId: 'v1' }
-  reset(placement => ({ ok: true, panel: true, guestId: placement === 1 ? null : 7 }), guest)
+  let release
+  reset(async placement => {
+    if (placement === 1) await new Promise(resolve => { release = resolve })
+    return { ok: true, panel: true, guestId: 7 }
+  }, guest)
 
   const old = assert.rejects(handle({ ...target, url: oldUrl }), { code: 'panel-navigation-superseded' })
   await new Promise(resolve => setImmediate(resolve))
   const latest = await handle({ ...target, url: newUrl })
+  release()
   await old
 
   assert.equal(latest.id, 7)
   assert.deepEqual(seen.navigations, [{ id: 7, params: { url: newUrl } }])
 })
+
+test('a cancelled transaction cannot claim or navigate its late guest', async () => {
+  let release
+  const target = { owner: 'session-a', viewId: 'v1', transactionId: 'request-one' }
+  const guest = new FakeContents(7, 'webview', 'about:blank')
+  reset(() => new Promise(resolve => { release = () => resolve({ ok: true, panel: true, guestId: 7 }) }), guest)
+  cancelInitialization = code => { assert.ok(code.includes('request-one')); release(); return true }
+  const rejected = assert.rejects(handle({ op: 'ensureSidebar', ...target, url: 'https://cancelled.example/' }), { code: 'BROWSER_NAVIGATION_CANCELLED' })
+  await new Promise(resolve => setImmediate(resolve))
+  const stale = await handle({ op: 'cancelSidebar', ...target, transactionId: 'stale' })
+  assert.equal(stale.cancelled, false)
+  const foreign = await handle({ op: 'cancelSidebar', ...target, owner: 'session-other' })
+  assert.equal(foreign.cancelled, false)
+  const cancelled = await handle({ op: 'cancelSidebar', ...target })
+  assert.equal(cancelled.cancelled, true)
+  await rejected
+  assert.equal(claims.has(7), false)
+  assert.deepEqual(seen.navigations, [])
+})
+
+for (const receipt of [undefined, {}, { stage: 'attached', guestId: '8' }]) {
+  test(`a missing or foreign initialization identity is refused: ${JSON.stringify(receipt)}`, async () => {
+    const guest = new FakeContents(7, 'webview', 'https://example.com/')
+    reset(() => ({ ok: true, created: true, panel: true, guestId: 7, initialization: receipt }), guest)
+    await assert.rejects(handle({ op: 'ensureSidebar', owner: 'session-a', url: guest.url }), { code: 'BROWSER_DOCUMENT_UNACKNOWLEDGED' })
+    assert.equal(claims.has(7), false)
+    assert.deepEqual(seen.navigations, [])
+  })
+}
 
 test('an existing page is reused without navigating it again', async () => {
   const guest = new FakeContents(7, 'webview', 'https://example.com/')
@@ -264,27 +308,23 @@ test('a panel that never produces a page fails within its budget', async () => {
   const started = Date.now()
   await assert.rejects(
     () => handle({ op: 'ensureSidebar', owner: 'session-a' }),
-    /produced no page/,
+    { code: 'BROWSER_DOCUMENT_UNACKNOWLEDGED' },
   )
   const elapsed = Date.now() - started
   assert.ok(elapsed < 8_000, 'a no-url request uses the short budget; it took ' + String(elapsed) + 'ms')
   assert.deepEqual(seen.clicks, [], 'and it never fell back to clicking anything')
 })
 
-test('waiting for a page READS; it never places one', async () => {
-  // The wait polls because a guest attaches asynchronously after the renderer creates the webview.
-  // Polling with the CREATING call is what turned a 20-second budget into one empty tab every
-  // 250ms — reported as "it opens a pile of blank pages at once, and only the last one is any
-  // good". A wait must never be a write.
+test('a missing guest acknowledgement refuses without a polling fallback', async () => {
   reset(() => ({ ok: true, created: true, panel: true, guestId: null }))
 
   await assert.rejects(
     () => handle({ op: 'ensureSidebar', owner: 'session-a', url: 'https://example.com/' }),
-    /produced no page/,
+    { code: 'BROWSER_DOCUMENT_UNACKNOWLEDGED' },
   )
 
   assert.equal(seen.placements.length, 1, 'exactly ONE placement, however long the wait was')
-  assert.ok(seen.reads.length >= 2, 'and every round of the wait used the read form')
+  assert.equal(seen.reads.length, 0, 'there are no independent polling reads')
   for (const read of seen.reads) {
     // The CALL, not the name: every expression carries `typeof api.openPanel !== 'function'` as a
     // capability check, so a substring test for the name would fail on a correct read.
