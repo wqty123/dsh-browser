@@ -27,10 +27,10 @@ export function registerIframeReference(pageId: string, owner: string, commands:
       if (text.ok !== true || typeof text.text !== 'string') return 'missing'
       const found = findTextQuote(text.text, part.anchor)
       if (found.range === undefined) return found.status === 'ambiguous' ? 'ambiguous' : 'missing'
-      const result = await command('highlight', { ...spec, ...found.range, durationMs: 2500 }, signal)
+      const result = await command('highlight', { ...spec, ...found.range }, signal)
       return result.ok === true ? 'revealed' : 'missing'
     }
-    const result = await command('element', { kind: part.type, anchor: part.anchor, durationMs: 2500 }, signal)
+    const result = await command('element', { kind: part.type, anchor: part.anchor }, signal)
     return result.ok === true && result.status === 'found' ? 'revealed' : result.status === 'ambiguous' ? 'ambiguous' : 'missing'
   } })
   return () => { sources.delete(pageId) }

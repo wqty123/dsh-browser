@@ -31,6 +31,7 @@ afterAll(() => {
 })
 beforeEach(() => { vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(box) })
 afterEach(() => {
+  window.dispatchEvent(new Event('pointerdown'))
   cleanup()
   vi.restoreAllMocks()
   window.getSelection()?.removeAllRanges()
@@ -245,6 +246,42 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     const setStart = vi.spyOn(Range.prototype, 'setStart')
     expect(execute(highlightScript(), { legacy: true, start: 5, end: 11 })).toMatchObject({ ok: true })
     expect(setStart).toHaveBeenCalledWith(node, 0)
+  })
+
+  it('scrolls to the quoted range and keeps its guest highlight and selection until interaction', () => {
+    document.body.innerHTML = '<p>quoted list item</p>'
+    let scrollY = 0
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY)
+    vi.spyOn(window, 'scrollTo').mockImplementation(options => { scrollY = (options as ScrollToOptions).top ?? 0 })
+    vi.spyOn(Range.prototype, 'getClientRects').mockImplementation(() => [
+      { ...box, top: 2400 - scrollY, bottom: 2420 - scrollY },
+    ] as unknown as DOMRectList)
+    vi.useFakeTimers()
+    try {
+      expect(execute(highlightScript(), { start: 0, end: 16 })).toEqual({ ok: true, rects: 1, scrolled: true })
+      expect(scrollY).toBeGreaterThan(0)
+      expect(2400 - scrollY).toBeGreaterThanOrEqual(0)
+      expect(2420 - scrollY).toBeLessThan(window.innerHeight)
+      const highlight = document.querySelector<HTMLElement>('#__dsh-ref-highlight > div')!
+      expect(highlight.style.top).toBe('2400px')
+      expect(highlight.style.background).not.toBe('')
+      expect(window.getSelection()!.toString()).toBe('quoted list item')
+      vi.advanceTimersByTime(7000)
+      expect(document.querySelector('#__dsh-ref-highlight > div')).toBe(highlight)
+      expect(window.getSelection()!.toString()).toBe('quoted list item')
+      window.dispatchEvent(new Event('pointerdown'))
+      expect(document.getElementById('__dsh-ref-highlight')).toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+
+  it.each(['empty', 'no geometry', 'scroll refused'])('does not acknowledge an invisible guest highlight: %s', failure => {
+    document.body.innerHTML = '<p>quoted list item</p>'
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue(
+      [failure === 'no geometry' ? { ...box, width: 0, height: 0 } : { ...box, top: 2400, bottom: 2420 }] as unknown as DOMRectList,
+    )
+    expect(execute(highlightScript(), { start: 0, end: failure === 'empty' ? 0 : 16 })).toMatchObject({ ok: false })
+    expect(document.getElementById('__dsh-ref-highlight')).toBeNull()
   })
 
   it.each([3000, MAX_REFERENCE_TEXT])('admits %i characters through server and draft validation', async length => {

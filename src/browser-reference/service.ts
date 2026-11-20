@@ -730,7 +730,6 @@ export class BrowserReferenceService {
               end: locate.range.end,
               maxChars: this.options.maxPageText,
               legacy: part.content === undefined,
-              durationMs: 2500,
             }], signal)
             results.push({
               partId: part.partId,
@@ -781,7 +780,6 @@ export class BrowserReferenceService {
       const result = await this.run<RawElementRevealResult>(sessionId, revealElementScript(), [{
         kind,
         anchor,
-        durationMs: 2500,
       }], signal)
       const status = result.status === 'found' ? 'revealed' : result.status === 'ambiguous' ? 'ambiguous' : 'missing'
       return { status, ...typeof result.matches === 'number' ? { matches: result.matches } : {} }
