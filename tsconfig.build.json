@@ -15,7 +15,10 @@
     "types": ["node"],
     "paths": {
       "electron": ["./src/types/electron-shim.d.ts"],
-      "@deepseek-ai/*": ["./node_modules/@deepseek-ai/*/lib/types/index.d.ts"]
+      "@deepseek-ai/*": [
+        "./.dsh-sdk-types/node_modules/@deepseek-ai/*/lib/types/index.d.ts",
+        "./node_modules/@deepseek-ai/*/lib/types/index.d.ts"
+      ]
     }
   },
   "include": ["src/**/*.ts"],

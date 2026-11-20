@@ -1,3 +1,27 @@
+# Host TypeScript checks in a DSH workspace
+
+`tsconfig.build.json` checks plugin sources strictly against SDK declarations.
+`exclude` cannot exclude an imported upstream `.ts` file, and `skipLibCheck`
+only skips declarations, not implementation sources. A workspace checkout
+therefore needs compiled SDK declarations or an isolated published SDK install.
+
+If workspace packages resolve to `vendor/deepseek-harness/**`, install the
+published SDK contracts in the plugin directory (one command, also in PowerShell):
+
+```sh
+npm install --prefix .dsh-sdk-types --ignore-scripts --no-package-lock --no-audit --no-fund @deepseek-ai/cordis@4.1.0 @deepseek-ai/schemastery@3.19.0 @deepseek-ai/dsh-brand@0.2.2-rc.5 @deepseek-ai/dsh-llm@0.2.2-rc.5 @deepseek-ai/dsh-tools@0.2.2-rc.5 @deepseek-ai/dsh-system-prompt@0.2.2-rc.5 @deepseek-ai/dsh-settings@0.2.2-rc.5
+node_modules/.bin/tsc --noEmit -p tsconfig.build.json
+```
+
+The ignored `.dsh-sdk-types` directory takes priority over workspace packages
+for type resolution only; runtime imports and the upstream checkout are not
+modified. This validates the plugin against **0.2.2-rc.5** contracts, not against
+arbitrary unreleased workspace changes. Refresh these pins when intentionally
+validating a different published SDK. A standalone installation whose normal
+`node_modules` already contains SDK declarations does not need the extra install.
+Without declarations in either location, TypeScript can still fall back to
+workspace source exports; do not interpret `skipLibCheck` as isolation in that case.
+
 # 开发
 
 ## 构建与测试

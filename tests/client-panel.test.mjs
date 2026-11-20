@@ -17,7 +17,9 @@ const proxied = (url, sessionId) =>
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-import ts from 'typescript'
+import { createRequire } from 'node:module'
+
+const ts = createRequire(import.meta.url)('typescript')
 
 const initializationSource = ts.transpileModule(readFileSync(new URL('../src/client/browser/initialization.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
 const initialization = {}
