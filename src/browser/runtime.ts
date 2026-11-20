@@ -142,7 +142,7 @@ export class BrowserRuntime extends Service {
 
   private providers = new Map<string, BrowserProvider>()
   private readonly providerId: string | undefined
-  private panelProvider: ((label?: string) => Promise<BrowserProvider | undefined>) | undefined
+  private panelProvider: { create: (label?: string) => Promise<BrowserProvider | undefined> } | undefined
   private readonly panelSessions = new Map<BrowserSessionId, BrowserProvider>()
   private readonly panelPages = new Map<string, Promise<BrowserSessionId>>()
 
@@ -227,10 +227,11 @@ export class BrowserRuntime extends Service {
       if (provider !== undefined) owned.add(provider)
       return provider
     }
+    const registration = { create: tracked }
     const dispose = this.ctx.effect(() => {
-      this.panelProvider = tracked
+      this.panelProvider = registration
       return () => {
-        if (this.panelProvider === tracked) this.panelProvider = undefined
+        if (this.panelProvider === registration) this.panelProvider = undefined
         for (const [session, provider] of this.panelSessions) {
           if (owned.has(provider)) this.panelSessions.delete(session)
         }
@@ -244,7 +245,7 @@ export class BrowserRuntime extends Service {
   /** Undefined means this surface has no controllable sidebar; never use the default carrier. */
   async openPanel(label?: string): Promise<BrowserSessionId | undefined> {
     const factory = this.panelProvider
-    const provider = await factory?.(label)
+    const provider = await factory?.create(label)
     if (provider === undefined) return undefined
     const session = await provider.open(label)
     if (this.panelProvider !== factory) {
