@@ -138,6 +138,7 @@ export const ELECTRON_BROWSER_PROVIDER_ID = 'electron'
  * desktop shell with a real `WebContentsView`; a fake implements it in tests.
  */
 export interface ElectronBrowserViewHost {
+  prepare?(): Promise<void>
   readonly referenceOverlayOwner?: 'client'
   retireSession?(scope: BrowserSessionId): Promise<void>
   /**
@@ -857,6 +858,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   readonly id = ELECTRON_BROWSER_PROVIDER_ID
 
   private readonly sessions = new Map<BrowserSessionId, Session>()
+  private carrierLaunchError: unknown
   /**
    * Tick that installs the selection bar in every live tab and collects what the
    * human confirmed. The Desktop sidebar carrier is the shell's own <webview>:
@@ -1202,6 +1204,18 @@ export class ElectronBrowserProvider implements BrowserProvider {
     return Promise.resolve(id)
   }
 
+  private async prepareCarrier(signal?: AbortSignal): Promise<void> {
+    if (this.host.prepare === undefined) return
+    signal?.throwIfAborted()
+    try {
+      await withTimeout(this.host.prepare(), 31_000, signal, 'browser: carrier launch timed out before navigating a guest')
+      this.carrierLaunchError = undefined
+    } catch (error) {
+      if (!signal?.aborted) this.carrierLaunchError = error
+      throw error
+    }
+  }
+
   async bindPage(session: BrowserSessionId, pageId: BrowserTabWireId): Promise<void> {
     const s = this.session(session)
     if (this.host.adoptPage === undefined || !s.label) throw new Error('sidebar page binding unsupported')
@@ -1233,6 +1247,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   async openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void> {
     try { setLastOpen(request.url, Date.now()) } catch { /* best effort */ }
     const s = this.session(session)
+    await this.prepareCarrier(signal)
     if (request.newTab === true) {
       this.newTab(s)
     }
@@ -1466,6 +1481,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Navigate the active tab's view to a URL, honoring HTTP(S)-only admission. */
   async navigate(session: BrowserSessionId, request: { readonly url: string }, signal?: AbortSignal): Promise<void> {
     const s = this.session(session)
+    await this.prepareCarrier(signal)
     const tab = this.activeTab(s)
     const transaction = this.beginNavigation(tab, signal)
     const { navigation } = transaction
@@ -4151,6 +4167,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** The active tab of a session. */
   private activeTab(s: Session): Tab {
+    if (this.carrierLaunchError !== undefined) throw this.carrierLaunchError
     const tab = s.tabs[s.activeIndex]
     if (tab === undefined) throw new BrowserError('browser: session has no active tab', 'BROWSER_TAB_UNKNOWN')
     if (tab.failure !== undefined) throw tab.failure

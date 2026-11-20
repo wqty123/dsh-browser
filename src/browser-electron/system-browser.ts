@@ -80,6 +80,21 @@ const PORT_PROBE_MS = 250
  */
 export type BrowserLauncher = (path: string, args: readonly string[]) => ReturnType<typeof spawn>
 
+export interface SystemBrowserLaunchDiagnostic {
+  stderrTail: string
+  exitCode: number | null
+  signal: string | null
+  devToolsActivePortPresent: boolean
+}
+
+function diagnosticTail(value: string): string {
+  return value.replace(/\b(?:https?|wss?):\/\/[^\s]+/giu, '[URL redacted]')
+    .replace(/\b(authorization|cookie|password|token|secret)(\s*[:=]\s*)[^\r\n]+/giu, '$1$2[redacted]')
+    .replace(/\bBearer\s+[^\s]+/giu, 'Bearer [redacted]')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/gu, '')
+    .split('\n').slice(-12).join('\n').slice(-2048)
+}
+
 /** The real launcher: retain stderr for bounded launch diagnostics. */
 const defaultLauncher: BrowserLauncher = (path, args) =>
   spawn(path, [...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: false })
@@ -515,6 +530,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private profileLease: ProfileLease | undefined
   private starting: Promise<CdpClient> | undefined
   private lastLaunchError: string | undefined
+  private launchDiagnostic: SystemBrowserLaunchDiagnostic | undefined
 
   /**
    * Browsers that ignored a kill.
@@ -554,13 +570,28 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private readonly profileError?: string,
   ) {}
 
-  connectionStatus(): { connected: boolean; detail: string } {
+  async prepare(): Promise<void> {
+    try {
+      await this.ensureClient()
+    } catch (error) {
+      const launch = this.connectionStatus().launch
+      if (!(error instanceof Error) || launch === undefined) throw error
+      throw Object.assign(new Error(`${error.message} Launch diagnostic: ${JSON.stringify(launch)}`, { cause: error }),
+        'code' in error ? { code: error.code } : {})
+    }
+  }
+
+  connectionStatus(): { connected: boolean; detail: string; launch?: SystemBrowserLaunchDiagnostic } {
     const connected = !this.disposed && this.client?.isAlive() === true && !this.clientSuspect
     return { connected, detail: connected ? 'Browser launched and connected over CDP.'
       : this.profileError ?? this.lastLaunchError ?? (this.disposed ? 'Browser carrier was released.'
         : this.starting ? 'Browser launch is in progress; no live CDP connection yet.'
           : this.client ? 'Browser CDP connection was lost or is awaiting verification.'
-            : 'Browser has not launched; run a browser command to establish CDP. No live CDP connection.') }
+            : 'Browser has not launched; run a browser command to establish CDP. No live CDP connection.'),
+      ...this.launchDiagnostic === undefined ? {} : { launch: {
+        ...this.launchDiagnostic, devToolsActivePortPresent: existsSync(join(this.profileDir, 'DevToolsActivePort')),
+      } },
+    }
   }
 
   /** Which product this host would drive (for diagnostics). */
@@ -867,6 +898,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     })()
     let child: ReturnType<typeof spawn>
     if (this.disposed || Date.now() >= deadline) throw new Error('dsh-builtin-browser: launch was cancelled or its deadline expired')
+    const launchDiagnostic: SystemBrowserLaunchDiagnostic = {
+      stderrTail: '', exitCode: null, signal: null, devToolsActivePortPresent: existsSync(portFile),
+    }
+    this.launchDiagnostic = launchDiagnostic
     try {
       child = this.launcher(this.browser.path, args)
     } catch (error) {
@@ -876,6 +911,12 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       throw new Error(`dsh-builtin-browser: could not launch ${this.browser.path}: ${error instanceof Error ? error.message : String(error)}`)
     }
     this.child = child
+    launchDiagnostic.exitCode = child.exitCode
+    launchDiagnostic.signal = child.signalCode
+    child.on('exit', (code, signal) => {
+      launchDiagnostic.exitCode = code ?? child.exitCode
+      launchDiagnostic.signal = signal ?? child.signalCode
+    })
     /**
      * A launch that fails (ENOENT, no permission, a broken binary) is reported by an
      * asynchronous 'error' event on the child, NOT by a throw here and NOT by exitCode.
@@ -886,11 +927,16 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     let diagnostic = ''
     child.stderr?.on('data', chunk => {
       diagnostic = (diagnostic + String(chunk)).slice(-4096)
+      launchDiagnostic.stderrTail = diagnosticTail(diagnostic)
       if (/remote debugging requires a non-default data directory/iu.test(diagnostic)) {
         launchError = new Error('The browser refused remote debugging on its default user profile. A live CDP connection is required; no alternative profile was substituted.')
       }
     })
-    child.on('error', error => { launchError = error })
+    child.on('error', error => {
+      launchError = error
+      launchDiagnostic.exitCode = child.exitCode
+      launchDiagnostic.signal = child.signalCode
+    })
     // A browser that exits later is as unusable as one that never started, and the failure
     // has to reach the NEXT call rather than being swallowed: clearing the client here is
     // what makes ensureClient() start a fresh browser instead of returning a socket to a

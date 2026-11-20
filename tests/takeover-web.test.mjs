@@ -61,8 +61,13 @@ test('real Chromium opaque Web guest: human login, sidebar completion, fresh sna
   const host = takeoverHost(new Proxy({}, { get() { throw new Error('Web takeover must not use a native browser bridge') } })), jar = new GuestCookieJar(), storage = new GuestStorage(), errors = []
   let connected = false
   const font = process.env.DSH_TEST_FONT ? await readFile(process.env.DSH_TEST_FONT) : undefined
+  const theme = process.env.DSH_TEST_THEME_CSS ? await readFile(process.env.DSH_TEST_THEME_CSS, 'utf8') : `
+    body { --dsw-alias-label-primary:#111; --dsw-alias-bg-layer-1:#fff; --dsw-alias-bg-base:#fff;
+      --dsw-alias-label-primary-foreground:#fff; --dsw-alias-button-primary-fill:#111; --dsw-alias-border-l3:#ddd; }
+    body[data-ds-dark-theme] { --dsw-alias-label-primary:#eee; --dsw-alias-bg-layer-1:#222; --dsw-alias-bg-base:#111;
+      --dsw-alias-label-primary-foreground:#111; --dsw-alias-button-primary-fill:#eee; --dsw-alias-border-l3:#444; }`
   const server = createServer((req, res) => {
-    if (req.url === '/') { res.setHeader('content-type', 'text/html'); res.end(`<!doctype html><meta charset="utf-8"><style>${font ? '@font-face{font-family:TakeoverTest;src:url(/font)}' : ''}body{font:14px TakeoverTest,sans-serif;margin:0}#viewport{position:relative;height:500px}.takeover{min-height:30px;background:#eff6ff}</style><div id="toolbar"></div><div id="viewport"></div><script type="module" src="/client.js"></script>`); return }
+    if (req.url === '/') { res.setHeader('content-type', 'text/html'); res.end(`<!doctype html><meta charset="utf-8"><style>${theme}\n${font ? '@font-face{font-family:TakeoverTest;src:url(/font)}' : ''}body{font:14px TakeoverTest,sans-serif;margin:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base)}#viewport{position:relative;height:500px}</style><div id="toolbar"></div><div id="viewport"></div><script type="module" src="/client.js"></script>`); return }
     if (req.url === '/font' && font) { res.setHeader('content-type', 'font/otf'); res.end(font); return }
     if (req.url === '/client.js') { res.setHeader('content-type', 'text/javascript'); res.end(javascript); return }
     if (req.url === '/connected') { res.end(JSON.stringify(connected)); return }
@@ -90,7 +95,24 @@ test('real Chromium opaque Web guest: human login, sidebar completion, fresh sna
     const { data } = await page.command('Page.captureScreenshot', { format: 'png' })
     await writeFile(join(process.env.DSH_TEST_EVIDENCE_DIR, name), Buffer.from(data, 'base64'))
   }
-  assert.equal(await page.evaluate(`getComputedStyle([...document.querySelectorAll('button')].find(button=>button.textContent==='确认完成')).backgroundColor`), 'rgb(37, 99, 235)')
+  const colors = []
+  for (const mode of ['dark', 'light', 'dark']) {
+    colors.push(await page.evaluate(`(() => {
+      document.body.toggleAttribute('data-ds-dark-theme', ${mode === 'dark'});
+      const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='确认完成');
+      if(window.themeButton && window.themeButton!==button)throw new Error('theme switch remounted pending controls');
+      window.themeButton=button;
+      const probe=document.createElement('span');document.body.append(probe);
+      const expected=(token)=>{probe.style.color='var('+token+')';return getComputedStyle(probe).color};
+      const banner=button.parentElement, skip=[...banner.querySelectorAll('button')].find(b=>b.textContent==='跳过');
+      const actual=[getComputedStyle(button).backgroundColor,getComputedStyle(button).color,getComputedStyle(banner).backgroundColor,getComputedStyle(skip).color];
+      const wanted=['--dsw-alias-button-primary-fill','--dsw-alias-label-primary-foreground','--dsw-alias-bg-layer-1','--dsw-alias-label-primary'].map(expected);
+      probe.remove();if(JSON.stringify(actual)!==JSON.stringify(wanted))throw new Error(JSON.stringify({actual,wanted}));return actual;
+    })()`))
+    await screenshot(`BR-theme-${mode}.png`)
+  }
+  assert.notDeepEqual(colors[0], colors[1], 'live theme switch changes the controls')
+  assert.deepEqual(colors[0], colors[2], 'switching back restores dark theme colors')
   await screenshot('BJ-takeover-waiting.png')
   await assert.rejects(host.tools.get('dsh_browser_open').execute({ url: 'https://takeover.example/other' }, host.exec), /awaiting human takeover/)
   const { targetInfos } = await page.command('Target.getTargets')

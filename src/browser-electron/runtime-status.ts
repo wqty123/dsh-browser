@@ -23,7 +23,7 @@
 import type { BridgeStatus } from './bridge-status.ts'
 import type { BridgeEndpointState } from './bridge-endpoint.ts'
 import type { ProvisionSnapshot } from './electron-provision.ts'
-import { detectBrowser, type BrowserChannel, type DetectedBrowser } from './system-browser.ts'
+import { detectBrowser, type BrowserChannel, type DetectedBrowser, type SystemBrowserLaunchDiagnostic } from './system-browser.ts'
 
 /** The part of the carrier the channel names, in the terms the panel has to explain. */
 export type CarrierKind = 'sidebar' | 'bundled' | 'system' | 'auto'
@@ -33,6 +33,7 @@ export type Readiness = 'ready' | 'blocked'
 
 /** The system-browser discovery result, obtained without launching an executable. */
 export interface SystemBrowserReadiness {
+  readonly launch?: SystemBrowserLaunchDiagnostic
   /** False for channels that use the sidebar or bundled runtime directly. */
   readonly checked: boolean
   readonly present: boolean
@@ -111,7 +112,7 @@ export interface RuntimeStatusDeps {
   readonly detectBrowser?: (channel: BrowserChannel) => DetectedBrowser | undefined
   /** The provider's current carrier, including a fallback selected after sidebar loss. */
   readonly selectedCarrier?: () => Exclude<CarrierKind, 'auto'> | undefined
-  readonly systemConnection?: () => { connected: boolean; detail: string } | undefined
+  readonly systemConnection?: () => { connected: boolean; detail: string; launch?: SystemBrowserLaunchDiagnostic } | undefined
 }
 
 /** Which carrier a channel names. */
@@ -179,6 +180,7 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
   const detected = checkSystemBrowser ? (deps.detectBrowser ?? detectBrowser)(channel) : undefined
   const connection = checkSystemBrowser ? deps.systemConnection?.() : undefined
   const systemBrowser: SystemBrowserReadiness = {
+    ...connection?.launch === undefined ? {} : { launch: connection.launch },
     checked: checkSystemBrowser,
     present: detected !== undefined,
     ...detected === undefined ? {} : { kind: detected.kind, path: detected.path },
