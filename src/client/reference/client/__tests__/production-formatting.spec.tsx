@@ -504,6 +504,43 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     expect(isOrderedReferenceGroup({ referenceId: 'r', parts: [{ kind: 'text', referenceId: 'r', partId: 't', text: 'x'.repeat(MAX_REFERENCE_TEXT + 1) }] })).toBe(false)
   })
 
+  it.each([MAX_REFERENCE_TEXT - 1, MAX_REFERENCE_TEXT + 1])('measures %i model-facing characters independently of formula MathML', async length => {
+    const latex = '\\sqrt[3]{x}'
+    const plain = 'x'.repeat(length - latex.length - 2)
+    const raw = select(`<p>${plain}<math><mroot><mi>x</mi><mn>3</mn></mroot></math></p>`)
+    const { outcome } = await stored(raw)
+    if (length > MAX_REFERENCE_TEXT) {
+      expect(outcome.reference).toBeUndefined()
+      expect(outcome.failures).toContainEqual(expect.objectContaining({ reason: 'text-too-long' }))
+      return
+    }
+    expect(outcome.failures).toEqual([])
+    const part = outcome.reference!.parts[0]!
+    expect(part.type).toBe('text')
+    if (part.type !== 'text') throw new Error('missing text part')
+    expect(renderReferenceText(part.content!)).toBe(`${plain}$${latex}$`)
+    expect(renderReferenceText(part.content!)).toHaveLength(length)
+    expect(isOrderedReferenceGroup(toOrderedGroup(outcome.reference!))).toBe(true)
+    const markup = renderToStaticMarkup(createElement(ReferenceText, { content: part.content! }))
+    expect(markup).toContain('<mroot>')
+  })
+
+  it('drops excessive auxiliary MathML but keeps source TeX and model text', async () => {
+    const raw = select('<p><math><mroot><mi>x</mi><mn>3</mn></mroot></math></p>')
+    const event = raw.events![0]!
+    for (const mathml of ['<math>' + 'x'.repeat(64_000) + '</math>', 123]) {
+      const { snapshot, parts } = await submit({ ...raw, events: [{ ...event,
+        content: [{ type: 'math', latex: '\\sqrt[3]{x}', display: false, mathml } as never],
+      }] })
+      expect(snapshot.parts[0]).toMatchObject({ content: [{ type: 'math', latex: '\\sqrt[3]{x}', display: false }] })
+      const part = snapshot.parts[0]!
+      if (part.type !== 'text') throw new Error('missing text part')
+      expect(part.content![0]).not.toHaveProperty('mathml')
+      expect(parts).toEqual([{ type: 'text', text: '$\\sqrt[3]{x}$\n' }])
+      expect(renderToStaticMarkup(createElement(ReferenceText, { content: part.content! }))).toContain('class="katex"')
+    }
+  })
+
   it('excludes hidden and executable content and refuses malformed semantic payloads', async () => {
     const raw = select('<p>safe<script>danger()</script><span style="display:none">hidden</span><a href="javascript:alert(1)"> text</a></p>')
     const { parts } = await submit(raw)
