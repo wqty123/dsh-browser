@@ -89,6 +89,7 @@ function cookiesFor(host: string): string | undefined {
 
 /** Responses larger than this pass through without rewriting. */
 const MAX_REWRITE_BYTES = 4 * 1024 * 1024
+const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
 
 /** Content types eligible for rewriting; sub-requests and non-HTML still pass through raw. */
 const REWRITABLE = /^(text\/|application\/(json|javascript|xhtml\+xml|xml|rss\+xml|atom\+xml))/iu
@@ -401,7 +402,25 @@ export async function handleGuest(
     let body: Buffer | undefined
     if (method !== 'GET' && method !== 'HEAD') {
       const chunks: Buffer[] = []
-      for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      let size = 0
+      const tooLarge = (): void => {
+        request.pause()
+        response.writeHead(413, { 'content-type': 'text/plain; charset=utf-8', connection: 'close' })
+        response.end('guest proxy: request body exceeds 10 MiB')
+      }
+      if (Number(request.headers['content-length']) > MAX_REQUEST_BODY_BYTES) {
+        tooLarge()
+        return
+      }
+      for await (const chunk of request.iterator({ destroyOnReturn: false })) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        size += buffer.length
+        if (size > MAX_REQUEST_BODY_BYTES) {
+          tooLarge()
+          return
+        }
+        chunks.push(buffer)
+      }
       body = Buffer.concat(chunks)
     }
     upstream = await fetchTarget(target, { method, headers, body: body as BodyInit | undefined, redirect: 'manual' })
