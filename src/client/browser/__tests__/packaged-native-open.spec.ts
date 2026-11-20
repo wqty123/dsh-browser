@@ -33,7 +33,10 @@ function load(source: string) {
   })
 }
 
-afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ''; localStorage.clear() })
+afterEach(() => {
+  vi.unstubAllGlobals(); document.body.innerHTML = ''; localStorage.clear()
+  document.head.querySelectorAll('style[data-plugin="dsh-builtin-browser"]').forEach(style => style.remove())
+})
 
 async function boot(pluginSource: string) {
   const registrations: any[] = [], disposers: (() => unknown)[] = [], injections: any[] = []
@@ -148,6 +151,11 @@ it('opens native documents through the shipped plugin and rc.3 sidebar bundles, 
   const h = await boot(pluginBundle())
   try {
     expect(h.ctx.sidebarRightTabs.get('browser').multiple).toBe(false)
+    const styles = Array.from(document.head.querySelectorAll('style[data-plugin="dsh-builtin-browser"]'))
+    expect(styles.map(style => style.getAttribute('data-plugin-css'))).toEqual(expect.arrayContaining([
+      'dsh-builtin-browser/Browser.module.css', 'dsh-builtin-browser/ReferenceDock.module.css',
+    ]))
+    expect(styles.map(style => style.textContent).join('\n')).toMatch(/height:38px/)
     const results = []
     for (const [viewId, url] of [['first', 'https://example.test/one'], ['first', 'https://example.test/one'], ['retry', 'https://example.test/two']]) {
       const result = await h.api.initializePanel('session-packaged', url, { viewId, deadline: Date.now() + 1500 })
