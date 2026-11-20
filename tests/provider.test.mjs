@@ -115,6 +115,30 @@ test('source binding retains the exact adopted page and destroys only the unused
   provider.dispose()
 })
 
+test('closing an adopted carrier page waits for acknowledgement and removes its provider tab', async () => {
+  const host = makeHost()
+  let exists = true
+  let refuse = true
+  const closed = []
+  host.listPages = async () => exists ? [{ id: '42', url: 'https://example.test/' }] : []
+  host.adoptPage = async () => host.createView()
+  host.closePage = async (id, owner) => {
+    closed.push([id, owner])
+    if (refuse) throw new Error('close refused')
+    exists = false
+  }
+  const provider = new ElectronBrowserProvider(host)
+  const session = await provider.open('owner')
+  await provider.switchTab(session, 'page:42')
+  await assert.rejects(provider.closeTab(session, 'page:42'), /close refused/)
+  assert.ok((await provider.listTabs(session)).some(tab => tab.id === 'page:42'))
+  refuse = false
+  await provider.closeTab(session, 'page:42')
+  assert.ok((await provider.listTabs(session)).every(tab => tab.id !== 'page:42'))
+  assert.deepEqual(closed, [['42', 'owner'], ['42', 'owner']])
+  provider.dispose()
+})
+
 /** Poll until fn() is truthy or the budget runs out. */
 async function waitFor(fn, ms = 1000) {
   const deadline = Date.now() + ms

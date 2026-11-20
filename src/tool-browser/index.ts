@@ -26,6 +26,7 @@ import { createReferenceService, summarizeReference, type BrowserReferenceServic
 import type { BrowserReferenceCarrier } from '../browser-reference/types.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { BrowserSessionId, BrowserPageOperationRequest, BrowserProbeMethod } from '../browser/types.ts'
+import { browserSessionHandle, resolveTabHandle, scopedTabs, sessionWireId } from '../browser/handles.ts'
 import {
   ELEMENT_ITEM_SCHEMA,
   NODE_ITEM_SCHEMA,
@@ -1816,7 +1817,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
         const tabs = await browser.listTabs(session)
-        return { tabs: tabs.map(t => ({ id: t.id, url: t.url, active: t.active })) }
+        return { tabs: scopedTabs(browserSessionHandle(taskKey(exec), session), tabs).map(t => ({ id: t.id, url: t.url, active: t.active })) }
       },
     }))
 
@@ -1837,7 +1838,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
-        await browser.switchTab(session, args.tabId)
+        const handle = resolveTabHandle(browserSessionHandle(taskKey(exec), session), args.tabId)
+        await browser.switchTab(handle.session, handle.tab)
         return { switched: true }
       },
     }))
@@ -1859,7 +1861,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
-        await browser.closeTab(session, args.tabId)
+        const handle = resolveTabHandle(browserSessionHandle(taskKey(exec), session), args.tabId)
+        await browser.closeTab(handle.session, handle.tab)
         return { closed: true }
       },
     }))
@@ -2220,7 +2223,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const tabs = await browser.listTabs(session)
-      return { session, tabs: tabs.map(t => ({ id: t.id, url: t.url, active: t.active })) }
+      const scope = browserSessionHandle(taskKey(exec), session)
+      return { session: sessionWireId(scope), tabs: scopedTabs(scope, tabs).map(t => ({ id: t.id, url: t.url, active: t.active })) }
     },
   }))
 

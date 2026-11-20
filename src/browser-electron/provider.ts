@@ -1394,7 +1394,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /** Close one tab; closing the active tab activates the next. */
-  closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
+  async closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
     const owner = this.session(session).label
     // A page the carrier owns rather than a view we created. It was reported by `listTabs` under
     // this prefix, so closing it here is what keeps the two tools consistent — a page that can be
@@ -1407,7 +1407,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
           'BROWSER_TAB_NOT_FOUND',
         ))
       }
-      return this.host.closePage(id, owner)
+      await this.host.closePage(id, owner)
+      if (!this.session(session).tabs.some(tab => tab.id === tabId)) return
     }
     const found = this.locateTab(session, tabId)
     const s = found.s
@@ -1415,7 +1416,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const removed = s.tabs[index]
     if (removed !== undefined) {
       s.tabs.splice(index, 1)
-      this.destroyTab(removed)
+      this.destroyTab(removed, { keepPage: tabId.startsWith('page:') })
     }
     if (s.tabs.length === 0) {
       // Session keeps one blank tab so it stays usable.
@@ -1435,13 +1436,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /**
-   * Find a tab by id, preferring the calling session. Tab ids are globally
-   * unique UUIDs, so when the calling session does not hold the tab (the tool
-   * layer's session resolution can drift from the session that opened it),
-   * fall back to locating it in any other session instead of failing — the
-   * caller explicitly named a tab, so acting on it is what they want. Throws
-   * BROWSER_TAB_UNKNOWN with the session's actual tabs when the id exists
-   * nowhere.
+   * Find a provider-local tab within the calling session.
    */
   private locateTab(session: BrowserSessionId, tabId: string): { s: Session; index: number } {
     const s = this.session(session)
@@ -4177,9 +4172,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
     this.showActive(s)
   }
 
-  private destroyTab(tab: Tab): void {
+  private destroyTab(tab: Tab, options?: { readonly keepPage?: boolean }): void {
     tab.navigationAbort?.abort(new BrowserError('browser: the navigation guest was closed', 'BROWSER_GUEST_CLOSED'))
-    this.host.destroyView(tab.handle)
+    this.host.destroyView(tab.handle, options)
   }
 
   private interrupt(handle: ElectronViewHandle, timedOut: boolean): void {
