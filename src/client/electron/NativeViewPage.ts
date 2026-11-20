@@ -10,6 +10,7 @@ import type { BrowserTarget } from '../browser/url.ts'
 import { parseBrowserAddress } from '../browser/url.ts'
 import { browserAddressCheckpoint } from '../browser/BrowserPersistence.ts'
 import { installReferenceOverlay } from './reference-overlay.ts'
+import type { NativeChildPresentation } from './NativeChildPresentation.ts'
 
 export type NativeSlotRegistrar = (tab: TabId, scope: string, viewportId: string, signal: AbortSignal) => Promise<SidebarNativeSlot>
 
@@ -31,15 +32,20 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   private attached = false
   private disposal: Promise<void> | undefined
   private documentLifetime: AbortController | undefined
+  private releaseChildOwner: (() => void) | undefined
+  private unsubscribeChildren: (() => void) | undefined
 
   constructor(private readonly options: BrowserPageOptions, private readonly native: DesktopNativeViews,
     private readonly register: NativeSlotRegistrar, private readonly workspace: (signal: AbortSignal) => Promise<string>,
-    private readonly owner: string, private readonly capture?: (intent: object, owner?: string) => Promise<void>) {}
+    private readonly owner: string, private readonly capture?: (intent: object, owner?: string) => Promise<void>,
+    private readonly children?: NativeChildPresentation) {}
 
   readonly lifecycle = { getSnapshot: (): BrowserCarrierState => this.carrier.getSnapshot(),
     subscribe: (listener: () => void): (() => void) => this.carrier.subscribe(listener) }
   getSnapshot = (): BrowserFrameState => this.state.getSnapshot()
   subscribe = (listener: () => void): (() => void) => this.state.subscribe(listener)
+
+  acknowledge(requestId: string): void { this.state.set({ ...this.state.getSnapshot(), navigationId: requestId }) }
 
   mount(viewport: string): () => void {
     this.detach()
@@ -90,6 +96,8 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   }
 
   private releaseAttachment(): void {
+    this.releaseChildOwner?.(); this.releaseChildOwner = undefined
+    this.unsubscribeChildren?.(); this.unsubscribeChildren = undefined
     this.documentLifetime?.abort()
     this.documentLifetime = undefined
     this.attachment?.lifetime.abort()
@@ -108,10 +116,11 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   }
 
   private initialize(): void {
-    if (this.mounted === undefined || this.pending === undefined) return
+    const child = this.options.tabId === undefined ? undefined : this.children?.child(this.options.tabId)
+    if (this.mounted === undefined || (this.pending === undefined && child === undefined)) return
     this.attachment ??= { viewport: this.mounted.viewport, lifetime: new AbortController() }
     const attachment = this.attachment
-    if (attachment === undefined || this.pending === undefined || this.initialization !== undefined || this.lease !== undefined) return
+    if (attachment === undefined || this.initialization !== undefined || this.lease !== undefined) return
     this.initialization = (async () => {
       await Promise.all(this.releases)
       const signal = attachment.lifetime.signal
@@ -120,15 +129,28 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
       if (tab === undefined) throw failure('BROWSER_OWNER_UNKNOWN')
       const scope = tabWireId({ owner: this.owner, session: 'sidebar', tab })
       const slot = await this.register(tab, scope, attachment.viewport, signal)
-      const workspace = await this.workspace(signal)
-      signal.throwIfAborted()
-      const { lease } = await this.native.acquire(scope, workspace)
+      const reservation = child === undefined
+        ? await this.native.acquire(scope, await this.workspace(signal)) : { lease: child.lease }
+      const { lease } = reservation
       if (signal.aborted) { this.release(lease); return }
       this.lease = lease
       this.unsubscribe = this.native.onState(lease, event => { this.observe(lease, event) })
-      await this.native.attach(lease, slot)
+      if (child === undefined) await this.native.attach(lease, slot)
+      else {
+        const children = this.children
+        if (children === undefined) throw failure('BROWSER_NATIVE_CHILD_UNAVAILABLE')
+        const adopted = await children.api.adopt(child.request, slot)
+        if (adopted.child !== scope || adopted.lease !== lease) throw failure('BROWSER_HANDLE_STALE')
+        this.pending = undefined
+      }
       signal.throwIfAborted()
       this.attached = true
+      if (this.children !== undefined) {
+        this.unsubscribeChildren = this.children.listen(scope)
+        const release = await this.children.api.registerOwner(scope, slot)
+        if (signal.aborted) { release(); return }
+        this.releaseChildOwner = release
+      }
       this.navigatePending()
     })().catch(error => {
       if (!attachment.lifetime.signal.aborted) this.fail(error)
@@ -157,6 +179,11 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
       const answer = await this.command('Runtime.evaluate', { expression: '({url:location.href,title:document.title})', returnByValue: true }) as { result?: { value?: { url?: string; title?: string } } }
       const history = await this.command('Page.getNavigationHistory') as { currentIndex: number; entries: readonly object[] }
       if (this.lease !== lease || revision !== this.revision || this.carrier.getSnapshot().generation !== event.generation) return
+      if (answer.result?.value?.url === 'about:blank' && this.options.tabId !== undefined && this.children?.child(this.options.tabId) !== undefined) {
+        this.carrier.set({ stage: 'ready', guestId: lease, generation: event.generation, frameId: event.frameId, loaderId: event.loaderId })
+        this.state.set({ ...this.state.getSnapshot(), address: 'unknown', loading: false, documentReady: true, error: undefined })
+        return
+      }
       const observed = parseBrowserAddress(answer.result?.value?.url ?? '', undefined)
       if (!observed.ok) throw failure('BROWSER_DOCUMENT_UNACKNOWLEDGED')
       const target = { ...observed.target, ...typeof answer.result?.value?.title === 'string' ? { title: answer.result.value.title } : {} }
@@ -209,7 +236,10 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
 
 export function createNativePage(options: BrowserPageOptions, native: DesktopNativeViews, register: NativeSlotRegistrar,
   workspace: (signal: AbortSignal) => Promise<string>, owner: string,
-  capture?: (intent: object, owner?: string) => Promise<void>): BrowserPage {
-  const page = new NativeViewPage(options, native, register, workspace, owner, capture)
-  return { frame: page, presentation: page }
+  capture?: (intent: object, owner?: string) => Promise<void>, children?: NativeChildPresentation): BrowserPage {
+  const page = new NativeViewPage(options, native, register, workspace, owner, capture, children)
+  const child = options.tabId === undefined ? undefined : children?.child(options.tabId)
+  return { frame: page, presentation: page, ...child === undefined ? {} : {
+    adoption: { url: child.url, acknowledge: (requestId: string) => { page.acknowledge(requestId) } },
+  } }
 }

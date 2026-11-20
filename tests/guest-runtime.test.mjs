@@ -127,7 +127,7 @@ test('XHR and beacon stay in the proxy; window.open never impersonates a child b
   assert.equal(requests[0].input, guestPath('https://ordinary.example/metrics'))
   assert.equal(requests[0].init.headers['x-dsh-guest-sub'], '1')
   assert.equal(requests[0].init.body, 'payload')
-  assert.throws(() => context.open('next', '_blank'), error => error.name === 'NotSupportedError' && error.code === 'native-child-opener-unavailable')
+  assert.throws(() => context.open('next', '_blank'), error => error.name === 'NotSupportedError' && error.code === 'BROWSER_NATIVE_CHILD_UNAVAILABLE')
   assert.deepEqual(navigations, [])
 })
 
@@ -202,7 +202,7 @@ test('native opener, named targets, blank children, POST targets and unready tab
   context.parent.postMessage = data => { if (data.type === 'dsh.browser.guest.child.request') requests.push(data) }
   listeners.get('message')({ source: context.parent, data: { type: 'dsh.browser.guest.navigation.request', loadId: 1 } })
   for (const args of [[], [''], ['about:blank'], ['next', 'login'], ['next', '_blank', 'noopener=0']]) {
-    assert.throws(() => context.open(...args), error => error.code === 'native-child-opener-unavailable')
+    assert.throws(() => context.open(...args), error => error.code === 'BROWSER_NATIVE_CHILD_UNAVAILABLE')
   }
   const form = new Form(); form.setAttribute('target', '_blank'); form.setAttribute('method', 'POST')
   listeners.get('submit')({ target: form, preventDefault() {} })

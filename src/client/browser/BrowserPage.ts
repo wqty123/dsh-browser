@@ -14,6 +14,7 @@ export interface BrowserPageOptions {
 
 /** The owning controller disposes frame; UI mounts only presentation. */
 export interface BrowserPage {
+  readonly adoption?: { readonly url: string; acknowledge(requestId: string): void }
   readonly frame: BrowserFrame
   readonly presentation: BrowserPresentation
 }

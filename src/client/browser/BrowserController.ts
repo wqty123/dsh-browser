@@ -167,6 +167,16 @@ export class BrowserController implements HostObservable<BrowserControllerState>
   applyMount(initialUrl: string | undefined, navigationRevision: number): void {
     if (this.disposed) return
     this.navigationRevision = navigationRevision
+    const adoption = this.page.adoption
+    if (adoption !== undefined && this.applied === undefined) {
+      this.applied = { url: adoption.url, revision: navigationRevision }
+      const receipt = this.journal.begin({ sessionId: this.sessionId, tabId: this.options.tabId,
+        occurrenceId: this.occurrenceId, navigationRevision, url: adoption.url })
+      adoption.acknowledge(receipt.requestId)
+      this.journal.advance(this.options.tabId, 'mounted', { navigationRevision })
+      this.publishInitialization()
+      return
+    }
     const navigates = initialUrl !== undefined && initialUrl !== ''
       && (this.applied === undefined || navigationRevision > this.applied.revision)
     // `latest` is keyed only by tab, so a rebuilt occurrence can inherit a

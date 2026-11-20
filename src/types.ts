@@ -43,7 +43,7 @@ export interface BrowserChildTabRequest {
 
 export type BrowserChildTabResult =
   | { readonly status: 'url-only-dispatched' }
-  | { readonly status: 'unsupported'; readonly code: 'native-child-opener-unavailable' | 'invalid-child-url' | 'guest-disposed' | 'sidebar-tab-dispatch-failed' }
+  | { readonly status: 'unsupported'; readonly code: 'BROWSER_NATIVE_CHILD_UNAVAILABLE' | 'invalid-child-url' | 'guest-disposed' | 'sidebar-tab-dispatch-failed' }
 
 export interface DesktopBrowserChildTabs {
   readonly protocolVersion: 1
@@ -51,11 +51,29 @@ export interface DesktopBrowserChildTabs {
   onRequested(lease: DesktopBrowserLeaseId, listener: (request: BrowserChildTabRequest) => BrowserChildTabResult): () => void
 }
 
+export interface DesktopNativeChild {
+  readonly request: string
+  readonly opener: string
+  readonly child: string
+  readonly lease: DesktopNativeLease
+  readonly target: string
+  readonly url: string
+  readonly disposition: string
+}
+
+export interface DesktopNativeChildTabs {
+  readonly protocolVersion: 2
+  registerOwner(parent: string, slot: SidebarNativeSlot): Promise<() => void>
+  onCreated(parent: string, listener: (child: DesktopNativeChild) => void): () => void
+  onClosed(parent: string, listener: (child: DesktopNativeChild) => void): () => void
+  adopt(request: string, slot: SidebarNativeSlot): Promise<{ child: string; lease: DesktopNativeLease }>
+}
+
 /** Origin-scoped operations; no Electron objects or arbitrary IPC cross this interface. */
 export interface DesktopBrowserBridge {
   readonly nativeViews?: DesktopNativeViews
-  /** Version 1 supports URL-only sidebar tabs, not native children or WindowProxy adoption. */
-  readonly childTabs?: DesktopBrowserChildTabs
+  /** Version 1 supports URL-only requests; version 2 adopts native WindowProxy children. */
+  readonly childTabs?: DesktopBrowserChildTabs | DesktopNativeChildTabs
   /** @param workspace - resolved storage account. @returns one approved guest reservation. */
   acquire(workspace: string): Promise<DesktopBrowserReservation>
   /** @param lease - the caller's reservation. @returns after its guest has been destroyed. */
