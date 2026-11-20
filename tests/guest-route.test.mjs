@@ -244,6 +244,42 @@ test('static rewriting keeps supported asset forms and special URLs intact', () 
   for (const html of ['<script src="/a.js"></script>', "<script src='/a.js'></script>", '<script src=/a.js></script>']) {
     assert.ok(rewriteDocument(html, base).includes(guestPath('https://ordinary.example/a.js')))
   }
-  const html = '<a href="#top">t</a><img src="data:image/gif;base64,AA"><form action="/search"></form>'
+  const html = '<a href="#top">t</a><img src="data:image/gif;base64,AA">'
   assert.equal(rewriteDocument(html, base), html)
+})
+
+test('Bing paging decodes HTML ampersands before encoding the proxy target', () => {
+  const html = '<a href="/search?q=deepseek&amp;first=10&amp;FORM=PORE">Next</a>'
+  assert.equal(rewriteDocument(html, new URL('https://cn.bing.com/search?q=deepseek')),
+    `<a href="${guestPath('https://cn.bing.com/search?q=deepseek&first=10&FORM=PORE')}">Next</a>`)
+})
+
+test('URL attributes decode named and numeric references once and escape each quote style', () => {
+  const base = new URL('https://ordinary.example/dir/page')
+  for (const attribute of ['href', 'src', 'poster', 'data-src', 'action']) {
+    for (const quote of ['"', "'", '']) {
+      const raw = '/path?x=1&amp;y=2&#38;z=3&#x26;v=&quot;q&quot;&#39;a&#39;&lt;b&gt;&#9731;&#x1F600;'
+      const path = guestPath(new URL('/path?x=1&y=2&z=3&v="q"\'a\'<b>☃😀', base).href)
+      const outputQuote = quote || '"'
+      const escaped = outputQuote === '"' ? path : path.replaceAll("'", '&#39;')
+      assert.equal(rewriteDocument(`<a ${attribute}=${quote}${raw}${quote}>`, base), `<a ${attribute}=${outputQuote}${escaped}${outputQuote}>`)
+    }
+  }
+  assert.equal(rewriteDocument('<a href="/?q=&amp;amp;">', base), `<a href="${guestPath('https://ordinary.example/?q=&amp;')}">`)
+  for (const value of ['', '#top', 'data:text/plain,&quot;hi&quot;', 'http://[']) {
+    const html = `<a href="${value}">`
+    assert.equal(rewriteDocument(html, base), html)
+  }
+  assert.ok(rewriteDocument('<img src="/&#0;&#xD800;&#1114112;">', base).includes(guestPath('https://ordinary.example/%EF%BF%BD%EF%BF%BD%EF%BF%BD')))
+})
+
+test('srcset candidates decode entities before resolving and safely retain literal special URLs', () => {
+  const base = new URL('https://ordinary.example/dir/page')
+  for (const quote of ['"', "'"]) {
+    const html = `<img srcset=${quote}/image?a=1&amp;b=2 1x, /&#x69;mage?size=2&#38;v=3 2x${quote}>`
+    const expected = `${guestPath('https://ordinary.example/image?a=1&b=2')} 1x, ${guestPath('https://ordinary.example/image?size=2&v=3')} 2x`
+    assert.equal(rewriteDocument(html, base), `<img srcset=${quote}${expected}${quote}>`)
+  }
+  assert.equal(rewriteDocument('<img srcset=/image?a=1&amp;b=2>', base), `<img srcset="${guestPath('https://ordinary.example/image?a=1&b=2')}">`)
+  assert.equal(rewriteDocument('<img srcset="about:&quot;blank&quot;">', base), '<img srcset="about:&#34;blank&#34;">')
 })
