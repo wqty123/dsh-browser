@@ -6,7 +6,7 @@ import { gunzipSync } from 'node:zlib'
 import { stripLegacyBridge } from './legacy-bridge.mjs'
 
 const specs = ['rc3', 'rc5'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8')))
-const previousSpecs = ['rc3', 'rc5'].flatMap(name => [5, 4, 3, 2, 1].map(revision =>
+const previousSpecs = ['rc3', 'rc5'].flatMap(name => [6, 5, 4, 3, 2, 1].map(revision =>
   JSON.parse(revision >= 3
     ? gunzipSync(fs.readFileSync(new URL(`./${name}-revision${revision}.json.gz`, import.meta.url))).toString('utf8')
     : fs.readFileSync(new URL(`./${name}-revision${revision}.json`, import.meta.url), 'utf8'))))
@@ -115,7 +115,7 @@ function inspect(packages, restoring, io) {
   try {
     const entries = plan(packages, restoring, io)
     return { status: entries.every(entry => entry.applied) ? 'applied' : 'absent',
-      ...(entries.some(entry => entry.previous) ? { reason: 'host patch revision 1 or 2 or 3 or 4 or 5; explicit bootstrap upgrade to revision 6 required' } : {}), entries }
+      ...(entries.some(entry => entry.previous) ? { reason: 'host patch revision 1 or 2 or 3 or 4 or 5 or 6; explicit bootstrap upgrade to revision 7 required' } : {}), entries }
   } catch (error) {
     return { status: error.status ?? 'anchors mismatch', reason: String(error.message ?? error) }
   }

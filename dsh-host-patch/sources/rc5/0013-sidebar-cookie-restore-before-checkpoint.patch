@@ -1,0 +1,127 @@
+From fe0a38ca9e9fb987f5d1a72f092564beffa38125 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 15:22:28 +0000
+Subject: [PATCH] fix(desktop): restore session cookies before checkpoint
+ permission setup
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ apps/desktop/src/sidebar-session-cookies.ts   | 44 +++++++++++--------
+ .../tests/sidebar-session-cookies.spec.ts     | 18 ++++++++
+ 2 files changed, 44 insertions(+), 18 deletions(-)
+
+diff --git a/apps/desktop/src/sidebar-session-cookies.ts b/apps/desktop/src/sidebar-session-cookies.ts
+index 6e0b2f7471..b64e421ce6 100644
+--- a/apps/desktop/src/sidebar-session-cookies.ts
++++ b/apps/desktop/src/sidebar-session-cookies.ts
+@@ -52,9 +52,10 @@ export class SidebarSessionCookies {
+   private disposed = false
+   private permissions: Promise<void> | undefined
+   private lastSnapshot: string | undefined
+-  private restoration: Promise<void> | undefined
++  private listening = false
++  private restoring = false
+   private readonly changed = (): void => {
+-    if (this.ready && !this.disposed) void this.flush().catch(() => { this.warn() })
++    if (!this.restoring && !this.disposed) void this.flush().catch(() => { this.warn() })
+   }
+ 
+   private constructor(private readonly browserSession: Pick<Session, 'cookies'>, home: string) {
+@@ -97,37 +98,44 @@ export class SidebarSessionCookies {
+ 
+   /** Listen before reading; gate checkpoints until individually valid entries are restored. */
+   restore(): Promise<void> {
+-    this.restoration ??= this.initialize()
+-    return this.restoration
++    return this.flush().catch(() => { this.warn() })
+   }
+ 
+   private async initialize(): Promise<void> {
+-    this.browserSession.cookies.on('changed', this.changed)
++    if (!this.listening) {
++      this.browserSession.cookies.on('changed', this.changed)
++      this.listening = true
++    }
+     let saved: unknown[] = []
+     try {
+-      await this.protection()
+       saved = sidecar.parse(JSON.parse(await readFile(this.file, 'utf8'))).cookies
+     } catch (error) {
+       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.warn()
+     }
+-    try {
+-      const persistent = new Set((await this.browserSession.cookies.get({ session: false })).map(key))
+-      for (const entry of saved) {
+-        const parsed = cookieRecord.safeParse(entry)
+-        if (!parsed.success) { this.warn(); continue }
+-        if (persistent.has(key(parsed.data))) continue
+-        try { await this.browserSession.cookies.set(details(parsed.data)) }
+-        catch (_unsupportedCookie) { this.warn() }
+-      }
+-    } catch (_unavailableCookies) { this.warn() }
++    const existing = new Set((await Promise.all([
++      this.browserSession.cookies.get({ session: false }), this.browserSession.cookies.get({ session: true }),
++    ])).flat().map(key))
++    for (const entry of saved) {
++      const parsed = cookieRecord.safeParse(entry)
++      if (!parsed.success) { this.warn(); continue }
++      if (existing.has(key(parsed.data))) continue
++      let cookie: CookiesSetDetails
++      try { cookie = details(parsed.data) }
++      catch (_unsupportedScope) { this.warn(); continue }
++      await this.browserSession.cookies.set(cookie)
++    }
+     this.ready = true
+-    await this.flush().catch(() => { this.warn() })
+   }
+ 
+   /** Await after host cookie mutations/logout, including deletion and replacement. */
+   flush(): Promise<void> {
+-    if (!this.ready || this.disposed) return this.writes
++    if (this.disposed) return this.writes
+     this.writes = this.writes.catch(() => undefined).then(async () => {
++      if (!this.ready) {
++        this.restoring = true
++        try { await this.initialize() }
++        finally { this.restoring = false }
++      }
+       await this.protection()
+       const cookies: SavedCookie[] = []
+       for (const value of await this.browserSession.cookies.get({ session: true })) {
+diff --git a/apps/desktop/tests/sidebar-session-cookies.spec.ts b/apps/desktop/tests/sidebar-session-cookies.spec.ts
+index 3c1b3cc550..91f66cf3a2 100644
+--- a/apps/desktop/tests/sidebar-session-cookies.spec.ts
++++ b/apps/desktop/tests/sidebar-session-cookies.spec.ts
+@@ -194,11 +194,29 @@ it('retries permission protection after failed restoration and checkpoint attemp
+   vi.mocked(mkdir).mockRejectedValueOnce(new Error('session-secret')).mockRejectedValueOnce(new Error('session-secret'))
+   await expect(f.store.restore()).resolves.toBeUndefined()
+   await expect(readFile(f.file)).rejects.toMatchObject({ code: 'ENOENT' })
++  await expect(f.store.flush()).rejects.toMatchObject({ code: 'BROWSER_PERSISTENT_SESSION_UNAVAILABLE' })
+   await expect(f.store.flush()).resolves.toBeUndefined()
+   expect((await snapshot(f.file)).cookies).toEqual([login])
+   expect(JSON.stringify(warning.mock.calls)).not.toContain('session-secret')
+ })
+ 
++it.each(['protection', 'enumeration', 'setting'])('preserves saved logins through transient %s failure before checkpointing', async (failure) => {
++  const f = await fixture()
++  vi.spyOn(console, 'error').mockImplementation(() => {})
++  const original = JSON.stringify({ version: 1, cookies: [login] })
++  await writeFile(f.file, original)
++  if (failure === 'protection') vi.mocked(mkdir).mockRejectedValueOnce(new Error('temporarily unavailable'))
++  if (failure === 'enumeration') f.cookies.get.mockRejectedValueOnce(new Error('temporarily unavailable'))
++  if (failure === 'setting') f.cookies.set.mockRejectedValueOnce(new Error('temporarily unavailable'))
++  await expect(f.store.restore()).resolves.toBeUndefined()
++  expect(await readFile(f.file, 'utf8')).toBe(original)
++  expect(writeFileAtomic).not.toHaveBeenCalled()
++  await expect(f.store.flush()).resolves.toBeUndefined()
++  expect(f.values).toEqual([login])
++  expect((await snapshot(f.file)).cookies).toEqual([login])
++  expect(f.cookies.listenerCount('changed')).toBe(1)
++})
++
+ it('drains queued changes and final snapshot before Chromium flush and listener disposal', async () => {
+   const f = await fixture([login])
+   await f.store.restore()
+-- 
+2.56.0
+

@@ -103,7 +103,7 @@ test('a mismatched preload refuses the whole Desktop/sidebar plan without writes
   for (const id of ['client', 'main']) assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'before'))
 })
 
-for (const revision of [2, 3, 4, 5]) for (const extraEdit of [false, true]) test(`revision ${revision} upgrades transactionally and restores originals (${extraEdit})`, t => {
+for (const revision of [2, 3, 4, 5, 6]) for (const extraEdit of [false, true]) test(`revision ${revision} upgrades transactionally and restores originals (${extraEdit})`, t => {
   const { packages, file } = setup(t)
   const previous = JSON.parse(revision >= 3
     ? gunzipSync(fs.readFileSync(new URL(`../dsh-host-patch/${release}-revision${revision}.json.gz`, import.meta.url))).toString('utf8')
