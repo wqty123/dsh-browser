@@ -9,7 +9,9 @@
 // node_modules and would be lost on the next update.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { createFakeBrowser } from './fixtures/fake-cdp-browser.mjs'
 import { DEFAULT_SETTINGS, resolveSettings } from '../lib/browser-electron/settings-store.js'
@@ -29,12 +31,13 @@ function fakeChild(exited = false) {
  * which is what these tests are about. A fake browser supplies the CDP side for the cases that need
  * a connected session.
  */
-async function capturedArgs(headlessMode, quiet = false, exited = false) {
+async function capturedArgs(headlessMode, quiet = false, exited = true) {
   const { SystemBrowserViewHost } = await import('../lib/browser-electron/system-browser.js')
   const seen = []
+  const profile = mkdtempSync(join(tmpdir(), 'dsh-headless-args-'))
   const host = new SystemBrowserViewHost(
     { kind: 'chrome', path: 'fake-browser' },
-    'D:/dsh-workspace/_scratch/headless-probe',
+    profile,
     [],
     undefined,
     (_path, args) => { seen.push(args); return fakeChild(exited) },
@@ -47,6 +50,7 @@ async function capturedArgs(headlessMode, quiet = false, exited = false) {
     // Expected: the stub is not a browser. The arguments are the evidence.
   } finally {
     host.dispose?.()
+    rmSync(profile, { recursive: true, force: true })
   }
   return seen[0] ?? []
 }
