@@ -2260,13 +2260,15 @@ for (const [state, label] of [
   test(`bridge ${state} offers its action outside folded diagnostics`, async () => {
     const calls = []
     const fetchMock = readinessFetch({ runtime: bridgeRuntime(state), calls })
-    const mounted = await mount({ fetch: fetchMock, render: false })
+    const mounted = await mount({ fetch: fetchMock, render: false, production: true })
     const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
     const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
     const diagnostics = elements(tree).find(node => node.type === 'details' && node.props.key === 'diagnostics')
     assert.ok(controls, 'bridge management remains visible without opening diagnostics')
     assert.ok(bridgeButton(controls, label), 'the action matches the actual bridge state')
     assert.equal(bridgeButton(diagnostics, label), undefined, 'the primary action is not buried in diagnostics')
+    assert.equal(Boolean(bridgeButton(controls, 'readiness.bridge.uninstall')), state === 'installed', 'installed users can restore without opening diagnostics')
+    assert.equal(bridgeButton(diagnostics, 'readiness.bridge.uninstall'), undefined, 'restore is not buried in diagnostics')
     assert.ok(textOf(controls).includes('readiness.bridge.maintenanceHint'), 'the restart is stated beside the explicit action')
     assert.equal(calls.filter(call => call.method === 'POST').length, 0, 'viewing settings starts no installation')
   })
@@ -2478,10 +2480,12 @@ test('a remounted panel resumes an active job and keeps polling through the rest
 test('a fresh panel recovers a completed job without rearming maintenance', async () => {
   const fixture = maintenanceFixture({ state: 'installed', initialJob: { id: 'completed-before-mount', action: 'install', phase: 'completed', ok: true, restarted: true } })
   const timers = maintenanceTimers(), clicks = []
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers, production: true })
   const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
   assert.ok(textOf(tree).includes('readiness.bridge.installedDone'))
   assert.equal(bridgeButton(tree, 'readiness.bridge.reinstall').props.disabled, false)
+  const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
+  assert.equal(bridgeButton(controls, 'readiness.bridge.uninstall').props.disabled, false, 'completed extension install retains visible restore')
   assert.equal(fixture.calls.some(call => call.init.method === 'POST'), false)
   assert.deepEqual(clicks, [])
   assert.equal(timers.pending.size, 0)
