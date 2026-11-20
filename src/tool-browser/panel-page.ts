@@ -76,7 +76,7 @@ export async function readPanelPage(
   options: { readonly limit?: number; readonly signal?: AbortSignal } = {},
 ): Promise<PanelPage> {
   const limit = options.limit ?? 120
-  const proxied = `${origin}/dsh-builtin-browser/browser-view/guest?u=${encodeURIComponent(pageUrl)}`
+  const proxied = `${origin}/dsh-builtin-browser/browser-view/isolated-guest?u=${encodeURIComponent(pageUrl)}`
   const response = await fetch(proxied, {
     headers: {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',

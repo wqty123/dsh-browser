@@ -7,7 +7,7 @@
  * 外壳由 `window.__ModuleLoader__.load({factory})` 换成普通导出函数：本仓库的客户端半由
  * tsdown 打成 CJS 工厂，`require` 由模块加载器在运行期注入，语义与旧加载器一致。
  */
-import { captureReferenceIntent } from '../reference-intents.ts'
+import { receiveGuestReference } from '../reference-intents.ts'
 
 export interface LegacyClientModule {
   readonly name?: string
@@ -1765,48 +1765,16 @@ const react = require("react")
      * never minted. Expansion requires a known owner, because it acts on the displayed surface.
      * @returns the on-screen session id, or null.
      */
-    // The Web panel's proxied guest asks which conversation it belongs to; this answers with the one
-    // on screen, so a quote lands in the right draft even for a tab the reader typed themselves.
-    if (typeof window !== "undefined" && typeof window.addEventListener === "function" && !window.__dshSidebarSessionBridge) {
+    if (typeof window !== "undefined" && !window.__dshSidebarSessionBridge) {
       window.__dshSidebarSessionBridge = true
       window.addEventListener("message", (event) => {
-        if (!event || event.origin !== location.origin) return
-        const data = event.data
-        if (!data || data.type !== "dsh.sidebar.session.request") return
-        const current = guestSession()
-        console.log('[app] session request ->', current)
-        if (typeof current !== "string" || current === "") return
-        try { event.source?.postMessage({ type: "dsh.sidebar.session", sessionId: current }, location.origin) } catch { /* detached frame */ }
+        receiveGuestReference(event, document.querySelectorAll('iframe[data-sidebar-browser-frame="iframe"]'), frame => {
+          const owner = frame.closest("[data-sidebar-right-session]")
+          let sessionId = owner?.getAttribute("data-sidebar-right-session")
+          for (let node: Element | null = frame; !sessionId && node; node = node.parentElement) sessionId = sessionIdOfElement(node)
+          return sessionId || undefined
+        })
       })
-    }
-    /**
-     * Drain reference intents from the Web panel's proxied guest.
-     *
-     * The desktop guest hands its intent to the preload bridge; a proxied document has no bridge, so
-     * the bar leaves it in the page and exposes \`__dshRefTake\`. Same-origin means this page can simply
-     * ask for it — the same mechanism the bundled carrier polls, without needing the guest to know
-     * which conversation it is quoting into.
-     */
-    function drainPanelIntents() {
-      if (typeof document === "undefined") return
-      // A brand-new conversation has no screen() entry yet, but the shell already stamps the Session on
-      // its own DOM. Without this fallback the first reference of a fresh conversation was dropped.
-      const sessionId = guestSession()
-      if (typeof sessionId !== "string" || sessionId === "") return
-      for (const frame of Array.from(document.querySelectorAll("iframe"))) {
-        let guest
-        try { guest = frame.contentWindow } catch { continue }
-        // Push the conversation id on every tick instead of waiting to be asked: the guest's request can
-        // be lost while the shell is still mounting, and a lost handshake meant a silently dropped quote.
-        try { guest.postMessage({ type: "dsh.sidebar.session", sessionId }, location.origin) } catch { /* detached */ }
-        if (!guest || typeof guest.__dshRefTake !== "function") continue
-        let intent
-        try { intent = guest.__dshRefTake() } catch { continue }
-        while (intent && typeof intent === "object") {
-          void captureReferenceIntent(intent, sessionId)
-          try { intent = guest.__dshRefTake() } catch { break }
-        }
-      }
     }
     /**
      * Place a tool-opened page into the Web sidebar.
@@ -1868,7 +1836,7 @@ const react = require("react")
           // live views of one page (the reported double-open). No echo, no tab.
           if (body.surface !== "panel") return
           if (open.at <= lastOpenHandled) return
-          const frame = document.querySelector('iframe[data-sidebar-browser-frame], iframe[src*="/browser-view/guest"]')
+          const frame = document.querySelector('iframe[data-sidebar-browser-frame]')
           const already = frame !== null && decodeURIComponent(frame.getAttribute("src") || "").includes(encodeURIComponent(open.url).slice(0, 24))
           if (already) { rememberOpenHandled(open.at); return }
           rememberOpenHandled(open.at)
@@ -1888,9 +1856,6 @@ const react = require("react")
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState !== "hidden") drainOpenRequest()
       })
-    }
-    if (typeof setInterval === "function" && !globalThis.__dshPanelIntentPoller) {
-      globalThis.__dshPanelIntentPoller = setInterval(drainPanelIntents, 700)
     }
     /**
      * The conversation a proxied guest should attribute its quote to.

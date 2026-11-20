@@ -4,7 +4,7 @@ export function guestRuntimeScript(pageUrl: string): string {
   if (window.__dshGuestRuntime) return;
   window.__dshGuestRuntime = true;
   let real = ${JSON.stringify(pageUrl).replace(/</gu, '\\u003c')};
-  const route = '/dsh-builtin-browser/browser-view/guest';
+  const route = '/dsh-builtin-browser/browser-view/isolated-guest';
   const attempt = fn => { try { return fn(); } catch {} };
   const realURL = value => {
     const raw = String(value);
@@ -39,7 +39,7 @@ export function guestRuntimeScript(pageUrl: string): string {
         if (!/^https?:$/.test(new URL(url, location.href).protocol)) return nativeFetch(input, init);
         const headers = new Headers(init && init.headers || (isRequest ? input.headers : undefined));
         headers.set('x-dsh-guest-sub', '1');
-        const options = Object.assign({}, init, { headers, mode: 'same-origin' });
+        const options = Object.assign({}, init, { headers, mode: 'cors', credentials: 'omit' });
         return nativeFetch(isRequest ? new Request(new URL(url, location.href), input) : url, options);
       } catch (error) { return Promise.reject(error); }
     };
@@ -69,12 +69,21 @@ export function guestRuntimeScript(pageUrl: string): string {
       const next = attempt(() => realURL(url));
       const result = original.call(this, state, title, toProxy(url));
       if (next && /^https?:$/.test(next.protocol)) real = next.href;
+      report();
       return result;
     };
   });
+  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length }, '*'));
+  attempt(() => window.addEventListener('message', event => {
+    if (event.source !== parent || !event.data || event.data.type !== 'dsh.browser.guest.history') return;
+    if (event.data.delta === -1) history.back();
+    else if (event.data.delta === 1) history.forward();
+  }));
+  attempt(() => window.addEventListener('DOMContentLoaded', report));
   attempt(() => window.addEventListener('popstate', () => {
     const next = attempt(() => realURL(location.href));
     if (next) real = next.href;
+    report();
   }));
   attempt(() => {
     const set = Element.prototype.setAttribute;
