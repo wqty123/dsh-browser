@@ -53,6 +53,7 @@ function report(channel, {
   browserReader = () => undefined,
   selectedCarrier,
   bridgeError,
+  systemConnection,
 } = {}) {
   return readRuntimeStatus({
     channel: () => channel,
@@ -63,6 +64,7 @@ function report(channel, {
     detectBrowser: browserReader,
     selectedCarrier,
     bridgeError,
+    systemConnection,
   })
 }
 
@@ -192,13 +194,14 @@ for (const kind of ['chrome', 'edge']) {
         assert.equal(channel, kind, 'the configured choice reaches the launch path detector')
         return { kind, path }
       },
+      systemConnection: () => ({ connected: true, detail: 'Live CDP connection.' }),
     })
     assert.equal(status.carrier, 'system')
     assert.equal(status.resolvedCarrier, 'system')
     assert.equal(status.readiness, 'ready')
     assert.equal(status.executable, path)
     assert.deepEqual(status.systemBrowser, {
-      checked: true, present: true, kind, path, detail: `${kind} is available at ${path}`,
+      checked: true, present: true, kind, path, detail: 'Live CDP connection.',
     })
   })
 
@@ -264,7 +267,7 @@ test('the default reader detects a real file through the launch path detector wi
       bridge: noDesktop,
       endpoint: noShell,
     })
-    assert.equal(status.readiness, 'ready')
+    assert.equal(status.readiness, 'blocked')
     assert.equal(status.executable, path)
     assert.equal(readFileSync(path, 'utf8'), 'this fixture is not an executable')
   } finally {
@@ -272,6 +275,24 @@ test('the default reader detects a real file through the launch path detector wi
     else process.env.DSH_BROWSER_CHROME_PATH = previous
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('system readiness follows the selected live CDP connection and preserves launch failures', () => {
+  let state
+  const options = { browserReader: () => ({ kind: 'edge', path: 'edge.exe' }), systemConnection: () => state }
+  assert.equal(report('edge', options).readiness, 'blocked')
+  assert.match(report('edge', options).systemBrowser.detail, /has not launched/)
+  for (const detail of ['Browser launch is in progress', 'Default-profile debugging refused', 'Singleton handoff without DevToolsActivePort', 'CDP connection lost']) {
+    state = { connected: false, detail }
+    const status = report('edge', options)
+    assert.equal(status.readiness, 'blocked')
+    assert.equal(status.systemBrowser.detail, detail)
+    assert.equal(status.resolvedCarrier, 'system')
+  }
+  state = { connected: true, detail: 'Live CDP' }
+  assert.equal(report('edge', options).readiness, 'ready')
+  state = { connected: false, detail: 'CDP closed' }
+  assert.equal(report('edge', options).readiness, 'blocked')
 })
 
 test('a runtime installed by hand is diagnostic, not a working sidebar', () => {

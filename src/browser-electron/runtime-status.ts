@@ -111,6 +111,7 @@ export interface RuntimeStatusDeps {
   readonly detectBrowser?: (channel: BrowserChannel) => DetectedBrowser | undefined
   /** The provider's current carrier, including a fallback selected after sidebar loss. */
   readonly selectedCarrier?: () => Exclude<CarrierKind, 'auto'> | undefined
+  readonly systemConnection?: () => { connected: boolean; detail: string } | undefined
 }
 
 /** Which carrier a channel names. */
@@ -176,11 +177,12 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
 
   const checkSystemBrowser = carrier === 'system'
   const detected = checkSystemBrowser ? (deps.detectBrowser ?? detectBrowser)(channel) : undefined
+  const connection = checkSystemBrowser ? deps.systemConnection?.() : undefined
   const systemBrowser: SystemBrowserReadiness = {
     checked: checkSystemBrowser,
     present: detected !== undefined,
     ...detected === undefined ? {} : { kind: detected.kind, path: detected.path },
-    detail: detected !== undefined ? `${detected.kind} is available at ${detected.path}`
+    detail: detected !== undefined ? connection?.detail ?? 'Browser has not launched; run a browser command to establish CDP. No live CDP connection.'
       : !checkSystemBrowser ? `the ${carrier} channel uses its own carrier`
         : `the selected ${channel} installation was not found`,
   }
@@ -192,7 +194,7 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
     readiness = sidebarReady ? 'ready' : 'blocked'
   } else {
     resolvedCarrier = 'system'
-    readiness = detected !== undefined ? 'ready' : 'blocked'
+    readiness = detected !== undefined && connection?.connected === true ? 'ready' : 'blocked'
   }
 
   return {

@@ -160,6 +160,11 @@ function userProfileRoot(kind: string): string | undefined {
   return undefined
 }
 
+function carrierSettingsKey(settings: ReturnType<SettingsStore['get']>): string {
+  return JSON.stringify([settings.browser.channel, settings.browser.systemProfile, settings.browser.headless,
+    settings.browser.systemProfile === 'plugin' ? settings.cookies.persist : undefined])
+}
+
 export const name = 'browser-electron'
 
 /** The browser seam this provider registers into. */
@@ -477,8 +482,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * nothing. Re-entrant by design — changing the channel means replacing the carrier, which is
    * exactly what a second call does.
    */
+  let chosenSettingsKey = ''
   const chooseCarrier = (): void => {
   if (disposed) return
+  chosenSettingsKey = carrierSettingsKey(settings.get())
   const choice = ++carrierChoice
   // A browser the user explicitly asked for outranks every automatic choice: the
   // whole point of the setting is that they know which browser they want. It is
@@ -526,10 +533,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // "plugin" keeps the old behaviour: a separate directory the plugin owns and may delete.
       const wantUserProfile = (settings.get() as { browser?: { systemProfile?: unknown } }).browser?.systemProfile !== 'plugin'
       const userProfile = wantUserProfile ? userProfileRoot(detected.kind) : undefined
-      const profileDir = userProfile ?? (persist
+      const profileDir = userProfile ?? (wantUserProfile ? join(profileRoot, 'unavailable-user-profile') : persist
         ? join(profileRoot, `${detected.kind}-profile`)
         : join(profileRoot, ephemeralProfileName(detected.kind, randomUUID())))
-      if (!persist) {
+      if (!persist && !wantUserProfile) {
         // A process killed outright never runs its own cleanup (see ephemeral-profile.ts),
         // so the sweep happens HERE — at the only moment that can still act on a profile
         // whose owner is gone — and before this run claims a directory of its own.
@@ -538,11 +545,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       }
       // The headless mode rides along so a display-less host (systemd, container, SSH-only server)
       // still gets a working browser instead of "exited immediately after launch" — issue #32.
-      ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = userProfile === undefined
+      ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = !wantUserProfile
         ? 'launched-plugin-profile'
         : 'launched-user-profile'
-      adopt(new SystemBrowserViewHost(detected, profileDir, [], userProfile === undefined && !persist ? profileDir : undefined,
-        undefined, settings.get().browser.headless, () => settings.get().ui.quiet),
+      adopt(new SystemBrowserViewHost(detected, profileDir, [], !wantUserProfile && !persist ? profileDir : undefined,
+        undefined, settings.get().browser.headless, () => settings.get().ui.quiet,
+        wantUserProfile && userProfile === undefined ? 'The selected user browser profile could not be located. No plugin profile was substituted.' : undefined),
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
   }
@@ -768,6 +776,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         channel: () => settings.get().browser.channel,
         selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
           : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
+        systemConnection: () => adoptedCarrier instanceof SystemBrowserViewHost ? adoptedCarrier.connectionStatus() : undefined,
         hasBinary: hasElectronRuntime,
         provision: provisionSnapshot,
         bridgeError: () => DesktopBridgeViewHost.compatibilityError(),
@@ -925,13 +934,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * unreachable or the user prefers the file. Measured: the document said `sidebar` and the plugin
    * kept driving the self-hosted window built for the previous choice, because nothing re-read it.
    *
-   * Change detection is on the channel alone, not the mtime: a poll that re-chose the carrier on
+   * Change detection is on carrier settings, not the mtime: a poll that re-chose the carrier on
    * every unrelated save would tear down and rebuild a working browser session for a switch that
    * cannot affect it. mtime is only the cheap trigger to go and look.
    */
   const watchSettingsFile = (): void => {
     const file = settingsPath()
-    let lastChannel = settings.get().browser.channel
     let lastMtime = 0
     try { lastMtime = statSync(file).mtimeMs } catch { /* not written yet */ }
     const timer = setInterval(() => {
@@ -940,10 +948,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       try { mtime = statSync(file).mtimeMs } catch { return }
       if (mtime === lastMtime) return
       lastMtime = mtime
-      const channel = settings.get().browser.channel
-      if (channel === lastChannel) return
-      lastChannel = channel
-      ctx.logger?.info?.(`dsh-builtin-browser: settings changed on disk, re-choosing the carrier for channel "${channel}"`)
+      if (carrierSettingsKey(settings.get()) === chosenSettingsKey) return
+      ctx.logger?.info?.('dsh-builtin-browser: carrier settings changed on disk, re-choosing the carrier')
       chooseCarrier()
     }, 5_000)
     // Unref-ed so a poll never holds the process open.
@@ -1287,7 +1293,7 @@ function installSettingsRoute(
  * @param request - the incoming request.
  * @param response - the response to write.
  * @param settings - the settings document.
- * @param onChannelChange - re-runs the carrier choice when this write changed `browser.channel`.
+ * @param onChannelChange - re-runs the carrier choice when this write changed carrier settings.
  */
 async function handleSettingsRequest(
   request: IncomingMessage,
@@ -1318,18 +1324,18 @@ async function handleSettingsRequest(
   try {
     const text = await readTextBody(request)
     const patch: unknown = text.trim() === '' ? {} : JSON.parse(text)
-    const before = settings.get().browser.channel
+    const before = carrierSettingsKey(settings.get())
     const updated = settings.update(patch)
-    // A changed `browser.channel` is a request to switch carriers, not just a value to store. The
+    // Changed carrier settings are a request to switch carriers, not just values to store. The
     // choice is re-run here so the write takes effect now — and the response says so, because a
     // caller that cannot tell "applied" from "stored for later" has no way to know what it got,
     // which is exactly how a write that did nothing read as a success.
-    const channelChanged = updated.browser.channel !== before
-    if (channelChanged) onChannelChange?.()
+    const carrierChanged = carrierSettingsKey(updated) !== before
+    if (carrierChanged) onChannelChange?.()
     json(200, {
       ok: true,
       settings: updated,
-      ...channelChanged ? { carrierRechosen: true } : {},
+      ...carrierChanged ? { carrierRechosen: true } : {},
     })
   } catch (error) {
     json(400, { ok: false, error: `invalid settings patch: ${String(error)}` })

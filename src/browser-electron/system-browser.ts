@@ -80,9 +80,9 @@ const PORT_PROBE_MS = 250
  */
 export type BrowserLauncher = (path: string, args: readonly string[]) => ReturnType<typeof spawn>
 
-/** The real launcher: spawn a detached-free child with pipes closed. */
+/** The real launcher: retain stderr for bounded launch diagnostics. */
 const defaultLauncher: BrowserLauncher = (path, args) =>
-  spawn(path, [...args], { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false })
+  spawn(path, [...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: false })
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
@@ -514,6 +514,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private child: ChildProcess | undefined
   private profileLease: ProfileLease | undefined
   private starting: Promise<CdpClient> | undefined
+  private lastLaunchError: string | undefined
 
   /**
    * Browsers that ignored a kill.
@@ -550,7 +551,17 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
      */
     private readonly headlessMode: HeadlessMode = 'auto',
     private readonly isQuiet: () => boolean = () => false,
+    private readonly profileError?: string,
   ) {}
+
+  connectionStatus(): { connected: boolean; detail: string } {
+    const connected = !this.disposed && this.client?.isAlive() === true && !this.clientSuspect
+    return { connected, detail: connected ? 'Browser launched and connected over CDP.'
+      : this.profileError ?? this.lastLaunchError ?? (this.disposed ? 'Browser carrier was released.'
+        : this.starting ? 'Browser launch is in progress; no live CDP connection yet.'
+          : this.client ? 'Browser CDP connection was lost or is awaiting verification.'
+            : 'Browser has not launched; run a browser command to establish CDP. No live CDP connection.') }
+  }
 
   /** Which product this host would drive (for diagnostics). */
   get kind(): DetectedBrowser['kind'] {
@@ -613,6 +624,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // A disposed host must never start a browser: doing so would spawn a process
     // nobody owns and nobody will kill.
     if (this.disposed) throw new Error('dsh-builtin-browser: this browser host was released')
+    if (this.profileError !== undefined) throw new Error(this.profileError)
     // The exit listener clears this, but a socket can also die without the process doing so
     // (the browser closing its debugging endpoint, a dropped connection). Checking the
     // socket's own state costs nothing and turns a 30s hang into a restart.
@@ -638,7 +650,13 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       this.forgetBrowserState()
     }
     // Concurrent first calls share one startup rather than racing two browsers.
-    this.starting ??= this.start().finally(() => { this.starting = undefined })
+    this.starting ??= this.start().then(client => {
+      this.lastLaunchError = undefined
+      return client
+    }).catch(error => {
+      this.lastLaunchError = error instanceof Error ? error.message : String(error)
+      throw error
+    }).finally(() => { this.starting = undefined })
     return await this.starting
   }
 
@@ -865,6 +883,13 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * down — one bad browser path would kill DSH, not just fail a tool call.
      */
     let launchError: Error | undefined
+    let diagnostic = ''
+    child.stderr?.on('data', chunk => {
+      diagnostic = (diagnostic + String(chunk)).slice(-4096)
+      if (/remote debugging requires a non-default data directory/iu.test(diagnostic)) {
+        launchError = new Error('The browser refused remote debugging on its default user profile. A live CDP connection is required; no alternative profile was substituted.')
+      }
+    })
     child.on('error', error => { launchError = error })
     // A browser that exits later is as unusable as one that never started, and the failure
     // has to reach the NEXT call rather than being swallowed: clearing the client here is
@@ -875,6 +900,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       this.client?.close()
       this.client = undefined
       this.child = undefined
+      this.lastLaunchError = 'Browser exited; the CDP connection is no longer live.'
       // The pages this client opened belong to the process that just died; keeping their
       // session ids means every later command is sent to a browser that never issued them.
       // Clearing these is what makes the restart usable rather than merely alive.
@@ -987,7 +1013,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     if (stopped === 'released') {
       throw new Error(`dsh-builtin-browser: ${target} was released while it was starting`)
     }
-    throw new Error(`dsh-builtin-browser: ${target} did not expose CDP within 30s`)
+    throw new Error(`dsh-builtin-browser: ${target} did not expose CDP within 30s. `
+      + (child.exitCode === 0 && !existsSync(portFile)
+        ? 'The launcher exited successfully without DevToolsActivePort; it may have handed off to an already-running browser without debugging enabled. '
+        : 'The selected profile did not provide a live debugging endpoint. ')
+      + 'No alternative browser profile was substituted.')
   }
 
   /**
