@@ -63,6 +63,35 @@ function textEvent(exact = 'selected words', prefix = 'before ', suffix = ' afte
   return { kind: 'text', exact, prefix, suffix }
 }
 
+test('each capture is stored for its requested owner, even when other sessions quote identical content', async t => {
+  const { service } = fixture(t)
+  const frozenCapture = { ok: true, url: 'https://example.com/article', title: 'Article', events: [textEvent()] }
+  const first = await service.capture({ sessionId: 'owner-A', frozenCapture })
+  const second = await service.capture({ sessionId: 'owner-B', frozenCapture })
+  const repeated = await service.capture({ sessionId: 'owner-B', frozenCapture })
+  assert.deepEqual(first.failures, [])
+  assert.deepEqual(second.failures, [])
+  assert.equal(second.reference.owner.sessionId, 'owner-B')
+  assert.notEqual(second.reference.referenceId, first.reference.referenceId)
+  assert.notEqual(repeated.reference.referenceId, second.reference.referenceId)
+  assert.deepEqual(service.list({ sessionId: 'owner-A' }).map(item => item.referenceId), [first.reference.referenceId])
+  assert.deepEqual(service.list({ sessionId: 'owner-B' }).map(item => item.referenceId), [second.reference.referenceId, repeated.reference.referenceId])
+})
+
+test('different table-only selections on one page remain distinct references', async t => {
+  const { service } = fixture(t)
+  const capture = text => service.capture({ sessionId: 'owner', frozenCapture: {
+    ok: true, url: 'https://example.com/article', title: 'Article', events: [{ kind: 'table', table: {
+      rowCount: 1, columnCount: 1, completeness: 'selected-cells', cells: [{ row: 0, column: 0, text }],
+    } }],
+  } })
+  const first = await capture('one')
+  const second = await capture('two')
+  assert.deepEqual(second.failures, [])
+  assert.notEqual(second.reference.referenceId, first.reference.referenceId)
+  assert.equal(second.reference.parts[0].table.cells[0].text, 'two')
+})
+
 test('capture commits an ordered reference with a self-consistent hash', async t => {
   const { page, service, storePath, assets } = fixture(t)
   page.capture = {

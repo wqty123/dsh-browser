@@ -1,5 +1,3 @@
-/** 同一次选择被重复投递的合并窗口（毫秒）。 */
-const CAPTURE_DEDUPE_MS = 30_000
 /**
  * Browser reference service: capture a page's selection into an immutable
  * snapshot, and reveal that snapshot later in the same page.
@@ -390,13 +388,6 @@ export class BrowserReferenceService {
   private readonly host: ReferenceHost
   private readonly options: ResolvedOptions
   private readonly store: ReferenceStore
-  /**
-   * 短窗内的重复投递指纹 → 已生成的引用。
-   *
-   * 页面侧同一次确认可能被发两次（bridge 与 queue 各一次、点击与表单各一次），没有这层幂等，
-   * 一次划选就会生成多张卡，用户的观感是「胶囊数量自己在涨」。
-   */
-  private readonly recentCaptures = new Map<string, { readonly referenceId: string; readonly at: number }>()
   /** Live-page lookup used by `reveal` when the capture session is gone. */
   private readonly currentSession: (() => string | undefined) | undefined
 
@@ -663,29 +654,11 @@ export class BrowserReferenceService {
       parts,
       ...comment !== '' ? { comment } : {},
     }
-    // 幂等：同一次选择被重复投递时只产生一条引用。两道指纹——
-    // ① 会话+页面+文本+评论（常规），② 页面+文本+评论（跨会话兜底：页面侧拿到的会话 id
-    // 可能不同，只靠 ① 会让同一次划选产生多条完全相同的引用）。
-    // 只对用户手选生效：agent 工具允许合法地重复抓同一段文本。
-    const quotedText = parts.map(part => part.type === 'text' ? part.text : '').join('\n').trim()
-    const dedupeKeys = origin === 'user-selection'
-      ? [`${sessionId}\u0000${pageUrl}\u0000${comment}\u0000${quotedText}`, `*\u0000${pageUrl}\u0000${comment}\u0000${quotedText}`]
-      : []
-    for (const key of dedupeKeys) {
-      const previous = this.recentCaptures.get(key)
-      if (previous === undefined) continue
-      const existing = this.store.get(previous.referenceId)
-      if (existing !== undefined && Date.now() - previous.at < CAPTURE_DEDUPE_MS) return { reference: existing, failures }
-      this.recentCaptures.delete(key)
-    }
     const reference: BrowserReference = { ...withoutHash, manifestHash: manifestHashOf(withoutHash) }
     try {
       this.store.append(reference)
     } catch (error) {
       return { failures: [...failures, { kind: 'reference', reason: `store-refused: ${messageOf(error)}` }] }
-    }
-    for (const key of dedupeKeys) {
-      this.recentCaptures.set(key, { referenceId: reference.referenceId, at: Date.now() })
     }
     return { reference, failures }
   }
