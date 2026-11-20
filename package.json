@@ -89,7 +89,6 @@
     "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-settings": "workspace:^",
     "@types/node": "^22.0.0",
-    "esbuild": "0.28.2",
     "react-dom": "^18.2.0",
     "tldts": "6.1.86",
     "typescript": "^5.5.0"

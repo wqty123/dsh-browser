@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { bundleHostCookies } from '../scripts/bundle-host.mjs'
 
 test('packed host and cookie jar load after extraction without plugin node_modules or runtime PSL dependencies', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-host-package-'))
@@ -15,18 +14,31 @@ test('packed host and cookie jar load after extraction without plugin node_modul
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   assert.equal(manifest.dependencies.tldts, undefined)
   assert.equal(manifest.dependencies['tldts-core'], undefined)
+  assert.equal(manifest.devDependencies.esbuild, undefined)
   cpSync(new URL('../lib/', import.meta.url), join(staging, 'lib'), { recursive: true })
   writeFileSync(join(staging, 'package.json'), JSON.stringify(manifest))
-  const metadata = await bundleHostCookies(pathToFileURL(join(staging, 'lib/browser-electron/guest-cookie-jar.js')))
-  for (const dependency of ['tldts', 'tldts-core']) {
-    assert.ok(Object.keys(metadata.inputs).some(path => path.replaceAll('\\', '/').includes(`/node_modules/${dependency}/`)
-      || path.replaceAll('\\', '/').startsWith(`node_modules/${dependency}/`)), `${dependency} must be bundled`)
-  }
   const run = (command, args, cwd = directory) => {
     const result = spawnSync(command, args, { cwd, encoding: 'utf8', env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, shell: process.platform === 'win32' && command === 'npm.cmd' })
     assert.equal(result.error, undefined)
     assert.equal(result.status, 0, result.stdout + result.stderr)
     return result.stdout
+  }
+  const blocker = `export function resolve(specifier, context, next) {
+    if (specifier === 'esbuild' || /[/\\\\]esbuild[/\\\\]/u.test(specifier)) {
+      throw Object.assign(new Error('esbuild is unavailable for this regression'), { code: 'ERR_MODULE_NOT_FOUND' })
+    }
+    return next(specifier, context)
+  }`
+  const blockEsbuild = `import { register } from 'node:module'; register(${JSON.stringify('data:text/javascript,' + encodeURIComponent(blocker))});`
+  const modules = JSON.parse(run(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(blockEsbuild)}`, '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    await assert.rejects(import('esbuild'), { code: 'ERR_MODULE_NOT_FOUND' });
+    const { bundleHostCookies } = await import(${JSON.stringify(new URL('../scripts/bundle-host.mjs', import.meta.url).href)});
+    console.log(JSON.stringify(await bundleHostCookies(new URL(${JSON.stringify(pathToFileURL(join(staging, 'lib/browser-electron/guest-cookie-jar.js')).href)}))));
+  `]))
+  for (const dependency of ['tldts', 'tldts-core']) {
+    assert.ok(modules.some(path => path.replaceAll('\\', '/').includes(`/node_modules/${dependency}/`)
+      || path.replaceAll('\\', '/').startsWith(`node_modules/${dependency}/`)), `${dependency} must be bundled without esbuild`)
   }
   const packed = JSON.parse(run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', directory], staging))
   run('tar', ['-xzf', join(directory, packed[0].filename), '-C', extracted])
