@@ -9,6 +9,7 @@ import type { BrowserPresentation } from '../view/BrowserPresentation.ts'
 import type { BrowserTarget } from '../browser/url.ts'
 import { parseBrowserAddress } from '../browser/url.ts'
 import { browserAddressCheckpoint } from '../browser/BrowserPersistence.ts'
+import { installReferenceOverlay } from './reference-overlay.ts'
 
 export type NativeSlotRegistrar = (tab: TabId, scope: string, viewportId: string, signal: AbortSignal) => Promise<SidebarNativeSlot>
 
@@ -28,10 +29,11 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   private revision = 0
   private attached = false
   private disposal: Promise<void> | undefined
+  private documentLifetime: AbortController | undefined
 
   constructor(private readonly options: BrowserPageOptions, private readonly native: DesktopNativeViews,
     private readonly register: NativeSlotRegistrar, private readonly workspace: (signal: AbortSignal) => Promise<string>,
-    private readonly owner: string) {}
+    private readonly owner: string, private readonly capture?: (intent: object, owner?: string) => Promise<void>) {}
 
   readonly lifecycle = { getSnapshot: (): BrowserCarrierState => this.carrier.getSnapshot(),
     subscribe: (listener: () => void): (() => void) => this.carrier.subscribe(listener) }
@@ -52,6 +54,7 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
 
   loadUrl(target: BrowserTarget, navigationId?: string): void {
     if (this.disposed) return
+    this.documentLifetime?.abort()
     this.revision++
     this.pending = target
     this.state.set({ ...this.state.getSnapshot(), target, navigationId, address: 'requested', loading: true, documentReady: false, error: undefined })
@@ -73,6 +76,8 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   }
 
   private detach(): void {
+    this.documentLifetime?.abort()
+    this.documentLifetime = undefined
     this.attachment?.lifetime.abort()
     this.attachment = undefined
     this.attached = false
@@ -126,6 +131,7 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
 
   private observe(lease: DesktopNativeLease, event: DesktopNativeState): void {
     if (this.lease !== lease || this.disposed) return
+    this.documentLifetime?.abort()
     if (event.stage === 'failed' || event.stage === 'closed') { this.fail(failure(event.code ?? 'BROWSER_GUEST_CLOSED')); return }
     this.carrier.set({ stage: 'guest', guestId: lease, generation: event.generation })
     this.state.set({ ...this.state.getSnapshot(), loading: true, documentReady: false })
@@ -142,6 +148,20 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
       this.state.set({ ...this.state.getSnapshot(), target, address: 'observed', loading: false, documentReady: true,
         canGoBack: history.currentIndex > 0, canGoForward: history.currentIndex < history.entries.length - 1, error: undefined })
       this.options.persist(browserAddressCheckpoint(target, this.revision))
+      const capture = this.capture
+      const attachment = this.attachment
+      if (capture !== undefined && attachment !== undefined) {
+        this.documentLifetime = new AbortController()
+        const signal = AbortSignal.any([attachment.lifetime.signal, this.documentLifetime.signal])
+        installReferenceOverlay(async expression => {
+          signal.throwIfAborted()
+          const answer = await this.command('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }) as {
+            result?: { value?: unknown }; exceptionDetails?: object
+          }
+          if (answer.exceptionDetails !== undefined) throw failure('BROWSER_DOCUMENT_UNACKNOWLEDGED')
+          return answer.result?.value
+        }, intent => capture(intent, this.owner), signal)
+      }
     })().catch(error => {
       if (this.lease === lease && revision === this.revision && this.carrier.getSnapshot().generation === event.generation) this.fail(error)
     })
@@ -171,7 +191,8 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
 }
 
 export function createNativePage(options: BrowserPageOptions, native: DesktopNativeViews, register: NativeSlotRegistrar,
-  workspace: (signal: AbortSignal) => Promise<string>, owner: string): BrowserPage {
-  const page = new NativeViewPage(options, native, register, workspace, owner)
+  workspace: (signal: AbortSignal) => Promise<string>, owner: string,
+  capture?: (intent: object, owner?: string) => Promise<void>): BrowserPage {
+  const page = new NativeViewPage(options, native, register, workspace, owner, capture)
   return { frame: page, presentation: page }
 }

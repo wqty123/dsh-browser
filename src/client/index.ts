@@ -268,7 +268,7 @@ export function apply(ctx: Context): void {
         return createNativePage(options, native, async (tab, address, viewport, signal) => {
           if (sidebar.nativeSlot === undefined) throw Object.assign(new Error('BROWSER_NATIVE_SURFACE_UNAVAILABLE'), { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' })
           return sidebar.nativeSlot(sessionId, tab, address, viewport, signal)
-        }, workspace, sessionId)
+        }, workspace, sessionId, capture)
       }
       return createElectronPage(options, desktop, workspace, sessionId, capture)
     })

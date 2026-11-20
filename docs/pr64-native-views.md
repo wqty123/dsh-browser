@@ -12,6 +12,8 @@ Main extensions use scoped `browserGuests` snapshot/command/fetch/release capabi
 
 Readiness requires attachment and a committed generation with frame and loader ids. The acknowledgement travels through the existing protocol-5 initialization journal and is checked against the main-owned native snapshot before binding a tool handle. Rendering holds, hidden-Session background markers, cancellation, remount and disposal remain part of admission. Native tool calls go through scoped host capabilities; renderer numeric ids cannot authorize them.
 
+The native adapter also installs the existing reference overlay through scoped evaluation and forwards captured intents to the owning Session; navigation and disposal stop its document polling lifetime.
+
 ## Runtime delivery
 
 `0004-native-views.patch` and `0005-native-client-errors.patch` supplement each rc.3/rc.5/main source series. Revision-3 runtime specs cover Sidebar-right `lib/client.js`, Desktop `lib/main.js` and `lib/preload-app.cjs`. Sidebar-browser changes only types/Host references, not its client runtime. The source-built release outputs compare byte-for-byte with runtime-patched pristine outputs. Full output fixtures remain compressed with uncompressed length/SHA-256 checks.
@@ -34,15 +36,17 @@ TSX_TSCONFIG_PATH=/home/ubuntu/repos/deepseek-harness/tsconfig.base.json node te
 
 Real Electron 44.7.0 qualification under xvfb runs the production native service and security policy. A second harness connects the production preload, SidebarNativeComposition and plugin NativeViewPage with `webviewTag:false`. OS mouse/keyboard input searches a local page; scoped CDP reads the same page and captures it. Both harnesses cover background/minimized generation changes, release and one-BrowserWindow lifetime. The integrated harness also disables requestAnimationFrame and remounts the plugin presentation.
 
+A failure-mode run forcefully crashes a real guest, closes another and reloads the owner renderer. It observes plugin failure, destruction, stale-command refusal and fresh admission/leases after owner reload, with one BrowserWindow throughout. Source/runtime comparison and the full plugin suite remain passing after merging base `292e189` without conflicts: 1,283 tests, 1,274 passed, 9 skipped; plugin Host and native-presentation client typechecks exit zero.
+
 Persistent VM evidence:
 
 - `/home/ubuntu/research/native30-host/{main.cjs,results.json,run.log}`
-- `/home/ubuntu/research/native30-integration/{main.cjs,renderer.ts,preload.ts,results.json,run.log,screen.png,guest.png}`
+- `/home/ubuntu/research/native30-integration/{main.cjs,renderer.ts,preload.ts,results.json,run.log,failure-results.json,failure-run.log,screen.png,guest.png}`
 - `/home/ubuntu/research/native30-runtime-comparator.log`
 
 ### Limits
 
-- These are real Electron component integrations, not a complete packaged DSH profile/UI boot. Crash, deadline, foreign/stale admission and denied-command branches have focused service tests; not every branch is repeated through the real plugin UI.
+- These are real Electron component integrations, not a complete packaged DSH profile/UI boot. Deadline and foreign/stale admission have focused service tests; not every branch is repeated through the real plugin UI.
 - No real Windows installation/restart, full Desktop quit/relaunch, active-task shutdown or laptop access was performed. Restart persistence is not established by the component harness.
 - The published rc.5 Desktop pristine artifact remains unavailable; source-build hashes are used and mismatches refuse patching.
 - No full production Sidebar layout/visual acceptance is claimed. The integrated native surface screenshot is a qualification layout rather than the shipped DSH shell.
