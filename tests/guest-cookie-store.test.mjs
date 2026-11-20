@@ -14,9 +14,9 @@ function fixture(t) {
 
 test('cookies survive a real process restart; session values never reach disk or logs', t => {
   const directory = fixture(t)
-  const module = new URL('../src/browser-electron/guest-cookie-store.ts', import.meta.url).href
+  const module = new URL('../lib/browser-electron/guest-cookie-store.js', import.meta.url).href
   const run = body => {
-    const result = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e',
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e',
       `import assert from 'node:assert/strict'; import { localGuestCookies } from ${JSON.stringify(module)};
       const jar = localGuestCookies(); const url = new URL('https://site.example/'); ${body}`], { encoding: 'utf8', env: { ...process.env, DSH_HOME: directory } })
     assert.equal(result.status, 0, result.stderr)
