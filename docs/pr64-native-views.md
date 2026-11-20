@@ -20,6 +20,8 @@ The native adapter also installs the existing reference overlay through scoped e
 
 Source commits: rc.3 `062adf7365` / `13705d30f0`; rc.5 `da20bebd9d` / `52511a6004`; main `aa0109aba9` / `f430580383`. Applying each new pair to its prior status-source commit reproduces the entire committed Git tree, not only selected files.
 
+`0006-native-same-document.patch` adds main-frame fragment/History API acknowledgements while preserving the committed generation/frame/loader. Source commits: rc.3 `cbc141dd42`, rc.5 `6f3d4987f9`, main `550c755e81`. The plugin refreshes the address/history and restarts reference polling on those document notifications.
+
 Revision-1 and revision-2 upgrades validate the live prior revision against the original backup before computing any new bytes. All selected targets validate before staging. Mismatches/unrelated edits refuse the entire plan; atomic rename, rollback and exact original restore remain unchanged. Revision-2 regression tests include clean upgrade/restore and an unrelated preload edit with no writes.
 
 ## Checks

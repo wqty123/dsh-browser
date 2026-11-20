@@ -140,6 +140,39 @@ test('native document overlays drain captured references to their Session and st
   } finally { await f.page.dispose(); globalThis.document = previous }
 })
 
+test('same-document native acknowledgements refresh fragment and History API addresses, history controls and reference polling', async () => {
+  const previous = globalThis.document
+  globalThis.document = { getElementById: () => ({ dataset: {} }) }
+  let url = target.url, currentIndex = 0, installations = 0
+  const f = fixture({ capture: async () => {}, command: async (_lease, method, params) => {
+    if (method === 'Page.getNavigationHistory') return { currentIndex, entries: [{}, {}, {}] }
+    if (method !== 'Runtime.evaluate') return {}
+    if (params.expression === '({url:location.href,title:document.title})') return { result: { value: { url } } }
+    if (!params.expression.includes('var intents = []')) installations++
+    return { result: { value: '[]' } }
+  } })
+  try {
+    f.page.loadUrl(target); f.page.mount('viewport'); await flush()
+    const document = { stage: 'document', generation: 'same', frameId: 'frame', loaderId: 'loader' }
+    f.listeners.get('lease-1')(document); await flush()
+    url += '#fragment'; currentIndex = 1
+    f.page.loadUrl({ ...target, url })
+    assert.equal(f.page.getSnapshot().loading, true)
+    f.listeners.get('lease-1')(document); await flush()
+    assert.equal(f.page.getSnapshot().target.url, url)
+    assert.equal(f.page.getSnapshot().loading, false)
+    assert.equal(f.page.getSnapshot().canGoBack, true)
+    assert.equal(f.page.getSnapshot().canGoForward, true)
+    url = 'https://example.test/history-state'; currentIndex = 2
+    f.listeners.get('lease-1')(document); await flush()
+    assert.equal(f.page.getSnapshot().target.url, url)
+    assert.equal(f.page.getSnapshot().documentReady, true)
+    assert.equal(f.page.getSnapshot().canGoForward, false)
+    assert.equal(f.page.lifecycle.getSnapshot().generation, 'same')
+    assert.equal(installations, 3)
+  } finally { await f.page.dispose(); globalThis.document = previous }
+})
+
 test('trusted native transport dispatches only scoped capabilities and revokes cached leases', async () => {
   const scope = 'dsh-tab:v1:' + encodeURIComponent(JSON.stringify(['session-native', 'sidebar', 'tab-native']))
   let entries = [{ scope, lease: 'opaque', state: { stage: 'document', generation: 'g', frameId: 'f', loaderId: 'l' }, url: target.url, title: 'Native' }]

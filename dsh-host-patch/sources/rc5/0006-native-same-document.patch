@@ -1,0 +1,64 @@
+From 6f3d4987f97d57d916e8fba30830412d51d6a6dc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 13:14:06 +0000
+Subject: [PATCH] fix(desktop): acknowledge native same-document navigation
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ apps/desktop/src/native-views.ts        |  6 +++++-
+ apps/desktop/tests/native-views.spec.ts | 15 +++++++++++++++
+ 2 files changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/apps/desktop/src/native-views.ts b/apps/desktop/src/native-views.ts
+index 52f4ec0c7c..dd730adb84 100644
+--- a/apps/desktop/src/native-views.ts
++++ b/apps/desktop/src/native-views.ts
+@@ -181,7 +181,7 @@ export class DesktopNativeViews {
+         this.publish(lease, native, { stage: 'attached', generation: native.generation })
+       }
+     })
+-    view.webContents.on('did-navigate', () => {
++    const committed = (): void => {
+       const generation = native.generation
+       void this.send(native, 'Page.getFrameTree').then((value) => {
+         const frame = record(record(record(value).frameTree).frame)
+@@ -191,6 +191,10 @@ export class DesktopNativeViews {
+           this.publish(lease, native, { stage: 'document', generation, frameId: frame.id, loaderId: frame.loaderId })
+         }
+       }).catch((_error) => { if (this.views.get(lease) === native) this.fail(lease, native, 'BROWSER_DOCUMENT_UNACKNOWLEDGED') })
++    }
++    view.webContents.on('did-navigate', committed)
++    view.webContents.on('did-navigate-in-page', (_event, _url, mainFrame) => {
++      if (mainFrame) committed()
+     })
+     view.webContents.on('did-fail-load', (_event, code, _description, _url, mainFrame) => {
+       if (mainFrame && code !== -3) this.fail(lease, native, 'BROWSER_DOCUMENT_UNACKNOWLEDGED')
+diff --git a/apps/desktop/tests/native-views.spec.ts b/apps/desktop/tests/native-views.spec.ts
+index 302c81ee6e..d79713bac5 100644
+--- a/apps/desktop/tests/native-views.spec.ts
++++ b/apps/desktop/tests/native-views.spec.ts
+@@ -123,6 +123,21 @@ it('creates only sandboxed native views, acknowledges actual attachment, and kee
+   expect(f.owner.send).toHaveBeenCalledWith('dsh-desktop:native-view-state', { lease, state: { stage: 'attached', generation: expect.any(String) } })
+ })
+ 
++it('acknowledges main-frame same-document navigation without changing the document identity', async () => {
++  const f = fixture(), { guest, lease } = await f.attached()
++  guest.emit('did-navigate')
++  await vi.waitFor(() => expect(f.service.snapshot()[0]?.state.stage).toBe('document'))
++  const document = f.service.snapshot()[0]?.state
++  const calls = guest.debugger.sendCommand.mock.calls.length
++  guest.emit('did-navigate-in-page', {}, 'https://example.test/#subframe', false)
++  await Promise.resolve()
++  expect(guest.debugger.sendCommand).toHaveBeenCalledTimes(calls)
++  guest.emit('did-navigate-in-page', {}, 'https://example.test/#fragment', true)
++  await vi.waitFor(() => expect(guest.debugger.sendCommand).toHaveBeenCalledTimes(calls + 1))
++  expect(f.owner.send).toHaveBeenLastCalledWith('dsh-desktop:native-view-state', { lease, state: document })
++  expect(f.service.snapshot()[0]?.state).toEqual(document)
++})
++
+ it('never dispatches denied or unacknowledged document commands', async () => {
+   const f = fixture(), { lease, guest } = await f.attached()
+   expect(await f.request({ op: 'command', lease, method: 'Browser.close' })).toMatchObject({ code: 'BROWSER_COMMAND_DENIED' })
+-- 
+2.56.0
+
