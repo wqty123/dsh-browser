@@ -8,7 +8,7 @@ export function guestRuntimeScript(pageUrl: string): string {
   const attempt = fn => { try { return fn(); } catch {} };
   const realURL = value => {
     const raw = String(value);
-    const proxyURL = new URL(raw, location.href);
+    const proxyURL = new URL(raw, location.origin + '/');
     if (proxyURL.origin === location.origin && proxyURL.pathname === route) {
       const inner = proxyURL.searchParams.get('u');
       if (inner) return new URL(inner);
@@ -22,7 +22,7 @@ export function guestRuntimeScript(pageUrl: string): string {
   const toProxy = value => {
     try {
       const raw = String(value);
-      const hostURL = new URL(raw, location.href);
+      const hostURL = new URL(raw, location.origin + '/');
       if (hostURL.origin === location.origin && hostURL.pathname === route) return raw;
       const url = realURL(raw);
       return /^https?:$/.test(url.protocol) ? route + '?u=' + encodeURIComponent(url.href) : raw;

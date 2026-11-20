@@ -83,6 +83,18 @@ test('fetch handles string, URL and Request inputs, preserving POST body and add
   for (const { init } of requests) assert.equal(init.headers.get('x-dsh-guest-sub'), '1')
 })
 
+test('query-only, fragment-only and empty URLs resolve against the real page, including after history changes', () => {
+  const { context } = page()
+  assert.equal(context.__dshGuestToProxy('?page=2'), guestPath('https://ordinary.example/dir/page?page=2'))
+  assert.equal(context.__dshGuestToProxy(''), guestPath('https://ordinary.example/dir/page'))
+  context.history.pushState({}, '', '/next/page?q=old#old')
+  assert.equal(context.__dshGuestToProxy('?page=3'), guestPath('https://ordinary.example/next/page?page=3'))
+  assert.equal(context.__dshGuestToProxy('#section'), guestPath('https://ordinary.example/next/page?q=old#section'))
+  assert.equal(context.__dshGuestToProxy(''), guestPath('https://ordinary.example/next/page?q=old'))
+  context.history.replaceState({}, '', '?replaced=1')
+  assert.equal(context.location.href, 'https://dsh.example' + guestPath('https://ordinary.example/next/page?replaced=1'))
+})
+
 test('XHR, beacon and window.open stay in the proxy', () => {
   const { context, requests, navigations, XHR } = page()
   const xhr = new XHR()
