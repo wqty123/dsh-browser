@@ -187,18 +187,13 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): void {
   // 旧实现依赖 `ctx.inject(['sidebarRight'], …)` 回调在 apply 期拿到服务；注入不成立时
   // opener 始终是 undefined，点击只会得到「侧栏网页已不在原来的标签页里」。
   // 改为**点击那一刻**从容器里取服务：只要宿主有侧栏，就一定跳得过去。
-  runtime.setSourceOpener((url) => {
+  runtime.setSourceOpener(async (url) => {
     const sessionId = runtime.currentSessionId()
-    if (sessionId === '') return false
+    if (sessionId === '') throw new Error('reference source requires a conversation')
     const service = ctx.get('sidebarRight') as {
-      openTabIn?: (sessionId: string, kind: string, options?: unknown) => void
+      openTabIn?: (sessionId: string, kind: string, options?: unknown) => void | Promise<unknown>
     } | undefined
-    if (typeof service?.openTabIn !== 'function') return false
-    try {
-      service.openTabIn(sessionId, 'browser', { params: { url } })
-      return true
-    } catch {
-      return false
-    }
+    if (typeof service?.openTabIn !== 'function') throw new Error('sidebar tab API is unavailable')
+    await service.openTabIn(sessionId, 'browser', { params: { url } })
   })
 }

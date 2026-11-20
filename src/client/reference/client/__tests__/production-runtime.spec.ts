@@ -363,11 +363,10 @@ describe('revealReference — it goes to the source page', () => {
     const { http, runtime, card } = await withCard()
     http.revealOutcome = { ok: true, status: 'session-unavailable' }
     const opened: string[] = []
-    runtime.setSourceOpener((url) => {
+    runtime.setSourceOpener(async (url) => {
       opened.push(url)
       // Stands for the page finishing its load: the next attempt locates it.
       http.revealOutcome = { ok: true, status: 'revealed' }
-      return true
     })
     await runtime.revealReference(card.referenceId)
     expect(opened).toEqual([card.source.pageUrl])
@@ -378,7 +377,7 @@ describe('revealReference — it goes to the source page', () => {
   it('keeps the specific reason when the host cannot open a page', async () => {
     const { http, runtime, card } = await withCard()
     http.revealOutcome = { ok: true, status: 'session-unavailable' }
-    runtime.setSourceOpener(() => false)
+    runtime.setSourceOpener(async () => { throw new Error('sidebar tab API is unavailable') })
     await runtime.revealReference(card.referenceId)
     expect(runtime.snapshot().reveal?.status).toBe('session-unavailable')
     expect(runtime.snapshot().reveal?.message).toContain('标签页')

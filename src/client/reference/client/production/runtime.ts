@@ -35,7 +35,7 @@ import {
   buildCardViewModel,
   type CardViewModel,
 } from './reference-card.ts'
-import { encodeBrowserRefUri } from '../scheme.ts'
+import { encodeBrowserRefUri, parseBrowserRefUri } from '../scheme.ts'
 import type { RevealStatus } from '../types.ts'
 import {
   createSubmissionSeam,
@@ -200,7 +200,7 @@ export interface ProductionRuntime {
   /** Remove a card for good: tombstoned locally and dropped on the plugin side. */
   removeCard(referenceId: string): Promise<void>
   /** Jump the sidebar browser back to a reference's原文 and highlight it. */
-  revealReference(referenceId: string): Promise<void>
+  revealReference(referenceId: string, partId?: string): Promise<RevealStatus>
   /**
    * "Open this URL in the sidebar browser", supplied by the client shell.
    *
@@ -208,11 +208,11 @@ export interface ProductionRuntime {
    * another page (or none at all) the only useful answer is to open the stored
    * URL there and try again, not to explain that it could not.
    */
-  setSourceOpener(opener: ((url: string) => boolean) | undefined): void
+  setSourceOpener(opener: ((url: string) => void | Promise<void>) | undefined): void
   /** 一条引用的可展示详情（消息胶囊悬停卡用）。 */
-  referenceDetail(referenceId: string): { readonly title: string; readonly host: string; readonly quote: string; readonly comment?: string } | undefined
+  referenceDetail(referenceId: string): (StoredReflection & { readonly sessionId: string; readonly card: CardViewModel }) | undefined
   /** Activate a canonical `dsh-browser-ref:` URI (reply-side link bridge). */
-  activateUri(uri: string): Promise<void>
+  activateUri(uri: string): Promise<RevealStatus>
   /** Edit the draft's own copy of the user's note (§5); never rewrites the snapshot. */
   setComment(referenceId: string, comment: string): boolean
   /** Production revealer (activate a `dsh-browser-ref:` link). */
@@ -264,7 +264,8 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
    * the source page: only the outcome the person ends up with is reported.
    */
   let mutedReveal = 0
-  let sourceOpener: ((url: string) => boolean) | undefined
+  let sourceOpener: ((url: string) => void | Promise<void>) | undefined
+  let revealIntent = 0
   let lastIssue: string | undefined
   // A failed "回到原文" used to stay on screen forever: the hint was only
   // rewritten by the NEXT reveal attempt, so recovering the sidebar never
@@ -291,15 +292,12 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     const unref = (revealTimer as unknown as { unref?: () => void }).unref
     if (typeof unref === 'function') unref.call(revealTimer)
   }
-  const activateUri = async (uri: string): Promise<void> => {
-    try {
-      // The revealer reports its own status through `showReveal` (injected as
-      // `report`), so the bridge path and the React source link give the SAME
-      // user-facing feedback. Only a thrown activation needs a fallback.
-      await revealer.activate(uri)
-    } catch {
-      showReveal('unavailable')
-    }
+  const activateUri = async (uri: string): Promise<RevealStatus> => {
+    const parsed = parseBrowserRefUri(uri)
+    if (parsed !== undefined) return revealReference(parsed.referenceId, parsed.partId)
+    revealIntent += 1
+    showReveal('unknown-reference')
+    return 'unknown-reference'
   }
 
   // --- wake-on-visible --------------------------------------------------------
@@ -836,7 +834,8 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     },
   })
 
-  const ownerFor = (referenceId: string): RevealOwner | undefined => {
+  const referenceDetail = (referenceId: string): (StoredReflection & { readonly sessionId: string; readonly card: CardViewModel }) | undefined => {
+    draftStoreFor(current)
     for (const [sessionId, store] of stores) {
       // A reference carried by a sent message lives in the archive, not in the
       // draft: its source link must keep working after the card clears. It may
@@ -847,28 +846,69 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
         ?? store.sentReflection(referenceId)
         ?? store.pendingReflection(referenceId)
       if (reflection === undefined) continue
-      const snapshot = reflection.snapshot
-      return {
-        sessionId: snapshot.owner.sessionId ?? sessionId,
-        browserSessionId: reflection.browserSessionId,
-        label: snapshot.source.title,
-        ...(snapshot.source.frameRoute === undefined ? {} : { frameRoute: snapshot.source.frameRoute }),
-        ...(snapshot.source.frameSelector === undefined ? {} : { frameSelector: snapshot.source.frameSelector }),
-      }
+      const index = store.state().reflections.indexOf(reflection) + 1
+      return { ...reflection, sessionId, card: buildCardViewModel(reflection, assetStoreFor(sessionId), index || 1) }
     }
     return undefined
+  }
+
+  const ownerFor = (referenceId: string): RevealOwner | undefined => {
+    const detail = referenceDetail(referenceId)
+    if (detail === undefined) return undefined
+    const { snapshot } = detail
+    return {
+      sessionId: snapshot.owner.sessionId ?? detail.sessionId,
+      browserSessionId: detail.browserSessionId,
+      label: snapshot.source.title,
+      ...(snapshot.source.frameRoute === undefined ? {} : { frameRoute: snapshot.source.frameRoute }),
+      ...(snapshot.source.frameSelector === undefined ? {} : { frameSelector: snapshot.source.frameSelector }),
+    }
   }
 
   const revealer = createProductionRevealer({
     http,
     resolveOwner: ownerFor,
     currentSessionId: () => current,
+    onActivate: activateUri,
     // A failed reply-side source link (linkSpec.onActivate) now surfaces the
     // same dock hint as the document-level bridge (B6). A retry in progress
     // stays quiet: intermediate "still on the wrong page" hints would flash
     // while the source page is loading.
     report: status => { if (mutedReveal === 0) showReveal(status) },
   })
+
+  const revealReference = async (referenceId: string, partId?: string): Promise<RevealStatus> => {
+    const intent = ++revealIntent
+    const sessionId = current
+    const active = (): boolean => !disposed && intent === revealIntent && current === sessionId
+    const uri = encodeBrowserRefUri({ referenceId, ...(partId === undefined ? {} : { partId }) })
+    const attempt = async (navigate: boolean): Promise<RevealStatus> => {
+      if (!active()) return 'superseded'
+      mutedReveal += 1
+      try { return await revealer.activate(uri, { navigate }) }
+      finally { mutedReveal -= 1 }
+    }
+    let status = await attempt(false)
+    try {
+      if (status === 'page-mismatch') status = await attempt(true)
+      const url = referenceDetail(referenceId)?.snapshot.source.pageUrl
+      if (active() && status === 'session-unavailable' && url && sourceOpener !== undefined) {
+        await sourceOpener(url)
+        for (const delay of [0, 700, 1100, 1600, 2200, 3000]) {
+          if (!active()) break
+          if (delay !== 0) await new Promise(resolve => { setTimeout(resolve, delay) })
+          status = await attempt(false)
+          if (status === 'page-mismatch') status = await attempt(true)
+          if (!['session-unavailable', 'unavailable'].includes(status)) break
+        }
+      }
+    } catch {
+      // A tab-open refusal is not a reveal acknowledgement.
+    }
+    if (!active()) return 'superseded'
+    showReveal(status)
+    return status
+  }
 
   const snapshot = (): DockSnapshot => {
     const availability = availabilityOf(poller.lastError)
@@ -945,6 +985,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     },
     setSession(sessionId) {
       if (disposed || sessionId === current) return
+      revealIntent += 1
       clearRevealHint()
       lastReveal = undefined
       lastIssue = undefined
@@ -1039,66 +1080,9 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       if (!store.state().reflections.some(entry => entry.referenceId === referenceId)) return
       removeReferences(current, [referenceId])
     },
-    async revealReference(referenceId) {
-      const uri = encodeBrowserRefUri({ referenceId })
-      const url = snapshot().cards.find(entry => entry.referenceId === referenceId)?.source.pageUrl
-      const attempt = async (navigate: boolean): Promise<RevealStatus> => {
-        mutedReveal += 1
-        try {
-          return await revealer.activate(uri, { navigate })
-        } finally {
-          mutedReveal -= 1
-        }
-      }
-      let status = await attempt(false)
-      // The sidebar is on another page: the plugin owns that page, so it is the
-      // one that can take it to the stored URL.
-      if (status === 'page-mismatch') status = await attempt(true)
-      // No page at all: only the shell can create the sidebar's browser tab.
-      if (status === 'session-unavailable' && url !== undefined && url !== '' && sourceOpener?.(url) === true) {
-        for (const delay of [700, 1100, 1600, 2200, 3000]) {
-          await new Promise(resolve => { setTimeout(resolve, delay) })
-          status = await attempt(false)
-          if (status === 'revealed') break
-          // Still loading elsewhere: keep waiting, but a real answer is final.
-          if (status !== 'page-mismatch' && status !== 'session-unavailable' && status !== 'unavailable') break
-        }
-      }
-      // Web 形态（同源代理）没有浏览器会话，宿主的 reveal 只能回答 session-unavailable。
-      // 这时用引用快照里的原文拼 text-fragment 打开页面，由浏览器原生高亮——这是 web 端
-      // 「点胶囊回原文」唯一可靠的路径。
-      if (status !== 'revealed' && url !== undefined && url !== '') {
-        const owner = ownerFor(referenceId)
-        const stored = owner?.snapshot as { readonly parts?: readonly { readonly type?: string; readonly text?: string }[] } | undefined
-        const quote = (stored?.parts ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join(' ').replace(/\s+/g, ' ').trim()
-        const excerpt = quote.slice(0, 80)
-        const target = excerpt === '' ? url : `${url.split('#')[0]}#:~:text=${encodeURIComponent(excerpt)}`
-        if (sourceOpener?.(target) === true) {
-          showReveal('revealed')
-          return
-        }
-      }
-      showReveal(status)
-    },
+    revealReference,
     setSourceOpener(opener) { sourceOpener = opener },
-    referenceDetail(referenceId) {
-      const owner = ownerFor(referenceId)
-      if (owner === undefined) return undefined
-      const snapshot = owner.snapshot as {
-        readonly source?: { readonly title?: string; readonly pageUrl?: string }
-        readonly parts?: readonly { readonly type?: string; readonly text?: string }[]
-      }
-      const quote = (snapshot.parts ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join('\n').trim()
-      const pageUrl = snapshot.source?.pageUrl ?? ''
-      let host = ''
-      try { host = pageUrl === '' ? '' : new URL(pageUrl).host } catch { host = '' }
-      return {
-        title: snapshot.source?.title ?? (host === '' ? referenceId : host),
-        host,
-        quote,
-        ...(owner.comment === undefined || owner.comment === '' ? {} : { comment: owner.comment }),
-      }
-    },
+    referenceDetail,
     activateUri,
     revealer,
     exportBundle(format, sessionId) {

@@ -37,6 +37,7 @@ export interface ProductionRevealerOptions {
   readonly resolveOwner: (referenceId: string) => RevealOwner | undefined
   /** Current DSH session id (for session-mismatch validation). */
   readonly currentSessionId: () => string
+  readonly onActivate?: (uri: string) => Promise<RevealStatus>
   /**
    * Report the outcome of EVERY activation (including the reply-side link's
    * `onActivate`, which used to call `run` directly and stay silent). The
@@ -73,7 +74,6 @@ class RevealUnavailableError extends Error {}
  */
 function wireStatus(status: string | undefined): RevealStatus {
   switch (status) {
-    case undefined:
     case 'revealed':
     case 'ok':
     case 'partial':
@@ -190,13 +190,7 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
         // chip (26px tall, 999px radius, the same two theme tokens).
         className: 'dsh-browser-ref-link',
         onActivate: (activated) => {
-          // The Web sidebar's guest is not a plugin browser session, so the host revealer has nothing to
-          // aim. Try it anyway (desktop path) and then hand the URI to the shell's panel hook.
-          void run(parseBrowserRefUri(activated))
-          try {
-            const hook = (globalThis as unknown as { __DSH_BROWSER_REF_REVEAL__?: (uri: string) => boolean }).__DSH_BROWSER_REF_REVEAL__
-            if (typeof hook === 'function') hook(activated)
-          } catch { /* the host path already reported */ }
+          void (options.onActivate === undefined ? run(parseBrowserRefUri(activated)) : options.onActivate(activated))
         },
         ...(label === undefined ? {} : { children: label }),
         // Always carry a tooltip: a chip with no title reads as decoration. When the reference is not
