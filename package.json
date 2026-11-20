@@ -63,9 +63,7 @@
   "bin": {
     "dsh-browser-install-electron": "scripts/install-electron.mjs"
   },
-  "dependencies": {
-    "electron": "^44.10.0"
-  },
+  "dependencies": {},
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-llm": "workspace:^",

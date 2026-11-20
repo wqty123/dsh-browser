@@ -49,11 +49,12 @@ test('the package carries no install-time lifecycle script', () => {
     assert.equal(scripts[forbidden], undefined,
       `"${forbidden}" runs during installation, where a network download must never live`)
   }
-  // The manual retry path stays available, and the runtime dependency stays declared.
   assert.equal(manifest().bin['dsh-browser-install-electron'], 'scripts/install-electron.mjs',
     'an operator can still provision it explicitly')
-  assert.equal(typeof manifest().dependencies.electron, 'string',
-    'and the package that ships the runtime is still a dependency')
+  for (const section of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+    assert.equal(manifest()[section]?.electron, undefined,
+      'the sidebar-only generation must not resolve the Electron builtin as a package dependency')
+  }
 })
 
 test('a runtime that is already there is not touched', async () => {
