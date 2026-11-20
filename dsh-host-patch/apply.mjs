@@ -2,6 +2,7 @@ import * as fs from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { stripLegacyBridge } from './legacy-bridge.mjs'
 
 const specs = ['rc3', 'rc5'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8')))
 const suffix = '.before-dsh-host-patch'
@@ -44,6 +45,7 @@ function patchSource(text, target, path, io) {
   if (!io.lstatSync(backup).isFile() || io.lstatSync(backup).isSymbolicLink()) throw new Error('legacy bridge backup is not a regular file')
   const pristine = io.readFileSync(backup, 'utf8')
   if (digest(pristine) !== target.sha256) throw new Error('legacy bridge backup pristine main.js hash mismatch')
+  if (stripLegacyBridge(text) !== pristine) throw new Error('live main.js is not the pristine backup plus a recognized legacy bridge; refusing to discard other edits')
   return pristine
 }
 

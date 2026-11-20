@@ -4,6 +4,7 @@ import * as fs from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyHostPatch, hostPatchStatus, patchText, restoreHostPatch } from '../dsh-host-patch/apply.mjs'
+import { legacyBridgeSnippets } from '../dsh-host-patch/legacy-bridge.mjs'
 
 for (const release of ['rc3', 'rc5']) describe(release, () => {
 const spec = JSON.parse(fs.readFileSync(new URL(`../dsh-host-patch/${release}.json`, import.meta.url), 'utf8'))
@@ -62,11 +63,10 @@ test('web package directory and hardlinked npm content are patched without chang
   assert.equal(fs.readFileSync(file('client'), 'utf8'), fixture('client', 'after'))
 })
 
-test('legacy bridge migration preserves exact restore bytes independently of the installer snippet version', t => {
+for (const [variant, snippet] of legacyBridgeSnippets.entries()) test(`recognized legacy bridge ${variant} preserves exact restore bytes`, t => {
   const { packages, file } = setup(t)
-  const target = spec.targets.find(target => target.id === 'main')
   const pristine = fixture('main', 'before')
-  const legacy = pristine.replace('export {};', `${target.legacyBridge.marker} pages.\napp.whenReady().then(() => import('./plugin-browser-bridge.js'));\nexport {};`)
+  const legacy = pristine.replace('export {};', snippet + 'export {};')
   assert.notEqual(legacy, pristine)
   fs.writeFileSync(file('main'), legacy)
   fs.writeFileSync(file('main') + '.before-bridge', pristine)
@@ -84,6 +84,30 @@ test('legacy bridge migration preserves exact restore bytes independently of the
   assert.equal(fs.readFileSync(file('client'), 'utf8'), fixture('client', 'before'))
   assert.deepEqual(restoreHostPatch(packages), { status: 'absent', changed: false })
   assert.deepEqual(applyHostPatch(packages), { status: 'applied', changed: true })
+})
+
+for (const mutation of ['extra edit', 'edited block', 'unknown block', 'duplicate block']) test(`legacy ${mutation} refuses with no writes`, t => {
+  const { packages, file } = setup(t)
+  const pristine = fixture('main', 'before')
+  const snippet = legacyBridgeSnippets[1]
+  let legacy = pristine.replace('export {};', snippet + 'export {};')
+  if (mutation === 'extra edit') legacy += '\n// unrelated edit\n'
+  if (mutation === 'edited block') legacy = legacy.replace('bridge.start();', 'bridge.start({ custom: true });')
+  if (mutation === 'unknown block') legacy = pristine.replace('export {};', spec.targets.find(target => target.id === 'main').legacyBridge.marker + '\nunknownBridge();\nexport {};')
+  if (mutation === 'duplicate block') legacy = legacy.replace('export {};', snippet + 'export {};')
+  fs.writeFileSync(file('main'), legacy)
+  fs.writeFileSync(file('main') + '.before-bridge', pristine)
+  let writes = 0
+  const io = { ...fs, writeFileSync: (...args) => { writes++; fs.writeFileSync(...args) } }
+  const result = applyHostPatch([...packages].reverse(), { fs: io })
+  assert.equal(result.status, 'anchors mismatch')
+  assert.equal(result.changed, false)
+  assert.match(result.reason, /refusing to discard other edits/)
+  assert.equal(writes, 0)
+  assert.equal(fs.readFileSync(file('main'), 'utf8'), legacy)
+  assert.equal(fs.readFileSync(file('main') + '.before-bridge', 'utf8'), pristine)
+  assert.equal(fs.readFileSync(file('client'), 'utf8'), fixture('client', 'before'))
+  for (const id of ['main', 'client']) assert.equal(fs.existsSync(file(id) + backupSuffix), false)
 })
 
 test('legacy migration validates sidebar anchors before changing either file or creating backups', t => {

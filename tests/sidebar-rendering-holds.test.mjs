@@ -8,6 +8,7 @@ import { EventEmitter, once } from 'node:events'
 import { connect } from 'node:net'
 import vm from 'node:vm'
 import { loadSettingsPanel } from '../src/client/settings/panel.ts'
+import { legacyBridgeSnippet } from '../dsh-host-patch/legacy-bridge.mjs'
 
 const directory = mkdtempSync(join(tmpdir(), 'sidebar-rendering-'))
 after(() => rmSync(directory, { recursive: true, force: true }))
@@ -288,6 +289,7 @@ test('a legacy file-change reload replaces the listener and invokes the old modu
     await once(second, 'listening')
     assert.equal(bridge.start(), second, 'an ordinary second startup still deduplicates after reload')
     const source = readFileSync(new URL('../desktop-bridge/install.mjs', import.meta.url), 'utf8')
-    assert.ok(source.includes('bridge.start({ reload: why === "file changed" })'))
+    assert.ok(source.includes('legacyBridgeSnippet as SNIPPET'))
+    assert.ok(legacyBridgeSnippet.includes('bridge.start({ reload: why === "file changed" })'))
   } finally { copy.stop() }
 })

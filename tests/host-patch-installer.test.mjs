@@ -72,22 +72,25 @@ test('an older legacy injection migrates from its pristine backup, restores exac
   assert.equal(readFileSync(client, 'utf8'), substitute(artifact('client', 'after')))
 })
 
-for (const backup of ['missing', 'wrong']) test(`${backup} legacy pristine backup refuses migration without blocking the bridge`, t => {
-  const { app, run } = setup(t)
+for (const backup of ['missing', 'wrong', 'extra edit']) test(`${backup} legacy pristine backup refuses migration without blocking the bridge`, t => {
+  const { app, sidebar, run } = setup(t)
   const manifest = join(app, 'package.json')
   const originalManifest = readFileSync(manifest, 'utf8')
   writeFileSync(manifest, originalManifest.replace('0.2.2-rc.3', '0.2.2-rc.2'))
   run()
   writeFileSync(manifest, originalManifest)
   const main = join(app, 'lib/main.js')
+  if (backup === 'extra edit') writeFileSync(main, readFileSync(main, 'utf8') + '\n// unrelated edit\n')
   const legacy = readFileSync(main, 'utf8')
   if (backup === 'missing') unlinkSync(main + '.before-bridge')
-  else writeFileSync(main + '.before-bridge', 'another build')
+  else if (backup === 'wrong') writeFileSync(main + '.before-bridge', 'another build')
   const output = run()
   assert.match(output, /"status":"anchors mismatch"/)
   assert.match(output, /bridge already installed/)
   assert.equal(readFileSync(main, 'utf8'), legacy)
+  assert.equal(readFileSync(join(sidebar, 'lib/client.js'), 'utf8'), artifact('client', 'before'))
   assert.equal(existsSync(main + '.before-dsh-host-patch'), false)
+  assert.equal(existsSync(join(sidebar, 'lib/client.js.before-dsh-host-patch')), false)
 })
 
 test('mismatched sidebar anchors do not block legacy bridge installation or modify sidebar bytes', t => {
