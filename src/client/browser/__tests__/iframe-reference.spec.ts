@@ -41,7 +41,7 @@ function fixture(initial = url) {
   page.presentation.mount(host.id)
   disposers.push(async () => { await controller.dispose(); journal.dispose() })
 
-  function connect(html = '<p>before selected words after</p>', holdReady = false) {
+  function connect(html = '<p>before selected words after</p>', holdReady = false, deferLoad = false) {
     const frame = host.querySelector('iframe')!
     const guest = { window: frame.contentWindow! }
     guest.window.document.open()
@@ -70,8 +70,10 @@ function fixture(initial = url) {
     const post = vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(data => {
       guest.window.dispatchEvent(new guest.window.MessageEvent('message', { origin: location.origin, source: parent as unknown as Window, data }))
     })
-    frame.dispatchEvent(new Event('load'))
-    return { guest, post, frame, receive, ready: () => { for (const report of held.splice(0)) receive(report) } }
+    const loaded = () => { frame.dispatchEvent(new Event('load')) }
+    if (deferLoad) guest.window.dispatchEvent(new guest.window.Event('DOMContentLoaded'))
+    else loaded()
+    return { guest, post, frame, receive, loaded, ready: () => { holdReady = false; for (const report of held.splice(0)) receive(report) } }
   }
   return { connect, controller, reader, sidebar, navigate, journal, page: () => page }
 }
@@ -190,14 +192,15 @@ it.each([
   await vi.waitFor(() => { expect(polledUrl).toBe('https://cn.bing.com/') })
   expect((await server.reveal(reference.referenceId, sessionId)).status).toBe('page-mismatch')
   const opening = openReferenceSource(f.sidebar, f.reader, sessionId, sourceUrl, new AbortController().signal)
-  guest = f.connect(html, true)
+  guest = f.connect(html, true, true)
   guest.ready()
   const source = await opening
   await vi.waitFor(() => { expect(polledUrl).toBe(sourceUrl) })
-  expect((await server.reveal(reference.referenceId, sessionId)).status).toBe('revealed')
   expect(await source.reveal!(reference, undefined, new AbortController().signal)).toBe('revealed')
   const returned = guest.guest.window.document
   expect(returned.querySelector('#__dsh-ref-highlight')?.children).toHaveLength(cells)
+  expect(guest.guest.window.getSelection()!.toString()).toBe(selected)
+  guest.loaded()
   expect(guest.guest.window.getSelection()!.toString()).toBe(selected)
   const command = guest.post.mock.calls.map(([data]) => data).find(data => data.operation === 'element')
   expect(command.spec.cells).toHaveLength(cells)
@@ -217,6 +220,26 @@ it('reports missing and ambiguous text and guest operation errors explicitly', a
   guest.guest.window.document.body.textContent = 'selected words'
   guest.guest.window.document.createRange = () => { throw new Error('guest range failed') }
   await expect(source.reveal!(snapshot, undefined, new AbortController().signal)).rejects.toThrow('guest range failed')
+})
+
+it('reveals a formula after navigation back at DOM readiness, without waiting for resource load', async () => {
+  const f = fixture('https://katex.org/')
+  f.connect('<p>initial source</p>')
+  f.controller.navigate('https://away.example/', 2)
+  f.connect('<p>away</p>')
+  const opened = openReferenceSource(f.sidebar, f.reader, sessionId, 'https://katex.org/', new AbortController().signal)
+  const guest = f.connect('<p>before <span class="katex" data-latex="\\KaTeX">KaTeX</span> after</p>', false, true)
+  const source = await opened
+  const formula = { ...snapshot, source: { ...snapshot.source, pageUrl: 'https://katex.org/' }, parts: [{
+    partId: 'p1', type: 'text' as const, text: '\\KaTeX', content: [{ type: 'math' as const, latex: '\\KaTeX', display: false }],
+    anchor: { exact: '\\KaTeX', prefix: 'before ', suffix: ' after' },
+  }] }
+  await expect(source.reveal!(formula, undefined, new AbortController().signal)).resolves.toBe('revealed')
+  expect(guest.guest.window.getSelection()!.toString()).toBe('KaTeX')
+  expect(guest.guest.window.document.querySelector('#__dsh-ref-highlight')).not.toBeNull()
+  guest.loaded()
+  expect(guest.guest.window.getSelection()!.toString()).toBe('KaTeX')
+  expect(f.controller.currentPage()?.url).toBe('https://katex.org/')
 })
 
 it.each(['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'fragment', 'properties'] as const)('proxies runtime stylesheet and image URLs synchronously through %s', async insertion => {
@@ -284,13 +307,15 @@ it('authenticates guest commands and acknowledges malformed or wrong-document re
   const guest = f.connect()
   const reply = vi.spyOn(guest.guest.window.parent, 'postMessage')
   const loadId = guest.post.mock.calls.at(-1)![0].loadId
-  const request = { type: 'dsh.browser.guest.reference.request', loadId, requestId: 12, url, operation: 'text', spec: {} }
+  const documentId = guest.post.mock.calls.at(-1)![0].documentId
+  const request = { type: 'dsh.browser.guest.reference.request', loadId, documentId, requestId: 12, url, operation: 'text', spec: {} }
   const send = (data: object, source = guest.guest.window.parent, origin = location.origin) => {
     guest.guest.window.dispatchEvent(new guest.guest.window.MessageEvent('message', { data, source, origin }))
   }
   send(request, guest.guest.window)
   send(request, guest.guest.window.parent, 'https://untrusted.test')
   send({ ...request, loadId: loadId - 1 })
+  send({ ...request, documentId: 'stale-document' })
   send({ ...request, requestId: '12' })
   expect(reply).not.toHaveBeenCalled()
   send({ ...request, operation: 'execute' })

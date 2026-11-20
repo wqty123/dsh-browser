@@ -69,6 +69,9 @@ export class IframePresentation implements BrowserPresentation {
   private rendered = false
   private depth = 1
   private loadId: number | undefined
+  private documentId: string | undefined
+  private loadedId: number | undefined
+  private nativeLoadId: number | undefined
   private nextLoadId = 0
   private childRequestId = 0
   private readonly receive = (event: MessageEvent): void => {
@@ -85,7 +88,7 @@ export class IframePresentation implements BrowserPresentation {
     }
     if (data?.type === 'dsh.browser.guest.reference.ack') {
       const request = this.pending.get(data.requestId)
-      if (request === undefined || data.loadId !== request.loadId || data.loadId !== this.loadId
+      if (request === undefined || data.loadId !== request.loadId || data.loadId !== this.loadId || data.documentId !== this.documentId
         || typeof data.url !== 'string' || !sameReferenceDocument(data.url, request.url)) return
       if (data.ok === false) request.reject(new Error(typeof data.reason === 'string' ? data.reason : 'guest reference failed'))
       else if (data.ok === true && data.value !== null && typeof data.value === 'object' && !Array.isArray(data.value)) request.resolve(data.value)
@@ -98,11 +101,26 @@ export class IframePresentation implements BrowserPresentation {
     if (!data || data.type !== 'dsh.browser.guest.navigation' || typeof data.url !== 'string'
       || !/^https?:\/\//iu.test(data.url) || this.document === undefined) return
     if (this.loadId === undefined) return
+    if (typeof data.documentId !== 'string' || !data.documentId || data.documentId.length > 100) return
+    if (data.loadId !== undefined && data.loadId !== this.loadId) {
+      this.requestNavigation()
+      return
+    }
+    if (data.documentId !== this.documentId) {
+      const nativeLoaded = this.documentId === undefined && this.nativeLoadId === this.loadId
+      this.invalidateGuest()
+      this.loadId = ++this.nextLoadId
+      this.documentId = data.documentId
+      if (nativeLoaded) this.nativeLoadId = this.loadId
+      this.requestNavigation()
+      return
+    }
     if (data.loadId !== this.loadId) {
       this.requestNavigation()
       return
     }
     this.depth = Number.isSafeInteger(data.depth) && data.depth > 0 ? data.depth : 1
+    if (data.ready === true) this.markLoaded()
     this.observedUrl = data.url
     this.events.observed(this.document.revision, data.url)
     if (data.ready === true) this.events.guestReady?.(this.document.revision, this.pageId)
@@ -135,7 +153,7 @@ export class IframePresentation implements BrowserPresentation {
       const abort = (): void => { finish(undefined, new Error('source reveal cancelled')) }
       this.pending.set(requestId, { loadId, url, resolve: value => { finish(value) }, reject: error => { finish(undefined, error) } })
       signal.addEventListener('abort', abort, { once: true })
-      try { win.postMessage({ type: 'dsh.browser.guest.reference.request', operation, spec, url, loadId, requestId }, '*') }
+      try { win.postMessage({ type: 'dsh.browser.guest.reference.request', operation, spec, url, loadId, documentId: this.documentId, requestId }, '*') }
       catch (error) { finish(undefined, error instanceof Error ? error : new Error(String(error))) }
     })
   }
@@ -143,6 +161,9 @@ export class IframePresentation implements BrowserPresentation {
   private invalidateGuest(): void {
     this.childRequestId = 0
     this.loadId = undefined
+    this.documentId = undefined
+    this.loadedId = undefined
+    this.nativeLoadId = undefined
     this.observedUrl = undefined
     for (const request of this.pending.values()) request.reject(new Error('source iframe document changed'))
     this.events.guestPending?.()
@@ -224,10 +245,16 @@ export class IframePresentation implements BrowserPresentation {
 
   private requestNavigation(): void {
     try {
-      this.element?.contentWindow?.postMessage({ type: 'dsh.browser.guest.navigation.request', loadId: this.loadId }, '*')
+      this.element?.contentWindow?.postMessage({ type: 'dsh.browser.guest.navigation.request', loadId: this.loadId, documentId: this.documentId }, '*')
     } catch {
       // Native load completion does not depend on a scriptable guest.
     }
+  }
+
+  private markLoaded(): void {
+    if (this.document === undefined || this.loadedId === this.loadId) return
+    this.loadedId = this.loadId
+    this.events.loaded(this.document.revision)
   }
 
   private render(): void {
@@ -245,16 +272,21 @@ export class IframePresentation implements BrowserPresentation {
     element.setAttribute('sandbox', current.sandboxed ? WEB_BROWSER_SANDBOX : RELAXED_BROWSER_SANDBOX)
     element.addEventListener('load', () => {
       if (this.element !== element) return
-      this.invalidateGuest()
-      this.loadId = ++this.nextLoadId
-      this.events.loaded(current.revision)
+      if (this.nativeLoadId === this.loadId) {
+        this.invalidateGuest()
+        this.loadId = ++this.nextLoadId
+      }
+      this.observedUrl = undefined
+      this.events.guestPending?.()
+      this.markLoaded()
+      this.nativeLoadId = this.loadId
       this.requestNavigation()
     })
     element.addEventListener('error', () => {
       if (this.element === element) { this.invalidateGuest(); this.events.failed(current.revision) }
     })
     this.depth = 1
-    this.loadId = undefined
+    this.loadId = ++this.nextLoadId
     this.element = element
     this.rendered = true
     host.append(element)

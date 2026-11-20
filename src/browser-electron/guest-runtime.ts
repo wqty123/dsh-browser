@@ -102,9 +102,10 @@ export function guestRuntimeScript(pageUrl: string): string {
     };
   });
   let loadId;
+  const documentId = String(Date.now()) + ':' + String(Math.random());
   let referenceRequestId = 0;
   const reference = ${guestReferenceHandlerScript()};
-  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length, loadId, ready: document.readyState !== 'loading' }, '*'));
+  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length, loadId, documentId, ready: document.readyState !== 'loading' }, '*'));
   attempt(() => window.addEventListener('message', event => {
     if (event.source !== parent || !event.data) return;
     if (event.data.type === 'dsh.browser.guest.navigation.request') {
@@ -113,10 +114,10 @@ export function guestRuntimeScript(pageUrl: string): string {
       report();
     } else if (event.data.type === 'dsh.browser.guest.reference.request') {
       const data = event.data;
-      if (event.origin !== location.origin || data.loadId !== loadId || loadId === undefined
+      if (event.origin !== location.origin || data.loadId !== loadId || loadId === undefined || data.documentId !== documentId
         || !Number.isSafeInteger(data.requestId) || data.requestId <= referenceRequestId) return;
       referenceRequestId = data.requestId;
-      const ack = { type: 'dsh.browser.guest.reference.ack', requestId: data.requestId, loadId, url: real };
+      const ack = { type: 'dsh.browser.guest.reference.ack', requestId: data.requestId, loadId, documentId, url: real };
       try {
         const current = new URL(real), source = new URL(data.url);
         current.hash = ''; source.hash = '';

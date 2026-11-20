@@ -41,7 +41,7 @@ it('observes navigation and drives history only through the current opaque guest
   presentation.show({ target: { kind: 'https', url: 'https://example.test/', title: 'Example' }, revision: 7, sandboxed: true })
   const frame = host.querySelector('iframe')!
   const post = vi.spyOn(frame.contentWindow!, 'postMessage')
-  const data = { type: 'dsh.browser.guest.navigation', url: 'https://example.test/next', depth: 3 }
+  const data = { type: 'dsh.browser.guest.navigation', url: 'https://example.test/next', depth: 3, documentId: 'guest-document' }
   const send = (source: Window | null, origin = 'null', payload: unknown = data) =>
     window.dispatchEvent(new MessageEvent('message', { source, origin, data: payload }))
   send(null)
