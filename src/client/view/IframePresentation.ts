@@ -14,7 +14,7 @@ import type { BrowserChildTabRequest } from '../../types.ts'
 function guestProxyUrl(url: string): string {
   if (!/^https?:\/\//iu.test(url)) return url
   if (url.includes('/dsh-builtin-browser/browser-view/isolated-guest')) return url
-  return `${location.origin}/dsh-builtin-browser/browser-view/isolated-guest?u=${encodeURIComponent(url)}`
+  return `${location.origin}/dsh-builtin-browser/browser-view/isolated-guest?u=${encodeURIComponent(url)}&runtime=2`
 }
 
 function capturedSourceUrl(value: unknown): unknown {
@@ -50,6 +50,7 @@ export interface IframePresentationEvents {
   readonly capabilityFailed?: (description: string) => void
   readonly guestReady?: (revision: number, pageId: string) => void
   readonly guestPending?: () => void
+  readonly guestFailed?: (revision: number, description: string) => void
   readonly failed: (revision: number) => void
   readonly remounted: () => void
 }
@@ -74,6 +75,8 @@ export class IframePresentation implements BrowserPresentation {
   private nativeLoadId: number | undefined
   private nextLoadId = 0
   private childRequestId = 0
+  private identityTimer: ReturnType<typeof setTimeout> | undefined
+  private identityRetried = false
   private readonly receive = (event: MessageEvent): void => {
     if (event.origin !== 'null' || event.source !== this.element?.contentWindow) return
     const data = event.data
@@ -88,8 +91,12 @@ export class IframePresentation implements BrowserPresentation {
     }
     if (data?.type === 'dsh.browser.guest.reference.ack') {
       const request = this.pending.get(data.requestId)
-      if (request === undefined || data.loadId !== request.loadId || data.loadId !== this.loadId || data.documentId !== this.documentId
-        || typeof data.url !== 'string' || !sameReferenceDocument(data.url, request.url)) return
+      if (request === undefined) return
+      if (data.loadId !== request.loadId || data.loadId !== this.loadId || data.documentId !== this.documentId
+        || typeof data.url !== 'string' || !sameReferenceDocument(data.url, request.url)) {
+        request.reject(new Error('GUEST_REFERENCE_IDENTITY_MISMATCH: source iframe acknowledgement belongs to another document'))
+        return
+      }
       if (data.ok === false) request.reject(new Error(typeof data.reason === 'string' ? data.reason : 'guest reference failed'))
       else if (data.ok === true && data.value !== null && typeof data.value === 'object' && !Array.isArray(data.value)) request.resolve(data.value)
       return
@@ -101,8 +108,16 @@ export class IframePresentation implements BrowserPresentation {
     if (!data || data.type !== 'dsh.browser.guest.navigation' || typeof data.url !== 'string'
       || !/^https?:\/\//iu.test(data.url) || this.document === undefined) return
     if (this.loadId === undefined) return
-    if (typeof data.documentId !== 'string' || !data.documentId || data.documentId.length > 100) return
+    if (typeof data.documentId !== 'string' || !data.documentId || data.documentId.length > 100) {
+      this.observedUrl = undefined
+      for (const request of [...this.pending.values()]) request.reject(new Error('GUEST_DOCUMENT_IDENTITY_UNAVAILABLE: source iframe identity is missing'))
+      this.events.guestPending?.()
+      this.awaitIdentity()
+      if (!this.identityRetried) { this.identityRetried = true; this.requestNavigation() }
+      return
+    }
     if (data.loadId !== undefined && data.loadId !== this.loadId) {
+      this.awaitIdentity()
       this.requestNavigation()
       return
     }
@@ -112,13 +127,18 @@ export class IframePresentation implements BrowserPresentation {
       this.loadId = ++this.nextLoadId
       this.documentId = data.documentId
       if (nativeLoaded) this.nativeLoadId = this.loadId
+      this.awaitIdentity()
       this.requestNavigation()
       return
     }
     if (data.loadId !== this.loadId) {
+      this.awaitIdentity()
       this.requestNavigation()
       return
     }
+    clearTimeout(this.identityTimer)
+    this.identityTimer = undefined
+    this.identityRetried = false
     this.depth = Number.isSafeInteger(data.depth) && data.depth > 0 ? data.depth : 1
     if (data.ready === true) this.markLoaded()
     this.observedUrl = data.url
@@ -137,14 +157,16 @@ export class IframePresentation implements BrowserPresentation {
   private command(operation: Parameters<GuestReferenceCommand>[0], spec: object, signal: AbortSignal,
     url: string, loadId: number | undefined): Promise<Record<string, unknown>> {
     signal.throwIfAborted()
-    if (loadId === undefined || loadId !== this.loadId || this.observedUrl === undefined
+    if (loadId === undefined || loadId !== this.loadId || this.documentId === undefined || this.observedUrl === undefined
       || !sameReferenceDocument(url, this.observedUrl) || this.element?.contentWindow == null) {
       return Promise.reject(new Error('source iframe document is not ready'))
     }
     const win = this.element.contentWindow
     const requestId = ++this.nextRequestId
     return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { finish(undefined, new Error('GUEST_REFERENCE_TIMEOUT: source iframe did not acknowledge the reveal')) }, 5000)
       const finish = (value?: Record<string, unknown>, error?: Error): void => {
+        clearTimeout(timer)
         this.pending.delete(requestId)
         signal.removeEventListener('abort', abort)
         if (error !== undefined) reject(error)
@@ -159,6 +181,9 @@ export class IframePresentation implements BrowserPresentation {
   }
 
   private invalidateGuest(): void {
+    clearTimeout(this.identityTimer)
+    this.identityTimer = undefined
+    this.identityRetried = false
     this.childRequestId = 0
     this.loadId = undefined
     this.documentId = undefined
@@ -251,6 +276,16 @@ export class IframePresentation implements BrowserPresentation {
     }
   }
 
+  private awaitIdentity(): void {
+    if (this.identityTimer !== undefined) return
+    const revision = this.document?.revision
+    this.identityTimer = setTimeout(() => {
+      this.identityTimer = undefined
+      if (revision === undefined || this.document?.revision !== revision) return
+      this.events.guestFailed?.(revision, 'GUEST_DOCUMENT_IDENTITY_UNAVAILABLE: source iframe did not provide a matching document identity')
+    }, 5000)
+  }
+
   private markLoaded(): void {
     if (this.document === undefined || this.loadedId === this.loadId) return
     this.loadedId = this.loadId
@@ -280,6 +315,7 @@ export class IframePresentation implements BrowserPresentation {
       this.events.guestPending?.()
       this.markLoaded()
       this.nativeLoadId = this.loadId
+      this.awaitIdentity()
       this.requestNavigation()
     })
     element.addEventListener('error', () => {

@@ -83,7 +83,8 @@ before(async () => {
       res.writeHead(200, { 'content-type': 'application/javascript' })
       res.end('fetch("/api"); const src="/raw";')
     } else if (req.url === '/doc') {
-      res.writeHead(200, { 'content-type': 'text/html', 'x-frame-options': 'DENY' })
+      res.writeHead(200, { 'content-type': 'text/html', 'x-frame-options': 'DENY',
+        'cache-control': 'public, max-age=86400', 'last-modified': 'Mon, 01 Jan 2024 00:00:00 GMT' })
       res.end('<html><head><script>original()</script></head><body><img src="pic.png"></body></html>')
     } else if (req.url === '/csp-doc' || req.url === '/large-csp-doc') {
       res.writeHead(200, { 'content-type': 'text/html',
@@ -730,6 +731,33 @@ test('static rewriting keeps supported asset forms and special URLs intact', () 
   }
   const html = '<a href="#top">t</a><img src="data:image/gif;base64,AA">'
   assert.equal(rewriteDocument(html, base), html)
+})
+
+test('HTML rewriting does not reinterpret raw text, comments or attribute values as markup', () => {
+  const base = new URL('https://ordinary.example/dir/page')
+  for (const kind of ['script', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes']) {
+    const text = 'href = $(this).children("a").attr("href"); <img src="/literal.png">'
+    const html = `<${kind} src="/actual.js">${text}</${kind}><img src="/actual.png">`
+    assert.equal(rewriteDocument(html, base),
+      `<${kind} src="${guestPath('https://ordinary.example/actual.js')}">${text}</${kind}><img src="${guestPath('https://ordinary.example/actual.png')}">`)
+  }
+  for (const html of ['', '<!-- <img src="/literal.png"> -->', '<button onclick="href = \'/literal\'">', '<script>href = "/literal";']) {
+    assert.equal(rewriteDocument(html, base), html)
+  }
+  const html = '<style>.x:after{content:\'src="/literal"\'} .x{background:url(/actual.png)}</style>'
+  assert.equal(rewriteDocument(html, base), html.replace('url(/actual.png)', `url("${guestPath('https://ordinary.example/actual.png')}")`))
+})
+
+test('rewritten documents cannot cache an obsolete injected runtime or revalidate into a bare 304', async () => {
+  const result = await call(guestPath('https://ordinary.example/doc'), { headers: {
+    'if-none-match': 'old-runtime', 'if-modified-since': 'Mon, 01 Jan 2024 00:00:00 GMT',
+  } })
+  assert.equal(result.status, 200)
+  assert.equal(result.headers['cache-control'], 'no-store')
+  assert.equal(result.headers['last-modified'], undefined)
+  assert.equal(forwarded.at(-1).options.headers.get('if-none-match'), null)
+  assert.equal(forwarded.at(-1).options.headers.get('if-modified-since'), null)
+  assert.match(result.body, /documentId/)
 })
 
 test('Bing paging decodes HTML ampersands before encoding the proxy target', () => {

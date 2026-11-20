@@ -57,6 +57,14 @@ export class IframeImpl implements BrowserFrame {
     this.carrier.set({ stage: 'guest' })
   }
 
+  handleGuestFailed(revision: number, description: string): void {
+    if (this.disposed || this.navigation.snapshot.navigation.status === 'empty'
+      || this.navigation.snapshot.navigation.revision !== revision) return
+    this.carrier.set({ stage: 'failed', reason: 'guest-bootstrap-failed', detail: description })
+    this.error = { code: 'browser-capability-unavailable', description }
+    this.publish()
+  }
+
   handleCapabilityFailure(description: string): void {
     if (this.disposed) return
     this.error = { code: 'browser-capability-unavailable', description }

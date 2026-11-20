@@ -84,7 +84,7 @@ describe('source page readiness', () => {
     expect(listeners.size).toBe(0)
   })
 
-  it('uses only the caller lifetime for readiness, without adding a timer or replacing its signal', async () => {
+  it('preserves caller cancellation while bounding a missing readiness acknowledgement', async () => {
     const { sidebar, reader, journal } = fixture()
     const caller = new AbortController()
     let lifetime: AbortSignal | undefined
@@ -93,9 +93,21 @@ describe('source page readiness', () => {
       return reader.wait(query, signal)
     } }, owner, url, caller.signal)
     await Promise.resolve()
-    try { expect(lifetime).toBe(caller.signal) }
+    try { expect(lifetime?.aborted).toBe(false) }
     finally { journal.advance(tabId, 'attached', { guestId: '42' }) }
     await expect(result).resolves.toEqual({ pageId: '42' })
+  })
+
+  it('fails an unacknowledged source opening explicitly and releases its subscription', async () => {
+    vi.useFakeTimers()
+    try {
+      const { sidebar, reader, listeners } = fixture()
+      const result = openReferenceSource(sidebar, reader, owner, url, new AbortController().signal)
+      const failed = expect(result).rejects.toThrow('GUEST_SOURCE_TIMEOUT')
+      await vi.advanceTimersByTimeAsync(15000)
+      await failed
+      expect(listeners.size).toBe(0)
+    } finally { vi.useRealTimers() }
   })
 
   it.each(['navigation-failed', 'workspace-unavailable'] as const)('fails closed on %s', async reason => {

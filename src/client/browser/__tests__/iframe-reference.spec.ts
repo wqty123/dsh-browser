@@ -19,7 +19,7 @@ const url = 'https://example.test/article'
 const snapshot = { ...makeSnapshot(owner), source: { ...makeSnapshot(owner).source, pageUrl: url, frameRoute: 'main' as const },
   parts: [{ partId: 'text', type: 'text' as const, text: 'selected words', content: [], anchor: { exact: 'selected words', prefix: '', suffix: '' } }] }
 const disposers: (() => void | Promise<void>)[] = []
-afterEach(async () => { for (const dispose of disposers.splice(0).reverse()) await dispose(); vi.restoreAllMocks(); document.body.replaceChildren() })
+afterEach(async () => { for (const dispose of disposers.splice(0).reverse()) await dispose(); vi.useRealTimers(); vi.restoreAllMocks(); document.body.replaceChildren() })
 
 function fixture(initial = url) {
   const listeners = new Set<() => void>()
@@ -289,9 +289,7 @@ it('rejects forged/stale acknowledgements and cancels pending commands on abort 
   const ack = { ...request, type: 'dsh.browser.guest.reference.ack', ok: true, value: { ok: true, text: 'selected words' } }
   guest.receive(ack, null)
   guest.receive(ack, guest.frame.contentWindow, location.origin)
-  guest.receive({ ...ack, loadId: request.loadId - 1 })
   guest.receive({ ...ack, requestId: request.requestId + 1 })
-  guest.receive({ ...ack, url: 'https://other.test/' })
   guest.receive({ ...ack, value: null })
   expect(guest.post.mock.calls.at(-1)![0].operation).toBe('text')
   abort.abort()
@@ -300,6 +298,42 @@ it('rejects forged/stale acknowledgements and cancels pending commands on abort 
   f.controller.navigate('https://other.test/', 3)
   await expect(next).rejects.toThrow('document changed')
   guest.receive(ack)
+})
+
+it.each(['documentId', 'loadId', 'url'])('settles a reveal with an explicit error for a mismatched acknowledgement %s', async field => {
+  const f = fixture(), guest = f.connect()
+  const source = await openReferenceSource(f.sidebar, f.reader, sessionId, url, new AbortController().signal)
+  guest.post.mockImplementation(() => {})
+  const reveal = source.reveal!(snapshot, undefined, new AbortController().signal)
+  const request = guest.post.mock.calls.at(-1)![0]
+  guest.receive({ ...request, type: 'dsh.browser.guest.reference.ack', ok: true, value: { ok: true, text: 'selected words' },
+    [field]: field === 'loadId' ? request.loadId - 1 : field === 'url' ? 'https://other.test/' : 'other-document' })
+  await expect(reveal).rejects.toThrow('GUEST_REFERENCE_IDENTITY_MISMATCH')
+})
+
+it('bounds a reveal with no acknowledgement instead of leaving it pending', async () => {
+  const f = fixture(), guest = f.connect()
+  const source = await openReferenceSource(f.sidebar, f.reader, sessionId, url, new AbortController().signal)
+  guest.post.mockImplementation(() => {})
+  vi.useFakeTimers()
+  const reveal = source.reveal!(snapshot, undefined, new AbortController().signal)
+  const failed = expect(reveal).rejects.toThrow('GUEST_REFERENCE_TIMEOUT')
+  await vi.advanceTimersByTimeAsync(5000)
+  await failed
+})
+
+it('propagates an absent guest identity through the actual controller and source-opening wait', async () => {
+  const f = fixture('https://away.test/')
+  const opening = openReferenceSource(f.sidebar, f.reader, sessionId, url, new AbortController().signal)
+  const frame = document.querySelector('iframe')!
+  vi.useFakeTimers()
+  frame.dispatchEvent(new Event('load'))
+  window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: frame.contentWindow,
+    data: { type: 'dsh.browser.guest.navigation', url, ready: true } }))
+  const failed = expect(opening).rejects.toThrow('GUEST_DOCUMENT_IDENTITY_UNAVAILABLE')
+  await vi.advanceTimersByTimeAsync(5000)
+  await failed
+  expect(f.journal.get(tabId)).toMatchObject({ stage: 'failed', reason: 'guest-bootstrap-failed' })
 })
 
 it('authenticates guest commands and acknowledges malformed or wrong-document requests with errors', () => {

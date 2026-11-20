@@ -2,7 +2,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { IframePresentation } from '../../view/IframePresentation.ts'
 
-afterEach(() => document.body.replaceChildren())
+afterEach(() => { vi.useRealTimers(); document.body.replaceChildren() })
 
 it('accepts only opaque-origin reference intents from its own mounted frame', () => {
   const host = document.createElement('div')
@@ -63,4 +63,49 @@ it('observes navigation and drives history only through the current opaque guest
   expect(loaded).toHaveBeenCalledTimes(1)
   expect(observed).toHaveBeenCalledTimes(1)
   expect(presentation.historyStep(1)).toBe(false)
+})
+
+it.each([undefined, '', 'x'.repeat(101)])('re-requests a missing/invalid identity (%s) and fails explicitly if it stays absent', async documentId => {
+  vi.useFakeTimers()
+  const host = document.createElement('div'); host.id = 'missing-identity'; document.body.append(host)
+  const guestFailed = vi.fn(), guestReady = vi.fn()
+  const presentation = new IframePresentation({ loaded: vi.fn(), observed: vi.fn(), failed: vi.fn(), remounted: vi.fn(), guestFailed, guestReady })
+  presentation.mount(host.id)
+  presentation.show({ target: { kind: 'https', url: 'https://example.test/', title: '' }, revision: 4, sandboxed: true })
+  const frame = host.querySelector('iframe')!
+  expect(new URL(frame.src).searchParams.get('runtime')).toBe('2')
+  const post = vi.spyOn(frame.contentWindow!, 'postMessage')
+  frame.dispatchEvent(new Event('load'))
+  const loadId = post.mock.calls.at(-1)![0].loadId
+  const report = { type: 'dsh.browser.guest.navigation', url: 'https://example.test/', ready: true, documentId, loadId }
+  const send = () => window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: frame.contentWindow, data: report }))
+  post.mockClear()
+  send(); send()
+  expect(post).toHaveBeenCalledTimes(1)
+  expect(guestReady).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(5000)
+  expect(guestFailed).toHaveBeenCalledWith(4, expect.stringContaining('GUEST_DOCUMENT_IDENTITY_UNAVAILABLE'))
+  presentation.dispose()
+})
+
+it('recovers when the identity handshake supplies a matching report before its deadline', async () => {
+  vi.useFakeTimers()
+  const host = document.createElement('div'); host.id = 'retry-identity'; document.body.append(host)
+  const guestFailed = vi.fn(), guestReady = vi.fn()
+  const presentation = new IframePresentation({ loaded: vi.fn(), observed: vi.fn(), failed: vi.fn(), remounted: vi.fn(), guestFailed, guestReady })
+  presentation.mount(host.id)
+  presentation.show({ target: { kind: 'https', url: 'https://example.test/', title: '' }, revision: 5, sandboxed: true })
+  const frame = host.querySelector('iframe')!, post = vi.spyOn(frame.contentWindow!, 'postMessage')
+  frame.dispatchEvent(new Event('load'))
+  const loadId = post.mock.calls.at(-1)![0].loadId
+  const report = { type: 'dsh.browser.guest.navigation', url: 'https://example.test/', ready: true, loadId }
+  for (const data of [report, { ...report, documentId: 'recovered-document' }]) {
+    window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: frame.contentWindow, data }))
+  }
+  window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: frame.contentWindow,
+    data: { ...report, documentId: 'recovered-document', loadId: post.mock.calls.at(-1)![0].loadId } }))
+  await vi.advanceTimersByTimeAsync(5000)
+  expect(guestReady).toHaveBeenCalledTimes(1)
+  expect(guestFailed).not.toHaveBeenCalled()
+  presentation.dispose()
 })
