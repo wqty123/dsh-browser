@@ -17,22 +17,17 @@ const proxied = (url, sessionId) =>
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-import { createRequire } from 'node:module'
+import { stripTypeScriptTypes } from 'node:module'
 
-const ts = createRequire(import.meta.url)('typescript')
-
-const initializationSource = ts.transpileModule(readFileSync(new URL('../src/client/browser/initialization.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-const initialization = {}
-vm.runInThisContext(`(exports) => { ${initializationSource}\n }`, { filename: 'initialization.js' })(initialization)
-const { createBrowserInitializationJournal, createBrowserInitializationReader } = initialization
+const initializationSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/browser/initialization.ts', import.meta.url), 'utf8'))
+const { createBrowserInitializationJournal, createBrowserInitializationReader } = await import(`data:text/javascript;base64,${Buffer.from(initializationSource).toString('base64')}`)
 
 const { DEFAULT_SETTINGS } = await import('../lib/browser-electron/settings-store.js')
 
-const panelSource = ts.transpileModule(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+const panelSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8')).replace(/^export /gm, '')
 const SOURCE = `window.__ModuleLoader__.load({ factory(require) {
-  const module = { exports: {} }, exports = module.exports;
   ${panelSource}
-  return exports.loadSettingsPanel(require);
+  return loadSettingsPanel(require);
 } })`
 const ROUTE = '/dsh-builtin-browser/settings'
 

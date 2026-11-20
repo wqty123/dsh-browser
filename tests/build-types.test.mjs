@@ -1,47 +1,37 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
-import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 
-const ts = createRequire(import.meta.url)('typescript')
+const tsc = fileURLToPath(new URL('../node_modules/typescript/bin/tsc', import.meta.url))
+const config = fileURLToPath(new URL('./fixtures/sdk-types/tsconfig.json', import.meta.url))
+const fixture = fileURLToPath(new URL('./fixtures/sdk-types/plugin.ts', import.meta.url)).replaceAll('\\', '/')
 
-const configPath = fileURLToPath(new URL('../tsconfig.build.json', import.meta.url))
-const config = ts.readConfigFile(configPath, ts.sys.readFile)
-assert.equal(config.error, undefined)
-const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, fileURLToPath(new URL('../', import.meta.url)))
+function compile(...args) {
+  const result = spawnSync(process.execPath, [tsc, '-p', config, '--noEmit', '--pretty', 'false', ...args], { encoding: 'utf8' })
+  assert.equal(result.error, undefined, result.error?.message)
+  return { status: result.status, output: result.stdout + result.stderr }
+}
 
-test('host typechecking resolves the published SDK contract, not workspace source exports', () => {
-  const host = {
-    ...ts.sys,
-    readFile(path) {
-      const text = ts.sys.readFile(path)
-      if (text && /@deepseek-ai[/\\]cordis[/\\]package\.json$/.test(path)) {
-        return JSON.stringify({ ...JSON.parse(text), exports: { '.': './src/index.ts' } })
-      }
-      return text
-    },
-  }
-  const module = ts.resolveModuleName('@deepseek-ai/cordis', fileURLToPath(new URL('../src/index.ts', import.meta.url)), parsed.options, host).resolvedModule
-  assert.ok(module)
-  assert.match(module.resolvedFileName.replaceAll('\\', '/'), /\/lib\/types\/index\.d\.ts$/)
-  assert.equal(parsed.options.skipLibCheck, true)
-  assert.equal(parsed.options.strict, true)
-  assert.ok(parsed.fileNames.every(path => !path.replaceAll('\\', '/').includes('/__tests__/')))
+test('host typechecking resolves SDK declarations without upstream implementations', () => {
+  const result = compile('--listFilesOnly')
+  assert.equal(result.status, 0, result.output)
+  const files = result.output.split(/\r?\n/).map(path => path.trim().replaceAll('\\', '/')).filter(path => /\.[cm]?tsx?$/i.test(path))
+  assert.ok(files.includes(fixture), result.output)
+  assert.ok(files.some(path => path.endsWith('/@deepseek-ai/cordis/lib/types/index.d.ts')), result.output)
+  assert.deepEqual(files.filter(path => !/\.d\.[cm]?ts$/i.test(path)), [fixture], 'no upstream implementation may enter the program')
+  const settings = JSON.parse(readFileSync(new URL('../tsconfig.build.json', import.meta.url), 'utf8'))
+  assert.equal(settings.compilerOptions.strict, true)
+  assert.equal(settings.compilerOptions.skipLibCheck, true)
 })
 
-test('SDK declarations isolate upstream implementations without suppressing plugin type errors', () => {
-  const file = fileURLToPath(new URL('../src/__sdk_typecheck_fixture__.ts', import.meta.url))
-  const source = "import type { Context } from '@deepseek-ai/cordis'; export const broken: number = 'wrong'; export type Host = Context"
-  const host = ts.createCompilerHost(parsed.options)
-  const getSourceFile = host.getSourceFile.bind(host)
-  host.getSourceFile = (path, ...args) => path === file ? ts.createSourceFile(file, source, ts.ScriptTarget.ES2022) : getSourceFile(path, ...args)
-  const program = ts.createProgram([file], { ...parsed.options, noEmit: true }, host)
-  const implementations = program.getSourceFiles().filter(source => !source.isDeclarationFile)
-  assert.deepEqual(implementations.map(source => source.fileName), [file], 'no upstream implementation may enter the program')
-  const errors = ts.getPreEmitDiagnostics(program)
-  assert.equal(errors.length, 1, ts.formatDiagnosticsWithColorAndContext(errors, {
-    getCanonicalFileName: path => path, getCurrentDirectory: ts.sys.getCurrentDirectory, getNewLine: () => '\n',
-  }))
-  assert.equal(errors[0].code, 2322)
-  assert.equal(errors[0].file.fileName, file)
+test('SDK isolation does not suppress type errors or strict checking in plugin files', () => {
+  const result = compile()
+  assert.notEqual(result.status, 0, 'invalid plugin source must fail typechecking')
+  assert.match(result.output, /error TS2322:/)
+  assert.match(result.output, /error TS7006:/)
+  const errors = result.output.split(/\r?\n/).filter(line => /error TS\d+:/.test(line))
+  assert.equal(errors.length, 2, result.output)
+  assert.ok(errors.every(line => /plugin\.ts\(/.test(line)), result.output)
 })

@@ -24,6 +24,12 @@ workspace source exports; do not interpret `skipLibCheck` as isolation in that c
 
 # 开发
 
+The behavior tests require Node.js 22.13 or later (including 22.20), which provides
+`node:module.stripTypeScriptTypes` for the client-only fixtures. There is no Node
+engine pin or checked-in CI workflow in this package. Tests use the installed
+`tsc` CLI for declaration checks, not the TypeScript JavaScript compiler API;
+this supports both TypeScript 5 and TypeScript 7 installations.
+
 ## 构建与测试
 
 ```sh
