@@ -1,0 +1,399 @@
+From ff1f9d16d53707cc67adf0d85bc01a9235ab2c94 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 05:56:38 +0000
+Subject: [PATCH 2/2] feat(desktop): load trusted profile main extensions
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ apps/desktop/README.i18n.yaml              |   3 +
+ apps/desktop/README.md                     |   6 +
+ apps/desktop/README.zh.md                  |   6 +
+ apps/desktop/src/host-process.ts           |   2 +-
+ apps/desktop/src/main-extensions.ts        | 105 ++++++++++++++++++
+ apps/desktop/src/main.ts                   |   9 ++
+ apps/desktop/tests/host-process.spec.ts    |   4 +-
+ apps/desktop/tests/main-extensions.spec.ts | 123 +++++++++++++++++++++
+ apps/desktop/tests/main-startup.spec.ts    |   1 +
+ 9 files changed, 256 insertions(+), 3 deletions(-)
+ create mode 100644 apps/desktop/src/main-extensions.ts
+ create mode 100644 apps/desktop/tests/main-extensions.spec.ts
+
+diff --git a/apps/desktop/README.i18n.yaml b/apps/desktop/README.i18n.yaml
+index 47445f0d66..969cf3d4b9 100644
+--- a/apps/desktop/README.i18n.yaml
++++ b/apps/desktop/README.i18n.yaml
+@@ -44,6 +44,9 @@
+ /deepseek-harness-desktop/develop:
+   en: faf7676ba18bbf2f
+   zh: f1d7b75ad348c548
++/deepseek-harness-desktop/develop/desktop-main-extensions:
++  en: cf14f96815b2e23a
++  zh: 333c777b3361d7eb
+ /deepseek-harness-desktop/develop/startup-onboarding:
+   en: 67dc7ef3e293236a
+   zh: 1b224db684a2d1d7
+diff --git a/apps/desktop/README.md b/apps/desktop/README.md
+index 3ef2f63f2d..e38632ced6 100644
+--- a/apps/desktop/README.md
++++ b/apps/desktop/README.md
+@@ -211,6 +211,12 @@ The [native/renderer keyboard tests](tests/keyboard.spec.ts) compile as part of
+ 
+ Dependency installation does not run the locked Electron package's separate binary installer. Before running the [Windows console-signal tests](tests/windows-cli-signals.spec.ts) directly, prepare the locked Electron binary with `pnpm --filter @deepseek-ai/dsh-desktop exec install-electron` from the repository root. For downloads through a proxy, enable `ELECTRON_GET_USE_PROXY=1` for that installer process. Windows coverage aggregates require successful provisioning before the instrumented unit inventory starts.
+ 
++### Desktop main extensions
++
++Direct installed dependencies of the desktop profile can declare `"dsh": { "desktop": { "main": "./entry.js" } }` in their package manifest. Desktop imports these trusted entries after app readiness and profile preparation, before starting the Host. The entry must remain inside its package, including after symlink resolution. Installing such a plugin grants full Electron main-process authority; only install trusted packages.
++
++Export `start(api)` to receive `{ app, webContents, mainWindow, dshHome }`; `mainWindow()` returns the current primary window or `undefined`. Return a synchronous cleanup function or an object with `dispose()` to clean up on `will-quit`. Each extension's discovery, startup, and cleanup errors are logged with its package name without blocking other extensions. Restart Desktop after installing or changing extensions; hot reload is not supported. The Host environment advertises this capability as `DSH_DESKTOP_MAIN_EXTENSIONS=1`.
++
+ ### Startup onboarding
+ 
+ The API-key input starts empty and uses `autocomplete="new-password"` to ask Chromium not to autofill saved login passwords.
+diff --git a/apps/desktop/README.zh.md b/apps/desktop/README.zh.md
+index 26b8e34ba3..3a14e8d8eb 100644
+--- a/apps/desktop/README.zh.md
++++ b/apps/desktop/README.zh.md
+@@ -211,6 +211,12 @@ Web 侧的对应命令是 `pnpm run dev:web` 与 `pnpm run start:web`，见[开
+ 
+ 安装工作区依赖不会自动运行锁定版本 Electron 提供的独立二进制安装程序。直接运行 [Windows 控制台信号测试](tests/windows-cli-signals.spec.ts)前，在仓库根目录执行 `pnpm --filter @deepseek-ai/dsh-desktop exec install-electron`，准备锁定版本的 Electron 二进制。通过代理下载时，为该安装进程启用 `ELECTRON_GET_USE_PROXY=1`。Windows 覆盖率检查要求安装成功后，才启动带覆盖率插桩的单元测试集。
+ 
++### Desktop 主进程扩展
++
++桌面 profile 的直接已安装依赖可在包清单中声明 `"dsh": { "desktop": { "main": "./entry.js" } }`。Desktop 在应用就绪且 profile 准备完成后、启动 Host 前导入这些受信任入口。入口及其符号链接解析结果必须位于包目录内。安装此类插件会授予完整的 Electron 主进程权限；只安装可信包。
++
++导出 `start(api)`，接收 `{ app, webContents, mainWindow, dshHome }`；`mainWindow()` 返回当前主窗口或 `undefined`。返回同步清理函数或带有 `dispose()` 的对象，在 `will-quit` 时清理。各扩展的发现、启动和清理错误会记录包名，不阻塞其他扩展。安装或修改扩展后须重启 Desktop，不支持热重载。Host 环境通过 `DSH_DESKTOP_MAIN_EXTENSIONS=1` 声明此能力。
++
+ ### 启动引导
+ 
+ API Key 输入框初始为空，并通过 `autocomplete="new-password"` 请求 Chromium 不要自动填入已保存的登录密码。
+diff --git a/apps/desktop/src/host-process.ts b/apps/desktop/src/host-process.ts
+index 8e26fb8d47..703e589ce6 100644
+--- a/apps/desktop/src/host-process.ts
++++ b/apps/desktop/src/host-process.ts
+@@ -219,7 +219,7 @@ export class DesktopHostProcess {
+       ...this.packageManager === undefined ? [] : [this.packageManager.pnpm, this.packageManager.nodeBin],
+     ], {
+       cwd: this.projectDir,
+-      env: desktopNodeEnvironment(this.node, undefined, this.environment),
++      env: { ...desktopNodeEnvironment(this.node, undefined, this.environment), DSH_DESKTOP_MAIN_EXTENSIONS: '1' },
+       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+     })
+     this.child = child
+diff --git a/apps/desktop/src/main-extensions.ts b/apps/desktop/src/main-extensions.ts
+new file mode 100644
+index 0000000000..f30d683910
+--- /dev/null
++++ b/apps/desktop/src/main-extensions.ts
+@@ -0,0 +1,105 @@
++/** Explicitly installed, trusted profile extensions running in Electron main. */
++import { readFile, realpath } from 'node:fs/promises'
++import { isAbsolute, join, relative, resolve } from 'node:path'
++import { pathToFileURL } from 'node:url'
++import type { App, BrowserWindow, webContents } from 'electron'
++
++/** Main-process capabilities granted to an installed desktop extension. */
++export interface DesktopMainExtensionApi {
++  readonly app: App
++  readonly webContents: typeof webContents
++  /** @returns the current primary window, if one exists. */
++  readonly mainWindow: () => BrowserWindow | undefined
++  readonly dshHome: string
++}
++
++/** One validated main-process entry owned by a profile dependency. */
++export interface DesktopMainExtension {
++  readonly name: string
++  readonly entry: string
++}
++
++function record(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value)
++}
++
++function inside(root: string, path: string): boolean {
++  const child = relative(root, path)
++  return child !== '' && !isAbsolute(child) && child !== '..' && !child.startsWith('../') && !child.startsWith('..\\')
++}
++
++/**
++ * Discover opt-in entries from direct installed profile dependencies; reject escaping paths, including symlinks.
++ * Invalid dependencies are reported individually and do not suppress other entries.
++ * @param profile - desktop profile directory.
++ * @param report - diagnostic sink receiving the failing package name and error.
++ * @returns validated main entry paths; an absent profile manifest yields no entries.
++ */
++export async function discoverDesktopMainExtensions(
++  profile: string, report: (name: string, error: unknown) => void,
++): Promise<DesktopMainExtension[]> {
++  let manifest: unknown
++  try { manifest = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8')) }
++  catch (error) {
++    if (!record(error) || error.code !== 'ENOENT') report('profile', error)
++    return []
++  }
++  if (!record(manifest) || !record(manifest.dependencies)) return []
++  const entries: DesktopMainExtension[] = []
++  for (const name of Object.keys(manifest.dependencies)) {
++    try {
++      if (!/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u.test(name)) {
++        throw new Error('invalid dependency name')
++      }
++      const directory = await realpath(join(profile, 'node_modules', name))
++      const pkg: unknown = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'))
++      if (!record(pkg) || !record(pkg.dsh) || !record(pkg.dsh.desktop) || pkg.dsh.desktop.main === undefined) continue
++      const main = pkg.dsh.desktop.main
++      if (typeof main !== 'string' || !main.startsWith('./') || !inside(directory, resolve(directory, main))) {
++        throw new Error('dsh.desktop.main must be a relative entry inside its package')
++      }
++      const entry = await realpath(resolve(directory, main))
++      if (!inside(directory, entry)) throw new Error('dsh.desktop.main resolves outside its package')
++      entries.push({ name, entry })
++    } catch (error) { report(name, error) }
++  }
++  return entries
++}
++
++/**
++ * Start trusted extensions independently and register synchronous cleanup on will-quit.
++ * @param profile - desktop profile containing installed dependencies.
++ * @param api - Electron capabilities and shared Harness home.
++ * @returns idempotent disposer that also removes the quit listener.
++ */
++export async function startDesktopMainExtensions(profile: string, api: DesktopMainExtensionApi): Promise<() => void> {
++  const report = (name: string, error: unknown): void => { console.error(`desktop main extension ${name}:`, error) }
++  const disposers: { name: string; dispose: () => void }[] = []
++  let stopped = false
++  const dispose = (): void => {
++    stopped = true
++    api.app.off('will-quit', dispose)
++    for (const extension of disposers.splice(0).reverse()) {
++      try { extension.dispose() }
++      catch (error) { report(extension.name, error) }
++    }
++  }
++  api.app.on('will-quit', dispose)
++  const entries = await discoverDesktopMainExtensions(profile, report)
++  for (const { name, entry } of entries) {
++    if (stopped) break
++    try {
++      const extension: unknown = await import(pathToFileURL(entry).href)
++      if (stopped) break
++      if (!record(extension) || typeof extension.start !== 'function') throw new Error('entry must export start(api)')
++      const result: unknown = await extension.start(api)
++      if (typeof result === 'function') disposers.push({ name, dispose: () => { result() } })
++      else if (record(result) && typeof result.dispose === 'function') {
++        const dispose = result.dispose.bind(result)
++        disposers.push({ name, dispose: () => { dispose() } })
++      }
++      if (stopped) dispose()
++    } catch (error) { report(name, error) }
++  }
++  return dispose
++}
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 8f9cd823a5..30ce210f64 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -12,6 +12,7 @@ import { join } from 'node:path'
+ import { fileURLToPath } from 'node:url'
+ import {
+   app,
++  webContents,
+   BrowserWindow,
+   clipboard,
+   dialog,
+@@ -27,6 +28,8 @@ import {
+   type MenuItemConstructorOptions,
+ } from 'electron'
+ import { resolveDesktopPaths } from './paths.ts'
++import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
++import { startDesktopMainExtensions } from './main-extensions.ts'
+ import { DesktopProjectManager } from './project-manager.ts'
+ import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError } from './host-process.ts'
+ import { DesktopPlatformView, PLATFORM_IPC, platformBounds } from './platform-view.ts'
+@@ -407,6 +410,8 @@ async function main(): Promise<void> {
+   let startup: Promise<void> | undefined
+   let workspaceRecovery: Promise<void> | undefined
+   let mainWindow: BrowserWindow | undefined
++  const mainExtensionApi = { app, webContents, mainWindow: () => mainWindow, dshHome: resolveDshHome() }
++  let mainExtensionsStarted = false
+   let welcomeWindow: BrowserWindow | undefined
+   const installFileDrag = (): (() => Promise<void>) => installDesktopFileDrag(
+     event => assertProductSender(event),
+@@ -682,6 +687,10 @@ async function main(): Promise<void> {
+       await navigateMain(applicationUrl)
+       await backend.start(async () => {
+         await Promise.all([manager.applyRelease(), prepareHostEnvironment()])
++        if (!mainExtensionsStarted) {
++          mainExtensionsStarted = true
++          await startDesktopMainExtensions(activeProject, mainExtensionApi)
++        }
+       })
+       if (backend.host !== undefined) await openInitialWindow()
+       if (backend.host !== undefined) updateJournal?.action('workspace-ready')
+diff --git a/apps/desktop/tests/host-process.spec.ts b/apps/desktop/tests/host-process.spec.ts
+index 9a72fd2925..2073be9b4c 100644
+--- a/apps/desktop/tests/host-process.spec.ts
++++ b/apps/desktop/tests/host-process.spec.ts
+@@ -27,7 +27,7 @@ const server = createServer((request, response) => {
+     return
+   }
+   response.setHeader('content-type', 'application/json')
+-  response.end(JSON.stringify({runtime: process.argv[2], profile: process.argv[3], cwd: process.cwd(), nodePath: process.env.NODE_PATH, registry: process.env.NPM_CONFIG_REGISTRY, nodeOptions: process.env.NODE_OPTIONS, runAsNode: process.env.ELECTRON_RUN_AS_NODE, internals: process.execArgv.includes('--expose-internals')}))
++  response.end(JSON.stringify({runtime: process.argv[2], profile: process.argv[3], cwd: process.cwd(), nodePath: process.env.NODE_PATH, registry: process.env.NPM_CONFIG_REGISTRY, nodeOptions: process.env.NODE_OPTIONS, runAsNode: process.env.ELECTRON_RUN_AS_NODE, mainExtensions: process.env.DSH_DESKTOP_MAIN_EXTENSIONS, internals: process.execArgv.includes('--expose-internals')}))
+ })
+ server.listen(0, '127.0.0.1', () => {
+   process.send({ type: 'ready', url: 'http://127.0.0.1:' + server.address().port + '/?token=fixture' })
+@@ -312,7 +312,7 @@ ${HTTP_HOST}`)
+     })
+     const { url } = await host.start()
+     const response = await fetch(url)
+-    expect(await response.json()).toEqual({ runtime, profile, cwd: realpathSync(profile), nodePath: '/custom', registry: 'https://registry.example.test/', nodeOptions: '--no-warnings', runAsNode: '1', internals: true })
++    expect(await response.json()).toEqual({ runtime, profile, cwd: realpathSync(profile), nodePath: '/custom', registry: 'https://registry.example.test/', nodeOptions: '--no-warnings', runAsNode: '1', mainExtensions: '1', internals: true })
+   })
+ 
+   it.each([
+diff --git a/apps/desktop/tests/main-extensions.spec.ts b/apps/desktop/tests/main-extensions.spec.ts
+new file mode 100644
+index 0000000000..dcede605ce
+--- /dev/null
++++ b/apps/desktop/tests/main-extensions.spec.ts
+@@ -0,0 +1,123 @@
++import { EventEmitter } from 'node:events'
++import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import type { App } from 'electron'
++import { afterEach, expect, it, vi } from 'vitest'
++import { discoverDesktopMainExtensions, startDesktopMainExtensions, type DesktopMainExtensionApi } from '../src/main-extensions.ts'
++
++const roots: string[] = []
++afterEach(async () => {
++  vi.restoreAllMocks()
++  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
++})
++
++async function fixture(dependencies: Record<string, string> = {}) {
++  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-main-extensions-')))
++  roots.push(root)
++  await writeFile(join(root, 'package.json'), JSON.stringify({ dependencies }))
++  return root
++}
++
++async function plugin(root: string, name: string, main: unknown, source = 'export function start() {}') {
++  const directory = join(root, 'node_modules', name)
++  await mkdir(directory, { recursive: true })
++  await writeFile(join(directory, 'package.json'), JSON.stringify({ type: 'module', dsh: { desktop: { main } } }))
++  await writeFile(join(directory, 'entry.mjs'), source)
++  return directory
++}
++
++it('discovers only opted-in direct dependencies, including scoped packages', async () => {
++  const root = await fixture({ '@test/browser': '*', ordinary: '*' })
++  const browser = await plugin(root, '@test/browser', './entry.mjs')
++  await plugin(root, 'ordinary', undefined)
++  await plugin(root, 'not-installed-directly', './entry.mjs')
++  const report = vi.fn()
++  expect(await discoverDesktopMainExtensions(root, report)).toEqual([{ name: '@test/browser', entry: join(browser, 'entry.mjs') }])
++  expect(report).not.toHaveBeenCalled()
++})
++
++it('accepts absent profiles and profiles without dependencies', async () => {
++  const root = await fixture()
++  const report = vi.fn()
++  expect(await discoverDesktopMainExtensions(root, report)).toEqual([])
++  expect(await discoverDesktopMainExtensions(join(root, 'absent'), report)).toEqual([])
++  expect(report).not.toHaveBeenCalled()
++})
++
++it('rejects malformed entries, traversal, absolute paths, and symlink escapes without losing valid entries', async () => {
++  const root = await fixture({ traversal: '*', absolute: '*', malformed: '*', linked: '*', missing: '*', good: '*' })
++  await plugin(root, 'traversal', './../good/entry.mjs')
++  await plugin(root, 'absolute', join(root, 'entry.mjs'))
++  await plugin(root, 'malformed', 12)
++  const linked = await plugin(root, 'linked', './escape/entry.mjs')
++  const good = await plugin(root, 'good', './entry.mjs')
++  await symlink(good, join(linked, 'escape'), 'junction')
++  const report = vi.fn()
++  expect(await discoverDesktopMainExtensions(root, report)).toEqual([{ name: 'good', entry: join(good, 'entry.mjs') }])
++  expect(report.mock.calls.map(([name]) => name)).toEqual(['traversal', 'absolute', 'malformed', 'linked', 'missing'])
++})
++
++it('reports malformed profile JSON', async () => {
++  const root = await fixture()
++  await writeFile(join(root, 'package.json'), '{')
++  const report = vi.fn()
++  expect(await discoverDesktopMainExtensions(root, report)).toEqual([])
++  expect(report).toHaveBeenCalledWith('profile', expect.any(SyntaxError))
++})
++
++it('rejects dependency names that could escape node_modules', async () => {
++  const root = await fixture({ '../escape': '*', '@scope/..': '*' })
++  const report = vi.fn()
++  expect(await discoverDesktopMainExtensions(root, report)).toEqual([])
++  expect(report.mock.calls.map(([name]) => name)).toEqual(['../escape', '@scope/..'])
++})
++
++it('cleans up a start that completes while the application is quitting', async () => {
++  const root = await fixture({ late: '*' })
++  await plugin(root, 'late', './entry.mjs', `
++    import { writeFileSync } from 'node:fs'
++    import { join } from 'node:path'
++    export function start(api) {
++      api.app.emit('will-quit')
++      return () => writeFileSync(join(api.dshHome, 'stopped'), 'late')
++    }
++  `)
++  const app = new EventEmitter() as App
++  const dispose = await startDesktopMainExtensions(root, {
++    app, webContents: {} as DesktopMainExtensionApi['webContents'], mainWindow: () => undefined, dshHome: root,
++  })
++  expect(await readFile(join(root, 'stopped'), 'utf8')).toBe('late')
++  expect(app.listenerCount('will-quit')).toBe(0)
++  dispose()
++})
++
++it('starts entries with capabilities and isolates startup and cleanup failures', async () => {
++  const root = await fixture({ bad: '*', missing: '*', object: '*', fn: '*' })
++  await plugin(root, 'bad', './entry.mjs', 'export function start() { throw new Error("startup failed") }')
++  await plugin(root, 'missing', './entry.mjs', 'export const other = 1')
++  await plugin(root, 'object', './entry.mjs', `
++    import { writeFileSync } from 'node:fs'
++    import { join } from 'node:path'
++    export function start(api) {
++      writeFileSync(join(api.dshHome, 'started'), String(api.mainWindow()) + ':' + typeof api.webContents)
++      return { dispose() { throw new Error('cleanup failed') } }
++    }
++  `)
++  await plugin(root, 'fn', './entry.mjs', `
++    import { appendFileSync } from 'node:fs'
++    import { join } from 'node:path'
++    export function start(api) { return () => appendFileSync(join(api.dshHome, 'stopped'), 'once') }
++  `)
++  const app = new EventEmitter() as App
++  const api: DesktopMainExtensionApi = { app, webContents: {} as DesktopMainExtensionApi['webContents'], mainWindow: () => undefined, dshHome: root }
++  const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
++  const dispose = await startDesktopMainExtensions(root, api)
++  expect(await readFile(join(root, 'started'), 'utf8')).toBe('undefined:object')
++  expect(errors.mock.calls.map(([message]) => message)).toEqual(['desktop main extension bad:', 'desktop main extension missing:'])
++  app.emit('will-quit')
++  dispose()
++  expect(app.listenerCount('will-quit')).toBe(0)
++  expect(await readFile(join(root, 'stopped'), 'utf8')).toBe('once')
++  expect(errors).toHaveBeenLastCalledWith('desktop main extension object:', expect.objectContaining({ message: 'cleanup failed' }))
++})
+diff --git a/apps/desktop/tests/main-startup.spec.ts b/apps/desktop/tests/main-startup.spec.ts
+index 17e16cec09..b650450049 100644
+--- a/apps/desktop/tests/main-startup.spec.ts
++++ b/apps/desktop/tests/main-startup.spec.ts
+@@ -312,6 +312,7 @@ vi.mock('../src/policy-test-auth.ts', () => ({ DesktopPolicyTestAuth: class {
+ 
+ vi.mock('electron', () => ({
+   app: harness.app,
++  webContents: {},
+   BrowserWindow: harness.FakeWindow,
+   WebContentsView: harness.FakeView,
+   dialog: harness.dialog,
+-- 
+2.56.0
+

@@ -32,7 +32,7 @@ class FakeContents extends EventEmitter {
     }
     // The panel path reaches the shell through `executeJavaScript`; it resolves with the value
     // itself, not a CDP envelope.
-    this.executeJavaScript = code => Promise.resolve(JSON.stringify(panelVerdict(String(code))))
+    this.executeJavaScript = code => Promise.resolve(code.includes('api?.holdRendering') ? false : JSON.stringify(panelVerdict(String(code))))
   }
   getType () { return this.type }
   getTitle () { return this.title }

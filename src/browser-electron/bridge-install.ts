@@ -17,6 +17,13 @@ import { bridgeEndpointPath } from './paths.ts'
 /** What the panel may ask for. */
 export type BridgeAction = 'install' | 'uninstall'
 
+/** Independent result of the optional, version-gated DSH host patch. */
+export interface HostPatchResult {
+  readonly status: 'absent' | 'applied' | 'unsupported version' | 'anchors mismatch'
+  readonly reason?: string
+  readonly changed?: boolean
+}
+
 /** Everything this module touches from outside, so a test can drive it without spawning. */
 export interface BridgeActionDeps {
   /** Runs the installer; resolves with an exit code and the tail of its output. */
@@ -48,6 +55,7 @@ export interface BridgeActionResult {
   readonly logFile?: string
   readonly restarted?: boolean
   readonly pid?: number
+  readonly hostPatch?: HostPatchResult
 }
 
 /** Final record written by the installer that actually performed the operation. */
@@ -59,6 +67,7 @@ export interface BridgeActionCompletion {
   readonly pid?: number
   readonly error?: string
   readonly completedAt: string
+  readonly hostPatch?: HostPatchResult
 }
 
 /** Read-only startup verification, with a private endpoint path available to isolated tests. */
@@ -127,6 +136,10 @@ export async function waitForBridgeActionCompletion(
         || typeof record.completedAt !== 'string' || !Number.isFinite(Date.parse(record.completedAt))
         || record.pid !== undefined
         || (record.error !== undefined && typeof record.error !== 'string')
+        || (record.hostPatch !== undefined && (record.hostPatch === null || typeof record.hostPatch !== 'object'
+          || !['absent', 'applied', 'unsupported version', 'anchors mismatch'].includes(record.hostPatch.status)
+          || (record.hostPatch.reason !== undefined && typeof record.hostPatch.reason !== 'string')
+          || (record.hostPatch.changed !== undefined && typeof record.hostPatch.changed !== 'boolean')))
         || (record.ok !== (record.code === 0))) {
         throw new Error('the bridge installer wrote an invalid completion record')
       }
@@ -244,7 +257,8 @@ export async function runBridgeAction(
     const final = await waitForBridgeActionCompletion(resultFile, action, Math.max(0, deadline - Date.now()), deps.resultPollMs)
     const output = [installerOutput, await recordedOutput(), final.error].filter(Boolean).join('\n')
     return { ok: final.ok, code: final.code, output: tail(output), command: printable, resultFile, logFile,
-      restarted: final.restarted, ...final.pid === undefined ? {} : { pid: final.pid } }
+      restarted: final.restarted, ...final.pid === undefined ? {} : { pid: final.pid },
+      ...final.hostPatch === undefined ? {} : { hostPatch: final.hostPatch } }
   } catch (error) {
     return { ok: false, code: null,
       output: tail([installerOutput, await recordedOutput(), String(error)].filter(Boolean).join('\n')),

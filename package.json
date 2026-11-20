@@ -22,6 +22,7 @@
     "src",
     "scripts",
     "desktop-bridge",
+    "dsh-host-patch",
     "cordis.patch.yml",
     "CHANGELOG.md",
     "README.md",
@@ -91,6 +92,9 @@
     "dsh": ">= 0.2.2-rc.3 < 0.2.3"
   },
   "dsh": {
+    "desktop": {
+      "main": "./desktop-bridge/main.mjs"
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },

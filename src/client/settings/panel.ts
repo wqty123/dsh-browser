@@ -57,6 +57,11 @@ const react = require("react")
   let refreshWatchLabels = () => {}
 
   const zh = {
+    "readiness.hostPatch": "DSH 宿主补丁",
+    "readiness.hostPatch.applied": "已应用（支持后台页面渲染）",
+    "readiness.hostPatch.absent": "未应用",
+    "readiness.hostPatch.unsupported-version": "不支持此版本；继续使用兼容桥接",
+    "readiness.hostPatch.anchors-mismatch": "文件不匹配；继续使用兼容桥接",
     nav: "浏览器",
     "watch.open": "观看浏览器",
     "watch.title": "实时画面",
@@ -226,6 +231,11 @@ const react = require("react")
   }
 
   const en = {
+    "readiness.hostPatch": "DSH host patch",
+    "readiness.hostPatch.applied": "Applied (background page rendering available)",
+    "readiness.hostPatch.absent": "Not applied",
+    "readiness.hostPatch.unsupported-version": "Unsupported version; using the legacy bridge",
+    "readiness.hostPatch.anchors-mismatch": "Files did not match; using the legacy bridge",
     nav: "Browser",
     "watch.open": "Watch browser",
     "watch.title": "Live view",
@@ -1075,6 +1085,8 @@ const react = require("react")
       ]) : null,
       bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase === "installing" && bridgeJob.action === "uninstall" ? "uninstalling" : bridgeJob.phase}`)) : null,
       bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t(bridgeJob.action === "uninstall" ? "readiness.bridge.uninstalledDone" : "readiness.bridge.installedDone")) : null,
+      bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
+        `${t("readiness.hostPatch")}: ${t("readiness.hostPatch." + bridgeJob.hostPatch.status.replaceAll(" ", "-"))}`) : null,
       bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
       bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
@@ -1721,6 +1733,19 @@ const react = require("react")
     let sidebarRight = null
     let initializationReader = null
     const pendingTabs = new Map()
+    const renderingHolds = new Map()
+    function releaseRendering(token) {
+      const hold = renderingHolds.get(token)
+      if (hold === undefined) return
+      renderingHolds.delete(token)
+      hold.release()
+    }
+    function releaseAllRendering() {
+      for (const token of renderingHolds.keys()) releaseRendering(token)
+    }
+    function hasRenderingHold(sessionId) {
+      return Array.from(renderingHolds.values()).some(hold => hold.sessionId === sessionId)
+    }
     /** The shell's own navigation service: `openSession` is how it is asked to DISPLAY a conversation. */
     let uiWorkspace = null
     // `inject` is how a client plugin waits for a service to appear. A host that does not offer it
@@ -1738,10 +1763,14 @@ const react = require("react")
         }, "dsh-builtin-browser: initialization receipt reader")
       })
       ctx.inject(["sidebarRight"], (scope) => {
-        if (sidebarRight !== scope.sidebarRight) pendingTabs.clear()
+        if (sidebarRight !== scope.sidebarRight) {
+          releaseAllRendering()
+          pendingTabs.clear()
+        }
         sidebarRight = scope.sidebarRight
         scope.effect(() => () => {
           if (sidebarRight === scope.sidebarRight) {
+            releaseAllRendering()
             sidebarRight = null
             pendingTabs.clear()
           }
@@ -1870,6 +1899,7 @@ const react = require("react")
 
     /** Display the owner of an explicit open request, including an already mounted hidden guest. */
     function claimConversation(sessionId) {
+      if (hasRenderingHold(sessionId)) return false
       if (uiWorkspace === null || typeof uiWorkspace.openSession !== "function") return false
       // Already displayed? Then the shell needs no navigation: the panel simply has not been opened
       // yet, and `revealPlacedPanel` opens it. Re-opening the conversation a human is reading would
@@ -2114,6 +2144,19 @@ const react = require("react")
 
     const api = {
       panelProtocol: 4,
+      holdRendering(sessionId, token) {
+        if (typeof sessionId !== "string" || !sessionId.startsWith("session-") || typeof token !== "string") return false
+        if (renderingHolds.has(token)) return true
+        if (onScreenSession() === sessionId || typeof sidebarRight?.holdRendering !== "function") return false
+        const release = sidebarRight.holdRendering(sessionId)
+        renderingHolds.set(token, { sessionId, release })
+        return true
+      },
+      releaseRendering,
+      isBackgroundRendering(sessionId) {
+        return hasRenderingHold(sessionId) && Array.from(document.querySelectorAll("[data-sidebar-right-background-rendering]"))
+          .some(element => element.getAttribute("data-sidebar-right-session") === sessionId)
+      },
       get initializationProtocol() { return initializationReader?.protocolVersion ?? 0 },
       panelInitialization(sessionId, tabId, url, requestId) {
         if (initializationReader === null || typeof sessionId !== "string" || !sessionId.startsWith("session-")
@@ -2303,6 +2346,7 @@ const react = require("react")
     ctx.effect(() => {
       globalThis.__dshBuiltinBrowser = api
       return () => {
+        releaseAllRendering()
         if (globalThis.__dshBuiltinBrowser === api) delete globalThis.__dshBuiltinBrowser
       }
     }, "dsh-builtin-browser: conversation panel service")

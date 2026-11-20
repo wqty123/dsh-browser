@@ -67,8 +67,8 @@ function codedError(code, message) {
  * Measured on DSH Desktop 0.2.0-rc.2, launched from a shortcut (no DSH_HOME in
  * its environment).
  */
-function endpointFile() {
-  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+function endpointFile(dshHome) {
+  const home = dshHome ?? process.env.DSH_HOME ?? join(homedir(), '.dsh')
   return join(home, 'dsh-builtin-browser-bridge.json')
 }
 
@@ -396,6 +396,8 @@ async function evaluatePanelService(shellId, sessionId, url, tabId, viewId, gues
     }
     try {
       const answer = JSON.parse(${call});
+      answer.backgroundRendering = typeof api.isBackgroundRendering === 'function'
+        && api.isBackgroundRendering(${JSON.stringify(String(sessionId))}) === true;
       const exactTab = answer.tabId ?? ${JSON.stringify(tabId ?? null)};
       if (api.initializationProtocol === 1 && typeof api.panelInitialization === 'function'
         && typeof exactTab === 'string' && ${typeof expectedUrl === 'string'}) {
@@ -442,6 +444,7 @@ async function evaluatePanelService(shellId, sessionId, url, tabId, viewId, gues
       panel: parsed?.panel === true,
       created: parsed?.created === true,
       navigating: parsed?.navigating === true,
+      backgroundRendering: parsed?.backgroundRendering === true,
       ...typeof parsed?.displayed === 'boolean' ? { displayed: parsed.displayed } : {},
       guestId: typeof parsed?.guestId === 'number' && Number.isFinite(parsed.guestId) ? parsed.guestId : null,
       ...typeof parsed?.tabId === 'string' ? { tabId: parsed.tabId } : {},
@@ -548,6 +551,30 @@ async function panelGuestIds(shell, owner) {
 
 /** Handle one JSON request line; every answer is a JSON line too. */
 async function handle(request) {
+  const shell = /^session-/.test(request?.owner) && ['ensureSidebar', 'cdp', 'download'].includes(request?.op)
+    ? webContents.getAllWebContents().find(contents => contents.getType() === 'window') : undefined
+  const token = randomBytes(16).toString('hex')
+  let held = false
+  try {
+    if (shell !== undefined) {
+      held = await shell.executeJavaScript(`(async () => {
+        const api = globalThis.__dshBuiltinBrowser;
+        if (typeof api?.holdRendering !== 'function') return false;
+        const held = api.holdRendering(${JSON.stringify(request.owner)}, ${JSON.stringify(token)});
+        if (held) await new Promise(resolve => requestAnimationFrame(() => resolve()));
+        return held;
+      })()`, true) === true
+    }
+    return await handleRequest(request)
+  } finally {
+    if (held) {
+      await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.releaseRendering?.(${JSON.stringify(token)})`, true)
+        .catch(error => console.error('[dsh-browser-bridge] rendering hold release failed:', error))
+    }
+  }
+}
+
+async function handleRequest(request) {
   if (request?.op !== 'ensureSidebar' || !request.url) return dispatch(request)
   const key = JSON.stringify([request.owner, request.viewId ?? null])
   const token = Symbol()
@@ -711,7 +738,7 @@ async function dispatch(request, checkCurrent) {
     tabId = first.tabId
     const nativeLoad = request.attachOnly === true && url !== '' && tabId !== undefined
       && (first.created || first.navigating) && first.guestId === null
-    if (first.displayed === false) {
+    if (first.displayed === false && !first.backgroundRendering) {
       throw codedError(PANEL_NOT_DISPLAYED, 'the requested conversation is still being displayed; its sidebar will attach after rendering')
     }
     if (first.guestId !== null) {
@@ -948,7 +975,7 @@ const instanceStartedAt = (() => {
  * by the process that actually owns the listener, and readers are told the pid
  * so they can verify liveness themselves.
  */
-function publishEndpoint(port, token) {
+function publishEndpoint(port, token, dshHome) {
   const payload = {
     port,
     token,
@@ -957,7 +984,7 @@ function publishEndpoint(port, token) {
     updatedAt: new Date().toISOString(),
   }
   try {
-    const file = endpointFile()
+    const file = endpointFile(dshHome)
     mkdirSync(join(file, '..'), { recursive: true })
     writeFileSync(file, JSON.stringify(payload, null, 2) + '\n')
     return true
@@ -1148,8 +1175,9 @@ export function stop() {
 }
 
 /** Start the bridge: loopback listener + published endpoint file + token. */
-export function start() {
-  stop()
+export function start(api) {
+  if (globalThis[ACTIVE]) return globalThis[ACTIVE].server
+  const application = api?.app ?? app
   // Sidebar guests are created by the shell at any time (including after a
   // bridge reload), so configure both the existing guests and every future one.
   // Default policy is direct, which is fast but useless on a machine whose
@@ -1295,7 +1323,7 @@ export function start() {
   server.listen(0, '127.0.0.1', () => {
     const address = server.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
-    if (publishEndpoint(port, token)) {
+    if (publishEndpoint(port, token, api?.dshHome)) {
       console.log(`[dsh-browser-bridge] listening on 127.0.0.1:${port} (pid ${process.pid})`)
     }
   })
@@ -1303,11 +1331,11 @@ export function start() {
   const keepalive = setInterval(() => {
     const address = server.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
-    if (port !== 0) publishEndpoint(port, token)
+    if (port !== 0) publishEndpoint(port, token, api?.dshHome)
   }, 15_000)
   keepalive.unref?.()
   const onQuit = () => stop()
-  app.on('will-quit', onQuit)
+  application.on('will-quit', onQuit)
   globalThis[ACTIVE] = { server, keepalive, onQuit, onGuestCreated }
   return server
 }

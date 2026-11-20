@@ -12,6 +12,7 @@ export interface MaintenanceState {
   readonly pid?: number
   readonly error?: string
   readonly output?: string
+  readonly hostPatch?: BridgeActionResult['hostPatch']
 }
 
 /** Effects are supplied by the independent worker; tests cannot close or start an application. */
@@ -79,7 +80,8 @@ export async function runMaintenanceLifecycle(action: BridgeAction, deps: Mainte
   if (failure === undefined && publicationFailure !== undefined) {
     failure = new Error(`Desktop maintenance finished, but progress could not be saved: ${String(publicationFailure)}`)
   }
-  const details = { restarted, ...pid === undefined ? {} : { pid }, ...outcome?.output ? { output: outcome.output } : {} }
+  const details = { restarted, ...pid === undefined ? {} : { pid }, ...outcome?.output ? { output: outcome.output } : {},
+    ...outcome?.hostPatch === undefined ? {} : { hostPatch: outcome.hostPatch } }
   return failure === undefined
     ? await publish('completed', { ...details, ok: true })
     : await publish('failed', { ...details, ok: false, error: String(failure) })

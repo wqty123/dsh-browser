@@ -26,6 +26,14 @@ test('explicit installation closes normally, installs, restarts and verifies bef
   assert.equal(result.restarted, true)
 })
 
+test('optional host patch results remain separate from successful bridge maintenance', async () => {
+  const hostPatch = { status: 'unsupported version', reason: 'supported: 0.2.2-rc.3' }
+  const f = fixture({ maintain: async () => ({ ok: true, code: 0, output: 'legacy bridge installed', command: 'fixture', hostPatch }) })
+  const result = await runMaintenanceLifecycle('install', f.deps)
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.hostPatch, hostPatch)
+})
+
 test('missing quit capability never installs or restarts', async () => {
   const f = fixture({ requestQuit: async () => { throw new Error('official Quit menu unavailable') } })
   const result = await runMaintenanceLifecycle('install', f.deps)

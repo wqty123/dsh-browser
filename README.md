@@ -124,6 +124,14 @@ DSH 侧栏下载使用目标页面所属浏览器会话的登录状态，分段�
 
 > 原生 DSH UI 改动**不会**随本 npm 插件包自动分发：已安装桌面需要把重建的客户端 bundle 复制到 `resources/app/dsh/node_modules/@deepseek-ai/`（必要时还有 profile 的 `node_modules`），bridge 另有独立安装步骤。本机重放脚本、字节级验证、冷启动与端到端真机证据见 `E:/ds 维护以及插件制作/_audit/deployment-review-20261109/`（含第三轮《整体到细节》第 9 节）；客户端 bundle 不在 HMR 监听范围，替换后需重启桌面（验证实例已关闭，下次启动即生效）。
 
+## DSH 宿主补丁
+
+插件设置中的桥接安装同时尝试应用随包分发的 **DSH 0.2.2-rc.3 宿主补丁**：侧栏后台渲染保留 API，以及 Desktop 主进程扩展 API。支持时桥接通过插件声明的扩展启动，不再注入 `main.js`；不支持或文件锚点不匹配时继续使用原兼容路径，设置中分别报告桥接与宿主补丁结果。卸载恢复原文件；桌面升级后可再次安装。
+
+后台浏览器操作会按能力检测使用 `ctx.sidebarRight.holdRendering(sessionId)`，不会切换用户当前会话；未打补丁的宿主保留既有行为。补丁仅包含上述两个 API，不包含上表中其他需要手动部署的原生 UI 改动。
+
+Web/npm 安装可通过包目录运行独立 CLI；补丁说明、校验／恢复命令及上游源码补丁见 [dsh-host-patch/README.md](dsh-host-patch/README.md)。
+
 ## 文档
 
 - [用户指南](docs/user-guide.md)

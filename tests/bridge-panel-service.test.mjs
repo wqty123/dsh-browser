@@ -92,6 +92,7 @@ let panelGuest = null
  * attaches one asynchronously after the tab is placed.
  */
 globalThis.__evalInShell__ = async (id, code) => {
+  if (code.includes('api?.holdRendering')) return false
   seen.evaluates.push({ id, expression: code })
   if (code.includes('.click(')) seen.clicks.push(code)
   // `panelGuest` is the READ form and `openPanel` the one that CREATES. Keeping them apart here is

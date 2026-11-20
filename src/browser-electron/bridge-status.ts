@@ -195,6 +195,16 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
       detail: 'not a DSH Desktop install: no resources/app/lib/main.js and no resources/app.asar',
     }
   }
+  if (!rawExistsSync(archivePath)
+    && safeIncludes(mainPath, '//#region lib/types/main-extensions.js')
+    && safeExists(fileURLToPath(new URL('../../desktop-bridge/main.mjs', import.meta.url)))) {
+    return {
+      state: 'installed', present: true, installRoot, archivePresent: false,
+      detail: 'DSH Desktop main extension loads the bridge from the installed profile plugin',
+      ...identity.version === undefined ? {} : { version: identity.version },
+      command: repairCommand(installRoot),
+    }
+  }
   let backupAt
   try {
     if (existsSync(backupPath)) backupAt = statSync(backupPath).mtime.toISOString()

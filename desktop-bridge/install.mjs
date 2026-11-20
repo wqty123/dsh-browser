@@ -65,6 +65,7 @@
  * start the already-closed app after maintenance; it never closes a running application.
  */
 import * as nodeFs from 'node:fs'
+import { applyHostPatch, hostPatchStatus, restoreHostPatch } from '../dsh-host-patch/apply.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 
@@ -373,6 +374,7 @@ const CLI_SHIM_MARKER = 'dsh-builtin-browser: resolve the app directory'
 const HOST_CLI_MARKER = 'dsh-builtin-browser: recognize an unpacked `app` directory'
 
 let targetWasClosed = false
+let hostPatch
 const resultFile = process.env.DSH_BRIDGE_ACTION_RESULT_FILE
 const installErrors = []
 if (resultFile !== undefined) {
@@ -400,6 +402,7 @@ process.once('exit', code => {
       ...lastStartedPid === undefined ? {} : { pid: lastStartedPid },
       ...installErrors.length === 0 ? {} : { error: installErrors.join('\n').slice(-2400) },
       completedAt: new Date().toISOString(),
+      ...hostPatch === undefined ? {} : { hostPatch },
     }
     try {
       const temporary = `${resultFile}.${process.pid}.tmp`
@@ -850,10 +853,19 @@ if (!existsSync(mainPath) && !existsSync(asarPath)) {
 }
 
 if (revert) {
+  const targets = [appDir, join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
+  const hasHostBackup = [mainPath, join(targets[1], 'lib', 'client.js')]
+    .some(path => existsSync(path + '.before-dsh-host-patch'))
+  hostPatch = hasHostBackup ? restoreHostPatch(targets, { fs: archiveFs }) : hostPatchStatus(targets, { fs: archiveFs })
+  console.log('DSH host patch: ' + JSON.stringify(hostPatch))
+  if (hasHostBackup && hostPatch.status !== 'absent') {
+    console.error('refusing to uninstall over a host patch that cannot be safely restored: ' + hostPatch.reason)
+    process.exit(1)
+  }
   // Tracked separately: restoring a CLI launcher or the runtime resolution is NOT an
   // uninstall. `reverted` only means some component was restored; whether the bridge is
   // actually gone is decided from the entry Electron loads, at the end of this branch.
-  let reverted = false
+  let reverted = hasHostBackup && hostPatch.status === 'absent'
   let mainEntrySkipped = false
   if (existsSync(asarMoved)) {
     if (existsSync(asarPath)) {
@@ -1017,6 +1029,18 @@ if (packedLayout) {
 }
 
 const current = readFileSync(mainPath, 'utf8')
+const hostTargets = [appDir, join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
+hostPatch = applyHostPatch(hostTargets, {
+  fs: archiveFs,
+  normalize: (text, target) => target.id === 'main' ? withoutOurSnippet(text) ?? text : text,
+})
+console.log('DSH host patch: ' + JSON.stringify(hostPatch))
+if (hostPatch.status === 'applied' || current.includes('//#region lib/types/main-extensions.js')) {
+  console.log('bridge activation: DSH Desktop main extension (profile plugin); no main.js injection')
+  installCliCompatibility()
+  if (!restart) console.log('restart DSH Desktop to activate it.')
+  process.exit(0)
+}
 if (current.includes(MARKER)) {
   console.log('bridge already installed (main.js carries the marker); refreshing the module copy')
   copyBridgeModules()

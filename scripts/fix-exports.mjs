@@ -46,7 +46,7 @@ manifest.publishConfig = { exports: publishExports }
 // 与 `automatic-maintenance.ts` 全都按 `../../desktop-bridge/…` 取安装器、桥本体与两个 PowerShell 脚本，
 // 少了它桌面端的桥接功能在安装后就是坏的（缺文件，不是逻辑问题）。
 // `tests` 不进包（发布不需要），它跑在仓库里。
-manifest.files = ['lib', 'dist', 'src', 'scripts', 'desktop-bridge', 'cordis.patch.yml', 'CHANGELOG.md', 'README.md', 'docs', 'skills', 'assets', '!src/**/__tests__']
+manifest.files = ['lib', 'dist', 'src', 'scripts', 'desktop-bridge', 'dsh-host-patch', 'cordis.patch.yml', 'CHANGELOG.md', 'README.md', 'docs', 'skills', 'assets', '!src/**/__tests__']
 
 writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 console.log('exports 已写回：dev→src（源码），publish→lib + dist/client.cjs')
