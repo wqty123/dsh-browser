@@ -290,10 +290,13 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
 
   let panelOpening: Promise<{ host: DesktopBridgeViewHost; provider: ElectronBrowserProvider } | undefined> | undefined
   let panelsDisposed = false
-  const retirePanel = (panel: { host: DesktopBridgeViewHost; provider: ElectronBrowserProvider }): void => {
+  const retirePanel = (panel: { host: DesktopBridgeViewHost; provider: ElectronBrowserProvider }, lost = false): void => {
     panel.provider.dispose()
     void Promise.allSettled(panel.provider.watchableSessions().map(id => panel.provider.close(id)))
-      .finally(() => { setImmediate(() => { panel.host.dispose() }) })
+      .finally(() => {
+        if (lost) setImmediate(() => { panel.host.dispose() })
+        else panel.host.dispose()
+      })
   }
   const unregisterPanel = ctx.browser.registerPanelProvider(async () => {
     if (panelOpening === undefined) {
@@ -305,7 +308,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         const panel = { host, provider }
         host.onLost(() => {
           if (panelOpening === opening) panelOpening = undefined
-          retirePanel(panel)
+          retirePanel(panel, true)
         })
         return panel
       })()
