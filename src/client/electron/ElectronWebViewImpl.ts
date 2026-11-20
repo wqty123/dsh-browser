@@ -7,8 +7,10 @@ import type { BrowserCarrierState } from '../browser/BrowserFrame.ts'
 import type { BrowserPageOptions } from '../browser/BrowserPage.ts'
 import { browserAddressCheckpoint, currentBrowserTarget } from '../browser/BrowserPersistence.ts'
 import { parseBrowserAddress, type BrowserTarget } from '../browser/url.ts'
+import { captureReferenceIntent } from '../reference-intents.ts'
+import { installReferenceOverlay } from './reference-overlay.ts'
 
-interface NavigationEvent extends Event { readonly isMainFrame: boolean }
+interface NavigationEvent extends Event { readonly isMainFrame: boolean; readonly isInPlace?: boolean }
 interface LoadFailureEvent extends NavigationEvent {
   readonly errorCode: number
   readonly errorDescription: string
@@ -21,6 +23,7 @@ export class ElectronWebViewImpl implements BrowserFrame {
   private readonly carrier: SnapshotStore<BrowserCarrierState>
   private readonly lifetime = new AbortController()
   private guestLifetime: AbortController | undefined
+  private documentLifetime: AbortController | undefined
   private element: WebviewElement | undefined
   private lease: DesktopBrowserLeaseId | undefined
   private workspaceKey: string | undefined
@@ -42,7 +45,7 @@ export class ElectronWebViewImpl implements BrowserFrame {
    */
   constructor(private readonly options: BrowserPageOptions, private readonly bridge: DesktopBrowserBridge,
     private readonly workspace: (signal: AbortSignal) => Promise<string>,
-    private readonly presentation: ElectronWebviewPresentation) {
+    private readonly presentation: ElectronWebviewPresentation, private readonly sessionId: string) {
     this.checkpoint = currentBrowserTarget(options.initial)
     this.store = createSnapshotStore(emptyBrowserFrame())
     this.carrier = createSnapshotStore<BrowserCarrierState>({ stage: 'idle' })
@@ -212,6 +215,11 @@ export class ElectronWebViewImpl implements BrowserFrame {
     })
     signal.addEventListener('abort', unsubscribeOpen, { once: true })
     element.addEventListener('dom-ready', () => {
+      this.documentLifetime?.abort()
+      this.documentLifetime = new AbortController()
+      installReferenceOverlay(source => element.executeJavaScript(source),
+        intent => { void captureReferenceIntent(intent, this.sessionId) },
+        AbortSignal.any([signal, this.documentLifetime.signal]))
       this.ready = true
       this.carrier.set({ stage: 'ready', guestId: String(reservation.lease) })
       this.observe(this.store.getSnapshot().address !== 'requested')
@@ -223,6 +231,7 @@ export class ElectronWebViewImpl implements BrowserFrame {
     }, { signal })
     element.addEventListener('did-start-navigation', (event) => {
       if ((event as NavigationEvent).isMainFrame) {
+        if (!(event as NavigationEvent).isInPlace) this.documentLifetime?.abort()
         this.store.set({ ...this.store.getSnapshot(), loading: true, error: undefined })
       }
     }, { signal })
@@ -314,6 +323,8 @@ export class ElectronWebViewImpl implements BrowserFrame {
   }
 
   private dropGuest(): Promise<void> {
+    this.documentLifetime?.abort()
+    this.documentLifetime = undefined
     this.guestLifetime?.abort()
     this.guestLifetime = undefined
     this.presentation.clear()
