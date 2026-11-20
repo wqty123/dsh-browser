@@ -369,7 +369,7 @@ export async function handleGuest(
       for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
       body = Buffer.concat(chunks)
     }
-    upstream = await fetch(target, { method, headers, body, redirect: 'manual' })
+    upstream = await fetch(target, { method, headers, body: body as BodyInit | undefined, redirect: 'manual' })
     rememberCookies(target.host, upstream.headers.getSetCookie?.() ?? [])
     // 反爬挑战识别 + 一次重试：站点（百度 `/s?wd=…`）在没有「先访问过站点」的痕迹时回「安全验证」。
     // 罐子里可能已经带着上次挑战页的 Cookie，所以这里不看有没有 Cookie，而是看**内容**：
