@@ -64,4 +64,30 @@ describe('iframe navigation and presentation assembly', () => {
     unmount()
     await page.frame.dispose()
   })
+
+  it.each(['before', 'after'])('keeps guest reports authoritative when iframe load fires %s the report', async order => {
+    const page = createIframePage({ initial: undefined, persist: () => {}, openRequested: () => {} })
+    const host = document.createElement('div')
+    host.id = 'authoritative-navigation'
+    document.body.append(host)
+    const unmount = page.presentation.mount(host.id)
+    page.frame.loadUrl(target('https://example.com/'))
+    const frame = host.querySelector('iframe')!
+    const report = (url: string, depth: number) => window.dispatchEvent(new MessageEvent('message', {
+      origin: 'null', source: frame.contentWindow,
+      data: { type: 'dsh.browser.guest.navigation', url, depth },
+    }))
+    if (order === 'before') frame.dispatchEvent(new Event('load'))
+    report('https://example.com/', 1)
+    if (order === 'after') frame.dispatchEvent(new Event('load'))
+    expect(page.frame.getSnapshot().canGoBack).toBe(false)
+    report('https://example.com/next', 2)
+    frame.dispatchEvent(new Event('load'))
+    report('https://example.com/next', 2)
+    expect(page.frame.getSnapshot().canGoBack).toBe(true)
+    page.frame.goBack()
+    expect(page.frame.getSnapshot().target?.url).toBe('https://example.com/')
+    unmount()
+    await page.frame.dispose()
+  })
 })

@@ -114,10 +114,6 @@ export class IframePresentation implements BrowserPresentation {
     element.referrerPolicy = 'no-referrer'
     element.dataset.sidebarBrowserFrame = 'iframe'
     element.setAttribute('sandbox', current.sandboxed ? WEB_BROWSER_SANDBOX : RELAXED_BROWSER_SANDBOX)
-    element.addEventListener('load', () => {
-      if (this.element !== element) return
-      this.events.loaded(current.revision)
-    })
     element.addEventListener('error', () => {
       if (this.element === element) this.events.failed(current.revision)
     })

@@ -45,7 +45,9 @@ export class IframeImpl implements BrowserFrame {
    */
   handleLoaded(revision: number, observedUrl?: string): void {
     if (this.disposed) return
-    this.navigation.frameLoaded(revision)
+    const navigation = this.navigation.snapshot.navigation
+    if (navigation.status !== 'empty' && navigation.revision !== revision) return
+    if (observedUrl === undefined || navigation.status === 'loading') this.navigation.frameLoaded(revision)
     if (observedUrl !== undefined && observedUrl !== '') {
       const current = BrowserNavigation.current(this.navigation.snapshot)
       if (current === undefined || current.url !== observedUrl) {
