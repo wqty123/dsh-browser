@@ -138,10 +138,7 @@ test('identity and the running-target refusal precede writes', () => {
   const identityAt = source.indexOf('const identity = verifyDesktopIdentity(installRoot)')
   const runningAt = source.indexOf('if (shellProcesses(installRoot).length !== 0)')
   const deleteAt = source.indexOf('rmSync(appDir')
-  // The installer now copies both bridge modules through copyBridgeModules().
-  // The helper definition is hoisted, so the meaningful "first write" is the
-  // first CALL after the running-target guard, not the definition.
-  const writeAt = source.indexOf('copyBridgeModules()', runningAt + 1)
+  const writeAt = source.indexOf('installBridgeLoader()', runningAt + 1)
   assert.ok(identityAt !== -1, 'the installer verifies identity')
   assert.ok(runningAt !== -1 && identityAt < runningAt, 'identity is checked before inspecting a running target')
   assert.ok(runningAt < deleteAt && runningAt < writeAt, 'a running target is refused before any write')

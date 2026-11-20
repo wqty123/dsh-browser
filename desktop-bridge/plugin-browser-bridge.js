@@ -1082,7 +1082,9 @@ export function stop() {
 export function start(api) {
   const current = globalThis[ACTIVE]
   if (current) {
-    if (api?.reload !== true) return current.server
+    const mainOwned = current.api?.owner === 'desktop-main'
+    if (mainOwned && api?.owner !== 'desktop-main') return current.server
+    if (api?.reload !== true && (mainOwned || api?.owner !== 'desktop-main')) return current.server
     if (typeof current.stop === 'function') current.stop()
     else stop()
   }

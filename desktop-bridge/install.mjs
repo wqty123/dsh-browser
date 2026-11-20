@@ -348,18 +348,34 @@ const asarPath = join(resourcesDir, 'app.asar')
 const asarMoved = `${asarPath}.before-bridge`
 const mainPath = join(appDir, 'lib', 'main.js')
 const bridgeTarget = join(appDir, 'lib', 'plugin-browser-bridge.js')
-const bridgeSource = join(import.meta.dirname, 'plugin-browser-bridge.js')
-const proxyTarget = join(appDir, 'lib', 'guest-proxy.mjs')
-const proxySource = join(import.meta.dirname, 'guest-proxy.mjs')
-const nativeTarget = join(appDir, 'lib', 'native-guests.mjs')
-const nativeSource = join(import.meta.dirname, 'native-guests.mjs')
+const bridgeSource = join(import.meta.dirname, 'profile-loader.mjs')
+const bridgeBackup = bridgeTarget + '.before-profile-loader'
+const bridgeAbsent = bridgeBackup + '.absent'
 const backupPath = `${mainPath}.before-bridge`
 
-/** The bridge imports its pure proxy-policy helper from the same directory. */
-function copyBridgeModules() {
+function validateBridgeLoaderBaseline() {
+  if (existsSync(bridgeBackup) && existsSync(bridgeAbsent)) throw new Error('Conflicting bridge loader restore baselines')
+  if (!existsSync(bridgeTarget)) return
+  const current = readFileSync(bridgeTarget)
+  if (current.equals(readFileSync(bridgeSource))) return
+  if (existsSync(bridgeAbsent) || (existsSync(bridgeBackup) && !current.equals(readFileSync(bridgeBackup)))) {
+    throw new Error('Bridge module differs from its preserved restore baseline')
+  }
+}
+
+function installBridgeLoader() {
+  validateBridgeLoaderBaseline()
+  if (!existsSync(bridgeBackup) && !existsSync(bridgeAbsent)) {
+    if (existsSync(bridgeTarget)) copyFileSync(bridgeTarget, bridgeBackup)
+    else writeFileSync(bridgeAbsent, '')
+  }
   copyFileSync(bridgeSource, bridgeTarget)
-  copyFileSync(proxySource, proxyTarget)
-  copyFileSync(nativeSource, nativeTarget)
+}
+
+function restoreBridgeLoader() {
+  validateBridgeLoaderBaseline()
+  if (existsSync(bridgeBackup)) copyFileSync(bridgeBackup, bridgeTarget)
+  else if (existsSync(bridgeAbsent)) rmSync(bridgeTarget, { force: true })
 }
 
 // Moving the archive aside breaks two more places that spell `app.asar` out
@@ -817,6 +833,7 @@ if (!existsSync(mainPath) && !existsSync(asarPath)) {
 }
 
 if (revert) {
+  validateBridgeLoaderBaseline()
   const targets = [appDir, join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
   const hasHostBackup = [mainPath, join(targets[1], 'lib', 'client.js')]
     .some(path => existsSync(path + '.before-dsh-host-patch'))
@@ -827,6 +844,7 @@ if (revert) {
     process.exit(1)
   }
   if (hasHostBackup && readFileSync(mainPath, 'utf8').includes(MARKER)) {
+    restoreBridgeLoader()
     console.log('restored the pre-install legacy bridge and sidebar; preserving its module copies, CLI and archive layout')
     process.exit(0)
   }
@@ -949,6 +967,7 @@ if (revert) {
   if (packedLayout) {
     console.log(`note: ${appDir} is inert while app.asar exists; delete it to reclaim ~350 MB`)
   }
+  restoreBridgeLoader()
   process.exit(0)
 }
 
@@ -997,20 +1016,22 @@ if (packedLayout) {
 }
 
 const current = readFileSync(mainPath, 'utf8')
+validateBridgeLoaderBaseline()
 const hostTargets = [appDir, join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
 hostPatch = applyHostPatch(hostTargets, {
   fs: archiveFs,
 })
 console.log('DSH host patch: ' + JSON.stringify(hostPatch))
 if (hostPatch.status === 'applied' || current.includes('//#region lib/types/main-extensions.js')) {
+  installBridgeLoader()
   console.log('bridge activation: DSH Desktop main extension (profile plugin); no main.js injection')
   installCliCompatibility()
   if (!restart) console.log('restart DSH Desktop to activate it.')
   process.exit(0)
 }
 if (current.includes(MARKER)) {
-  console.log('bridge already installed (main.js carries the marker); refreshing the module copy')
-  copyBridgeModules()
+  console.log('bridge already installed (main.js carries the marker); refreshing the profile loader')
+  installBridgeLoader()
   installCliCompatibility()
   process.exit(0)
 }
@@ -1030,10 +1051,9 @@ if (insertAt === -1) {
 const patched = `${current.slice(0, insertAt)}${SNIPPET}${current.slice(insertAt)}`
 writeFileSync(mainPath, patched)
 
-copyBridgeModules()
+installBridgeLoader()
 console.log(`installed bridge into ${appDir}`)
 console.log(`  module: ${bridgeTarget}`)
-console.log(`  proxy policy: ${proxyTarget}`)
 console.log(`  patch:  ${mainPath} (+${SNIPPET.split('\n').length} lines)`)
 installCliCompatibility()
 if (!restart) {

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -26,13 +26,28 @@ test('main extension starts once, reports host status, replaces a crash endpoint
   }
   const main = await import(pathToFileURL(join(directory, 'main.mjs')).href)
   const bridge = await import(pathToFileURL(join(directory, 'plugin-browser-bridge.js')).href)
+  const profile = join(home, 'profiles', 'desktop')
+  mkdirSync(join(profile, 'node_modules'), { recursive: true })
+  writeFileSync(join(profile, 'package.json'), JSON.stringify({ dependencies: { 'dsh-builtin-browser': 'file:../plugin' } }))
+  symlinkSync(root, join(profile, 'node_modules', 'dsh-builtin-browser'), 'dir')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => { if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome })
+  writeFileSync(join(root, 'loader.mjs'), readFileSync(new URL('../desktop-bridge/profile-loader.mjs', import.meta.url)))
+  const loader = await import(pathToFileURL(join(root, 'loader.mjs')).href)
+  const legacy = loader.start()
+  t.after(() => loader.stop())
+  if (!legacy.listening) await once(legacy, 'listening')
+  const legacyClosed = once(legacy, 'close')
   const status = { state: 'loaded', version: '0.7.42', loadedAt: new Date().toISOString() }
   const api = { app, webContents, mainWindow: () => undefined, dshHome: home,
     mainExtensions: { async status(name) { assert.equal(name, 'dsh-builtin-browser'); return status } } }
   const dispose = main.start(api)
+  await legacyClosed
   t.after(() => dispose())
   const server = bridge.start(api)
   assert.equal(bridge.start(api), server)
+  assert.equal(loader.start({ reload: true }), server)
   if (!server.listening) await once(server, 'listening')
   assert.equal(app.listenerCount('will-quit'), 1)
   assert.equal(app.listenerCount('web-contents-created'), 1)
