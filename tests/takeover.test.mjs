@@ -52,7 +52,7 @@ test('empty, ambiguous, malformed, foreign and expired takeover inputs fail clos
 })
 
 for (const mode of ['button-done', 'button-skip', 'card-done', 'card-skip', 'abort', 'unavailable']) {
-  test(`real rc.5 approval and registered takeover tool: ${mode}`, async t => {
+  test(`host approval contract and registered takeover tool: ${mode}`, async t => {
     const bindings = []
     const host = takeoverHost({ bindPanelPage: async (...args) => { bindings.push(args); return 'browser:panel' },
       snapshot: async () => ({ url: 'https://example.test/finished', title: 'Human finished', elements: [

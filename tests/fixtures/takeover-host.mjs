@@ -1,8 +1,36 @@
 import { Context } from '@deepseek-ai/cordis'
-import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
+import { randomUUID } from 'node:crypto'
 import { apply } from '../../src/tool-browser/index.ts'
 
-export function takeoverHost(browser = {}) {
+/** rc.5 ask-policy approval contract, supplied by the host in production. */
+export class ApprovalContract {
+  async request(request) {
+    const session = request.agent.session
+    if (!this.approvalStateOf(session).turnOpen) throw new Error('approval.request() outside an open turn')
+    const id = randomUUID()
+    session.append('approval/asked', { id, toolName: request.toolName,
+      ...request.callId === undefined ? {} : { callId: request.callId },
+      ...request.reason === undefined ? {} : { reason: request.reason } })
+    const outcome = await this.decide(request)
+    session.append('approval/decided', { id, outcome })
+    return outcome
+  }
+
+  async decide(request) {
+    const { signal } = request
+    if (signal?.aborted) return 'cancelled'
+    const answer = Promise.resolve().then(() => this.ctx.waterfall('approval/request', request, () => Promise.resolve('unavailable')))
+      .then(outcome => ['allowed-once', 'rejected', 'cancelled', 'unavailable'].includes(outcome) ? outcome : 'unavailable', () => 'unavailable')
+    if (!signal) return answer
+    return new Promise(resolve => {
+      const abort = () => { signal.removeEventListener('abort', abort); resolve('cancelled') }
+      signal.addEventListener('abort', abort, { once: true })
+      void answer.then(outcome => { signal.removeEventListener('abort', abort); resolve(outcome) })
+    })
+  }
+}
+
+export function takeoverHost(browser = {}, ApprovalService = ApprovalContract) {
   const events = new Context(), tools = new Map(), routes = new Map(), audit = [], sections = [], disposers = []
   const native = []
   let turnOpen = true
