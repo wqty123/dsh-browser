@@ -20,6 +20,8 @@ const MAX_TIMEOUT_MS = 600_000
 /** Per-cell output cap, as Browser Use 1.0's MAX_OUTPUT_CHARS. */
 const MAX_OUTPUT_CHARS = 12_000
 const MAX_IMAGES = 4
+/** An idle REPL worker is ended after this long; DSH does not tell the plugin when a task ends. */
+const IDLE_MS = 15 * 60_000
 
 /** The slice of a registered tool definition the code tool dispatches to. */
 export interface CatalogTool {
@@ -77,6 +79,7 @@ class CellWorker {
   onMessage: ((message: WorkerMessage) => void) | undefined
   onExit: ((reason: string) => void) | undefined
   exited = false
+  private idleTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor() {
     const script = fileURLToPath(new URL('./code-worker.js', import.meta.url))
@@ -103,6 +106,7 @@ class CellWorker {
   }
 
   busy(): void {
+    clearTimeout(this.idleTimer)
     this.child.ref()
     ;(this.child.channel as { ref?: () => void } | undefined)?.ref?.()
     ;(this.child.stderr as { ref?: () => void } | null)?.ref?.()
@@ -110,11 +114,17 @@ class CellWorker {
 
   /** An idle REPL never keeps the host process alive. */
   idle(): void {
+    clearTimeout(this.idleTimer)
+    this.idleTimer = setTimeout(() => this.kill(), IDLE_MS)
+    this.idleTimer.unref?.()
     this.child.unref()
     ;(this.child.channel as { unref?: () => void } | undefined)?.unref?.()
     ;(this.child.stderr as { unref?: () => void } | null)?.unref?.()
   }
-  kill(): void { if (!this.exited) this.child.kill('SIGKILL') }
+  kill(): void {
+    clearTimeout(this.idleTimer)
+    if (!this.exited) this.child.kill('SIGKILL')
+  }
 }
 
 /**
@@ -199,19 +209,12 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
       let calls = 0
       let ok = true
       const worker = workerFor(key)
+      const forget = () => { if (workers.get(key) === worker) workers.delete(key) }
       worker.busy()
       try {
         await worker.ready
         const outcome = await new Promise<{ ok: boolean; error?: string }>(finish => {
-          const stop = (reason: string) => {
-            controller.abort(new Error(reason))
-            worker.kill()
-            workers.delete(key)
-            finish({ ok: false, error: `${reason}; the REPL was restarted, so its variables are gone (browser state is kept)` })
-          }
-          const timer = setTimeout(() => stop(`cell exceeded its ${budget}ms deadline`), budget)
-          const onAbort = () => stop('cell cancelled')
-          exec.signal?.addEventListener('abort', onAbort, { once: true })
+          let timer: ReturnType<typeof setTimeout> | undefined
           const settle = (result: { ok: boolean; error?: string }) => {
             clearTimeout(timer)
             exec.signal?.removeEventListener('abort', onAbort)
@@ -219,7 +222,18 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
             worker.onExit = undefined
             finish(result)
           }
-          worker.onExit = reason => { workers.delete(key); settle({ ok: false, error: `the REPL worker exited: ${reason}` }) }
+          const stop = (reason: string) => {
+            controller.abort(new Error(reason))
+            worker.onExit = undefined
+            worker.kill()
+            forget()
+            settle({ ok: false, error: `${reason}; the REPL was restarted, so its variables are gone (browser state is kept)` })
+          }
+          const onAbort = () => stop('cell cancelled')
+          exec.signal?.addEventListener('abort', onAbort, { once: true })
+          if (exec.signal?.aborted === true) { onAbort(); return }
+          timer = setTimeout(() => stop(`cell exceeded its ${budget}ms deadline`), budget)
+          worker.onExit = reason => { forget(); settle({ ok: false, error: `the REPL worker exited: ${reason}` }) }
           worker.onMessage = message => {
             if (message.type === 'log') lines.push(message.text)
             else if (message.type === 'done') settle(message)
@@ -256,7 +270,7 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
         }
       } catch (error) {
         ok = false
-        workers.delete(key)
+        forget()
         lines.push(`Error: ${error instanceof Error ? error.message : String(error)}`)
       } finally {
         if (!worker.exited) worker.idle()

@@ -107,7 +107,8 @@ function compiles(body: string): boolean {
  * @param script - an expression, or statements with `return`.
  */
 function pageScript(script: string): string {
-  const body = /(^|[;\n{}])\s*return\b/.test(script) ? script : `return (${script.replace(/;\s*$/, '')})`
+  const expression = `return (${script.replace(/;\s*$/, '')})`
+  const body = compiles(expression) ? expression : script
   return `(async () => { const v = await (async () => {\n${body}\n})(); return JSON.stringify(v === undefined ? null : v) })()`
 }
 

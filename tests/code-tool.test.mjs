@@ -140,6 +140,35 @@ test('js() returns page strings exactly, even when they look like JSON numbers',
   assert.equal(value.output, '["string","9007199254740993"]')
 })
 
+test('js() treats an expression with nested returns as an expression', async () => {
+  const scripts = []
+  const { run } = mount({ execute: async (_session, request) => { scripts.push(request.script); return { ok: true, value: '[2,4]' } } })
+  await run(`await call('open', { url: 'https://example.test/', surface: 'builtin' })`)
+  const value = await run('await js("[1,2].map(x => { return x * 2 })")')
+  assert.equal(value.output, '[2,4]')
+  assert.match(scripts.at(-1), /return \(\[1,2\]\.map/)
+})
+
+test('a call cancelled while its REPL starts runs no browser action', async () => {
+  const { tools, calls } = mount()
+  const controller = new AbortController()
+  const pending = tools.get('dsh_browser_code').execute({ code: "await click('Buy')" }, { agent: { id: 'fresh-owner' }, signal: controller.signal })
+  controller.abort()
+  await assert.rejects(pending)
+  await new Promise(done => setTimeout(done, 300))
+  assert.equal(calls.some(([name]) => name === 'click'), false)
+})
+
+test('the REPL that replaces a killed one keeps its variables', async () => {
+  const { tools } = mount()
+  const code = tools.get('dsh_browser_code')
+  const exec = { agent: { id: 'replace-owner' } }
+  await code.execute({ code: 'while (true) {}', timeoutMs: 1000 }, exec)
+  await code.execute({ code: 'const fresh = 7' }, exec)
+  await new Promise(done => setTimeout(done, 200))
+  assert.equal((await code.execute({ code: 'fresh' }, exec)).output, '7')
+})
+
 test('cells become REPL cells: declarations persist and the last expression is the value', () => {
   assert.equal(prepare('const a = 1\nlet b = 2\na + b'), 'globalThis.a = 1\nglobalThis.b = 2\nreturn (a + b)')
   assert.equal(prepare('async function f() {\n  return 1\n}'), 'globalThis.f = async function f() {\n  return 1\n}')
