@@ -11,6 +11,7 @@ export interface MaintenanceState {
   readonly restarted?: boolean
   readonly pid?: number
   readonly error?: string
+  readonly progressError?: string
   readonly output?: string
   readonly hostPatch?: BridgeActionResult['hostPatch']
 }
@@ -47,8 +48,9 @@ export async function runMaintenanceLifecycle(action: BridgeAction, deps: Mainte
       // prevent reopening a Desktop that already exited normally.
       if (phase === 'armed') throw error
       publicationFailure ??= error
+      console.error(`[dsh-browser maintenance] cannot publish ${phase} progress: ${String(error)}`)
     }
-    return state
+    return publicationFailure === undefined ? state : { ...state, progressError: String(publicationFailure) }
   }
   await publish('armed')
   try {
@@ -77,10 +79,8 @@ export async function runMaintenanceLifecycle(action: BridgeAction, deps: Mainte
   } catch (error) {
     failure = failure === undefined ? error : new Error(`${String(failure)}; Desktop recovery: ${String(error)}`)
   }
-  if (failure === undefined && publicationFailure !== undefined) {
-    failure = new Error(`Desktop maintenance finished, but progress could not be saved: ${String(publicationFailure)}`)
-  }
   const details = { restarted, ...pid === undefined ? {} : { pid }, ...outcome?.output ? { output: outcome.output } : {},
+    ...publicationFailure === undefined ? {} : { progressError: String(publicationFailure) },
     ...outcome?.hostPatch === undefined ? {} : { hostPatch: outcome.hostPatch } }
   return failure === undefined
     ? await publish('completed', { ...details, ok: true })

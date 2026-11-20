@@ -66,6 +66,7 @@
  */
 import * as nodeFs from 'node:fs'
 import { applyHostPatch, hostPatchStatus, restoreHostPatch } from '../dsh-host-patch/apply.mjs'
+import { renameMaintenanceFileSync } from './maintenance-files.mjs'
 import { legacyBridgeMarker as MARKER, legacyBridgeSnippet as SNIPPET } from '../dsh-host-patch/legacy-bridge.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -408,7 +409,7 @@ process.once('exit', code => {
     try {
       const temporary = `${resultFile}.${process.pid}.tmp`
       writeFileSync(temporary, JSON.stringify(result))
-      renameSync(temporary, resultFile)
+      renameMaintenanceFileSync(temporary, resultFile, { rename: renameSync })
     } catch (error) {
       originalResultError(error)
     }
@@ -417,7 +418,6 @@ process.once('exit', code => {
 
 function originalResultError(error) {
   console.error('could not record the bridge installer result: ' + String(error))
-  process.exitCode = 1
 }
 
 /**

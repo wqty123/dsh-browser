@@ -1,7 +1,7 @@
 /** User-requested Windows maintenance, coordinated outside the Desktop process tree. */
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdir, open, readFile, rename, stat as statAsync, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, stat as statAsync, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prepareBridgeMaintenance } from './bridge-maintenance.ts'
@@ -11,6 +11,7 @@ import { defaultInstallerPath, runBridgeAction, waitForRestartedBridge, type Bri
 import { readDesktopIdentity } from './desktop-identity.ts'
 import { dshHome } from './paths.ts'
 import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.ts'
+import { renameMaintenanceFile } from '../../desktop-bridge/maintenance-files.mjs'
 
 interface DesktopProcess { readonly pid: number; readonly path: string; readonly command: string; readonly started: string }
 export interface AutomaticMaintenanceJob extends MaintenanceState { readonly id: string; readonly workerPid?: number; readonly startedAt?: string }
@@ -122,7 +123,11 @@ async function atomicJson(path: string, value: unknown, exclusive = false): Prom
   }
   const temp = `${path}.${String(process.pid)}.tmp`
   await writeFile(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 })
-  await rename(temp, path)
+  try { await renameMaintenanceFile(temp, path) } finally {
+    await unlink(temp).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') reportMaintenanceFailure('cannot remove maintenance temporary file', error)
+    })
+  }
 }
 
 export interface MaintenanceProgressOptions {

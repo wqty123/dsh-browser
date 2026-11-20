@@ -75,14 +75,16 @@ test('uninstall is verified as an uninstall after the same safe lifecycle', asyn
   assert.equal(f.calls.at(-1), 'verify:12345:uninstall')
 })
 test('failure to save a post-quit progress update cannot prevent recovery or restart', async () => {
-  for (const phase of ['closing', 'installing', 'restarting', 'verifying']) {
+  for (const phase of ['closing', 'installing', 'restarting', 'verifying', 'completed']) {
     const f = fixture({ publish: async state => { if (state.phase === phase) throw new Error('disk unavailable') } })
     const result = await runMaintenanceLifecycle('install', f.deps)
-    assert.equal(result.phase, 'failed')
+    assert.equal(result.phase, 'completed')
     assert.equal(result.restarted, true)
     assert.ok(f.calls.includes('maintain'))
     assert.ok(f.calls.includes('restart'))
-    assert.match(result.error, /progress could not be saved/)
+    assert.equal(result.ok, true)
+    assert.equal(result.error, undefined)
+    assert.match(result.progressError, /disk unavailable/)
   }
 })
 test('failure to persist armed state prevents all Desktop actions', async () => {
