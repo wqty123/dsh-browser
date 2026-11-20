@@ -1,0 +1,831 @@
+From 68522dfec0903872fa2ef9a695b18b1fffa39cbb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 04:36:50 +0000
+Subject: [PATCH] fix: isolate web guests from the DSH application origin
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ src/browser-electron/guest-route.ts           | 122 ++++++------------
+ src/browser-electron/guest-runtime.ts         |  13 +-
+ .../__tests__/guest-reference-channel.spec.ts |  55 ++++++++
+ .../__tests__/iframe-popup-policy.spec.ts     |   7 +-
+ src/client/reference-intents.ts               |  16 ++-
+ src/client/settings/panel.ts                  |  53 ++------
+ src/client/view/IframePresentation.ts         |  97 ++++----------
+ src/tool-browser/panel-page.ts                |   2 +-
+ src/web-guest.ts                              |   9 +-
+ tests/guest-isolation.test.mjs                |  84 ++++++++++++
+ tests/guest-route.test.mjs                    |   9 +-
+ tests/guest-runtime.test.mjs                  |  15 ++-
+ 12 files changed, 259 insertions(+), 223 deletions(-)
+ create mode 100644 src/client/browser/__tests__/guest-reference-channel.spec.ts
+ create mode 100644 tests/guest-isolation.test.mjs
+
+diff --git a/src/browser-electron/guest-route.ts b/src/browser-electron/guest-route.ts
+index 9719e71..3503223 100644
+--- a/src/browser-electron/guest-route.ts
++++ b/src/browser-electron/guest-route.ts
+@@ -1,27 +1,9 @@
+ /**
+- * Same-origin guest proxy for the Web sidebar.
+- *
+- * WHY THIS EXISTS
+- * The DSH desktop shell hosts a sidebar tab in an Electron `<webview>`, so the plugin can reach into
+- * that guest and inject the reference bar. The Web shell has no such handle: its sidebar renders an
+- * ordinary `<iframe>`, and an iframe pointed at a real site is cross-origin — unreadable and
+- * uninjectable. That is why "the sidebar cannot reference" on Web while the same flow works in the
+- * desktop shell, and why opening a page used to escape into a separate browser window.
+- *
+- * The fix is to serve the guest THROUGH the host: the iframe loads
+- * `/dsh-builtin-browser/browser-view/guest/<encoded-url>`, this module fetches the page, rewrites its
+- * document and subresource URLs to the same prefix, injects the reference overlay, and returns it
+- * from the plugin's own origin. The frame is then same-origin, so selection, the bar and the intent
+- * channel all work exactly as they do in the desktop guest.
+- *
+- * SCOPE AND LIMITS (deliberate, documented rather than hidden)
+- * - Methods and bodies are forwarded; only HTML document responses are rewritten.
+- * - Frames and scripts inside the page are not executed by the host; they load through the same
+- *   prefix so they stay readable.
+- * - The overlay is injected on every HTML response, so a rewritten navigation keeps the bar.
++ * Web guests execute in CSP-sandboxed opaque origins, including direct document loads.
++ * Only this proxy prefix is available to guest network requests. App storage, APIs,
++ * cookies and authenticated reference submission remain in the owning app frame.
+  * @module dsh-builtin-browser/browser-electron/guest-route
+  */
+-
+ import type { IncomingMessage, ServerResponse } from 'node:http'
+ import { promises as dns } from 'node:dns'
+ import { guestRuntimeScript } from './guest-runtime.ts'
+@@ -50,7 +32,7 @@ function isSelfTarget(url: URL): boolean {
+   return false
+ }
+ 
+-export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/guest'
++export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/isolated-guest'
+ 
+ class UnsafeGuestTargetError extends Error {}
+ 
+@@ -63,16 +45,6 @@ const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
+ /** Content types eligible for rewriting; sub-requests and non-HTML still pass through raw. */
+ const REWRITABLE = /^(text\/|application\/(json|javascript|xhtml\+xml|xml|rss\+xml|atom\+xml))/iu
+ 
+-/** Only these site-minted cookies on the proxy origin may accompany jar cookies upstream. */
+-const FORWARD_COOKIE = /^(BAIDUID|BDUSS|BIDUPSID|PSTM|ZFY|BDSVRTM|H_PS_PSSID|__bsi|ab_sr|sug|sugstore|H_PS_|SUB|SUBP|SSOLoginState|SRF|ALF|XSRF)/iu
+-
+-function forwardableCookies(header: string | undefined): string | undefined {
+-  if (typeof header !== 'string' || header === '') return undefined
+-  const pairs = header.split(';').map(part => part.trim()).filter(part => part !== '')
+-  const kept = pairs.filter(part => FORWARD_COOKIE.test(part.split('=')[0] ?? ''))
+-  return kept.length === 0 ? undefined : kept.join('; ')
+-}
+-
+ /** A desktop Chrome identity; several sites refuse a request without one. */
+ const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+ 
+@@ -213,54 +185,14 @@ export function rewriteDocument(html: string, base: URL): string {
+   )
+ }
+ 
+-/**
+- * The last mile for a proxied guest: hand the reference intent to the plugin.
+- *
+- * The desktop guest exposes a preload bridge; a proxied document does not, so the bar leaves its intent
+- * in the queue. This relay drains that queue into the plugin's own capture route, which is same-origin
+- * here and therefore carries the session cookie. Without it the bar appears and confirming looks like it
+- * did nothing at all.
+- * @param sessionId - the conversation the tab belongs to.
+- * @returns the inline script element.
+- */
+-export function relayTag(sessionId: string): string {
+-  const seeded = JSON.stringify(sessionId).replace(/</gu, '\\u003c')
+-  const body = [
+-    "(function(){",
+-    `  var session = ${seeded}`,
+-    "  var queue = window.__dshRefIntents || (window.__dshRefIntents = [])",
+-    "  var log = window.__relayLog || (window.__relayLog = [])",
+-    // The panel knows which conversation it belongs to, the document does not. Ask the parent (same
+-    // origin) once, and use the answer for every intent. Seeded value wins when it is present.
+-    "  try {",
+-    "    if (typeof session !== 'string' || session === '') top.postMessage({ type: 'dsh.sidebar.session.request' }, location.origin)",
+-    "  } catch (error) { /* top-level document: nothing to ask */ }",
+-    "  window.addEventListener('message', function (event) {",
+-    "    if (!event || event.origin !== location.origin) return",
+-    "    var data = event.data || {}",
+-    "    if (data.type === 'dsh.sidebar.session' && typeof data.sessionId === 'string') { session = data.sessionId; console.log('[relay] got session', session) }",
+-    "    if (data && (data.type === 'dsh-browser-ref:intent' || data.type === 'dsh.browser-reference.intent')) post(data)",
+-    "  })",
+-    "  log.push('relay:loaded')",
+-    "  var post = function (intent) {",
+-    "    log.push('relay:post session=' + session)",
+-    "    console.log('[relay] post intent, session=', session)",
+-    "    if (typeof session !== 'string' || session === '') return",
+-    "    try {",
+-    "      (window.__dshGuestFetch || window.fetch)('/dsh-builtin-browser/reference/capture', {",
+-    "        method: 'POST',",
+-    "        headers: { 'content-type': 'application/json' },",
+-    "        credentials: 'same-origin',",
+-    "        body: JSON.stringify(Object.assign({}, intent, { sessionId: session })),",
+-    "      }).then(function (r) { return r.text().then(function (b) { log.push('relay:status=' + r.status + ' ' + String(b).slice(0, 90)) }) }).catch(function (e) { log.push('relay:err=' + e) })",
+-    "    } catch (error) { /* the reader can retry; nothing is lost */ }",
+-    "  }",
+-    "  log.push('relay:queue len=' + queue.length)",
+-    "  var push = queue.push",
+-    "  queue.push = function (item) { post(item); return push.call(queue, item) }",
+-    "})()",
+-  ].join('\n')
+-  return `<script data-dsh-ref-guest-relay="1">${body}</script>`
++/** Relay reference data to the owning app frame, never authenticated API requests. */
++export function relayTag(_sessionId: string): string {
++  return `<script data-dsh-ref-guest-relay="1">
++  window.addEventListener('message', function (event) {
++    if (event.source !== window || !event.data || event.data.type !== 'dsh-browser-ref:intent') return;
++    if (parent !== window) parent.postMessage(event.data, '*');
++  });
++  </script>`
+ }
+ 
+ /** Forward a document or sub-request, keeping upstream cookies off the DSH origin. */
+@@ -271,6 +203,29 @@ export async function handleGuest(
+   sessionId: string,
+ ): Promise<void> {
+   const method = request.method ?? 'GET'
++  const authority = request.headers.host ?? ''
++  if (!/^(?:\[[\da-f:]+\]|[a-z\d.-]+)(?::\d+)?$/iu.test(authority)) {
++    response.writeHead(400)
++    response.end('guest proxy: invalid host')
++    return
++  }
++  const sources = ['http:', 'https:'].map(protocol => new URL(protocol + '//' + authority).origin + GUEST_ROUTE).join(' ')
++  response.setHeader('content-security-policy', "sandbox allow-scripts allow-forms; default-src " + sources
++    + "; script-src " + sources + " 'unsafe-inline' 'unsafe-eval'; style-src " + sources
++    + " 'unsafe-inline'; img-src " + sources + " data: blob:; connect-src " + sources
++    + "; frame-src " + sources + "; form-action " + sources
++    + "; object-src 'none'; worker-src 'none'; base-uri 'none'; frame-ancestors 'self'")
++  response.setHeader('referrer-policy', 'no-referrer')
++  response.setHeader('x-content-type-options', 'nosniff')
++  response.setHeader('access-control-allow-origin', 'null')
++  if (method === 'OPTIONS') {
++    response.writeHead(204, {
++      'access-control-allow-methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
++      'access-control-allow-headers': [...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub'].join(', '),
++    })
++    response.end()
++    return
++  }
+   const query = new URLSearchParams((request.url ?? '').split('?')[1] ?? '')
+   const session = query.get('s') ?? sessionId
+   const target = guestTarget(request.url ?? '')
+@@ -330,10 +285,9 @@ export async function handleGuest(
+     } catch {}
+   }
+   const jarCookie = cookieJar.getCookieHeader(target)
+-  const replay = forwardableCookies(request.headers.cookie)
+   const refreshCookies = (url = target): void => {
+-    const cookie = [cookieJar.getCookieHeader(url), replay].filter(part => typeof part === 'string' && part !== '').join('; ')
+-    if (cookie !== '') headers.set('cookie', cookie)
++    const cookie = cookieJar.getCookieHeader(url)
++    if (cookie) headers.set('cookie', cookie)
+     else headers.delete('cookie')
+   }
+   refreshCookies()
+@@ -420,7 +374,7 @@ export async function handleGuest(
+   cookieJar.setCookies(target, upstream.headers.getSetCookie?.() ?? [])
+   const out = new Headers()
+   for (const [name, value] of upstream.headers) {
+-    if (!DROP_RESPONSE_HEADERS.has(name.toLowerCase())) out.set(name, value)
++    if (!DROP_RESPONSE_HEADERS.has(name.toLowerCase()) && !name.toLowerCase().startsWith('access-control-')) out.set(name, value)
+   }
+   const location = upstream.headers.get('location')
+   if (location !== null && upstream.status >= 300 && upstream.status < 400) {
+diff --git a/src/browser-electron/guest-runtime.ts b/src/browser-electron/guest-runtime.ts
+index 21607f2..54b1a05 100644
+--- a/src/browser-electron/guest-runtime.ts
++++ b/src/browser-electron/guest-runtime.ts
+@@ -4,7 +4,7 @@ export function guestRuntimeScript(pageUrl: string): string {
+   if (window.__dshGuestRuntime) return;
+   window.__dshGuestRuntime = true;
+   let real = ${JSON.stringify(pageUrl).replace(/</gu, '\\u003c')};
+-  const route = '/dsh-builtin-browser/browser-view/guest';
++  const route = '/dsh-builtin-browser/browser-view/isolated-guest';
+   const attempt = fn => { try { return fn(); } catch {} };
+   const realURL = value => {
+     const raw = String(value);
+@@ -39,7 +39,7 @@ export function guestRuntimeScript(pageUrl: string): string {
+         if (!/^https?:$/.test(new URL(url, location.href).protocol)) return nativeFetch(input, init);
+         const headers = new Headers(init && init.headers || (isRequest ? input.headers : undefined));
+         headers.set('x-dsh-guest-sub', '1');
+-        const options = Object.assign({}, init, { headers, mode: 'same-origin' });
++        const options = Object.assign({}, init, { headers, mode: 'cors', credentials: 'omit' });
+         return nativeFetch(isRequest ? new Request(new URL(url, location.href), input) : url, options);
+       } catch (error) { return Promise.reject(error); }
+     };
+@@ -69,12 +69,21 @@ export function guestRuntimeScript(pageUrl: string): string {
+       const next = attempt(() => realURL(url));
+       const result = original.call(this, state, title, toProxy(url));
+       if (next && /^https?:$/.test(next.protocol)) real = next.href;
++      report();
+       return result;
+     };
+   });
++  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length }, '*'));
++  attempt(() => window.addEventListener('message', event => {
++    if (event.source !== parent || !event.data || event.data.type !== 'dsh.browser.guest.history') return;
++    if (event.data.delta === -1) history.back();
++    else if (event.data.delta === 1) history.forward();
++  }));
++  attempt(() => window.addEventListener('DOMContentLoaded', report));
+   attempt(() => window.addEventListener('popstate', () => {
+     const next = attempt(() => realURL(location.href));
+     if (next) real = next.href;
++    report();
+   }));
+   attempt(() => {
+     const set = Element.prototype.setAttribute;
+diff --git a/src/client/browser/__tests__/guest-reference-channel.spec.ts b/src/client/browser/__tests__/guest-reference-channel.spec.ts
+new file mode 100644
+index 0000000..9b0146c
+--- /dev/null
++++ b/src/client/browser/__tests__/guest-reference-channel.spec.ts
+@@ -0,0 +1,55 @@
++// @vitest-environment jsdom
++import { afterEach, expect, it, vi } from 'vitest'
++import { receiveGuestReference } from '../../reference-intents.ts'
++import { IframePresentation } from '../../view/IframePresentation.ts'
++
++afterEach(() => document.body.replaceChildren())
++
++it('accepts only opaque-origin intents from the owned frame and uses app-owned identity', () => {
++  const frame = document.createElement('iframe')
++  const foreign = document.createElement('iframe')
++  document.body.append(frame, foreign)
++  const submit = vi.fn(async () => {})
++  const owner = vi.fn(() => 'owned-session')
++  const data = { type: 'dsh-browser-ref:intent', comment: 'quote', sessionId: 'forged' }
++  const receive = (source: Window | null, origin = 'null', payload: unknown = data) =>
++    receiveGuestReference(new MessageEvent('message', { source, origin, data: payload }), [frame], owner, submit)
++  receive(foreign.contentWindow)
++  receive(null)
++  receive(frame.contentWindow, location.origin)
++  receive(frame.contentWindow, 'null', { type: 'arbitrary-api-request' })
++  expect(submit).not.toHaveBeenCalled()
++  receive(frame.contentWindow)
++  expect(submit).toHaveBeenCalledWith(data, 'owned-session')
++  owner.mockReturnValue('')
++  receive(frame.contentWindow)
++  expect(submit).toHaveBeenCalledTimes(1)
++})
++
++it('observes navigation and drives history only through the current opaque guest', () => {
++  const host = document.createElement('div')
++  host.id = 'guest-test'
++  document.body.append(host)
++  const loaded = vi.fn()
++  const presentation = new IframePresentation({ loaded, failed: vi.fn(), remounted: vi.fn() })
++  presentation.mount(host.id)
++  presentation.show({ target: { kind: 'https', url: 'https://example.test/', title: 'Example' }, revision: 7, sandboxed: true })
++  const frame = host.querySelector('iframe')!
++  const post = vi.spyOn(frame.contentWindow!, 'postMessage')
++  const data = { type: 'dsh.browser.guest.navigation', url: 'https://example.test/next', depth: 3 }
++  const send = (source: Window | null, origin = 'null', payload: unknown = data) =>
++    window.dispatchEvent(new MessageEvent('message', { source, origin, data: payload }))
++  send(null)
++  send(frame.contentWindow, location.origin)
++  send(frame.contentWindow, 'null', { ...data, url: 'javascript:alert(1)' })
++  expect(loaded).not.toHaveBeenCalled()
++  send(frame.contentWindow)
++  expect(loaded).toHaveBeenCalledWith(7, data.url)
++  expect(presentation.historyDepth()).toBe(3)
++  expect(presentation.historyStep(-1)).toBe(true)
++  expect(post).toHaveBeenCalledWith({ type: 'dsh.browser.guest.history', delta: -1 }, '*')
++  presentation.dispose()
++  send(frame.contentWindow)
++  expect(loaded).toHaveBeenCalledTimes(1)
++  expect(presentation.historyStep(1)).toBe(false)
++})
+diff --git a/src/client/browser/__tests__/iframe-popup-policy.spec.ts b/src/client/browser/__tests__/iframe-popup-policy.spec.ts
+index 4845a18..10f3d39 100644
+--- a/src/client/browser/__tests__/iframe-popup-policy.spec.ts
++++ b/src/client/browser/__tests__/iframe-popup-policy.spec.ts
+@@ -4,6 +4,7 @@ import { WEB_BROWSER_SANDBOX } from '../../view/IframePresentation.ts'
+ 
+ function sidebar() {
+   const frames: { attributes: Map<string, string>; src: string }[] = []
++  vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() })
+   vi.stubGlobal('location', { origin: 'https://dsh.test' })
+   vi.stubGlobal('document', {
+     getElementById: () => ({ append: vi.fn() }),
+@@ -27,9 +28,11 @@ function expectNoPopups(frame: { attributes: Map<string, string> } | undefined)
+   const policy = frame?.attributes.get('sandbox')
+   expect(policy).toBeDefined()
+   const tokens = policy?.split(/\s+/u) ?? []
++  expect(tokens).not.toContain('allow-same-origin')
++  expect(tokens).not.toContain('allow-top-navigation')
+   expect(tokens).not.toContain('allow-popups')
+   expect(tokens).not.toContain('allow-popups-to-escape-sandbox')
+-  for (const token of ['allow-scripts', 'allow-forms', 'allow-same-origin']) expect(tokens).toContain(token)
++  for (const token of ['allow-scripts', 'allow-forms']) expect(tokens).toContain(token)
+   return tokens
+ }
+ 
+@@ -41,7 +44,7 @@ describe('Web sidebar popup policy', () => {
+     page.frame.loadUrl({ kind: 'https', url: 'https://example.test/page', title: 'Example' })
+     expectNoPopups(frames.at(-1))
+     expect(frames.at(-1)?.attributes.get('sandbox')).toBe(WEB_BROWSER_SANDBOX)
+-    expect(frames.at(-1)?.src).toContain('/browser-view/guest?u=')
++    expect(frames.at(-1)?.src).toContain('/browser-view/isolated-guest?u=')
+     void page.frame.dispose()
+   })
+ 
+diff --git a/src/client/reference-intents.ts b/src/client/reference-intents.ts
+index db5d790..7dd9821 100644
+--- a/src/client/reference-intents.ts
++++ b/src/client/reference-intents.ts
+@@ -1,4 +1,18 @@
+-/** Submit low-trust page intents from either sidebar carrier in the app context. */
++/** Accept reference intents only from an app-owned opaque sidebar frame. */
++export function receiveGuestReference(
++  event: MessageEvent,
++  frames: Iterable<HTMLIFrameElement>,
++  owner: (frame: HTMLIFrameElement) => string | undefined,
++  submit: (intent: object, sessionId: string) => Promise<void> = captureReferenceIntent,
++): void {
++  if (event.origin !== 'null' || event.source === null || !event.data || event.data.type !== 'dsh-browser-ref:intent') return
++  const frame = Array.from(frames).find(frame => frame.contentWindow === event.source)
++  if (frame === undefined) return
++  const sessionId = owner(frame)
++  if (typeof sessionId === 'string' && sessionId !== '') void submit(event.data, sessionId)
++}
++
++/** Submit low-trust page intents in the authenticated app context. */
+ export async function captureReferenceIntent(intent: object, sessionId: string): Promise<void> {
+   if (sessionId === '') return
+   try {
+diff --git a/src/client/settings/panel.ts b/src/client/settings/panel.ts
+index e7c2b53..e4b7341 100644
+--- a/src/client/settings/panel.ts
++++ b/src/client/settings/panel.ts
+@@ -7,7 +7,7 @@
+  * 外壳由 `window.__ModuleLoader__.load({factory})` 换成普通导出函数：本仓库的客户端半由
+  * tsdown 打成 CJS 工厂，`require` 由模块加载器在运行期注入，语义与旧加载器一致。
+  */
+-import { captureReferenceIntent } from '../reference-intents.ts'
++import { receiveGuestReference } from '../reference-intents.ts'
+ 
+ export interface LegacyClientModule {
+   readonly name?: string
+@@ -1765,49 +1765,17 @@ const react = require("react")
+      * never minted. Expansion requires a known owner, because it acts on the displayed surface.
+      * @returns the on-screen session id, or null.
+      */
+-    // The Web panel's proxied guest asks which conversation it belongs to; this answers with the one
+-    // on screen, so a quote lands in the right draft even for a tab the reader typed themselves.
+-    if (typeof window !== "undefined" && typeof window.addEventListener === "function" && !window.__dshSidebarSessionBridge) {
++    if (typeof window !== "undefined" && !window.__dshSidebarSessionBridge) {
+       window.__dshSidebarSessionBridge = true
+       window.addEventListener("message", (event) => {
+-        if (!event || event.origin !== location.origin) return
+-        const data = event.data
+-        if (!data || data.type !== "dsh.sidebar.session.request") return
+-        const current = guestSession()
+-        console.log('[app] session request ->', current)
+-        if (typeof current !== "string" || current === "") return
+-        try { event.source?.postMessage({ type: "dsh.sidebar.session", sessionId: current }, location.origin) } catch { /* detached frame */ }
++        receiveGuestReference(event, document.querySelectorAll('iframe[data-sidebar-browser-frame="iframe"]'), frame => {
++          const owner = frame.closest("[data-sidebar-right-session]")
++          let sessionId = owner?.getAttribute("data-sidebar-right-session")
++          for (let node: Element | null = frame; !sessionId && node; node = node.parentElement) sessionId = sessionIdOfElement(node)
++          return sessionId || undefined
++        })
+       })
+     }
+-    /**
+-     * Drain reference intents from the Web panel's proxied guest.
+-     *
+-     * The desktop guest hands its intent to the preload bridge; a proxied document has no bridge, so
+-     * the bar leaves it in the page and exposes \`__dshRefTake\`. Same-origin means this page can simply
+-     * ask for it — the same mechanism the bundled carrier polls, without needing the guest to know
+-     * which conversation it is quoting into.
+-     */
+-    function drainPanelIntents() {
+-      if (typeof document === "undefined") return
+-      // A brand-new conversation has no screen() entry yet, but the shell already stamps the Session on
+-      // its own DOM. Without this fallback the first reference of a fresh conversation was dropped.
+-      const sessionId = guestSession()
+-      if (typeof sessionId !== "string" || sessionId === "") return
+-      for (const frame of Array.from(document.querySelectorAll("iframe"))) {
+-        let guest
+-        try { guest = frame.contentWindow } catch { continue }
+-        // Push the conversation id on every tick instead of waiting to be asked: the guest's request can
+-        // be lost while the shell is still mounting, and a lost handshake meant a silently dropped quote.
+-        try { guest.postMessage({ type: "dsh.sidebar.session", sessionId }, location.origin) } catch { /* detached */ }
+-        if (!guest || typeof guest.__dshRefTake !== "function") continue
+-        let intent
+-        try { intent = guest.__dshRefTake() } catch { continue }
+-        while (intent && typeof intent === "object") {
+-          void captureReferenceIntent(intent, sessionId)
+-          try { intent = guest.__dshRefTake() } catch { break }
+-        }
+-      }
+-    }
+     /**
+      * Place a tool-opened page into the Web sidebar.
+      *
+@@ -1868,7 +1836,7 @@ const react = require("react")
+           // live views of one page (the reported double-open). No echo, no tab.
+           if (body.surface !== "panel") return
+           if (open.at <= lastOpenHandled) return
+-          const frame = document.querySelector('iframe[data-sidebar-browser-frame], iframe[src*="/browser-view/guest"]')
++          const frame = document.querySelector('iframe[data-sidebar-browser-frame]')
+           const already = frame !== null && decodeURIComponent(frame.getAttribute("src") || "").includes(encodeURIComponent(open.url).slice(0, 24))
+           if (already) { rememberOpenHandled(open.at); return }
+           rememberOpenHandled(open.at)
+@@ -1889,9 +1857,6 @@ const react = require("react")
+         if (document.visibilityState !== "hidden") drainOpenRequest()
+       })
+     }
+-    if (typeof setInterval === "function" && !globalThis.__dshPanelIntentPoller) {
+-      globalThis.__dshPanelIntentPoller = setInterval(drainPanelIntents, 700)
+-    }
+     /**
+      * The conversation a proxied guest should attribute its quote to.
+      *
+diff --git a/src/client/view/IframePresentation.ts b/src/client/view/IframePresentation.ts
+index 0c7010c..80899b2 100644
+--- a/src/client/view/IframePresentation.ts
++++ b/src/client/view/IframePresentation.ts
+@@ -4,55 +4,16 @@ import type { BrowserTarget } from '../browser/url.ts'
+ import type { BrowserPresentation } from './BrowserPresentation.ts'
+ import css from './Browser.module.css'
+ 
+-/** Fixed iframe policy; top navigation and downloads are not granted directly. */
+-
+-/**
+- * 侧栏 iframe 实际加载的地址：**经同源代理**。
+- *
+- * 直连（`return url`）试过一轮，实测不可行：大量站点用 `X-Frame-Options` / CSP `frame-ancestors`
+- * 禁止被第三方 iframe 嵌入——sudoku.com、必应都是 `SAMEORIGIN`，GitHub 是 `deny` + `'none'`，
+- * 浏览器直接拒绝显示（用户看到的「拒绝连接」）。代理由宿主自己返回 HTML，响应里没有这些头，
+- * 因此任何站点都能嵌进侧栏，这也是引用能读到选区的前提（同源）。
+- *
+- * 代理的已知边界另算：站点用 `fetch` 去拿自己的接口时，请求会被跨域拦或打到宿主根路径。
+- * @param url - the page the reader asked for.
+- * @returns the proxied address, or the original for non-http(s) targets.
+- */
++/** Route Web pages through the opaque-origin proxy. */
+ function guestProxyUrl(url: string): string {
+   if (!/^https?:\/\//iu.test(url)) return url
+-  if (url.includes('/dsh-builtin-browser/browser-view/guest')) return url
+-  return `${location.origin}/dsh-builtin-browser/browser-view/guest?u=${encodeURIComponent(url)}`
++  if (url.includes('/dsh-builtin-browser/browser-view/isolated-guest')) return url
++  return `${location.origin}/dsh-builtin-browser/browser-view/isolated-guest?u=${encodeURIComponent(url)}`
+ }
+ 
+-/**
+- * 反向读出「代理地址里真正要打开的页面」。
+- *
+- * 页内点链接后 iframe 的地址会变成 `…/browser-view/guest?u=<真实地址>`；因为代理是同源的，
+- * 这里可以读出来，交回控制器更新地址栏——否则地址栏停在旧地址，还会提示「URL 已变化」。
+- * @param frame - 已加载完成的 iframe。
+- * @returns 真实 http(s) 地址；读不到（跨源、非代理地址）时返回 undefined。
+- */
+-function observedTargetUrl(frame: HTMLIFrameElement): string | undefined {
+-  let href: string
+-  try {
+-    href = String(frame.contentWindow?.location.href ?? '')
+-  } catch {
+-    return undefined
+-  }
+-  if (href === '') return undefined
+-  let parsed: URL
+-  try {
+-    parsed = new URL(href)
+-  } catch {
+-    return undefined
+-  }
+-  const raw = parsed.searchParams.get('u')
+-  if (raw === null || raw === '') return undefined
+-  return /^https?:\/\//iu.test(raw) ? raw : undefined
+-}
+-
+-export const WEB_BROWSER_SANDBOX = 'allow-scripts allow-forms allow-same-origin'
+-const RELAXED_BROWSER_SANDBOX = `${WEB_BROWSER_SANDBOX} allow-downloads allow-modals allow-pointer-lock allow-top-navigation allow-orientation-lock allow-presentation allow-storage-access-by-user-activation`
++/** Opaque guest documents cannot access the application's origin or open native windows. */
++export const WEB_BROWSER_SANDBOX = 'allow-scripts allow-forms'
++const RELAXED_BROWSER_SANDBOX = `${WEB_BROWSER_SANDBOX} allow-downloads allow-modals allow-pointer-lock allow-orientation-lock allow-presentation allow-storage-access-by-user-activation`
+ 
+ interface IframeDocument {
+   readonly target: BrowserTarget
+@@ -62,7 +23,7 @@ interface IframeDocument {
+ 
+ /** Reports only what an iframe can observe without inspecting cross-origin content. */
+ export interface IframePresentationEvents {
+-  /** @param revision - document generation whose iframe emitted `load`. @param observedUrl - same-origin page the frame ended up on, when readable. */
++  /** @param revision - document generation. @param observedUrl - URL reported by the owned opaque guest. */
+   readonly loaded: (revision: number, observedUrl?: string) => void
+   readonly failed: (revision: number) => void
+   readonly remounted: () => void
+@@ -74,41 +35,34 @@ export class IframePresentation implements BrowserPresentation {
+   private element: HTMLIFrameElement | undefined
+   private document: IframeDocument | undefined
+   private rendered = false
++  private depth = 1
++  private readonly receive = (event: MessageEvent): void => {
++    if (event.origin !== 'null' || event.source !== this.element?.contentWindow) return
++    const data = event.data
++    if (!data || data.type !== 'dsh.browser.guest.navigation' || typeof data.url !== 'string'
++      || !/^https?:\/\//iu.test(data.url) || this.document === undefined) return
++    this.depth = Number.isSafeInteger(data.depth) && data.depth > 0 ? data.depth : 1
++    this.events.loaded(this.document.revision, data.url)
++  }
+ 
+   /** @param events - provider-owned load and remount callbacks. */
+   constructor(private readonly events: IframePresentationEvents) {}
+ 
+-  /**
+-   * 用 iframe 自己的会话历史后退/前进。
+-   *
+-   * 应用侧只记录「我们自己发起过的地址」，页内链接与表单提交都不在里面，所以侧栏那两个键在
+-   * 真实网页上一直是禁用的（用户报「两个键不能正常点击」）。代理是同源页面，直接驱它的
+-   * `history` 才能覆盖页内导航。
+-   * @param delta - 负数后退，正数前进。
+-   * @returns 是否真的发起了一次历史移动。
+-   */
++  /** Request history movement in the guest without reading its cross-origin window. */
+   historyStep(delta: number): boolean {
+     const win = this.element?.contentWindow
+     if (win === undefined || win === null) return false
+     try {
+-      if (delta < 0) win.history.back()
+-      else win.history.forward()
++      win.postMessage({ type: 'dsh.browser.guest.history', delta: delta < 0 ? -1 : 1 }, '*')
+       return true
+     } catch {
+       return false
+     }
+   }
+ 
+-  /**
+-   * iframe 内可回退的深度（同源代理才读得到）。
+-   * @returns 历史条数；读不到时返回 1（表示「没有可回退项」）。
+-   */
++  /** History depth reported by the guest. */
+   historyDepth(): number {
+-    try {
+-      return this.element?.contentWindow?.history.length ?? 1
+-    } catch {
+-      return 1
+-    }
++    return this.depth
+   }
+ 
+   /** @param viewportId - mounted placeholder. @returns removes only the iframe presentation. */
+@@ -118,10 +72,12 @@ export class IframePresentation implements BrowserPresentation {
+     this.element?.remove()
+     this.element = undefined
+     this.host = host
++    window.addEventListener('message', this.receive)
+     if (this.rendered) this.events.remounted()
+     else this.render()
+     return () => {
+       if (this.host !== host) return
++      window.removeEventListener('message', this.receive)
+       this.element?.remove()
+       this.element = undefined
+       this.host = undefined
+@@ -139,6 +95,7 @@ export class IframePresentation implements BrowserPresentation {
+ 
+   /** Remove the owned DOM and retained presentation data. */
+   dispose(): void {
++    window.removeEventListener('message', this.receive)
+     this.element?.remove()
+     this.element = undefined
+     this.host = undefined
+@@ -152,10 +109,6 @@ export class IframePresentation implements BrowserPresentation {
+     this.element?.remove()
+     const element = document.createElement('iframe')
+     element.className = css.frame as string
+-    // Web shell only: serve the guest through the plugin's same-origin proxy so the frame is
+-    // READABLE. A cross-origin frame can be displayed but never quoted from, which is why the Web
+-    // sidebar showed pages yet produced no references. The proxy rewrites the document and injects
+-    // the reference bar; a document that is not http(s) (about:blank, a start page) is untouched.
+     element.src = guestProxyUrl(current.target.url)
+     element.title = current.target.title
+     element.referrerPolicy = 'no-referrer'
+@@ -163,12 +116,12 @@ export class IframePresentation implements BrowserPresentation {
+     element.setAttribute('sandbox', current.sandboxed ? WEB_BROWSER_SANDBOX : RELAXED_BROWSER_SANDBOX)
+     element.addEventListener('load', () => {
+       if (this.element !== element) return
+-      // 同源（代理形态）时能读出页面自己走到了哪个地址，交给控制器更新地址栏。
+-      this.events.loaded(current.revision, observedTargetUrl(element))
++      this.events.loaded(current.revision)
+     })
+     element.addEventListener('error', () => {
+       if (this.element === element) this.events.failed(current.revision)
+     })
++    this.depth = 1
+     this.element = element
+     this.rendered = true
+     host.append(element)
+diff --git a/src/tool-browser/panel-page.ts b/src/tool-browser/panel-page.ts
+index 1c627cb..4352e81 100644
+--- a/src/tool-browser/panel-page.ts
++++ b/src/tool-browser/panel-page.ts
+@@ -76,7 +76,7 @@ export async function readPanelPage(
+   options: { readonly limit?: number; readonly signal?: AbortSignal } = {},
+ ): Promise<PanelPage> {
+   const limit = options.limit ?? 120
+-  const proxied = `${origin}/dsh-builtin-browser/browser-view/guest?u=${encodeURIComponent(pageUrl)}`
++  const proxied = `${origin}/dsh-builtin-browser/browser-view/isolated-guest?u=${encodeURIComponent(pageUrl)}`
+   const response = await fetch(proxied, {
+     headers: {
+       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+diff --git a/src/web-guest.ts b/src/web-guest.ts
+index f2d6db9..6a6960d 100644
+--- a/src/web-guest.ts
++++ b/src/web-guest.ts
+@@ -1,11 +1,4 @@
+-/**
+- * 侧栏 guest 代理的路由注册。
+- *
+- * 这条路由原先只在 `browser-electron` 行里注册。web 端没有可用的 Electron 二进制时那行会被关掉，
+- * 结果侧栏 iframe 请求 `/dsh-builtin-browser/browser-view/guest` 直接 404 —— 表现为「搜索后白屏」。
+- * 代理与载体无关，注册放到根行，任何载体组合下侧栏都能打开页面。
+- * @module dsh-builtin-browser/web-guest
+- */
++/** Register only the CSP-sandboxed opaque-origin guest endpoint. */
+ import type { Context } from '@deepseek-ai/cordis'
+ import { overlayScript } from './browser-reference/entry.ts'
+ import { GUEST_ROUTE, handleGuest } from './browser-electron/guest-route.ts'
+diff --git a/tests/guest-isolation.test.mjs b/tests/guest-isolation.test.mjs
+new file mode 100644
+index 0000000..e4b8515
+--- /dev/null
++++ b/tests/guest-isolation.test.mjs
+@@ -0,0 +1,84 @@
++import { test } from 'node:test'
++import assert from 'node:assert/strict'
++import { createServer } from 'node:http'
++import { once } from 'node:events'
++import { execFile } from 'node:child_process'
++import { promisify } from 'node:util'
++import { promises as dns } from 'node:dns'
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { registerWebGuest } from '../src/web-guest.ts'
++import { GUEST_ROUTE, guestPath, handleGuest } from '../src/browser-electron/guest-route.ts'
++
++test('the root registers only the isolated endpoint, never the old DSH-origin guest route', () => {
++  const routes = []
++  registerWebGuest({ inject(names, install) {
++    assert.deepEqual(names, ['webServer'])
++    install({ effect: callback => callback(), webServer: { register: route => { routes.push(route); return () => {} } } })
++  } })
++  assert.deepEqual(routes.map(route => route.path), ['/dsh-builtin-browser/browser-view/isolated-guest'])
++  assert.notEqual(GUEST_ROUTE, '/dsh-builtin-browser/browser-view/guest')
++})
++
++test('Chromium enforces opaque storage, API isolation, site networking and reference relay', {
++  skip: !process.env.DSH_TEST_CHROME && 'set DSH_TEST_CHROME to a Chromium executable',
++}, async t => {
++  const originalFetch = globalThis.fetch
++  const originalLookup = dns.lookup
++  const profile = mkdtempSync(join(tmpdir(), 'dsh-guest-isolation-'))
++  let origin, apiCalls = 0
++  const upstreamCookies = []
++  dns.lookup = async () => [{ address: '93.184.216.34', family: 4 }]
++  globalThis.fetch = async (target, options) => {
++    assert.equal(new URL(target).hostname, 'ordinary.example')
++    upstreamCookies.push(new Headers(options.headers).get('cookie'))
++    if (new URL(target).pathname === '/site-api') return new Response('{"site":true}', { headers: { 'content-type': 'application/json' } })
++    return new Response(`<html><head></head><body><p>Quoted <strong>content</strong></p><script>
++      (async () => {
++        const result = {};
++        try { localStorage.getItem('DSH_TOKEN'); result.storage = false; } catch { result.storage = true; }
++        try { parent.localStorage.getItem('DSH_TOKEN'); result.parent = false; } catch { result.parent = true; }
++        try { result.cookie = !document.cookie.includes('DSH_TOKEN'); } catch { result.cookie = true; }
++        try { await window.__dshGuestFetch(${JSON.stringify(origin + '/api/private')}, { credentials: 'include' }); result.api = false; } catch { result.api = true; }
++        result.site = (await (await fetch('/site-api')).json()).site;
++        parent.postMessage({ type: 'security-report', result }, '*');
++        window.postMessage({ type: 'dsh-browser-ref:intent', comment: 'quote', capture: { ok: true } }, '*');
++      })();
++    </script></body></html>`, { headers: { 'content-type': 'text/html' } })
++  }
++  const server = createServer((req, res) => {
++    if (req.url === '/') {
++      res.setHeader('content-type', 'text/html')
++      res.end(`<html><body><pre id="result">waiting</pre><script>
++        localStorage.setItem('DSH_TOKEN', 'private-app-token'); document.cookie = 'DSH_TOKEN=private-app-cookie';
++        let report, intent;
++        addEventListener('message', event => {
++          if (event.source !== frame.contentWindow || event.origin !== 'null') return;
++          if (event.data.type === 'security-report') report = event.data.result;
++          if (event.data.type === 'dsh-browser-ref:intent') intent = event.data.comment === 'quote';
++          if (report && intent) document.getElementById('result').textContent = JSON.stringify({ ...report, intent });
++        });
++        const frame = document.createElement('iframe'); frame.src = ${JSON.stringify(guestPath('https://ordinary.example/document'))}; document.body.append(frame);
++      </script></body></html>`)
++    } else if (req.url === '/api/private') { apiCalls++; res.end('private-app-token') }
++    else if (new URL(req.url, 'http://fixture').pathname === GUEST_ROUTE) void handleGuest(req, res, '', '').catch(error => res.destroy(error))
++    else { res.writeHead(404); res.end('not found') }
++  }).listen(0, '127.0.0.1')
++  t.after(async () => {
++    globalThis.fetch = originalFetch
++    dns.lookup = originalLookup
++    await new Promise(resolve => server.close(resolve))
++    rmSync(profile, { recursive: true, force: true })
++  })
++  await once(server, 'listening')
++  origin = `http://127.0.0.1:${server.address().port}`
++  const { stdout } = await promisify(execFile)(process.env.DSH_TEST_CHROME, [
++    '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run', `--user-data-dir=${profile}`,
++    '--virtual-time-budget=5000', '--dump-dom', origin,
++  ], { timeout: 30000, maxBuffer: 4 * 1024 * 1024 })
++  const json = stdout.match(/<pre id="result">([^<]+)<\/pre>/)?.[1]
++  assert.deepEqual(JSON.parse(json), { storage: true, parent: true, cookie: true, api: true, site: true, intent: true })
++  assert.equal(apiCalls, 0, 'CSP blocks the request, not merely reading its response')
++  assert.ok(upstreamCookies.every(cookie => cookie === null), 'app cookies never leave the proxy')
++})
+diff --git a/tests/guest-route.test.mjs b/tests/guest-route.test.mjs
+index 87ea756..8c0a3ab 100644
+--- a/tests/guest-route.test.mjs
++++ b/tests/guest-route.test.mjs
+@@ -177,6 +177,7 @@ test('caps declared and chunked request bodies at 10 MiB without reading or forw
+         assert.fail('must not read the remainder')
+       } }
+     await handleGuest(request, {
++      setHeader() {},
+       writeHead(code, headers) { status = code; responseHeaders = headers },
+       end(body) { message = body },
+     }, '', '')
+@@ -207,11 +208,11 @@ test('stores redirect cookies and rewrites redirect location for a login round-t
+   assert.equal(forwarded.at(-1).options.redirect, 'manual')
+ })
+ 
+-test('replays only allowlisted inbound site cookies alongside the existing jar', async () => {
++test('never replays browser cookies, including site-looking names, alongside the jar', async () => {
+   const result = await call(guestPath('https://ordinary.example/echo'), {
+     headers: { cookie: 'DSH=private; BAIDUID=baidu; SUB=weibo; XSRF=site-token; session=private' },
+   })
+-  assert.equal(JSON.parse(result.body).headers.cookie, 'SID=logged-in; theme=dark; BAIDUID=baidu; SUB=weibo; XSRF=site-token')
++  assert.equal(JSON.parse(result.body).headers.cookie, 'SID=logged-in; theme=dark')
+ })
+ 
+ test('proxy cookie round-trip honors directory paths, duplicate names and Secure without leaking Set-Cookie', async () => {
+@@ -338,7 +339,7 @@ test('GET challenge warms once and retries once, merging challenge, root and inb
+   assert.deepEqual(requests.map(item => item.target), [
+     'https://challenge.example/challenge', 'https://challenge.example/', 'https://challenge.example/challenge',
+   ])
+-  assert.equal(requests[2].options.headers.get('cookie'), 'CHALLENGE=seen; VISITED=root; SUB=weibo')
++  assert.equal(requests[2].options.headers.get('cookie'), 'CHALLENGE=seen; VISITED=root')
+   assert.equal(requests[2].options.headers.get('referer'), 'https://challenge.example/')
+ })
+ 
+@@ -364,7 +365,7 @@ test('HTML sub-requests stay raw by explicit marker or fetch destination; framin
+     assert.equal(result.headers['content-type'], 'text/html')
+     assert.equal(result.body, '<a href="/raw">fragment</a>')
+     assert.equal(result.headers['x-frame-options'], undefined)
+-    assert.equal(result.headers['content-security-policy'], undefined)
++    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms;/)
+   }
+ })
+ 
+diff --git a/tests/guest-runtime.test.mjs b/tests/guest-runtime.test.mjs
+index 5ed3151..50a5b03 100644
+--- a/tests/guest-runtime.test.mjs
++++ b/tests/guest-runtime.test.mjs
+@@ -45,6 +45,7 @@ function page() {
+     Object.defineProperty(context[name].prototype, prop, { configurable: true,
+       get() { return this.value }, set(value) { this.value = value } })
+   }
++  context.parent = { postMessage() {} }
+   context.window = context
+   vm.createContext(context)
+   vm.runInContext(guestRuntimeScript('https://ordinary.example/dir/page'), context)
+@@ -174,14 +175,18 @@ test('download anchors, including empty download attributes, retain native brows
+   }
+ })
+ 
+-test('the reference relay bypasses site request interception', async () => {
+-  const { context, requests } = page()
++test('the reference relay sends data to the parent without authenticated requests', async () => {
++  const { context, requests, listeners } = page()
+   const tag = relayTag('owner')
+   vm.runInContext(tag.slice(tag.indexOf('>') + 1, tag.lastIndexOf('</script>')), context)
+-  context.__dshRefIntents.push({ comment: 'quote' })
++  const sent = []
++  context.parent.postMessage = (intent, target) => sent.push({ intent, target })
++  listeners.get('message')({ source: vm.runInContext('window', context), data: { type: 'dsh-browser-ref:intent', comment: 'quote' } })
+   await new Promise(resolve => setImmediate(resolve))
+-  assert.equal(requests[0].input, '/dsh-builtin-browser/reference/capture')
+-  assert.equal(JSON.parse(requests[0].init.body).sessionId, 'owner')
++  assert.equal(requests.length, 0)
++  assert.equal(sent.length, 1)
++  assert.equal(sent[0].intent.comment, 'quote')
++  assert.equal(sent[0].target, '*')
+ })
+ 
+ test('observer proxies parsed resource subtrees and attribute mutations without rewrite loops', () => {
+-- 
+2.56.0
+
