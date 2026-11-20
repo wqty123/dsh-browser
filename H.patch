@@ -1,0 +1,586 @@
+From 97186424425a4cb7478195ef0211eb9936bccd05 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 04:59:14 +0000
+Subject: [PATCH] fix: preserve carrier loss contracts with sidebar-only
+ recovery
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ src/browser-electron/desktop-bridge-host.ts |   1 +
+ src/browser-electron/entry.ts               |  37 ++++---
+ src/browser-electron/sidebar-only-host.ts   |   4 +-
+ tests/bridge-tombstone.test.mjs             |  35 +++---
+ tests/carrier-harness.mjs                   |  67 +++++++++++
+ tests/carrier-selection-behaviour.test.mjs  |   6 +-
+ tests/channel-rechoose.test.mjs             |  83 ++++++--------
+ tests/loss-reporting.test.mjs               | 116 ++++++++++----------
+ tests/sidebar-frame-kind.test.mjs           |  35 ++++--
+ tests/sidebar-only-host.test.mjs            |   5 +-
+ 10 files changed, 231 insertions(+), 158 deletions(-)
+ create mode 100644 tests/carrier-harness.mjs
+
+diff --git a/src/browser-electron/desktop-bridge-host.ts b/src/browser-electron/desktop-bridge-host.ts
+index 82cbce1..a555182 100644
+--- a/src/browser-electron/desktop-bridge-host.ts
++++ b/src/browser-electron/desktop-bridge-host.ts
+@@ -231,6 +231,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
+    * @returns the host, or undefined when no bridge is available.
+    */
+   static async discover(sessionId?: string, isQuiet?: () => boolean): Promise<DesktopBridgeViewHost | undefined> {
++    DesktopBridgeViewHost.refuseIframe = false
+     let endpoint: BridgeEndpoint
+     try {
+       const raw = JSON.parse(readFileSync(bridgeEndpointPath(), 'utf8')) as Partial<BridgeEndpoint>
+diff --git a/src/browser-electron/entry.ts b/src/browser-electron/entry.ts
+index ee43d4c..29bc6f7 100644
+--- a/src/browser-electron/entry.ts
++++ b/src/browser-electron/entry.ts
+@@ -321,16 +321,29 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
+     }).catch(() => {})
+   })
+ 
+-  const requiredSidebar = (): SidebarOnlyHost => new SidebarOnlyHost(async signal => {
+-    for (const pause of [0, 1_000, 3_000, 8_000]) {
+-      signal.throwIfAborted()
+-      if (pause > 0) await wait(pause, undefined, { signal })
+-      const sidebar = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
+-      if (sidebar !== undefined) return sidebar
+-      if (DesktopBridgeViewHost.refusedIframePanel()) break
+-    }
+-    throw new Error('dsh-builtin-browser: no controllable DSH sidebar is available. Use a host-provided sidebar/webview carrier or reconnect the existing sidebar, then retry. The Web panel supports manual browsing, not CDP tools. No standalone browser will be opened.')
+-  })
++  const reportCarrierLoss = (reason: CarrierLossReason): void => {
++    const detail = reason === 'shell-exited'
++      ? 'the desktop shell backed the sidebar browser and has exited'
++      : 'the desktop shell is running, but its sidebar browser panel cannot be driven'
++    ctx.logger?.warn?.(`dsh-builtin-browser: ${detail} (${reason}); the next operation requires the DSH sidebar. No standalone fallback will be opened.`)
++  }
++  const requiredSidebar = (): SidebarOnlyHost => {
++    const host = new SidebarOnlyHost(async signal => {
++      for (const pause of [0, 1_000, 3_000, 8_000]) {
++        signal.throwIfAborted()
++        if (pause > 0) await wait(pause, undefined, { signal })
++        const sidebar = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
++        if (sidebar !== undefined) return sidebar
++        if (DesktopBridgeViewHost.refusedIframePanel()) break
++      }
++      const detail = DesktopBridgeViewHost.refusedIframePanel()
++        ? 'the DSH sidebar is an iframe and cannot support CDP tools'
++        : 'no controllable DSH sidebar is available'
++      throw new Error(`dsh-builtin-browser: ${detail}. Use a host-provided sidebar/webview carrier or reconnect the existing sidebar, then retry. The Web panel supports manual browsing, not CDP tools. No standalone browser will be opened.`)
++    })
++    host.onLost(reportCarrierLoss)
++    return host
++  }
+   const initialHost = requiredSidebar()
+   let unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(initialHost, providerConfig)))
+   let disposed = false
+@@ -363,9 +376,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
+       unregister()
+       unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(restored, providerConfig)))
+       adoptedCarrier = restored
+-      ctx.logger?.warn?.(
+-        `dsh-builtin-browser: browser carrier lost (${reason}); the next operation requires the DSH sidebar. No standalone fallback will be opened.`,
+-      )
++      reportCarrierLoss(reason)
+     } catch (error) {
+       // Nothing better is available: the adopted carrier is gone and a provider that throws is
+       // worse than one that explains.
+diff --git a/src/browser-electron/sidebar-only-host.ts b/src/browser-electron/sidebar-only-host.ts
+index fee3e67..2fbd954 100644
+--- a/src/browser-electron/sidebar-only-host.ts
++++ b/src/browser-electron/sidebar-only-host.ts
+@@ -216,7 +216,9 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
+       view.pending = undefined
+     }
+     // A command already in flight keeps its original outcome; the next call rediscovers.
+-    try { lease.host.dispose?.() } catch { /* The next discovery replaces this failed carrier. */ }
++    setImmediate(() => {
++      try { lease.host.dispose?.() } catch { /* The next discovery replaces this failed carrier. */ }
++    })
+     try { this.lostListener?.(reason) } catch { /* Transport recovery must survive a listener failure. */ }
+   }
+ 
+diff --git a/tests/bridge-tombstone.test.mjs b/tests/bridge-tombstone.test.mjs
+index d5d0626..1849240 100644
+--- a/tests/bridge-tombstone.test.mjs
++++ b/tests/bridge-tombstone.test.mjs
+@@ -10,11 +10,12 @@
+ // rewrites `updatedAt` every fifteen seconds.
+ import { test } from 'node:test'
+ import assert from 'node:assert/strict'
+-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
++import { mkdtempSync, writeFileSync } from 'node:fs'
+ import { tmpdir } from 'node:os'
+ import { join } from 'node:path'
+ 
+ import { BridgeConnection } from '../lib/browser-electron/bridge-connection.js'
++import { carrierHarness, Sidebar } from './carrier-harness.mjs'
+ 
+ /** An endpoint file with a chosen age, on a port nothing listens on. */
+ function endpointFile(ageMs) {
+@@ -67,20 +68,20 @@ test('an endpoint with no stamp at all keeps working', async () => {
+   assert.equal(lost, 0, 'no stamp is not the same answer as an old stamp')
+ })
+ 
+-test('a carrier that borrows an outside process can report its loss', () => {
+-  // The interface point the fallback hangs on. Removing `onLost` from the bridge host while
+-  // leaving `adopt`'s listener would be a silent regression: the listener would simply never run.
+-  const host = readFileSync(new URL('../src/browser-electron/desktop-bridge-host.ts', import.meta.url), 'utf8')
+-  assert.match(host, /onLost\(listener: \(reason: CarrierLossReason\) => void\): void \{/,
+-    'the bridge host accepts a listener carrying the reason')
+-  // The transport can only conclude one thing — the shell stopped refreshing its endpoint — so it
+-  // reports that, while the panel failure is reported where it is observed.
+-  assert.match(host, /new BridgeConnection\(endpoint, bridgeEndpointPath\(\), \(\) => this\.reportLost\('shell-exited'\)\)/,
+-    'and wires it into the transport, which reports an exiting shell')
+-
+-  const entry = readFileSync(new URL('../src/browser-electron/entry.ts', import.meta.url), 'utf8')
+-  assert.match(entry, /host\.onLost\?\.\(reason => \{ restoreSelfHosted\(host, reason\) \}\)/,
+-    'entry point reacts by restoring the self-hosted browser')
+-  assert.match(entry, /const restoreSelfHosted = \(adopted: ElectronBrowserViewHost, reason: CarrierLossReason\): void => \{/,
+-    'through a function that exists precisely for it')
++test('a borrowed carrier reports its loss and reconnects only the sidebar', async t => {
++  const first = new Sidebar(), second = new Sidebar()
++  let discoveries = 0
++  const h = carrierHarness(t, { discover: async () => ++discoveries === 1 ? first : second })
++  const host = h.current
++  const view = host.createView('session-owner')
++  await view.sendCommand('Runtime.evaluate')
++  first.lose('shell-exited')
++  assert.equal(first.disposed, false)
++  await new Promise(setImmediate)
++  assert.equal(first.disposed, true)
++  assert.match(h.warnings.join('\n'), /shell-exited/)
++  assert.deepEqual(await view.sendCommand('Runtime.evaluate'), { method: 'Runtime.evaluate', owner: 'session-owner' })
++  assert.equal(discoveries, 2)
++  assert.equal(h.current, host)
++  assert.deepEqual(h.registered, [host], 'loss never installs an external carrier')
+ })
+diff --git a/tests/carrier-harness.mjs b/tests/carrier-harness.mjs
+new file mode 100644
+index 0000000..855e805
+--- /dev/null
++++ b/tests/carrier-harness.mjs
+@@ -0,0 +1,67 @@
++import assert from 'node:assert/strict'
++import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { Readable } from 'node:stream'
++import { apply } from '../lib/browser-electron/entry.js'
++import { DEFAULT_SETTINGS, SettingsStore } from '../lib/browser-electron/settings-store.js'
++import { DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
++
++export class Sidebar {
++  disposed = false
++  onLost(listener) { this.lose = listener }
++  dispose() { this.disposed = true }
++  createView(owner) { return { id: 'guest-' + owner, async sendCommand(method) { return { method, owner } } } }
++  destroyView() {}
++  showView() {}
++}
++
++export function carrierHarness(t, { channel = 'sidebar', discover = async () => new Sidebar(), viewHost } = {}) {
++  const folder = mkdtempSync(join(tmpdir(), 'dsh-carrier-contract-'))
++  const oldHome = process.env.DSH_HOME
++  const oldChrome = process.env.DSH_BROWSER_CHROME_PATH
++  process.env.DSH_HOME = folder
++  process.env.DSH_BROWSER_CHROME_PATH = process.execPath
++  mkdirSync(join(folder, 'dsh-builtin-browser-host'))
++  let settings = { ...DEFAULT_SETTINGS, browser: { ...DEFAULT_SETTINGS.browser, channel } }
++  t.mock.method(SettingsStore.prototype, 'get', () => settings)
++  t.mock.method(SettingsStore.prototype, 'update', patch => {
++    settings = { ...settings, browser: { ...settings.browser, ...patch.browser } }
++    return settings
++  })
++  t.mock.method(DesktopBridgeViewHost, 'discover', discover)
++  const registered = [], warnings = [], disposers = []
++  let current, handler
++  const ctx = {
++    get(name) { if (name === 'connection') return { authorizeIndex() { return true } } },
++    browser: {
++      registerPanelProvider() { return () => {} },
++      registerBrowserProvider(provider) { current = provider.host; registered.push(current); return () => {} },
++    },
++    effect(fn) { const dispose = fn(); if (dispose) disposers.push(dispose) },
++    logger: { info() {}, warn(message) { warnings.push(message) } },
++    inject(_deps, callback) { callback({ effect(fn) { const dispose = fn(); if (dispose) disposers.push(dispose) }, webServer: {
++      register(route) { if (route.path === '/dsh-builtin-browser/settings') handler = route.handler; return () => {} },
++    } }) },
++  }
++  t.after(() => {
++    for (const dispose of disposers.reverse()) dispose()
++    for (const host of registered) host.dispose?.()
++    if (oldHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = oldHome
++    if (oldChrome === undefined) delete process.env.DSH_BROWSER_CHROME_PATH; else process.env.DSH_BROWSER_CHROME_PATH = oldChrome
++    rmSync(folder, { recursive: true, force: true })
++  })
++  apply(ctx, { viewHost })
++  return {
++    get current() { return current }, registered, warnings,
++    async choose(nextChannel) {
++      const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel } })])
++      request.method = 'PUT'
++      request.headers = { host: 'localhost:3000', origin: 'http://localhost:3000' }
++      let response
++      await handler(request, { writeHead() {}, end(text) { response = JSON.parse(text) } })
++      assert.equal(response.ok, true)
++      return response
++    },
++  }
++}
+diff --git a/tests/carrier-selection-behaviour.test.mjs b/tests/carrier-selection-behaviour.test.mjs
+index dc29ba9..e77c0be 100644
+--- a/tests/carrier-selection-behaviour.test.mjs
++++ b/tests/carrier-selection-behaviour.test.mjs
+@@ -188,6 +188,8 @@ test('a current sidebar loss reconnects the same handles without replacing the p
+   await view.sendCommand('Runtime.evaluate')
+   sidebar.lost('shell-exited')
+   assert.equal(h.current, selected)
++  assert.equal(sidebar.disposed, false)
++  await new Promise(setImmediate)
+   assert.equal(sidebar.disposed, true)
+   assert.deepEqual(await view.sendCommand('Runtime.evaluate'), { method: 'Runtime.evaluate', owner: 'task' })
+   assert.equal(discoveries, 2)
+@@ -204,13 +206,13 @@ test('a current sidebar loss reconnects the same handles without replacing the p
+ })
+ 
+ for (const channel of ['sidebar', 'bundled', 'auto']) {
+-  test(`${channel} stays inert until needed and reports a missing sidebar without a fallback`, async t => {
++  test(`${channel} stays inert until needed and refuses an iframe sidebar without a fallback`, async t => {
+     let discoveries = 0
+     const h = harness(t, channel, async () => { discoveries++; return undefined })
+     t.mock.method(DesktopBridgeViewHost, 'refusedIframePanel', () => true)
+     assert.equal(discoveries, 0)
+     assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
+-    await assert.rejects(h.current.createView('task').sendCommand('Runtime.evaluate'), /no controllable DSH sidebar.*host-provided sidebar\/webview.*No standalone browser/s)
++    await assert.rejects(h.current.createView('task').sendCommand('Runtime.evaluate'), /sidebar is an iframe.*cannot support CDP tools.*host-provided sidebar\/webview.*No standalone browser/s)
+     assert.equal(discoveries, 1)
+     assert.ok(h.registered.every(host => host.constructor.name === 'SidebarOnlyHost'))
+   })
+diff --git a/tests/channel-rechoose.test.mjs b/tests/channel-rechoose.test.mjs
+index ac2b908..570376a 100644
+--- a/tests/channel-rechoose.test.mjs
++++ b/tests/channel-rechoose.test.mjs
+@@ -1,74 +1,53 @@
+-// `browser.channel` is read live everywhere else, but the carrier was chosen once.
+-//
+-// The settings route stores the value and answers `ok`, the settings file is re-read on every
+-// call, and the one thing a caller cannot tell apart from a working write is a write that stored a
+-// value nothing will ever read. Reported with a reproduction that measured it: after editing the
+-// channel the browser stayed the bundled Electron one, and only a DSH restart produced the Edge
+-// the setting named.
+ import { test } from 'node:test'
+ import assert from 'node:assert/strict'
+-import { readFileSync } from 'node:fs'
+-
+ import { resolveSettings } from '../lib/browser-electron/settings-store.js'
++import { carrierHarness, Sidebar } from './carrier-harness.mjs'
+ 
+-const entrySource = () => readFileSync(new URL('../src/browser-electron/entry.ts', import.meta.url), 'utf8')
+-
+-test('a mistyped channel is reported, not silently replaced by the default', () => {
++test('a mistyped channel is reported and coerced to the sidebar-only default', () => {
+   const complaints = []
+   const resolved = resolveSettings({ browser: { channel: 'edgeee' } }, message => complaints.push(message))
+-
+-  assert.equal(resolved.browser.channel, 'bundled', 'the value is still coerced')
+-  assert.equal(complaints.length, 1, 'but never quietly')
+-  assert.match(complaints[0] ?? '', /edgeee/, 'the message quotes what was written')
+-  assert.match(complaints[0] ?? '', /chrome, edge, auto, bundled, sidebar/,
+-    'and lists what would have been accepted')
++  assert.equal(resolved.browser.channel, 'sidebar')
++  assert.equal(complaints.length, 1)
++  assert.match(complaints[0], /edgeee/)
++  assert.match(complaints[0], /chrome, edge, auto, bundled, sidebar/)
+ })
+ 
+ test('a channel that is absent is the ordinary case, not a mistake', () => {
+-  // Most documents never mention it. Reporting those would train people to ignore the warning.
+   const complaints = []
+-  resolveSettings({ browser: {} }, message => complaints.push(message))
+-  resolveSettings({}, message => complaints.push(message))
+-  assert.deepEqual(complaints, [], 'an unset channel says nothing')
++  assert.equal(resolveSettings({ browser: {} }, message => complaints.push(message)).browser.channel, 'sidebar')
++  assert.equal(resolveSettings({}, message => complaints.push(message)).browser.channel, 'sidebar')
++  assert.deepEqual(complaints, [])
+ })
+ 
+ test('a valid channel says nothing at all', () => {
+   const complaints = []
+-  const resolved = resolveSettings({ browser: { channel: 'edge' } }, message => complaints.push(message))
+-  assert.equal(resolved.browser.channel, 'edge')
++  assert.equal(resolveSettings({ browser: { channel: 'edge' } }, message => complaints.push(message)).browser.channel, 'edge')
+   assert.deepEqual(complaints, [])
+ })
+ 
+-test('the carrier choice is re-runnable, and a second run is not refused', () => {
+-  const source = entrySource()
+-
+-  // The choice lives in a function, because a write that changes the channel has to be able to
+-  // run it again.
+-  assert.match(source, /const chooseCarrier = \(\): void => \{/,
+-    'the carrier choice is a function')
+-  assert.match(source, /installSettingsRoute\(ctx, settings, \(\) => \{ chooseCarrier\(\) \}\)/,
+-    'and the settings route is wired to re-run it')
+-
+-  // The one-shot guard would make that re-run a no-op, which is the bug in a new costume. It now
+-  // releases the previous carrier instead of refusing the new one.
+-  assert.match(source, /const previous = adoptedCarrier/, 'a replaced carrier is remembered')
+-  assert.match(source, /previous\.dispose\?\.\(\)/, 'and released')
+-  assert.doesNotMatch(source, /if \(upgraded\) \{ host\.dispose\?\.\(\); return \}/,
+-    'the refusal that made the first choice final is gone')
++test('settings changes rechoose the carrier and release the previous selection', async t => {
++  const h = carrierHarness(t)
++  const initial = h.current
++  assert.equal((await h.choose('chrome')).carrierRechosen, true)
++  const chrome = h.current
++  assert.notEqual(chrome, initial)
++  assert.equal(initial.available(), false)
++  assert.equal((await h.choose('sidebar')).carrierRechosen, true)
++  assert.equal(chrome.available(), false)
++  assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
+ })
+ 
+-test('the settings response distinguishes applied from merely stored', () => {
+-  const source = entrySource()
+-  assert.match(source, /const channelChanged = updated\.browser\.channel !== before/,
+-    'a changed channel is noticed')
+-  assert.match(source, /channelChanged \? \{ carrierRechosen: true \} : \{\}/,
+-    'and reported back, so ok never means "stored and ignored"')
++test('a settings response distinguishes a changed channel from an unchanged one', async t => {
++  const h = carrierHarness(t)
++  assert.equal((await h.choose('sidebar')).carrierRechosen, undefined)
++  assert.equal(h.registered.length, 1)
++  assert.equal((await h.choose('auto')).carrierRechosen, true)
++  assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
+ })
+ 
+-test('a surface whose carrier comes from its composition says the setting cannot apply', () => {
+-  // On the desktop shell the carrier is supplied by the composition, so the setting is outranked.
+-  // That is a legitimate outcome; leaving it unsaid is what makes it look like a bug elsewhere.
+-  const source = entrySource()
+-  assert.match(source, /browser\.channel is "\$\{asked\}", but this surface's carrier was/,
+-    'the mismatch is reported rather than passed over')
++test('a composition-owned carrier reports that an external channel setting cannot apply', t => {
++  const supplied = new Sidebar()
++  const h = carrierHarness(t, { channel: 'chrome', viewHost: supplied })
++  assert.equal(h.current, supplied)
++  assert.match(h.warnings.join('\n'), /browser.channel is "chrome".*supplied by its composition/)
+ })
+diff --git a/tests/loss-reporting.test.mjs b/tests/loss-reporting.test.mjs
+index 787c00a..afdf235 100644
+--- a/tests/loss-reporting.test.mjs
++++ b/tests/loss-reporting.test.mjs
+@@ -1,74 +1,68 @@
+-// Three message/semantics defects a reporter found on DSH Desktop 2.0.17, all of the same kind:
+-// the behaviour was right, what it SAID was wrong. None of them broke a function, which is exactly
+-// why each survived a round of testing that only checked whether things worked.
+ import { test } from 'node:test'
+ import assert from 'node:assert/strict'
+-import { readFileSync } from 'node:fs'
++import { readFileSync, writeFileSync } from 'node:fs'
++import { join } from 'node:path'
++import { carrierHarness, Sidebar } from './carrier-harness.mjs'
++import { BridgeConnection } from '../lib/browser-electron/bridge-connection.js'
++import { DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
+ 
+-const read = p => readFileSync(new URL(p, import.meta.url), 'utf8')
+-const bridge = read('../desktop-bridge/plugin-browser-bridge.js')
+-const entry = read('../src/browser-electron/entry.ts')
+-const host = read('../src/browser-electron/desktop-bridge-host.ts')
+-const types = read('../src/browser/types.ts')
+-
+-test('the fallback says WHICH loss happened, not always an exiting shell', () => {
+-  // Reported: a fallback caused by an undrivable sidebar panel logged
+-  //   "the desktop shell backed the sidebar browser and has exited"
+-  // while the shell was alive and answering. The user had no way to know their desktop had not
+-  // crashed, and the reporter's own words for it were that this inverts the reason.
+-  assert.match(types, /export type CarrierLossReason = 'shell-exited' \| 'panel-unusable'/,
+-    'the two reasons are named')
+-  assert.match(entry, /reason: CarrierLossReason/, 'the fallback takes the reason')
+-  assert.match(entry, /reason === 'shell-exited'\s*\n?\s*\?/, 'and branches on it')
+-  assert.match(entry, /the desktop shell backed the sidebar browser and has exited/, 'keeping the exiting-shell wording')
+-  assert.match(entry, /renders the sidebar browser panel in a way that\s*\n?\s*'?\s*\+?\s*'?cannot be driven/,
+-    'and a wording that says the shell is still running')
+-  // The transport can only ever conclude one thing, and it must still say the right one.
+-  assert.match(host, /reportLost\('shell-exited'\)/, 'the transport reports an exiting shell')
+-  assert.match(host, /reportLost\('panel-unusable'\)/, 'the panel failure reports an unusable panel')
++test('sidebar loss reports the actual cause without selecting a standalone browser', async t => {
++  const sidebar = new Sidebar()
++  let current = sidebar
++  const h = carrierHarness(t, { discover: async () => current })
++  const view = h.current.createView('session-owner')
++  await view.sendCommand('Runtime.evaluate')
++  sidebar.lose('panel-unusable')
++  assert.match(h.warnings[0], /shell is running.*cannot be driven.*panel-unusable/)
++  assert.doesNotMatch(h.warnings[0], /has exited/)
++  await new Promise(setImmediate)
++  const next = new Sidebar()
++  current = next
++  await view.sendCommand('Runtime.evaluate')
++  next.lose('shell-exited')
++  assert.match(h.warnings[1], /shell.*has exited.*shell-exited/)
++  assert.equal(h.registered.length, 1)
+ })
+ 
+-test('the reason travels from the host through the interface to the entry point', () => {
+-  // A reason that stops at the host is decoration. All three hops are asserted because dropping any
+-  // one of them silently restores the old behaviour: the listener would be called with no reason.
+-  assert.match(host, /onLost\(listener: \(reason: CarrierLossReason\) => void\): void \{/, 'the host accepts it')
+-  assert.match(host, /this\.lostListener\?\.\(reason\)/, 'and forwards it')
+-  assert.match(read('../src/browser-electron/provider.ts'), /onLost\?\(listener: \(reason: CarrierLossReason\) => void\): void/,
+-    'the interface declares it')
+-  assert.match(entry, /host\.onLost\?\.\(reason => \{ restoreSelfHosted\(host, reason\) \}\)/, 'and entry uses it')
++test('a real bridge transport forwards shell loss through the sidebar to the entry logger', async t => {
++  const discover = DesktopBridgeViewHost.discover.bind(DesktopBridgeViewHost)
++  const h = carrierHarness(t, { discover })
++  const file = join(process.env.DSH_HOME, 'dsh-builtin-browser-bridge.json')
++  writeFileSync(file, JSON.stringify({ port: 1, token: 'fixture', pid: 999999, updatedAt: new Date(0).toISOString() }))
++  const original = BridgeConnection.prototype.call
++  t.mock.method(BridgeConnection.prototype, 'call', function (request, timeout) {
++    if (request.op === 'list') return Promise.resolve({ ok: true, frame: 'webview' })
++    return original.call(this, request, timeout)
++  })
++  await assert.rejects(h.current.createView('session-owner').sendCommand('Page.navigate', { url: 'https://example.com' }), /has exited/)
++  assert.match(h.warnings.join('\n'), /shell-exited/)
++  assert.equal(h.registered.length, 1)
+ })
+ 
+-test('the fallback does not replace its own explanation with a connection error', () => {
+-  // Reported: the first call after an iframe panel was adopted returned
+-  //   "dsh-builtin-browser: bridge closed"
+-  // instead of the designed "... sidebar unavailable (... produced no page ...)". Disposing the
+-  // adopted carrier synchronously closes the bridge socket while the request that triggered this
+-  // fallback is still settling, and the close rejects every call waiting on it — so the reason the
+-  // user needed was overwritten by one about the connection, on the very path whose purpose is to
+-  // explain what happened.
+-  const fn = entry.slice(entry.indexOf('const restoreSelfHosted ='))
+-  const body = fn.slice(0, fn.indexOf('\n  }'))
+-  assert.match(body, /setImmediate\(/, 'disposal is deferred to a later turn')
+-  assert.match(body, /adopted\.dispose\?\.\(\)/, 'and still happens')
+-  // The synchronous form must be gone: a `finally { adopted.dispose?.() }` right after the try is
+-  // the exact shape that caused the report.
+-  const finallyBlock = body.slice(body.indexOf('} finally {'))
+-  assert.doesNotMatch(finallyBlock.slice(0, finallyBlock.indexOf('})') + 2), /adopted\.dispose\?\.\(\)\s*\n\s*\}\)/,
+-    'not disposed synchronously inside finally')
++test('disposal preserves the in-flight failure and happens on a later turn', async t => {
++  const sidebar = new Sidebar()
++  let rejectPending
++  sidebar.createView = () => ({ id: 'guest', sendCommand: () => new Promise((resolve, reject) => {
++    rejectPending = reject
++    sidebar.lose('panel-unusable')
++    queueMicrotask(() => reject(new Error('sidebar unavailable (cannot drive this panel)')))
++  }) })
++  sidebar.dispose = () => { sidebar.disposed = true; rejectPending(new Error('bridge closed')) }
++  const h = carrierHarness(t, { discover: async () => sidebar })
++  await assert.rejects(h.current.createView('session-owner').sendCommand('Runtime.evaluate'), /sidebar unavailable \(cannot drive this panel\)/)
++  assert.equal(sidebar.disposed, false)
++  await new Promise(setImmediate)
++  assert.equal(sidebar.disposed, true)
++  assert.match(h.warnings.join('\n'), /panel-unusable/)
+ })
+ 
+ test('startedAt records when the bridge started, not when it last said hello', () => {
+-  // Reported: two reads 15 seconds apart differed by exactly 15 seconds with the port unchanged,
+-  // which read as "the bridge restarted". `publishEndpoint` runs on every keepalive, so refreshing
+-  // the field there made it mean the last keepalive — the one thing a reader does not want from a
+-  // field called startedAt.
+-  assert.match(bridge, /function publishEndpoint\(port, token\)/, 'the publisher exists')
++  const bridge = readFileSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url), 'utf8')
+   const fn = bridge.slice(bridge.indexOf('function publishEndpoint(port, token)'))
+   const body = fn.slice(0, fn.indexOf('\n}'))
+-  assert.match(body, /startedAt: instanceStartedAt\(\)/, 'startedAt comes from the instance')
+-  assert.doesNotMatch(body, /startedAt: new Date\(\)\.toISOString\(\)/, 'not from the current time')
+-  assert.match(body, /updatedAt: new Date\(\)\.toISOString\(\)/, 'while updatedAt still tracks the keepalive')
+-  // Recorded once per module evaluation, which is one bridge instance: a real restart IS reported.
+-  assert.match(bridge, /const instanceStartedAt = \(\(\) => \{/, 'an instance-scoped constant')
+-  assert.match(bridge, /const at = new Date\(\)\.toISOString\(\)\n\s*return \(\) => at/, 'captured once and returned')
++  assert.match(body, /startedAt: instanceStartedAt\(\)/)
++  assert.doesNotMatch(body, /startedAt: new Date\(\)\.toISOString\(\)/)
++  assert.match(body, /updatedAt: new Date\(\)\.toISOString\(\)/)
++  assert.match(bridge, /const instanceStartedAt = \(\(\) => \{/)
++  assert.match(bridge, /const at = new Date\(\)\.toISOString\(\)\n\s*return \(\) => at/)
+ })
+diff --git a/tests/sidebar-frame-kind.test.mjs b/tests/sidebar-frame-kind.test.mjs
+index ba7e2e5..44ea2a5 100644
+--- a/tests/sidebar-frame-kind.test.mjs
++++ b/tests/sidebar-frame-kind.test.mjs
+@@ -11,11 +11,14 @@
+ // Neither is repairable from a plugin, and both are legible from the renderer.
+ import { test } from 'node:test'
+ import assert from 'node:assert/strict'
+-import { readFileSync } from 'node:fs'
++import { readFileSync, writeFileSync } from 'node:fs'
++import { join } from 'node:path'
++import { DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
++import { BridgeConnection } from '../lib/browser-electron/bridge-connection.js'
++import { carrierHarness } from './carrier-harness.mjs'
+ 
+ const bridge = readFileSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url), 'utf8')
+ const host = readFileSync(new URL('../src/browser-electron/desktop-bridge-host.ts', import.meta.url), 'utf8')
+-const entry = readFileSync(new URL('../src/browser-electron/entry.ts', import.meta.url), 'utf8')
+ 
+ test('the liveness answer carries the panel kind, read from the same attribute the shell sets', () => {
+   // The official client keys off this attribute to choose between its webview and iframe paths, so
+@@ -36,15 +39,25 @@ test('the frame kind is read without a conversation, because it is a property of
+     'which is what the owner-less probe already sends')
+ })
+ 
+-test('an iframe panel is refused, and the other answers are not', () => {
+-  // Refusing on `none` would break the first open of every session (the panel does not exist until
+-  // it is asked for), and refusing on `unknown` would break a carrier because a probe ran early.
+-  assert.match(host, /if \(String\(answer\.frame \?\? 'unknown'\) === 'iframe'\) \{/,
+-    'only iframe is a refusal')
+-  assert.match(host, /DesktopBridgeViewHost\.refuseIframe = true/, 'and it is recorded')
+-  assert.match(host, /static refusedIframePanel\(\): boolean/, 'so the entry point can say why')
+-  assert.match(entry, /a desktop bridge is installed, but this shell renders the sidebar/,
+-    'and it does')
++test('an iframe panel is refused for CDP with an actionable sidebar-only error', async t => {
++  const discover = DesktopBridgeViewHost.discover.bind(DesktopBridgeViewHost)
++  const h = carrierHarness(t, { discover })
++  writeFileSync(join(process.env.DSH_HOME, 'dsh-builtin-browser-bridge.json'), JSON.stringify({ port: 1, token: 'fixture', pid: process.pid }))
++  let frame
++  const probe = t.mock.method(BridgeConnection.prototype, 'call', async request => {
++    assert.deepEqual(request, { op: 'list' }, 'discovery is owner-less')
++    return { ok: true, frame }
++  })
++  for (frame of ['iframe', 'webview', 'none', 'unknown', undefined]) {
++    const found = await DesktopBridgeViewHost.discover('session-owner')
++    assert.equal(found !== undefined, frame !== 'iframe')
++    assert.equal(DesktopBridgeViewHost.refusedIframePanel(), frame === 'iframe', 'old refusal cannot taint later discovery')
++    found?.dispose()
++  }
++  frame = 'iframe'
++  await assert.rejects(h.current.createView('session-owner').sendCommand('Runtime.evaluate'), /sidebar is an iframe.*cannot support CDP tools.*host-provided sidebar\/webview.*No standalone browser will be opened/)
++  assert.equal(h.registered.length, 1)
++  assert.ok(probe.mock.callCount() >= 6)
+ })
+ 
+ test('a panel requires explicit unusable evidence before carrier fallback', () => {
+diff --git a/tests/sidebar-only-host.test.mjs b/tests/sidebar-only-host.test.mjs
+index b5c61ee..5d55b3b 100644
+--- a/tests/sidebar-only-host.test.mjs
++++ b/tests/sidebar-only-host.test.mjs
+@@ -175,6 +175,7 @@ test('carrier loss reconnects existing wrappers to the sidebar with stable ident
+   assert.deepEqual([a.id, b.id], ids)
+   assert.deepEqual(second.calls.filter(call => call.action === 'create').map(call => call.owner), ['owner-a', 'owner-b'])
+   assert.deepEqual(reasons, ['shell-exited'])
++  await new Promise(setImmediate)
+   assert.equal(first.calls.filter(call => call.action === 'dispose').length, 1)
+   first.lose()
+   await a.sendCommand('Runtime.evaluate')
+@@ -224,7 +225,9 @@ test('a carrier lost while creating a view cannot install a stale binding', asyn
+   const view = host.createView('owner-a')
+   await assert.rejects(view.sendCommand('Page.navigate'), /bridge changed while binding/)
+   assert.equal(first.calls.some(call => call.action === 'send'), false)
+-  assert.deepEqual(first.calls.slice(-2), [{ action: 'dispose' }, { action: 'destroy', id: 'guest-1' }])
++  assert.deepEqual(first.calls.at(-1), { action: 'destroy', id: 'guest-1' })
++  await new Promise(setImmediate)
++  assert.deepEqual(first.calls.at(-1), { action: 'dispose' })
+   await view.sendCommand('Page.navigate')
+   assert.equal(loads, 2)
+   assert.equal(second.calls.filter(call => call.action === 'send').length, 1)
+-- 
+2.56.0
+

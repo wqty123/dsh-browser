@@ -1,0 +1,342 @@
+From 5286060c4c7a994bae5cdd9998056a56931e2681 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 05:07:27 +0000
+Subject: [PATCH] fix: align native sidebar guest zoom with its content
+ viewport
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ .../electron/ElectronWebviewPresentation.ts   |  42 ++++++
+ tests/fixtures/sidebar-viewport.cjs           |  30 +++++
+ tests/fixtures/sidebar-viewport.js            | 121 ++++++++++++++++++
+ tests/sidebar-viewport.test.mjs               |  61 +++++++++
+ 4 files changed, 254 insertions(+)
+ create mode 100644 tests/fixtures/sidebar-viewport.cjs
+ create mode 100644 tests/fixtures/sidebar-viewport.js
+ create mode 100644 tests/sidebar-viewport.test.mjs
+
+diff --git a/src/client/electron/ElectronWebviewPresentation.ts b/src/client/electron/ElectronWebviewPresentation.ts
+index 0743768..c0a19ba 100644
+--- a/src/client/electron/ElectronWebviewPresentation.ts
++++ b/src/client/electron/ElectronWebviewPresentation.ts
+@@ -16,6 +16,8 @@ export interface WebviewElement extends HTMLElement {
+   goForward(): void
+   reload(): void
+   isLoading(): boolean
++  getZoomFactor(): number
++  setZoomFactor(factor: number): void
+ }
+ 
+ /** Physical attachment notifications; hiding a retained Sidebar body emits neither. */
+@@ -28,6 +30,13 @@ export interface ElectronPresentationEvents {
+ export class ElectronWebviewPresentation implements BrowserPresentation {
+   private element: WebviewElement | undefined
+   private host: HTMLElement | undefined
++  private zoomRevision = 0
++  private scaleQuery: MediaQueryList | undefined
++  private readonly ready = (): void => { void this.syncZoom() }
++  private readonly scaleChanged = (): void => {
++    this.watchScale()
++    void this.syncZoom()
++  }
+ 
+   constructor(private readonly events: ElectronPresentationEvents) {}
+ 
+@@ -37,10 +46,12 @@ export class ElectronWebviewPresentation implements BrowserPresentation {
+     if (host === null) throw new Error('Electron presentation: content container is not mounted')
+     if (this.host !== undefined) this.events.unmounted()
+     this.host = host
++    this.watchScale()
+     this.events.mounted()
+     return () => {
+       if (this.host !== host) return
+       this.events.unmounted()
++      this.unwatchScale()
+       this.host = undefined
+     }
+   }
+@@ -70,6 +81,7 @@ export class ElectronWebviewPresentation implements BrowserPresentation {
+     if (this.host === undefined) throw new Error('Electron presentation: cannot attach without a content container')
+     this.clear()
+     this.element = element
++    element.addEventListener('dom-ready', this.ready)
+     this.host.append(element)
+   }
+ 
+@@ -83,6 +95,8 @@ export class ElectronWebviewPresentation implements BrowserPresentation {
+ 
+   /** Destroy only the guest DOM; a replacement may use the same mounted container. */
+   clear(): void {
++    this.zoomRevision++
++    this.element?.removeEventListener('dom-ready', this.ready)
+     this.element?.remove()
+     this.element = undefined
+   }
+@@ -90,6 +104,34 @@ export class ElectronWebviewPresentation implements BrowserPresentation {
+   /** Destroy the guest DOM and release its content container. */
+   dispose(): void {
+     this.clear()
++    this.unwatchScale()
+     this.host = undefined
+   }
++
++  private watchScale(): void {
++    this.unwatchScale()
++    this.scaleQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
++    this.scaleQuery.addEventListener('change', this.scaleChanged)
++  }
++
++  private unwatchScale(): void {
++    this.scaleQuery?.removeEventListener('change', this.scaleChanged)
++    this.scaleQuery = undefined
++  }
++
++  private async syncZoom(): Promise<void> {
++    const element = this.element
++    if (element === undefined) return
++    const revision = ++this.zoomRevision
++    try {
++      const guestRatio = await element.executeJavaScript('window.devicePixelRatio')
++      if (this.element !== element || revision !== this.zoomRevision) return
++      if (typeof guestRatio !== 'number' || !Number.isFinite(guestRatio) || guestRatio <= 0) return
++      const zoom = element.getZoomFactor()
++      const factor = zoom * window.devicePixelRatio / guestRatio
++      if (Math.abs(zoom - factor) > 0.0001) element.setZoomFactor(factor)
++    } catch (error) {
++      if (this.element === element && revision === this.zoomRevision) console.error('Electron presentation: cannot align guest zoom', error)
++    }
++  }
+ }
+diff --git a/tests/fixtures/sidebar-viewport.cjs b/tests/fixtures/sidebar-viewport.cjs
+new file mode 100644
+index 0000000..2a72f13
+--- /dev/null
++++ b/tests/fixtures/sidebar-viewport.cjs
+@@ -0,0 +1,30 @@
++const { app, BrowserWindow } = require('electron')
++const { mkdirSync, writeFileSync } = require('node:fs')
++const { join } = require('node:path')
++const origin = process.env.DSH_VIEWPORT_ORIGIN
++const profile = process.env.DSH_VIEWPORT_PROFILE
++const screenshots = process.env.DSH_TEST_SCREENSHOT_DIR
++app.setPath('userData', profile)
++app.commandLine.appendSwitch('force-device-scale-factor', '2')
++app.disableHardwareAcceleration()
++app.whenReady().then(async () => {
++  const win = new BrowserWindow({ width: 1200, height: 900, webPreferences: { webviewTag: true, backgroundThrottling: false } })
++  await win.loadURL(origin)
++  const rows = []
++  for (const zoom of [1, 1.25, 0.8]) {
++    win.webContents.setZoomFactor(zoom)
++    rows.push(...await win.webContents.executeJavaScript('window.measureViewports()'))
++    if (screenshots) {
++      mkdirSync(screenshots, { recursive: true })
++      for (const kind of ['webview', 'iframe']) {
++        await win.webContents.executeJavaScript(`window.showViewport('${kind}')`)
++        writeFileSync(join(screenshots, `${kind}-${zoom}.png`), (await win.webContents.capturePage()).toPNG())
++      }
++      await win.webContents.executeJavaScript("window.showViewport('webview')")
++    }
++  }
++  const lifecycle = await win.webContents.executeJavaScript('window.checkLifecycle()')
++  console.log('VIEWPORT_RESULT=' + JSON.stringify({ rows, lifecycle }))
++  win.destroy()
++  app.quit()
++}).catch(error => { console.error(error); app.exit(1) })
+diff --git a/tests/fixtures/sidebar-viewport.js b/tests/fixtures/sidebar-viewport.js
+new file mode 100644
+index 0000000..1890479
+--- /dev/null
++++ b/tests/fixtures/sidebar-viewport.js
+@@ -0,0 +1,121 @@
++import { ElectronWebviewPresentation } from '/src/client/electron/ElectronWebviewPresentation.ts'
++import { IframePresentation } from '/src/client/view/IframePresentation.ts'
++
++const sidebar = document.getElementById('sidebar')
++const viewport = document.getElementById('viewport')
++const tick = () => new Promise(resolve => setTimeout(resolve, 30))
++let observation
++async function until(check) {
++  for (let attempt = 0; attempt < 150; attempt++) {
++    const result = await check()
++    if (result) return result
++    await tick()
++  }
++  throw new Error('viewport did not settle: ' + JSON.stringify(observation))
++}
++const hostSize = () => ({ width: viewport.clientWidth, height: viewport.clientHeight, dpr: devicePixelRatio })
++const aligned = (guest, host) => Math.abs(guest.width - host.width) <= 1 && Math.abs(guest.height - host.height) <= 1 && Math.abs(guest.dpr - host.dpr) < 0.01
++
++let state
++async function initialize() {
++  if (state) return state
++  const seed = document.createElement('webview')
++  seed.setAttribute('partition', 'persist:layout')
++  seed.setAttribute('src', '/guest')
++  const seedReady = new Promise(resolve => seed.addEventListener('dom-ready', resolve, { once: true }))
++  viewport.append(seed)
++  await seedReady
++  seed.setZoomFactor(0.8)
++  await until(async () => Math.abs(await seed.executeJavaScript('devicePixelRatio') - 1.6) < 0.01)
++  seed.remove()
++  const presentation = new ElectronWebviewPresentation({ mounted() {}, unmounted() { presentation.clear() } })
++  const unmount = presentation.mount('viewport')
++  const native = presentation.createElement({ lease: 'layout', partition: 'persist:layout' })
++  native.setAttribute('src', '/guest')
++  let ready = false
++  native.addEventListener('dom-ready', () => { ready = true })
++  presentation.present(native)
++  await until(() => ready)
++  const iframe = new IframePresentation({ loaded() {}, failed() {}, remounted() {} })
++  const remove = iframe.mount('viewport')
++  iframe.show({ target: { url: location.origin + '/guest', title: 'Viewport' }, revision: 1, sandboxed: true })
++  state = { native, presentation, unmount, iframe, remove }
++  return state
++}
++
++window.measureViewports = async () => {
++  const rows = []
++  const { native } = await initialize()
++  for (const width of [500, 280, 720]) {
++    sidebar.style.width = width + 'px'
++    sidebar.style.height = width === 280 ? '420px' : '600px'
++    const row = await until(async () => {
++      const guest = await native.executeJavaScript('({width: innerWidth, height: innerHeight, dpr: devicePixelRatio})')
++      const host = hostSize()
++      observation = { guest, host, zoom: native.getZoomFactor(), bounds: native.getBoundingClientRect().toJSON() }
++      return aligned(guest, host) && { kind: 'webview', guest, host }
++    })
++    rows.push(row)
++  }
++  await native.loadURL(location.origin + '/next-page')
++  await until(async () => aligned(await native.executeJavaScript('({width: innerWidth, height: innerHeight, dpr: devicePixelRatio})'), hostSize()))
++  const frame = viewport.querySelector('iframe')
++  let measurement
++  const receive = event => { if (event.origin === 'null' && event.source === frame.contentWindow && event.data?.type === 'measurement') measurement = event.data }
++  window.addEventListener('message', receive)
++  for (const width of [500, 280, 720]) {
++    sidebar.style.width = width + 'px'
++    sidebar.style.height = width === 280 ? '420px' : '600px'
++    const row = await until(async () => {
++      measurement = undefined
++      frame.contentWindow.postMessage('measure', '*')
++      await tick()
++      const host = hostSize()
++      return measurement && aligned(measurement, host) && { kind: 'iframe', guest: measurement, host }
++    })
++    rows.push(row)
++  }
++  window.removeEventListener('message', receive)
++  return rows
++}
++
++window.showViewport = async kind => {
++  viewport.querySelector('iframe').style.visibility = kind === 'iframe' ? 'visible' : 'hidden'
++  state.native.style.visibility = kind === 'webview' ? 'visible' : 'hidden'
++  await tick()
++}
++
++window.checkLifecycle = async () => {
++  state.unmount()
++  state.presentation.dispose()
++  state.remove()
++  state.iframe.dispose()
++  const presentation = new ElectronWebviewPresentation({ mounted() {}, unmounted() { presentation.clear() } })
++  let writes = 0, resolve
++  const element = document.createElement('div')
++  element.executeJavaScript = () => new Promise(done => { resolve = done })
++  element.getZoomFactor = () => 0.8
++  element.setZoomFactor = () => { writes++ }
++  const remove = presentation.mount('viewport')
++  presentation.present(element)
++  element.dispatchEvent(new Event('dom-ready'))
++  presentation.clear()
++  resolve(1.6)
++  await tick()
++  const pendingIgnored = writes === 0
++  remove()
++  const detached = viewport.children.length === 0
++  const oldError = console.error
++  let errors = 0
++  console.error = () => { errors++ }
++  const removeAgain = presentation.mount('viewport')
++  element.executeJavaScript = async () => { throw new Error('guest unavailable') }
++  presentation.present(element)
++  element.dispatchEvent(new Event('dom-ready'))
++  await tick()
++  console.error = oldError
++  const errorReported = errors === 1
++  presentation.dispose()
++  removeAgain()
++  return { detached, disposed: viewport.children.length === 0, pendingIgnored, emptySafe: writes === 0, errorReported }
++}
+diff --git a/tests/sidebar-viewport.test.mjs b/tests/sidebar-viewport.test.mjs
+new file mode 100644
+index 0000000..ac72b93
+--- /dev/null
++++ b/tests/sidebar-viewport.test.mjs
+@@ -0,0 +1,61 @@
++import { test } from 'node:test'
++import assert from 'node:assert/strict'
++import { createServer } from 'node:http'
++import { once } from 'node:events'
++import { execFile } from 'node:child_process'
++import { promisify } from 'node:util'
++import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { fileURLToPath } from 'node:url'
++import { stripTypeScriptTypes } from 'node:module'
++
++test('native and opaque iframe viewports follow the sidebar at matching zoom and device scale', {
++  skip: !process.env.DSH_TEST_ELECTRON && 'set DSH_TEST_ELECTRON to an Electron executable',
++}, async t => {
++  const profile = mkdtempSync(join(tmpdir(), 'dsh-sidebar-viewport-'))
++  const css = readFileSync(new URL('../src/client/view/Browser.module.css', import.meta.url), 'utf8')
++  const server = createServer((req, res) => {
++    res.setHeader('content-type', 'text/javascript')
++    if (req.url === '/src/client/view/Browser.module.css') {
++      res.end('export default new Proxy({}, {get: (_, name) => name})')
++    } else if (req.url === '/src/client/electron/ElectronWebviewPresentation.ts' || req.url === '/src/client/view/IframePresentation.ts') {
++      res.end(stripTypeScriptTypes(readFileSync(new URL('..' + req.url, import.meta.url), 'utf8'), { mode: 'transform' }))
++    } else if (req.url === '/fixture.js') {
++      res.end(readFileSync(new URL('./fixtures/sidebar-viewport.js', import.meta.url), 'utf8'))
++    } else if (req.url === '/') {
++      res.setHeader('content-type', 'text/html')
++      res.end(`<html><head><style>${css}
++        body { margin: 0; background: #e8edf4; } #sidebar { position: absolute; right: 0; top: 0; width: 500px; height: 600px; display: flex; flex-direction: column; }
++      </style></head><body><div id="sidebar"><div class="content"><div class="viewport" id="viewport"></div></div></div><script type="module" src="/fixture.js"></script></body></html>`)
++    } else {
++      res.setHeader('content-type', 'text/html')
++      res.end(`<html><body style="margin:0"><h2>Sidebar viewport</h2><div style="width:100%;height:100px;background:#c6e8d1">Responsive guest</div><script>
++        addEventListener('message', event => { if (event.data === 'measure') parent.postMessage({ type: 'measurement', width: innerWidth, height: innerHeight, dpr: devicePixelRatio }, '*') })
++      </script></body></html>`)
++    }
++  }).listen(0, '127.0.0.1')
++  t.after(async () => {
++    await new Promise(resolve => server.close(resolve))
++    rmSync(profile, { recursive: true, force: true })
++  })
++  await once(server, 'listening')
++  const origin = `http://127.0.0.1:${server.address().port}`
++  const { stdout, stderr } = await promisify(execFile)(process.env.DSH_TEST_ELECTRON, [
++    '--no-sandbox', fileURLToPath(new URL('./fixtures/sidebar-viewport.cjs', import.meta.url)),
++  ], { timeout: 60000, maxBuffer: 4 * 1024 * 1024, env: {
++    ...process.env, DSH_VIEWPORT_ORIGIN: origin, DSH_VIEWPORT_PROFILE: profile,
++  } })
++  const line = stdout.split('\n').find(line => line.startsWith('VIEWPORT_RESULT='))
++  assert.ok(line, stdout + '\n' + stderr)
++  const result = JSON.parse(line.slice('VIEWPORT_RESULT='.length))
++  for (const row of result.rows) {
++    assert.ok(Math.abs(row.guest.width - row.host.width) <= 1, JSON.stringify(row))
++    assert.ok(Math.abs(row.guest.height - row.host.height) <= 1, JSON.stringify(row))
++    assert.ok(Math.abs(row.guest.dpr - row.host.dpr) < 0.01, JSON.stringify(row))
++  }
++  assert.deepEqual([...new Set(result.rows.map(row => row.host.width))], [500, 280, 720])
++  assert.equal(result.rows.length, 18)
++  assert.deepEqual(result.lifecycle, { detached: true, disposed: true, pendingIgnored: true, emptySafe: true, errorReported: true })
++  console.log(`Viewport layout: ${result.rows.length} native/opaque-iframe measurements passed; lifecycle checks passed`)
++})
+-- 
+2.56.0
+
