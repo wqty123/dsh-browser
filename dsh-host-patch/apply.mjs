@@ -2,11 +2,14 @@ import * as fs from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { gunzipSync } from 'node:zlib'
 import { stripLegacyBridge } from './legacy-bridge.mjs'
 
 const specs = ['rc3', 'rc5'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8')))
-const previousSpecs = ['rc3', 'rc5'].flatMap(name => [2, 1].map(revision =>
-  JSON.parse(fs.readFileSync(new URL(`./${name}-revision${revision}.json`, import.meta.url), 'utf8'))))
+const previousSpecs = ['rc3', 'rc5'].flatMap(name => [3, 2, 1].map(revision =>
+  JSON.parse(revision === 3
+    ? gunzipSync(fs.readFileSync(new URL(`./${name}-revision${revision}.json.gz`, import.meta.url))).toString('utf8')
+    : fs.readFileSync(new URL(`./${name}-revision${revision}.json`, import.meta.url), 'utf8'))))
 const suffix = '.before-dsh-host-patch'
 const digest = value => createHash('sha256').update(value).digest('hex')
 
@@ -112,7 +115,7 @@ function inspect(packages, restoring, io) {
   try {
     const entries = plan(packages, restoring, io)
     return { status: entries.every(entry => entry.applied) ? 'applied' : 'absent',
-      ...(entries.some(entry => entry.previous) ? { reason: 'host patch revision 1 or 2; explicit bootstrap upgrade to revision 3 required' } : {}), entries }
+      ...(entries.some(entry => entry.previous) ? { reason: 'host patch revision 1 or 2 or 3; explicit bootstrap upgrade to revision 4 required' } : {}), entries }
   } catch (error) {
     return { status: error.status ?? 'anchors mismatch', reason: String(error.message ?? error) }
   }

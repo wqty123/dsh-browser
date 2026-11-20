@@ -135,7 +135,9 @@ DSH 侧栏下载使用目标页面所属浏览器会话的登录状态，分段�
 
 补丁按宿主包精确版本与原文件校验选择；锚点不匹配时安全拒绝。rc.5 Desktop 的原文件哈希来自源码构建，尚未与已发布桌面安装包核对。详见 [宿主补丁说明](dsh-host-patch/README.md) 和 [#36 集成与验收记录](docs/pr64-extension-status.md)。
 
-后台浏览器操作会按能力检测使用 `ctx.sidebarRight.holdRendering(sessionId)`，不会切换用户当前会话；未打补丁的宿主保留既有行为。补丁仅包含上述两个 API，不包含上表中其他需要手动部署的原生 UI 改动。
+revision 4 增加 `childTabs` v2：复用原生视图服务接管 Chromium 创建的子页面，保留 opener、消息、命名目标、POST 和关闭语义，不重放 URL、不创建额外窗口。支持 revision 2 / 3 的安全升级与精确恢复。未支持的原生 opener 请求明确返回 `BROWSER_NATIVE_CHILD_UNAVAILABLE`；显式 URL-only 行为不变。详见 [#8 集成与验收](docs/pr64-native-children.md)。
+
+后台浏览器操作会按能力检测使用 `ctx.sidebarRight.holdRendering(sessionId)`，不会切换用户当前会话；未打补丁的宿主保留既有行为。
 
 Web/npm 安装可通过包目录运行独立 CLI；补丁说明、校验／恢复命令及上游源码补丁见 [dsh-host-patch/README.md](dsh-host-patch/README.md)。
 

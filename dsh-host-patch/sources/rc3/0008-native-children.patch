@@ -1,0 +1,789 @@
+From 78cdafd52d3600eb7dc9592715fb5c2c59998db5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 13:42:06 +0000
+Subject: [PATCH 1/3] feat(desktop): adopt native children in admitted sidebar
+ slots
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ apps/desktop/src/ipc.ts                       |   1 +
+ apps/desktop/src/native-views.ts              | 137 +++++++++++++++++-
+ apps/desktop/src/preload-browser.ts           |  44 +++++-
+ apps/desktop/tests/native-views.spec.ts       |  73 +++++++++-
+ apps/desktop/tests/preload-app.spec.ts        |  29 ++++
+ .../client/ui-sidebar-browser/src/types.ts    |  21 +++
+ .../ui-sidebar-right/src/client/service.ts    |  13 ++
+ .../ui-sidebar-right/src/client/stores.ts     |  10 ++
+ .../tests/service.client.spec.ts              |  20 +++
+ .../tests/stores.client.spec.ts               |  14 ++
+ 10 files changed, 356 insertions(+), 6 deletions(-)
+
+diff --git a/apps/desktop/src/ipc.ts b/apps/desktop/src/ipc.ts
+index 3a843dcb2a..5a9c15675a 100644
+--- a/apps/desktop/src/ipc.ts
++++ b/apps/desktop/src/ipc.ts
+@@ -13,6 +13,7 @@ import type { DesktopMainExtensionStatus } from './main-extensions.ts'
+ export const DESKTOP_MAIN_EXTENSIONS_REVISION = 2
+ 
+ export const DESKTOP_IPC = {
++  nativeChildEvent: 'dsh-desktop:native-child-event',
+   nativeViewsRequest: 'dsh-desktop:native-views-request',
+   nativeViewState: 'dsh-desktop:native-view-state',
+   mainExtensionStatus: 'dsh-desktop:main-extension-status',
+diff --git a/apps/desktop/src/native-views.ts b/apps/desktop/src/native-views.ts
+index 9532d898d0..65562501c5 100644
+--- a/apps/desktop/src/native-views.ts
++++ b/apps/desktop/src/native-views.ts
+@@ -2,13 +2,14 @@
+ import { randomUUID } from 'node:crypto'
+ import { WebContentsView, View, type BrowserWindow, type WebContents } from 'electron'
+ import { HarnessError } from '@deepseek-ai/dsh-error'
+-import type { DesktopBrowserLeaseId, DesktopNativeLease, DesktopNativeState, SidebarNativeSlot, SidebarNativePlacement } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
++import type { DesktopBrowserLeaseId, DesktopNativeLease, DesktopNativeState, DesktopNativeChild, SidebarNativeSlot, SidebarNativePlacement } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
+ import type { DesktopBrowserGuests } from './browser-guests.ts'
+ import { DESKTOP_IPC } from './ipc.ts'
+ 
+ type Failure = 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' | 'BROWSER_OWNER_UNKNOWN' | 'BROWSER_SLOT_UNAVAILABLE'
+   | 'BROWSER_HANDLE_STALE' | 'BROWSER_GUEST_CLOSED' | 'BROWSER_DOCUMENT_UNACKNOWLEDGED'
+   | 'BROWSER_DOCUMENT_TIMEOUT' | 'BROWSER_COMMAND_DENIED' | 'BROWSER_URL_DENIED'
++  | 'BROWSER_NATIVE_CHILD_UNAVAILABLE' | 'BROWSER_CHILD_ALREADY_ADOPTED' | 'BROWSER_CHILD_ADOPTION_TIMEOUT'
+ 
+ export class DesktopNativeViewError extends HarnessError {
+   constructor(code: Failure) { super(code, code) }
+@@ -42,6 +43,7 @@ interface Slot {
+ }
+ 
+ interface Native {
++  readonly workspace: string
+   readonly renderer: WebContents
+   readonly scope: string
+   readonly reservation: DesktopBrowserLeaseId
+@@ -54,6 +56,14 @@ interface Native {
+   documentTimer?: ReturnType<typeof setTimeout>
+ }
+ 
++interface ChildRequest {
++  readonly event: DesktopNativeChild
++  readonly renderer: WebContents
++  readonly parent: DesktopNativeLease
++  readonly timer: ReturnType<typeof setTimeout>
++  slot?: SidebarNativeSlot
++}
++
+ const methods = new Set([
+   'Page.navigate', 'Page.reload', 'Page.stopLoading', 'Page.getFrameTree', 'Page.createIsolatedWorld',
+   'Page.getNavigationHistory', 'Page.navigateToHistoryEntry', 'Page.getLayoutMetrics', 'Page.captureScreenshot',
+@@ -67,6 +77,9 @@ export class DesktopNativeViews {
+   private readonly slots = new Map<SidebarNativeSlot, Slot>()
+   private readonly views = new Map<DesktopNativeLease, Native>()
+   private readonly releasing = new Map<DesktopNativeLease, { renderer: WebContents; completion: Promise<void> }>()
++  private readonly childOwners = new Map<DesktopNativeLease, { token: string; slot: SidebarNativeSlot }>()
++  private readonly children = new Map<string, ChildRequest>()
++  private readonly endedChildren = new Map<string, { renderer: WebContents; code: Failure }>()
+ 
+   constructor(private readonly window: () => BrowserWindow | undefined, private readonly policy: DesktopBrowserGuests) {}
+ 
+@@ -85,6 +98,9 @@ export class DesktopNativeViews {
+         case 'attach': result = this.attach(renderer, request.lease, request.slot); break
+         case 'command': result = await this.command(renderer, request.lease, request.method, request.params); break
+         case 'release': result = await this.release(renderer, request.lease); break
++        case 'child-register': result = this.registerChildOwner(renderer, request.parent, request.slot); break
++        case 'child-unregister': result = await this.unregisterChildOwner(renderer, request.parent, request.token); break
++        case 'child-adopt': result = this.adoptChild(renderer, request.request, request.slot); break
+         default: return refuse('BROWSER_COMMAND_DENIED')
+       }
+       return { ok: true, result }
+@@ -166,9 +182,14 @@ export class DesktopNativeViews {
+       void this.policy.release(renderer, reservation.lease).catch(error => console.error(error))
+       return refuse('BROWSER_NATIVE_SURFACE_UNAVAILABLE')
+     }
++    return this.install(renderer, address.wire, workspace as string, reservation.lease, view)
++  }
++
++  private install(renderer: WebContents, scope: string, workspace: string, reservation: DesktopBrowserLeaseId,
++    view: WebContentsView): { lease: DesktopNativeLease } {
+     const lease = randomUUID() as DesktopNativeLease
+     const generation = randomUUID()
+-    const native: Native = { renderer, scope: address.wire, reservation: reservation.lease, view,
++    const native: Native = { renderer, scope, workspace, reservation, view,
+       container: new View(), generation, state: { stage: 'attached', generation }, queue: Promise.resolve() }
+     native.container.addChildView(view)
+     this.views.set(lease, native)
+@@ -185,7 +206,7 @@ export class DesktopNativeViews {
+       const generation = native.generation
+       void this.send(native, 'Page.getFrameTree').then((value) => {
+         const frame = record(record(record(value).frameTree).frame)
+-        if (this.views.get(lease) === native && native.slot !== undefined && generation === native.generation
++        if (this.views.get(lease) === native && generation === native.generation
+           && typeof frame.id === 'string' && typeof frame.loaderId === 'string') {
+           clearTimeout(native.documentTimer)
+           this.publish(lease, native, { stage: 'document', generation, frameId: frame.id, loaderId: frame.loaderId })
+@@ -201,6 +222,8 @@ export class DesktopNativeViews {
+     })
+     view.webContents.on('render-process-gone', () => { this.fail(lease, native, 'BROWSER_GUEST_CLOSED') })
+     view.webContents.once('destroyed', () => {
++      this.endChild(lease, 'BROWSER_GUEST_CLOSED')
++      void this.closeChildren(renderer, lease).catch(error => console.error(error))
+       clearTimeout(native.documentTimer)
+       if (this.views.get(lease) === native) {
+         this.publish(lease, native, { stage: 'closed', generation: native.generation })
+@@ -212,6 +235,111 @@ export class DesktopNativeViews {
+     return { lease }
+   }
+ 
++  private registerChildOwner(renderer: WebContents, parent: unknown, slotId: unknown): string {
++    const scope = tab(parent).wire
++    const slot = this.slot(renderer, slotId)
++    if (slot.scope !== scope || slot.lease === undefined) return refuse('BROWSER_OWNER_UNKNOWN')
++    const lease = slot.lease, native = this.native(renderer, lease)
++    if (native.scope !== scope || native.slot !== slotId) return refuse('BROWSER_OWNER_UNKNOWN')
++    if (this.childOwners.has(lease)) return refuse('BROWSER_HANDLE_STALE')
++    const registration = { token: randomUUID(), slot: slotId as SidebarNativeSlot }
++    this.childOwners.set(lease, registration)
++    native.view.webContents.setWindowOpenHandler((details) => {
++      if (this.childOwners.get(lease) !== registration || this.views.get(lease) !== native
++        || this.slots.get(registration.slot) !== slot || renderer.isDestroyed()
++        || [...this.children.values()].filter(child => child.parent === lease && child.slot === undefined).length >= 32
++        || (details.url !== 'about:blank' && !this.policy.allowedNavigation(details.url))) return { action: 'deny' }
++      return { action: 'allow', outlivesOpener: false,
++        overrideBrowserWindowOptions: { webPreferences: {
++          session: native.view.webContents.session, sandbox: true, contextIsolation: true, nodeIntegration: false,
++          nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true,
++          allowRunningInsecureContent: false, webviewTag: false, plugins: false, navigateOnDragDrop: false,
++          disableDialogs: true, backgroundThrottling: false,
++        } },
++        createWindow: (options) => {
++          if (this.childOwners.get(lease) !== registration || this.views.get(lease) !== native) return refuse('BROWSER_OWNER_UNKNOWN')
++          const address = tab(scope)
++          const child = `dsh-tab:v1:${encodeURIComponent(JSON.stringify([address.owner, address.session, randomUUID()]))}`
++          const reservation = this.policy.acquire(renderer, native.workspace)
++          let view: WebContentsView | undefined
++          try {
++            view = new WebContentsView(options)
++            this.policy.bindNative(renderer, reservation.lease, view.webContents)
++            const created = this.install(renderer, child, native.workspace, reservation.lease, view)
++            const event: DesktopNativeChild = { request: randomUUID(), opener: scope, child, lease: created.lease,
++              target: details.frameName, url: details.url, disposition: details.disposition }
++            const timer = setTimeout(() => {
++              this.endChild(created.lease, 'BROWSER_CHILD_ADOPTION_TIMEOUT')
++              void this.release(renderer, created.lease).catch(error => console.error(error))
++            }, 10_000)
++            this.children.set(event.request, { event, renderer, parent: lease, timer })
++            renderer.send(DESKTOP_IPC.nativeChildEvent, { type: 'created', parent: scope, child: event })
++            return view.webContents
++          } catch (_error) {
++            const guest = view?.webContents ?? (options as typeof options & { webContents?: WebContents }).webContents
++            if (guest !== undefined && !guest.isDestroyed()) guest.close({ waitForBeforeUnload: false })
++            void this.policy.release(renderer, reservation.lease).catch(error => console.error(error))
++            return refuse('BROWSER_NATIVE_CHILD_UNAVAILABLE')
++          }
++        },
++      }
++    })
++    return registration.token
++  }
++
++  private adoptChild(renderer: WebContents, request: unknown, slotId: unknown): { child: string; lease: DesktopNativeLease } {
++    if (typeof request !== 'string') return refuse('BROWSER_HANDLE_STALE')
++    const child = this.children.get(request)
++    if (child === undefined) {
++      const ended = this.endedChildren.get(request)
++      if (ended !== undefined && ended.renderer !== renderer) return refuse('BROWSER_OWNER_UNKNOWN')
++      return refuse(ended?.code ?? 'BROWSER_HANDLE_STALE')
++    }
++    if (child.renderer !== renderer) return refuse('BROWSER_OWNER_UNKNOWN')
++    const slot = this.slot(renderer, slotId)
++    if (child.slot !== undefined && child.slot !== slotId) return refuse('BROWSER_CHILD_ALREADY_ADOPTED')
++    const parent = this.native(renderer, child.parent)
++    const owner = this.childOwners.get(child.parent)
++    if (owner === undefined || parent.slot !== owner.slot || !this.slots.has(owner.slot)) return refuse('BROWSER_OWNER_UNKNOWN')
++    if (slot.scope !== child.event.child || this.slots.get(owner.slot)?.admission !== slot.admission) return refuse('BROWSER_OWNER_UNKNOWN')
++    this.attach(renderer, child.event.lease, slotId)
++    child.slot = slotId as SidebarNativeSlot
++    clearTimeout(child.timer)
++    return { child: child.event.child, lease: child.event.lease }
++  }
++
++  private endChild(lease: DesktopNativeLease, code: Failure): void {
++    for (const [request, child] of this.children) {
++      if (child.event.lease !== lease) continue
++      clearTimeout(child.timer)
++      this.children.delete(request)
++      this.endedChildren.set(request, { renderer: child.renderer, code })
++      if (this.endedChildren.size > 256) {
++        const oldest = this.endedChildren.keys().next().value
++        if (oldest !== undefined) this.endedChildren.delete(oldest)
++      }
++      if (!child.renderer.isDestroyed()) child.renderer.send(DESKTOP_IPC.nativeChildEvent,
++        { type: 'closed', parent: child.event.opener, child: child.event.child })
++    }
++  }
++
++  private async closeChildren(renderer: WebContents, lease: DesktopNativeLease): Promise<void> {
++    this.childOwners.delete(lease)
++    const children = [...this.children.values()].filter(child => child.parent === lease)
++    for (const child of children) await this.release(renderer, child.event.lease)
++  }
++
++  private async unregisterChildOwner(renderer: WebContents, parent: unknown, token: unknown): Promise<void> {
++    const scope = tab(parent).wire
++    const entry = [...this.views].find(([, native]) => native.scope === scope)
++    if (entry === undefined) return
++    const [lease, native] = entry
++    if (native.renderer !== renderer) return refuse('BROWSER_OWNER_UNKNOWN')
++    if (this.childOwners.get(lease)?.token !== token) return refuse('BROWSER_HANDLE_STALE')
++    native.view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
++    await this.closeChildren(renderer, lease)
++  }
++
+   private publish(lease: DesktopNativeLease, native: Native, state: DesktopNativeState): void {
+     native.state = state
+     if (!native.renderer.isDestroyed()) native.renderer.send(DESKTOP_IPC.nativeViewState, { lease, state })
+@@ -297,12 +425,15 @@ export class DesktopNativeViews {
+     }
+     if (native.renderer !== renderer) return refuse('BROWSER_OWNER_UNKNOWN')
+     this.views.delete(id as DesktopNativeLease)
++    this.endChild(id as DesktopNativeLease, 'BROWSER_GUEST_CLOSED')
++    const children = this.closeChildren(renderer, id as DesktopNativeLease)
+     clearTimeout(native.documentTimer)
+     this.detach(native)
+     if (native.slot !== undefined) {
+       this.slots.delete(native.slot)
+     }
+     const completion = Promise.resolve().then(async () => {
++      await children
+       await this.policy.release(renderer, native.reservation)
+       this.publish(id as DesktopNativeLease, native, { stage: 'closed', generation: native.generation })
+     }).finally(() => { this.releasing.delete(id as DesktopNativeLease) })
+diff --git a/apps/desktop/src/preload-browser.ts b/apps/desktop/src/preload-browser.ts
+index 3369469715..f989534142 100644
+--- a/apps/desktop/src/preload-browser.ts
++++ b/apps/desktop/src/preload-browser.ts
+@@ -1,6 +1,6 @@
+ /** Lease-scoped browser operations and one main-process event subscription per window. */
+ import { ipcRenderer } from 'electron'
+-import type { DesktopBrowserBridge, DesktopBrowserLeaseId, DesktopNativeLease, DesktopNativeState, DesktopNativeViews } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
++import type { DesktopBrowserBridge, DesktopBrowserLeaseId, DesktopNativeLease, DesktopNativeState, DesktopNativeViews, DesktopNativeChild } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
+ import { HarnessError } from '@deepseek-ai/dsh-error'
+ import { DESKTOP_IPC } from './ipc.ts'
+ 
+@@ -29,6 +29,33 @@ export function createDesktopBrowserBridge(): DesktopBrowserBridge {
+     if (!answer.ok) throw new HarnessError(answer.message, answer.code)
+     return answer.result
+   }
++  const created = new Map<string, Set<(child: DesktopNativeChild) => void>>()
++  const closed = new Map<string, Set<(child: string) => void>>()
++  ipcRenderer.on(DESKTOP_IPC.nativeChildEvent, (_event, input: unknown) => {
++    if (typeof input !== 'object' || input === null || !('parent' in input) || typeof input.parent !== 'string'
++      || !('type' in input) || !('child' in input)) return
++    if (input.type === 'created') {
++      const child = input.child
++      if (typeof child !== 'object' || child === null || !['request', 'opener', 'child', 'lease', 'target', 'url', 'disposition']
++        .every(key => key in child && typeof Reflect.get(child, key) === 'string')) return
++      for (const listener of [...created.get(input.parent) ?? []]) {
++        try { listener(child as DesktopNativeChild) } catch (error) { console.error('Native child listener failed', error) }
++      }
++    } else if (input.type === 'closed' && typeof input.child === 'string') {
++      for (const listener of [...closed.get(input.parent) ?? []]) {
++        try { listener(input.child) } catch (error) { console.error('Native child listener failed', error) }
++      }
++    }
++  })
++  const subscribe = <T>(registry: Map<string, Set<(value: T) => void>>, parent: string, listener: (value: T) => void): (() => void) => {
++    let listeners = registry.get(parent)
++    if (listeners === undefined) { listeners = new Set(); registry.set(parent, listeners) }
++    listeners.add(listener)
++    return () => {
++      listeners.delete(listener)
++      if (listeners.size === 0 && registry.get(parent) === listeners) registry.delete(parent)
++    }
++  }
+   const nativeViews: DesktopNativeViews = {
+     protocolVersion: 1,
+     slots: {
+@@ -64,6 +91,21 @@ export function createDesktopBrowserBridge(): DesktopBrowserBridge {
+     }
+   })
+   return {
++    childTabs: {
++      protocolVersion: 2,
++      async registerOwner(parent, slot) {
++        const token = await invoke<string>({ op: 'child-register', parent, slot })
++        let active = true
++        return () => {
++          if (!active) return
++          active = false
++          void invoke({ op: 'child-unregister', parent, token }).catch(error => console.error('Native child owner release failed', error))
++        }
++      },
++      onCreated: (parent, listener) => subscribe(created, parent, listener),
++      onClosed: (parent, listener) => subscribe(closed, parent, listener),
++      adopt: (request, slot) => invoke({ op: 'child-adopt', request, slot }),
++    },
+     nativeViews,
+     acquire: workspace => ipcRenderer.invoke(DESKTOP_IPC.browserAcquire, workspace) as ReturnType<DesktopBrowserBridge['acquire']>,
+     release: lease => ipcRenderer.invoke(DESKTOP_IPC.browserRelease, lease) as Promise<void>,
+diff --git a/apps/desktop/tests/native-views.spec.ts b/apps/desktop/tests/native-views.spec.ts
+index 4b8f1dbc95..4988350e62 100644
+--- a/apps/desktop/tests/native-views.spec.ts
++++ b/apps/desktop/tests/native-views.spec.ts
+@@ -6,6 +6,7 @@ import { DesktopNativeViews } from '../src/native-views.ts'
+ import type { DesktopBrowserLeaseId } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
+ 
+ interface Guest extends EventEmitter {
++  open?: Parameters<WebContents['setWindowOpenHandler']>[0]
+   dead: boolean
+   isDestroyed(): boolean
+   close(): void
+@@ -15,6 +16,8 @@ const electron = vi.hoisted(() => ({ guests: [] as Guest[], options: [] as objec
+ vi.mock('electron', async () => {
+   const { EventEmitter } = await import('node:events')
+   class Guest extends EventEmitter {
++    open?: Parameters<WebContents['setWindowOpenHandler']>[0]
++    setWindowOpenHandler(handler: Parameters<WebContents['setWindowOpenHandler']>[0]) { this.open = handler }
+     dead = false
+     debugger = { attach: vi.fn(), isAttached: () => true,
+       sendCommand: vi.fn(async () => ({ frameTree: { frame: { id: 'frame', loaderId: 'loader' } } })) }
+@@ -30,11 +33,77 @@ vi.mock('electron', async () => {
+     setVisible = vi.fn()
+   }
+   return { app: {}, session: {}, View, WebContentsView: class extends View {
+-    webContents = new Guest()
+-    constructor(options: object) { super(); electron.options.push(options); electron.guests.push(this.webContents) }
++    webContents: Guest
++    constructor(options: { webContents?: Guest }) {
++      super()
++      this.webContents = options.webContents ?? new Guest()
++      electron.options.push(options)
++      electron.guests.push(this.webContents)
++    }
+   } }
+ })
+ 
++async function childFixture() {
++  const f = fixture(), parent = await f.attached()
++  const token = await f.ok({ op: 'child-register', parent: scope(), slot: parent.slot })
++  const open = parent.guest.open!({ url: 'https://example.test/child', frameName: 'child', disposition: 'new-window',
++    features: '', referrer: { url: '', policy: 'default' } })
++  expect(open.action).toBe('allow')
++  if (open.action !== 'allow') throw new Error('Native child denied')
++  const nativeChild = new (parent.guest.constructor as new () => Guest)()
++  expect(open.createWindow!({ webContents: nativeChild as Guest & WebContents })).toBe(nativeChild)
++  const event = f.owner.send.mock.calls.find(([channel, value]) => channel === 'dsh-desktop:native-child-event' && value.type === 'created')![1].child
++  const admission = parent.admission
++  const slot = await f.ok({ op: 'register', admission, scope: event.child })
++  await f.ok({ op: 'update', slot, placement })
++  return { ...f, parent, token, nativeChild, event, slot }
++}
++
++it('adopts the actual native child once, replays only to the same slot, and acknowledges an early document', async () => {
++  const f = await childFixture()
++  f.nativeChild.emit('did-navigate')
++  await vi.waitFor(() => expect(f.nativeChild.debugger.sendCommand).toHaveBeenCalledWith('Page.getFrameTree', {}))
++  await f.ok({ op: 'child-adopt', request: f.event.request, slot: f.slot })
++  expect(await f.ok({ op: 'child-adopt', request: f.event.request, slot: f.slot })).toEqual({ child: f.event.child, lease: f.event.lease })
++  expect(f.service.snapshot().find(view => view.scope === f.event.child)?.state.stage).toBe('document')
++  expect(f.nativeChild.debugger.sendCommand.mock.calls.every(([method]) => method !== 'Page.navigate')).toBe(true)
++  expect(await f.request({ op: 'child-adopt', request: f.event.request, slot: f.parent.slot })).toMatchObject({ code: 'BROWSER_CHILD_ALREADY_ADOPTED' })
++  await f.service.release(f.renderer, f.event.lease)
++  expect(await f.request({ op: 'child-adopt', request: f.event.request, slot: f.slot })).toMatchObject({ code: 'BROWSER_GUEST_CLOSED' })
++})
++
++it('denies foreign owners, admissions and requests without creating another native child', async () => {
++  const f = await childFixture(), count = electron.guests.length
++  expect(await f.request({ op: 'child-adopt', request: f.event.request, slot: f.slot }, new EventEmitter() as WebContents)).toMatchObject({ code: 'BROWSER_OWNER_UNKNOWN' })
++  const foreign = await f.admit('foreign', 'foreign')
++  expect(await f.request({ op: 'child-adopt', request: f.event.request, slot: foreign.slot })).toMatchObject({ code: 'BROWSER_OWNER_UNKNOWN' })
++  expect(await f.request({ op: 'child-register', parent: scope(), slot: foreign.slot })).toMatchObject({ code: 'BROWSER_OWNER_UNKNOWN' })
++  expect(await f.request({ op: 'child-adopt', request: 'forged', slot: f.slot })).toMatchObject({ code: 'BROWSER_HANDLE_STALE' })
++  expect(electron.guests).toHaveLength(count)
++})
++
++it('destroys expired children and refuses adoption without replacing or navigating anything', async () => {
++  vi.useFakeTimers()
++  const f = await childFixture()
++  await vi.advanceTimersByTimeAsync(10_000)
++  expect(f.nativeChild.dead).toBe(true)
++  expect(await f.request({ op: 'child-adopt', request: f.event.request, slot: f.slot })).toMatchObject({ code: 'BROWSER_CHILD_ADOPTION_TIMEOUT' })
++  expect(f.parent.guest.dead).toBe(false)
++  expect(f.parent.guest.debugger.sendCommand).not.toHaveBeenCalled()
++})
++
++it('revokes the creation policy and closes pending and adopted descendants with their parent', async () => {
++  for (const adopted of [false, true]) {
++    const f = await childFixture()
++    if (adopted) await f.ok({ op: 'child-adopt', request: f.event.request, slot: f.slot })
++    await f.ok({ op: 'child-unregister', parent: scope(), token: f.token })
++    expect(f.nativeChild.dead).toBe(true)
++    expect(f.parent.guest.dead).toBe(false)
++    expect(f.owner.send).toHaveBeenCalledWith('dsh-desktop:native-child-event', { type: 'closed', parent: scope(), child: f.event.child })
++    expect(f.parent.guest.open!({} as Electron.HandlerDetails)).toEqual({ action: 'deny' })
++  }
++})
++
+ const scope = (owner = 'owner', tab = 'tab') => `dsh-tab:v1:${encodeURIComponent(JSON.stringify([owner, 'browser-session', tab]))}`
+ const placement = { x: 5, y: 10, width: 400, height: 300, visible: true, background: false }
+ const services: { service: DesktopNativeViews; renderer: WebContents }[] = []
+diff --git a/apps/desktop/tests/preload-app.spec.ts b/apps/desktop/tests/preload-app.spec.ts
+index b686042f32..d090ecfe53 100644
+--- a/apps/desktop/tests/preload-app.spec.ts
++++ b/apps/desktop/tests/preload-app.spec.ts
+@@ -29,6 +29,35 @@ it('exposes only package-name status requests through the main-extension product
+   expect(electron.ipcRenderer.invoke).toHaveBeenCalledWith(DESKTOP_IPC.mainExtensionStatus, 'dsh-builtin-browser')
+ })
+ 
++it('exposes native child v2 with scoped events, adoption and idempotent owner cleanup', async () => {
++  vi.stubGlobal('location', new URL('dsh-app://app/'))
++  await import('../src/preload-app.ts')
++  const api = electron.contextBridge.exposeInMainWorld.mock.calls.find(([name]) => name === 'dshDesktop')?.[1] as DshDesktopProductApi
++  const children = api.browser.childTabs!
++  expect(children.protocolVersion).toBe(2)
++  const parent = 'parent', slot = 'slot' as import('@deepseek-ai/dsh-client-ui-sidebar-browser/types').SidebarNativeSlot
++  electron.ipcRenderer.invoke.mockResolvedValue({ ok: true, result: 'owner-token' })
++  const release = await children.registerOwner(parent, slot)
++  expect(electron.ipcRenderer.invoke).toHaveBeenLastCalledWith(DESKTOP_IPC.nativeViewsRequest, { op: 'child-register', parent, slot })
++  const created = vi.fn(), closed = vi.fn()
++  const stopCreated = children.onCreated(parent, created), stopClosed = children.onClosed(parent, closed)
++  const dispatch = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.nativeChildEvent)![1]
++  const child = { request: 'request', opener: parent, child: 'child', lease: 'lease', target: 'name', url: 'https://example.test', disposition: 'new-window' }
++  dispatch({}, { type: 'created', parent: 'foreign', child })
++  dispatch({}, { type: 'created', parent, child: {} })
++  expect(created).not.toHaveBeenCalled()
++  dispatch({}, { type: 'created', parent, child })
++  expect(created).toHaveBeenCalledExactlyOnceWith(child)
++  dispatch({}, { type: 'closed', parent, child: child.child })
++  expect(closed).toHaveBeenCalledExactlyOnceWith(child.child)
++  await children.adopt(child.request, slot)
++  expect(electron.ipcRenderer.invoke).toHaveBeenLastCalledWith(DESKTOP_IPC.nativeViewsRequest, { op: 'child-adopt', request: child.request, slot })
++  stopCreated(); stopClosed(); release(); release()
++  expect(electron.ipcRenderer.invoke.mock.calls.filter(([, value]) => value?.op === 'child-unregister')).toHaveLength(1)
++  dispatch({}, { type: 'created', parent, child })
++  expect(created).toHaveBeenCalledTimes(1)
++})
++
+ it('reads only native login API-key presence through the onboarding bridge', async () => {
+   vi.stubGlobal('location', new URL('dsh-app://app/'))
+   electron.ipcRenderer.invoke.mockResolvedValueOnce(true)
+diff --git a/packages/client/ui-sidebar-browser/src/types.ts b/packages/client/ui-sidebar-browser/src/types.ts
+index 79949bbed9..ca5e241eaa 100644
+--- a/packages/client/ui-sidebar-browser/src/types.ts
++++ b/packages/client/ui-sidebar-browser/src/types.ts
+@@ -44,6 +44,7 @@ export interface DesktopBrowserOpenRequest {
+ 
+ /** Origin-scoped operations; no Electron objects or arbitrary IPC cross this interface. */
+ export interface DesktopBrowserBridge {
++  readonly childTabs?: DesktopNativeChildTabs
+   readonly nativeViews?: DesktopNativeViews
+   /** @param workspace - resolved storage account. @returns one approved guest reservation. */
+   acquire(workspace: string): Promise<DesktopBrowserReservation>
+@@ -52,3 +53,23 @@ export interface DesktopBrowserBridge {
+   /** @param lease - originating guest. @param listener - approved URL consumer. @returns unsubscribe callback. */
+   onOpenRequested(lease: DesktopBrowserLeaseId, listener: (url: string) => void): () => void
+ }
++
++/** Main-reserved native child; addresses never authorize adoption. */
++export interface DesktopNativeChild {
++  readonly request: string
++  readonly opener: string
++  readonly child: string
++  readonly lease: DesktopNativeLease
++  readonly target: string
++  readonly url: string
++  readonly disposition: string
++}
++
++/** Native WindowProxy-preserving child creation, independent of URL-only notifications. */
++export interface DesktopNativeChildTabs {
++  readonly protocolVersion: 2
++  registerOwner(parent: string, slot: SidebarNativeSlot): Promise<() => void>
++  onCreated(parent: string, listener: (child: DesktopNativeChild) => void): () => void
++  adopt(request: string, slot: SidebarNativeSlot): Promise<{ child: string; lease: DesktopNativeLease }>
++  onClosed(parent: string, listener: (child: string) => void): () => void
++}
+diff --git a/packages/client/ui-sidebar-right/src/client/service.ts b/packages/client/ui-sidebar-right/src/client/service.ts
+index 65f7e8e895..bb1e6324c1 100644
+--- a/packages/client/ui-sidebar-right/src/client/service.ts
++++ b/packages/client/ui-sidebar-right/src/client/service.ts
+@@ -224,6 +224,8 @@ export type SidebarRightCloseHandler = (sessionId: SessionId, tab: TabRecord) =>
+ 
+ /** The outward right-Sidebar face (`ctx.sidebarRight`). */
+ export interface ISidebarRight {
++  /** Present a host-reserved tab identity; native adoption separately authenticates its slot. */
++  openReservedTab?(sessionId: SessionId, kind: string, tabId: TabId): boolean
+   /** Register a committed tab viewport; lifetime cancellation revokes it before native reuse. */
+   nativeSlot?(sessionId: SessionId, tabId: TabId, scope: string, viewportId: string, signal: AbortSignal): Promise<SidebarNativeSlot>
+   /**
+@@ -452,6 +454,17 @@ export class SidebarRightController implements ISidebarRight {
+     if (actions !== undefined) this.placeTab(sessionId, actions, kind, options)
+   }
+ 
++  /** Open a main-reserved native child without replacing the parent's page tab. */
++  openReservedTab(sessionId: SessionId, kind: string, tabId: TabId): boolean {
++    const actions = this.actionsFor(sessionId), definition = this.tabs.get(kind)
++    const surface = this.adopted.get(sessionId)?.store.getSnapshot().bySession[sessionId]
++    if (actions === undefined || definition === undefined || surface?.layout.tabs[tabId] !== undefined) return false
++    const contentId = `${pageAddress(kind)}/${tabId}`
++    actions.openReservedTab(sessionId, { id: tabId, kind, contentId, title: definition.title(contentId) })
++    this.tabDomain.navigate(sessionId, tabId, { address: contentId, params: undefined })
++    return true
++  }
++
+   /**
+    * Close a tab of one session, preserving the sole docked guide; nothing happens
+    * for a session whose store was never adopted or whose adoption was released.
+diff --git a/packages/client/ui-sidebar-right/src/client/stores.ts b/packages/client/ui-sidebar-right/src/client/stores.ts
+index 142de493fe..2c69cc1031 100644
+--- a/packages/client/ui-sidebar-right/src/client/stores.ts
++++ b/packages/client/ui-sidebar-right/src/client/stores.ts
+@@ -277,6 +277,7 @@ function seat(
+ 
+ /** Declared write set; each entry is one settled intent. */
+ type SidebarRightActions = {
++  openReservedTab: (draft: SidebarRightState, sessionId: string, tab: TabRecord) => void
+   open: (draft: SidebarRightState, sessionId: string) => void
+   setExpanded: (draft: SidebarRightState, sessionId: string, expanded: boolean) => void
+   toggleExpanded: (draft: SidebarRightState, sessionId: string) => void
+@@ -331,6 +332,15 @@ export function createSidebarRightStore(
+       // Materialize a session's surface without changing it, so the first read
+       // after a session switch sees the collapsed empty column rather than nothing.
+       open: (d, sessionId: string) => { d.bySession = seat(d, sessionId, surface => surface) },
++      openReservedTab: (d, sessionId, tab) => {
++        d.bySession = seat(d, sessionId, s => advance(s, (state) => {
++          if (state.tabs[tab.id] !== undefined) return []
++          const paneId = activeDockPaneId(state)
++          return [...planSetExpanded(state, true),
++            { type: 'openTab', paneId, tab, index: getPane(state, paneId).tabs.length },
++            { type: 'focusTab', tabId: tab.id }]
++        }, seed))
++      },
+       setExpanded: (d, sessionId: string, expanded: boolean) => {
+         d.bySession = seat(d, sessionId, s => advance(s, state => planSetExpanded(state, expanded), seed))
+       },
+diff --git a/packages/client/ui-sidebar-right/tests/service.client.spec.ts b/packages/client/ui-sidebar-right/tests/service.client.spec.ts
+index 46072beeaf..0ff39333ec 100644
+--- a/packages/client/ui-sidebar-right/tests/service.client.spec.ts
++++ b/packages/client/ui-sidebar-right/tests/service.client.spec.ts
+@@ -17,6 +17,26 @@ import { createSidebarRightStore } from '../src/client/stores.ts'
+ import { controllerHarness as harness, SESSION } from './controller-harness.client.ts'
+ 
+ describe('SidebarRightController — opening', () => {
++  it('opens a reserved native identity with a normal navigation occurrence and refuses replay', () => {
++    const h = harness(), id = 'main-issued-child' as TabId
++    h.tabs.register({ id: 'test/browser', kind: 'browser', multiple: true, title: () => 'Browser' })
++    const release = h.publish()
++    try {
++      h.controller.openTab('browser')
++      const parent = h.tabOf('Browser')
++      expect(h.controller.openReservedTab(SESSION, 'browser', id)).toBe(true)
++      expect(h.layout().tabs[id]).toMatchObject({ id, kind: 'browser' })
++      expect(h.layout().tabs[parent]).toBeDefined()
++      expect(h.controller.tabDomain.occurrence(SESSION, { id }).navigation.getSnapshot()).toEqual({
++        address: `sidebar://browser/${id}`, params: undefined, revision: 1,
++      })
++      const entries = h.entries()
++      expect(h.controller.openReservedTab(SESSION, 'browser', id)).toBe(false)
++      expect(h.controller.openReservedTab('foreign' as SessionId, 'browser', id)).toBe(false)
++      expect(h.controller.openReservedTab(SESSION, 'absent', 'other' as TabId)).toBe(false)
++      expect(h.entries()).toBe(entries)
++    } finally { release(); h.unadopt() }
++  })
+   it('keeps independently opened instances distinct when they return to the same pane', () => {
+     const h = harness()
+     h.tabs.register({ id: 'test/terminal', kind: 'terminal', multiple: true, title: () => 'terminal' })
+diff --git a/packages/client/ui-sidebar-right/tests/stores.client.spec.ts b/packages/client/ui-sidebar-right/tests/stores.client.spec.ts
+index bdf1b8e962..96bdfaa3aa 100644
+--- a/packages/client/ui-sidebar-right/tests/stores.client.spec.ts
++++ b/packages/client/ui-sidebar-right/tests/stores.client.spec.ts
+@@ -37,6 +37,20 @@ function harness() {
+ }
+ 
+ describe('createSidebarRightStore — the sequence', () => {
++  it('opens a reserved native identity beside its parent without minting or replacing the parent tab', () => {
++    const f = harness(); f.expand()
++    const parent = f.guide(), id = 'main-reserved-child' as TabId
++    const tab = { id, kind: 'browser', contentId: 'dsh-page://browser/' + id, title: 'Child' }
++    f.actions.openReservedTab(SESSION, tab)
++    expect(f.layout().tabs[id]).toEqual(tab)
++    expect(f.layout().tabs[parent]).toBeDefined()
++    const entries = f.entries()
++    f.actions.openReservedTab(SESSION, tab)
++    expect(f.entries()).toBe(entries)
++    f.actions.closeTab(SESSION, id)
++    expect(f.layout().tabs[id]).toBeUndefined()
++    expect(f.layout().tabs[parent]).toBeDefined()
++  })
+   it.each(['left', 'right'] as const)('splits one pane at its %s edge and records the tab move as one reversible intent', (zone) => {
+     const { actions, layout, entries, guide, expand } = harness()
+     expand()
+-- 
+2.56.0
+
+
+From e12a219b11b2909392f3eda4377e4ba524c257bf Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 13:44:23 +0000
+Subject: [PATCH 2/3] fix(desktop): publish complete native child close records
+ and blank acknowledgements
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ apps/desktop/src/native-views.ts                |  6 +++++-
+ apps/desktop/src/preload-browser.ts             | 12 +++++-------
+ apps/desktop/tests/native-views.spec.ts         | 10 +++++++++-
+ apps/desktop/tests/preload-app.spec.ts          |  4 ++--
+ packages/client/ui-sidebar-browser/src/types.ts |  2 +-
+ 5 files changed, 22 insertions(+), 12 deletions(-)
+
+diff --git a/apps/desktop/src/native-views.ts b/apps/desktop/src/native-views.ts
+index 65562501c5..c6fcaa8fbc 100644
+--- a/apps/desktop/src/native-views.ts
++++ b/apps/desktop/src/native-views.ts
+@@ -54,6 +54,7 @@ interface Native {
+   slot?: SidebarNativeSlot
+   queue: Promise<unknown>
+   documentTimer?: ReturnType<typeof setTimeout>
++  acknowledge?: () => void
+ }
+ 
+ interface ChildRequest {
+@@ -213,6 +214,7 @@ export class DesktopNativeViews {
+         }
+       }).catch((_error) => { if (this.views.get(lease) === native) this.fail(lease, native, 'BROWSER_DOCUMENT_UNACKNOWLEDGED') })
+     }
++    native.acknowledge = committed
+     view.webContents.on('did-navigate', committed)
+     view.webContents.on('did-navigate-in-page', (_event, _url, mainFrame) => {
+       if (mainFrame) committed()
+@@ -319,7 +321,7 @@ export class DesktopNativeViews {
+         if (oldest !== undefined) this.endedChildren.delete(oldest)
+       }
+       if (!child.renderer.isDestroyed()) child.renderer.send(DESKTOP_IPC.nativeChildEvent,
+-        { type: 'closed', parent: child.event.opener, child: child.event.child })
++        { type: 'closed', parent: child.event.opener, child: child.event })
+     }
+   }
+ 
+@@ -361,6 +363,8 @@ export class DesktopNativeViews {
+     this.compose(native, slot)
+     clearTimeout(native.documentTimer)
+     this.publish(id as DesktopNativeLease, native, native.state)
++    if (native.state.stage === 'attached' && native.view.webContents.getURL() === 'about:blank'
++      && [...this.children.values()].some(child => child.event.lease === id)) native.acknowledge?.()
+   }
+ 
+   private compose(native: Native, slot: Slot): void {
+diff --git a/apps/desktop/src/preload-browser.ts b/apps/desktop/src/preload-browser.ts
+index f989534142..1009adb587 100644
+--- a/apps/desktop/src/preload-browser.ts
++++ b/apps/desktop/src/preload-browser.ts
+@@ -30,21 +30,19 @@ export function createDesktopBrowserBridge(): DesktopBrowserBridge {
+     return answer.result
+   }
+   const created = new Map<string, Set<(child: DesktopNativeChild) => void>>()
+-  const closed = new Map<string, Set<(child: string) => void>>()
++  const closed = new Map<string, Set<(child: DesktopNativeChild) => void>>()
+   ipcRenderer.on(DESKTOP_IPC.nativeChildEvent, (_event, input: unknown) => {
+     if (typeof input !== 'object' || input === null || !('parent' in input) || typeof input.parent !== 'string'
+       || !('type' in input) || !('child' in input)) return
+-    if (input.type === 'created') {
++    if (input.type === 'created' || input.type === 'closed') {
+       const child = input.child
+       if (typeof child !== 'object' || child === null || !['request', 'opener', 'child', 'lease', 'target', 'url', 'disposition']
+         .every(key => key in child && typeof Reflect.get(child, key) === 'string')) return
+-      for (const listener of [...created.get(input.parent) ?? []]) {
++      if ((child as DesktopNativeChild).opener !== input.parent) return
++      const registry = input.type === 'created' ? created : closed
++      for (const listener of [...registry.get(input.parent) ?? []]) {
+         try { listener(child as DesktopNativeChild) } catch (error) { console.error('Native child listener failed', error) }
+       }
+-    } else if (input.type === 'closed' && typeof input.child === 'string') {
+-      for (const listener of [...closed.get(input.parent) ?? []]) {
+-        try { listener(input.child) } catch (error) { console.error('Native child listener failed', error) }
+-      }
+     }
+   })
+   const subscribe = <T>(registry: Map<string, Set<(value: T) => void>>, parent: string, listener: (value: T) => void): (() => void) => {
+diff --git a/apps/desktop/tests/native-views.spec.ts b/apps/desktop/tests/native-views.spec.ts
+index 4988350e62..c763a12d88 100644
+--- a/apps/desktop/tests/native-views.spec.ts
++++ b/apps/desktop/tests/native-views.spec.ts
+@@ -72,6 +72,14 @@ it('adopts the actual native child once, replays only to the same slot, and ackn
+   expect(await f.request({ op: 'child-adopt', request: f.event.request, slot: f.slot })).toMatchObject({ code: 'BROWSER_GUEST_CLOSED' })
+ })
+ 
++it('acknowledges an adopted initial blank document without replaying navigation', async () => {
++  const f = await childFixture()
++  Object.assign(f.nativeChild, { getURL: () => 'about:blank' })
++  await f.ok({ op: 'child-adopt', request: f.event.request, slot: f.slot })
++  await vi.waitFor(() => expect(f.service.snapshot().find(view => view.scope === f.event.child)?.state.stage).toBe('document'))
++  expect(f.nativeChild.debugger.sendCommand.mock.calls.some(([method]) => method === 'Page.navigate')).toBe(false)
++})
++
+ it('denies foreign owners, admissions and requests without creating another native child', async () => {
+   const f = await childFixture(), count = electron.guests.length
+   expect(await f.request({ op: 'child-adopt', request: f.event.request, slot: f.slot }, new EventEmitter() as WebContents)).toMatchObject({ code: 'BROWSER_OWNER_UNKNOWN' })
+@@ -99,7 +107,7 @@ it('revokes the creation policy and closes pending and adopted descendants with
+     await f.ok({ op: 'child-unregister', parent: scope(), token: f.token })
+     expect(f.nativeChild.dead).toBe(true)
+     expect(f.parent.guest.dead).toBe(false)
+-    expect(f.owner.send).toHaveBeenCalledWith('dsh-desktop:native-child-event', { type: 'closed', parent: scope(), child: f.event.child })
++    expect(f.owner.send).toHaveBeenCalledWith('dsh-desktop:native-child-event', { type: 'closed', parent: scope(), child: f.event })
+     expect(f.parent.guest.open!({} as Electron.HandlerDetails)).toEqual({ action: 'deny' })
+   }
+ })
+diff --git a/apps/desktop/tests/preload-app.spec.ts b/apps/desktop/tests/preload-app.spec.ts
+index d090ecfe53..a2ea9f324a 100644
+--- a/apps/desktop/tests/preload-app.spec.ts
++++ b/apps/desktop/tests/preload-app.spec.ts
+@@ -48,8 +48,8 @@ it('exposes native child v2 with scoped events, adoption and idempotent owner cl
+   expect(created).not.toHaveBeenCalled()
+   dispatch({}, { type: 'created', parent, child })
+   expect(created).toHaveBeenCalledExactlyOnceWith(child)
+-  dispatch({}, { type: 'closed', parent, child: child.child })
+-  expect(closed).toHaveBeenCalledExactlyOnceWith(child.child)
++  dispatch({}, { type: 'closed', parent, child })
++  expect(closed).toHaveBeenCalledExactlyOnceWith(child)
+   await children.adopt(child.request, slot)
+   expect(electron.ipcRenderer.invoke).toHaveBeenLastCalledWith(DESKTOP_IPC.nativeViewsRequest, { op: 'child-adopt', request: child.request, slot })
+   stopCreated(); stopClosed(); release(); release()
+diff --git a/packages/client/ui-sidebar-browser/src/types.ts b/packages/client/ui-sidebar-browser/src/types.ts
+index ca5e241eaa..c96e01b236 100644
+--- a/packages/client/ui-sidebar-browser/src/types.ts
++++ b/packages/client/ui-sidebar-browser/src/types.ts
+@@ -71,5 +71,5 @@ export interface DesktopNativeChildTabs {
+   registerOwner(parent: string, slot: SidebarNativeSlot): Promise<() => void>
+   onCreated(parent: string, listener: (child: DesktopNativeChild) => void): () => void
+   adopt(request: string, slot: SidebarNativeSlot): Promise<{ child: string; lease: DesktopNativeLease }>
+-  onClosed(parent: string, listener: (child: string) => void): () => void
++  onClosed(parent: string, listener: (child: DesktopNativeChild) => void): () => void
+ }
+-- 
+2.56.0
+
+
+From 7f9dce79fbfd2678a58577aa38a75b109dac4d8a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 13:45:42 +0000
+Subject: [PATCH 3/3] fix(desktop): bundle structured errors in sandboxed
+ preloads
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ apps/desktop/tsdown.config.ts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/apps/desktop/tsdown.config.ts b/apps/desktop/tsdown.config.ts
+index 40ed1a0316..c508da9930 100644
+--- a/apps/desktop/tsdown.config.ts
++++ b/apps/desktop/tsdown.config.ts
+@@ -108,6 +108,6 @@ export default defineConfig([
+     fixedExtension: false,
+     dts: false,
+     clean: false,
+-    deps: { neverBundle: ['electron'] },
++    deps: { neverBundle: ['electron'], alwaysBundle: ['@deepseek-ai/dsh-error'] },
+   })),
+ ])
+-- 
+2.56.0
+
