@@ -6,7 +6,13 @@ Desktop childTabs protocol 2 admits an opener only after its canonical tab and n
 
 The plugin feature-detects protocol 2 and the optional reserved-tab controller method against unpatched host declarations. The host event is recorded before opening the reserved tab, so the page factory sees the main-owned child before rendering its occurrence. It subscribes before adoption, reuses the supplied lease and acknowledges initialization without `Page.navigate`. Initial blank documents can become ready without converting `about:blank` to an HTTP URL. Unsupported native-opener requests report `BROWSER_NATIVE_CHILD_UNAVAILABLE`; explicit URL-only requests remain separate.
 
-Revision 4 runtime specs retain compressed revision-3 specs and revision-1/2 specs. Upgrade validates the complete previous output against original backups before writing any selected bundle. Restore retains the pre-bootstrap bytes; unrelated edits refuse upgrade. Source patches are supplied for rc.3, rc.5 and main.
+Revision 5 includes native children and opt-in persistent Sidebar storage, retaining compressed revision-3/4 specs and revision-1/2 specs. Upgrade validates the complete previous output against original backups before writing any selected bundle. Restore retains the pre-bootstrap bytes; unrelated edits refuse upgrade. Source patches are supplied for rc.3, rc.5 and main.
+
+## Persistent Sidebar sessions
+
+The guest and native-view APIs advertise optional `persistentSession: true`. The plugin requests persistence only when advertised; older hosts retain their workspace-scoped memory partitions. Main derives one persistent partition from the resolved `DSH_HOME`, never from a workspace or renderer-supplied storage identity. All workspaces in that home share cookies and web storage across restarts; different homes remain isolated. Existing memory-only sessions have no durable data to migrate. No plugin storage keys, user IDs or provider hooks change.
+
+Run `DSH_SOURCE_ROOT=<dsh-source> PERSISTENCE_EVIDENCE=<directory> node tools/check-sidebar-persistence.mjs` for four real Electron launches under xvfb: write, restart/read, different-home empty, original-home read. The fixture checks cookies, localStorage and cross-workspace sharing through the emitted production partition policy, with `webviewTag: false` and one BrowserWindow.
 
 ## Reproduction
 
