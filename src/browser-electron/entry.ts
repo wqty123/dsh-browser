@@ -321,16 +321,29 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }).catch(() => {})
   })
 
-  const requiredSidebar = (): SidebarOnlyHost => new SidebarOnlyHost(async signal => {
-    for (const pause of [0, 1_000, 3_000, 8_000]) {
-      signal.throwIfAborted()
-      if (pause > 0) await wait(pause, undefined, { signal })
-      const sidebar = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
-      if (sidebar !== undefined) return sidebar
-      if (DesktopBridgeViewHost.refusedIframePanel()) break
-    }
-    throw new Error('dsh-builtin-browser: no controllable DSH sidebar is available. Use a host-provided sidebar/webview carrier or reconnect the existing sidebar, then retry. The Web panel supports manual browsing, not CDP tools. No standalone browser will be opened.')
-  })
+  const reportCarrierLoss = (reason: CarrierLossReason): void => {
+    const detail = reason === 'shell-exited'
+      ? 'the desktop shell backed the sidebar browser and has exited'
+      : 'the desktop shell is running, but its sidebar browser panel cannot be driven'
+    ctx.logger?.warn?.(`dsh-builtin-browser: ${detail} (${reason}); the next operation requires the DSH sidebar. No standalone fallback will be opened.`)
+  }
+  const requiredSidebar = (): SidebarOnlyHost => {
+    const host = new SidebarOnlyHost(async signal => {
+      for (const pause of [0, 1_000, 3_000, 8_000]) {
+        signal.throwIfAborted()
+        if (pause > 0) await wait(pause, undefined, { signal })
+        const sidebar = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
+        if (sidebar !== undefined) return sidebar
+        if (DesktopBridgeViewHost.refusedIframePanel()) break
+      }
+      const detail = DesktopBridgeViewHost.refusedIframePanel()
+        ? 'the DSH sidebar is an iframe and cannot support CDP tools'
+        : 'no controllable DSH sidebar is available'
+      throw new Error(`dsh-builtin-browser: ${detail}. Use a host-provided sidebar/webview carrier or reconnect the existing sidebar, then retry. The Web panel supports manual browsing, not CDP tools. No standalone browser will be opened.`)
+    })
+    host.onLost(reportCarrierLoss)
+    return host
+  }
   const initialHost = requiredSidebar()
   let unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(initialHost, providerConfig)))
   let disposed = false
@@ -363,9 +376,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       unregister()
       unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(restored, providerConfig)))
       adoptedCarrier = restored
-      ctx.logger?.warn?.(
-        `dsh-builtin-browser: browser carrier lost (${reason}); the next operation requires the DSH sidebar. No standalone fallback will be opened.`,
-      )
+      reportCarrierLoss(reason)
     } catch (error) {
       // Nothing better is available: the adopted carrier is gone and a provider that throws is
       // worse than one that explains.

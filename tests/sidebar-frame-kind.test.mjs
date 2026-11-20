@@ -11,11 +11,14 @@
 // Neither is repairable from a plugin, and both are legible from the renderer.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
+import { BridgeConnection } from '../lib/browser-electron/bridge-connection.js'
+import { carrierHarness } from './carrier-harness.mjs'
 
 const bridge = readFileSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url), 'utf8')
 const host = readFileSync(new URL('../src/browser-electron/desktop-bridge-host.ts', import.meta.url), 'utf8')
-const entry = readFileSync(new URL('../src/browser-electron/entry.ts', import.meta.url), 'utf8')
 
 test('the liveness answer carries the panel kind, read from the same attribute the shell sets', () => {
   // The official client keys off this attribute to choose between its webview and iframe paths, so
@@ -36,15 +39,25 @@ test('the frame kind is read without a conversation, because it is a property of
     'which is what the owner-less probe already sends')
 })
 
-test('an iframe panel is refused, and the other answers are not', () => {
-  // Refusing on `none` would break the first open of every session (the panel does not exist until
-  // it is asked for), and refusing on `unknown` would break a carrier because a probe ran early.
-  assert.match(host, /if \(String\(answer\.frame \?\? 'unknown'\) === 'iframe'\) \{/,
-    'only iframe is a refusal')
-  assert.match(host, /DesktopBridgeViewHost\.refuseIframe = true/, 'and it is recorded')
-  assert.match(host, /static refusedIframePanel\(\): boolean/, 'so the entry point can say why')
-  assert.match(entry, /a desktop bridge is installed, but this shell renders the sidebar/,
-    'and it does')
+test('an iframe panel is refused for CDP with an actionable sidebar-only error', async t => {
+  const discover = DesktopBridgeViewHost.discover.bind(DesktopBridgeViewHost)
+  const h = carrierHarness(t, { discover })
+  writeFileSync(join(process.env.DSH_HOME, 'dsh-builtin-browser-bridge.json'), JSON.stringify({ port: 1, token: 'fixture', pid: process.pid }))
+  let frame
+  const probe = t.mock.method(BridgeConnection.prototype, 'call', async request => {
+    assert.deepEqual(request, { op: 'list' }, 'discovery is owner-less')
+    return { ok: true, frame }
+  })
+  for (frame of ['iframe', 'webview', 'none', 'unknown', undefined]) {
+    const found = await DesktopBridgeViewHost.discover('session-owner')
+    assert.equal(found !== undefined, frame !== 'iframe')
+    assert.equal(DesktopBridgeViewHost.refusedIframePanel(), frame === 'iframe', 'old refusal cannot taint later discovery')
+    found?.dispose()
+  }
+  frame = 'iframe'
+  await assert.rejects(h.current.createView('session-owner').sendCommand('Runtime.evaluate'), /sidebar is an iframe.*cannot support CDP tools.*host-provided sidebar\/webview.*No standalone browser will be opened/)
+  assert.equal(h.registered.length, 1)
+  assert.ok(probe.mock.callCount() >= 6)
 })
 
 test('a panel requires explicit unusable evidence before carrier fallback', () => {
