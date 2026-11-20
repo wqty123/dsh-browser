@@ -13,6 +13,9 @@ class Sidebar {
   disposed = false
   onLost(listener) { this.lost = listener }
   dispose() { this.disposed = true }
+  createView(owner) { return { id: 'visible-' + owner, async sendCommand(method) { return { method, owner } } } }
+  destroyView() {}
+  showView() {}
 }
 
 function harness(t, channel, discover = () => new Promise(() => {})) {
@@ -31,7 +34,7 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
   t.mock.method(DesktopBridgeViewHost, 'discover', discover)
   const registered = []
   const disposers = []
-  let current, handler, panelFactory
+  let current, handler, panelFactory, failRegistration = false
   const routes = new Map()
   const ctx = {
     get(name) {
@@ -49,6 +52,7 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
       panelFactory = factory
       return () => { panelFactory = undefined }
     }, registerBrowserProvider(provider) {
+      if (failRegistration) { failRegistration = false; throw new Error('registration failed') }
       current = provider.host
       registered.push(current)
       return () => {}
@@ -77,6 +81,7 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
   apply(ctx, {})
   return {
     get current() { return current }, get panelFactory() { return panelFactory }, registered, dispose,
+    failNextRegistration() { failRegistration = true },
     async choose(nextChannel) {
       const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel } })])
       request.method = 'PUT'
@@ -89,30 +94,34 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
   }
 }
 
-test('switching from Chrome back to bundled installs a fresh self-hosted carrier', async t => {
+test('switching from Chrome to legacy bundled installs only a reconnectable sidebar', async t => {
   const h = harness(t, 'chrome')
   const previous = h.current
   await h.choose('bundled')
-  assert.equal(h.current.constructor.name, 'RemoteElectronViewHost')
-  assert.notEqual(h.current, h.registered[0], 'the initial self-hosted carrier was already released')
+  assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
+  assert.notEqual(h.current, h.registered[0], 'the initial sidebar was released by explicit Chrome selection')
   assert.equal(previous.available(), false, 'the previous browser is released')
 })
 
-test('auto with no installed browser replaces a previous explicit carrier with bundled', async t => {
+test('legacy auto with no installed browser replaces an explicit carrier with the sidebar', async t => {
   const h = harness(t, 'chrome')
   const exists = t.mock.method(fs, 'existsSync', () => false)
   syncBuiltinESMExports()
   try { await h.choose('auto') } finally { exists.mock.restore(); syncBuiltinESMExports() }
-  assert.equal(h.current.constructor.name, 'RemoteElectronViewHost')
+  assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
 })
 
 test('a stale sidebar discovery cannot overwrite a newer explicit selection', async t => {
   let resolveDiscovery
   const h = harness(t, 'bundled', () => new Promise(resolve => { resolveDiscovery = resolve }))
+  const pending = h.current.createView('task').sendCommand('Runtime.evaluate')
+  const rejected = assert.rejects(pending, /disposed/)
+  await new Promise(setImmediate)
   await h.choose('chrome')
   const selected = h.current
   const stale = new Sidebar()
   resolveDiscovery(stale)
+  await rejected
   await new Promise(setImmediate)
   assert.equal(h.current, selected)
   assert.equal(stale.disposed, true, 'unused discovery results release their resources')
@@ -122,8 +131,8 @@ test('a stale sidebar discovery cannot overwrite a newer explicit selection', as
 test('a late loss notification from a replaced sidebar cannot replace the current carrier', async t => {
   const sidebar = new Sidebar()
   const h = harness(t, 'bundled', async () => sidebar)
-  await new Promise(setImmediate)
-  assert.equal(h.current, sidebar)
+  await h.current.createView('task').sendCommand('Runtime.evaluate')
+  assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
   await h.choose('chrome')
   const selected = h.current
   sidebar.lost('shell-exited')
@@ -134,10 +143,14 @@ test('a late loss notification from a replaced sidebar cannot replace the curren
 test('disposing the plugin cancels pending discovery and releases the currently selected carrier', async t => {
   let resolveDiscovery
   const h = harness(t, 'bundled', () => new Promise(resolve => { resolveDiscovery = resolve }))
+  const pending = h.current.createView('task').sendCommand('Runtime.evaluate')
+  const rejected = assert.rejects(pending, /disposed/)
+  await new Promise(setImmediate)
   h.dispose()
   const registrations = h.registered.length
   const stale = new Sidebar()
   resolveDiscovery(stale)
+  await rejected
   await new Promise(setImmediate)
   assert.equal(h.registered.length, registrations, 'disposed contexts never register a replacement')
   assert.equal(stale.disposed, true)
@@ -154,32 +167,61 @@ test('disposing the plugin cancels a scheduled sidebar retry', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   let attempts = 0
   const h = harness(t, 'bundled', async () => { attempts += 1; return undefined })
+  const pending = h.current.createView('task').sendCommand('Runtime.evaluate')
+  const rejected = assert.rejects(pending, /abort/iu)
   await new Promise(setImmediate)
   assert.equal(attempts, 1)
   h.dispose()
+  await rejected
   t.mock.timers.tick(30_000)
   await new Promise(setImmediate)
   assert.equal(attempts, 1, 'a stopped plugin performs no further endpoint discovery')
 })
 
-test('a current sidebar loss installs a fallback that is also released at teardown', async t => {
+test('a current sidebar loss reconnects the same handles without replacing the provider', async t => {
   const sidebar = new Sidebar()
-  const h = harness(t, 'bundled', async () => sidebar)
-  await new Promise(setImmediate)
+  const recovered = new Sidebar()
+  let discoveries = 0
+  const h = harness(t, 'bundled', async () => ++discoveries === 1 ? sidebar : recovered)
+  const selected = h.current
+  const view = selected.createView('task')
+  await view.sendCommand('Runtime.evaluate')
   sidebar.lost('shell-exited')
-  await new Promise(setImmediate)
-  const fallback = h.current
-  assert.equal(fallback.constructor.name, 'RemoteElectronViewHost')
+  assert.equal(h.current, selected)
   assert.equal(sidebar.disposed, true)
+  assert.deepEqual(await view.sendCommand('Runtime.evaluate'), { method: 'Runtime.evaluate', owner: 'task' })
+  assert.equal(discoveries, 2)
   const registrations = h.registered.length
   h.dispose()
+  assert.equal(recovered.disposed, true)
   sidebar.lost('shell-exited')
   assert.equal(h.registered.length, registrations)
   await assert.rejects(
-    () => fallback.createView().sendCommand('Runtime.evaluate', { expression: '1' }),
+    async () => selected.createView().sendCommand('Runtime.evaluate', { expression: '1' }),
     /disposed/,
-    'the fallback is released and cannot restart a child',
+    'the disposed sidebar cannot discover or start another carrier',
   )
+})
+
+for (const channel of ['sidebar', 'bundled', 'auto']) {
+  test(`${channel} stays inert until needed and reports a missing sidebar without a fallback`, async t => {
+    let discoveries = 0
+    const h = harness(t, channel, async () => { discoveries++; return undefined })
+    t.mock.method(DesktopBridgeViewHost, 'refusedIframePanel', () => true)
+    assert.equal(discoveries, 0)
+    assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
+    await assert.rejects(h.current.createView('task').sendCommand('Runtime.evaluate'), /no controllable DSH sidebar.*host-provided sidebar\/webview.*No standalone browser/s)
+    assert.equal(discoveries, 1)
+    assert.ok(h.registered.every(host => host.constructor.name === 'SidebarOnlyHost'))
+  })
+}
+
+test('a failed explicit carrier registration restores only the sidebar', async t => {
+  const h = harness(t, 'sidebar')
+  h.failNextRegistration()
+  await h.choose('chrome')
+  assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
+  assert.ok(h.registered.every(host => host.constructor.name !== 'RemoteElectronViewHost'))
 })
 
 test('the panel provider uses a discovered sidebar independently of an explicit Chrome carrier', async t => {

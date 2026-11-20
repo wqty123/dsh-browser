@@ -3,10 +3,8 @@
  * `BrowserProvider` with `ctx.browser`. The provider needs a view host (real
  * Electron `WebContentsView` objects). When a desktop shell supplies
  * `ctx.electronViewHost`, that host is used (embedded, human-machine shared
- * view). Otherwise the plugin self-hosts: it spawns its own Electron child
- * (`host-main.js`) and drives it over a local TCP JSON-RPC socket, so
- * installing the plugin is enough for `dsh_browser_*` tools to work on any
- * surface.
+ * view). Otherwise it requires a reconnectable sidebar carrier. Only explicitly
+ * selected Chrome or Edge may launch an external browser.
  * @module dsh-browser/browser-electron
  */
 
@@ -26,7 +24,6 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { dshHome } from './paths.ts'
 import { setTimeout as wait } from 'node:timers/promises'
-import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.ts'
 import { DesktopBridgeViewHost } from './desktop-bridge-host.ts'
 import { SidebarOnlyHost } from './sidebar-only-host.ts'
 import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.ts'
@@ -169,7 +166,7 @@ export const inject = ['browser']
 
 /** Plugin config: an optional externally-supplied view host. */
 export interface Config {
-  /** View host supplied by a desktop shell; absent -> self-host. */
+  /** View host supplied by a desktop shell; absent -> discover the sidebar. */
   readonly viewHost?: ElectronBrowserViewHost
   /** Allow navigation only to HTTP(S) URLs. Default true. */
   readonly httpOnly?: boolean
@@ -324,41 +321,26 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }).catch(() => {})
   })
 
-  // Explicit sidebar selection stays on the desktop's carrier, including while its bridge
-  // reconnects. Other choices can use the independently hosted browser when appropriate.
-  const selfHosted = new RemoteElectronViewHost(defaultHostMainPath())
-  // The self-hosted carrier is the only one that needs Electron, and it is prepared HERE, lazily,
-  // rather than during package installation (issue #41: a `postinstall` download made a default
-  // pnpm 11 profile refuse the install outright, and a failed fetch failed the install too).
-  //
-  // Non-fatal by construction: this never rejects, never blocks a tool call, and its failure leaves
-  // the sidebar / Chrome / Edge carriers untouched. Only the two channels that can use the bundled
-  // runtime are worth the download; an explicit chrome/edge choice is not.
-  const wantedChannel = settings.get().browser.channel
-  if (wantedChannel === 'bundled' || wantedChannel === 'auto') {
-    void provisionElectronInBackground(message => ctx.logger?.info?.(`dsh-builtin-browser: ${message}`))
-  }
-  const requiredSidebar = (): SidebarOnlyHost => new SidebarOnlyHost(async () => {
+  const requiredSidebar = (): SidebarOnlyHost => new SidebarOnlyHost(async signal => {
     for (const pause of [0, 1_000, 3_000, 8_000]) {
-      if (pause > 0) await wait(pause)
+      signal.throwIfAborted()
+      if (pause > 0) await wait(pause, undefined, { signal })
       const sidebar = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
       if (sidebar !== undefined) return sidebar
       if (DesktopBridgeViewHost.refusedIframePanel()) break
     }
-    throw new Error('dsh-builtin-browser: the selected DSH sidebar is not connected. Check or repair the desktop bridge in Browser settings, then retry the same operation.')
+    throw new Error('dsh-builtin-browser: no controllable DSH sidebar is available. Use a host-provided sidebar/webview carrier or reconnect the existing sidebar, then retry. The Web panel supports manual browsing, not CDP tools. No standalone browser will be opened.')
   })
-  const initialHost = wantedChannel === 'sidebar' ? requiredSidebar() : selfHosted
+  const initialHost = requiredSidebar()
   let unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(initialHost, providerConfig)))
   let disposed = false
   let carrierChoice = 0
-  let discovery: AbortController | undefined
   /** The carrier an `adopt` installed, so a later choice can release it. */
-  let adoptedCarrier: ElectronBrowserViewHost | undefined = initialHost === selfHosted ? undefined : initialHost
+  let adoptedCarrier: ElectronBrowserViewHost | undefined = initialHost
 
   ctx.effect(() => () => {
     disposed = true
     carrierChoice += 1
-    discovery?.abort()
     unregister()
     // The reference pump is a real interval, not a one-shot: `unref` alone lets
     // the process exit but leaves the tick running inside a live plugin, so it
@@ -366,49 +348,28 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     // user-action listeners, which the view host never unsubscribes.
     referenceProvider?.dispose()
     adoptedCarrier?.dispose?.()
-    selfHosted.dispose()
   })
 
   /**
-   * Put the self-hosted browser back after an adopted carrier reports that it is gone.
-   *
-   * This is the half the startup retries never covered: a bridge that was alive at apply time and
-   * exited later left every subsequent call dialling a port nobody owns, because the swap happened
-   * once and only in one direction. Reaching here means the carrier cannot serve anything more, so
-   * the choice made at startup is no longer a choice — the alternative to falling back is a browser
-   * surface that does nothing until DSH is restarted.
-   *
-   * Two failures arrive here and the message must distinguish them. The first draft announced an
-   * exiting shell unconditionally, so a fallback caused by an undrivable sidebar panel told the
-   * user their desktop shell had exited while it was running normally.
+   * Require the sidebar after a borrowed carrier is lost; never launch a fallback window.
    * @param adopted - the carrier that reported the loss, disposed once its replacement is in place.
    * @param reason - which failure this was; see {@link CarrierLossReason}.
    */
-  const restoreSelfHosted = (adopted: ElectronBrowserViewHost, reason: CarrierLossReason): void => {
+  const restoreSidebar = (adopted: ElectronBrowserViewHost, reason: CarrierLossReason): void => {
     // A replaced carrier may finish an outstanding request after the new choice is installed.
     if (disposed || adoptedCarrier !== adopted) return
     try {
-      const sidebarSelected = settings.get().browser.channel === 'sidebar'
-      const restored = sidebarSelected ? requiredSidebar() : new RemoteElectronViewHost(defaultHostMainPath())
+      const restored = requiredSidebar()
       unregister()
       unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(restored, providerConfig)))
       adoptedCarrier = restored
       ctx.logger?.warn?.(
-        sidebarSelected
-          ? 'dsh-builtin-browser: the selected DSH sidebar connection was lost; the next operation will reconnect to the sidebar.'
-          : reason === 'shell-exited'
-          ? 'dsh-builtin-browser: the desktop shell backed the sidebar browser and has exited, so the '
-            + 'browser this plugin hosts itself takes over. Pages from the sidebar are gone with it; '
-            + 'open the page again.'
-          : 'dsh-builtin-browser: this desktop shell renders the sidebar browser panel in a way that '
-            + 'cannot be driven (no webContents, so no CDP endpoint), so the browser this plugin hosts '
-            + 'itself takes over. The shell is still running and nothing else is affected; the page '
-            + 'opens in this plugin\'s own window. Set browser.channel to another value to silence this.',
+        `dsh-builtin-browser: browser carrier lost (${reason}); the next operation requires the DSH sidebar. No standalone fallback will be opened.`,
       )
     } catch (error) {
       // Nothing better is available: the adopted carrier is gone and a provider that throws is
       // worse than one that explains.
-      ctx.logger?.warn?.(`dsh-builtin-browser: could not fall back to the self-hosted browser: ${String(error)}`)
+      ctx.logger?.warn?.(`dsh-builtin-browser: could not restore the sidebar carrier: ${String(error)}`)
     } finally {
       // Disposed on a LATER turn of the event loop, deliberately.
       //
@@ -445,13 +406,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     try {
       unregister()
       unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(host, providerConfig)))
-      selfHosted.dispose()
       adoptedCarrier = host
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
       // A borrowed carrier can lose the process behind it, and this is the only notification that
       // will ever arrive. Registering AFTER the swap succeeded means a listener can never fire
       // against a provider that was never installed.
-      if (!(host instanceof SidebarOnlyHost)) host.onLost?.(reason => { restoreSelfHosted(host, reason) })
+      if (!(host instanceof SidebarOnlyHost)) host.onLost?.(reason => { restoreSidebar(host, reason) })
       // Released AFTER the replacement is installed, so the surface is never without a provider.
       if (previous !== undefined && previous !== host) {
         try { previous.dispose?.() } catch { /* the replacement is already serving */ }
@@ -469,7 +429,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // exit code 1: a failed upgrade, which should only ever cost a warning, took the whole
       // session down instead. Observed 2026-10-05 (crash-…-host.log, phase: running).
       try {
-        const fallback = settings.get().browser.channel === 'sidebar' ? requiredSidebar() : new RemoteElectronViewHost(defaultHostMainPath())
+        const fallback = requiredSidebar()
         unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(fallback, providerConfig)))
         adoptedCarrier = fallback
         if (previous !== undefined && previous !== host) {
@@ -497,10 +457,6 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   const chooseCarrier = (): void => {
   if (disposed) return
   const choice = ++carrierChoice
-  discovery?.abort()
-  const controller = new AbortController()
-  discovery = controller
-  const { signal } = controller
   // A browser the user explicitly asked for outranks every automatic choice: the
   // whole point of the setting is that they know which browser they want. It is
   // launched with a plugin-owned profile, so their own windows are untouched.
@@ -515,27 +471,14 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // that choice real — otherwise a user who picked Chrome would silently get the sidebar,
   // and a user who picked a browser that is not installed would never see the explanation
   // written for exactly that case, because the sidebar would quietly replace it.
-  const explicitChoice: boolean = channel !== 'bundled' && channel !== 'auto' && channel !== 'sidebar'
-  if (channel === 'sidebar') {
+  if (channel !== 'chrome' && channel !== 'edge') {
     if (!(adoptedCarrier instanceof SidebarOnlyHost)) adopt(requiredSidebar(), 'using only the selected DSH sidebar', choice)
     return
   }
-  if (channel !== 'bundled') {
     const detected = detectBrowser(channel)
     if (detected === undefined) {
-      // `auto` promises to take whatever is available, so falling back is what it
-      // asked for. Naming a browser is a specific request, and quietly satisfying it
-      // with a different one turns the real problem ("no Chrome here") into a
-      // confusing error about Electron later on. Report it instead.
-      if (channel === 'auto') {
-        ctx.logger?.warn?.('dsh-builtin-browser: no installed browser was found; using the bundled browser')
-        if (adoptedCarrier !== undefined) {
-          adopt(new RemoteElectronViewHost(defaultHostMainPath()), 'using the bundled browser', choice)
-        }
-      } else {
         adopt(new MissingSystemBrowserHost(channel, searchSummary(channel)),
           `the selected ${channel} is not installed — commands will explain how to fix it`)
-      }
     } else {
       // Same profile root as settings-store, history-store and desktop-bridge-host: the
       // `?.dsh` component used to be missing HERE only, so a desktop launched from a
@@ -579,61 +522,6 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         undefined, settings.get().browser.headless, () => settings.get().ui.quiet),
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
-  } else if (adoptedCarrier !== undefined) {
-    // The original self-hosted carrier was disposed by the first adoption. Switching back
-    // must install a new one, even when no sidebar is found during the discovery below.
-    adopt(new RemoteElectronViewHost(defaultHostMainPath()), 'using the bundled browser', choice)
-  }
-
-  // An explicit choice was already adopted above; discovering the sidebar here would
-  // replace it, which is exactly what this guard prevents.
-  //
-  // Explicit sidebar selection was handled above by its reconnectable sidebar-only host.
-  if (explicitChoice) return
-
-  // The shell may not be up yet. `dsh web` starts before — or entirely without — the desktop app
-  // that hosts the bridge, and a one-shot discovery meant a bridge that appeared a second later
-  // was never adopted for the rest of the process's life. Retry a handful of times over roughly
-  // half a minute, then stop: this is a convenience, not a promise, and the session the user is
-  // already driving in the self-hosted window is not worth replacing minutes into their work.
-  // Each attempt belongs to this choice. A later settings write or teardown cancels its waits,
-  // and an endpoint returned by an already-running discovery is disposed instead of installed.
-  void (async () => {
-    for (const delay of [0, 2_000, 5_000, 15_000]) {
-      if (delay > 0) {
-        try { await wait(delay, undefined, { signal }) } catch { return }
-      }
-      if (signal.aborted || disposed) return
-      let sidebar: Awaited<ReturnType<typeof DesktopBridgeViewHost.discover>>
-      try {
-        sidebar = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
-      } catch {
-        sidebar = undefined // discovery is documented not to throw; never let it stop the retries
-      }
-      if (signal.aborted || disposed) {
-        try { sidebar?.dispose?.() } catch { /* the choice no longer owns this result */ }
-        return
-      }
-      if (sidebar === undefined) continue
-      adopt(sidebar, 'driving the desktop sidebar browser', choice)
-      return
-    }
-    // A bridge exists but its sidebar panel is an iframe. Saying nothing here would leave the user
-    // with a second browser window on a machine where they just followed the instructions to
-    // install the bridge, and no way to know the two facts are related. The carrier is not
-    // unavailable by accident: an iframe has no CDP endpoint, so adopting it would fail every call
-    // instead of falling back — see DesktopBridgeViewHost.discover.
-    if (DesktopBridgeViewHost.refusedIframePanel()) {
-      ctx.logger?.warn?.(
-        'dsh-builtin-browser: a desktop bridge is installed, but this shell renders the sidebar '
-        + 'browser panel as an iframe rather than a webview, which exposes no CDP endpoint and '
-        + 'cannot be driven. Using the browser this plugin hosts itself instead — that is the '
-        + 'independent window, not the sidebar. A shell that exposes `dshDesktop.browser` and '
-        + 'enables `webviewTag` would provide a drivable panel.',
-      )
-      return
-    }
-  })()
   }
 
   chooseCarrier()
@@ -1057,7 +945,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   })
   const referenceCarrier = (): BrowserReferenceCarrier => {
     const channel = settings.get().browser.channel
-    return channel === 'sidebar' || channel === 'chrome' || channel === 'edge' ? channel : 'bundled'
+    return channel === 'chrome' || channel === 'edge' ? channel : 'sidebar'
   }
 
   /**

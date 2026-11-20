@@ -64,25 +64,25 @@ function report(channel, {
   })
 }
 
-test('automatic status follows an adopted fallback instead of rediscovering the rejected sidebar', () => {
+test('legacy automatic ignores obsolete standalone fallback reports', () => {
   const status = report('auto', { binary: true, bridgeReader: bridge('installed'), endpointReader: shellRunning,
     selectedCarrier: () => 'bundled', browserReader: () => ({ kind: 'chrome', path: 'fixture-chrome' }) })
-  assert.equal(status.resolvedCarrier, 'bundled')
+  assert.equal(status.resolvedCarrier, 'sidebar')
   assert.equal(status.readiness, 'ready')
   assert.equal(status.executable, undefined)
 })
 
 test('a selected automatic carrier with missing requirements remains blocked even if alternatives exist', () => {
-  const status = report('auto', { bridgeReader: bridge('installed'), endpointReader: shellRunning,
+  const status = report('auto', { bridgeReader: bridge('installed'),
     selectedCarrier: () => 'bundled', browserReader: () => ({ kind: 'chrome', path: 'fixture-chrome' }) })
-  assert.equal(status.resolvedCarrier, 'bundled')
+  assert.equal(status.resolvedCarrier, 'sidebar')
   assert.equal(status.readiness, 'blocked')
 })
 
-test('the bundled carrier with a runtime on disk is ready, and offers no button', () => {
+test('legacy bundled requires a sidebar even with an Electron runtime on disk', () => {
   const status = report('bundled', { binary: true })
-  assert.equal(status.carrier, 'bundled')
-  assert.equal(status.readiness, 'ready')
+  assert.equal(status.carrier, 'sidebar')
+  assert.equal(status.readiness, 'blocked')
   assert.equal(status.electron.state, 'present', 'the binary on disk outranks what the machine last said')
   assert.match(status.electron.detail, /already available/,
     'and the sentence agrees with the state — "present" next to "not been asked for yet" was measured on a live install')
@@ -97,10 +97,10 @@ test('a download in progress is reported as such, and is not restarted by the bu
   assert.equal(status.canProvision, false, 'a second download into one directory is the one thing to refuse')
 })
 
-test('a failed preparation is blocked AND offers the retry', () => {
+test('a failed preparation remains diagnostic and never offers a standalone runtime retry', () => {
   const status = report('bundled', { provisioning: provision('failed', 'the download failed: fetch failed') })
   assert.equal(status.readiness, 'blocked')
-  assert.equal(status.canProvision, true, 'this is the state the retry button exists for')
+  assert.equal(status.canProvision, false, 'the standalone carrier is not selectable')
   assert.match(status.electron.detail, /fetch failed/)
 })
 
@@ -148,24 +148,25 @@ test('automatic resolves a running installed bridge before an available system b
     binary: true, browserReader: () => ({ kind: 'chrome', path: 'C:/browser/chrome.exe' }),
   })
   assert.equal(viaBridge.readiness, 'ready')
-  assert.equal(viaBridge.carrier, 'auto', 'the configured choice stays visible')
+  assert.equal(viaBridge.channel, 'auto', 'the configured choice stays visible')
+  assert.equal(viaBridge.carrier, 'sidebar')
   assert.equal(viaBridge.resolvedCarrier, 'sidebar')
-  assert.equal(viaBridge.systemBrowser.present, true, 'discovery facts remain available to diagnostics')
+  assert.equal(viaBridge.systemBrowser.checked, false, 'automatic never selects an external browser')
   assert.equal(viaBridge.executable, undefined, 'the system executable is not the resolved carrier')
   const viaRuntime = report('auto', { binary: true })
-  assert.equal(viaRuntime.readiness, 'ready')
-  assert.equal(viaRuntime.resolvedCarrier, 'bundled')
+  assert.equal(viaRuntime.readiness, 'blocked')
+  assert.equal(viaRuntime.resolvedCarrier, 'sidebar')
   const installedButClosed = report('auto', { bridgeReader: bridge('installed') })
   assert.equal(installedButClosed.readiness, 'blocked', 'a closed desktop is not a working carrier')
-  assert.equal(installedButClosed.resolvedCarrier, 'bundled')
+  assert.equal(installedButClosed.resolvedCarrier, 'sidebar')
 })
 
 test('automatic without a live bridge, system browser or runtime reports what is missing', () => {
   const status = report('auto', { provisioning: provision('failed') })
   assert.equal(status.readiness, 'blocked')
-  assert.equal(status.resolvedCarrier, 'bundled')
+  assert.equal(status.resolvedCarrier, 'sidebar')
   assert.deepEqual(status.systemBrowser, {
-    checked: true, present: false, detail: 'no Chrome, Edge or Brave installation was found',
+    checked: false, present: false, detail: 'the sidebar channel uses its own carrier',
   })
 })
 
@@ -201,20 +202,17 @@ for (const kind of ['chrome', 'edge']) {
   })
 }
 
-test('automatic prefers an installed system browser to the runtime and works without the runtime', () => {
+test('automatic never detects or adopts a system browser, with or without Electron', () => {
   for (const binary of [false, true]) {
     const status = report('auto', {
       binary,
       bridgeReader: bridge('installed'),
-      browserReader: channel => {
-        assert.equal(channel, 'auto')
-        return { kind: 'edge', path: 'C:/installed Edge/msedge.exe' }
-      },
+      browserReader: () => { throw new Error('external browser detection is opt-in') },
     })
-    assert.equal(status.readiness, 'ready')
-    assert.equal(status.resolvedCarrier, 'system')
-    assert.equal(status.systemBrowser.kind, 'edge')
-    assert.equal(status.executable, 'C:/installed Edge/msedge.exe')
+    assert.equal(status.readiness, 'blocked')
+    assert.equal(status.resolvedCarrier, 'sidebar')
+    assert.equal(status.systemBrowser.checked, false)
+    assert.equal(status.executable, undefined)
   }
 })
 
@@ -223,19 +221,19 @@ test('automatic does not adopt an uninstalled bridge even if its published endpo
     bridgeReader: bridge('stale'), endpointReader: shellRunning,
     browserReader: () => ({ kind: 'brave', path: 'C:/Brave/brave.exe' }),
   })
-  assert.equal(status.readiness, 'ready')
-  assert.equal(status.resolvedCarrier, 'system')
-  assert.equal(status.systemBrowser.kind, 'brave')
+  assert.equal(status.readiness, 'blocked')
+  assert.equal(status.resolvedCarrier, 'sidebar')
+  assert.equal(status.systemBrowser.checked, false)
 })
 
 test('sidebar and bundled choices do not scan unrelated system browsers', () => {
-  for (const channel of ['sidebar', 'bundled']) {
+  for (const channel of ['sidebar', 'bundled', 'auto']) {
     const status = report(channel, {
       browserReader: () => { throw new Error('system detection must not run for this channel') },
     })
     assert.equal(status.systemBrowser.checked, false)
     assert.equal(status.systemBrowser.present, false)
-    assert.equal(status.resolvedCarrier, channel)
+    assert.equal(status.resolvedCarrier, 'sidebar')
   }
 })
 
@@ -263,13 +261,13 @@ test('the default reader detects a real file through the launch path detector wi
   }
 })
 
-test('a runtime installed by hand after a failure is reported ready without a restart', () => {
+test('a runtime installed by hand is diagnostic, not a working sidebar', () => {
   // The binary probe wins over the last provisioning result on purpose: the runtime can appear by
   // another route (a manual install, another process, ELECTRON_PATH) and a panel that kept saying
   // "failed" while a launch would succeed is the sort of stale state that sends people hunting.
   const status = report('bundled', { binary: true, provisioning: provision('failed', 'the download failed') })
   assert.equal(status.electron.state, 'present')
-  assert.equal(status.readiness, 'ready')
+  assert.equal(status.readiness, 'blocked')
 })
 
 test('the state vocabulary the panel localizes matches what the host can emit', () => {
@@ -290,7 +288,7 @@ test('a previously prepared runtime removed from disk can be prepared again', ()
   const result = report('bundled', { binary: false, provisioning: provision('ready') })
   assert.equal(result.readiness, 'blocked')
   assert.equal(result.electron.state, 'failed')
-  assert.equal(result.canProvision, true)
+  assert.equal(result.canProvision, false)
 })
 
 test('every state and carrier the report can name has a label in both languages', () => {

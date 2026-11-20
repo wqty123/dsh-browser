@@ -62,6 +62,7 @@ function makeHost() {
 test('a missing file resolves to the documented defaults', () => {
   const store = new SettingsStore(settingsFile())
   assert.deepEqual(store.get(), DEFAULT_SETTINGS)
+  assert.equal(store.get().browser.channel, 'sidebar', 'native windows require an explicit external browser choice')
   assert.equal(store.get().history.enabled, true, 'history records by default')
   assert.equal(store.get().ui.autoExpandOnce, true, 'auto-expand is once-per-task by default')
   assert.equal(store.get().ui.closeWithSession, false, 'closing the interface is not the default end of a session')

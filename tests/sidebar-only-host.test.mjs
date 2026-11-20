@@ -8,6 +8,19 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
+test('disposing the carrier cancels a waiting discovery', async () => {
+  let signal
+  const host = new SidebarOnlyHost(value => new Promise((resolve, reject) => {
+    signal = value
+    value.addEventListener('abort', () => reject(new Error('discovery aborted')), { once: true })
+  }))
+  const pending = host.createView().sendCommand('Runtime.evaluate')
+  await Promise.resolve()
+  host.dispose()
+  assert.equal(signal.aborted, true)
+  await assert.rejects(pending, /discovery aborted/)
+})
+
 function sidebar() {
   const calls = []
   let count = 0
