@@ -155,6 +155,24 @@ export function guestTarget(rawUrl: string): URL | undefined {
   }
 }
 
+function decodeAttribute(value: string): string {
+  const named: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' }
+  return value.replace(/&(?:#(x[\da-f]+|\d+);?|(amp|quot|apos|lt|gt);)/giu, (match, numeric?: string, name?: string) => {
+    if (numeric === undefined) return named[name?.toLowerCase() ?? ''] ?? match
+    const point = /^x/iu.test(numeric) ? Number.parseInt(numeric.slice(1), 16) : Number(numeric)
+    return point === 0 || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff) ? '\ufffd' : String.fromCodePoint(point)
+  })
+}
+
+function escapeAttribute(value: string, quote: string): string {
+  return value.replace(/[&<>"'`=\s]/gu, char => {
+    if (char === '&') return '&amp;'
+    if (char === '<') return '&lt;'
+    if (char === '>') return '&gt;'
+    return quote === '' || char === quote ? `&#${char.codePointAt(0)};` : char
+  })
+}
+
 /**
  * Rewrite one document so its own links and assets stay inside the proxy.
  *
@@ -182,21 +200,17 @@ export function rewriteDocument(html: string, base: URL): string {
     }
   }
   return html.replace(
-    // `action` 不在这里改写：表单提交要把字段拼进目标地址，而代理地址的 `?u=` 会吞掉表单追加的
-    // 查询串（实测：侧栏里搜索「数独」按回车 → 请求变成 `guest?u=<首页>&q=数独`，代理按首页取回，
-    // 结果页永远出不来，最终白屏）。表单提交由注入的 form-relay 脚本统一处理。
     // 三种引号形式都要改写，因为真实页面三种都在用：`src="/a.js"`、`src='/a.js'`，以及压缩过/服务端渲染
     // 的 HTML 更偏爱的无引号写法 `src=/a.js`。只处理带引号的两个，会让所有无引号资源指向 DSH 宿主而不是
     // 站点——实测 example.com 唯一的脚本就是 `<script src=/s.js>`：文档看着正常，脚本和样式全部 404。
-    /(\s(?:href|src|poster|data-src)\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/giu,
+    /(\s(?:href|src|poster|data-src|action)\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/giu,
     (match, prefix: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
       const value = doubleQuoted ?? singleQuoted ?? bare
       if (value === undefined) return match
-      const next = proxied(value)
+      const next = proxied(decodeAttribute(value))
       if (next === undefined) return match
-      if (bare !== undefined) return `${prefix}${next}`
-      const quote = doubleQuoted !== undefined ? '"' : "'"
-      return `${prefix}${quote}${next}${quote}`
+      const quote = singleQuoted !== undefined ? "'" : '"'
+      return `${prefix}${quote}${escapeAttribute(next, quote)}${quote}`
     },
   ).replace(
     // `target="_blank"` 让点击**新开窗口**，代理改写就白做：实测百度新闻 107 个链接里 49 个带
@@ -205,15 +219,17 @@ export function rewriteDocument(html: string, base: URL): string {
     /(\s)target\s*=\s*(["'])_(?:blank|new|top|parent)\2/giu,
     (match, space: string) => `${space}target="_self"`,
   ).replace(
-    /(\ssrcset\s*=\s*)(["'])([^"']*)\2/giu,
-    (match, prefix: string, quote: string, value: string) => {
-      const rewritten = value.split(',').map(part => {
+    /(\ssrcset\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/giu,
+    (match, prefix: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
+      const value = doubleQuoted ?? singleQuoted ?? bare ?? ''
+      const quote = singleQuoted !== undefined ? "'" : '"'
+      const rewritten = decodeAttribute(value).split(',').map(part => {
         const [url, descriptor] = part.trim().split(/\s+/u)
         const next = url === undefined ? undefined : proxied(url)
         if (next === undefined) return part.trim()
         return descriptor === undefined ? next : `${next} ${descriptor}`
       }).join(', ')
-      return `${prefix}${quote}${rewritten}${quote}`
+      return `${prefix}${quote}${escapeAttribute(rewritten, quote)}${quote}`
     },
   ).replace(
     /url\((\s*['"]?)([^'")]+)\1\)/giu,
