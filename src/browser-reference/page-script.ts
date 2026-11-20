@@ -158,6 +158,23 @@ const PAGE_LIB = String.raw`
 
   function pageBody() { return document.body || document.documentElement }
 
+  function unwrapProxyUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return ''
+    try {
+      if (typeof window.__dshGuestFromProxy === 'function') return window.__dshGuestFromProxy(rawUrl)
+      var parsed = new URL(rawUrl, location.href)
+      if (parsed.pathname.indexOf('/browser-view/guest') >= 0) {
+        var inner = parsed.searchParams.get('u')
+        if (inner) return inner
+      }
+      return rawUrl
+    } catch (error) { return rawUrl }
+  }
+
+  function canonicalPageUrl() {
+    return unwrapProxyUrl(String(location.href))
+  }
+
   function collapse(value, limit) {
     var text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim()
     return limit && text.length > limit ? text.slice(0, limit) : text
@@ -279,7 +296,7 @@ const PAGE_LIB = String.raw`
       var type = types[tag] || (block ? 'block' : undefined)
       if (tag === 'DIV') type = 'block'
       var result = { type: type, children: children, start: start, end: end }
-      if (tag === 'A' && /^https?:\/\//i.test(node.href || '')) { result.type = 'link'; result.href = String(node.href).slice(0, 4000) }
+      var realHref = tag === 'A' ? unwrapProxyUrl(String(node.href || '')) : ''; if (tag === 'A' && /^https?:\/\//i.test(realHref)) { result.type = 'link'; result.href = realHref.slice(0, 4000) }
       if (type === 'list') {
         result.ordered = tag === 'OL'
         var first = Number(node.getAttribute('start') || 1)
@@ -479,8 +496,8 @@ const PAGE_LIB = String.raw`
       } else if (String(node.tagName).toUpperCase() === 'IMG') {
         runs.push({
           type: 'image',
-          src: String(node.currentSrc || node.src || ''),
-          currentSrc: String(node.currentSrc || ''),
+          src: unwrapProxyUrl(String(node.currentSrc || node.src || '')),
+          currentSrc: unwrapProxyUrl(String(node.currentSrc || '')),
           alt: collapse(node.getAttribute('alt'), 500),
         })
       }
@@ -904,9 +921,9 @@ const PAGE_LIB = String.raw`
         node: element,
         payload: {
           kind: 'image',
-          src: elementCanvas ? canvasData : String(element.currentSrc || element.src || ''),
-          currentSrc: elementCanvas ? canvasData : String(element.currentSrc || ''),
-          attributeSrc: elementCanvas ? canvasData : element.getAttribute ? String(element.getAttribute('src') || '') : '',
+          src: elementCanvas ? canvasData : unwrapProxyUrl(String(element.currentSrc || element.src || '')),
+          currentSrc: elementCanvas ? canvasData : unwrapProxyUrl(String(element.currentSrc || '')),
+          attributeSrc: elementCanvas ? canvasData : unwrapProxyUrl(element.getAttribute ? String(element.getAttribute('src') || '') : ''),
           dataUrl: canvasData,
           alt: collapse(element.getAttribute ? element.getAttribute('alt') : '', 500),
           caption: captionOf(element),
@@ -940,8 +957,8 @@ const PAGE_LIB = String.raw`
 
     return {
       ok: true,
-      url: String(location.href),
-      frameUrl: String(location.href),
+      url: canonicalPageUrl(),
+      frameUrl: canonicalPageUrl(),
       title: String(document.title || ''),
       multipleRanges: ranges.length > 1,
       truncated: map.truncated,
@@ -1129,9 +1146,9 @@ const PAGE_LIB = String.raw`
       var candidate = pool[p]
       var score = 0
       if (kind === 'image') {
-        var src = String(candidate.currentSrc || candidate.src || '')
+        var src = unwrapProxyUrl(String(candidate.currentSrc || candidate.src || ''))
         if (anchor.currentSrc && src === anchor.currentSrc) score += 4
-        if (anchor.src && (src === anchor.src || String(candidate.getAttribute('src') || '') === anchor.src)) score += 3
+        if (anchor.src && (src === anchor.src || unwrapProxyUrl(String(candidate.getAttribute('src') || '')) === anchor.src)) score += 3
         if (anchor.alt && collapse(candidate.getAttribute('alt'), 500) === anchor.alt) score += 2
         if (anchor.selector && selectorOf(candidate) === anchor.selector) score += 1
       } else {
@@ -1310,12 +1327,12 @@ export function validateFrozenCapture(value: unknown): RawCaptureResult | undefi
 /** Read the page's visible text, for a host-side text-quote locate. */
 export function pageTextScript(): string {
   return script(`var map = flatTextMap(spec.maxChars, false, spec.legacy)
-    return JSON.stringify({ ok: true, url: String(location.href), title: String(document.title || ''), text: map.text, truncated: map.truncated })`)
+    return JSON.stringify({ ok: true, url: canonicalPageUrl(), title: String(document.title || ''), text: map.text, truncated: map.truncated })`)
 }
 
 /** Facts needed to decide whether the page is still the one a reference came from. */
 export function pageFactsScript(): string {
-  return script(`return JSON.stringify({ ok: true, url: String(location.href), title: String(document.title || '') })`)
+  return script(`return JSON.stringify({ ok: true, url: canonicalPageUrl(), title: String(document.title || '') })`)
 }
 
 /** Highlight one flat [start, end) range of the page text. */
