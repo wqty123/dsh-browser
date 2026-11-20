@@ -13,6 +13,7 @@ import { writeAsar } from './fake-asar.mjs'
 import { copyFile, readdir, symlink } from 'node:fs/promises'
 
 const withProfileCheckpoint = (home, job, operation, options = {}) => checkpoint(home, job, operation, { reconcile: async () => {}, ...options })
+const offlineMetaError = String.raw`✗ Lockfile failed supply-chain policy check … [ERR_PNPM_NO_OFFLINE_META] Failed to resolve @browserbasehq/sdk in package mirror C:\Users\FB\AppData\Local\pnpm-cache\v12\metadata-full\…\@browserbasehq\sdk.jsonl`
 
 function pruneOrphan(profile) {
   const destination = join(profile, 'node_modules/.ignored/@scope/orphan')
@@ -98,14 +99,72 @@ test('an unavailable pre-job plugin is refused before any operation or checkpoin
   assert.deepEqual(readdirSync(f.job), [])
 })
 
-test('failed rollback suppresses recovery restart and retains the checkpoint', async t => {
-  const f = fixture(t)
+test('offline metadata failure in remove restores the plugin and exact manifests without pnpm before restarting', async t => {
+  const f = fixture(t), modules = join(f.profile, 'node_modules/.modules.yaml')
+  writeFileSync(modules, 'original pnpm metadata\r\n')
+  const before = tree(f.profile)
+  let restarted = false
   const result = await runMaintenanceLifecycle('reinstall', {
     requestQuit: async () => {}, waitUntilClosed: async () => {}, publish: async () => {},
-    maintain: () => withProfileCheckpoint(f.home, f.job, async () => { throw new Error('remove failed') }, { reconcile: async () => { throw new Error('offline reconciliation failed') } }),
-    restart: async () => assert.fail('must not restart an unverified profile'), verify: async () => {},
+    maintain: () => withProfileCheckpoint(f.home, f.job, async () => {
+      writeFileSync(join(f.profile, 'package.json'), '{}')
+      writeFileSync(join(f.profile, 'pnpm-lock.yaml'), 'changed lockfile')
+      writeFileSync(modules, 'changed metadata')
+      rmSync(f.plugin, { recursive: true })
+      mkdirSync(join(f.plugin, 'node_modules'), { recursive: true })
+      throw new Error(`REINSTALL_REMOVE_FAILED: ${offlineMetaError}`)
+    }, { reconcile: async () => assert.fail('direct restoration must not require pnpm') }),
+    restart: async () => {
+      assert.deepEqual(tree(f.profile), before)
+      assert.equal(createRequire(join(f.profile, 'package.json'))('dsh-builtin-browser').alive, true)
+      restarted = true
+      return 42
+    }, verify: async () => {},
   })
-  assert.equal(result.restarted, false)
+  assert.equal(result.restarted, true)
+  assert.equal(restarted, true)
+  assert.equal(result.phase, 'failed')
+  assert.ok(result.error.includes(offlineMetaError))
+  assert.match(result.error, /REINSTALL_PROFILE_RESTORED/)
+})
+
+test('offline metadata failure in reconcile still restores exact manifests and plugin and restarts, retaining the warning and checkpoint', async t => {
+  const f = fixture(t)
+  const modules = join(f.profile, 'node_modules/.modules.yaml')
+  writeFileSync(modules, 'original pnpm metadata\r\n')
+  const before = tree(f.profile)
+  let restarted = false, reconciled = false
+  const result = await runMaintenanceLifecycle('reinstall', {
+    requestQuit: async () => {}, waitUntilClosed: async () => {}, publish: async () => {},
+    maintain: () => withProfileCheckpoint(f.home, f.job, async () => {
+      rmSync(join(f.profile, 'node_modules/@scope/orphan'), { recursive: true })
+      rmSync(f.plugin, { recursive: true })
+      throw new Error(`REINSTALL_REMOVE_FAILED: ${offlineMetaError}`)
+    }, { reconcile: async () => {
+      reconciled = true
+      assert.equal(createRequire(join(f.profile, 'package.json'))('dsh-builtin-browser').alive, true)
+      writeFileSync(join(f.profile, 'package.json'), '{}')
+      writeFileSync(join(f.profile, 'pnpm-lock.yaml'), 'pnpm changed lockfile')
+      writeFileSync(modules, 'pnpm changed metadata')
+      rmSync(f.plugin, { recursive: true })
+      throw new Error(`REINSTALL_RECONCILE_FAILED: Packages: -20\n${offlineMetaError}`)
+    } }),
+    restart: async () => {
+      for (const path of ['package.json', 'pnpm-lock.yaml']) assert.deepEqual(tree(f.profile)[path], before[path])
+      assert.deepEqual(tree(f.plugin), before.node_modules['dsh-builtin-browser'])
+      assert.equal(readFileSync(modules, 'utf8'), 'original pnpm metadata\r\n')
+      assert.ok(existsSync(createRequire(join(f.profile, 'package.json')).resolve('dsh-builtin-browser')))
+      restarted = true
+      return 42
+    }, verify: async () => {},
+  })
+  assert.equal(result.restarted, true)
+  assert.equal(restarted, true)
+  assert.equal(reconciled, true)
+  assert.equal(result.phase, 'failed')
+  assert.match(result.error, /REINSTALL_RECONCILE_FAILED/)
+  assert.ok(result.error.includes(offlineMetaError))
+  assert.match(result.error, /REINSTALL_PROFILE_RESTORED/)
   assert.match(result.error, /REINSTALL_ROLLBACK_FAILED/)
   assert.equal(existsSync(join(f.job, 'profile-before/files/node_modules/dsh-builtin-browser/package.json')), true)
 })
@@ -168,7 +227,7 @@ test('partial checkpoint failure removes its checkpoint without changing the pro
   assert.deepEqual(readdirSync(f.job), [])
 })
 
-test('file symlink restore denial fails cleanly, retaining the checkpoint and suppressing restart', async t => {
+test('file symlink restore denial reports incomplete recovery, retaining the checkpoint and restarting Desktop', async t => {
   const f = fixture(t), target = join(f.root, 'file.txt')
   writeFileSync(target, 'outside file stays intact')
   try { symlinkSync(target, join(f.plugin, 'file-link'), 'file') } catch (error) {
@@ -184,9 +243,9 @@ test('file symlink restore denial fails cleanly, retaining the checkpoint and su
         return symlink(target, path, type)
       },
     }),
-    restart: async () => assert.fail('must not restart after failed restore'), verify: async () => {},
+    restart: async () => 42, verify: async () => {},
   })
-  assert.equal(result.restarted, false)
+  assert.equal(result.restarted, true)
   assert.match(result.error, /REINSTALL_ROLLBACK_FAILED.*REINSTALL_LINK_RESTORE_FAILED: file link.*file symlink denied/)
   assert.ok(existsSync(join(f.job, 'profile-before/metadata.json')))
   assert.equal(readFileSync(target, 'utf8'), 'outside file stays intact')
@@ -236,8 +295,8 @@ for (const path of ['.pnpm/foreign@1.0.0/node_modules/foreign/index.js', '.bin/f
   mkdirSync(dirname(foreign), { recursive: true }); writeFileSync(foreign, 'keep this unrelated package')
   const before = tree(f.profile)
   let reconciled = false
-  await assert.rejects(withProfileCheckpoint(f.home, f.job, async () => { rmSync(foreign); throw new Error('remove failed') }, {
-    reconcile: async () => { reconciled = true; writeFileSync(foreign, 'keep this unrelated package') },
+  await assert.rejects(withProfileCheckpoint(f.home, f.job, async () => { rmSync(join(f.profile, 'node_modules', path.split('/')[0]), { recursive: true }); throw new Error('remove failed') }, {
+    reconcile: async () => { reconciled = true; mkdirSync(dirname(foreign), { recursive: true }); writeFileSync(foreign, 'keep this unrelated package') },
   }), /REINSTALL_PROFILE_RESTORED/)
   assert.equal(reconciled, true)
   assert.deepEqual(tree(f.profile), before)
@@ -276,24 +335,16 @@ for (const code of ['EXDEV', 'UNKNOWN']) test(`checkpoint never hardlinks or tra
   assert.equal(readFileSync(join(external, 'node_modules/zod/compile.d.cts'), 'utf8'), 'external types')
 })
 
-test('reconciliation precedes orphan recovery from .ignored and preserves exact profile files', async t => {
+test('direct restoration recovers orphans from .ignored and exact profile files without reconciliation', async t => {
   const f = fixture(t), modules = join(f.profile, 'node_modules/.modules.yaml')
   writeFileSync(modules, 'original metadata\r\n')
   const before = tree(f.profile)
-  let reconciled = false
   await assert.rejects(withProfileCheckpoint(f.home, f.job, async () => {
     writeFileSync(join(f.profile, 'package.json'), '{}')
     writeFileSync(modules, 'changed')
     pruneOrphan(f.profile)
     throw new Error('remove failed')
-  }, { reconcile: async () => {
-    reconciled = true
-    assert.match(readFileSync(join(f.profile, 'package.json'), 'utf8'), /dsh-builtin-browser/)
-    assert.equal(readFileSync(modules, 'utf8'), 'original metadata\r\n')
-    assert.equal(existsSync(join(f.profile, 'node_modules/.ignored/@scope/orphan')), true)
-    writeFileSync(modules, 'pnpm rewrote metadata')
-  } }), /REINSTALL_PROFILE_RESTORED/)
-  assert.equal(reconciled, true)
+  }, { reconcile: async () => assert.fail('orphan recovery must not require pnpm') }), /REINSTALL_PROFILE_RESTORED/)
   assert.deepEqual(tree(f.profile), before)
 })
 

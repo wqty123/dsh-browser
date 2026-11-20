@@ -28,20 +28,20 @@ function fixture(t) {
   return { root, home, app, profile, cli, resources }
 }
 
-test('rollback reconciliation uses bounded bundled pnpm with a frozen offline profile and no ASAR or scripts', async t => {
+test('rollback reconciliation uses bounded bundled pnpm with inherited network settings and no ASAR or scripts', async t => {
   const f = fixture(t)
   let calls = 0
   await reconcileProfile(f.app, f.home, async (command, argv, env, timeout) => {
     calls++
     assert.equal(command, join(f.app, 'DeepSeek Harness.exe'))
     assert.deepEqual(argv, ['--expose-internals', join(f.app, 'resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs'),
-      '--dir', f.profile, 'install', '--offline', '--frozen-lockfile', '--ignore-scripts', '--config.auto-install-peers=false'])
+      '--dir', f.profile, 'install', '--frozen-lockfile', '--ignore-scripts', '--config.auto-install-peers=false'])
     assert.equal(env.ELECTRON_NO_ASAR, '1')
     assert.equal(env.ELECTRON_RUN_AS_NODE, '1')
-    assert.equal(env.PNPM_CONFIG_OFFLINE, 'true')
+    for (const name of ['npm_config_offline', 'PNPM_CONFIG_OFFLINE', 'npm_config_fetch_retries', 'PNPM_CONFIG_FETCH_RETRIES', 'npm_config_fetch_timeout', 'PNPM_CONFIG_FETCH_TIMEOUT']) assert.equal(env[name], process.env[name])
     assert.equal(env.PNPM_CONFIG_IGNORE_SCRIPTS, 'true')
     assert.equal(env.PNPM_CONFIG_AUTO_INSTALL_PEERS, 'false')
-    assert.equal(timeout, 60_000)
+    assert.equal(timeout, 300_000)
     return { code: 0, output: 'reconciled' }
   })
   assert.equal(calls, 1)
@@ -55,7 +55,7 @@ test('profile repair and removal invoke the trusted CLI and do not change app re
   const before = f.resources.map(path => readFileSync(join(f.app, path)))
   const calls = []
   for (const action of ['install', 'uninstall']) {
-    const result = await repairProfileExtension(action, f.app, f.home, async (command, argv, env) => {
+    const result = await repairProfileExtension(action, f.app, f.home, async (command, argv, env, timeout) => {
       calls.push({ command, argv, env })
       assert.equal(command, join(f.app, 'DeepSeek Harness.exe'))
       assert.deepEqual(argv.slice(0, 3), ['--expose-internals', '--input-type=module', '--eval'])
@@ -64,9 +64,9 @@ test('profile repair and removal invoke the trusted CLI and do not change app re
       assert.equal(env.DSH_HOME, f.home); assert.equal(env.ELECTRON_RUN_AS_NODE, '1')
       assert.equal(args[4], action === 'install' ? 'add' : 'remove')
       assert.equal(args[5], action === 'install' ? `file:${join(f.home, 'plugin.tgz')}` : 'dsh-builtin-browser')
-      assert.equal(env.npm_config_offline, 'true')
+      for (const name of ['npm_config_offline', 'PNPM_CONFIG_OFFLINE', 'npm_config_fetch_retries', 'PNPM_CONFIG_FETCH_RETRIES', 'npm_config_fetch_timeout', 'PNPM_CONFIG_FETCH_TIMEOUT']) assert.equal(env[name], process.env[name])
+      assert.equal(timeout, 300_000)
       assert.equal(env.npm_config_ignore_scripts, 'true')
-      assert.equal(env.PNPM_CONFIG_OFFLINE, 'true')
       assert.equal(env.PNPM_CONFIG_IGNORE_SCRIPTS, 'true')
       assert.equal(env.PNPM_CONFIG_AUTO_INSTALL_PEERS, 'false')
       assert.equal(env.ELECTRON_NO_ASAR, '1')

@@ -104,7 +104,9 @@ test('real rc.3 Desktop CLI removes and re-adds a file dependency offline withou
     assert.deepEqual(readFileSync(join(profile, 'pnpm-lock.yaml')), lockBefore)
     await installedProfileExtension(home)
     assert.deepEqual(readFileSync(orphan), before)
-    console.log('Real bundled pnpm frozen/offline checkpoint reconciliation and .ignored orphan recovery: PASS')
+    await reconcileProfile(app, home, async (_command, args, env, timeout) =>
+      runProfileCommand(process.env.DSH_ELECTRON_BINARY ?? process.execPath, args, { ...env, ...environment }, timeout))
+    console.log('Real direct checkpoint restore, .ignored orphan recovery and bundled pnpm frozen-lockfile reconciliation: PASS')
   }
   const loaded = readdirSync(coverage).flatMap(name => JSON.parse(readFileSync(join(coverage, name), 'utf8')).result.map(entry => entry.url))
   for (const path of owned) assert.ok(loaded.includes(pathToFileURL(join(source, path)).href), `real rc.3 module did not execute: ${path}`)

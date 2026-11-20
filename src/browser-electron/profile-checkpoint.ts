@@ -81,15 +81,21 @@ async function restoreLink(profile: string, entry: Extract<Entry, { kind: 'link'
 }
 
 async function restoreFiles(profile: string, before: string, entries: readonly Entry[], io: CheckpointIO): Promise<void> {
-  for (const path of [...manifestPaths, pluginPath]) await rm(join(profile, path), { recursive: true, force: true })
-  for (const entry of entries) {
-    const destination = join(profile, entry.path)
-    if (entry.kind === 'directory') await mkdir(destination, { recursive: true })
-    else if (entry.kind === 'file') {
-      await mkdir(dirname(destination), { recursive: true })
-      await io.copyFile(join(before, 'files', entry.path), destination)
-    } else if (entry.kind === 'link') await restoreLink(profile, entry, io)
+  const errors: string[] = []
+  for (const path of [...manifestPaths, pluginPath]) {
+    try { await rm(join(profile, path), { recursive: true, force: true }) } catch (error) { errors.push(`${path}: ${String(error)}`) }
   }
+  for (const entry of entries) {
+    try {
+      const destination = join(profile, entry.path)
+      if (entry.kind === 'directory') await mkdir(destination, { recursive: true })
+      else if (entry.kind === 'file') {
+        await mkdir(dirname(destination), { recursive: true })
+        await io.copyFile(join(before, 'files', entry.path), destination)
+      } else if (entry.kind === 'link') await restoreLink(profile, entry, io)
+    } catch (error) { errors.push(`${entry.path}: ${String(error)}`) }
+  }
+  if (errors.length > 0) throw new Error(errors.join('; '))
 }
 
 function unrelated(entries: readonly Entry[]): string {
@@ -98,10 +104,10 @@ function unrelated(entries: readonly Entry[]): string {
 
 async function recoverModules(profile: string, modules: readonly Entry[], io: CheckpointIO): Promise<void> {
   const ignored = join('node_modules', '.ignored')
-  for (const entry of modules) {
-    if (entry.path === pluginPath || manifestPaths.includes(entry.path) || entry.path === ignored) continue
+  const recover = async (entry: Entry): Promise<void> => {
+    if (entry.path === pluginPath || manifestPaths.includes(entry.path) || entry.path === ignored) return
     const current = await describe(profile, entry.path, true)
-    if (JSON.stringify(current) === JSON.stringify(entry)) continue
+    if (JSON.stringify(current) === JSON.stringify(entry)) return
     if (current.kind !== 'missing') throw new Error(`REINSTALL_UNRELATED_PACKAGE_CHANGED: ${entry.path}`)
     if (entry.kind === 'link') await restoreLink(profile, entry, io)
     else {
@@ -120,6 +126,11 @@ async function recoverModules(profile: string, modules: readonly Entry[], io: Ch
       }
     }
   }
+  const errors: string[] = []
+  for (const entry of modules) {
+    try { await recover(entry) } catch (error) { errors.push(String(error)) }
+  }
+  if (errors.length > 0) throw new Error(errors.join('; '))
 }
 
 async function verifyProfile(home: string): Promise<void> {
@@ -151,16 +162,24 @@ export async function withProfileCheckpoint<T>(home: string, directory: string, 
     await verifyProfile(home)
     return result
   } catch (failure) {
-    if (failure instanceof MaintenanceRecoveryError) throw failure
-    try {
-      await restoreFiles(profile, before, saved.entries, io)
-      await io.reconcile()
-      await recoverModules(profile, saved.modules, io)
-      await restoreFiles(profile, before, saved.entries, io)
-      await verifyProfile(home)
-    } catch (error) {
-      throw new MaintenanceRecoveryError(`REINSTALL_ROLLBACK_FAILED: ${String(error)}; original failure: ${String(failure)}; checkpoint: ${before}`)
+    const attempt = async (restore: () => Promise<void>): Promise<string | undefined> => {
+      try { await restore(); return undefined } catch (error) { return String(error) }
     }
-    throw new Error(`${String(failure)}; REINSTALL_PROFILE_RESTORED: profile manifests and plugin restored, dependencies reconciled offline and plugin resolution verified`)
+    let filesError = await attempt(() => restoreFiles(profile, before, saved.entries, io))
+    let modulesError = await attempt(() => recoverModules(profile, saved.modules, io))
+    let resolutionError = await attempt(() => verifyProfile(home))
+    let reconcileError: string | undefined
+    if (filesError === undefined && (modulesError !== undefined || resolutionError !== undefined)) {
+      reconcileError = await attempt(() => io.reconcile())
+      filesError = await attempt(() => restoreFiles(profile, before, saved.entries, io))
+      modulesError = await attempt(() => recoverModules(profile, saved.modules, io))
+      resolutionError = await attempt(() => verifyProfile(home))
+    }
+    const restored = filesError === undefined && resolutionError === undefined
+      ? 'REINSTALL_PROFILE_RESTORED: profile manifests and plugin restored directly and plugin resolution verified'
+      : 'Profile restoration could not be fully verified'
+    const errors = [filesError, modulesError, resolutionError, reconcileError].filter(error => error !== undefined)
+    if (errors.length > 0) throw new MaintenanceRecoveryError(`REINSTALL_ROLLBACK_FAILED: ${errors.join('; ')}; ${restored}; original failure: ${String(failure)}; checkpoint: ${before}`)
+    throw new Error(`${String(failure)}; ${restored}`)
   }
 }

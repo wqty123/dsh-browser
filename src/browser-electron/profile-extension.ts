@@ -92,7 +92,7 @@ export async function profileExtensionCommand(action: BridgeAction, root: string
 }
 
 export async function repairProfileExtension(action: BridgeAction, root: string, home: string, run: (
-  command: string, argv: readonly string[], environment: NodeJS.ProcessEnv,
+  command: string, argv: readonly string[], environment: NodeJS.ProcessEnv, timeout?: number,
 ) => Promise<{ code: number; output: string }>, capturedSpec?: string): Promise<BridgeActionResult> {
   const support = await profileRuntimeDirectory(root)
   const invocation = await profileExtensionCommand(action, root, home, capturedSpec)
@@ -101,20 +101,20 @@ export async function repairProfileExtension(action: BridgeAction, root: string,
   const argv = ['--expose-internals', '--input-type=module', '--eval', script, '--', ...invocation]
   const command = join(root, 'DeepSeek Harness.exe')
   const environment = profileEnvironment(home, packedCli)
-  const result = await run(command, argv, environment)
+  const result = await run(command, argv, environment, 300_000)
   return { ok: result.code === 0, code: result.code, output: result.output.slice(-20_000), command: [command, ...argv].map(value => JSON.stringify(value)).join(' '), restarted: false }
 }
 
 function profileEnvironment(home: string, packedCli = false): NodeJS.ProcessEnv {
   return { ...process.env, DSH_HOME: home, ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ASAR: packedCli ? undefined : '1',
-    npm_config_offline: 'true', npm_config_ignore_scripts: 'true', npm_config_fetch_retries: '0', npm_config_fetch_timeout: '10000', npm_config_auto_install_peers: 'false',
-    PNPM_CONFIG_OFFLINE: 'true', PNPM_CONFIG_IGNORE_SCRIPTS: 'true', PNPM_CONFIG_FETCH_RETRIES: '0', PNPM_CONFIG_FETCH_TIMEOUT: '10000', PNPM_CONFIG_AUTO_INSTALL_PEERS: 'false' }
+    npm_config_ignore_scripts: 'true', npm_config_auto_install_peers: 'false',
+    PNPM_CONFIG_IGNORE_SCRIPTS: 'true', PNPM_CONFIG_AUTO_INSTALL_PEERS: 'false' }
 }
 
-/** Reconcile a restored profile using only its frozen lockfile and local store. */
+/** Best-effort reconciliation after the checkpoint has restored the profile files and plugin. */
 export async function reconcileProfile(root: string, home: string, run: typeof runProfileCommand = runProfileCommand): Promise<void> {
   const runtime = await profileRuntimeDirectory(root)
   const result = await run(join(root, 'DeepSeek Harness.exe'), ['--expose-internals', join(runtime, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs'),
-    '--dir', join(home, 'profiles', 'desktop'), 'install', '--offline', '--frozen-lockfile', '--ignore-scripts', '--config.auto-install-peers=false'], profileEnvironment(home), 60_000)
+    '--dir', join(home, 'profiles', 'desktop'), 'install', '--frozen-lockfile', '--ignore-scripts', '--config.auto-install-peers=false'], profileEnvironment(home), 300_000)
   if (result.code !== 0) throw new Error(`REINSTALL_RECONCILE_FAILED: ${result.output}`)
 }

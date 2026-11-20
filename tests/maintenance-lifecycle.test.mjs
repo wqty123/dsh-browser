@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { runMaintenanceLifecycle } from '../lib/browser-electron/maintenance-lifecycle.js'
+import { MaintenanceRecoveryError, runMaintenanceLifecycle } from '../lib/browser-electron/maintenance-lifecycle.js'
 
 function fixture(overrides = {}) {
   const calls = []
@@ -66,6 +66,19 @@ test('a spawned Desktop without a working new bridge cannot be reported installe
   assert.equal(result.phase, 'failed')
   assert.equal(result.restarted, true)
   assert.match(result.error, /handshake failed/)
+})
+
+test('unverified rollback still restarts Desktop and loudly preserves recovery and verification failures', async () => {
+  const f = fixture({
+    maintain: async () => { throw new MaintenanceRecoveryError('REINSTALL_ROLLBACK_FAILED: profile resolution unverified') },
+    verify: async () => { throw new Error('recovery process verification failed') },
+  })
+  const result = await runMaintenanceLifecycle('reinstall', f.deps)
+  assert.equal(result.phase, 'failed')
+  assert.equal(result.ok, false)
+  assert.equal(result.restarted, true)
+  assert.deepEqual(f.calls, ['quit', 'closed', 'restart'])
+  assert.match(result.error, /REINSTALL_ROLLBACK_FAILED.*profile resolution unverified.*recovery process verification failed/)
 })
 
 test('uninstall is verified as an uninstall after the same safe lifecycle', async () => {
