@@ -124,7 +124,7 @@ test('validates DNS on redirect targets and again when the next hop is requested
 test('forwards POST body, content type and safe headers without app cookies or internal headers', async () => {
   const result = await call(guestPath('https://ordinary.example/echo'), { method: 'POST', body: 'q=hello&pw=secret',
     headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json',
-      'x-requested-with': 'XMLHttpRequest', authorization: 'Bearer site-token',
+      'x-requested-with': 'XMLHttpRequest', authorization: 'Bearer dsh-private',
       cookie: 'DSH=private; session=app-private', 'x-dsh-private': 'private', 'x-dsh-guest-sub': '1' } })
   assert.equal(result.status, 200)
   const echo = JSON.parse(result.body)
@@ -133,7 +133,7 @@ test('forwards POST body, content type and safe headers without app cookies or i
   assert.equal(echo.headers['content-type'], 'application/x-www-form-urlencoded')
   assert.equal(echo.headers.accept, 'application/json')
   assert.equal(echo.headers['x-requested-with'], 'XMLHttpRequest')
-  assert.equal(echo.headers.authorization, 'Bearer site-token')
+  assert.equal(echo.headers.authorization, undefined)
   assert.equal(echo.headers.cookie, undefined)
   assert.equal(echo.headers['x-dsh-private'], undefined)
   assert.equal(echo.headers['x-dsh-guest-sub'], undefined)

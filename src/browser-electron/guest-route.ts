@@ -110,7 +110,7 @@ const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 /** Only site request metadata may leave the app; never forward DSH cookies or internal headers. */
 const SAFE_REQUEST_HEADERS = new Set([
   'accept', 'accept-language', 'content-type', 'content-language', 'x-requested-with',
-  'authorization', 'x-csrf-token', 'x-xsrf-token', 'range', 'if-range',
+  'x-csrf-token', 'x-xsrf-token', 'range', 'if-range',
   'if-none-match', 'if-modified-since', 'cache-control',
 ])
 
