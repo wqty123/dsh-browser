@@ -22,6 +22,7 @@ import type { CardActions, CardPart, CardViewModel } from './reference-card.ts'
 import type { ReferenceLabels } from './reference-labels.ts'
 import css from './ReferenceDock.module.css'
 import { ReferenceText } from './ReferenceText.tsx'
+import { referenceTableRows } from '../../../../reference-text.ts'
 
 export interface ReferenceCapsulesProps {
   readonly sessionId: string
@@ -48,15 +49,15 @@ function Part({ part, labels }: { readonly part: CardPart; readonly labels: Refe
   if (part.kind === 'image') return part.value.bound
     ? <img className={css.image} data-part-kind="image" src={part.value.thumbnailSrc} alt={part.value.alt ?? labels.image} />
     : <p className={css.secondary} data-part-kind="image" role="status">{labels.loadingImage}</p>
-  const rows = new Map<number, typeof part.value.cells[number][]>()
-  for (const cell of part.value.cells) rows.set(cell.row, [...rows.get(cell.row) ?? [], cell])
+  const rows = referenceTableRows(part.value)
   return <div className={css.tableScroll} data-part-kind="table" tabIndex={0} aria-label={part.value.caption ?? labels.table}>
     <table className={css.table}>
       {part.value.caption !== undefined && <caption>{part.value.caption}</caption>}
-      <tbody>{[...rows].sort(([a], [b]) => a - b).map(([row, cells]) => <tr key={row}>
-        {cells.sort((a, b) => a.column - b.column).map((cell) => {
+      <tbody>{rows.map(({ row, cells }) => <tr key={row}>
+        {cells.map(({ column, columnSpan, rowSpan, value: cell }) => {
+          if (cell === undefined) return <td key={column} colSpan={columnSpan} />
           const Cell = cell.role === 'header' ? 'th' : 'td'
-          return <Cell key={cell.column} rowSpan={cell.rowSpan} colSpan={cell.columnSpan}>{cell.text}
+          return <Cell key={column} rowSpan={rowSpan} colSpan={columnSpan}>{cell.text}
             {cell.inlineImages.map(image => image.thumbnailSrc === undefined
               ? <span key={image.partId} className={css.secondary}>{labels.loadingImage}</span>
               : <img key={image.partId} className={css.image} src={image.thumbnailSrc} alt={labels.image} />)}

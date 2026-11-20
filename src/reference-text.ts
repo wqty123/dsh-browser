@@ -77,6 +77,7 @@ export function renderReferenceText(nodes: readonly ReferenceTextNode[]): string
 }
 
 export interface ReferenceTable {
+  readonly columnCount?: number
   readonly cells: readonly {
     readonly row: number
     readonly column: number
@@ -92,6 +93,7 @@ export function isReferenceTable(value: unknown): value is ReferenceTable {
   if (typeof value !== 'object' || value === null) return false
   const table = value as ReferenceTable
   return (table.caption === undefined || (typeof table.caption === 'string' && table.caption.length <= MAX_REFERENCE_TEXT))
+    && (table.columnCount === undefined || (Number.isSafeInteger(table.columnCount) && table.columnCount >= 0))
     && Array.isArray(table.cells) && table.cells.length <= 20_000
     && table.cells.every(cell => cell && typeof cell.text === 'string' && cell.text.length <= MAX_REFERENCE_TEXT
       && (cell.role === 'header' || cell.role === 'data')
@@ -101,15 +103,31 @@ export function isReferenceTable(value: unknown): value is ReferenceTable {
 
 export function renderReferenceTable(table: ReferenceTable): string {
   const escape = (text: string): string => text.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/\r?\n/gu, '<br>')
-  const rows = new Map<number, ReferenceTable['cells'][number][]>()
-  for (const cell of table.cells) {
-    const row = rows.get(cell.row) ?? []
-    row.push(cell)
-    rows.set(cell.row, row)
-  }
   const caption = table.caption === undefined ? '' : `<caption>${escape(table.caption)}</caption>\n`
-  return `<table>\n${caption}${[...rows].sort(([a], [b]) => a - b).map(([, cells]) => `<tr>${cells.sort((a, b) => a.column - b.column).map(cell => {
+  return `<table>\n${caption}${referenceTableRows(table).map(({ cells }) => `<tr>${cells.map(({ value: cell, columnSpan, rowSpan }) => {
+    if (cell === undefined) return `<td colspan="${columnSpan}"></td>`
     const tag = cell.role === 'header' ? 'th' : 'td'
-    return `<${tag} rowspan="${cell.rowSpan}" colspan="${cell.columnSpan}">${escape(cell.text)}</${tag}>`
+    return `<${tag} rowspan="${rowSpan}" colspan="${columnSpan}">${escape(cell.text)}</${tag}>`
   }).join('')}</tr>`).join('\n')}\n</table>`
+}
+
+export function referenceTableRows<T extends ReferenceTable['cells'][number]>(table: { readonly cells: readonly T[]; readonly columnCount?: number }): {
+  row: number; cells: { column: number; columnSpan: number; rowSpan: number; value?: T }[]
+}[] {
+  const rows = [...new Set(table.cells.map(cell => cell.row))].sort((a, b) => a - b)
+  const width = table.cells.reduce((max, cell) => Math.max(max, cell.column + cell.columnSpan), table.columnCount ?? 0)
+  return rows.map(row => {
+    const slots = table.cells.filter(cell => cell.row <= row && cell.row + cell.rowSpan > row)
+      .sort((a, b) => a.column - b.column)
+    const cells: { column: number; columnSpan: number; rowSpan: number; value?: T }[] = []
+    let column = 0
+    for (const cell of slots) {
+      if (cell.column > column) cells.push({ column, columnSpan: cell.column - column, rowSpan: 1 })
+      if (cell.row === row) cells.push({ column: cell.column, columnSpan: cell.columnSpan,
+        rowSpan: rows.filter(index => index >= row && index < row + cell.rowSpan).length, value: cell })
+      column = Math.max(column, cell.column + cell.columnSpan)
+    }
+    if (column < width) cells.push({ column, columnSpan: width - column, rowSpan: 1 })
+    return { row, cells }
+  })
 }

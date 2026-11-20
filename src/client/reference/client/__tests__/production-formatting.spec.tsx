@@ -5,15 +5,21 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { cleanup, render } from '@testing-library/react'
 import { captureScript, highlightScript, pageTextScript, type RawCaptureResult } from '../../../../browser-reference/page-script.ts'
 import { BrowserReferenceService } from '../../../../browser-reference/service.ts'
 import { frameCaptureScript } from '../../../../browser-reference/entry.ts'
 import { ReferenceStore } from '../../../../browser-reference/store.ts'
-import { isReferenceText, MAX_REFERENCE_TEXT, renderReferenceText } from '../../../../reference-text.ts'
+import { isReferenceText, isReferenceTable, MAX_REFERENCE_TEXT, renderReferenceText, referenceTableRows, renderReferenceTable } from '../../../../reference-text.ts'
 import { emptyDraftState, insertGroup, isOrderedReferenceGroup } from '../draft-reference.ts'
 import { toOrderedGroup } from '../production/snapshot-adapter.ts'
 import { wireSubmissionContent } from '../production/production-submission.ts'
 import { ReferenceText } from '../production/ReferenceText.tsx'
+import { ReferenceCapsules } from '../production/ReferenceCapsules.tsx'
+import { buildCardViewModel } from '../production/reference-card.ts'
+import { createAssetStore } from '../production/asset-store.ts'
+import { referenceLabels } from '../production/reference-labels.ts'
+import { memoryKV } from './production.fixtures.ts'
 
 const directories: string[] = []
 const box = { x: 10, y: 100, left: 10, top: 100, right: 650, bottom: 120, width: 640, height: 20, toJSON: () => ({}) }
@@ -25,6 +31,7 @@ afterAll(() => {
 })
 beforeEach(() => { vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(box) })
 afterEach(() => {
+  cleanup()
   vi.restoreAllMocks()
   window.getSelection()?.removeAllRanges()
   document.body.replaceChildren()
@@ -63,6 +70,37 @@ async function submit(raw: RawCaptureResult) {
 }
 
 describe('formatted quotations through emitted capture, storage, draft and submission', () => {
+  it('keeps partial table columns under their own headers through capture and submission', async () => {
+    document.body.innerHTML = '<table><thead><tr><th>A</th><th>B</th><th>C</th><th>D</th></tr></thead><tbody><tr><td>omit</td><td colspan="2">selected</td><td>omit too</td></tr></tbody></table>'
+    const range = document.createRange()
+    range.selectNodeContents(document.querySelectorAll('tbody td')[1]!)
+    window.getSelection()!.addRange(range)
+    const raw = execute<RawCaptureResult>(captureScript())
+    const { snapshot, group, parts } = await submit(raw)
+    const table = snapshot.parts.find(part => part.type === 'table')!
+    expect(table.type).toBe('table')
+    if (table.type !== 'table') throw new Error('missing table')
+    expect(table.table.cells.find(cell => cell.role === 'data')).toMatchObject({ column: 1, columnSpan: 2, text: 'selected' })
+    const html = parts.filter(part => part.type === 'text').map(part => part.text).join('\n')
+    expect(html).toContain('<tr><td colspan="1"></td><td rowspan="1" colspan="2">selected</td><td colspan="1"></td></tr>')
+    expect(referenceTableRows(table.table)[1]!.cells.map(cell => cell.column)).toEqual([0, 1, 3])
+    const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
+    render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
+    const cells = document.querySelectorAll('[data-part-kind="table"] tbody tr:nth-child(2) td')
+    expect([...cells].map(cell => cell.textContent)).toEqual(['', 'selected', ''])
+    expect(cells[1]!.getAttribute('colspan')).toBe('2')
+  })
+
+  it('leaves rowspan-covered columns occupied, and handles empty tables', () => {
+    const table = { columnCount: 3, cells: [
+      { row: 0, column: 0, rowSpan: 2, columnSpan: 1, role: 'header' as const, text: 'A' },
+      { row: 0, column: 1, rowSpan: 1, columnSpan: 2, role: 'header' as const, text: 'B/C' },
+      { row: 1, column: 2, rowSpan: 1, columnSpan: 1, role: 'data' as const, text: 'C value' },
+    ] }
+    expect(renderReferenceTable(table)).toContain('<tr><td colspan="1"></td><td rowspan="1" colspan="1">C value</td></tr>')
+    expect(referenceTableRows({ cells: [] })).toEqual([])
+    expect(isReferenceTable({ ...table, columnCount: -1 })).toBe(false)
+  })
   it('preserves paragraphs, nested inline emphasis, links, lists and explicit line breaks', async () => {
     const raw = select('<p>First <strong>bold <em>nested</em></strong> <a href="https://example.com/a?q=1">link</a>.</p><p>Second<br>line</p><ol start="3"><li>Alpha</li><li>Beta</li></ol><ul><li>Gamma</li></ul>')
     expect(raw.ok).toBe(true)
