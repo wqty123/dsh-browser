@@ -1,8 +1,10 @@
 # DSH host APIs
 
-The bridge settings installer applies the runtime specification in `rc3.json` to **DSH 0.2.2-rc.3**. It installs sidebar rendering holds and Desktop main extensions, not replacements for arbitrary DSH bundles. Desktop updates may require reinstalling from plugin settings.
+The bridge settings installer selects the runtime specification by the package's exact version: `rc3.json` for **DSH 0.2.2-rc.3**, and `rc5.json` for **DSH 0.2.2-rc.5**. It installs sidebar rendering holds and Desktop main extensions, not replacements for arbitrary DSH bundles. Desktop updates may require reinstalling from plugin settings.
 
-`sources/rc3/` and `sources/main/` contain the two upstream source commits as `git format-patch` files for source builds. The runtime spec was derived from the unpatched/patched rc.3 builds; its anchors include unchanged context, `before` is the unique input anchor, and `after` is its replacement. Tests compare the complete output artifacts byte for byte. The fixtures are repository tests only and are not published.
+`sources/rc3/`, `sources/rc5/`, and `sources/main/` contain the two upstream source commits as `git format-patch` files for source builds. Each runtime spec was derived from its own unpatched/patched release builds; its anchors include unchanged context, `before` is the unique input anchor, and `after` is its replacement. Tests compare the complete output artifacts byte for byte. The fixtures are repository tests only and are not published.
+
+The rc.5 source base is release tag `dsh-v0.2.2-rc.5`, commit `9c2670d3bce5275e0d1610272958121af87787bb`, not the later master merge `2e39e704`. Its sidebar sources match the published npm package, `lib/index.js` matches byte for byte, and `lib/client.js` matches after normalizing only the three build-directory-dependent CSS-module prefixes. The rc.5 Desktop pristine hash is from a source build, not a published Desktop artifact: the GitHub release exposes source archives only. Desktop installations with a different pristine hash are refused safely and retain the legacy bridge fallback.
 
 ## Standalone CLI (including Web)
 

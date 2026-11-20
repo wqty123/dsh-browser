@@ -76,7 +76,7 @@ test('a cache refresh failure reports that files changed and a restart is requir
 })
 
 test('missing service, unsupported version, anchors mismatch and read-only package stay disabled with reasons', async t => {
-  for (const options of [{ missing: true }, { version: '0.2.2-rc.5' }, { mismatch: true }, { readOnly: true }]) {
+  for (const options of [{ missing: true }, { version: '0.2.2-rc.4' }, { mismatch: true }, { readOnly: true }]) {
     const f = fixture(t, undefined, options)
     if (options.mismatch) writeFileSync(f.file, 'unknown bundle')
     if (options.readOnly) { chmodSync(f.file, 0o444); t.after(() => { if (existsSync(f.file)) chmodSync(f.file, 0o644) }) }

@@ -1,12 +1,13 @@
-import { test } from 'node:test'
+import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import * as fs from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyHostPatch, hostPatchStatus, patchText, restoreHostPatch } from '../dsh-host-patch/apply.mjs'
 
-const spec = JSON.parse(fs.readFileSync(new URL('../dsh-host-patch/rc3.json', import.meta.url), 'utf8'))
-const fixture = (id, kind) => fs.readFileSync(new URL(`./fixtures/dsh-host-patch/${id}.${kind}.js`, import.meta.url), 'utf8')
+for (const release of ['rc3', 'rc5']) describe(release, () => {
+const spec = JSON.parse(fs.readFileSync(new URL(`../dsh-host-patch/${release}.json`, import.meta.url), 'utf8'))
+const fixture = (id, kind) => fs.readFileSync(new URL(`./fixtures/dsh-host-patch/${release === 'rc3' ? '' : release + '/'}${id}.${kind}.js`, import.meta.url), 'utf8')
 const backupSuffix = '.before-dsh-host-patch'
 function setup(t, ids = ['client', 'main']) {
   const root = fs.mkdtempSync(join(tmpdir(), 'dsh-host-patch-'))
@@ -23,14 +24,15 @@ function setup(t, ids = ['client', 'main']) {
 }
 
 for (const target of spec.targets) {
-  test(`${target.id}: runtime anchors produce the exact rc.3 patched artifact`, () => {
+  test(`${target.id}: runtime anchors produce the exact ${spec.version} patched artifact`, () => {
     assert.equal(patchText(fixture(target.id, 'before'), target), fixture(target.id, 'after'))
     assert.throws(() => patchText(fixture(target.id, 'after'), target), /already patched/)
   })
 }
 
 test('sidebar hashes are resolved from the target, including the laptop prefix and other modules', () => {
-  const substitute = text => text.replaceAll('ex8EMa_', 'acoR2W_').replaceAll('_3o69ta_', 'otherGuide_').replaceAll('qifk2W_', 'otherExpand_')
+  const prefix = fixture('client', 'before').match(/\.([A-Za-z0-9_-]+)_session\{display:contents\}/)[1] + '_'
+  const substitute = text => text.replaceAll(prefix, 'acoR2W_').replaceAll('_3o69ta_', 'otherGuide_').replaceAll('qifk2W_', 'otherExpand_')
   assert.equal(patchText(substitute(fixture('client', 'before')), spec.targets[0]), substitute(fixture('client', 'after')))
 })
 
@@ -61,7 +63,7 @@ test('web package directory and hardlinked npm content are patched without chang
 })
 
 for (const [name, mutate, status] of [
-  ['unsupported version', ({ packages }) => fs.writeFileSync(join(packages[1], 'package.json'), JSON.stringify({ name: spec.targets[1].packageName, version: '0.2.2-rc.5' })), 'unsupported version'],
+  ['unsupported version', ({ packages }) => fs.writeFileSync(join(packages[1], 'package.json'), JSON.stringify({ name: spec.targets[1].packageName, version: '0.2.2-rc.4' })), 'unsupported version'],
   ['missing anchor', ({ file }) => fs.writeFileSync(file('client'), fixture('client', 'before').replace(spec.targets[0].edits[1].before, 'missing')), 'anchors mismatch'],
   ['ambiguous anchor', ({ file }) => fs.appendFileSync(file('client'), spec.targets[0].edits[1].before), 'anchors mismatch'],
   ['ambiguous CSS prefix', ({ file }) => fs.appendFileSync(file('client'), '.other_session{display:contents}'), 'anchors mismatch'],
@@ -129,4 +131,5 @@ test('a staging failure changes neither targets nor backups', t => {
     assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'before'))
     assert.equal(fs.existsSync(file(id) + backupSuffix), false)
   }
+})
 })

@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const spec = JSON.parse(fs.readFileSync(new URL('./rc3.json', import.meta.url), 'utf8'))
+const specs = ['rc3', 'rc5'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8')))
 const suffix = '.before-dsh-host-patch'
 const digest = value => createHash('sha256').update(value).digest('hex')
 
@@ -44,8 +44,9 @@ function plan(packages, restoring, io, normalize = text => text) {
   const entries = directories.map(directory => {
     const root = io.realpathSync(directory)
     const manifest = JSON.parse(io.readFileSync(join(root, 'package.json'), 'utf8'))
-    if (manifest.version !== spec.version) {
-      const error = new Error(`unsupported DSH version: ${String(manifest.version)} (supported: ${spec.version})`)
+    const spec = specs.find(item => item.version === manifest.version)
+    if (!spec) {
+      const error = new Error(`unsupported DSH version: ${String(manifest.version)} (supported: ${specs.map(item => item.version).join(', ')})`)
       error.status = 'unsupported version'
       throw error
     }
