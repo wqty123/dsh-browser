@@ -6,6 +6,8 @@ Host bootstrap remains an explicit compatibility action. It may change Desktop/s
 
 Supported repair reuses Desktop's bundled CLI and reserved-profile permission: `dsh plugin --profile desktop add <the existing dependency spec>`. Relative `file:`/`link:` specs are resolved against that profile. Removal uses `remove dsh-builtin-browser`. A missing profile/spec or package-manager failure is surfaced, not replaced by an app-file installer. Settings passes a feature-detected status from the authenticated Desktop preload even if the bridge itself failed to start.
 
+This is the cold CLI, after confirmed Desktop shutdown, not the live HMR plugin manager. On both rc.3 and rc.5, `apps/cli/src/bin.ts` dispatches to `runPlugin`; `apps/cli/src/plugin.ts` takes the Desktop writer lock and calls `runProfilePnpm` directly. It never boots HMR or calls `PluginManager.installBundle`, whose `already-installed` guard applies to live HMR installation. No remove/add gap is needed for this CLI path. A nonzero package command remains a failed maintenance result even when Desktop is reopened for recovery.
+
 The existing Windows maintenance coordinator still opens the official application menu and requests normal Exit. It waits for confirmed shutdown and refuses writes while a Desktop process remains; it does not force termination. The restarted process receives the job's captured `DSH_HOME`. Successful install requires a live endpoint owned by the new PID plus matching home identifier, package version, bridge code digest and host `loaded` status. Profile removal also removes the plugin's settings/tools after restart; restoring host files is a separate action.
 
 ## Host and runtime patch

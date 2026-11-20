@@ -9,6 +9,7 @@ import { once } from 'node:events'
 import { installedProfileExtension, profileExtensionCommand, repairProfileExtension, extensionHomeId, readHostExtensionStatus } from '../src/browser-electron/profile-extension.ts'
 import { waitForRestartedBridge } from '../src/browser-electron/bridge-install.ts'
 import { readBridgeStatus } from '../src/browser-electron/bridge-status.ts'
+import { runMaintenanceLifecycle } from '../src/browser-electron/maintenance-lifecycle.ts'
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'profile-extension-'))
@@ -55,6 +56,24 @@ test('missing profiles and missing package specs fail before starting any instal
     calls++; return { code: 1, output: 'EACCES: profile is read-only' }
   })
   assert.equal(calls, 1); assert.equal(result.ok, false); assert.match(result.output, /EACCES/)
+})
+
+test('a rejected profile command remains failed after Desktop recovery instead of reporting a repaired extension', async t => {
+  const f = fixture(t)
+  const phases = [], verified = []
+  const result = await runMaintenanceLifecycle('install', {
+    requestQuit: async () => {}, waitUntilClosed: async () => {},
+    maintain: () => repairProfileExtension('install', f.app, f.home, async () => ({ code: 1, output: 'already-installed' })),
+    restart: async () => 123,
+    verify: async (_pid, action) => { verified.push(action) },
+    publish: async state => { phases.push(state.phase) },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.phase, 'failed')
+  assert.equal(result.restarted, true)
+  assert.match(result.error, /already-installed/)
+  assert.deepEqual(verified, ['uninstall'])
+  assert.equal(phases.includes('completed'), false)
 })
 
 test('live package metadata includes same-version bridge replacements and keeps separate homes separate', async t => {
