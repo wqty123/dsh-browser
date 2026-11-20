@@ -5,6 +5,8 @@ import type { BrowserPresentation } from './BrowserPresentation.ts'
 import css from './Browser.module.css'
 import { registerIframeReference, type GuestReferenceCommand } from '../browser/iframe-reference.ts'
 import { sameReferenceDocument } from '../../reference-page.ts'
+import { dispatchChildTab } from '../browser/child-tabs.ts'
+import type { BrowserChildTabRequest } from '../../types.ts'
 
 /** Route Web pages through the opaque-origin proxy. */
 function guestProxyUrl(url: string): string {
@@ -30,6 +32,8 @@ export interface IframePresentationEvents {
   /** @param revision - document generation. @param observedUrl - URL reported by the owned opaque guest. */
   readonly observed: (revision: number, observedUrl: string) => void
   readonly reference?: (intent: object) => Promise<void>
+  readonly childRequested?: (url: string) => void
+  readonly capabilityFailed?: (description: string) => void
   readonly guestReady?: (revision: number, pageId: string) => void
   readonly guestPending?: () => void
   readonly failed: (revision: number) => void
@@ -50,9 +54,19 @@ export class IframePresentation implements BrowserPresentation {
   private depth = 1
   private loadId: number | undefined
   private nextLoadId = 0
+  private childRequestId = 0
   private readonly receive = (event: MessageEvent): void => {
     if (event.origin !== 'null' || event.source !== this.element?.contentWindow) return
     const data = event.data
+    if (data?.type === 'dsh.browser.guest.child.request') {
+      if (this.loadId === undefined || data.loadId !== this.loadId || !Number.isSafeInteger(data.requestId)
+        || data.requestId <= this.childRequestId || typeof data.url !== 'string'
+        || !['url-only', 'native-opener'].includes(data.mode)) return
+      this.childRequestId = data.requestId
+      const result = dispatchChildTab(data as BrowserChildTabRequest, location.origin, url => { this.events.childRequested?.(url) })
+      if (result.status === 'unsupported') this.events.capabilityFailed?.(result.code)
+      return
+    }
     if (data?.type === 'dsh.browser.guest.reference.ack') {
       const request = this.pending.get(data.requestId)
       if (request === undefined || data.loadId !== request.loadId || data.loadId !== this.loadId
@@ -111,6 +125,7 @@ export class IframePresentation implements BrowserPresentation {
   }
 
   private invalidateGuest(): void {
+    this.childRequestId = 0
     this.loadId = undefined
     this.observedUrl = undefined
     for (const request of this.pending.values()) request.reject(new Error('source iframe document changed'))

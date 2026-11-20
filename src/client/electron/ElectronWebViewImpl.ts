@@ -1,6 +1,6 @@
 /** Electron navigation and guest lifetime, independent from DOM placement. */
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
-import type { DesktopBrowserBridge, DesktopBrowserLeaseId } from '../../types.ts'
+import type { DesktopBrowserBridge, DesktopBrowserLeaseId, BrowserChildTabRequest, BrowserChildTabResult } from '../../types.ts'
 import type { ElectronWebviewPresentation, WebviewElement } from './ElectronWebviewPresentation.ts'
 import { emptyBrowserFrame, type BrowserFrame, type BrowserFrameState, type BrowserLoadError } from '../browser/BrowserFrame.ts'
 import type { BrowserCarrierState } from '../browser/BrowserFrame.ts'
@@ -9,6 +9,7 @@ import { browserAddressCheckpoint, currentBrowserTarget } from '../browser/Brows
 import { parseBrowserAddress, type BrowserTarget } from '../browser/url.ts'
 import { captureReferenceIntent } from '../reference-intents.ts'
 import { installReferenceOverlay } from './reference-overlay.ts'
+import { dispatchChildTab } from '../browser/child-tabs.ts'
 
 interface NavigationEvent extends Event { readonly isMainFrame: boolean; readonly isInPlace?: boolean }
 interface LoadFailureEvent extends NavigationEvent {
@@ -212,9 +213,16 @@ export class ElectronWebViewImpl implements BrowserFrame {
     }
     this.element = element
     this.carrier.set({ stage: 'guest' })
-    const unsubscribeOpen = this.bridge.onOpenRequested(reservation.lease, (url) => {
-      if (this.element === element && !signal.aborted) this.options.openRequested(url)
-    })
+    const requested = (request: BrowserChildTabRequest): BrowserChildTabResult => {
+      const result = dispatchChildTab(request, location.origin, this.options.openRequested, this.element === element && !signal.aborted)
+      if (result.status === 'unsupported' && result.code !== 'guest-disposed') {
+        this.store.set({ ...this.store.getSnapshot(), error: { code: 'browser-capability-unavailable', description: result.code } })
+      }
+      return result
+    }
+    const unsubscribeOpen = this.bridge.childTabs?.protocolVersion === 1
+      ? this.bridge.childTabs.onRequested(reservation.lease, requested)
+      : this.bridge.onOpenRequested(reservation.lease, url => { requested({ mode: 'url-only', url }) })
     signal.addEventListener('abort', unsubscribeOpen, { once: true })
     element.addEventListener('dom-ready', () => {
       this.documentLifetime?.abort()

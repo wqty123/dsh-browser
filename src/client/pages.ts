@@ -15,6 +15,8 @@ export function createIframePage(options: BrowserPageOptions, sessionId?: string
     loaded: (revision) => { frame.handleLoaded(revision) },
     observed: (revision, observedUrl) => { frame.handleObserved(revision, observedUrl) },
     reference: (intent: object) => capture(intent, sessionId),
+    childRequested: options.openRequested,
+    capabilityFailed: description => { frame.handleCapabilityFailure(description) },
     guestReady: (revision, pageId) => { frame.handleGuestReady(revision, pageId) },
     guestPending: () => { frame.handleGuestPending() },
     failed: (revision) => { frame.handleLoadFailed(revision) },

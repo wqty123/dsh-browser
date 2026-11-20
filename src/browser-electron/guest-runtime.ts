@@ -63,7 +63,33 @@ export function guestRuntimeScript(pageUrl: string): string {
       } catch { return false; }
     };
   });
-  attempt(() => { window.open = url => { attempt(() => location.assign(toProxy(url || real))); return window; }; });
+  let childRequestId = 0;
+  const childError = code => {
+    const error = new Error(code + ': this sidebar supports URL-only tabs, not native child windows or opener relationships');
+    error.name = 'NotSupportedError'; error.code = code;
+    return error;
+  };
+  const childRequest = (mode, url) => {
+    if (loadId === undefined) throw childError('sidebar-tab-owner-not-ready');
+    parent.postMessage({ type: 'dsh.browser.guest.child.request', loadId, requestId: ++childRequestId, mode, url }, '*');
+  };
+  const nativeChild = url => {
+    attempt(() => childRequest('native-opener', url));
+    throw childError('native-child-opener-unavailable');
+  };
+  const detached = features => String(features || '').split(',').some(feature => {
+    const [key, value] = feature.trim().toLowerCase().split(/\\s*=\\s*/);
+    return ['noopener', 'noreferrer'].includes(key) && !['0', 'no', 'false'].includes(value);
+  });
+  attempt(() => { window.open = (url, target = '_blank', features = '') => {
+    const name = String(target || '_blank').toLowerCase();
+    if (name !== '_self' && (name !== '_blank' || !detached(features))) return nativeChild(String(url || ''));
+    const next = realURL(url == null || String(url) === '' ? 'about:blank' : url);
+    if (!/^https?:$/.test(next.protocol)) throw childError('invalid-child-url');
+    if (name === '_self') { location.assign(toProxy(next.href)); return window; }
+    childRequest('url-only', next.href);
+    return null;
+  }; });
   for (const name of ['pushState', 'replaceState']) attempt(() => {
     const original = history[name];
     history[name] = function(state, title, url) {
@@ -189,6 +215,13 @@ export function guestRuntimeScript(pageUrl: string): string {
       const url = realURL(href);
       if (!/^https?:$/.test(url.protocol)) return;
       event.preventDefault();
+      const target = (node.getAttribute('target') || '_self').toLowerCase();
+      if (target !== '_self') {
+        const opener = /(?:^|\\s)opener(?:\\s|$)/i.test(node.getAttribute('rel') || '');
+        try { if (target !== '_blank' || opener) nativeChild(url.href); else childRequest('url-only', url.href); }
+        catch (error) { console.error('[dsh-browser]', error); }
+        return;
+      }
       location.assign(toProxy(href));
     });
   }, true));
@@ -197,12 +230,20 @@ export function guestRuntimeScript(pageUrl: string): string {
     const method = (submitter && submitter.getAttribute('formmethod') || form.getAttribute('method') || 'GET').toUpperCase();
     const url = realURL(action);
     if (!/^https?:$/.test(url.protocol)) return false;
+    const target = (submitter && submitter.getAttribute('formtarget') || form.getAttribute('target') || '_self').toLowerCase();
+    if (target !== '_self' && (target !== '_blank' || method !== 'GET'
+      || /(?:^|\\s)opener(?:\\s|$)/i.test(form.getAttribute('rel') || ''))) {
+      try { nativeChild(url.href); } catch (error) { console.error('[dsh-browser]', error); }
+      return true;
+    }
     if (method === 'GET') {
       const params = new URLSearchParams();
       const data = submitter ? new FormData(form, submitter) : new FormData(form);
       for (const [key, value] of data) params.append(key, typeof value === 'string' ? value : value.name);
       url.search = params.toString();
-      location.assign(toProxy(url.href));
+      if (target === '_blank') {
+        try { childRequest('url-only', url.href); } catch (error) { console.error('[dsh-browser]', error); }
+      } else location.assign(toProxy(url.href));
       return true;
     }
     form.setAttribute('action', toProxy(url.href));

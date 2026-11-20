@@ -4,7 +4,7 @@ import type { BrowserTarget } from './url.ts'
 
 /** A loading failure, optionally carrying the underlying browser's diagnostic. */
 export interface BrowserLoadError {
-  readonly code: number | undefined
+  readonly code: number | string | undefined
   readonly description: string | undefined
 }
 

@@ -66,7 +66,7 @@ Web 页面和嵌套 iframe 都受响应级 `sandbox allow-scripts allow-forms` �
 
 - **侧栏载体不上报"用户操作"事件**:人在那个页面里点击是外壳自己的事件,而 bridge 没有用于回报它的操作。因此依赖该事件的功能(如自定义的接管提示)在桌面端侧栏下不会触发;换到自托管载体则可以。
 - **本机 Chrome / Edge 载体使用插件自己的 profile**:插件用它自己的用户数据目录启动浏览器(`$DSH_HOME/dsh-builtin-browser-host/<chrome|edge>-profile`),所以你日常浏览器里的书签、扩展与登录态**不会自动继承** —— 这是刻意的,避免插件操作与你的个人会话混在一起;登录态是否跨重启保留由 `cookies.persist` 决定。
-- 页面弹窗(`window.open` / `target=_blank`)不再覆盖当前视图:HTTP(S) 弹窗会在同一会话窗口**新开一个标签页**并计入历史,原页面与 opener 上下文保留;非 HTTP(S) 弹窗(空 URL 弹窗承接、`mailto:`、自定义协议)仍**放行原生窗口**,交给系统处理 —— 这类弹窗不纳入会话模型。
+- 页面不能打开原生弹窗。Web 的普通 `target=_blank` 链接、GET 表单及显式 `window.open(url, '_blank', 'noopener')` 只请求同会话侧栏中的 URL 标签，不建立 child/opener、命名窗口、`WindowProxy` 或跨窗口通信；`window.open` 的该受限模式返回 `null`。需要 opener、命名目标、空白子窗口或 POST 新目标的请求会明确报 `native-child-opener-unavailable`，不会改为覆盖原页面。Desktop 的旧 `onOpenRequested` 也只是 URL 通知，不能证明支持原生 child/opener。新宿主可实现 `DesktopBrowserBridge.childTabs` v1 的结构化请求/拒绝协议（见 `docs/child-tabs.md`）；当前插件仍不支持原生子窗口接管。
 - 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建** —— 仅页面状态丢失,无需手动 `dsh_browser_reset_session`。`dsh_browser_reset_session` 仍可用于主动重置。
 - 新视图创建前会先有界加载 `about:blank`(3 秒上限,保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时。
 - 子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`;写之前若该文件已超过 2 MiB,则**丢弃旧内容、只写入一行带时间戳的轮转记录**(形如 `<ISO 时间戳> log rotated: previous content exceeded 2097152 bytes and was discarded`)—— 旧内容就此消失不留副本,但那一行证明"曾发生过轮转",纯 `dsh web` 自托管可据此自助排查崩溃循环。
