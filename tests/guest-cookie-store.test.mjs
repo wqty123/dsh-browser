@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { loadGuestCookies, localGuestCookies } from '../src/browser-electron/guest-cookie-store.ts'
 
@@ -76,5 +76,5 @@ test('empty, corrupt and unwritable stores remain usable without disclosing stor
   mkdirSync(file)
   assert.doesNotThrow(() => jar.setCookies(new URL('https://site.example/'), ['SECRET=value; Max-Age=3600']))
   assert.equal(loadGuestCookies(directory).getCookieHeader(new URL('https://site.example/')), undefined)
-  assert.deepEqual(readdirSync(directory), [file.split('/').at(-1)])
+  assert.deepEqual(readdirSync(directory), [basename(file)])
 })
