@@ -1,0 +1,38 @@
+# dsh-builtin-browser —— 一份包、一次安装装齐全部能力，不改 DSH 本体。
+#
+# 这份文件由包清单的 `dsh.bundle.patch` 声明：DSH 的插件管理器在安装时读它并把行挂进用户
+# 的 profile，所以用户装完即可用，不需要手工改任何设置。
+#
+# 行名必须与包的真实子路径一致；客户端半由**根行**承载——宿主把行的 specifier 解析到包根后
+# 读 `dsh.client`，因此 `dsh-builtin-browser` 这条根行（惰性）同时是客户端半的入口。
+#
+# 这里刻意不写 `!!js` 之类自定义标签：bundle patch 由装配器按固定 schema 解析，
+# 只保留 patch 操作本身，取值走各行自己的配置默认值。
+
+# 1) 让位：DSH 自带（`dsh-web-app` bundle）的侧栏浏览器行 `ui-sidebar-browser` 与本包的同名能力
+#    争同一个标签类型，而 builtin 优先级更高——桌面端实测显示的是**上游那套面板**（没有起始页、
+#    没有本包的设置分节），表现为「快捷访问没了」。关掉它，由本包的客户端半提供面板。
+- id: ui-sidebar-browser
+  disabled: true
+
+# 2) 本包的行。
+- insert:
+    - id: dsh-builtin-browser
+      name: dsh-builtin-browser
+
+    - id: browser
+      name: dsh-builtin-browser/browser
+
+    - id: browser-electron
+      name: dsh-builtin-browser/browser-electron
+
+    - id: tool-browser
+      name: dsh-builtin-browser/tool-browser
+
+    # 起始页的宿主伴生条目：注册 `browser-startpage` 设置分节（快捷方式与搜索引擎）。
+    # 没有它，起始页读不到快捷方式列表（`startpage-shortcuts.ts` 会抛
+    # `the "browser-startpage" settings entry is not loaded in this profile`），
+    # 面板就退化成「输入 HTTP(S) 地址开始浏览」的空态——桌面端实测过这个现象。
+    # 由本包提供（`./startpage` 出口）：不依赖上游导出，装到哪都能用。
+    - id: browser-startpage
+      name: dsh-builtin-browser/startpage

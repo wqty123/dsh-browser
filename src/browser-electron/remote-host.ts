@@ -1,0 +1,1462 @@
+/**
+ * Self-hosted Electron browser host (parent side): an
+ * {@link ElectronBrowserViewHost} implementation that spawns the plugin's own
+ * Electron child process (host-main.js) and drives it over line-delimited
+ * JSON-RPC on a loopback TCP socket. This is what makes the plugin work on
+ * surfaces without a desktop shell's electronViewHost (plain dsh web):
+ * installing the plugin is enough — the browser window appears on first use.
+ *
+ * Protocol (one JSON object per line, both directions):
+ *   -> { id, op: 'createView' } | { id, op: 'destroyView', viewId } |
+ *      { id, op: 'showView', viewId } | { id, op: 'command', viewId, method, params }
+ *   <- { id, op: 'hello', token } (the child's FIRST message — authenticates it)
+ *   <- { id, ok: true, result? } | { id, ok: false, err }
+ *
+ * The child is Electron's main process; host-main.js owns the BrowserWindow,
+ * WebContentsViews, and webContents.debugger (CDP).
+ *
+ * Security: the RPC server accepts exactly ONE connection, and only after
+ * that connection proves knowledge of the random per-spawn token (passed to
+ * the child via its stdin (first line, never in argv). A local process that
+ * connects to the loopback port without the token can neither impersonate the
+ * child nor inject replies — it is disconnected as soon as its first line
+ * arrives. Commands are only written after the hello authenticates, and every
+ * other inbound op (including the fire-and-forget `userAction` / `viewClosed`
+ * notifications) is dispatched only once that check has passed, so an
+ * unauthenticated peer can neither read traffic nor drive a session.
+ * @module dsh-browser/browser-electron/remote-host
+ */
+
+import { execFileSync, spawn } from 'node:child_process'
+import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join } from 'node:path'
+import { createServer, type Server, type Socket } from 'node:net'
+import { withTimeoutShared } from './timing.ts'
+import { fileURLToPath } from 'node:url'
+import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, PresentOptions, ScreenshotOptions } from './provider.ts'
+import type { ExportedCookie } from '../browser/types.ts'
+
+/** How long to wait for the child to signal readiness before failing. */
+const READY_TIMEOUT_MS = 20_000
+
+/** Budget for the present/barrier round-trips (see presentView). */
+const PRESENT_TIMEOUT_MS = 10_000
+
+/** Safety cap on a single RPC reply line (base64 downloads are the big ones). */
+const MAX_RPC_BUFFER_BYTES = 512 * 1024 * 1024
+
+/**
+ * Locate a SPAWNABLE Electron binary — one that runs a script given as an
+ * argument, i.e. a BARE electron, never a packaged app executable:
+ *   0. ELECTRON_PATH (explicit override — user intent beats auto-discovery),
+ *   1. the plugin's own electron package (a real dependency since 0.1.18),
+ *      found by a pure filesystem walk — never require(), whose semantics
+ *      differ inside an Electron main process (there it is the built-in API
+ *      module, not the npm package) and which would trigger electron 44+'s
+ *      lazy binary download;
+ *   2. every DSH install anchor (electron installed separately, e.g.
+ *      `dsh plugin add electron` into the profile or a global prefix),
+ *      choosing the NEWEST version found. Older Electron releases (e.g.
+ *      33.x) have a compositor defect that intermittently breaks page
+ *      capture, so prefer the newest binary available in the environment,
+ *   3. the current process, when it IS a bare Electron (dev hosts, e.g.
+ *      `electron .`): reuse the host binary. Packaged app executables
+ *      (resources/app.asar beside the exe) are never reused — they ignore
+ *      the script argument and launch the app itself, typically exiting
+ *      immediately via the single-instance lock, which is exactly the
+ *      "browser host exited (code=0)" failure on DSH Desktop;
+ *   4. last resort: the process ancestry, for hosts that run this plugin in a
+ *      child Node process of their own bare-Electron main process.
+ * @returns the path to the Electron executable.
+ */
+/** The discovery inputs {@link resolveElectronPathImpl} selects over, injectable for tests. */
+interface ElectronPathInputs {
+  /** ELECTRON_PATH (may be unset, empty, or pointing at a missing file). */
+  readonly override: string | undefined
+  /** True when running inside an Electron main process. */
+  readonly inElectron: boolean
+  /** process.execPath (candidate for in-process host reuse). */
+  readonly execPath: string
+  /** The plugin's own electron package probe (bundled). */
+  readonly bundled: () => string | undefined
+  /** The DSH install-anchor probe. */
+  readonly anchored: () => string | undefined
+  /** The process-ancestry probe (last resort). */
+  readonly ancestry: () => string | undefined
+}
+
+function resolveElectronPath(): string {
+  return resolveElectronPathImpl({
+    override: process.env.ELECTRON_PATH,
+    inElectron: typeof process.versions.electron === 'string',
+    execPath: process.execPath,
+    bundled: bundledElectronBinary,
+    anchored: anchoredElectronBinary,
+    ancestry: hostElectronViaProcessTree,
+  })
+}
+
+/**
+ * Pure selection over the discovery probes, in order:
+ *   0. override (user intent) → 1. bundled package → 2. anchors (newest) →
+ *   3. in-process BARE host → 4. process ancestry → throw.
+ * Packaged app executables are never reused (steps 3/4 skip them).
+ */
+function resolveElectronPathImpl(inputs: ElectronPathInputs): string {
+  // 0. Explicit override first: a user-set ELECTRON_PATH is a deliberate
+  //    choice and must beat every auto-discovery (including the bundled
+  //    package) — auto-discovery is a fallback, not an override.
+  const override = inputs.override
+  if (typeof override === 'string' && override.length > 0 && existsSync(override)) return override
+  // 1. The plugin's own electron package (filesystem probe). Never require():
+  //    inside an Electron main process require('electron') is the built-in
+  //    API module, not the npm package, and electron 44+ downloads its binary
+  //    on first require — probing must stay side-effect free (available()
+  //    would otherwise block DSH startup on the download).
+  const bundled = inputs.bundled()
+  if (bundled !== undefined) return bundled
+  // 2. DSH install anchors, newest wins. (The plugin's own tree — plain and
+  //    pnpm store layouts — was already scanned in step 1; the anchors cover
+  //    electron installed separately, e.g. `dsh plugin add electron` into the
+  //    profile or a global prefix.)
+  const anchored = inputs.anchored()
+  if (anchored !== undefined) return anchored
+  // 3. The current process IS a bare Electron (dev hosts, e.g. `electron .`):
+  //    reuse the host binary — it cannot be missing because we are running on
+  //    it. A PACKAGED app executable (resources/app.asar beside it, e.g. DSH
+  //    Desktop.exe) is NOT spawnable as bare electron: it ignores the script
+  //    argument, launches the app itself, and typically exits immediately
+  //    (single-instance lock) — so it is never reused.
+  if (inputs.inElectron) {
+    const exe = inputs.execPath
+    if (typeof exe === 'string' && exe.length > 0 && existsSync(exe) && isBareElectron(exe)) return exe
+  }
+  // 4. Last resort for bare-Electron hosts: walk the process ancestry (the
+  //    plugin may run in a child Node process of an Electron main process).
+  const hostExe = inputs.ancestry()
+  if (hostExe !== undefined) return hostExe
+  throw new Error(
+    'dsh-builtin-browser: cannot locate a spawnable Electron binary. ' +
+    'The electron package ships with the plugin and its binary is downloaded on first use, not at install time ' +
+    '(issue #41: an install-time download made default profiles refuse the plugin). The plugin prepares it ' +
+    'automatically when the bundled carrier is selected, so right after an install this can mean the ' +
+    'download is still running: Settings → Browser → Readiness shows that state and can retry it. To do it ' +
+    'by hand instead, run `npx --no dsh-browser-install-electron` in the profile that installed the ' +
+    'plugin, then retry. Alternatively set ELECTRON_PATH to an electron executable. Note: the host\'s own ' +
+    'executable cannot be reused when it is a packaged Electron app (e.g. DSH Desktop.exe) — only a real ' +
+    'electron binary can be spawned.',
+  )
+}
+
+/** DSH install anchors: electron installed separately (profile / global prefix), newest wins. */
+function anchoredElectronBinary(): string | undefined {
+  const require = createRequire(import.meta.url)
+  const candidates: Array<{ version: string; path: string }> = []
+  const add = (version: string, path: string | undefined): void => {
+    if (path !== undefined) candidates.push({ version, path })
+  }
+  const anchors: string[] = []
+  const globalPrefix = process.env.npm_config_prefix ?? process.env.PREFIX
+  if (globalPrefix !== undefined) {
+    anchors.push(join(globalPrefix, 'node_modules'))
+    anchors.push(join(globalPrefix, 'node_modules', '@deepseek-ai', 'dsh', 'node_modules'))
+  }
+  if (process.env.DSH_HOME !== undefined) {
+    anchors.push(join(process.env.DSH_HOME, 'profiles', 'node_modules'))
+  }
+  for (const anchor of anchors) {
+    try {
+      const resolved: unknown = require.resolve('electron', { paths: [anchor] })
+      // Inside an Electron main process resolve('electron') yields the
+      // built-in module NAME (not a path) — requiring an absolute path keeps
+      // electronExeBeside from probing cwd-relative garbage like ./dist/.
+      if (typeof resolved === 'string' && resolved.length > 0 && isAbsolute(resolved)) {
+        add(versionOf(resolved), electronExeBeside(resolved))
+      }
+    } catch {
+      // continue probing
+    }
+  }
+  return pickNewest(candidates)
+}
+
+/**
+ * The plugin's own electron package binary, found by a pure filesystem walk
+ * (never require(), whose semantics differ inside an Electron main process —
+ * there `require('electron')` is the built-in API module, not the npm package
+ * — and which would trigger electron 44+'s lazy binary download when the dist
+ * is missing). Checks every `node_modules/electron` above this module,
+ * including pnpm virtual-store layouts, and returns the NEWEST ready binary.
+ * Scan ONLY the plugin's own install tree: never cwd or the executable's
+ * directory, which can sit inside an unrelated project whose node_modules may
+ * hold a different electron (executing the newest random binary in the
+ * filesystem is a supply-chain hazard with no benefit).
+ */
+function bundledElectronBinary(): string | undefined {
+  const candidates: Array<{ version: string; path: string }> = []
+  const consider = (pkgRoot: string, versionHint: string): void => {
+    const exe = electronDistExe(pkgRoot)
+    if (exe !== undefined) candidates.push({ version: versionHint || pkgVersion(pkgRoot), path: exe })
+  }
+  let dir = fileURLToPath(new URL('.', import.meta.url))
+  for (let depth = 0; depth < 8; depth++) {
+    // Plain (npm/yarn, hoisted) layout: <ancestor>/node_modules/electron.
+    const plain = join(dir, 'node_modules', 'electron')
+    if (existsSync(join(plain, 'package.json'))) consider(plain, '')
+    // pnpm layout: <ancestor>/node_modules/.pnpm or <ancestor>/.pnpm, with
+    // electron@<version>/node_modules/electron entries.
+    for (const storeRoot of [join(dir, 'node_modules', '.pnpm'), join(dir, '.pnpm')]) {
+      if (!existsSync(storeRoot)) continue
+      for (const entry of readdirSync(storeRoot)) {
+        if (!entry.startsWith('electron@')) continue
+        const pkg = join(storeRoot, entry, 'node_modules', 'electron')
+        // Strip pnpm's peer-dependency suffix (electron@44.0.0_@types+node@22).
+        if (existsSync(join(pkg, 'package.json'))) consider(pkg, entry.slice('electron@'.length).split('_')[0])
+      }
+    }
+    const parent = join(dir, '..')
+    if (parent === dir) break
+    dir = parent
+  }
+  return pickNewest(candidates)
+}
+
+/** The electron version from a package root's package.json, or '0.0.0'. */
+function pkgVersion(pkgRoot: string): string {
+  try {
+    const pkg = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8')) as { version?: unknown }
+    return typeof pkg.version === 'string' && pkg.version.length > 0 ? pkg.version : '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+}
+
+/** The highest-versioned candidate's path, or undefined when none. */
+function pickNewest(candidates: Array<{ version: string; path: string }>): string | undefined {
+  let best: { version: string; path: string } | undefined
+  for (const c of candidates) {
+    if (best === undefined || compareVersions(c.version, best.version) > 0) best = c
+  }
+  return best?.path
+}
+
+/**
+ * Last-resort Electron discovery: walk this process's ancestry looking for a
+ * parent process whose executable is a BARE Electron binary (only bare
+ * electron can be spawned with a script argument). Covers hosts that run the
+ * plugin in a child Node process of their own Electron main process: the host
+ * binary is already on disk and running, so reusing it needs no extra
+ * install. Filesystem-only on POSIX (/proc); on Windows a best-effort
+ * PowerShell CIM query is used — this path only runs when every other lookup
+ * failed, so its latency never touches the happy path, and a
+ * missing/blocked powershell simply yields nothing.
+ */
+function hostElectronViaProcessTree(): string | undefined {
+  let pid: number | undefined = process.ppid
+  for (let depth = 0; depth < 6 && pid !== undefined && pid > 1; depth++) {
+    const exe = processExecutable(pid)
+    if (exe !== undefined && isBareElectron(exe)) return exe
+    pid = processParent(pid)
+  }
+  return undefined
+}
+
+/** One scalar property of a Windows process, read through CIM. */
+function cimQuery(pid: number, property: 'ExecutablePath' | 'ParentProcessId'): string {
+  const out = execFileSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").${property}`,
+  ], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
+  return out.trim().split(/\r?\n/)[0] ?? ''
+}
+
+/** The executable path of a running process, or undefined when unknown. */
+function processExecutable(pid: number): string | undefined {
+  try {
+    if (process.platform === 'win32') {
+      const line = cimQuery(pid, 'ExecutablePath')
+      return line.length > 0 ? line : undefined
+    }
+    const exe = readlinkSync(`/proc/${pid}/exe`)
+    return exe.length > 0 ? exe : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The parent pid of a running process, or undefined when unknown. */
+function processParent(pid: number): number | undefined {
+  try {
+    if (process.platform === 'win32') {
+      const n = Number(cimQuery(pid, 'ParentProcessId'))
+      return Number.isInteger(n) && n > 1 ? n : undefined
+    }
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    // Format: pid (comm) state ppid ... — comm is parenthesized and may
+    // itself contain spaces/parens, so parse from the LAST ')'; ppid is the
+    // second field after it.
+    const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)
+    const n = Number(fields[1])
+    return Number.isInteger(n) && n > 1 ? n : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * True when the given executable is an Electron binary. The name match
+ * covers dev binaries (electron, electron.exe); the resources marker covers
+ * packaged apps whose exe carries the product name (e.g. "DSH Desktop.exe") —
+ * every Electron distribution ships `resources/electron.asar`,
+ * `resources/app.asar`, or `resources/default_app.asar` beside the binary.
+ */
+function isElectronBinary(exe: string): boolean {
+  if (basename(exe).toLowerCase().includes('electron')) return true
+  const resources = join(dirname(exe), 'resources')
+  return existsSync(join(resources, 'electron.asar'))
+    || existsSync(join(resources, 'app.asar'))
+    || existsSync(join(resources, 'default_app.asar'))
+}
+
+/**
+ * True when the executable is a BARE (unpackaged) Electron that can be
+ * spawned with a script argument (`exe script.js --rpc-port N`). Packaged
+ * apps carry their code inside a resources dir (`app.asar`, or an unpacked
+ * `app` dir) and are NOT spawnable as bare electron: they ignore the script
+ * argument and launch the app itself, typically exiting immediately via the
+ * single-instance lock — spawning e.g. DSH Desktop.exe is exactly the
+ * "browser host exited (code=0)" failure. A portable single-file build (no
+ * resources dir at all) likewise cannot run a script argument.
+ */
+function isBareElectron(exe: string): boolean {
+  const dir = dirname(exe)
+  // Windows/Linux keep resources beside the binary; macOS app bundles keep
+  // them in Contents/Resources, one level above the binary's MacOS dir.
+  const resourcesList = process.platform === 'darwin'
+    ? [join(dir, '..', 'Resources'), join(dir, 'resources')]
+    : [join(dir, 'resources')]
+  for (const resources of resourcesList) {
+    if (existsSync(join(resources, 'app.asar')) || existsSync(join(resources, 'app'))) return false
+  }
+  // A real electron always ships a resources dir somewhere; requiring one
+  // keeps every not-actually-spawnable layout out.
+  if (!resourcesList.some(p => existsSync(p))) return false
+  return isElectronBinary(exe)
+}
+
+/** Extract an electron version like "43.4.0" from a path containing it. */
+function versionOf(path: string): string {
+  const match = /electron@(\d+\.\d+\.\d+)/.exec(path)
+  return match?.[1] ?? '0.0.0'
+}
+
+/** Compare dotted numeric versions; higher wins. */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map(n => Number(n) || 0)
+  const pb = b.split('.').map(n => Number(n) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return 0
+}
+
+/** Candidate executable layouts used by the Electron npm package on one platform. */
+function electronDistCandidates(pkgRoot: string, platform: NodeJS.Platform = process.platform): string[] {
+  // macOS keeps the runnable binary inside the Electron.app bundle; unlike
+  // Windows/Linux there is no dist/electron(.exe) sibling to probe.
+  if (platform === 'darwin') {
+    return [join(pkgRoot, 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron')]
+  }
+  return [
+    join(pkgRoot, 'dist', 'electron.exe'),
+    join(pkgRoot, 'dist', 'electron'),
+  ]
+}
+
+/** From an electron package entry file, find the dist executable beside it. */
+function electronExeBeside(entry: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  const packageRoots = [dirname(entry), join(dirname(entry), '..')]
+  for (const packageRoot of packageRoots) {
+    const candidate = electronDistExe(packageRoot, platform)
+    if (candidate !== undefined) return candidate
+  }
+  return undefined
+}
+
+/** From an electron package root, find its dist executable. */
+function electronDistExe(pkgRoot: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  for (const candidate of electronDistCandidates(pkgRoot, platform)) {
+    if (existsSync(candidate)) return candidate
+  }
+  return undefined
+}
+
+/** One RPC round-trip with the child. */
+interface Pending {
+  resolve(result: unknown): void
+  reject(err: Error): void
+}
+
+/**
+ * Thrown whenever the browser host (the Electron child) is gone — it exited,
+ * failed to start, or its RPC connection dropped. Operations against a dead
+ * host can never succeed, so the view layer treats this as "rebuild against a
+ * fresh host" instead of a page-level error. Kept module-private: callers
+ * observe the behavior (auto-restart), not the class.
+ */
+class HostGoneError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'HostGoneError'
+  }
+}
+
+/**
+ * Line-delimited JSON-RPC client over a local TCP socket. Electron's main
+ * process on Windows does not receive piped stdin, so the parent listens on a
+ * loopback port and passes it to the child via `--rpc-port`; the child
+ * connects back and speaks the same one-JSON-per-line protocol.
+ */
+class ElectronChildClient {
+  private readonly child: import('node:child_process').ChildProcessWithoutNullStreams
+  private readonly pending = new Map<number, Pending>()
+  private nextId = 1
+  private buffer = ''
+  private socket: import('node:net').Socket | undefined
+  private connected = false
+  private outbox: string[] = []
+  /** Set once the child has exited; further calls fail fast instead of queueing. */
+  private dead = false
+  /**
+   * True until the first message proves the child knows the spawn token.
+   * Commands are queued (not written) until then, so a spoofed socket never
+   * sees any traffic.
+   */
+  private awaitingHello = true
+  private helloTimer: ReturnType<typeof setTimeout> | undefined
+
+  constructor(
+    private readonly hostMainPath: string,
+    private readonly port: number,
+    private readonly token: string,
+    private readonly onExit?: () => void,
+    private readonly onUserAction?: (action: BrowserUserAction) => void,
+    /**
+     * Called when the human closes a browser window. The session it showed is
+     * over: the provider releases it, while history and login state stay on disk
+     * so the next open is a clean session rather than a resurrected one.
+     */
+    private readonly onViewClosed?: (windowId: string) => void,
+    /** Test seam: the executable to spawn instead of the resolved Electron
+     *  binary. Absent -> resolveElectronPath() (production behavior). */
+    private readonly executable?: string,
+  ) {
+    const electron = this.executable ?? resolveElectronPath()
+    const source = this.executable !== undefined
+      ? 'provided'
+      : electron === process.env.ELECTRON_PATH ? 'ELECTRON_PATH' : 'auto'
+    // Record what is about to be spawned — with existence checks — BEFORE the
+    // attempt. When Electron cannot load the app entry it exits 1 with EMPTY
+    // stderr, and that signature is otherwise indistinguishable from a missing
+    // binary: writing both paths (and whether they exist) in advance is what
+    // turns the next occurrence into a named cause instead of a guess.
+    process.stderr.write(`[dsh-browser host] spawning electron: ${electron} source=${source}\n`)
+    appendHostLog(
+      `${hostStamp()} spawning: electron=${electron} (exists=${String(existsSync(electron))})`
+      + ` source=${source}`
+      + ` hostMain=${this.hostMainPath} (exists=${String(existsSync(this.hostMainPath))})`
+      + ` port=${String(this.port)}\n`,
+    )
+    // ELECTRON_RUN_AS_NODE (even an empty string) makes Electron run as plain
+    // Node, breaking require('electron'); NODE_OPTIONS can inject flags that
+    // break the child. Rebuild the env without either.
+    const env: Record<string, string | undefined> = { ...process.env }
+    delete env.ELECTRON_RUN_AS_NODE
+    delete env.NODE_OPTIONS
+    // Windows GUI-subsystem processes (Electron included) never receive piped
+    // stdin, so the token written below is silently lost there. Pass it as an
+    // environment variable too (hidden from the process-listing tools that
+    // expose argv, and preferred over stdin only when stdin cannot deliver):
+    // the child reads env only as a fallback after stdin yields nothing.
+    env.DSH_BROWSER_RPC_TOKEN = token
+    this.child = spawn(electron, [hostMainPath, '--rpc-port', String(port)], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: false,
+      env,
+    })
+    this.child.stderr.setEncoding('utf8')
+    this.child.stderr.on('data', chunk => {
+      // Diagnostics only; never parse stderr as protocol. Mirror to a log file
+      // as well: under a plain `dsh web` self-host these lines only ever reach
+      // the DSH process's stderr, so a host that crashes in a restart loop left
+      // the user with a string of timeouts and no stack to act on.
+      const text = String(chunk)
+      process.stderr.write(`[dsh-browser host] ${text}`)
+      appendHostLog(text)
+    })
+    // Send the spawn token over stdin (first line). The child reads it from
+    // stdin instead of argv so the token is never visible in the process
+    // listing (WMI / Process Explorer / /proc/*). After writing, close stdin
+    // so the child knows the token has been fully delivered.
+    this.child.stdin?.write(token + '\n')
+    this.child.stdin?.end()
+    // A failed spawn (bad/corrupt binary) emits 'error' — without a listener
+    // that would crash the whole DSH process.
+    this.child.on('error', error => {
+      const line = `${hostStamp()} spawn error: ${String(error)} electron=${electron} hostMain=${this.hostMainPath}`
+      process.stderr.write(`[dsh-browser host] ${line}\n`)
+      appendHostLog(`${line}\n`)
+      // The cached availability answer is retired by `onExit` below, which this reaches
+      // through fail(): the decision needs the host's view of what is on disk, not the
+      // client's.
+      this.fail(new Error(`dsh-builtin-browser: browser host failed to start: ${String(error)}`))
+    })
+    this.child.on('exit', (code, signal) => {
+      // The exit code/signal is the other half of a crash report; without it a
+      // restart loop is indistinguishable from a clean stop. The timestamp, pid
+      // and both paths are what turn a bare `code=1` into a diagnosis: Electron
+      // exits 1 with empty stderr precisely when it cannot load the app entry,
+      // so the dated `exists=` line written at spawn is the other half.
+      const entryExists = existsSync(this.hostMainPath)
+      const line = `${hostStamp()} browser host exited (code=${String(code)} signal=${String(signal)})`
+        + ` pid=${String(this.child?.pid)} electron=${electron} hostMain=${this.hostMainPath}`
+        + ` entryExists=${String(entryExists)}`
+        // Comparing this with the `exists=` recorded at spawn is the whole
+        // diagnosis: present at spawn and absent now means the installation was
+        // replaced underneath a running host, which is exactly how Electron ends
+        // up unable to load the app entry and exits 1 with empty stderr.
+        + (entryExists ? '' : ' [entry script missing at exit]')
+      appendHostLog(`${line}\n`)
+      this.fail(new Error(`dsh-builtin-browser: ${line}`))
+    })
+  }
+
+  /**
+   * Drop the escalation kill once there is nothing left for it to target.
+   *
+   * Called on the paths where the child is known to be gone — after an observed exit, and on
+   * release. It is deliberately NOT called from `fail()`: a dead socket says nothing about the
+   * process on the other end, and the timer exists for exactly the case where the child ignores
+   * the socket closing. Clearing it there disarmed the only escalation there was, which is how
+   * a child that ignored its socket could outlive dispose() and keep holding the profile.
+   */
+  private clearKillGrace(): void {
+    if (this.killGraceTimer === undefined) return
+    clearTimeout(this.killGraceTimer)
+    this.killGraceTimer = undefined
+  }
+
+  /** Drop the "did not authenticate" deadline once it can no longer be meaningful. */
+  private clearHelloTimer(): void {
+    if (this.helloTimer === undefined) return
+    clearTimeout(this.helloTimer)
+    this.helloTimer = undefined
+  }
+
+  /** Reject everything in flight, mark the client dead, and notify the host. */
+  private fail(err: Error): void {
+    if (this.dead) return
+    this.dead = true
+    this.connected = false
+    // The authentication deadline outlives the socket it was armed for otherwise: it is
+    // keyed on `awaitingHello` alone, so a client that already failed on some other path
+    // kept a live timer until it fired (harmless, but it is a dangling timer in a process
+    // that may be shutting down).
+    this.clearHelloTimer()
+    // NOT clearKillGrace(): this path runs when the SOCKET died, which says nothing about
+    // whether the process did. Clearing the escalation here disarmed it for exactly the case it
+    // exists for — a child that ignores its socket closing — so dispose() could return with the
+    // child still running and still holding the profile. The timer clears itself when the child
+    // exits, and `kill()` replaces it on an explicit release.
+    // Tag every failure as "host gone" so the view layer can tell a dead host
+    // apart from a page-level error and rebuild against a fresh child.
+    const wrapped = err instanceof HostGoneError ? err : new HostGoneError(err.message)
+    for (const pending of this.pending.values()) pending.reject(wrapped)
+    this.pending.clear()
+    this.outbox = []
+    this.onExit?.()
+  }
+
+  /** Whether a connection (authenticated or still authenticating) is held. */
+  isAttached(): boolean {
+    return this.socket !== undefined
+  }
+
+  /**
+   * Accept the child's connection (called by the server). Exactly one socket
+   * is ever attached; the server drops any further connection. Commands stay
+   * queued until the child's first line authenticates with the spawn token.
+   */
+  attach(socket: import('node:net').Socket): void {
+    if (this.socket !== undefined) {
+      // Already attached: this is a second connection; reject it.
+      socket.destroy()
+      return
+    }
+    this.socket = socket
+    socket.setEncoding('utf8')
+    // Without an 'error' listener a remote reset (ECONNRESET/EPIPE) throws an
+    // uncaught 'error' event and crashes the whole DSH process; 'close' below
+    // does the cleanup.
+    socket.on('error', error => {
+      process.stderr.write(`[dsh-browser host] socket error: ${String(error)}\n`)
+    })
+    socket.on('data', chunk => this.onData(chunk))
+    socket.on('close', () => {
+      this.connected = false
+      if (!this.dead) {
+        this.fail(new Error('dsh-builtin-browser: browser host connection closed'))
+      }
+    })
+    // The child must authenticate within the readiness budget; otherwise the
+    // connection is treated as hostile and torn down.
+    this.helloTimer = setTimeout(() => {
+      if (this.awaitingHello) {
+        socket.destroy()
+        this.fail(new Error('dsh-builtin-browser: browser host did not authenticate'))
+      }
+    }, READY_TIMEOUT_MS)
+  }
+
+  private onData(chunk: string | Buffer): void {
+    this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    // Safety net: a pathological child (or a reply larger than expected)
+    // must not grow the parent's memory without bound. The child caps
+    // downloads at 256 MiB, so a healthy stream never approaches this.
+    if (this.buffer.length > MAX_RPC_BUFFER_BYTES) {
+      this.buffer = ''
+      this.fail(new Error(`dsh-builtin-browser: RPC reply exceeded ${MAX_RPC_BUFFER_BYTES} bytes`))
+      return
+    }
+    let nl: number
+    while ((nl = this.buffer.indexOf('\n')) >= 0) {
+      const line = this.buffer.slice(0, nl).trim()
+      this.buffer = this.buffer.slice(nl + 1)
+      if (line === '') continue
+      let msg: { id?: number; op?: string; token?: string; ok?: boolean; result?: unknown; err?: string; action?: unknown; windowId?: unknown }
+      try {
+        msg = JSON.parse(line) as typeof msg
+      } catch {
+        // Non-protocol line; ignore.
+        continue
+      }
+      if (msg.op === 'userAction' || msg.op === 'viewClosed') {
+        // A fire-and-forget notification from the child's own UI (toolbar). These carry no
+        // reply and no pending id, and they hand the provider a session-level verb — so they
+        // are dispatched ONLY once the peer has proved it knows the spawn token.
+        //
+        // They used to be handled before the hello check, while the module comment claimed an
+        // unauthenticated peer "is disconnected immediately … a spoofed socket never sees
+        // traffic". Both were wrong: any loopback process that won the race for the single
+        // accepted socket could inject `viewClosed` and end the human's browser session
+        // before the token check rejected it. Only the loopback interface can connect, so
+        // this is a same-machine race rather than a remote attack — which is exactly the
+        // kind of thing the token exists to close.
+        if (this.awaitingHello) {
+          this.awaitingHello = false
+          this.clearHelloTimer()
+          this.socket?.destroy()
+          this.fail(new Error('dsh-builtin-browser: browser host sent a notification before authenticating'))
+          return
+        }
+        if (msg.op === 'userAction') {
+          // Route it straight to the host's user-action handler (which the provider registered).
+          this.onUserAction?.(msg.action as BrowserUserAction)
+        } else {
+          // The human closed the window, so the interface that session showed is gone. The
+          // provider decides what that ends — browsing history and login state survive on
+          // disk, only the session itself does not.
+          this.onViewClosed?.(typeof msg.windowId === 'string' ? msg.windowId : '')
+        }
+        continue
+      }
+      if (this.awaitingHello) {
+        // The FIRST line must be the child's hello carrying the spawn token.
+        // Anything else (or a wrong token) means a spoofed connection: drop
+        // it and fail every pending call rather than trust the line.
+        this.awaitingHello = false
+        this.clearHelloTimer()
+        if (msg.op !== 'hello' || msg.token !== this.token) {
+          this.socket?.destroy()
+          this.fail(new Error('dsh-builtin-browser: browser host authentication failed'))
+          return
+        }
+        this.connected = true
+        // Flush anything queued while disconnected — now that the peer is
+        // authenticated, it is safe to send commands.
+        if (this.outbox.length > 0) {
+          for (const line of this.outbox) this.socket?.write(line + '\n')
+          this.outbox = []
+        }
+        continue
+      }
+      if (typeof msg.id !== 'number') continue
+      const pending = this.pending.get(msg.id)
+      if (pending === undefined) continue
+      this.pending.delete(msg.id)
+      if (msg.ok === true) pending.resolve(msg.result)
+      else pending.reject(new Error(msg.err ?? 'browser host command failed'))
+    }
+  }
+
+  /** Send one command and await the reply. */
+  call<T = unknown>(op: string, payload: Record<string, unknown> = {}): Promise<T> {
+    if (this.dead) {
+      return Promise.reject(new HostGoneError('dsh-builtin-browser: browser host is not running'))
+    }
+    const id = this.nextId++
+    const line = JSON.stringify({ id, op, ...payload })
+    return new Promise<T>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
+      if (this.connected && this.socket !== undefined) {
+        try {
+          this.socket.write(line + '\n')
+        } catch {
+          // The socket died between the dead check and the write; the 'close'
+          // handler fails the rest. Reject THIS call as host-gone so the
+          // caller can recover immediately instead of hanging.
+          this.pending.delete(id)
+          reject(new HostGoneError('dsh-builtin-browser: browser host connection closed'))
+        }
+      } else {
+        // Not connected yet: queue; attach() flushes on the child's arrival.
+        this.outbox.push(line)
+      }
+    })
+  }
+
+  /**
+   * How long the child gets to exit by itself after the socket closes, before it is killed.
+   * The child quits on that signal, so in practice this is a few dozen milliseconds; the timer
+   * exists for the case where it does not, and it is deliberately NOT unref'd — the parent must
+   * stay alive long enough to enforce it, or the escalation would be dropped with the process.
+   */
+  private static readonly KILL_GRACE_MS = 500
+  private killGraceTimer: NodeJS.Timeout | undefined
+
+  /**
+   * Terminate the child, after giving it the chance to shut down properly.
+   *
+   * The socket goes first, because that is the signal the child actually handles: its `close`
+   * listener quits the app, and a normal quit is what lets Chromium write its profile out. Only
+   * a child still alive after the grace period is killed outright.
+   *
+   * This order used to be the other way round, justified by a comment claiming the child's own
+   * path "closes its window and flushes the profile", which made killing first the safer order.
+   * Both halves of that were wrong: the path ran `app.exit(0)`, which skips before-quit/will-quit
+   * and does not flush Chromium's profile writers at all; and on Windows `child.kill()` is
+   * TerminateProcess, which lands before the child can run any handler whatsoever. So the
+   * graceful path that comment was protecting never got to start, and the profile went
+   * unflushed on every single dispose.
+   */
+  kill(): void {
+    this.clearHelloTimer()
+    try { this.socket?.destroy() } catch { /* already closed */ }
+    const child = this.child
+    this.clearKillGrace()
+    this.killGraceTimer = setTimeout(() => {
+      try { child.kill() } catch { /* already gone */ }
+    }, ElectronChildClient.KILL_GRACE_MS)
+  }
+}
+
+/** One view in the child: its id, used for every command. */
+class RemoteView implements ElectronViewHandle {
+  constructor(readonly id: string, private readonly client: ElectronChildClient) {}
+
+  sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.client.call<Record<string, unknown>>('command', {
+      viewId: this.id,
+      method,
+      params: params ?? {},
+    })
+  }
+
+  /** Give this view web focus in the child, so keyboard input reaches the page. */
+  focus(options?: PresentOptions): Promise<void> {
+    return this.client.call<void>('focus', { viewId: this.id, ...options?.quiet ? { quiet: true } : {} })
+  }
+
+  /** Ask the child to download a URL to a local file (keeps cookies/login). */
+  async download(url: string, savePath: string): Promise<void> {
+    // The child writes the file itself (temp + rename); only a small
+    // confirmation crosses the RPC, so large downloads never balloon the
+    // parent's memory or hit the single-line cap.
+    await this.client.call<{ path: string }>('download', { viewId: this.id, url, savePath })
+  }
+
+  /** Native capturePage snapshot of the view (base64 + mime). */
+  capture(opts?: ScreenshotOptions): Promise<{ base64: string; mime: string }> {
+    return this.client.call<{ base64: string; mime: string }>('capture', { viewId: this.id, ...opts ?? {} })
+  }
+
+  /** Export the session's cookies (login state). */
+  flushAuth(): Promise<ExportedCookie[]> {
+    return this.client.call<{ cookies: ExportedCookie[] }>('flushAuth', { viewId: this.id }).then(r => r.cookies)
+  }
+
+  /** Import cookies into the session (restore login state). */
+  restoreAuth(cookies: ExportedCookie[]): Promise<number> {
+    return this.client.call<{ restored: number }>('restoreAuth', { viewId: this.id, cookies }).then(r => r.restored)
+  }
+}
+
+/**
+ * How long a FAILED Electron-binary probe is remembered before the binary
+ * search runs again (`available()`). A success is kept for the host's lifetime.
+ */
+const PROBE_RETRY_MS = (() => {
+  const raw = Number(process.env.DSH_BROWSER_PROBE_RETRY_MS)
+  return Number.isFinite(raw) && raw >= 0 ? raw : 30000
+})()
+
+/**
+ * Retry schedule for a browser host that will not stay up, in milliseconds, indexed by the
+ * number of consecutive failed starts (see {@link RemoteElectronViewHost.noteStartFailure}).
+ *
+ * The first entry is 0 on purpose: an ordinary one-off death must still heal on the very
+ * next call, which is the behaviour remote-host-recovery.test.mjs pins. From the second
+ * failure on, each attempt is spaced. `available()` can only answer "is there a binary",
+ * so a binary that exists and crashes on every launch (`code=1` with empty stderr) would
+ * otherwise produce an endless crash loop, one window per tool call, with nothing to make
+ * it stop.
+ */
+const START_RETRY_SCHEDULE_MS: readonly number[] = [0, 500, 2_000, 8_000, 30_000]
+
+/** Attempts after which the host stops retrying immediately and keeps the longest delay. */
+const START_FAILURES_MAX = START_RETRY_SCHEDULE_MS.length
+
+/** Two reports within this window describe the same dying child, not two attempts. */
+const START_FAILURE_DEDUPE_MS = 1_000
+
+/** Render a delay for a human-readable log line. */
+function formatDelay(ms: number): string {
+  return ms >= 1_000 ? `${(ms / 1_000).toFixed(1)}s` : `${String(ms)}ms`
+}
+
+/**
+ * Self-hosted view host: spawns the plugin's Electron child on first use and
+ * keeps it alive until dispose(). Fallback when no desktop shell provides
+ * ctx.electronViewHost.
+ */
+export class RemoteElectronViewHost implements ElectronBrowserViewHost {
+  private client: ElectronChildClient | undefined
+  private server: Server | undefined
+  private pendingSocket: Socket | undefined
+  private readonly views = new Map<string, ElectronViewHandle>()
+  private readyPromise: Promise<void> | undefined
+  private disposed = false
+  /** Last probe result. A success is kept for the host's lifetime; a failure
+   *  is retried after `PROBE_RETRY_MS` (see `available()`). */
+  private electronAvailable: boolean | undefined
+  /** Earliest time the next probe may run after a negative one. */
+  private nextProbeAt = 0
+  /** Consecutive child starts that did not survive; drives {@link startRetryAt}. */
+  private startFailures = 0
+  /** Earliest time `ready()` may spawn another child after a failed start. */
+  private startRetryAt: number | undefined
+  /** When the last start failure was reported, used to keep one death to one log line. */
+  private lastStartFailureAt = 0
+  /** Window groups (windowId per view), re-sent on every materialization so
+   *  a restarted child still places views in the right windows. */
+  private readonly groups = new Map<string, { windowId: string; label?: string }>()
+  /** The provider's user-action handler; routes toolbar actions into sessions. */
+  private userActionHandler: ((action: BrowserUserAction) => void) | undefined
+  /**
+   * The provider's handler for a window the human closed. Closing the interface
+   * ends the session it showed: history and login state stay on disk, so the
+   * next open starts clean instead of resuming a window nobody can see.
+   */
+  private viewClosedHandler: ((windowId: string) => void) | undefined
+
+  constructor(
+    private readonly hostMainPath: string,
+    /** Test seam: the executable to spawn instead of the resolved Electron
+     *  binary. Absent -> resolveElectronPath() (production behavior). */
+    private readonly spawnExecutable?: string,
+    /** Test seam: the binary probe behind `available()`. Absent ->
+     *  resolveElectronPath(). */
+    private readonly probe: () => void = resolveElectronPath,
+  ) {}
+
+  /**
+   * Cheap usability probe: can we find an Electron binary to spawn? The scan
+   * is filesystem-only (no network), per the seam's contract, so a missing
+   * binary surfaces as `BROWSER_PROVIDER_UNAVAILABLE` at provider selection
+   * instead of a confusing spawn failure on first use.
+   *
+   * A success is cached for the host's lifetime. A failure is NOT: an install
+   * (`npm i electron`, or the postinstall that fetches the binary) can land
+   * long after DSH started, and provider selection happens once per process —
+   * caching "no" permanently reported "no usable browser provider is
+   * registered" until DSH restarted, with no way back short of that. Retrying
+   * on a cooldown heals it by itself while keeping the scan off the hot path.
+   */
+  available(): boolean {
+    if (this.electronAvailable === true) return true
+    if (Date.now() < this.nextProbeAt) return false
+    this.nextProbeAt = Date.now() + PROBE_RETRY_MS
+    try {
+      this.probe()
+      this.electronAvailable = true
+    } catch (error) {
+      this.electronAvailable = false
+      // The provider will be reported unavailable, so the detailed
+      // resolution error (install-electron / ELECTRON_PATH guidance) would
+      // otherwise never reach the user — surface it on stderr.
+      process.stderr.write(`[dsh-browser host] electron unavailable: ${error instanceof Error ? error.message : String(error)}\n`)
+    }
+    return this.electronAvailable
+  }
+
+  /**
+   * Retire the cached "an Electron binary is here" answer.
+   *
+   * A success is cached for the host's lifetime because rescanning on every tool call was
+   * the original bug — but the probe reads the FILESYSTEM, so it cannot see a binary that
+   * stops being usable afterwards. Only a real spawn attempt can observe that, which is why
+   * the two failure paths in {@link RemoteElectronViewHost.start} call this: the next
+   * `available()` rescans and reports what is actually on disk, instead of advertising a
+   * provider that cannot start.
+   */
+  private forgetBinary(): void {
+    this.electronAvailable = undefined
+    this.nextProbeAt = 0
+  }
+
+  /**
+   * Whether the binary the host would spawn — or the entry it needs — is no longer there.
+   *
+   * Only asked after a launch actually failed, so a healthy path never pays for it. The
+   * entry script counts because Electron exits 1 with empty stderr when it cannot load it,
+   * and resolution itself throws exactly when it can find nothing, which is the same answer.
+   * @returns true when the next `available()` must rescan instead of reusing its cache.
+   */
+  private binaryIsGone(): boolean {
+    if (!existsSync(this.hostMainPath)) return true
+    try {
+      return !existsSync(this.spawnExecutable ?? resolveElectronPath())
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * Ensure the child is up and ready (lazy on first use; restarts after a crash).
+   *
+   * Never throws synchronously. Callers are fire-and-forget
+   * (`void this.ready().then(…).catch(…)`), and a synchronous throw escapes their
+   * `.catch` entirely — the shape that let a failed toolbar report take the whole
+   * DSH host down (issue #16). A disposed host is reported as a rejected promise
+   * instead, which those callers already handle.
+   */
+  private ready(): Promise<void> {
+    // Fail fast on a disposed host: a recovery path can re-enter ready() after
+    // dispose() cleared its state, and starting fresh here would spawn a child
+    // nobody will ever kill.
+    if (this.disposed) {
+      const gone = Promise.reject(new HostGoneError('browser host disposed'))
+      // Keep the rejection observable to callers while marking it handled here:
+      // a fire-and-forget caller that forgot to attach a handler must not turn
+      // this into an unhandled rejection either.
+      gone.catch(() => undefined)
+      return gone
+    }
+    if (this.readyPromise !== undefined) return this.readyPromise
+    // Backoff gate for a host that keeps failing to START (see START_RETRY_SCHEDULE_MS).
+    // The client is undefined exactly when the previous child is gone — a start failure, or
+    // a child that died after it came up — so this only delays restarts, never first use.
+    const retryAt = this.startRetryAt
+    if (retryAt !== undefined && Date.now() < retryAt && this.client === undefined) {
+      const waitMs = retryAt - Date.now()
+      const waiting = Promise.reject(new HostGoneError(
+        `browser host did not start; retrying in ${formatDelay(waitMs)} `
+        + `(attempt ${String(this.startFailures)}${this.startFailures >= START_FAILURES_MAX ? ', start attempts are now spaced out rather than immediate' : ''})`,
+      ))
+      // Keep the rejection observable to callers while marking it handled here: the
+      // fire-and-forget callers that drive this path attach their own handler, but one that
+      // forgets must not turn the recovery gate into an unhandled rejection.
+      waiting.catch(() => undefined)
+      return waiting
+    }
+    const started = this.start()
+    const wrapped = started.then(
+      () => {
+        // A child that came up clears the record: the next death is a new failure, not
+        // another entry in this run of them.
+        this.startFailures = 0
+        this.startRetryAt = undefined
+      },
+      error => {
+        // Record the failure BEFORE tearing anything down, and gate the teardown on the
+        // retry state being gone rather than on readyPromise alone. Ordering matters: a
+        // child that exits while the readiness call is still in flight fires the client's
+        // 'exit' handler first (onChildExit invalidates this promise and starts the retry
+        // clock), and the rejection then lands here — at which point clearing startRetryAt
+        // would erase the very backoff that was just armed, so every tool call spawned
+        // another dying child. noteStartFailure's dedupe window counts that pair once.
+        this.noteStartFailure(error)
+        // A failed startup must not poison the host forever: tear down whatever
+        // was half-created and let the next call retry from scratch.
+        if (this.readyPromise === wrapped) {
+          this.readyPromise = undefined
+          this.client?.kill()
+          this.client = undefined
+          this.server?.close()
+          this.server = undefined
+          this.pendingSocket?.destroy()
+          this.pendingSocket = undefined
+        }
+        throw error
+      },
+    )
+    this.readyPromise = wrapped
+    return wrapped
+  }
+
+  /**
+   * Record one child that did not survive, and set the earliest retry time.
+   *
+   * `available()` answers "is there a binary to spawn" from the FILESYSTEM, and a success
+   * there is cached for the host's lifetime (correctly — rescanning on every tool call was
+   * the bug). That probe therefore cannot see the failure mode where the binary exists and
+   * crashes on every launch: the signature `code=1` with empty stderr that host-log.test.mjs
+   * asserts. Each browser call then spawned a child that died within milliseconds, with no
+   * backoff and nothing that ever gives up — an endless crash loop, each iteration a window
+   * flashing on screen.
+   *
+   * The first retry is immediate, so the ordinary transient death (the DSH restart in
+   * remote-host-recovery.test.mjs) still heals on the very next call. After that the delay
+   * grows: once {@link START_FAILURES_MAX} attempts have failed, every later attempt is
+   * spaced by the table's last entry — the host keeps trying, but a permanently broken
+   * install now costs one spawn per 30s instead of one per tool call. Nothing is marked
+   * dead for good: a repaired installation heals on the next attempt, and `dispose()`
+   * still stops everything immediately.
+   * @param error - what the failed attempt reported.
+   */
+  private noteStartFailure(error: unknown): void {
+    // The same death arrives twice: the child's exit reports it, and ready() rejecting
+    // reports it again. Counting both pushed the first retry to the 500ms step and made
+    // the log say "attempt 2" for a first failure, while START_RETRY_SCHEDULE_MS[0] = 0
+    // exists precisely so an ordinary death heals on the next call. So a report inside the
+    // window is dropped ENTIRELY — the count and the log line alike.
+    //
+    // That last part used to be split in two: the guard below, and a second dedupe that only
+    // suppressed the LOG. The second one read `now - this.lastStartFailureAt` after the line
+    // above had already stored `failureAt` into that same field, so its window was 0-1ms wide
+    // and the comparison was unconditionally true — the log line was never written at all.
+    // Nothing noticed, because this function exists to make a silent failure visible and its
+    // only output was the thing being dropped: a child that exists and dies instantly (code=1,
+    // empty stderr) left no trace anywhere.
+    const failureAt = Date.now()
+    if (this.lastStartFailureAt !== undefined && failureAt - this.lastStartFailureAt < START_FAILURE_DEDUPE_MS) return
+    this.lastStartFailureAt = failureAt
+    this.startFailures += 1
+    const index = Math.min(this.startFailures, START_RETRY_SCHEDULE_MS.length) - 1
+    const delayMs = START_RETRY_SCHEDULE_MS[index] ?? 0
+    this.startRetryAt = delayMs > 0 ? failureAt + delayMs : undefined
+    const line = `${hostStamp()} browser host start failed (attempt ${String(this.startFailures)}`
+      + `${this.startFailures >= START_FAILURES_MAX ? ', giving up on immediate retries' : ''}): ${String(error)}`
+      + `${delayMs > 0 ? ` — next attempt in ${formatDelay(delayMs)}` : ''}`
+    process.stderr.write(`[dsh-browser host] ${line}\n`)
+    appendHostLog(`${line}\n`)
+  }
+
+  private async start(): Promise<void> {
+    // Listen on an ephemeral loopback port; the child connects back. The
+    // server accepts exactly one connection: the child's. Any further
+    // connection (a local process probing the port) is destroyed at once.
+    const server = createServer(socket => {
+      if (this.client !== undefined && this.client.isAttached()) {
+        // A live child connection already exists — reject the extra one.
+        socket.destroy()
+        return
+      }
+      if (this.client !== undefined) {
+        // The child's first connection arrived after the client was created.
+        this.client.attach(socket)
+        return
+      }
+      if (this.pendingSocket !== undefined) {
+        // Only one connection may wait for the client; drop the older one.
+        this.pendingSocket.destroy()
+      }
+      this.pendingSocket = socket
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    // A later server error (rare on a loopback ephemeral port) must not crash
+    // the process; the client's fail path handles the actual recovery.
+    server.on('error', error => {
+      process.stderr.write(`[dsh-browser host] rpc server error: ${String(error)}\n`)
+    })
+    const address = server.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    this.server = server
+    // Random per-spawn token: the child must prove knowledge of it (via
+    // stdin hello) before any command is written to the socket.
+    const token = randomBytes(24).toString('hex')
+    this.client = new ElectronChildClient(
+      this.hostMainPath,
+      port,
+      token,
+      () => this.onChildExit(),
+      action => this.userActionHandler?.(action),
+      windowId => this.viewClosedHandler?.(windowId),
+      this.spawnExecutable,
+    )
+    if (this.pendingSocket !== undefined) {
+      this.client.attach(this.pendingSocket)
+      this.pendingSocket = undefined
+    }
+    // dispose() can race this spawn (it may run while start() is suspended
+    // between the listen and the client creation): re-check here so a host
+    // that was torn down mid-start does not leak a child nobody will kill.
+    if (this.disposed) {
+      this.client.kill()
+      this.client = undefined
+      try { server.close() } catch { /* already closed */ }
+      if (this.server === server) this.server = undefined
+      throw new HostGoneError('browser host disposed')
+    }
+    // Wait for the child's connection + authentication + readiness ping. The
+    // ping is queued until the hello authenticates, so a spoofed socket
+    // never observes it.
+    await withTimeout(this.client.call('ping'), READY_TIMEOUT_MS, 'browser host did not become ready')
+  }
+
+  /** The child died: tear down so the next use starts a fresh child. */
+  private onChildExit(): void {
+    // A disposed host still has to drop these: returning here left a child that had
+    // already been replaced during a dispose race in no map at all, so nothing would
+    // ever kill it. Only the restart is suppressed, not the cleanup.
+    const wasDisposed = this.disposed
+    if (!wasDisposed) process.stderr.write('[dsh-browser host] browser host gone; will restart on next use\n')
+    // A child that started and then died is also a failed start, and it is the shape a crash
+    // loop takes (the child comes up far enough to be pending on `ping`, then exits): count
+    // it so the restart is spaced instead of attempted on every single tool call.
+    if (!wasDisposed) this.noteStartFailure('the browser host process exited')
+    // The cached `available()` answer came from the FILESYSTEM, so only a real attempt can
+    // contradict it. A binary that stops being usable after the probe said yes — an
+    // interrupted reinstall, a removed mount, a wiped cache — kept the provider advertised
+    // as available for the rest of the process's life, because provider selection reads
+    // that same cached yes; every later call then paid a doomed spawn. Both failure routes
+    // (a spawn error, and a child that exits) arrive here, so this is the one place that
+    // observes the loss, and it costs two stats on a path that is already failing.
+    if (this.binaryIsGone()) this.forgetBinary()
+    this.client = undefined
+    this.server?.close()
+    this.server = undefined
+    this.pendingSocket?.destroy()
+    this.pendingSocket = undefined
+    this.readyPromise = undefined
+    // Keep the views map: handles still resolve to ids, and
+    // DeferredRemoteView re-materializes them against the fresh child on
+    // their next use — sessions opened before the crash stay usable instead
+    // of going stale (only the page state is lost).
+  }
+
+  createView(): ElectronViewHandle {
+    // The seam is synchronous; the provider uses the handle immediately, so
+    // commands are deferred until the child is up and the view materialized.
+    const id = `view:${Math.random().toString(36).slice(2, 10)}`
+    const view = new DeferredRemoteView(id, () => this.ensureView(id))
+    this.views.set(id, view)
+    return view
+  }
+
+  private async ensureView(id: string): Promise<RemoteView> {
+    // A rebuild in flight during dispose() must not spawn a fresh child that
+    // would then outlive the host (a zombie window nobody disposes).
+    if (this.disposed) throw new HostGoneError('browser host disposed')
+    await this.ready()
+    // dispose() may have landed while the host was starting (ready() resolved
+    // after dispose cleared its state): never materialize into a dead host.
+    if (this.disposed) throw new HostGoneError('browser host disposed')
+    const client = this.client
+    if (client === undefined) throw new HostGoneError('browser host unavailable')
+    // Re-send the window group before creating the view: the child routes the
+    // view into its session's own window. Re-sending every materialization
+    // also covers a child restart (the new child has no assignments yet).
+    const group = this.groups.get(id)
+    if (group !== undefined) {
+      await client.call('groupView', { viewId: id, windowId: group.windowId, ...group.label !== undefined ? { label: group.label } : {} })
+    }
+    await client.call('createView', { viewId: id })
+    // If the view was destroyed while the createView RPC was in flight, do
+    // not re-insert a stale entry that would resurrect a dead child view.
+    if (this.views.get(id) === undefined) {
+      throw new Error('browser: view destroyed while starting')
+    }
+    const view = new RemoteView(id, client)
+    this.views.set(id, view)
+    return view
+  }
+
+  showView(handle: ElectronViewHandle, label?: string, options?: PresentOptions): void {
+    // Fire-and-forget by design (visibility is best-effort), but a rejected
+    // promise must not become an unhandled rejection (crash on Node >= 15).
+    // The label (session/task id) rides along so the child can show it in the
+    // window title — a human can then tell which task's page is visible.
+    // `quiet` is only sent when it is on: the child's default is the documented
+    // "present and raise" behaviour, so an old child keeps working either way.
+    void this.ready()
+      .then(() => this.client?.call('showView', {
+        viewId: handle.id,
+        ...label !== undefined ? { label } : {},
+        ...options?.quiet === true ? { quiet: true } : {},
+      }))
+      .catch(() => { /* host unavailable */ })
+  }
+
+  /**
+   * (Re)present a view and WAIT for the child to confirm it, so the provider
+   * can dispatch CDP `Input.*` knowing the view has a display surface.
+   *
+   * Two things this fixes, both silent before:
+   *  - showing a view that does not exist yet is a no-op in the child, so the
+   *    view must be materialized first (a fresh tab's createView races the
+   *    provider's showActive);
+   *  - a view whose renderer was replaced by a navigation is \"already\n   *    visible\" and therefore skipped by the child's flicker-avoidance fast
+   *    path, leaving the new renderer without a surface.
+   *
+   * The barrier ping is meaningful because the child handles messages strictly
+   * in order: its reply is queued behind the showView and so only arrives once
+   * the visibility change has been applied.
+   */
+  async presentView(handle: ElectronViewHandle, label?: string, options?: PresentOptions): Promise<void> {
+    await this.ready()
+    const client = this.client
+    if (client === undefined) throw new HostGoneError('browser host unavailable')
+    // A view created after the last createView does not exist in the child yet.
+    // ensureMaterialized also rebuilds it against a fresh child after a host
+    // death, which is the path that used to leave sessions timing out forever.
+    if (handle instanceof DeferredRemoteView) {
+      await withTimeout(handle.ensureMaterialized(), PRESENT_TIMEOUT_MS, 'browser host did not materialize the view')
+    }
+    await withTimeout(
+      client.call('showView', {
+        viewId: handle.id,
+        ...label !== undefined ? { label } : {},
+        // `needSurface` tells the child this is the pre-input barrier: under quiet mode this
+        // is the only presentation allowed to un-minimize a window, because Chromium drops
+        // `Input.*` without a display surface. One line below in the child, and only read
+        // there when `quiet` is set.
+        ...options?.quiet === true ? { quiet: true, needSurface: true } : {},
+      }),
+      PRESENT_TIMEOUT_MS,
+      'browser host did not confirm the view presentation',
+    )
+    await withTimeout(client.call('ping'), PRESENT_TIMEOUT_MS, 'browser host stopped answering')
+  }
+
+  /** Route a view into its session's own window (one window per session). */
+  groupView(handle: ElectronViewHandle, windowId: string, label?: string): void {
+    this.groups.set(handle.id, { windowId, ...label !== undefined ? { label } : {} })
+    // Fire-and-forget: the child may not exist yet; ensureView re-sends the
+    // group before every createView anyway.
+    void this.ready()
+      .then(() => this.client?.call('groupView', { viewId: handle.id, windowId, ...label !== undefined ? { label } : {} }))
+      .catch(() => { /* host unavailable */ })
+  }
+
+  /** Register the provider's handler for user-initiated toolbar actions. */
+  onUserAction(handler: (action: BrowserUserAction) => void): void {
+    this.userActionHandler = handler
+  }
+
+  /** Register the provider's handler for windows the human closed. */
+  onViewClosed(handler: (windowId: string) => void): void {
+    this.viewClosedHandler = handler
+  }
+
+  /** Surface a failed user action to the child's toolbar (address bar etc.). */
+  notifyUserActionError(windowId: string, message: string): void {
+    void this.ready()
+      .then(() => this.client?.call('userActionError', { windowId, message }))
+      .catch(() => { /* host unavailable */ })
+  }
+
+  destroyView(handle: ElectronViewHandle): void {
+    const view = this.views.get(handle.id)
+    if (view === undefined) return
+    this.views.delete(handle.id)
+    void this.ready()
+      .then(() => this.client?.call('destroyView', { viewId: handle.id }))
+      .catch(() => { /* child already gone */ })
+  }
+
+  /** Shut the child and the RPC server down. */
+  dispose(): void {
+    this.disposed = true
+    this.client?.kill()
+    this.client = undefined
+    this.server?.close()
+    this.server = undefined
+    this.pendingSocket?.destroy()
+    this.pendingSocket = undefined
+    this.readyPromise = undefined
+    this.views.clear()
+  }
+}
+
+/** A view handle that waits for child readiness before issuing commands. */
+class DeferredRemoteView implements ElectronViewHandle {
+  private materialized: Promise<RemoteView> | undefined
+
+  constructor(
+    readonly id: string,
+    private readonly materialize: () => Promise<RemoteView>,
+  ) {}
+
+  /**
+   * Materialize once and cache: every operation on the same handle must
+   * target the SAME child view (re-materializing would re-run createView and
+   * duplicate the window). A FAILED materialization is reset so a later call
+   * (e.g. after the host restarted) can retry instead of being poisoned.
+   */
+  private materializeOnce(): Promise<RemoteView> {
+    if (this.materialized === undefined) {
+      const pending = this.materialize()
+      // Compare against the promise actually stored — the derived one — not against `pending`.
+      // Storing `pending.catch(...)` and comparing `this.materialized === pending` compared two
+      // different objects, so the test was never true and the reset never ran: a materialization
+      // that failed with anything other than a HostGoneError (the child alive but not answering
+      // a ping, say) poisoned the handle for good, and the retry the comment below promises was
+      // unreachable.
+      const guarded = pending.catch(error => {
+        if (this.materialized === guarded) this.materialized = undefined
+        throw error
+      })
+      this.materialized = guarded
+    }
+    return this.materialized
+  }
+
+  /**
+   * Run one operation against this view's backing child, automatically
+   * recovering from a dead host. The cached materialization is bound to the
+   * child it was created on; once that child is gone (exited, crashed, or its
+   * connection dropped — e.g. the DSH process that spawned it was restarted),
+   * any further operation on the same handle would otherwise fail forever
+   * with "browser host is not running". Instead: drop the cache, rebuild the
+   * view against a freshly spawned child, and retry the operation exactly
+   * once — so sessions that survive a host death self-heal on their FIRST
+   * call after it, without a manual dsh_browser_reset_session. Page-level errors
+   * are never retried (the view itself is fine).
+   */
+  private async withRecovery<T>(op: (view: RemoteView) => Promise<T>): Promise<T> {
+    try {
+      const view = await this.materializeOnce()
+      return await op(view)
+    } catch (error) {
+      if (!(error instanceof HostGoneError)) throw error
+      // The backing child is gone: a retry on the same materialization can
+      // never succeed. Rebuild against a fresh child and retry once; a second
+      // failure (fresh host also failing to start) surfaces to the caller.
+      this.materialized = undefined
+      const fresh = await this.materializeOnce()
+      return op(fresh)
+    }
+  }
+
+  async sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.withRecovery(view => view.sendCommand(method, params))
+  }
+
+  async download(url: string, savePath: string): Promise<void> {
+    return this.withRecovery(view => view.download(url, savePath))
+  }
+
+  async capture(opts?: ScreenshotOptions): Promise<{ base64: string; mime: string }> {
+    return this.withRecovery(view => view.capture(opts))
+  }
+
+  async focus(options?: PresentOptions): Promise<void> {
+    return this.withRecovery(view => view.focus(options))
+  }
+
+  async flushAuth(): Promise<ExportedCookie[]> {
+    return this.withRecovery(view => view.flushAuth())
+  }
+
+  async restoreAuth(cookies: ExportedCookie[]): Promise<number> {
+    return this.withRecovery(view => view.restoreAuth(cookies))
+  }
+
+  /** Materialize this view in the child (no-op when already there). */
+  async ensureMaterialized(): Promise<void> {
+    await this.withRecovery(async () => undefined)
+  }
+}
+
+/**
+ * Append one host-diagnostics chunk to `$DSH_HOME/logs/dsh-builtin-browser-host.log`.
+ * Best-effort and self-limiting: diagnostics must never break the host or grow
+ * without bound, so failures are swallowed and the file is truncated when it
+ * gets large (a crash loop writes quickly).
+ */
+const HOST_LOG_MAX_BYTES = 2 * 1024 * 1024
+
+/**
+ * ISO timestamp prefix for host-log lines. This log is the only place a spawn
+ * failure is recorded, and an undated line cannot be lined up with anything else
+ * that happened on the machine — a plugin update replacing the entry script, for
+ * instance — which is precisely the question this log gets asked.
+ */
+function hostStamp(): string {
+  return new Date().toISOString()
+}
+
+function appendHostLog(text: string): void {
+  const home = process.env.DSH_HOME
+  if (home === undefined || home === '') return
+  try {
+    const dir = join(home, 'logs')
+    const file = join(dir, 'dsh-builtin-browser-host.log')
+    try {
+      if (statSync(file).size > HOST_LOG_MAX_BYTES) {
+        // Discard the old bytes but leave a dated marker: truncating to empty
+        // makes a rotation look like "nothing ever happened", which is how the
+        // history of a crash loop gets silently swallowed.
+        writeFileSync(file, `${hostStamp()} log rotated: previous content exceeded ${String(HOST_LOG_MAX_BYTES)} bytes and was discarded\n`)
+      }
+    } catch {
+      // No readable file yet: the log directory may not exist. When statSync
+      // succeeded the file exists, so its directory does too and creating it
+      // again was a redundant syscall on every child stdout/stderr line.
+      mkdirSync(dir, { recursive: true })
+    }
+    appendFileSync(file, text)
+  } catch { /* diagnostics are best-effort only */ }
+}
+
+/** Reject a promise if it does not settle within the budget. */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return withTimeoutShared(promise, ms, () => new Error(`${message} (${ms}ms)`))
+}
+
+/** Default host-main path relative to this module's build output. */
+export function defaultHostMainPath(): string {
+  return fileURLToPath(new URL('./host-main.js', import.meta.url))
+}
+
+/**
+ * Test/diagnostic hooks (mirrors tool-browser's `internals` convention).
+ * `isBareElectron` is the packaged-app discriminator behind the host-reuse
+ * steps; `resolveElectronPath` is the full resolution order.
+ */
+export const internals = {
+  electronDistCandidates,
+  electronDistExe,
+  electronExeBeside,
+  isBareElectron,
+  resolveElectronPath,
+  resolveElectronPathImpl,
+}
