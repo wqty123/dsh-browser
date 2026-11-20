@@ -45,7 +45,7 @@ async function hostFor(browser, { spawn = false } = {}) {
   return { host, profileDir, launches }
 }
 
-test('a view adopts the page the browser opened, and the surplus is closed', async () => {
+test('a view adopts one startup page without closing other pages', async () => {
   // Two blanks, which is what a real Chrome has by the time a client can talk to it.
   const browser = createFakeBrowser({ blanks: ['blank-kept', 'blank-surplus'] })
   await browser.listen()
@@ -65,8 +65,7 @@ test('a view adopts the page the browser opened, and the surplus is closed', asy
     assert.deepEqual(browser.attached, ['blank-kept'], 'the view adopted the page that was already there')
     assert.deepEqual(browser.created, [], 'and nothing was created, so nothing was discarded')
 
-    // Exactly the surplus went away — one blank is kept for the view to adopt.
-    assert.deepEqual(browser.closed, ['blank-surplus'], 'the surplus blank was closed')
+    assert.deepEqual(browser.closed, [], 'initial allocation does not close other startup pages')
   } finally {
     host.dispose()
     await browser.kill()

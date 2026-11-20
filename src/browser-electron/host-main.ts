@@ -44,6 +44,7 @@ import { createRpcLineReader } from './rpc-input.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withTimeoutShared } from './timing.ts'
+import { dshHome } from './paths.ts'
 
 // Report the binary actually running this child, even when ELECTRON_PATH
 // intentionally selects a different version from the plugin's dependency.
@@ -64,7 +65,7 @@ for (const line of electronRuntimeDiagnosticLines(process.versions)) {
 // (capturePage then fails). A dedicated userData also persists cookies across
 // host restarts (on top of dsh_browser_auth). Must run before app is ready.
 try {
-  const base = process.env.DSH_HOME ?? app.getPath('appData')
+  const base = dshHome()
   app.setPath('userData', join(base, 'dsh-builtin-browser-host'))
 } catch (error) {
   process.stderr.write(`[dsh-browser host] userData setup failed: ${String(error)}\n`)

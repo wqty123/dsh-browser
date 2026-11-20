@@ -108,4 +108,3 @@ export { manifestHashOf, ReferenceStore, referenceStorePath } from './browser-re
 export { buildTextAnchor, findTextQuote } from './browser-reference/text-quote.ts'
 export { ElectronBrowserProvider } from './browser-electron/provider.ts'
 export type { ElectronBrowserViewHost, ElectronViewHandle } from './browser-electron/provider.ts'
-export { RemoteElectronViewHost, defaultHostMainPath } from './browser-electron/remote-host.ts'

@@ -4,7 +4,7 @@
  * cookies and authenticated reference submission remain in the owning app frame.
  * @module dsh-builtin-browser/browser-electron/guest-route
  */
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import { promises as dns } from 'node:dns'
 import { guestRuntimeScript } from './guest-runtime.ts'
 import { GuestCookieJar } from './guest-cookie-jar.ts'
@@ -208,6 +208,15 @@ export function relayTag(_sessionId: string): string {
   </script>`
 }
 
+function guestPolicy(authority: string): string {
+  const sources = ['http:', 'https:'].map(protocol => new URL(protocol + '//' + authority).origin + GUEST_ROUTE).join(' ')
+  return "sandbox allow-scripts allow-forms; default-src " + sources
+    + "; script-src " + sources + " 'unsafe-inline' 'unsafe-eval'; style-src " + sources
+    + " 'unsafe-inline'; img-src " + sources + " data: blob:; font-src " + sources + " data:; connect-src " + sources
+    + "; frame-src " + sources + "; form-action " + sources
+    + "; object-src 'none'; worker-src 'none'; base-uri 'none'"
+}
+
 /** Forward a document or sub-request, keeping upstream cookies off the DSH origin. */
 export async function handleGuest(
   request: IncomingMessage,
@@ -222,17 +231,15 @@ export async function handleGuest(
     response.end('guest proxy: invalid host')
     return
   }
-  const sources = ['http:', 'https:'].map(protocol => new URL(protocol + '//' + authority).origin + GUEST_ROUTE).join(' ')
-  response.setHeader('content-security-policy', "sandbox allow-scripts allow-forms; default-src " + sources
-    + "; script-src " + sources + " 'unsafe-inline' 'unsafe-eval'; style-src " + sources
-    + " 'unsafe-inline'; img-src " + sources + " data: blob:; font-src " + sources + " data:; connect-src " + sources
-    + "; frame-src " + sources + "; form-action " + sources
-    + "; object-src 'none'; worker-src 'none'; base-uri 'none'")
+  const policy = guestPolicy(authority)
+  const writeHead = (status: number, headers: OutgoingHttpHeaders = {}): void => {
+    response.writeHead(status, { ...headers, 'content-security-policy': policy })
+  }
   response.setHeader('referrer-policy', 'no-referrer')
   response.setHeader('x-content-type-options', 'nosniff')
   response.setHeader('access-control-allow-origin', 'null')
   if (method === 'OPTIONS') {
-    response.writeHead(204, {
+    writeHead(204, {
       'access-control-allow-methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
       'access-control-allow-headers': [...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub'].join(', '),
     })
@@ -243,7 +250,7 @@ export async function handleGuest(
   const session = query.get('s') ?? sessionId
   const target = guestTarget(request.url ?? '')
   if (target === undefined) {
-    response.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+    writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
     response.end('guest proxy: a canonical http(s) URL is required')
     return
   }
@@ -270,7 +277,7 @@ export async function handleGuest(
     return fetch(url, options)
   }
   if (blocked(target)) {
-    response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+    writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
     response.end('guest proxy: local and DSH host targets are not allowed')
     return
   }
@@ -343,7 +350,7 @@ export async function handleGuest(
       let size = 0
       const tooLarge = (): void => {
         request.pause()
-        response.writeHead(413, { 'content-type': 'text/plain; charset=utf-8', connection: 'close' })
+        writeHead(413, { 'content-type': 'text/plain; charset=utf-8', connection: 'close' })
         response.end('guest proxy: request body exceeds 10 MiB')
       }
       if (Number(request.headers['content-length']) > MAX_REQUEST_BODY_BYTES) {
@@ -380,7 +387,7 @@ export async function handleGuest(
       }
     }
   } catch (error) {
-    response.writeHead(error instanceof UnsafeGuestTargetError ? 403 : 502, { 'content-type': 'text/plain; charset=utf-8' })
+    writeHead(error instanceof UnsafeGuestTargetError ? 403 : 502, { 'content-type': 'text/plain; charset=utf-8' })
     response.end(`guest proxy: cannot reach ${target.host}: ${String((error as Error).message ?? error)}`)
     return
   }
@@ -398,7 +405,7 @@ export async function handleGuest(
     } catch {}
     if (next === undefined) {
       await upstream.body?.cancel()
-      response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+      writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
       response.end('guest proxy: redirect target is not allowed')
       return
     }
@@ -407,7 +414,7 @@ export async function handleGuest(
   const type = upstream.headers.get('content-type') ?? 'application/octet-stream'
   const length = Number(upstream.headers.get('content-length') ?? '0')
   if (method === 'HEAD' || upstream.body === null) {
-    response.writeHead(upstream.status, Object.fromEntries(out))
+    writeHead(upstream.status, Object.fromEntries(out))
     response.end()
     return
   }
@@ -416,13 +423,13 @@ export async function handleGuest(
     out.delete('etag')
     out.delete('content-md5')
     out.set('content-type', 'text/css; charset=utf-8')
-    response.writeHead(upstream.status, Object.fromEntries(out))
+    writeHead(upstream.status, Object.fromEntries(out))
     response.end(css)
     return
   }
   if (subRequest || !REWRITABLE.test(type) || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
     || length > MAX_REWRITE_BYTES || (upstream.status >= 300 && upstream.status < 400)) {
-    response.writeHead(upstream.status, Object.fromEntries(out))
+    writeHead(upstream.status, Object.fromEntries(out))
     const body = Buffer.from(await upstream.arrayBuffer())
     response.end(/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
       ? Buffer.from(stripDocumentPolicies(body.toString('latin1')), 'latin1') : body)
@@ -439,6 +446,6 @@ export async function handleGuest(
   out.delete('etag')
   out.delete('content-md5')
   out.set('content-type', type)
-  response.writeHead(upstream.status, Object.fromEntries(out))
+  writeHead(upstream.status, Object.fromEntries(out))
   response.end(body)
 }

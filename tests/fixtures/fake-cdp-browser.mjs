@@ -104,7 +104,7 @@ function createFakeBrowser(options = {}) {
       const ids = discoveryEnabled ? [...preexisting, ...created] : [...created]
       return {
         id: message.id,
-        result: { targetInfos: ids.map(targetId => ({ targetId, type: 'page', url: 'about:blank' })) },
+        result: options.invalidInventory ? {} : { targetInfos: ids.map(targetId => ({ targetId, type: 'page', url: 'about:blank' })) },
       }
     }
     if (message.method === 'Target.closeTarget') {
@@ -114,7 +114,7 @@ function createFakeBrowser(options = {}) {
     if (message.method === 'Browser.getVersion') {
       // The protocol half of adoption's evidence. A bare-looking product is refused there, so
       // this mirrors the HTTP half rather than answering something the real browser would not.
-      return { id: message.id, result: { product: browserName } }
+      return { id: message.id, result: { product: options.product ?? browserName } }
     }
     if (message.method === 'Target.createTarget') {
       state.targetId = `target-${randomUUID()}`

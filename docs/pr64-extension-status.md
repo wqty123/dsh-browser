@@ -32,5 +32,11 @@ The source-build comparator checks actual rc.3 and rc.5 before/after bundles, no
 - No laptop access, real Windows reinstall/restart or visual settings verification was performed.
 - Read-only package-manager failure and normal profile package operations are tested through the runner seam; this does not establish a real packaged Desktop/pnpm install on a read-only Windows profile.
 - Pending-task cancellation uses the existing normal-quit coordinator regression tests; no real active-task Desktop shutdown was exercised for this change.
-- The plugin host emit retains its existing Electron typing diagnostics; a clean full plugin typecheck is not claimed. The client was built with the repository's current client-bundle preset because this older plugin's checked-in tsdown config imports a removed `@local/tsdown-plugin-cordis` package.
+- Before merging the refreshed base, plugin host emit retained 27 existing Electron typing diagnostics (zero additions). The base's SDK declaration isolation and Electron shim updates remove those diagnostics: the merged `tsc -p tsconfig.build.json` exits zero. The client was built with the repository's current client-bundle preset because this older plugin's checked-in tsdown config imports a removed `@local/tsdown-plugin-cordis` package.
 - #8 native child adoption and #30 native views are outside this change.
+
+## Base refresh
+
+Merged `devin/1763597000-sidebar-browser-both-ends` at `e22c245acf99f7b2d042646dc2fade32ea9ea7c3`. Conflicts were limited to `desktop-bridge/main.mjs` (both branches introduced the same extension entry) and `desktop-bridge/plugin-browser-bridge.js` (`start(api)` initialization). Kept the shared API-aware entry plus #36 version/build metadata and idempotent startup/explicit reload. Preserved the base's remaining sidebar-only exports, pairing admission, profile leases, handle and SDK/typecheck changes. No host-authority or carrier-policy decision was needed.
+
+The first merged-suite run found the new SDK-isolation fixture resolving the workspace's real `vendor/cordis/lib/types` path instead of an isolated published SDK. Installed the base's documented `.dsh-sdk-types` dependencies before rechecking; no test or compiler configuration was changed.

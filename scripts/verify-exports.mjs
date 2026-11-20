@@ -11,6 +11,10 @@ import { existsSync, readFileSync } from 'node:fs'
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8').replace(/^\uFEFF/, ''))
 const problems = []
 
+if (manifest.exports?.['./host-main'] !== undefined || manifest.publishConfig?.exports?.['./host-main'] !== undefined) {
+  problems.push('standalone host-main must not be exported by the sidebar-only package')
+}
+
 const devClient = manifest.exports?.['./client']
 const publishClient = manifest.publishConfig?.exports?.['./client']
 

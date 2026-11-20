@@ -17,16 +17,17 @@ const proxied = (url, sessionId) =>
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-import ts from 'typescript'
-import { createBrowserInitializationJournal, createBrowserInitializationReader } from '../lib/client/browser/initialization.js'
+import { stripTypeScriptTypes } from 'node:module'
+
+const initializationSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/browser/initialization.ts', import.meta.url), 'utf8'))
+const { createBrowserInitializationJournal, createBrowserInitializationReader } = await import(`data:text/javascript;base64,${Buffer.from(initializationSource).toString('base64')}`)
 
 const { DEFAULT_SETTINGS } = await import('../lib/browser-electron/settings-store.js')
 
-const panelSource = ts.transpileModule(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+const panelSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8')).replace(/^export /gm, '')
 const SOURCE = `window.__ModuleLoader__.load({ factory(require) {
-  const module = { exports: {} }, exports = module.exports;
   ${panelSource}
-  return exports.loadSettingsPanel(require);
+  return loadSettingsPanel(require);
 } })`
 const ROUTE = '/dsh-builtin-browser/settings'
 

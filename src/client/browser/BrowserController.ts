@@ -308,7 +308,7 @@ export class BrowserController implements HostObservable<BrowserControllerState>
   currentPage(): BrowserObservedPage | undefined {
     const frame = this.page.frame.getSnapshot()
     const carrier = this.page.frame.lifecycle?.getSnapshot()
-    if (this.disposed || frame.address !== 'observed' || frame.loading || frame.error !== undefined
+    if (this.disposed || frame.address !== 'observed' || (frame.loading && frame.documentReady !== true) || frame.error !== undefined
       || frame.target === undefined || (carrier !== undefined && carrier.stage !== 'ready')) return undefined
     return { url: frame.target.url, ...carrier?.guestId === undefined ? {} : { guestId: carrier.guestId } }
   }
@@ -361,7 +361,7 @@ export class BrowserController implements HostObservable<BrowserControllerState>
       || frame.navigationId !== receipt.requestId) return
     if (frame.error !== undefined) {
       this.journal.fail(this.options.tabId, 'navigation-failed')
-    } else if (frame.address === 'observed' && !frame.loading && frame.target !== undefined) {
+    } else if (frame.address === 'observed' && (!frame.loading || frame.documentReady === true) && frame.target !== undefined) {
       const carrier = this.page.frame.lifecycle?.getSnapshot()
       if (carrier !== undefined && carrier.stage !== 'ready') return
       this.journal.advance(this.options.tabId, 'attached',
