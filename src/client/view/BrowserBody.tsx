@@ -93,11 +93,16 @@ export function BrowserBody(props: BrowserBodyProps): ReactNode {
   const [takeover, setTakeover] = useState<{ notice?: TakeoverNotice; error?: boolean }>({})
   const takeoverChannel = useRef<ReturnType<typeof connectBrowserTakeover>>()
   const webPage = useSyncExternalStore(subscribeIframePages, () => iframePage(sessionId, viewportId))
+  const lastVerifiedWebPage = useRef<{ sessionId: string; epoch: number; page: NonNullable<typeof webPage> }>()
+  if (webPage) lastVerifiedWebPage.current = { sessionId, epoch: mountEpoch, page: webPage }
+  const takeoverWebPage = webPage ?? (lastVerifiedWebPage.current?.sessionId === sessionId
+    && lastVerifiedWebPage.current.epoch === mountEpoch && state?.initialization?.stage !== 'failed' ? lastVerifiedWebPage.current.page : undefined)
   const observedPage = props.currentPage?.(tab.id)
   const carrierPageId = observedPage?.guestId ?? state?.initialization?.guestId
-  const pageId = webPage?.pageId ?? (carrierPageId?.startsWith('iframe:') ? undefined : carrierPageId)
-  takeoverCurrent.current = { url: webPage?.url ?? observedPage?.url ?? state?.frame.target?.url ?? '', active: tab.visible === true,
-    ...webPage?.navigationUrl === undefined ? {} : { navigationUrl: webPage.navigationUrl } }
+  const pageId = takeoverWebPage?.pageId ?? (carrierPageId?.startsWith('iframe:') ? undefined : carrierPageId)
+  takeoverCurrent.current = { url: takeoverWebPage?.url ?? observedPage?.url ?? state?.frame.target?.url ?? '',
+    active: tab.visible === true && (takeoverWebPage === undefined || webPage !== undefined),
+    ...takeoverWebPage?.navigationUrl === undefined ? {} : { navigationUrl: takeoverWebPage.navigationUrl } }
   useEffect(() => {
     if (!pageId) return
     const lifetime = new AbortController()

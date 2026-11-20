@@ -88,6 +88,17 @@ it.each(['42', 'iframe:page'])('shared BrowserBody wires the current Desktop/Web
   await act(async () => { await vi.advanceTimersByTimeAsync(0) })
   expect(requests[0]).toMatchObject({ operation: 'register', owner: 'session-owner', tabId: 'sidebar-tab', pageId })
   expect(requests.some(request => request.operation === 'poll' && request.active === true)).toBe(true)
+  if (pageId.startsWith('iframe:')) {
+    await act(async () => { unregister?.() })
+    await act(async () => { await vi.advanceTimersByTimeAsync(400) })
+    expect(requests.some(request => request.operation === 'remove')).toBe(false)
+    expect(requests.filter(request => request.operation === 'poll').at(-1)?.active).toBe(false)
+    expect(screen.getByRole('status').textContent).toContain(labels.label)
+    await act(async () => { unregister = registerIframePage('owner', view.container.querySelector('[id]')!.id, pageId, 'https://example.test/secure') })
+    await act(async () => { await vi.advanceTimersByTimeAsync(400) })
+    expect(requests.filter(request => request.operation === 'register')).toHaveLength(1)
+    expect(requests.filter(request => request.operation === 'poll').at(-1)).toMatchObject({ active: true, url: 'https://example.test/secure' })
+  }
   tab.visible = false
   view.rerender(<BrowserBody {...props} />)
   await act(async () => { await vi.advanceTimersByTimeAsync(400) })
