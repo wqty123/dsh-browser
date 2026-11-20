@@ -232,11 +232,14 @@ const PAGE_LIB = String.raw`
     if (node.nodeType === 3) return node.nodeValue || ''
     var tag = String(node.localName || '').toLowerCase()
     if (tag === 'annotation' || tag === 'annotation-xml') return ''
-    var children = Array.prototype.map.call(node.childNodes || [], function (child) { return mathMLText(child, (depth || 0) + 1) })
+    var children = Array.prototype.filter.call(node.childNodes || [], function (child) {
+      return child.nodeType === 1 || /^(mi|mn|mo|mtext|ms)$/.test(tag)
+    }).map(function (child) { return mathMLText(child, (depth || 0) + 1) })
     if (tag === 'mfrac') return '\\frac{' + (children[0] || '') + '}{' + (children[1] || '') + '}'
-    if (tag === 'msup' || tag === 'msub') return (children[0] || '') + (tag === 'msup' ? '^{' : '_{') + (children[1] || '') + '}'
-    if (tag === 'msubsup') return (children[0] || '') + '_{' + (children[1] || '') + '}^{' + (children[2] || '') + '}'
+    if (tag === 'msup' || tag === 'msub' || tag === 'mover' || tag === 'munder') return (children[0] || '') + (tag === 'msup' || tag === 'mover' ? '^{' : '_{') + (children[1] || '') + '}'
+    if (tag === 'msubsup' || tag === 'munderover') return (children[0] || '') + '_{' + (children[1] || '') + '}^{' + (children[2] || '') + '}'
     if (tag === 'msqrt') return '\\sqrt{' + children.join('') + '}'
+    if (tag === 'mroot') return '\\sqrt[' + (children[1] || '') + ']{' + (children[0] || '') + '}'
     return children.join('')
   }
 
@@ -246,13 +249,23 @@ const PAGE_LIB = String.raw`
     var script = tag === 'SCRIPT' && /^math\/tex/i.test(node.getAttribute('type') || '')
     if (script && node.previousElementSibling && node.previousElementSibling.matches(MATH_SELECTOR)) return null
     if (!script && !matches(MATH_SELECTOR)) return null
-    var annotation = node.querySelector('annotation[encoding="application/x-tex"], annotation[encoding="application/x-latex"]')
+    var annotations = node.querySelectorAll('annotation')
+    var annotation = ''
+    for (var a = 0; a < annotations.length; a++) {
+      if (/^(application\/(x-tex|x-latex)|text\/(x-tex|tex))$/i.test(String(annotations[a].getAttribute('encoding') || '').split(';')[0].trim())) {
+        annotation = String(annotations[a].textContent || '').trim()
+        if (annotation) break
+      }
+    }
     var data = node.getAttribute('data-latex') || (node.querySelector('[data-latex]') || {}).getAttribute?.('data-latex')
     var next = node.nextElementSibling
     var sourceScript = next && /^math\/tex/i.test(next.getAttribute('type') || '') ? next : null
     var math = tag === 'MATH' ? node : node.querySelector('math')
-    var latex = script ? node.textContent : annotation ? annotation.textContent : data || (sourceScript ? sourceScript.textContent : math ? mathMLText(math) : '[math source unavailable]')
-    return { latex: String(latex || '[math source unavailable]').trim() || '[math source unavailable]', display: matches('.katex-display, .MathJax_Display, .MathJax_SVG_Display, .MathJax_CHTML_Display') || node.getAttribute('display') === 'block' || node.getAttribute('display') === 'true' || /mode\s*=\s*display/i.test((script ? node : sourceScript)?.getAttribute('type') || '') }
+    var sourceTex = script ? String(node.textContent || '').trim() : annotation || String(data || '').trim() || String(sourceScript ? sourceScript.textContent || '' : '').trim()
+    var latex = sourceTex || (math ? mathMLText(math) : '[math source unavailable]')
+    return { latex: String(latex || '[math source unavailable]').trim() || '[math source unavailable]',
+      mathml: math && !sourceTex && String(math.outerHTML || '').length <= 64000 ? String(math.outerHTML) : undefined,
+      display: matches('.katex-display, .MathJax_Display, .MathJax_SVG_Display, .MathJax_CHTML_Display') || node.getAttribute('display') === 'block' || node.getAttribute('display') === 'true' || /mode\s*=\s*display/i.test((script ? node : sourceScript)?.getAttribute('type') || '') }
   }
 
   function flatTextMap(maxChars, structured, legacy, root) {
@@ -295,7 +308,7 @@ const PAGE_LIB = String.raw`
         var at = out.text.length
         append(formula.latex)
         out.nodes.push({ node: node, start: at, end: out.text.length, atomic: true })
-        return structured ? [{ type: 'math', latex: formula.latex, display: Boolean(formula.display), start: at, end: out.text.length }] : []
+        return structured ? [Object.assign({ type: 'math', latex: formula.latex, display: Boolean(formula.display), start: at, end: out.text.length }, formula.mathml === undefined ? {} : { mathml: formula.mathml })] : []
       }
       if (SKIP_TAGS[node.tagName] || !visibleNode(node)) return []
       var tag = node.tagName
@@ -366,7 +379,7 @@ const PAGE_LIB = String.raw`
       if (node.type === 'text') {
         result.push({ type: 'text', text: node.text.slice(Math.max(0, start - node.start), Math.min(node.text.length, end - node.start)) })
       } else if (node.type === 'break' || node.type === 'rule') result.push({ type: node.type })
-      else if (node.type === 'math') result.push({ type: 'math', latex: node.latex, display: node.display })
+      else if (node.type === 'math') result.push(Object.assign({ type: 'math', latex: node.latex, display: node.display }, node.mathml === undefined ? {} : { mathml: node.mathml }))
       else {
         var children = selectedContent(node.children, start, end, preserveWhitespace || node.type === 'pre' || node.type === 'code')
         if (!children.length) continue
@@ -491,8 +504,8 @@ const PAGE_LIB = String.raw`
         var index = 1
         var sibling = node.previousElementSibling
         while (sibling) { if (sibling.tagName === node.tagName) index += 1; sibling = sibling.previousElementSibling }
-        parts.unshift(tag + (index > 1 ? ':nth-of-type(' + index + ')' : ''))
         if (node.id && /^[A-Za-z][A-Za-z0-9_-]*$/.test(node.id)) { parts.unshift('#' + node.id); break }
+        parts.unshift(tag + (index > 1 ? ':nth-of-type(' + index + ')' : ''))
         node = node.parentElement
         depth += 1
       }
@@ -1327,6 +1340,14 @@ const PAGE_LIB = String.raw`
     if (!best || bestScore <= 0) return { ok: true, status: 'missing', matches: 0, reason: 'no-candidate' }
     if (ties > 1) return { ok: true, status: 'ambiguous', matches: ties, reason: 'several-candidates' }
     var target = best
+    var selectedCells = []
+    if (kind === 'table' && Array.isArray(spec.cells)) {
+      for (var sc = 0; sc < spec.cells.length && sc < 5000; sc++) {
+        var selectedCell = cellAt(best, spec.cells[sc].row, spec.cells[sc].column)
+        if (selectedCell && selectedCells.indexOf(selectedCell) === -1) selectedCells.push(selectedCell)
+      }
+      selectedCells.sort(documentOrder)
+    }
     if (kind === 'table' && anchor.cell) {
       var at = cellAt(best, anchor.cell.row, anchor.cell.column)
       if (at) target = at
@@ -1334,10 +1355,25 @@ const PAGE_LIB = String.raw`
     try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }) } catch (error) {
       try { target.scrollIntoView() } catch (ignored) { /* highlight still lands */ }
     }
-    var rects = target.getClientRects ? target.getClientRects() : []
-    if (!rects.length) rects = [target.getBoundingClientRect()]
+    var rects = []
+    var targets = selectedCells.length ? selectedCells : [target]
+    for (var sr = 0; sr < targets.length; sr++) {
+      var selectedRects = targets[sr].getClientRects ? targets[sr].getClientRects() : []
+      if (!selectedRects.length) selectedRects = [targets[sr].getBoundingClientRect()]
+      for (var cr = 0; cr < selectedRects.length; cr++) rects.push(selectedRects[cr])
+    }
     if (!visibleRect(rects)) return { ok: false, status: 'missing', matches: 1, reason: 'element-not-visible' }
     var count = highlightRects(rects, spec)
+    if (kind === 'table' && count > 0) {
+      var selectionRange = document.createRange()
+      selectionRange.selectNodeContents(selectedCells.length ? selectedCells[0] : target)
+      if (selectedCells.length) {
+        var lastCell = selectedCells[selectedCells.length - 1]
+        selectionRange.setEnd(lastCell, lastCell.childNodes.length)
+      }
+      var selection = window.getSelection()
+      if (selection) { selection.removeAllRanges(); selection.addRange(selectionRange) }
+    }
     return { ok: count > 0, status: count > 0 ? 'found' : 'missing', matches: 1, described: selectorOf(target), rects: count, scrolled: count > 0 }
   }
 
@@ -1353,12 +1389,19 @@ const PAGE_LIB = String.raw`
       return null
     }
     if (row < 0 || row >= rows.length) return null
-    var cells = rows[row].cells || []
-    var at = 0
-    for (var i = 0; i < cells.length; i++) {
-      var span = Math.max(1, Number(cells[i].colSpan) || 1)
-      if (at <= column && column < at + span) return cells[i]
-      at += span
+    var occupied = []
+    for (var r = 0; r <= row; r++) {
+      if (r === row && occupied[column] && occupied[column].end > r) return occupied[column].cell
+      var cells = rows[r].cells || []
+      var at = 0
+      for (var i = 0; i < cells.length; i++) {
+        while (occupied[at] && occupied[at].end > r) at++
+        var span = Math.max(1, Math.min(Number(cells[i].colSpan) || 1, 200))
+        if (r === row && at <= column && column < at + span) return cells[i]
+        var end = r + Math.max(1, Math.min(Number(cells[i].rowSpan) || 1, 1000))
+        for (var c = at; c < at + span; c++) occupied[c] = { end: end, cell: cells[i] }
+        at += span
+      }
     }
     return null
   }

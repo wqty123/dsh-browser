@@ -13,7 +13,7 @@ import { createReferenceRouteHandlers } from '../../lib/browser-electron/referen
 import { createReferenceService } from '../../lib/browser-reference/service.js'
 import { ReferenceStore, manifestHashOf } from '../../lib/browser-reference/store.js'
 
-export async function nativeMainReveal(snapshot, live, guestId = 2) {
+export async function nativeMainReveal(snapshot, live, guestId = 2, evaluate) {
   const folder = mkdtempSync(join(process.cwd(), '.native-main-reveal-'))
   const home = join(folder, 'home')
   mkdirSync(home)
@@ -24,8 +24,8 @@ export async function nativeMainReveal(snapshot, live, guestId = 2) {
   ctx.browser.registerBrowserProvider({ id: 'default', available: () => true, exists: () => false })
   const providers = [], hosts = [], commands = [], posts = [], outcomes = []
   const owner = `session-${snapshot.owner.sessionId}`
-  const selected = snapshot.parts[0].anchor
-  const pageText = selected.prefix + selected.exact + selected.suffix
+  const selected = snapshot.parts[0]?.anchor
+  const pageText = selected === undefined ? '' : selected.prefix + selected.exact + selected.suffix
   const app = new EventEmitter()
   const shell = new EventEmitter()
   Object.assign(shell, {
@@ -46,6 +46,7 @@ export async function nativeMainReveal(snapshot, live, guestId = 2) {
         commands.push({ method, params })
         assert.equal(method, 'Runtime.evaluate', 'binding must not navigate or replace the visible guest')
         assert.equal(live.ready, true, 'the client must await the current document')
+        if (evaluate !== undefined) return evaluate(method, params)
         const expression = params.expression
         let value
         if (expression.includes('return JSON.stringify(highlightText(spec))')) {
@@ -67,23 +68,24 @@ export async function nativeMainReveal(snapshot, live, guestId = 2) {
     return provider
   })
   const store = new ReferenceStore(join(home, 'references.jsonl'))
-  store.append({ ...snapshot, manifestHash: manifestHashOf(snapshot) })
+  if (snapshot.referenceId !== undefined) store.append({ ...snapshot, manifestHash: manifestHashOf(snapshot) })
   const service = createReferenceService(ctx.browser, {
     store, assetDir: join(home, 'assets'),
     sourceSession: (task, page) => ctx.browser.bindPanelPage(`session-${task}`, page),
   })
-  const route = createReferenceRouteHandlers({ service }).reveal
+  const routes = createReferenceRouteHandlers({ service })
   let stop
   return {
     commands, posts, outcomes, home, app,
-    async post(body) {
+    get: referenceId => store.get(referenceId),
+    async post(body, capture = false) {
       posts.push(body)
       const request = Readable.from([JSON.stringify(body)])
       request.method = 'POST'
       request.headers = { host: 'localhost:3180', origin: 'http://localhost:3180' }
       request.socket = { remoteAddress: '127.0.0.1' }
       let outcome
-      await route(request, {
+      await (capture ? routes.capture : routes.reveal)(request, {
         writeHead(status) { assert.equal(status, 200) },
         end(json) { outcome = JSON.parse(json); outcomes.push(outcome) },
       })

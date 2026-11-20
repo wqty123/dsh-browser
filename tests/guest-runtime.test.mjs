@@ -4,7 +4,7 @@ import vm from 'node:vm'
 import { guestRuntimeScript } from '../src/browser-electron/guest-runtime.ts'
 import { guestPath, relayTag } from '../src/browser-electron/guest-route.ts'
 
-function page() {
+function page(storage, storageAvailable = true) {
   const requests = [], navigations = [], listeners = new Map(), observers = []
   class Element {
     nodeType = 1
@@ -28,7 +28,7 @@ function page() {
   const history = { pushState(state, title, url) { location.href = new URL(url, location.href).href },
     replaceState(state, title, url) { location.href = new URL(url, location.href).href } }
   const context = {
-    URL, URLSearchParams, Headers, Request, Element, HTMLFormElement: Form, XMLHttpRequest: XHR, location, history,
+    URL, URLSearchParams, Headers, Request, Element, HTMLFormElement: Form, XMLHttpRequest: XHR, location, history, Storage: class {},
     FormData: class { constructor(form, submitter) { this.values = [...form.fields]; if (submitter) this.values.push(['button', 'search']) }
       [Symbol.iterator]() { return this.values[Symbol.iterator]() } },
     document: { addEventListener(name, listener) { listeners.set(name, listener) } }, navigator: {},
@@ -47,10 +47,32 @@ function page() {
   }
   context.parent = { postMessage() {} }
   context.window = context
+  if (!storageAvailable) delete context.Storage
   vm.createContext(context)
-  vm.runInContext(guestRuntimeScript('https://ordinary.example/dir/page'), context)
+  vm.runInContext(guestRuntimeScript('https://ordinary.example/dir/page', storage), context)
   return { context, requests, navigations, listeners, Element, Form, XHR, observers }
 }
+
+test('guest navigation carries the tab storage context without changing the upstream identity', () => {
+  const { context } = page({ token: 'capability', context: 'one-browser-context' })
+  for (const value of ['/next', guestPath('https://other.example/page')]) {
+    const proxied = new URL(context.__dshGuestToProxy(value), context.location.href)
+    assert.equal(proxied.searchParams.get('storage-context'), 'one-browser-context')
+    assert.equal(new URL(proxied.searchParams.get('u')).origin,
+      value === '/next' ? 'https://ordinary.example' : 'https://other.example')
+  }
+})
+
+test('an unavailable Storage shim cannot prevent the document identity handshake', () => {
+  const { context, listeners } = page({ token: 'capability', context: 'one-browser-context' }, false)
+  const sent = []
+  context.parent.postMessage = data => sent.push(data)
+  listeners.get('message')({ source: context.parent,
+    data: { type: 'dsh.browser.guest.navigation.request', loadId: 1 } })
+  assert.equal(sent.length, 1)
+  assert.equal(typeof sent[0].documentId, 'string')
+  assert.ok(sent[0].documentId.length > 0)
+})
 
 test('toProxy resolves relative, root-relative, absolute and URL values against the real page', () => {
   const { context } = page()

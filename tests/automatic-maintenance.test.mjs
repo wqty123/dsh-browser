@@ -114,7 +114,7 @@ function fixture(t) {
 }
 
 test('an automatic launch is prohibited in the test process before discovery or broker creation', async () => {
-  await assert.rejects(startAutomaticMaintenance('install', 'C:/not-a-real-target'), /forbidden in a test process|requires Windows Desktop/)
+  await assert.rejects(startAutomaticMaintenance('reinstall', 'C:/not-a-real-target'), /forbidden in a test process|requires Windows Desktop/)
 })
 
 test('committing the current armed job writes a process-bound permission without changing its phase', async t => {

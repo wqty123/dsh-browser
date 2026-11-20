@@ -1,12 +1,13 @@
 import type { ReactNode } from 'react'
 import type { ReferenceTextNode } from '../../../../reference-text.ts'
+import { ReferenceMath } from './ReferenceMath.tsx'
 
 export function ReferenceText({ content }: { readonly content: readonly ReferenceTextNode[] }): ReactNode {
   return content.map((node, index) => {
     if (node.type === 'text') return node.text
     if (node.type === 'break') return <br key={index} />
     if (node.type === 'rule') return <hr key={index} />
-    if (node.type === 'math') return <code key={index} data-reference-math={node.display ? 'display' : 'inline'} style={{ display: node.display ? 'block' : 'inline', whiteSpace: 'pre-wrap' }}>{node.latex}</code>
+    if (node.type === 'math') return <ReferenceMath key={index} node={node} />
     const children = <ReferenceText content={node.children} />
     switch (node.type) {
       case 'block': return <div key={index}>{children}</div>

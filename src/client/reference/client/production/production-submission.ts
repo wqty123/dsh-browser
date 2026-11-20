@@ -134,7 +134,7 @@ export function wireSubmissionContent(input: WireSubmissionInput): readonly Host
       }
     })
     if (markers.length === 0) return
-    blocks.push({ type: 'text', text: `${markers.join('\n')}\n` })
+    blocks.push({ type: 'text', text: `${markers.join('\n')}\n${submissionQuote('Browser reference presentation: the attached references are already displayed as interactive capsules. Do not repeat their markers, reference URIs, source URLs, or source/citation links in the reply. Answer using the quoted content; the capsules provide source navigation.')}` })
   }
   const noted = input.comments === undefined
     ? undefined

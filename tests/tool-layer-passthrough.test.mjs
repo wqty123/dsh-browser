@@ -93,9 +93,30 @@ test('the prompt section coexists with another browser plugin in either registra
     }
     apply(ctx)
     if (!siblingFirst) ctx.systemPrompt.section({ name: 'tool:browser' })
-    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:dsh-builtin-browser'])
+    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
     assert.ok(tools.has('dsh_browser_open'), 'tool registration completes')
   }
+})
+
+test('reference guidance leaves source navigation in capsules, not model-generated citations', () => {
+  const { ctx, tools } = makeContext()
+  const sections = []
+  ctx.systemPrompt.section = section => { sections.push(section) }
+  apply(ctx)
+  const guidance = sections.find(section => section.name === 'tool:dsh-browser-reference-presentation')
+  assert.match(guidance.text, /Do not repeat.*source\/citation links/u)
+  const capture = tools.get('dsh_browser_reference_capture')
+  const list = tools.get('dsh_browser_reference_list')
+  assert.match(capture.description, /Do not repeat reference URIs/u)
+  assert.match(list.description, /do not repeat reference URIs/u)
+  const reference = { referenceId: 'ref-1', title: 'Test', pageUrl: 'https://example.com/', capturedAt: 'now', parts: [], failures: [] }
+  const captured = capture.output.render({}, { ...reference, ok: true })[0].text
+  const listed = list.output.render({}, { references: [reference] })[0].text
+  assert.match(captured, /Do not repeat.*source\/citation link/u)
+  assert.match(listed, /not a reply link/u)
+  for (const text of [captured, listed]) assert.doesNotMatch(text, /Cite it|dsh-browser-ref:ref-1|\]\(/u)
+  assert.match(capture.output.render({}, { ok: false, failures: [{ kind: 'text', reason: 'empty-text' }] })[0].text, /Nothing was captured/u)
+  assert.match(list.output.render({}, { references: [] })[0].text, /No browser references/u)
 })
 
 test('dsh_browser_a11y hands the selector on', async () => {

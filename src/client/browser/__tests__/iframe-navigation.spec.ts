@@ -74,10 +74,12 @@ describe('iframe navigation and presentation assembly', () => {
     page.frame.loadUrl(target('https://example.com/'))
     const frame = host.querySelector('iframe')!
     const post = vi.spyOn(frame.contentWindow!, 'postMessage')
-    const report = (url: string, depth: number) => window.dispatchEvent(new MessageEvent('message', {
-      origin: 'null', source: frame.contentWindow,
-      data: { type: 'dsh.browser.guest.navigation', url, depth, loadId: post.mock.calls.at(-1)?.[0].loadId },
-    }))
+    const report = (url: string, depth: number) => {
+      for (let handshake = 0; handshake < 2; handshake++) window.dispatchEvent(new MessageEvent('message', {
+        origin: 'null', source: frame.contentWindow,
+        data: { type: 'dsh.browser.guest.navigation', url, depth, documentId: url, loadId: post.mock.calls.at(-1)?.[0].loadId },
+      }))
+    }
     if (order === 'after') frame.dispatchEvent(new Event('load'))
     report('https://example.com/', 1)
     expect(page.frame.getSnapshot().loading).toBe(order === 'before')
@@ -126,16 +128,18 @@ describe('iframe navigation and presentation assembly', () => {
     const post = vi.spyOn(frame.contentWindow!, 'postMessage')
     const report = (loadId: number) => window.dispatchEvent(new MessageEvent('message', {
       origin: 'null', source: frame.contentWindow,
-      data: { type: 'dsh.browser.guest.navigation', url: 'https://example.com/', depth: 1, loadId },
+      data: { type: 'dsh.browser.guest.navigation', url: 'https://example.com/', depth: 1, documentId: 'old-document', loadId },
     }))
     frame.dispatchEvent(new Event('load'))
     const first = post.mock.calls.at(-1)![0].loadId
     report(first)
+    report(post.mock.calls.at(-1)![0].loadId)
     frame.dispatchEvent(new Event('load'))
     expect(page.frame.getSnapshot().loading).toBe(false)
     expect(page.frame.getSnapshot().address).toBe('unknown')
     report(first)
     expect(page.frame.getSnapshot().address).toBe('unknown')
+    report(post.mock.calls.at(-1)![0].loadId)
     report(post.mock.calls.at(-1)![0].loadId)
     expect(page.frame.getSnapshot().address).toBe('requested')
     expect(page.frame.getSnapshot().canGoBack).toBe(false)

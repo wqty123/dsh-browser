@@ -1,13 +1,22 @@
 import { guestReferenceHandlerScript } from '../browser-reference/page-script.ts'
+import { guestStorageScript, type GuestStorageConfig } from './guest-storage-runtime.ts'
 
 /** Early, self-contained interception for documents served from the guest proxy. */
-export function guestRuntimeScript(pageUrl: string): string {
+export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig): string {
   return `(() => {
   if (window.__dshGuestRuntime) return;
   window.__dshGuestRuntime = true;
   let real = ${JSON.stringify(pageUrl).replace(/</gu, '\\u003c')};
   const route = '/dsh-builtin-browser/browser-view/isolated-guest';
   const attempt = fn => { try { return fn(); } catch {} };
+  ${storage === undefined ? '' : 'attempt(() => { ' + guestStorageScript(storage) + ' });'}
+  const storageContext = ${JSON.stringify(storage?.context ?? '')};
+  const contextual = value => {
+    if (!storageContext) return value;
+    const url = new URL(value, location.href);
+    url.searchParams.set('storage-context', storageContext);
+    return value.startsWith('/') ? url.pathname + url.search + url.hash : url.href;
+  };
   const realURL = value => {
     const raw = String(value);
     const proxyURL = new URL(raw, location.origin + '/');
@@ -25,9 +34,9 @@ export function guestRuntimeScript(pageUrl: string): string {
     try {
       const raw = String(value);
       const hostURL = new URL(raw, location.origin + '/');
-      if (hostURL.origin === location.origin && hostURL.pathname === route) return raw;
+      if (hostURL.origin === location.origin && hostURL.pathname === route) return contextual(raw);
       const url = realURL(raw);
-      return /^https?:$/.test(url.protocol) ? route + '?u=' + encodeURIComponent(url.href) : raw;
+      return /^https?:$/.test(url.protocol) ? contextual(route + '?u=' + encodeURIComponent(url.href)) : raw;
     } catch { return value; }
   };
   window.__dshGuestToProxy = toProxy;
@@ -102,9 +111,10 @@ export function guestRuntimeScript(pageUrl: string): string {
     };
   });
   let loadId;
+  const documentId = String(Date.now()) + ':' + String(Math.random());
   let referenceRequestId = 0;
   const reference = ${guestReferenceHandlerScript()};
-  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length, loadId, ready: document.readyState !== 'loading' }, '*'));
+  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length, loadId, documentId, ready: document.readyState !== 'loading' }, '*'));
   attempt(() => window.addEventListener('message', event => {
     if (event.source !== parent || !event.data) return;
     if (event.data.type === 'dsh.browser.guest.navigation.request') {
@@ -113,10 +123,10 @@ export function guestRuntimeScript(pageUrl: string): string {
       report();
     } else if (event.data.type === 'dsh.browser.guest.reference.request') {
       const data = event.data;
-      if (event.origin !== location.origin || data.loadId !== loadId || loadId === undefined
+      if (event.origin !== location.origin || data.loadId !== loadId || loadId === undefined || data.documentId !== documentId
         || !Number.isSafeInteger(data.requestId) || data.requestId <= referenceRequestId) return;
       referenceRequestId = data.requestId;
-      const ack = { type: 'dsh.browser.guest.reference.ack', requestId: data.requestId, loadId, url: real };
+      const ack = { type: 'dsh.browser.guest.reference.ack', requestId: data.requestId, loadId, documentId, url: real };
       try {
         const current = new URL(real), source = new URL(data.url);
         current.hash = ''; source.hash = '';
@@ -143,21 +153,6 @@ export function guestRuntimeScript(pageUrl: string): string {
     report();
   }));
   attempt(() => {
-    const set = Element.prototype.setAttribute;
-    Element.prototype.setAttribute = function(name, value) {
-      return set.call(this, name, /^(src|href|action)$/i.test(name) ? toProxy(value) : value);
-    };
-  });
-  for (const [name, prop] of [['HTMLImageElement', 'src'], ['HTMLScriptElement', 'src'],
-    ['HTMLIFrameElement', 'src'], ['HTMLLinkElement', 'href'], ['HTMLSourceElement', 'src']]) attempt(() => {
-    const proto = window[name].prototype;
-    const descriptor = Object.getOwnPropertyDescriptor(proto, prop);
-    if (!descriptor || !descriptor.set) return;
-    Object.defineProperty(proto, prop, Object.assign({}, descriptor, {
-      set(value) { descriptor.set.call(this, toProxy(value)); }
-    }));
-  });
-  attempt(() => {
     const proxyResource = value => {
       if (/^(#|data:|blob:|about:|javascript:)/i.test(value.trim())) return value;
       return toProxy(value);
@@ -181,6 +176,21 @@ export function guestRuntimeScript(pageUrl: string): string {
       }
       return result;
     };
+    const resourceAttribute = (name, value) => name.toLowerCase() === 'srcset' ? proxySrcset(String(value)) : proxyResource(String(value));
+    const set = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value) {
+      return set.call(this, name, /^(src|href|action|poster|srcset)$/i.test(name) ? resourceAttribute(name, value) : value);
+    };
+    for (const [name, prop] of [['HTMLImageElement', 'src'], ['HTMLScriptElement', 'src'],
+      ['HTMLIFrameElement', 'src'], ['HTMLLinkElement', 'href'], ['HTMLSourceElement', 'src'],
+      ['HTMLImageElement', 'srcset'], ['HTMLSourceElement', 'srcset'], ['HTMLVideoElement', 'poster']]) attempt(() => {
+      const proto = window[name].prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!descriptor || !descriptor.set) return;
+      Object.defineProperty(proto, prop, Object.assign({}, descriptor, {
+        set(value) { descriptor.set.call(this, resourceAttribute(prop, value)); }
+      }));
+    });
     const rewriteResource = node => {
       if (!node || node.nodeType !== 1 || /^(A|FORM)$/.test(node.tagName)) return;
       for (const attribute of ['src', 'href', 'srcset', 'poster']) attempt(() => {
@@ -196,6 +206,47 @@ export function guestRuntimeScript(pageUrl: string): string {
         for (const descendant of node.querySelectorAll('[src],[href],[srcset],[poster]')) rewriteResource(descendant);
       }
     };
+    for (const name of ['Node', 'Element', 'Document', 'DocumentFragment']) {
+      for (const method of ['appendChild', 'insertBefore', 'replaceChild', 'append', 'prepend', 'before', 'after', 'replaceWith', 'replaceChildren', 'insertAdjacentElement']) attempt(() => {
+        const proto = window[name].prototype;
+        if (!Object.prototype.hasOwnProperty.call(proto, method)) return;
+        const original = proto[method];
+        proto[method] = function(...args) {
+          for (const node of args) if (node && typeof node === 'object') rewriteTree(node);
+          return original.apply(this, args);
+        };
+      });
+    }
+    const html = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+    let inert;
+    const rewriteMarkup = (value, context) => {
+      if (!inert) inert = document.implementation.createHTMLDocument('');
+      const container = context && context.nodeType === 1
+        ? inert.createElementNS(context.namespaceURI, context.localName) : inert.createElement('div');
+      html.set.call(container, value);
+      rewriteTree(container.content || container);
+      return html.get.call(container);
+    };
+    for (const prop of ['innerHTML', 'outerHTML']) attempt(() => {
+      const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, prop);
+      Object.defineProperty(Element.prototype, prop, Object.assign({}, descriptor, {
+        set(value) { descriptor.set.call(this, rewriteMarkup(value, prop === 'innerHTML' ? this : this.parentElement)); }
+      }));
+    });
+    attempt(() => {
+      const original = Element.prototype.insertAdjacentHTML;
+      Element.prototype.insertAdjacentHTML = function(position, value) {
+        const outside = /^(beforebegin|afterend)$/i.test(position);
+        return original.call(this, position, rewriteMarkup(value, outside ? this.parentElement : this));
+      };
+    });
+    attempt(() => {
+      const original = window.Range.prototype.createContextualFragment;
+      window.Range.prototype.createContextualFragment = function(value) {
+        const context = this.startContainer.nodeType === 1 ? this.startContainer : this.startContainer.parentElement;
+        return original.call(this, rewriteMarkup(value, context));
+      };
+    });
     const observer = new MutationObserver(records => {
       for (const record of records) attempt(() => {
         if (record.type === 'attributes') rewriteResource(record.target);

@@ -19,6 +19,7 @@ export function createIframePage(options: BrowserPageOptions, sessionId?: string
     capabilityFailed: description => { frame.handleCapabilityFailure(description) },
     guestReady: (revision, pageId) => { frame.handleGuestReady(revision, pageId) },
     guestPending: () => { frame.handleGuestPending() },
+    guestFailed: (revision, description) => { frame.handleGuestFailed(revision, description) },
     failed: (revision) => { frame.handleLoadFailed(revision) },
     remounted: () => { frame.reload() },
   }, sessionId)

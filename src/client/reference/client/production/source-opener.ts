@@ -1,5 +1,5 @@
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
-import type { BrowserInitializationReader } from '../../../browser/initialization.ts'
+import type { BrowserInitializationReader, BrowserInitReceipt } from '../../../browser/initialization.ts'
 import { sameReferenceDocument } from '../../../../reference-page.ts'
 import { iframeReferenceSource, type ReferenceSourcePage } from '../../../browser/iframe-reference.ts'
 
@@ -43,7 +43,13 @@ export async function openReferenceSource(sidebar: SourceSidebar, reader: Browse
     tabId = created[0]!.id as TabId
   }
   signal.throwIfAborted()
-  const receipt = await reader.wait({ sessionId, tabId, url, afterRequestId }, signal)
+  const waiting = new AbortController()
+  const abort = (): void => { waiting.abort(signal.reason) }
+  signal.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(() => { waiting.abort(new Error('GUEST_SOURCE_TIMEOUT: source page did not become ready')) }, 15000)
+  let receipt: BrowserInitReceipt
+  try { receipt = await reader.wait({ sessionId, tabId, url, afterRequestId }, waiting.signal) }
+  finally { clearTimeout(timer); signal.removeEventListener('abort', abort) }
   if (!receipt.guestId) throw new Error('source highlighting requires a controllable sidebar guest')
   return sourcePage(receipt.guestId)
 }

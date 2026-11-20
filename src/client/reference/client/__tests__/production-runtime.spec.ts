@@ -82,8 +82,8 @@ describe('createProductionRuntime — prepared delivery full apply (content-leve
     Object.assign(hosts['sess-A']!, { insertQuote: undefined, insertReference: (ref: { clipboardText: string }) => { inserted = ref; return true } })
     http.enqueue(deliveriesResponse([makeDelivery({ state: 'acknowledged', sequence: 1 })], 1))
     await runtime.pollOnce()
-    expect(inserted!.clipboardText).toMatch(/^\[引用来源 1/u)
-    expect(inserted!.clipboardText).toContain('](dsh-browser-ref:ref-mixed-1)')
+    expect(inserted!.clipboardText).toMatch(/^<dsh-browser-reference /u)
+    expect(inserted!.clipboardText).toContain('uri="dsh-browser-ref:ref-mixed-1"')
     expect(inserted!.clipboardText).not.toContain(LONG_TEXT)
     expect(hosts['sess-A']!.calls).not.toContain('insertText')
     runtime.dispose()
@@ -411,9 +411,19 @@ describe('revealReference — it goes to the source page', () => {
     http.revealOutcome = { ok: true, status: 'session-unavailable' }
     runtime.setSourceOpener(async () => { throw new Error('sidebar tab API is unavailable') })
     await runtime.revealReference(card.referenceId)
-    expect(runtime.snapshot().reveal?.status).toBe('session-unavailable')
-    expect(runtime.snapshot().reveal?.message).toContain('标签页')
+    expect(runtime.snapshot().reveal?.status).toBe('unavailable')
+    expect(runtime.snapshot().reveal?.message).toContain('sidebar tab API is unavailable')
   })
+
+  it.each(['GUEST_DOCUMENT_IDENTITY_UNAVAILABLE', 'GUEST_REFERENCE_IDENTITY_MISMATCH', 'GUEST_REFERENCE_TIMEOUT', 'GUEST_SOURCE_TIMEOUT'])(
+    'shows the source-channel failure %s instead of retaining page-mismatch or hanging', async reason => {
+      const { http, runtime, card } = await withCard()
+      http.revealOutcome = { ok: true, status: 'page-mismatch' }
+      runtime.setSourceOpener(async () => ({ pageId: 'iframe:owned', reveal: async () => { throw new Error(reason) } }))
+      await expect(runtime.revealReference(card.referenceId)).resolves.toBe('unavailable')
+      expect(runtime.snapshot().reveal).toMatchObject({ status: 'unavailable', message: expect.stringContaining(reason) })
+    },
+  )
 
   it.each([false, true])('uses the acknowledged Web source channel instead of retrying native reveal (expired Web source: %s)', async web => {
     const { http, runtime, card } = await withCard(web)

@@ -19,7 +19,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { referenceOwnerKey } from '../reference-owner.ts'
 import { webReferenceSources, type WebReferenceSources } from './web-sources.ts'
 import { sameReferenceDocument as samePage } from '../reference-page.ts'
-import { isReferenceText, MAX_REFERENCE_TEXT, referenceTextContent } from '../reference-text.ts'
+import { isReferenceText, normalizeReferenceText, MAX_REFERENCE_TEXT, referenceTextContent, renderReferenceText } from '../reference-text.ts'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { manifestHashOf, ReferenceStore, referenceStorePath } from './store.ts'
@@ -775,7 +775,9 @@ export class BrowserReferenceService {
         }, signal)
         results.push({ partId: part.partId, type: 'image', status: result.status, matches: result.matches })
       } else {
-        const result = await this.revealElement(sessionId, 'table', part.anchor, signal)
+        const cells = part.table.cells.filter(cell => cell.includedAs === 'selection')
+          .map(({ row, column }) => ({ row, column }))
+        const result = await this.revealElement(sessionId, 'table', part.anchor, signal, cells)
         results.push({ partId: part.partId, type: 'table', status: result.status, matches: result.matches })
       }
     }
@@ -792,11 +794,13 @@ export class BrowserReferenceService {
     kind: 'image' | 'table',
     anchor: object,
     signal?: AbortSignal,
+    cells?: readonly { readonly row: number; readonly column: number }[],
   ): Promise<{ status: 'revealed' | 'ambiguous' | 'missing'; matches?: number }> {
     try {
       const result = await this.run<RawElementRevealResult>(sessionId, revealElementScript(), [{
         kind,
         anchor,
+        ...cells === undefined ? {} : { cells },
       }], signal)
       const status = result.status === 'found' ? 'revealed' : result.status === 'ambiguous' ? 'ambiguous' : 'missing'
       return { status, ...typeof result.matches === 'number' ? { matches: result.matches } : {} }
@@ -809,18 +813,22 @@ export class BrowserReferenceService {
   private textPart(event: RawCaptureEvent, nextPartId: () => string): TextReferencePart | CaptureFailure {
     const exact = textOf(event.exact, this.options.maxTextPartLength + 1)
     if (exact.trim() === '') return { kind: 'text', reason: 'empty-text' }
-    if (exact.length > this.options.maxTextPartLength) {
+    if (event.content === undefined && exact.length > this.options.maxTextPartLength) {
       return { kind: 'text', reason: 'text-too-long', detail: { characters: exact.length, limit: this.options.maxTextPartLength } }
     }
-    if (event.content !== undefined && (!isReferenceText(event.content)
-      || referenceTextContent(event.content).replace(/\s/gu, '') !== exact.replace(/\s/gu, ''))) {
+    const content = event.content === undefined ? undefined : normalizeReferenceText(event.content, Infinity)
+    if (event.content !== undefined && (content === undefined
+      || referenceTextContent(content).replace(/\s/gu, '') !== exact.replace(/\s/gu, ''))) {
       return { kind: 'text', reason: 'invalid-text-content' }
+    }
+    if (content !== undefined && !isReferenceText(content, this.options.maxTextPartLength)) {
+      return { kind: 'text', reason: 'text-too-long', detail: { characters: renderReferenceText(content).length, limit: this.options.maxTextPartLength } }
     }
     return {
       partId: nextPartId(),
       type: 'text',
       text: exact,
-      ...(event.content === undefined ? {} : { content: event.content }),
+      ...(content === undefined ? {} : { content }),
       anchor: {
         exact,
         prefix: textOf(event.prefix, 512),
@@ -1084,7 +1092,8 @@ export class BrowserReferenceService {
     const raw = event.table
     if (!isRecord(raw)) return { kind: 'table', reason: 'table-missing' }
     const table = raw as RawTable
-    const rawCells = Array.isArray(table.cells) ? table.cells : []
+    const rawCells = Array.isArray(table.cells) ? table.cells.map(cell => isRecord(cell) && cell.content !== undefined
+      ? { ...cell, content: normalizeReferenceText(cell.content) ?? null } : cell) : []
     if (rawCells.length === 0) return { kind: 'table', reason: 'table-empty' }
     if (booleanOf(table.truncated) || rawCells.length > this.options.maxTableCells) {
       return {

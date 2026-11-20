@@ -19,7 +19,7 @@ const url = 'https://example.test/article'
 const snapshot = { ...makeSnapshot(owner), source: { ...makeSnapshot(owner).source, pageUrl: url, frameRoute: 'main' as const },
   parts: [{ partId: 'text', type: 'text' as const, text: 'selected words', content: [], anchor: { exact: 'selected words', prefix: '', suffix: '' } }] }
 const disposers: (() => void | Promise<void>)[] = []
-afterEach(async () => { for (const dispose of disposers.splice(0).reverse()) await dispose(); vi.restoreAllMocks(); document.body.replaceChildren() })
+afterEach(async () => { for (const dispose of disposers.splice(0).reverse()) await dispose(); vi.useRealTimers(); vi.restoreAllMocks(); document.body.replaceChildren() })
 
 function fixture(initial = url) {
   const listeners = new Set<() => void>()
@@ -41,7 +41,7 @@ function fixture(initial = url) {
   page.presentation.mount(host.id)
   disposers.push(async () => { await controller.dispose(); journal.dispose() })
 
-  function connect(html = '<p>before selected words after</p>', holdReady = false) {
+  function connect(html = '<p>before selected words after</p>', holdReady = false, deferLoad = false) {
     const frame = host.querySelector('iframe')!
     const guest = { window: frame.contentWindow! }
     guest.window.document.open()
@@ -70,8 +70,10 @@ function fixture(initial = url) {
     const post = vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(data => {
       guest.window.dispatchEvent(new guest.window.MessageEvent('message', { origin: location.origin, source: parent as unknown as Window, data }))
     })
-    frame.dispatchEvent(new Event('load'))
-    return { guest, post, frame, receive, ready: () => { for (const report of held.splice(0)) receive(report) } }
+    const loaded = () => { frame.dispatchEvent(new Event('load')) }
+    if (deferLoad) guest.window.dispatchEvent(new guest.window.Event('DOMContentLoaded'))
+    else loaded()
+    return { guest, post, frame, receive, loaded, ready: () => { holdReady = false; for (const report of held.splice(0)) receive(report) } }
   }
   return { connect, controller, reader, sidebar, navigate, journal, page: () => page }
 }
@@ -149,6 +151,64 @@ it.each([true, false])('reveals through the actual Web guest runtime after readi
   await expect(source.reveal!({ ...snapshot, owner: { sessionId: 'another-conversation' } }, undefined, new AbortController().signal)).resolves.toBe('session-mismatch')
 })
 
+it.each([
+  { table: '<thead><tr><th>Firstname</th><th>Lastname</th></tr></thead><tbody><tr><td>Peter</td><td>Griffin</td></tr><tr><td>Lois</td><td>Griffin</td></tr></tbody>', cells: 6, selected: 'FirstnameLastnamePeterGriffinLoisGriffin' },
+  { table: '<thead><tr><th colspan="2">Firstname</th></tr></thead><tbody><tr><td rowspan="2">Peter</td><td>Griffin</td></tr><tr><td>Griffin</td></tr></tbody>', cells: 4, selected: 'FirstnamePeterGriffinGriffin' },
+])('captures a dragged Runoob-like table ($cells cells) over HTTP and selects its cells after navigating back', async ({ table, cells, selected }) => {
+  const server = await webReferenceHttp()
+  disposers.push(() => server.close())
+  const sourceUrl = 'https://www.runoob.com/html/html-tables.html'
+  const html = '<div id="content"><h2>HTML 表格</h2><table>' + table + '</table></div>'
+  let captured: { referenceId: string } | undefined
+  let polledUrl: string | undefined
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = vi.fn(async (input, init) => {
+    const path = new URL(String(input), server.baseUrl).pathname
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined
+    const response = await server.call(path, body)
+    if (body?.operation === 'poll') polledUrl = body.url
+    if (path.endsWith('/capture') && response.status === 200) captured = response.json().reference
+    return new Response(response.text, { status: response.status })
+  })
+  disposers.push(() => { globalThis.fetch = previousFetch })
+  const f = fixture(sourceUrl)
+  let guest = f.connect(html)
+  const doc = guest.guest.window.document
+  const range = doc.createRange()
+  range.setStart(doc.querySelector('th')!.firstChild!, 0)
+  range.setEnd(doc.querySelector('tr:last-child td:last-child')!.firstChild!, 'Griffin'.length)
+  guest.guest.window.getSelection()!.addRange(range)
+  const frozen = runInNewContext(`(${captureEntrySource()})({context:32})`, {
+    window: guest.guest.window, document: doc, location: guest.guest.window.location, URL, NodeFilter: guest.guest.window.NodeFilter,
+  })
+  expect(frozen.events.map((event: { kind: string }) => event.kind)).toEqual(['table'])
+  expect(doc.querySelector(frozen.events[0].selector)).toBe(doc.querySelector('table'))
+  guest.receive({ type: 'dsh-browser-ref:intent', origin: 'user-selection', entry: 'page-overlay', hasSelection: true, capture: frozen })
+  await vi.waitFor(() => { expect(captured).toBeDefined() })
+  const reference = server.service.get(captured!.referenceId)
+  expect(reference.parts[0].type).toBe('table')
+  f.controller.navigate('https://cn.bing.com/', 2)
+  f.connect('<p>Another page</p>')
+  await vi.waitFor(() => { expect(polledUrl).toBe('https://cn.bing.com/') })
+  expect((await server.reveal(reference.referenceId, sessionId)).status).toBe('page-mismatch')
+  const opening = openReferenceSource(f.sidebar, f.reader, sessionId, sourceUrl, new AbortController().signal)
+  guest = f.connect(html, true, true)
+  guest.ready()
+  const source = await opening
+  await vi.waitFor(() => { expect(polledUrl).toBe(sourceUrl) })
+  expect(await source.reveal!(reference, undefined, new AbortController().signal)).toBe('revealed')
+  const returned = guest.guest.window.document
+  expect(returned.querySelector('#__dsh-ref-highlight')?.children).toHaveLength(cells)
+  expect(guest.guest.window.getSelection()!.toString()).toBe(selected)
+  guest.loaded()
+  expect(guest.guest.window.getSelection()!.toString()).toBe(selected)
+  const command = guest.post.mock.calls.map(([data]) => data).find(data => data.operation === 'element')
+  expect(command.spec.cells).toHaveLength(cells)
+  guest.guest.window.dispatchEvent(new guest.guest.window.Event('resize'))
+  expect(returned.querySelector('#__dsh-ref-highlight')).toBeNull()
+  expect(guest.guest.window.getSelection()!.toString()).toBe(selected)
+})
+
 it('reports missing and ambiguous text and guest operation errors explicitly', async () => {
   const f = fixture()
   const guest = f.connect('<p>selected words selected words</p>')
@@ -162,6 +222,62 @@ it('reports missing and ambiguous text and guest operation errors explicitly', a
   await expect(source.reveal!(snapshot, undefined, new AbortController().signal)).rejects.toThrow('guest range failed')
 })
 
+it('reveals a formula after navigation back at DOM readiness, without waiting for resource load', async () => {
+  const f = fixture('https://katex.org/')
+  f.connect('<p>initial source</p>')
+  f.controller.navigate('https://away.example/', 2)
+  f.connect('<p>away</p>')
+  const opened = openReferenceSource(f.sidebar, f.reader, sessionId, 'https://katex.org/', new AbortController().signal)
+  const guest = f.connect('<p>before <span class="katex" data-latex="\\KaTeX">KaTeX</span> after</p>', false, true)
+  const source = await opened
+  const formula = { ...snapshot, source: { ...snapshot.source, pageUrl: 'https://katex.org/' }, parts: [{
+    partId: 'p1', type: 'text' as const, text: '\\KaTeX', content: [{ type: 'math' as const, latex: '\\KaTeX', display: false }],
+    anchor: { exact: '\\KaTeX', prefix: 'before ', suffix: ' after' },
+  }] }
+  await expect(source.reveal!(formula, undefined, new AbortController().signal)).resolves.toBe('revealed')
+  expect(guest.guest.window.getSelection()!.toString()).toBe('KaTeX')
+  expect(guest.guest.window.document.querySelector('#__dsh-ref-highlight')).not.toBeNull()
+  guest.loaded()
+  expect(guest.guest.window.getSelection()!.toString()).toBe('KaTeX')
+  expect(f.controller.currentPage()?.url).toBe('https://katex.org/')
+})
+
+it.each(['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'fragment', 'properties'] as const)('proxies runtime stylesheet and image URLs synchronously through %s', async insertion => {
+  const f = fixture('https://www.bing.com/search?q=example')
+  const guest = f.connect('<div id="dynamic"></div>')
+  const doc = guest.guest.window.document
+  const host = doc.querySelector('#dynamic')!
+  const markup = '<link rel="stylesheet" href="/x.css"><img src="/y.png">'
+  if (insertion === 'innerHTML') host.innerHTML = markup
+  else if (insertion === 'outerHTML') host.outerHTML = markup
+  else if (insertion === 'insertAdjacentHTML') host.insertAdjacentHTML('beforeend', markup)
+  else if (insertion === 'fragment') {
+    const range = doc.createRange()
+    range.selectNodeContents(host)
+    const fragment = range.createContextualFragment(markup)
+    expect(new URL(fragment.querySelector('link')!.getAttribute('href')!, location.origin).pathname).toBe('/dsh-builtin-browser/browser-view/isolated-guest')
+    host.append(fragment)
+  } else {
+    const link = doc.createElement('link')
+    link.rel = 'stylesheet'
+    link.href = '/x.css'
+    const image = doc.createElement('img')
+    image.src = '/y.png'
+    host.append(link, image)
+  }
+  for (const [selector, attribute, source] of [['link', 'href', 'https://www.bing.com/x.css'], ['img', 'src', 'https://www.bing.com/y.png']]) {
+    const resolved = new URL(doc.querySelector(selector)!.getAttribute(attribute)!, location.origin)
+    expect(resolved.origin).toBe(location.origin)
+    expect(resolved.pathname).toBe('/dsh-builtin-browser/browser-view/isolated-guest')
+    expect(resolved.searchParams.get('u')).toBe(source)
+  }
+  const table = doc.createElement('table')
+  table.innerHTML = '<tbody><tr><td>Preserved table context</td></tr></tbody>'
+  expect(table.rows[0]!.cells[0]!.textContent).toBe('Preserved table context')
+  await Promise.resolve()
+  expect(doc.querySelectorAll('link')).toHaveLength(1)
+})
+
 it('rejects forged/stale acknowledgements and cancels pending commands on abort or navigation', async () => {
   const f = fixture()
   const guest = f.connect()
@@ -173,9 +289,7 @@ it('rejects forged/stale acknowledgements and cancels pending commands on abort 
   const ack = { ...request, type: 'dsh.browser.guest.reference.ack', ok: true, value: { ok: true, text: 'selected words' } }
   guest.receive(ack, null)
   guest.receive(ack, guest.frame.contentWindow, location.origin)
-  guest.receive({ ...ack, loadId: request.loadId - 1 })
   guest.receive({ ...ack, requestId: request.requestId + 1 })
-  guest.receive({ ...ack, url: 'https://other.test/' })
   guest.receive({ ...ack, value: null })
   expect(guest.post.mock.calls.at(-1)![0].operation).toBe('text')
   abort.abort()
@@ -186,18 +300,56 @@ it('rejects forged/stale acknowledgements and cancels pending commands on abort 
   guest.receive(ack)
 })
 
+it.each(['documentId', 'loadId', 'url'])('settles a reveal with an explicit error for a mismatched acknowledgement %s', async field => {
+  const f = fixture(), guest = f.connect()
+  const source = await openReferenceSource(f.sidebar, f.reader, sessionId, url, new AbortController().signal)
+  guest.post.mockImplementation(() => {})
+  const reveal = source.reveal!(snapshot, undefined, new AbortController().signal)
+  const request = guest.post.mock.calls.at(-1)![0]
+  guest.receive({ ...request, type: 'dsh.browser.guest.reference.ack', ok: true, value: { ok: true, text: 'selected words' },
+    [field]: field === 'loadId' ? request.loadId - 1 : field === 'url' ? 'https://other.test/' : 'other-document' })
+  await expect(reveal).rejects.toThrow('GUEST_REFERENCE_IDENTITY_MISMATCH')
+})
+
+it('bounds a reveal with no acknowledgement instead of leaving it pending', async () => {
+  const f = fixture(), guest = f.connect()
+  const source = await openReferenceSource(f.sidebar, f.reader, sessionId, url, new AbortController().signal)
+  guest.post.mockImplementation(() => {})
+  vi.useFakeTimers()
+  const reveal = source.reveal!(snapshot, undefined, new AbortController().signal)
+  const failed = expect(reveal).rejects.toThrow('GUEST_REFERENCE_TIMEOUT')
+  await vi.advanceTimersByTimeAsync(5000)
+  await failed
+})
+
+it('propagates an absent guest identity through the actual controller and source-opening wait', async () => {
+  const f = fixture('https://away.test/')
+  const opening = openReferenceSource(f.sidebar, f.reader, sessionId, url, new AbortController().signal)
+  const frame = document.querySelector('iframe')!
+  vi.useFakeTimers()
+  frame.dispatchEvent(new Event('load'))
+  window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: frame.contentWindow,
+    data: { type: 'dsh.browser.guest.navigation', url, ready: true } }))
+  const failed = expect(opening).rejects.toThrow('GUEST_DOCUMENT_IDENTITY_UNAVAILABLE')
+  await vi.advanceTimersByTimeAsync(5000)
+  await failed
+  expect(f.journal.get(tabId)).toMatchObject({ stage: 'failed', reason: 'guest-bootstrap-failed' })
+})
+
 it('authenticates guest commands and acknowledges malformed or wrong-document requests with errors', () => {
   const f = fixture()
   const guest = f.connect()
   const reply = vi.spyOn(guest.guest.window.parent, 'postMessage')
   const loadId = guest.post.mock.calls.at(-1)![0].loadId
-  const request = { type: 'dsh.browser.guest.reference.request', loadId, requestId: 12, url, operation: 'text', spec: {} }
+  const documentId = guest.post.mock.calls.at(-1)![0].documentId
+  const request = { type: 'dsh.browser.guest.reference.request', loadId, documentId, requestId: 12, url, operation: 'text', spec: {} }
   const send = (data: object, source = guest.guest.window.parent, origin = location.origin) => {
     guest.guest.window.dispatchEvent(new guest.guest.window.MessageEvent('message', { data, source, origin }))
   }
   send(request, guest.guest.window)
   send(request, guest.guest.window.parent, 'https://untrusted.test')
   send({ ...request, loadId: loadId - 1 })
+  send({ ...request, documentId: 'stale-document' })
   send({ ...request, requestId: '12' })
   expect(reply).not.toHaveBeenCalled()
   send({ ...request, operation: 'execute' })

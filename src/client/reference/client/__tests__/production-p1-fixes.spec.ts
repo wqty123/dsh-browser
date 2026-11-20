@@ -176,7 +176,7 @@ describe('P1 / problem 2 — an acknowledged delivery re-fetches temporarily mis
       // 新契约：确认过的投递首次落地时插入一行来源标记（用户原文保持在前），
       // 且同一引用只会插一次（store.hasInserted 记账），不会随轮询重复叠加。
       expect(host.text.startsWith('保留用户的问题')).toBe(true)
-      expect(host.text.match(/引用来源/g) ?? []).toHaveLength(1)
+      expect(host.text.match(/<dsh-browser-reference /g) ?? []).toHaveLength(1)
       expect(http.ackCalls).toHaveLength(0)
     } finally {
       runtime.dispose()

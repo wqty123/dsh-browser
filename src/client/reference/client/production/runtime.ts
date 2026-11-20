@@ -281,9 +281,9 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     clearTimeout(revealTimer)
     revealTimer = undefined
   }
-  const showReveal = (status: string): void => {
+  const showReveal = (status: string, detail?: string): void => {
     clearRevealHint()
-    lastReveal = { status, message: REVEAL_MESSAGES[status] ?? '' }
+    lastReveal = { status, message: [REVEAL_MESSAGES[status] ?? '', detail].filter(Boolean).join(' ') }
     markDirty()
     publish()
     if (lastReveal.message === '') return
@@ -885,6 +885,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       finally { mutedReveal -= 1 }
     }
     let status = await attempt()
+    let sourceFailure: string | undefined
     try {
       const url = referenceDetail(referenceId)?.snapshot.source.pageUrl
       if (active() && (status === 'session-unavailable' || status === 'page-mismatch' || status === 'unavailable') && url && sourceOpener !== undefined) {
@@ -895,11 +896,12 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
           ? await ready.reveal(detail.snapshot, partId, opening.signal)
           : await attempt(ready.pageId)
       }
-    } catch {
-      // A tab-open refusal is not a reveal acknowledgement.
+    } catch (error) {
+      status = 'unavailable'
+      sourceFailure = errorMessage(error)
     }
     if (!active()) return 'superseded'
-    showReveal(status)
+    showReveal(status, sourceFailure)
     return status
   }
 

@@ -4,7 +4,7 @@ export type ReferenceTextNode =
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'break' }
   | { readonly type: 'rule' }
-  | { readonly type: 'math'; readonly latex: string; readonly display: boolean }
+  | { readonly type: 'math'; readonly latex: string; readonly display: boolean; readonly mathml?: string }
   | { readonly type: 'heading'; readonly level: number; readonly children: readonly ReferenceTextNode[] }
   | { readonly type: 'pre'; readonly language?: string; readonly children: readonly ReferenceTextNode[] }
   | { readonly type: 'list-item'; readonly value?: number; readonly children: readonly ReferenceTextNode[] }
@@ -13,21 +13,21 @@ export type ReferenceTextNode =
   | { readonly type: 'list'; readonly ordered: boolean; readonly start: number; readonly children: readonly ReferenceTextNode[] }
 
 /** Accept only bounded semantic data, never page HTML or arbitrary attributes. */
-export function isReferenceText(value: unknown): value is readonly ReferenceTextNode[] {
+export function isReferenceText(value: unknown, maxLength = MAX_REFERENCE_TEXT): value is readonly ReferenceTextNode[] {
   let count = 0
-  let characters = 0
+  let mathmlCharacters = 0
   const visit = (nodes: unknown, depth: number): boolean => Array.isArray(nodes) && depth <= 64 && nodes.every(node => {
     if (++count > 4096 || typeof node !== 'object' || node === null) return false
     if (node.type === 'text') {
       if (typeof node.text !== 'string') return false
-      characters += node.text.length
-      return characters <= MAX_REFERENCE_TEXT
+      return node.text.length <= maxLength
     }
     if (node.type === 'break' || node.type === 'rule') return true
     if (node.type === 'math') {
       if (typeof node.latex !== 'string' || node.latex.length === 0 || typeof node.display !== 'boolean') return false
-      characters += node.latex.length
-      return characters <= MAX_REFERENCE_TEXT
+      if (node.mathml !== undefined && (typeof node.mathml !== 'string' || node.mathml.length > 64_000)) return false
+      mathmlCharacters += node.mathml?.length ?? 0
+      return node.latex.length <= maxLength && mathmlCharacters <= 64_000
     }
     if (!['block', 'paragraph', 'strong', 'emphasis', 'code', 'pre', 'list-item', 'blockquote', 'link', 'list', 'heading', 'definition-list', 'term', 'definition', 'sup', 'sub', 'ruby', 'ruby-text'].includes(node.type)) return false
     if (node.type === 'heading' && (!Number.isInteger(node.level) || node.level < 1 || node.level > 6)) return false
@@ -37,7 +37,28 @@ export function isReferenceText(value: unknown): value is readonly ReferenceText
     if (node.type === 'list' && (typeof node.ordered !== 'boolean' || !Number.isSafeInteger(node.start) || Math.abs(node.start) > 1_000_000)) return false
     return visit(node.children, depth + 1)
   })
-  return visit(value, 0)
+  return visit(value, 0) && renderReferenceText(value as readonly ReferenceTextNode[]).length <= maxLength
+}
+
+/** Optional preview structure must not consume the model-facing quote budget. */
+export function normalizeReferenceText(value: unknown, maxLength = MAX_REFERENCE_TEXT): readonly ReferenceTextNode[] | undefined {
+  let count = 0
+  let remainingMathML = 64_000
+  const visit = (nodes: unknown, depth: number): unknown => {
+    if (!Array.isArray(nodes) || depth > 64) return undefined
+    return nodes.map(node => {
+      if (++count > 4096 || typeof node !== 'object' || node === null) return undefined
+      if (node.type === 'math') {
+        const { mathml, ...source } = node
+        if (typeof mathml !== 'string' || mathml.length > remainingMathML) return source
+        remainingMathML -= mathml.length
+        return { ...source, mathml }
+      }
+      return 'children' in node ? { ...node, children: visit(node.children, depth + 1) } : node
+    })
+  }
+  const normalized = visit(value, 0)
+  return isReferenceText(normalized, maxLength) ? normalized : undefined
 }
 
 function escapeMarkdown(text: string): string {

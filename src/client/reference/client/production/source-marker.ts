@@ -27,18 +27,22 @@ export function sourceMarker(referenceId: string, index: number, title?: string)
   const displayTitle = (title ?? '').replace(/[\r\n\t]+/gu, ' ')
     .replace(/[\[\]()\\`<>*_]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 80).trim()
   const label = `${SOURCE_LINK_LABEL} ${index + 1}${displayTitle === '' ? '' : `：${displayTitle}`}`
-  return `[${label}](${encodeBrowserRefUri({ referenceId })})`
+  return `<dsh-browser-reference uri="${encodeBrowserRefUri({ referenceId })}" label="${encodeURIComponent(label)}"/>`
 }
 
 export function readSourceMarker(text: string, from: number) {
-  const marker = /\[([^\]\r\n]*)\]\((dsh-browser-ref:[^()\s]+)\)/gu
+  const marker = /<dsh-browser-reference uri="(dsh-browser-ref:[^"\s]+)" label="([^"\s]*)"\/>|\[([^\]\r\n]*)\]\((dsh-browser-ref:[^()\s]+)\)/gu
   marker.lastIndex = from
   for (let candidate = marker.exec(text); candidate !== null; candidate = marker.exec(text)) {
-    const uri = candidate[2]!
+    const uri = (candidate[1] ?? candidate[4])!
     const reference = parseBrowserRefUri(uri)
     if (reference === undefined) continue
+    let label = candidate[3] ?? uri
+    if (candidate[2] !== undefined) {
+      try { label = decodeURIComponent(candidate[2]) } catch { continue }
+    }
     return { start: candidate.index, end: candidate.index + candidate[0].length,
-      uri, label: candidate[1] ?? uri, ...reference }
+      uri, label, ...reference }
   }
   return undefined
 }

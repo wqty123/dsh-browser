@@ -2241,7 +2241,7 @@ test('bridge maintenance names its automatic restart and retains the diagnostic 
   const runtime = bridgeRuntime('installed')
   runtime.bridge.command = 'node "C:/Plugin/desktop-bridge/install.mjs" "C:/DSH Desktop"'
   const fetchMock = readinessFetch({ runtime })
-  const mounted = await mount({ fetch: fetchMock, render: false, locale: locale.api })
+  const mounted = await mount({ production: true, fetch: fetchMock, render: false, locale: locale.api })
   const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
   const zh = textOf(tree).join(' | ')
   assert.match(zh, /点击后将正常退出并重启 DSH/, 'the explicit action names the desktop restart')
@@ -2267,6 +2267,7 @@ for (const [state, label] of [
     const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
     const diagnostics = elements(tree).find(node => node.type === 'details' && node.props.key === 'diagnostics')
     assert.ok(controls, 'bridge management remains visible without opening diagnostics')
+    assert.equal(elements(controls).filter(node => node.type === 'button').length, 1)
     assert.ok(bridgeButton(controls, label), 'the action matches the actual bridge state')
     assert.equal(bridgeButton(diagnostics, label), undefined, 'the primary action is not buried in diagnostics')
     assert.equal(elements(controls).filter(node => node.type === 'button').length, 1)
@@ -2279,7 +2280,7 @@ for (const [state, label] of [
 test('bridge management requires a detected desktop installation', async () => {
   for (const runtime of [bridgeRuntime('absent', false), bridgeRuntime('missing', false), bridgeRuntime('absent', true)]) {
     const fetchMock = readinessFetch({ runtime })
-    const mounted = await mount({ fetch: fetchMock, render: false })
+    const mounted = await mount({ production: true, fetch: fetchMock, render: false })
     const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
     assert.equal(elements(tree).some(node => node.props.key === 'bridge-controls'), false)
     assert.equal(bridgeButton(tree, 'readiness.bridge.uninstall'), undefined)
@@ -2458,6 +2459,29 @@ test('an in-flight handoff ignores duplicate clicks and disables concurrent cont
   assert.deepEqual(clicks, ['official-menu'])
 })
 
+for (const { name, snapshot, documentLanguage, switchLanguage, expected } of [
+  { name: 'current English snapshot', snapshot: 'en', documentLanguage: 'zh-CN', expected: 'en' },
+  { name: 'current Chinese snapshot', snapshot: 'zh', documentLanguage: 'en-GB', expected: 'zh' },
+  { name: 'a language switch before the click', snapshot: 'zh', switchLanguage: 'en', documentLanguage: 'zh-CN', expected: 'en' },
+  { name: 'legacy English document language', documentLanguage: 'en-GB', expected: 'en' },
+  { name: 'legacy Chinese document language', documentLanguage: 'zh-CN', expected: 'zh' },
+  { name: 'an unavailable language source', documentLanguage: '', expected: 'zh' },
+]) {
+  test(`maintenance passes locale from ${name}`, async () => {
+    const fixture = maintenanceFixture(), locale = lazyLocale()
+    const document = maintenanceDocument()
+    document.documentElement.lang = documentLanguage
+    if (snapshot !== undefined) locale.setLocale(snapshot)
+    else delete locale.api.getSnapshot
+    const mounted = await mount({ production: true, fetch: fixture.fetchMock, render: false, document, locale: locale.api, timers: maintenanceTimers() })
+    const Component = readinessComponent(mounted.exports)
+    const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
+    if (switchLanguage) locale.setLocale(switchLanguage)
+    await elements(tree).find(node => node.props.key === 'reinstall').props.onClick()
+    const post = fixture.calls.find(call => call.init.method === 'POST')
+    assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall', locale: expected })
+  })
+}
 test('remote or unsupported surfaces cannot arm bridge maintenance', async () => {
   const fixture = maintenanceFixture(), timers = maintenanceTimers()
   const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: makeDocument(), timers })
@@ -2472,7 +2496,7 @@ test('remote or unsupported surfaces cannot arm bridge maintenance', async () =>
 
 for (const [name, response, reason] of [
   ['old host', { ok: false, status: 404, data: { ok: false } }, 'readiness.bridge.unsupported'],
-  ['missing protocol acknowledgement', { ok: true, status: 200, data: { ok: true, accepted: true, job: { id: 'unsafe', phase: 'armed', action: 'install' } } }, 'invalid bridge maintenance acknowledgement'],
+  ['missing protocol acknowledgement', { ok: true, status: 200, data: { ok: true, accepted: true, job: { id: 'unsafe', phase: 'armed', action: 'reinstall' } } }, 'invalid bridge maintenance acknowledgement'],
   ['HTTP rejection', { ok: false, status: 409, data: { ok: false, error: 'bridge-maintenance-in-progress' } }, 'bridge-maintenance-in-progress'],
   ['installer refusal', { ok: true, status: 200, data: { ok: false, output: 'EBUSY: archive locked' } }, 'EBUSY: archive locked'],
   ['connection failure', null, 'connection interrupted'],
@@ -2496,7 +2520,7 @@ for (const [name, response, reason] of [
 }
 
 test('a remounted panel resumes an active job and keeps polling through the restart disconnect', async () => {
-  const job = { id: 'resumed', action: 'install', phase: 'installing' }
+  const job = { id: 'resumed', action: 'reinstall', phase: 'installing' }
   const fixture = maintenanceFixture({ initialJob: job }), timers = maintenanceTimers(), clicks = []
   const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
   const Component = readinessComponent(mounted.exports)
@@ -2520,7 +2544,7 @@ test('a remounted panel resumes an active job and keeps polling through the rest
 })
 
 test('a fresh panel recovers a completed job without rearming maintenance', async () => {
-  const fixture = maintenanceFixture({ state: 'installed', initialJob: { id: 'completed-before-mount', action: 'install', phase: 'completed', ok: true, restarted: true } })
+  const fixture = maintenanceFixture({ state: 'installed', initialJob: { id: 'completed-before-mount', action: 'reinstall', phase: 'completed', ok: true, restarted: true } })
   const timers = maintenanceTimers(), clicks = []
   const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers, production: true })
   const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
@@ -2536,8 +2560,8 @@ test('a fresh panel recovers a completed job without rearming maintenance', asyn
 for (const phase of ['failed', 'cancelled']) {
   test(`a ${phase} job exposes details only in diagnostics and enables retry`, async () => {
     const detail = 'worker diagnostic '.repeat(150)
-    const fixture = maintenanceFixture({ initialJob: { id: 'finished', action: 'install', phase, error: detail, output: 'worker output' } }), timers = maintenanceTimers()
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(), timers })
+    const fixture = maintenanceFixture({ initialJob: { id: 'finished', action: 'reinstall', phase, error: detail, output: 'worker output' } }), timers = maintenanceTimers()
+    const mounted = await mount({ production: true, fetch: fixture.fetchMock, render: false, document: maintenanceDocument(), timers })
     const Component = readinessComponent(mounted.exports)
     const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
     const alert = elements(tree).find(node => node.props.key === 'bridge-job-error')
@@ -2555,8 +2579,8 @@ for (const { name, error, output, expected } of [
   { name: 'distinct worker output and recovery failure', output: 'bridge files were restored', error: 'recovery could not restart the Desktop', expected: 'recovery could not restart the Desktop\nbridge files were restored' },
 ]) {
   test(`maintenance diagnostics retain ${name} without duplicate output`, async () => {
-    const fixture = maintenanceFixture({ initialJob: { id: 'diagnostic', action: 'install', phase: 'failed', error, output } })
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(), timers: maintenanceTimers() })
+    const fixture = maintenanceFixture({ initialJob: { id: 'diagnostic', action: 'reinstall', phase: 'failed', error, output } })
+    const mounted = await mount({ production: true, fetch: fixture.fetchMock, render: false, document: maintenanceDocument(), timers: maintenanceTimers() })
     const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
     const detail = elements(tree).find(node => node.props.key === 'bridge-job-detail')
     assert.deepEqual(textOf(detail), [expected])

@@ -30,7 +30,9 @@ export function registerIframeReference(pageId: string, owner: string, commands:
       const result = await command('highlight', { ...spec, ...found.range }, signal)
       return result.ok === true ? 'revealed' : 'missing'
     }
-    const result = await command('element', { kind: part.type, anchor: part.anchor }, signal)
+    const result = await command('element', { kind: part.type, anchor: part.anchor,
+      ...part.type === 'table' ? { cells: part.table.cells.filter(cell => cell.includedAs === 'selection').map(cell => ({ row: cell.row, column: cell.column })) } : {},
+    }, signal)
     return result.ok === true && result.status === 'found' ? 'revealed' : result.status === 'ambiguous' ? 'ambiguous' : 'missing'
   } })
   return () => { sources.delete(pageId) }

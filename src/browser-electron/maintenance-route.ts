@@ -33,7 +33,7 @@ export function createAutomaticMaintenanceHandler(deps: AutomaticMaintenanceRout
     let action: 'reinstall'
     let locale: 'zh' | 'en' | undefined
     try {
-      const value = await readJsonBody<{ action?: unknown; locale?: unknown; mode?: unknown; hostStatus?: { state?: unknown; version?: unknown } }>(request, 4096)
+      const value = await readJsonBody<{ action?: unknown; locale?: unknown; mode?: unknown; hostStatus?: unknown }>(request, 4096)
       if (value?.action !== 'reinstall') throw new Error('action must be reinstall')
       if (value.mode !== undefined || value.hostStatus !== undefined) throw new Error('mode and hostStatus are no longer supported')
       if (value.locale !== undefined && value.locale !== 'zh' && value.locale !== 'en') throw new Error('locale must be zh or en')

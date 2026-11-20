@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
+import { renderToString as renderKatex } from 'katex'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { cleanup, fireEvent, render } from '@testing-library/react'
 import { captureScript, highlightScript, pageTextScript, revealElementScript, type RawCaptureResult } from '../../../../browser-reference/page-script.ts'
@@ -116,6 +117,7 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     const formula = document.body.firstElementChild!
     const { snapshot, group, parts } = await submit(raw)
     expect(parts).toEqual([{ type: 'text', text: display ? `$$\n${latex}\n$$\n` : `$${latex}$\n` }])
+    const mathSelector = raw.events![0]!.content!.some(node => node.type === 'math' && node.mathml) ? 'math' : '.katex'
     const startBefore = vi.spyOn(Range.prototype, 'setStartBefore')
     const endAfter = vi.spyOn(Range.prototype, 'setEndAfter')
     expect(execute(highlightScript(), { start: 0, end: latex.length })).toMatchObject({ ok: true })
@@ -125,11 +127,51 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     const composer = render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels() }))
     expect(document.querySelector('[data-reference-math]')).toBeNull()
     fireEvent.mouseEnter(composer.getByRole('button'))
-    expect(document.querySelector('[data-reference-math]')?.textContent).toBe(latex)
+    expect(document.querySelector('[data-reference-math]')?.querySelector(mathSelector)).not.toBeNull()
     composer.unmount()
     render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
     expect(document.querySelector('[data-reference-math]')?.getAttribute('data-reference-math')).toBe(display ? 'display' : 'inline')
-    expect(document.querySelector('[data-reference-math]')?.textContent).toBe(latex)
+    expect(document.querySelector('[data-reference-math]')?.querySelector(mathSelector)).not.toBeNull()
+  })
+
+  it.each([
+    ['KaTeX annotation', renderKatex('\\sqrt[3]{x}', { throwOnError: false, trust: false }), false],
+    ['MathJax assistive MathML', '<mjx-container><mjx-math>x3</mjx-math><mjx-assistive-mml><math><mroot>\n<mi>x</mi>\n<mn>3</mn>\n</mroot></math></mjx-assistive-mml></mjx-container>', true],
+    ['raw MathML', '<math><mroot><mi>x</mi><mn>3</mn></mroot></math>', true],
+    ['later nonempty annotation', '<math><semantics><mroot><mi>x</mi><mn>3</mn></mroot><annotation encoding="application/x-tex"> </annotation><annotation encoding="Application/X-TeX; charset=utf-8">\\sqrt[3]{x}</annotation></semantics></math>', false],
+    ['empty annotation fallback', '<math><semantics><mroot><mi>x</mi><mn>3</mn></mroot><annotation encoding="application/x-tex"> </annotation></semantics></math>', true],
+  ] as const)('preserves cube-root structure and source through %s capture, storage, model and preview', async (_name, html, native) => {
+    const raw = select(html)
+    const math = raw.events![0]!.content![0]!
+    expect(math).toMatchObject({ type: 'math', latex: '\\sqrt[3]{x}', display: false })
+    if (math.type !== 'math') throw new Error('missing captured formula')
+    expect(math.mathml !== undefined).toBe(native)
+    if (native) expect(math.mathml).toContain('<mroot>')
+    const { snapshot, group, parts } = await submit(raw)
+    expect(parts).toEqual([{ type: 'text', text: '$\\sqrt[3]{x}$\n' }])
+    expect(snapshot.parts[0]).toMatchObject({ type: 'text', content: [math] })
+    const preview = render(createElement(ReferenceText, { content: group.parts[0]!.content! }))
+    expect(preview.container.querySelector('math mroot mi')?.textContent).toBe('x')
+    expect(preview.container.querySelector('math mroot mn')?.textContent).toBe('3')
+    expect(Boolean(preview.container.querySelector('.katex'))).toBe(!native)
+    expect(preview.container.querySelector('code')).toBeNull()
+    if (!native) expect(preview.container.querySelector('annotation[encoding="application/x-tex"]')?.textContent).toBe('\\sqrt[3]{x}')
+  })
+
+  it.each([
+    ['msqrt', '<mi>x</mi>', '\\sqrt{x}'],
+    ['mfrac', '<mi>x</mi>\n<mi>y</mi>', '\\frac{x}{y}'],
+    ['msup', '<mi>x</mi>\n<mn>2</mn>', 'x^{2}'],
+    ['msub', '<mi>x</mi>\n<mi>i</mi>', 'x_{i}'],
+    ['munderover', '<mi>x</mi>\n<mi>i</mi>\n<mi>n</mi>', 'x_{i}^{n}'],
+  ])('retains native %s layout rather than concatenating its children', async (tag, children, latex) => {
+    const raw = select(`<math><${tag}>\n${children}\n</${tag}></math>`)
+    expect(raw.events![0]!.content![0]).toMatchObject({ type: 'math', latex, mathml: expect.stringContaining(`<${tag}>`) })
+    const { group, parts } = await submit(raw)
+    expect(parts).toEqual([{ type: 'text', text: `$${latex}$\n` }])
+    const preview = render(createElement(ReferenceText, { content: group.parts[0]!.content! }))
+    expect(preview.container.querySelector(`math ${tag}`)?.children.length).toBe(tag === 'msqrt' ? 1 : tag === 'munderover' ? 3 : 2)
+    expect(preview.container.querySelector('.katex, code')).toBeNull()
   })
 
   it('expands a partial rendered-formula selection atomically, without capturing adjacent text', async () => {
@@ -198,7 +240,8 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
     render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
     expect(document.querySelector('[data-part-kind="table"] th[colspan="2"]')).not.toBeNull()
-    expect(document.querySelector('[data-part-kind="table"] td[rowspan="2"] [data-reference-math]')?.textContent).toBe('x^2')
+    expect(document.querySelector('[data-part-kind="table"] td[rowspan="2"] [data-reference-math] .katex')).not.toBeNull()
+    expect(document.querySelector('[data-part-kind="table"] td[rowspan="2"] annotation')?.textContent).toBe('x^2')
   })
 
   it('keeps image alt, caption, source identity and caption model text', async () => {
@@ -377,6 +420,23 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     expect(group.parts[1]!.table!.cells[0]).toMatchObject({ role: 'header', columnSpan: 2 })
   })
 
+  it('keeps the real Runoob table readable beside trailing navigation text in a mixed preview', async () => {
+    const markup = readFileSync(join(process.cwd(), 'tests/fixtures/runoob-html-tables.html'), 'utf8')
+    const upstream = new DOMParser().parseFromString(markup, 'text/html')
+    const table = [...upstream.querySelectorAll('table')].find(table => table.querySelector('th'))!
+    const { snapshot, group } = await submit(select(table.outerHTML + '<p>HTML 图像 / HTML 列表</p>'))
+    expect(snapshot.parts.map(part => part.type)).toEqual(['table', 'text'])
+    const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'mixed', browserSessionId: 'browser:s', group,
+      addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
+    render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
+    const parts = document.querySelectorAll('[role="dialog"] [data-part-kind]')
+    expect([...parts].map(node => node.getAttribute('data-part-kind'))).toEqual(['table', 'text'])
+    expect(parts[0]!.querySelectorAll('tr')).toHaveLength(table.rows.length)
+    expect(parts[0]!.textContent).toContain('<table>定义表格')
+    expect(parts[0]!.textContent).toContain('<tfoot>定义表格的页脚')
+    expect(parts[1]!.textContent).toBe('HTML 图像 / HTML 列表')
+  })
+
   it('clips selected inline content and keeps the original ordered-list numbering', async () => {
     select('<ol start="7"><li>Unselected</li><li>prefix <strong>selected</strong> suffix</li></ol>')
     const range = document.createRange()
@@ -459,6 +519,43 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     expect(outcome.reference).toBeUndefined()
     expect(outcome.failures).toContainEqual(expect.objectContaining({ reason: 'text-too-long' }))
     expect(isOrderedReferenceGroup({ referenceId: 'r', parts: [{ kind: 'text', referenceId: 'r', partId: 't', text: 'x'.repeat(MAX_REFERENCE_TEXT + 1) }] })).toBe(false)
+  })
+
+  it.each([MAX_REFERENCE_TEXT - 1, MAX_REFERENCE_TEXT + 1])('measures %i model-facing characters independently of formula MathML', async length => {
+    const latex = '\\sqrt[3]{x}'
+    const plain = 'x'.repeat(length - latex.length - 2)
+    const raw = select(`<p>${plain}<math><mroot><mi>x</mi><mn>3</mn></mroot></math></p>`)
+    const { outcome } = await stored(raw)
+    if (length > MAX_REFERENCE_TEXT) {
+      expect(outcome.reference).toBeUndefined()
+      expect(outcome.failures).toContainEqual(expect.objectContaining({ reason: 'text-too-long' }))
+      return
+    }
+    expect(outcome.failures).toEqual([])
+    const part = outcome.reference!.parts[0]!
+    expect(part.type).toBe('text')
+    if (part.type !== 'text') throw new Error('missing text part')
+    expect(renderReferenceText(part.content!)).toBe(`${plain}$${latex}$`)
+    expect(renderReferenceText(part.content!)).toHaveLength(length)
+    expect(isOrderedReferenceGroup(toOrderedGroup(outcome.reference!))).toBe(true)
+    const markup = renderToStaticMarkup(createElement(ReferenceText, { content: part.content! }))
+    expect(markup).toContain('<mroot>')
+  })
+
+  it('drops excessive auxiliary MathML but keeps source TeX and model text', async () => {
+    const raw = select('<p><math><mroot><mi>x</mi><mn>3</mn></mroot></math></p>')
+    const event = raw.events![0]!
+    for (const mathml of ['<math>' + 'x'.repeat(64_000) + '</math>', 123]) {
+      const { snapshot, parts } = await submit({ ...raw, events: [{ ...event,
+        content: [{ type: 'math', latex: '\\sqrt[3]{x}', display: false, mathml } as never],
+      }] })
+      expect(snapshot.parts[0]).toMatchObject({ content: [{ type: 'math', latex: '\\sqrt[3]{x}', display: false }] })
+      const part = snapshot.parts[0]!
+      if (part.type !== 'text') throw new Error('missing text part')
+      expect(part.content![0]).not.toHaveProperty('mathml')
+      expect(parts).toEqual([{ type: 'text', text: '$\\sqrt[3]{x}$\n' }])
+      expect(renderToStaticMarkup(createElement(ReferenceText, { content: part.content! }))).toContain('class="katex"')
+    }
   })
 
   it('excludes hidden and executable content and refuses malformed semantic payloads', async () => {
