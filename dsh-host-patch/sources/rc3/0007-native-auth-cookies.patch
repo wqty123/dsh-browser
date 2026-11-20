@@ -1,0 +1,73 @@
+From 7fa9ced01b92c9bd3b366a0d6b87f7e8f0dd7866 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 13:17:00 +0000
+Subject: [PATCH] fix(desktop): restore auth in the native lease partition
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ apps/desktop/src/native-views.ts        |  6 ++++--
+ apps/desktop/tests/native-views.spec.ts | 20 ++++++++++++++++++++
+ 2 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/apps/desktop/src/native-views.ts b/apps/desktop/src/native-views.ts
+index dd730adb84..9532d898d0 100644
+--- a/apps/desktop/src/native-views.ts
++++ b/apps/desktop/src/native-views.ts
+@@ -58,7 +58,7 @@ const methods = new Set([
+   'Page.navigate', 'Page.reload', 'Page.stopLoading', 'Page.getFrameTree', 'Page.createIsolatedWorld',
+   'Page.getNavigationHistory', 'Page.navigateToHistoryEntry', 'Page.getLayoutMetrics', 'Page.captureScreenshot',
+   'Runtime.evaluate', 'Runtime.terminateExecution', 'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent',
+-  'Input.insertText', 'Network.getCookies',
++  'Input.insertText', 'Network.getCookies', 'Storage.setCookies',
+ ])
+ 
+ /** Owns slots, leases, native objects and document generations for one product window. */
+@@ -256,11 +256,13 @@ export class DesktopNativeViews {
+     this.slot(renderer, native.slot)
+     if (typeof method !== 'string' || !methods.has(method)) return refuse('BROWSER_COMMAND_DENIED')
+     const input = params === undefined ? {} : record(params)
++    if (method === 'Storage.setCookies' && (!Array.isArray(input.cookies)
++      || Object.keys(input).some(key => key !== 'cookies'))) return refuse('BROWSER_COMMAND_DENIED')
+     if (method === 'Page.createIsolatedWorld' && input.grantUniveralAccess === true) return refuse('BROWSER_COMMAND_DENIED')
+     if (method === 'Page.navigate' && (typeof input.url !== 'string' || !this.policy.allowedNavigation(input.url))) return refuse('BROWSER_URL_DENIED')
+     if (native.state.stage !== 'document' && !['Page.navigate', 'Page.stopLoading', 'Page.getFrameTree'].includes(method)) return refuse('BROWSER_DOCUMENT_UNACKNOWLEDGED')
+     const expectedGeneration = ['Page.navigate', 'Page.stopLoading', 'Page.getFrameTree'].includes(method) ? undefined : native.generation
+-    try { return await this.send(native, method, input, expectedGeneration) }
++    try { return await this.send(native, method === 'Storage.setCookies' ? 'Network.setCookies' : method, input, expectedGeneration) }
+     catch (error) {
+       if (error instanceof DesktopNativeViewError && error.code === 'BROWSER_DOCUMENT_TIMEOUT') this.fail(id as DesktopNativeLease, native, 'BROWSER_DOCUMENT_TIMEOUT')
+       throw error
+diff --git a/apps/desktop/tests/native-views.spec.ts b/apps/desktop/tests/native-views.spec.ts
+index d79713bac5..4b8f1dbc95 100644
+--- a/apps/desktop/tests/native-views.spec.ts
++++ b/apps/desktop/tests/native-views.spec.ts
+@@ -147,6 +147,26 @@ it('never dispatches denied or unacknowledged document commands', async () => {
+   expect(guest.debugger.sendCommand).not.toHaveBeenCalled()
+ })
+ 
++it('restores cookies only through the lease target network session and refuses context selection before dispatch', async () => {
++  const f = fixture(), { lease, guest } = await f.attached()
++  const other = await f.admit('owner', 'other'), otherLease = await f.acquire('other')
++  await f.ok({ op: 'attach', lease: otherLease, slot: other.slot })
++  const otherGuest = electron.guests.at(-1)!
++  guest.emit('did-navigate')
++  await vi.waitFor(() => expect(f.service.snapshot()[0]?.state.stage).toBe('document'))
++  guest.debugger.sendCommand.mockClear()
++  const cookies = [{ name: 'login', value: 'restored', domain: 'example.test', path: '/', secure: true, httpOnly: true }]
++  await f.ok({ op: 'command', lease, method: 'Storage.setCookies', params: { cookies } })
++  await f.ok({ op: 'command', lease, method: 'Storage.setCookies', params: { cookies: [] } })
++  expect(guest.debugger.sendCommand.mock.calls).toEqual([['Network.setCookies', { cookies }], ['Network.setCookies', { cookies: [] }]])
++  expect(otherGuest.debugger.sendCommand).not.toHaveBeenCalled()
++  for (const params of [{ cookies, browserContextId: 'foreign' }, {}, { cookies: 'invalid' }]) {
++    expect(await f.request({ op: 'command', lease, method: 'Storage.setCookies', params })).toMatchObject({ code: 'BROWSER_COMMAND_DENIED' })
++  }
++  await expect(f.service.scopedCommand(scope('foreign'), lease as never, 'Storage.setCookies', { cookies })).rejects.toMatchObject({ code: 'BROWSER_OWNER_UNKNOWN' })
++  expect(guest.debugger.sendCommand).toHaveBeenCalledTimes(2)
++})
++
+ it('acknowledges committed frame/loader generations independently of animation frames', async () => {
+   const f = fixture(), { lease, guest } = await f.attached()
+   const first = f.service.snapshot()[0]?.state.generation
+-- 
+2.56.0
+

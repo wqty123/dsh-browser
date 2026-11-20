@@ -22,6 +22,12 @@ Source commits: rc.3 `062adf7365` / `13705d30f0`; rc.5 `da20bebd9d` / `52511a600
 
 `0006-native-same-document.patch` adds main-frame fragment/History API acknowledgements while preserving the committed generation/frame/loader. Source commits: rc.3 `cbc141dd42`, rc.5 `6f3d4987f9`, main `550c755e81`. The plugin refreshes the address/history and restarts reference polling on those document notifications.
 
+`0007-native-auth-cookies.patch` permits the existing `restoreAuth` request (`Storage.setCookies`) but dispatches `Network.setCookies` on the native guest's debugger session. Browser-context selectors and malformed envelopes are denied before dispatch; cookies cannot target another workspace partition. Empty batches remain valid. Failed native tabs also preserve their mounted presentation identity so reload or a fresh address can reacquire a lease without remounting.
+
+Cookie-source commits: rc.3 `7fa9ced01b`, rc.5 `1b89543db9`, main `eeea47412d`. The two follow-up patches reproduce each release's complete committed tree from its preceding client-error commit.
+
+Review follow-up verification: the native service suite passes 16 tests on each source branch; the full plugin suite passes 1,277 of 1,286 tests with 9 skipped. The real-Electron integration also verifies failed-tab reload and fresh navigation without remounting, fragment/History API address refresh with an unchanged document generation, and cookie restoration isolated from a second workspace partition. Runtime comparisons pass all six targets with Desktop main at 876,968 bytes.
+
 Revision-1 and revision-2 upgrades validate the live prior revision against the original backup before computing any new bytes. All selected targets validate before staging. Mismatches/unrelated edits refuse the entire plan; atomic rename, rollback and exact original restore remain unchanged. Revision-2 regression tests include clean upgrade/restore and an unrelated preload edit with no writes.
 
 ## Checks

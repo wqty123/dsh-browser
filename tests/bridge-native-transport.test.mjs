@@ -69,6 +69,9 @@ test('native TCP bridge requires committed acknowledgement, retains holds and di
   const answer = await wire.call({ op: 'cdp', handle, method: 'Runtime.evaluate', params: { expression: 'document.title' } })
   assert.equal(answer.result.result.value, 'native document')
   assert.deepEqual(calls.at(-1), [scope, lease, 'Runtime.evaluate', { expression: 'document.title' }])
+  const cookies = [{ name: 'login', value: 'restored', domain: 'native.example', path: '/' }]
+  assert.equal((await wire.call({ op: 'cdp', handle, method: 'Storage.setCookies', params: { cookies } })).ok, true)
+  assert.deepEqual(calls.at(-1), [scope, lease, 'Storage.setCookies', { cookies }])
   const foreign = sessionWireId({ owner: 'session-foreign', session: 'browser' })
   assert.deepEqual((await wire.call({ op: 'list', handle: foreign })).sidebar, [])
   assert.equal((await wire.call({ op: 'list', handle: session })).sidebar.length, 1)
