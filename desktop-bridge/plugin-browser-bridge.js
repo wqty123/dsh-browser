@@ -255,11 +255,12 @@ function describe(contents) {
 const CDP_COMMAND_TIMEOUT_MS = 15_000
 const timedOutGuests = new WeakSet()
 
-async function sendCdp(id, method, params) {
+async function sendCdp(id, method, params, checkCurrent) {
   const guest = guestById(id)
   if (guest === undefined || guest.isDestroyed()) throw new Error(`guest ${id} is not available`)
   const previous = queues.get(id) ?? Promise.resolve()
   const guarded = previous.then(async () => {
+    checkCurrent?.()
     const current = guestById(id)
     if (current !== guest || current.isDestroyed()) throw new Error(`guest ${id} is not available`)
     if (timedOutGuests.has(current)) throw new Error(`guest ${id} has a timed-out command; close and reopen its page before sending more commands`)
@@ -573,36 +574,44 @@ async function panelGuestIds(shell, owner) {
 }
 
 /** Handle one JSON request line; every answer is a JSON line too. */
-async function handle(request) {
+async function handle(request, signal) {
+  const checkCurrent = () => signal?.throwIfAborted()
+  checkCurrent()
   const shell = /^session-/.test(request?.owner) && ['ensureSidebar', 'cdp', 'download'].includes(request?.op)
     ? webContents.getAllWebContents().find(contents => contents.getType() === 'window') : undefined
   const token = randomBytes(16).toString('hex')
-  let held = false
+  let releasePromise
+  const release = () => releasePromise ??= (async () => {
+    try {
+      await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.releaseRendering?.(${JSON.stringify(token)})`, true)
+    } catch (error) { console.error('[dsh-browser-bridge] rendering hold release failed:', error) }
+  })()
   try {
     if (shell !== undefined) {
-      held = await shell.executeJavaScript(`(async () => {
+      signal?.addEventListener('abort', release, { once: true })
+      await shell.executeJavaScript(`(async () => {
         const api = globalThis.__dshBuiltinBrowser;
         if (typeof api?.holdRendering !== 'function') return false;
-        const held = api.holdRendering(${JSON.stringify(request.owner)}, ${JSON.stringify(token)});
-        if (held) await new Promise(resolve => requestAnimationFrame(() => resolve()));
-        return held;
-      })()`, true) === true
+        return api.holdRendering(${JSON.stringify(request.owner)}, ${JSON.stringify(token)});
+      })()`, true)
     }
-    return await handleRequest(request)
+    checkCurrent()
+    return await handleRequest(request, checkCurrent)
   } finally {
-    if (held) {
-      await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.releaseRendering?.(${JSON.stringify(token)})`, true)
-        .catch(error => console.error('[dsh-browser-bridge] rendering hold release failed:', error))
+    if (shell !== undefined) {
+      signal?.removeEventListener('abort', release)
+      await release()
     }
   }
 }
 
-async function handleRequest(request) {
-  if (request?.op !== 'ensureSidebar' || !request.url) return dispatch(request)
+async function handleRequest(request, checkCancelled) {
+  if (request?.op !== 'ensureSidebar' || !request.url) return dispatch(request, checkCancelled)
   const key = JSON.stringify([request.owner, request.viewId ?? null])
   const token = Symbol()
   pendingSidebarOpens.set(key, token)
   const checkCurrent = () => {
+    checkCancelled?.()
     if (pendingSidebarOpens.get(key) !== token) {
       throw codedError('panel-navigation-superseded', 'a newer navigation was requested for this sidebar view')
     }
@@ -615,6 +624,7 @@ async function handleRequest(request) {
 }
 
 async function dispatch(request, checkCurrent) {
+  checkCurrent?.()
   const op = String(request?.op ?? '')
   // Who is asking. Declared once, for every op, because the first attempt at this put `owner` in
   // the allocation path only and the reuse path — which every later call takes — stayed blind,
@@ -685,13 +695,14 @@ async function dispatch(request, checkCurrent) {
     const id = Number(request.id)
     if (!Number.isSafeInteger(id) || id <= 0) throw new Error('cdp requires a positive numeric guest id')
     await assertGuestOwner(id, owner)
-    const result = await sendCdp(id, String(request.method ?? ''), request.params)
+    const result = await sendCdp(id, String(request.method ?? ''), request.params, checkCurrent)
     return { ok: true, result, bridgeRequestId: request.bridgeRequestId }
   }
   if (op === 'download') {
     const id = Number(request.id)
     if (!Number.isSafeInteger(id) || id <= 0) throw new Error('download requires a positive numeric guest id')
     await assertGuestOwner(id, owner)
+    checkCurrent?.()
     const guest = guestById(id)
     if (guest === undefined || guest.isDestroyed() || guest.getType() !== 'webview') throw new Error('download guest is not available')
     await downloadGuest(guest, request.url, request.savePath)
@@ -767,7 +778,7 @@ async function dispatch(request, checkCurrent) {
     if (first.guestId !== null) {
       claims.set(first.guestId, owner)
       if (!request.attachOnly && !guestShows(first.guestId, url)) {
-        await sendCdp(first.guestId, 'Page.navigate', { url }).catch(() => undefined)
+        await sendCdp(first.guestId, 'Page.navigate', { url }, checkCurrent).catch(() => undefined)
         checkCurrent?.()
       }
       return { ok: true, created: false, id: first.guestId, via: 'panel', owner }
@@ -811,7 +822,7 @@ async function dispatch(request, checkCurrent) {
       }
       claims.set(polled.guestId, owner)
       if (!request.attachOnly && !guestShows(polled.guestId, url)) {
-        await sendCdp(polled.guestId, 'Page.navigate', { url }).catch(() => undefined)
+        await sendCdp(polled.guestId, 'Page.navigate', { url }, checkCurrent).catch(() => undefined)
         checkCurrent?.()
       }
       return { ok: true, created: true, id: polled.guestId, via: 'panel', owner }
@@ -1271,12 +1282,16 @@ export function start(api) {
   } catch { /* no webContents at all; nothing to detach */ }
   const token = randomBytes(24).toString('hex')
   const server = createServer(socket => {
+    const controller = new AbortController()
     let buffer = ''
     let authed = false
     socket.setEncoding('utf8')
     const authenticationDeadline = setTimeout(() => socket.destroy(), 5_000)
     authenticationDeadline.unref?.()
-    socket.on('close', () => clearTimeout(authenticationDeadline))
+    socket.on('close', () => {
+      clearTimeout(authenticationDeadline)
+      controller.abort(codedError('bridge-request-abandoned', 'the bridge client disconnected'))
+    })
     socket.on('data', chunk => {
       if (Buffer.byteLength(buffer, 'utf8') + Buffer.byteLength(chunk, 'utf8') > 32 * 1024 * 1024) {
         socket.destroy()
@@ -1313,7 +1328,7 @@ export function start(api) {
           // (A client may also put the token on its first real request; both work.)
           if (typeof request.op !== 'string' || request.op === '') continue
         }
-        void handle(request)
+        void handle(request, controller.signal)
           // The request id is stamped HERE, at the single point where every answer is written,
           // rather than on the handful of returns that happened to remember it.
           //

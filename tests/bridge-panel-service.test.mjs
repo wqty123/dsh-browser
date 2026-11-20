@@ -62,11 +62,11 @@ src = src.replace(/^main\(\)$/m, '')
 // The signature must match the source EXACTLY, or the patch silently does nothing and every
 // scenario reads as "the code was correct". The previous harness lost the id here too; this one
 // keeps it, because the panel path is judged by WHICH webContents it evaluates in.
-const SIGNATURE = 'async function sendCdp(id, method, params) {'
+const SIGNATURE = 'async function sendCdp(id, method, params, checkCurrent) {'
 assert.ok(src.includes(SIGNATURE), 'sendCdp signature changed; this harness would silently no-op')
 src = src.replace(
   SIGNATURE,
-  'async function sendCdp(id, method, params) { return globalThis.__answerCdp__(id, method, params) }\n'
+  'async function sendCdp(id, method, params, checkCurrent) { checkCurrent?.(); return globalThis.__answerCdp__(id, method, params) }\n'
   + 'async function __unusedRealSendCdp(id, method, params) {',
 )
 src += '\nglobalThis.__bridge_handle__ = handle;\nglobalThis.__bridge_claims__ = claims;\n'

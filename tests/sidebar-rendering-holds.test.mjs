@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { EventEmitter, once } from 'node:events'
+import { connect } from 'node:net'
 import vm from 'node:vm'
 import { loadSettingsPanel } from '../src/client/settings/panel.ts'
 
@@ -113,6 +114,101 @@ test('held DOM backgrounds are accepted, while the unheld panel-not-displayed fa
   assert.equal(state.held.size, 0)
   state.api.holdRendering = () => false
   await assert.rejects(bridge.handle({ op: 'ensureSidebar', owner: 'session-agent' }), { code: 'panel-not-displayed' })
+})
+
+test('a minimized window dispatches held commands without animation frames', async t => {
+  const state = mount(t)
+  globalThis.requestAnimationFrame = () => assert.fail('minimized windows do not produce animation frames')
+  state.api.openPanel = () => ({ ok: true, panel: true, displayed: false, guestId: 2, url: '' })
+  contents.push({ id: 2, getType: () => 'webview', isDestroyed: () => false })
+  assert.equal((await bridge.handle({ op: 'ensureSidebar', owner: 'session-agent' })).id, 2)
+  assert.equal(state.held.size, 0)
+})
+
+test('abandoning a request releases a hold even before its renderer reply, and never dispatches it later', async t => {
+  const state = mount(t)
+  const shell = contents[0]
+  const execute = shell.executeJavaScript
+  let resume
+  shell.executeJavaScript = async expression => {
+    const result = await execute(expression)
+    if (expression.includes('api.holdRendering(')) await new Promise(resolve => { resume = resolve })
+    return result
+  }
+  state.api.openPanel = () => assert.fail('an abandoned request must not reach the panel')
+  const controller = new AbortController()
+  const pending = bridge.handle({ op: 'ensureSidebar', owner: 'session-agent' }, controller.signal)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(state.held.size, 1)
+  controller.abort(new Error('client timed out'))
+  assert.equal(state.held.size, 0)
+  resume()
+  await assert.rejects(pending, /client timed out/)
+  assert.equal(state.released(), 1)
+})
+
+test('a disconnected request does not run after an earlier command drains the guest queue', async t => {
+  const state = mount(t)
+  let finishFirst
+  const commands = []
+  contents.push({ id: 2, getType: () => 'webview', isDestroyed: () => false, debugger: {
+    isAttached: () => true,
+    sendCommand: async method => {
+      commands.push(method)
+      if (method === 'Runtime.evaluate') await new Promise(resolve => { finishFirst = resolve })
+      return {}
+    },
+  } })
+  state.api.panelGuests = () => [2]
+  const request = { op: 'cdp', owner: 'session-agent', id: 2 }
+  const first = bridge.handle({ ...request, method: 'Runtime.evaluate' })
+  await new Promise(resolve => setImmediate(resolve))
+  const controller = new AbortController()
+  const queued = bridge.handle({ ...request, method: 'Input.insertText', params: { text: 'late' } }, controller.signal)
+  const rejected = assert.rejects(queued, /client timed out/)
+  await new Promise(resolve => setImmediate(resolve))
+  controller.abort(new Error('client timed out'))
+  assert.equal(state.held.size, 1)
+  finishFirst()
+  await first
+  await rejected
+  assert.deepEqual(commands, ['Runtime.evaluate'])
+  assert.equal(state.held.size, 0)
+})
+
+test('closing the transport while a held renderer reply is stalled cancels the request', async t => {
+  const state = mount(t)
+  const shell = contents[0]
+  const execute = shell.executeJavaScript
+  let resume
+  let acquired, released
+  const acquisition = new Promise(resolve => { acquired = resolve })
+  const release = new Promise(resolve => { released = resolve })
+  shell.executeJavaScript = async expression => {
+    const result = await execute(expression)
+    if (expression.includes('api.holdRendering(')) {
+      acquired()
+      await new Promise(resolve => { resume = resolve })
+    }
+    if (expression.includes('releaseRendering?.')) released()
+    return result
+  }
+  state.api.openPanel = () => assert.fail('disconnect must cancel the panel operation')
+  const server = bridge.start({ app: application, dshHome: directory })
+  t.after(() => bridge.stop())
+  await once(server, 'listening')
+  const { port, token } = JSON.parse(readFileSync(join(directory, 'dsh-builtin-browser-bridge.json'), 'utf8'))
+  const socket = connect(port, '127.0.0.1')
+  t.after(() => socket.destroy())
+  socket.write(JSON.stringify({ op: 'ensureSidebar', owner: 'session-agent', token }) + '\n')
+  await acquisition
+  assert.equal(state.held.size, 1)
+  socket.destroy()
+  await release
+  assert.equal(state.held.size, 0)
+  resume()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(state.released(), 1)
 })
 
 test('extension and legacy imports share one listener and honor the supplied DSH home', async () => {
