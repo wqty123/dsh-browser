@@ -8,6 +8,12 @@ export interface StoredCookie {
   readonly expiresAt?: number
 }
 
+function validCookieValue(value: string): boolean {
+  const octets = value.length >= 2 && value.startsWith('"') && value.endsWith('"')
+    ? value.slice(1, -1) : value
+  return !/[^\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]/u.test(octets)
+}
+
 export function normalizeStoredCookie(value: unknown): StoredCookie | undefined {
   if (value === null || typeof value !== 'object') return undefined
   const c = value as Record<string, unknown>
@@ -15,7 +21,7 @@ export function normalizeStoredCookie(value: unknown): StoredCookie | undefined 
     || typeof c.path !== 'string' || typeof c.secure !== 'boolean'
     || (c.expiresAt !== undefined && (typeof c.expiresAt !== 'number' || !Number.isFinite(c.expiresAt)))
     || !c.path.startsWith('/') || /[\x00-\x1f\x7f]/u.test(c.path)
-    || !/^[!#$%&'*+\-.^_`|~\da-z]+$/iu.test(c.name) || /[^\x21-\x7e]|["\\;,]/u.test(c.value)) return undefined
+    || !/^[!#$%&'*+\-.^_`|~\da-z]+$/iu.test(c.name) || !validCookieValue(c.value)) return undefined
   try {
     const url = new URL(c.origin)
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
@@ -55,12 +61,13 @@ export class GuestCookieJar {
   setCookies(target: URL, values: readonly string[]): void {
     const now = Date.now()
     for (const raw of values) {
+      if (/[\r\n]/u.test(raw)) continue
       const [pair = '', ...attributes] = raw.split(';').map(part => part.trim())
       const index = pair.indexOf('=')
       if (index <= 0) continue
       const name = pair.slice(0, index).trim()
       const value = pair.slice(index + 1).trim()
-      if (!/^[!#$%&'*+\-.^_`|~\da-z]+$/iu.test(name) || /[\x00-\x20\x7f;,]/u.test(value)) continue
+      if (!/^[!#$%&'*+\-.^_`|~\da-z]+$/iu.test(name) || !validCookieValue(value)) continue
       let path = defaultPath(target.pathname), secure = false, domain: string | undefined
       let expires: number | undefined, maxAge: number | undefined
       for (const attribute of attributes) {

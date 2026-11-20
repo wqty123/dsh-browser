@@ -27,7 +27,10 @@ before(async () => {
   upstream = createServer(async (req, res) => {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
-    if (req.url === '/persistent-login') {
+    if (req.url === '/quoted-login') {
+      res.writeHead(303, { location: '/account', 'set-cookie': ['SID="abc"; Secure; Max-Age=3600; HttpOnly; Path=/'] })
+      res.end()
+    } else if (req.url === '/persistent-login') {
       res.writeHead(303, { location: '/account', 'set-cookie': ['SAVED=yes; Max-Age=3600; HttpOnly; Path=/', 'SESSION=temporary; Path=/'] })
       res.end()
     } else if (req.url === '/login') {
@@ -238,6 +241,42 @@ test('proxy restores persistent login cookies after restart, not session cookies
   cookieJar = loadGuestCookies(directory)
   account = await call(login.headers.location)
   assert.equal(JSON.parse(account.body).headers.cookie, 'SAVED=yes')
+})
+
+test('quoted login cookie survives an HTTP proxy round-trip and restart with quotes preserved', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'guest-quoted-'))
+  const previous = cookieJar
+  t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+  cookieJar = loadGuestCookies(directory)
+  const login = await call(guestPath('https://ordinary.example/quoted-login'), { method: 'POST' })
+  assert.equal(login.status, 303)
+  assert.equal(login.headers['set-cookie'], undefined)
+  assert.equal(JSON.parse((await call(login.headers.location)).body).headers.cookie, 'SID="abc"')
+  assert.equal(JSON.parse(readFileSync(join(directory, 'cookies.json'), 'utf8')).cookies[0].value, '"abc"')
+  cookieJar = loadGuestCookies(directory)
+  const account = await call(login.headers.location)
+  assert.equal(account.status, 200)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SID="abc"')
+})
+
+test('RFC 6265 cookie values are validated on parse, load and use', () => {
+  const target = new URL('https://ordinary.example/')
+  for (const value of ['', 'abc', '"abc"', '""', 'a=b', '"a=b"']) {
+    const jar = new GuestCookieJar()
+    jar.setCookies(target, [`SID=${value}; Max-Age=3600`])
+    assert.equal(jar.getCookieHeader(target), `SID=${value}`)
+    const loaded = new GuestCookieJar(undefined, [{ origin: target.origin, name: 'SID', value,
+      path: '/', secure: false, expiresAt: Date.now() + 3600000 }])
+    assert.equal(loaded.getCookieHeader(target), `SID=${value}`)
+  }
+  for (const value of ['"', '"abc', 'abc"', '"a"b"', '"a b"', '"a,b"', '"a;b"', '"a\\b"', '"a\nb"', 'abc\n', '\u007f', '\u0100']) {
+    const jar = new GuestCookieJar()
+    jar.setCookies(target, [`SID=${value}; Max-Age=3600`])
+    assert.equal(jar.getCookieHeader(target), undefined, JSON.stringify(value))
+    const loaded = new GuestCookieJar(undefined, [{ origin: target.origin, name: 'SID', value,
+      path: '/', secure: false, expiresAt: Date.now() + 3600000 }])
+    assert.equal(loaded.getCookieHeader(target), undefined, JSON.stringify(value))
+  }
 })
 
 test('http port 443 cookies survive restart without breaking any sidebar page', async t => {
