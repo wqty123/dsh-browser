@@ -37,8 +37,7 @@ export async function openReferenceSource(sidebar: SourceSidebar, reader: Browse
     tabId = created[0]!.id as TabId
   }
   signal.throwIfAborted()
-  const receipt = await reader.wait({ sessionId, tabId, url, afterRequestId },
-    AbortSignal.any([signal, AbortSignal.timeout(30_000)]))
+  const receipt = await reader.wait({ sessionId, tabId, url, afterRequestId }, signal)
   if (!receipt.guestId) throw new Error('source highlighting requires a controllable sidebar guest')
   return { pageId: receipt.guestId }
 }

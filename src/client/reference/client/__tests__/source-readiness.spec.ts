@@ -84,6 +84,20 @@ describe('source page readiness', () => {
     expect(listeners.size).toBe(0)
   })
 
+  it('uses only the caller lifetime for readiness, without adding a timer or replacing its signal', async () => {
+    const { sidebar, reader, journal } = fixture()
+    const caller = new AbortController()
+    let lifetime: AbortSignal | undefined
+    const result = openReferenceSource(sidebar, { ...reader, wait(query, signal) {
+      lifetime = signal
+      return reader.wait(query, signal)
+    } }, owner, url, caller.signal)
+    await Promise.resolve()
+    try { expect(lifetime).toBe(caller.signal) }
+    finally { journal.advance(tabId, 'attached', { guestId: '42' }) }
+    await expect(result).resolves.toEqual({ pageId: '42' })
+  })
+
   it.each(['navigation-failed', 'workspace-unavailable'] as const)('fails closed on %s', async reason => {
     const { sidebar, reader, journal, listeners } = fixture()
     const result = openReferenceSource(sidebar, reader, owner, url, new AbortController().signal)
