@@ -31,11 +31,11 @@ export function carrierHarness(t, { channel = 'sidebar', discover = async () => 
   })
   t.mock.method(DesktopBridgeViewHost, 'discover', discover)
   const registered = [], warnings = [], disposers = []
-  let current, handler
+  let current, handler, panelFactory
   const ctx = {
     get(name) { if (name === 'connection') return { authorizeIndex() { return true } } },
     browser: {
-      registerPanelProvider() { return () => {} },
+      registerPanelProvider(factory) { panelFactory = factory; return () => { panelFactory = undefined } },
       registerBrowserProvider(provider) { current = provider.host; registered.push(current); return () => {} },
     },
     effect(fn) { const dispose = fn(); if (dispose) disposers.push(dispose) },
@@ -54,6 +54,7 @@ export function carrierHarness(t, { channel = 'sidebar', discover = async () => 
   apply(ctx, { viewHost })
   return {
     get current() { return current }, registered, warnings,
+    openPanel: () => panelFactory?.(),
     async choose(nextChannel) {
       const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel } })])
       request.method = 'PUT'

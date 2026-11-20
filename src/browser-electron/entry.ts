@@ -290,15 +290,26 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
 
   let panelOpening: Promise<{ host: DesktopBridgeViewHost; provider: ElectronBrowserProvider } | undefined> | undefined
   let panelsDisposed = false
+  const retirePanel = (panel: { host: DesktopBridgeViewHost; provider: ElectronBrowserProvider }): void => {
+    panel.provider.dispose()
+    void Promise.allSettled(panel.provider.watchableSessions().map(id => panel.provider.close(id)))
+      .finally(() => { setImmediate(() => { panel.host.dispose() }) })
+  }
   const unregisterPanel = ctx.browser.registerPanelProvider(async () => {
     if (panelOpening === undefined) {
-      panelOpening = (async () => {
+      const opening = (async () => {
         const host = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
         if (host === undefined) return undefined
         if (panelsDisposed) { host.dispose(); return undefined }
         const provider = new ElectronBrowserProvider(host, providerConfig)
-        return { host, provider }
+        const panel = { host, provider }
+        host.onLost(() => {
+          if (panelOpening === opening) panelOpening = undefined
+          retirePanel(panel)
+        })
+        return panel
       })()
+      panelOpening = opening
     }
     try {
       const panel = await panelOpening
@@ -312,12 +323,9 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   ctx.effect(() => () => {
     panelsDisposed = true
     unregisterPanel()
-    void panelOpening?.then(async panel => {
+    void panelOpening?.then(panel => {
       if (panel === undefined) return
-      panel.provider.dispose()
-      try {
-        await Promise.allSettled(panel.provider.watchableSessions().map(id => panel.provider.close(id)))
-      } finally { panel.host.dispose() }
+      retirePanel(panel)
     }).catch(() => {})
   })
 
