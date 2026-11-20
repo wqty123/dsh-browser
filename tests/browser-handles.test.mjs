@@ -38,7 +38,7 @@ function toolsFor(browser) {
   )))
 }
 
-test('registered tool RPCs round-trip listed tab handles, refuse foreign/stale handles and propagate errors', async () => {
+test('registered tools round-trip listed tab handles, refuse foreign/stale handles and propagate errors', async () => {
   const calls = []
   let revision = 1
   const browser = {

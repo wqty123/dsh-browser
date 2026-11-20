@@ -84,7 +84,7 @@ test('provider passes the calling task to carrier page listing and closing', asy
     await provider.listTabs(session)
     await provider.closeTab(session, 'page:extra')
     assert.deepEqual(calls, [['list', 'session-audit'], ['close', 'extra', 'session-audit']])
-    assert.throws(() => provider.closeTab('unknown', 'page:extra'))
+    await assert.rejects(provider.closeTab('unknown', 'page:extra'), /session "unknown" is not open/)
     assert.equal(calls.length, 2, 'an invalid session cannot close a carrier page')
   } finally { await provider.close(session) }
 })

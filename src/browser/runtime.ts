@@ -56,6 +56,9 @@ import type {
 } from './types.ts'
 import { BrowserError } from './types.ts'
 
+export { browserSessionHandle, resolveTabHandle, scopedTabs, sessionWireId, tabWireId } from './handles.ts'
+export type { BrowserOwnerHandle, BrowserSessionHandle, BrowserTabHandle, BrowserSessionWireId, BrowserTabWireId } from './handles.ts'
+
 export {
   BrowserError,
 } from './types.ts'
