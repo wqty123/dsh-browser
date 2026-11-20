@@ -25,7 +25,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { pageOperationScript } from './page-probe.ts'
-import { CODE_TOOL, createCodeTool, type CatalogTool } from './code-tool.ts'
+import { CODE_PROMPT, CODE_TOOL, createCodeTool, type CatalogTool } from './code-tool.ts'
 import { SettingsStore, settingsPath } from '../browser-electron/settings-store.ts'
 import { createShortcutStore, type ShortcutSettings } from '../browser-electron/startpage-shortcuts.ts'
 import { createReferenceService, summarizeReference, type BrowserReferenceService } from '../browser-reference/service.ts'
@@ -543,7 +543,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // tool sections so ordering does not depend on plugin load sequence.
     order: 150,
     text: surface === 'code'
-      ? 'Operate the built-in browser with dsh_browser_code: write a short async JavaScript body that calls the browser helpers (open, click, type, press, read, snapshot, js, waitFor, screenshot, call) and returns what you need. Put a whole run of steps in ONE call (e.g. open, type the query with {submit: true}, waitFor results, then read or extract with js) instead of one call per action, and use loops and try/catch to handle lists, pagination and fallbacks. Each task has its own session and window (real toolbar): the human can watch and take over, and other tasks\' pages are not visible to you. Extract lists and tables with js() returning JSON rather than reading whole pages. Say what you are doing on the page. On a CAPTCHA, login, 2FA or payment, call dsh_browser_request_takeover; never try to solve it.'
+      ? CODE_PROMPT
       : 'Use dsh_browser_* tools to operate the built-in browser. Each task has its own session and window (real toolbar): the human can watch and take over, and other tasks\' pages are not visible to you. Map a page with dsh_browser_a11y (semantic roles/names/states) or dsh_browser_snapshot (numbered elements), then drive it: dsh_browser_click/dsh_browser_type take a target {by: css|text|xpath, value}, or coordinates from dsh_browser_screenshot. Prefer dsh_browser_fill (batch) or dsh_browser_set_value/check/select/clear for forms; verify with dsh_browser_get_value. Use dsh_browser_scrape (not hand-written dsh_browser_execute) for list pages; dsh_browser_wait after slow navigation. Use dsh_browser_do for a run of steps, dsh_browser_assert to check results, and dsh_browser_console/network when the screen is unclear. Say what you are doing on the page. On a CAPTCHA (dsh_browser_challenge), stop retrying and ask the human to solve it in the browser window, then re-check.',
   })
 
@@ -3621,7 +3621,9 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   if (surface === 'code') {
     try {
-      ctx.tools.register(createCodeTool(catalog, { timeoutMs }))
+      const code = createCodeTool(catalog)
+      ctx.tools.register(code.tool)
+      ctx.effect(() => code.dispose)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-builtin-browser: could not register ${CODE_TOOL} (${String(error)}).`)
     }

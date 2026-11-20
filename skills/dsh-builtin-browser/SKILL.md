@@ -6,54 +6,51 @@ description: Use when a task needs a real web page — opening a URL, reading or
 # Driving the browser
 
 The browser is a real Chromium the human can watch and take over. You drive it with one tool,
-`dsh_browser_code`: write an async JavaScript function body that calls the browser helpers, and
-return what you need to see. One call can open a page, act, wait, extract and decide.
+`dsh_browser_code`, after Browser Use 1.0's `python` tool: each call is a JavaScript cell in a
+persistent REPL. Top-level `const`/`let`/`function` survive calls, the last expression is printed,
+and every browser helper is async (`await` it).
 
 ```js
-await open('https://example.com/search')
+await goto_url('https://example.com/search')
 await type('input[name=q]', 'wireless headphones', { submit: true })
-await waitFor({ text: 'results' })
-return await js(`[...document.querySelectorAll('.result')].slice(0, 10).map(r => ({
+await wait_for_element('.result')
+const rows = await js(`[...document.querySelectorAll('.result')].slice(0, 10).map(r => ({
   title: r.querySelector('h3')?.innerText, price: r.querySelector('.price')?.innerText }))`)
+rows.length
 ```
+
+The next cell can keep using `rows`.
 
 ## Helpers
 
-- `open(url)`, `back()`, `forward()`, `refresh()` — navigate; returns a page summary.
-- `click(target)`, `type(target, text, {submit})` / `type(text)`, `press(key)`, `select(target, optionText)`,
-  `fill(fields)`, `scroll(deltaY | {toBottom, toTop, selector})`.
-- `target` is visible text (`'Sign in'`), a CSS selector (`'#email'`, `'button[type=submit]'`),
-  `{text|css|xpath, index}` or `{x, y}` from a screenshot. A target re-resolves on every call.
-- `read({format, selector, maxChars})` — page text as markdown; `snapshot()` — numbered interactive
-  elements with labels and selectors; `find(text)`; `state()`; `tabs()`.
-- `js(expr)` — evaluate in the page and get the value back (objects and arrays come back as data).
-  Best for lists, tables and attributes: extract exactly the fields you need.
-- `waitFor({text | gone | url | selector, timeoutMs})` waits on a fact; `sleep(ms)` only as a last resort.
-- `screenshot({fullPage})` — for canvas-only pages or to show the human; vision models see the image.
-- `refs.capture({excerptText})`, `refs.list()`, `refs.reveal({referenceId})` — browser references.
-- `call(name, args)` reaches every other action with its structured result: `download`, `upload`,
-  `console`, `network`, `wait_for_response`, `dialog`, `hover`, `drag`, `switch_tab`, `close_tab`,
-  `set_value`, `check`, `get_value`, `scrape`, `a11y`, `assert`, `do`, `doctor`, ... `help()` lists
-  them and `help(name)` describes one.
-- `log(...)` prints; the return value is printed. A failing helper throws — wrap it in try/catch to
-  try another selector or route in the same call.
+- Navigation: `goto_url(url)`, `new_tab(url)`, `wait_for_load()`, `page_info()`, `back()`, `forward()`,
+  `refresh()`, `list_tabs()`, `switch_tab(tabId)`, `close_tab(tabId)`.
+- Page data: `js(expr)` (objects, arrays and exact strings come back as data; `return` works),
+  `read({selector, maxChars})`, `snapshot()`, `find(text)`, `state()`, `screenshot()`.
+- Input: `click(target)`, `type(target, text, {submit})`, `fill_input(target, text)`, `select(target, optionText)`,
+  `fill(fields, {submit})`, `click_at_xy(x, y)`, `type_text(text)`, `press_key(key)`, `scroll(dy)`,
+  `upload_file(selector, path)`. A `target` is visible text, a CSS selector, `{text|css|xpath, index}` or `{x, y}`.
+- Waiting: `wait_for_element(selector)`, `wait_for_network_idle()`, `sleep(ms)` only as a last resort.
+- References: `refs.capture({excerptText})`, `refs.list()`, `refs.reveal({referenceId})`.
+- Everything else: `call(name, args)` (download, console, network, wait_for_response, dialog, hover,
+  drag, set_value, check, scrape, a11y, assert, do, reset_session, ...). `await help()` lists the
+  actions and `await help(name)` describes one.
 
 ## Batch, do not drip
 
-Put a whole run of steps in one call, and use loops for pagination and lists. Return only what you
-need: a few fields from `js()` beat a whole `read()` of the page. When you do not know the page yet,
-`open()` then `snapshot()` in the first call, then act on what it showed.
+Every call is a full model turn. Put a run of steps in one cell, and use loops for lists and
+pagination. A failing helper throws, so wrap the risky step in try/catch and try another selector
+in the same cell. Return only what you need: a few fields from `js()` beat a whole `read()`.
 
 ## Verify, then retry
 
 "Clicked" and "the form accepted it" are different claims: check the URL, a confirmation text or
-`call('wait_for_response', ...)` before moving on. Before retrying anything that changes server
-state, check that the previous attempt did not already take effect.
+`call('wait_for_response', ...)` before moving on. A cell that timed out may have partly run:
+inspect before repeating anything that changes server state.
 
 ## Never
 
 - Never solve a CAPTCHA, slider, login, 2FA or payment yourself: call `dsh_browser_request_takeover`.
-- Do not re-submit a form whose result you have not verified — a lost reply is not a failed submit.
 - Do not paste cookies, tokens or exported login state into the conversation.
 - Do not assume another task's tabs or navigation are visible to you: each task has its own
-  session, and `call('reset_session')` ends yours without touching anyone else's.
+  session and its own REPL.
