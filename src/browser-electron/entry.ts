@@ -42,6 +42,7 @@ import { runBridgeAction } from './bridge-install.ts'
 import { prepareBridgeMaintenance } from './bridge-maintenance.ts'
 import { commitAutomaticMaintenance, readAutomaticMaintenance, startAutomaticMaintenance } from './automatic-maintenance.ts'
 import { AUTOMATIC_MAINTENANCE_ROUTE, createAutomaticMaintenanceHandler } from './maintenance-route.ts'
+import { HOST_PATCH_ROUTE, createHostPatchMaintenance, servedClientModules } from './host-patch-maintenance.ts'
 import { runWithManualBridgePreference } from './bridge-auto.ts'
 import { replyJson, writeJsonText } from './json-reply.ts'
 import { readJsonBody, readTextBody } from './http-body.ts'
@@ -704,6 +705,14 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     if (typeof injectStatus !== 'function') return
     try {
       injectStatus(['webServer'], (host) => {
+        const hostPatchMaintenance = createHostPatchMaintenance({
+          modules: () => servedClientModules(ctx.get('clientModules')),
+          desktop: () => process.versions.electron !== undefined,
+        })
+        host.effect(() => host.webServer.register({
+          kind: 'exact', path: HOST_PATCH_ROUTE,
+          handler: authenticated(ctx, hostPatchMaintenance),
+        }, 'dsh-builtin-browser: Web host patch maintenance'))
         const automaticMaintenance = createAutomaticMaintenanceHandler({
           supported: () => process.platform === 'win32',
           busy: () => bridgeActionRunning,

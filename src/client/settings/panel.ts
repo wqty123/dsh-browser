@@ -58,6 +58,11 @@ const react = require("react")
 
   const zh = {
     "readiness.hostPatch": "DSH 宿主补丁",
+    "hostPatch.install": "安装宿主补丁",
+    "hostPatch.restore": "恢复原文件",
+    "hostPatch.working": "正在更新…",
+    "hostPatch.reload": "已更新，请重新加载此页面。无需重启服务器。",
+    "hostPatch.restart": "已更新；请重启 DSH Web 服务器，然后重新加载此页面。",
     "readiness.hostPatch.applied": "已应用（支持后台页面渲染）",
     "readiness.hostPatch.absent": "未应用",
     "readiness.hostPatch.unsupported-version": "不支持此版本；继续使用兼容桥接",
@@ -232,6 +237,11 @@ const react = require("react")
 
   const en = {
     "readiness.hostPatch": "DSH host patch",
+    "hostPatch.install": "Install host patch",
+    "hostPatch.restore": "Restore original files",
+    "hostPatch.working": "Updating…",
+    "hostPatch.reload": "Updated. Reload this page; no server restart is needed.",
+    "hostPatch.restart": "Updated. Restart the DSH Web server, then reload this page.",
     "readiness.hostPatch.applied": "Applied (background page rendering available)",
     "readiness.hostPatch.absent": "Not applied",
     "readiness.hostPatch.unsupported-version": "Unsupported version; using the legacy bridge",
@@ -874,6 +884,55 @@ const react = require("react")
    * same one background attempt the plugin makes on its own, which is why pressing it is never
    * harmful and never starts a second download.
    */
+  function HostPatchControls() {
+    useLocaleVersion()
+    const t = translate
+    const [state, setState] = useState(null)
+    const [busy, setBusy] = useState(false)
+    const [error, setError] = useState("")
+    const [notice, setNotice] = useState("")
+    const alive = useRef(true)
+    const pending = useRef(false)
+    useEffect(() => {
+      alive.current = true
+      void fetch("/dsh-builtin-browser/host-patch-maintenance", { headers: { accept: "application/json" } })
+        .then(async response => {
+          if (response.status === 404) return
+          const data = await response.json()
+          if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+          if (alive.current && data.hostPatch?.surface === "web") setState(data.hostPatch)
+        }).catch(failure => { if (alive.current) setError(String(failure)) })
+      return () => { alive.current = false }
+    }, [])
+    const change = async action => {
+      if (pending.current) return
+      pending.current = true
+      setBusy(true); setError(""); setNotice("")
+      try {
+        const response = await fetch("/dsh-builtin-browser/host-patch-maintenance", {
+          method: "POST", headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({ action }),
+        })
+        const data = await response.json()
+        if (alive.current && data.hostPatch) setState(data.hostPatch)
+        if (!response.ok || data.ok !== true) throw new Error(data.error || data.hostPatch?.reason || `HTTP ${response.status}`)
+        if (alive.current) setNotice(t(data.hostPatch.restartRequired ? "hostPatch.restart" : "hostPatch.reload"))
+      } catch (failure) { if (alive.current) setError(String(failure)) }
+      finally { pending.current = false; if (alive.current) setBusy(false) }
+    }
+    if (state === null && error === "") return null
+    return h("div", { key: "web-host-patch", style: styles.group }, [
+      h("p", { key: "state", role: "status" }, t("readiness.hostPatch") + (state ? ": " + t("readiness.hostPatch." + state.status.replaceAll(" ", "-")) : "")),
+      state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
+      h("div", { key: "buttons", style: styles.row }, [
+        h("button", { key: "install", type: "button", style: styles.button, disabled: busy || !state?.canInstall, onClick: () => change("install") }, t(busy ? "hostPatch.working" : "hostPatch.install")),
+        h("button", { key: "restore", type: "button", style: styles.button, disabled: busy || !state?.canRestore, onClick: () => change("restore") }, t("hostPatch.restore")),
+      ]),
+      notice ? h("p", { key: "notice", role: "status", style: styles.hint }, notice) : null,
+      error ? h("p", { key: "error", role: "alert", style: styles.error }, error) : null,
+    ])
+  }
+
   function Readiness({ channel } = {}) {
     useLocaleVersion()
     const t = translate
@@ -1526,6 +1585,7 @@ const react = require("react")
         options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
       h(Readiness, { key: "readiness", channel: settings.browser.channel }),
+      h(HostPatchControls, { key: "host-patch" }),
       section("ui.title", [
         toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
         toggle("ui", "autoExpandOnce"),
@@ -2787,6 +2847,7 @@ const react = require("react")
     // on-demand menu, so a harness must be able to render it without driving
     // the popover's own state.
     exports.__references = References
+    exports.__hostPatchSection = HostPatchControls
     ctx.slots.inject("settings.section", () => ctx.slots.register({
       name: "settings.section",
       id: "dsh-builtin-browser",

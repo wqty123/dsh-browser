@@ -15,7 +15,9 @@ node /path/to/dsh-builtin-browser/dsh-host-patch/apply.mjs status /path/to/node_
 node /path/to/dsh-builtin-browser/dsh-host-patch/apply.mjs restore /path/to/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right
 ```
 
-For a Web/npm install, resolve that package from the Web profile's `node_modules`. There is no Web file-maintenance settings action: use the CLI and restart the Web server/reload its client. Multiple package directories can be supplied for a transactional Desktop + sidebar apply. The Desktop settings installer locates its own bundled sidebar under `resources/app/dsh/node_modules`.
+Web settings also provide Install and Restore actions. The Host asks DSH's live `clientModules.clientPath()` registry for the sidebar bundle it actually serves; this works with both npm installs and source checkouts, without guessing an installation path. Missing registries, unsupported bundles, and read-only packages leave the controls unavailable with a reason. Maintenance requires an authenticated, same-origin request directly from localhost. A successful change refreshes the registry cache through `rebuilt()` and asks you to reload the page; older registries without cache refresh require a server restart, which settings report explicitly. Desktop still uses its separate closed-application bridge maintenance.
+
+For standalone Web/npm CLI use, resolve that package from the Web profile's `node_modules`. Multiple package directories can be supplied for a transactional Desktop + sidebar apply. The Desktop settings installer locates its own bundled sidebar under `resources/app/dsh/node_modules`.
 
 ## Safety and fallback
 
