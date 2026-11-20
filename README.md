@@ -135,7 +135,7 @@ DSH 侧栏下载使用目标页面所属浏览器会话的登录状态，分段�
 
 补丁按宿主包精确版本与原文件校验选择；锚点不匹配时安全拒绝。rc.5 Desktop 的原文件哈希来自源码构建，尚未与已发布桌面安装包核对。详见 [宿主补丁说明](dsh-host-patch/README.md) 和 [#36 集成与验收记录](docs/pr64-extension-status.md)。
 
-revision 7 包含 `childTabs` v2 与按 `DSH_HOME` 持久化的侧栏会话：子页面保留 opener、消息、命名目标、POST 和关闭语义，不重放 URL、不创建额外窗口；同一 home 的工作区共享登录，无过期时间的会话 cookie 也会在重启前后保存与恢复。恢复完成前不会覆盖检查点，暂时失败后会重试。插件检测持久化能力，不支持时保留原有内存会话。支持 revision 2 / 3 / 4 / 5 / 6 的安全升级与精确恢复。未支持的原生 opener 请求明确返回 `BROWSER_NATIVE_CHILD_UNAVAILABLE`；显式 URL-only 行为不变。详见 [集成与验收](docs/pr64-native-children.md)。
+revision 8 包含 `childTabs` v2 与按 `DSH_HOME` 持久化的侧栏会话：子页面保留 opener、消息、命名目标、POST 和关闭语义，不重放 URL、不创建额外窗口；同一 home 的工作区共享登录，无过期时间的会话 cookie 也会在重启前后保存与恢复。每个分区仅恢复一次，完成前阻止页面加载；后续检查点只保存实时 cookie，不会重放已注销的登录。无效条目单独跳过，读取失败经有限重试后保留 `.bak` 并继续运行。插件检测持久化能力，不支持时保留原有内存会话。支持 revision 2 / 3 / 4 / 5 / 6 / 7 的安全升级与精确恢复。未支持的原生 opener 请求明确返回 `BROWSER_NATIVE_CHILD_UNAVAILABLE`；显式 URL-only 行为不变。详见 [集成与验收](docs/pr64-native-children.md)。
 
 后台浏览器操作会按能力检测使用 `ctx.sidebarRight.holdRendering(sessionId)`，不会切换用户当前会话；未打补丁的宿主保留既有行为。
 

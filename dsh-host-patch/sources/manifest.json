@@ -10,5 +10,17 @@
   "rc5/0004-native-views.patch": {
     "bytes": 86227,
     "sha256": "57dc227f3eb17627194994b68e3d4fec56330fac04bb040f255772a4807e38e2"
+  },
+  "main/0010-sidebar-session-cookies.patch": {
+    "bytes": 44306,
+    "sha256": "53e74aedf16fda4289d533a3054f10bd60935ce464c7793f07542835816f68c7"
+  },
+  "rc3/0010-sidebar-session-cookies.patch": {
+    "bytes": 44306,
+    "sha256": "7d0ecb845030b67e696d773c6a0bf4fd43b0a871814c798e19a752d5e71d31f9"
+  },
+  "rc5/0010-sidebar-session-cookies.patch": {
+    "bytes": 44306,
+    "sha256": "d5a9180171ca8eb37eccfdfafedddd11f8fa653f04bec79fb2cac4e57419a809"
   }
 }

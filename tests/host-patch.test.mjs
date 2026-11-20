@@ -18,10 +18,11 @@ test('compressed release artifacts retain their full source-build bytes', () => 
   }
 })
 
-test('compressed native-view source patches retain their complete git format-patch bytes', () => {
+test('compressed source patches retain their complete git format-patch bytes', () => {
   const root = new URL('../dsh-host-patch/sources/', import.meta.url)
   const manifest = JSON.parse(fs.readFileSync(new URL('manifest.json', root), 'utf8'))
-  assert.deepEqual(Object.keys(manifest).sort(), ['main', 'rc3', 'rc5'].map(release => `${release}/0004-native-views.patch`))
+  assert.deepEqual(Object.keys(manifest).sort(), ['main', 'rc3', 'rc5'].flatMap(release =>
+    ['0004-native-views.patch', '0010-sidebar-session-cookies.patch'].map(file => `${release}/${file}`)))
   for (const [file, expected] of Object.entries(manifest)) {
     const bytes = gunzipSync(fs.readFileSync(new URL(`${file}.gz`, root)))
     assert.equal(bytes.length, expected.bytes, file)
@@ -103,7 +104,7 @@ test('a mismatched preload refuses the whole Desktop/sidebar plan without writes
   for (const id of ['client', 'main']) assert.equal(fs.readFileSync(file(id), 'utf8'), fixture(id, 'before'))
 })
 
-for (const revision of [2, 3, 4, 5, 6]) for (const extraEdit of [false, true]) test(`revision ${revision} upgrades transactionally and restores originals (${extraEdit})`, t => {
+for (const revision of [2, 3, 4, 5, 6, 7]) for (const extraEdit of [false, true]) test(`revision ${revision} upgrades transactionally and restores originals (${extraEdit})`, t => {
   const { packages, file } = setup(t)
   const previous = JSON.parse(revision >= 3
     ? gunzipSync(fs.readFileSync(new URL(`../dsh-host-patch/${release}-revision${revision}.json.gz`, import.meta.url))).toString('utf8')
