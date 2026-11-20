@@ -10,10 +10,11 @@ import { createBrowserControllers } from '../src/client/browser/BrowserControlle
 const flush = () => new Promise(resolve => setImmediate(resolve))
 const target = { kind: 'https', url: 'https://example.test/', title: 'example.test' }
 
-function fixture({ acquire, attach, register, command, capture, children } = {}) {
+function fixture({ acquire, attach, register, command, capture, children, persistentSession } = {}) {
   const calls = [], released = [], listeners = new Map()
   let sequence = 0
   const native = { protocolVersion: 1,
+    persistentSession,
     acquire: acquire ?? (async () => ({ lease: 'lease-' + ++sequence })),
     attach: attach ?? (async lease => { listeners.get(lease)?.({ stage: 'attached', generation: 'initial' }) }),
     onState: (lease, listener) => { listeners.set(lease, listener); return () => listeners.delete(lease) },
@@ -30,6 +31,19 @@ function fixture({ acquire, attach, register, command, capture, children } = {})
     register ?? (async (...args) => { registrations.push(args); return 'slot' }), async () => 'workspace', 'session-native', capture, children)
   return { page, native, calls, released, listeners, registrations }
 }
+
+for (const persistentSession of [undefined, true]) test(`native storage opts into persistence only when advertised (${persistentSession})`, async () => {
+  const previous = globalThis.document, acquired = []
+  globalThis.document = { getElementById: () => ({ dataset: {} }) }
+  const f = fixture({ persistentSession, acquire: async (...args) => { acquired.push(args); return { lease: 'lease' } } })
+  try {
+    f.page.loadUrl(target)
+    f.page.mount('viewport')
+    await flush(); await flush()
+    assert.deepEqual(acquired, [[tabWireId({ owner: 'session-native', session: 'sidebar', tab: 'tab-native' }), 'workspace',
+      ...persistentSession ? [true] : []]])
+  } finally { await f.page.dispose(); globalThis.document = previous }
+})
 
 test('native children adopt the reserved lease with no acquire or navigation replay and retain canonical identity', async () => {
   const previous = globalThis.document

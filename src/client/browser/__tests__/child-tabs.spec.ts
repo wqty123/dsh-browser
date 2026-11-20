@@ -27,10 +27,11 @@ it.each([true, false])('binds Desktop child requests to the guest lifetime (stru
   let legacy!: (url: string) => void
   const onRequested = vi.fn((_lease, listener) => { requested = listener; return stop })
   const onOpenRequested = vi.fn((_lease, listener) => { legacy = listener; return stop })
+  const acquire = vi.fn(async () => ({ lease: 'child-lease' as DesktopBrowserLeaseId, partition: 'persist:test' }))
   const bridge: DesktopBrowserBridge = {
-    acquire: async () => ({ lease: 'child-lease' as DesktopBrowserLeaseId, partition: 'persist:test' }),
+    acquire,
     release: vi.fn(async () => {}), onOpenRequested,
-    ...(structured ? { childTabs: { protocolVersion: 1 as const, onRequested } } : {}),
+    ...(structured ? { persistentSession: true as const, childTabs: { protocolVersion: 1 as const, onRequested } } : {}),
   }
   const element = Object.assign(document.createElement('div'), { loadURL: load }) as unknown as WebviewElement
   const presentation = { createElement: () => element, present() {}, clear() {}, dispose() {} } as unknown as ElectronWebviewPresentation
@@ -38,6 +39,7 @@ it.each([true, false])('binds Desktop child requests to the guest lifetime (stru
   frame.loadUrl({ kind: 'https', url: 'https://example.test/source', title: 'Source' })
   frame.attach()
   await vi.waitFor(() => expect(structured ? onRequested : onOpenRequested).toHaveBeenCalledOnce())
+  expect(acquire).toHaveBeenCalledExactlyOnceWith('workspace', ...structured ? [true] : [])
   if (structured) {
     expect(onOpenRequested).not.toHaveBeenCalled()
     expect(requested({ mode: 'native-opener', url: 'https://example.test/child' })).toEqual({ status: 'unsupported', code: 'BROWSER_NATIVE_CHILD_UNAVAILABLE' })

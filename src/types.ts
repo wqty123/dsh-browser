@@ -14,7 +14,8 @@ export interface DesktopNativeState {
 
 export interface DesktopNativeViews {
   readonly protocolVersion: 1
-  acquire(scope: string, workspace: string): Promise<{ readonly lease: DesktopNativeLease }>
+  readonly persistentSession?: true
+  acquire(scope: string, workspace: string, persistent?: boolean): Promise<{ readonly lease: DesktopNativeLease }>
   attach(lease: DesktopNativeLease, slot: SidebarNativeSlot): Promise<void>
   command(lease: DesktopNativeLease, method: string, params?: object): Promise<object>
   onState(lease: DesktopNativeLease, listener: (state: DesktopNativeState) => void): () => void
@@ -71,11 +72,12 @@ export interface DesktopNativeChildTabs {
 
 /** Origin-scoped operations; no Electron objects or arbitrary IPC cross this interface. */
 export interface DesktopBrowserBridge {
+  readonly persistentSession?: true
   readonly nativeViews?: DesktopNativeViews
   /** Version 1 supports URL-only requests; version 2 adopts native WindowProxy children. */
   readonly childTabs?: DesktopBrowserChildTabs | DesktopNativeChildTabs
   /** @param workspace - resolved storage account. @returns one approved guest reservation. */
-  acquire(workspace: string): Promise<DesktopBrowserReservation>
+  acquire(workspace: string, persistent?: boolean): Promise<DesktopBrowserReservation>
   /** @param lease - the caller's reservation. @returns after its guest has been destroyed. */
   release(lease: DesktopBrowserLeaseId): Promise<void>
   /** Legacy URL-only notifications. These do not promise a child WindowProxy or opener. */

@@ -130,7 +130,10 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
       const scope = tabWireId({ owner: this.owner, session: 'sidebar', tab })
       const slot = await this.register(tab, scope, attachment.viewport, signal)
       const reservation = child === undefined
-        ? await this.native.acquire(scope, await this.workspace(signal)) : { lease: child.lease }
+        ? await (async () => {
+          const workspace = await this.workspace(signal)
+          return this.native.persistentSession === true ? this.native.acquire(scope, workspace, true) : this.native.acquire(scope, workspace)
+        })() : { lease: child.lease }
       const { lease } = reservation
       if (signal.aborted) { this.release(lease); return }
       this.lease = lease
