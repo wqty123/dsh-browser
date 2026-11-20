@@ -4,6 +4,8 @@
 
 ## 截图
 
+当前默认与回退载体仅限 DSH 侧栏：`bundled`、`auto` 是 `sidebar` 的旧设置别名，不再启动自托管 Electron 或自动选择本机浏览器。下文自托管实现的描述仅供历史诊断，不代表可选载体。外部 Chrome / Edge 需要显式选择。缺少宿主侧栏 API 时，工具报告能力错误；不要用修改 `app.asar` 的旧 bridge 安装器补齐该能力。
+
 - JPEG 在**自托管**与**本机 Chrome / Edge** 上可用;**桌面端侧栏**走外壳的 `webContents.debugger`,其 Electron 的 CDP JPEG 编码会挂起,因此该载体下请求 JPEG 会返回 PNG。
 - 降采样(`maxWidth`/`maxHeight`)**三种载体都支持**(经 CDP `clip.scale`,或自托管走原生 `capturePage`)。
 - 自托管截图优先走 Electron 原生 `capturePage`(CDP `captureScreenshot` 在多视图下会挂起);截图前自动把目标标签置顶 —— 除非开启**安静模式**,那时不碰窗口(见下)。

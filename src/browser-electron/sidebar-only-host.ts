@@ -40,9 +40,10 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
   private ownerOverride: string | undefined
   private loading: Promise<HostLease> | undefined
   private disposed = false
+  private readonly discovery = new AbortController()
   private lostListener: ((reason: CarrierLossReason) => void) | undefined
 
-  constructor(private readonly loader: () => Promise<ElectronBrowserViewHost>) {}
+  constructor(private readonly loader: (signal: AbortSignal) => Promise<ElectronBrowserViewHost>) {}
 
   /** Keep the explicit selection available so discovery failures reach the caller unchanged. */
   available(): boolean { return !this.disposed }
@@ -156,6 +157,7 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.discovery.abort()
     this.views.clear()
     const lease = this.lease
     this.lease = undefined
@@ -181,7 +183,7 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
     this.assertOpen()
     if (this.lease !== undefined) return Promise.resolve(this.lease)
     if (this.loading !== undefined) return this.loading
-    const pending = Promise.resolve().then(this.loader).then(host => {
+    const pending = Promise.resolve().then(() => this.loader(this.discovery.signal)).then(host => {
       if (this.disposed) {
         host.dispose?.()
         this.assertOpen()

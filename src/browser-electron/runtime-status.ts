@@ -114,15 +114,7 @@ export interface RuntimeStatusDeps {
 
 /** Which carrier a channel names. */
 function carrierOf(channel: BrowserChannel): CarrierKind {
-  if (channel === 'sidebar') return 'sidebar'
-  if (channel === 'bundled') return 'bundled'
-  if (channel === 'auto') return 'auto'
-  return 'system'
-}
-
-/** Whether a binary being present settles the Electron question. */
-function electronReady(state: ElectronReadiness['state']): boolean {
-  return state === 'present' || state === 'ready'
+  return channel === 'chrome' || channel === 'edge' ? 'system' : 'sidebar'
 }
 
 /**
@@ -177,7 +169,7 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
   // shell actually running. Either one alone is the false green this report exists to prevent.
   const sidebarReady = bridge.state === 'installed' && bridge.running
 
-  const checkSystemBrowser = carrier === 'system' || carrier === 'auto'
+  const checkSystemBrowser = carrier === 'system'
   const detected = checkSystemBrowser ? (deps.detectBrowser ?? detectBrowser)(channel) : undefined
   const systemBrowser: SystemBrowserReadiness = {
     checked: checkSystemBrowser,
@@ -185,8 +177,7 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
     ...detected === undefined ? {} : { kind: detected.kind, path: detected.path },
     detail: detected !== undefined ? `${detected.kind} is available at ${detected.path}`
       : !checkSystemBrowser ? `the ${carrier} channel uses its own carrier`
-        : channel === 'auto' ? 'no Chrome, Edge or Brave installation was found'
-          : `the selected ${channel} installation was not found`,
+        : `the selected ${channel} installation was not found`,
   }
 
   let readiness: Readiness
@@ -194,14 +185,6 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
   if (carrier === 'sidebar') {
     resolvedCarrier = 'sidebar'
     readiness = sidebarReady ? 'ready' : 'blocked'
-  } else if (carrier === 'bundled') {
-    resolvedCarrier = 'bundled'
-    readiness = electronReady(state) ? 'ready' : 'blocked'
-  } else if (carrier === 'auto') {
-    // Discovery may adopt a live desktop bridge after initially choosing a system browser. Match
-    // that priority here, then use the bundled runtime when no system browser was found.
-    resolvedCarrier = deps.selectedCarrier?.() ?? (sidebarReady ? 'sidebar' : detected !== undefined ? 'system' : 'bundled')
-    readiness = (resolvedCarrier === 'sidebar' ? sidebarReady : resolvedCarrier === 'system' ? detected !== undefined : electronReady(state)) ? 'ready' : 'blocked'
   } else {
     resolvedCarrier = 'system'
     readiness = detected !== undefined ? 'ready' : 'blocked'
@@ -216,8 +199,6 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
     ...resolvedCarrier === 'system' && detected !== undefined ? { executable: detected.path } : {},
     electron,
     bridge,
-    // Offering the button while a download runs would be a second download, which is the one thing
-    // the shared attempt exists to prevent.
-    canProvision: !electronReady(state) && state !== 'preparing',
+    canProvision: false,
   }
 }

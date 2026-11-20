@@ -103,10 +103,10 @@ const react = require("react")
     "credentials.allowRead": "允许 Agent 读取 cookies / 导出登录状态",
     "browser.channel": "默认浏览器",
     "browser.sidebar": "DSH 侧栏面板",
-    "browser.bundled": "内置浏览器",
+    "browser.bundled": "DSH 侧栏（旧版内置选项）",
     "browser.chrome": "本机 Chrome",
     "browser.edge": "本机 Edge",
-    "browser.auto": "自动",
+    "browser.auto": "DSH 侧栏（旧版自动选项）",
     "actions.title": "Agent 权限",
     "actions.allowExecute": "允许在页面里执行脚本",
     "actions.allowDownload": "允许下载文件到磁盘",
@@ -272,10 +272,10 @@ const react = require("react")
     "credentials.allowRead": "Allow the agent to read cookies / export login state",
     "browser.channel": "Default browser",
     "browser.sidebar": "DSH sidebar",
-    "browser.bundled": "Bundled browser",
+    "browser.bundled": "DSH sidebar (legacy bundled setting)",
     "browser.chrome": "Installed Chrome",
     "browser.edge": "Installed Edge",
-    "browser.auto": "Automatic",
+    "browser.auto": "DSH sidebar (legacy automatic setting)",
     "actions.title": "Agent permissions",
     "actions.allowExecute": "Run scripts in the page",
     "actions.allowDownload": "Download files to disk",
@@ -1508,7 +1508,7 @@ const react = require("react")
       h("h3", { key: "title", style: styles.groupTitle }, t(titleKey)),
       ...children,
     ])
-    const systemBrowser = ["chrome", "edge", "auto"].includes(settings.browser.channel)
+    const systemBrowser = ["chrome", "edge"].includes(settings.browser.channel)
 
     return h("div", { style: styles.wrap, className: "dsh-bb-settings" }, [
       selector("browser.channel", settings.browser.channel,

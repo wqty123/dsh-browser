@@ -185,10 +185,8 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   cookies: { persist: true },
   ui: { autoExpandOnce: true, closeWithSession: false, virtualCursor: true, quiet: false },
   vision: { strategy: 'auto' },
-  // Bundled by default: it needs nothing installed, and on the desktop the carrier
-  // is the sidebar anyway. Choosing a system browser is an explicit opt-in because
-  // it starts a real Chrome/Edge with its own profile.
-  browser: { channel: 'bundled', headless: 'auto', systemProfile: 'plugin' },
+  // External browsers require an explicit choice; automatic modes never open native windows.
+  browser: { channel: 'sidebar', headless: 'auto', systemProfile: 'plugin' },
   credentials: { allowRead: true },
   // Off unless the host turns it on. A frame can show a CAPTCHA, an account name, or logged-in
   // content, so watching is an explicit decision rather than something a remote client can arrange.
