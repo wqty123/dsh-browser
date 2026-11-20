@@ -8,6 +8,7 @@ import type { ProductionRuntime } from '../production/runtime.ts'
 import type { RequestLike } from '../production/http-transport.ts'
 import { ROUTES, type RevealResultWire } from '../production/protocol.ts'
 import { browserSourceRule } from '../production/user-text-rule.ts'
+import { UserTextDocument } from '@deepseek-ai/dsh-client-ui-conversation/src/client/conversation/user-text-document.ts'
 import { encodeBrowserRefUri } from '../scheme.ts'
 import { createBrowserInitializationJournal, createBrowserInitializationReader } from '../../../browser/initialization.ts'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
@@ -128,11 +129,11 @@ async function assembled(storage = memoryKV(), options: {
     },
     async sentMessage(text: string) {
       expect(sourceRule).toBe(browserSourceRule)
-      const nodes = []
-      for (let node = sourceRule!.match(text, 0); node !== undefined; node = sourceRule!.match(text, node.end)) nodes.push(node)
-      expect(nodes[0]).toMatchObject({ id: 'browser-ref', data: { uri: encodeBrowserRefUri({ referenceId: 'ref-mixed-1' }) } })
+      const nodes = new UserTextDocument().evaluate({ text, facts: {} }, [sourceRule!])
+      expect(nodes.find(node => node.id === 'browser-ref')).toMatchObject({ data: { uri: encodeBrowserRefUri({ referenceId: 'ref-mixed-1' }) } })
       return mount(() => createElement(Fragment, null, ...nodes.map(node =>
-        components.get('conversation.user.text.node')!({ node, raw: text }) as ReactNode)))
+        node.id === 'text' ? node.data.display ?? node.data.text :
+          components.get('conversation.user.text.node')!({ node, raw: text.slice(node.start, node.end) }) as ReactNode)))
     },
     async composer() {
       return mount(() => components.get('conversation.input.dock')!({ sessionId: hostSessionId }) as ReactNode)
@@ -169,9 +170,28 @@ describe('production assembly — shared composer and sent capsules', () => {
     expect(message.match(/dsh-browser-ref:/gu)).toHaveLength(1)
     const sent = await h.sentMessage(message)
     expect(sent.querySelectorAll('button[data-reference-id="ref-mixed-1"]')).toHaveLength(1)
+    const textOnly = sent.cloneNode(true) as HTMLElement
+    textOnly.querySelector('.dsh-browser-reference-capsules')!.remove()
+    expect(textOnly.textContent?.trim()).toBe('')
     await act(async () => { pill(sent).focus() })
     expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1)
     h.runtime.dispose()
+  })
+
+  it('renders the complete submitted message as one capsule plus user text, keeping the full quote for the model', async () => {
+    const h = await assembled()
+    const message = await send(h.runtime, 'my own question')
+    expect(message).toContain(LONG_TEXT)
+    expect(message).toContain(TAIL_TEXT)
+    expect(message).toContain('My frozen-source comment')
+    const sent = await h.sentMessage(message)
+    expect(sent.querySelectorAll('button[data-reference-id]')).toHaveLength(1)
+    const textOnly = sent.cloneNode(true) as HTMLElement
+    textOnly.querySelector('.dsh-browser-reference-capsules')!.remove()
+    expect(textOnly.textContent?.trim()).toBe('my own question')
+    await act(async () => { pill(sent).focus() })
+    expect(document.querySelector('[role="dialog"]')!.textContent).toContain(LONG_TEXT)
+    expect(document.querySelector('[role="dialog"]')!.textContent).toContain('My frozen-source comment')
   })
 
   it('keeps a sent capsule, with ordered snapshot parts + comment on hover after durable reload', async () => {

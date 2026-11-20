@@ -1,6 +1,27 @@
 import { encodeBrowserRefUri, parseBrowserRefUri } from '../scheme.ts'
 
 export const SOURCE_LINK_LABEL = '引用来源'
+const QUOTE_OPEN = '<dsh-browser-quote length="'
+const QUOTE_CLOSE = '</dsh-browser-quote>'
+
+export function submissionQuote(text: string): string {
+  return `${QUOTE_OPEN}${text.length}">${text}${QUOTE_CLOSE}\n`
+}
+
+export function readSubmissionQuote(text: string, from: number) {
+  const header = /<dsh-browser-quote length="(\d+)">/gu
+  header.lastIndex = from
+  for (let match = header.exec(text); match !== null; match = header.exec(text)) {
+    const length = Number(match[1])
+    if (!Number.isSafeInteger(length)) continue
+    const close = header.lastIndex + length
+    if (text.slice(close, close + QUOTE_CLOSE.length) !== QUOTE_CLOSE) continue
+    let end = close + QUOTE_CLOSE.length
+    if (text[end] === '\n') end += 1
+    return { start: match.index, end, body: text.slice(header.lastIndex, close) }
+  }
+  return undefined
+}
 
 export function sourceMarker(referenceId: string, index: number, title?: string): string {
   const displayTitle = (title ?? '').replace(/[\r\n\t]+/gu, ' ')

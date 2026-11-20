@@ -25,7 +25,7 @@ import { renderReferenceTable } from '../../../../reference-text.ts'
 import { referenceOwnerKey } from '../../../../reference-owner.ts'
 import type { OrderedReferenceGroup } from '../types.ts'
 import { createSubmissionProjector, type TextPosition } from '../ordered-submission.ts'
-import { composerText, sourceMarker } from './source-marker.ts'
+import { composerText, sourceMarker, submissionQuote } from './source-marker.ts'
 import type { AssetStore } from './asset-store.ts'
 
 /** Mirror of `session-controller/src/types.ts:78` (no cross-package import). */
@@ -105,16 +105,11 @@ export { SOURCE_LINK_LABEL } from './source-marker.ts'
 export function wireSubmissionContent(input: WireSubmissionInput): readonly HostPromptContentPart[] {
   const perGroup = createSubmissionProjector({ mode: 'ordered' })
   const text = composerText(input.text, new Set(input.groups.map(group => group.referenceId)))
-  // The host renders adjacent text blocks as one run, so EVERY projected
-  // text/table block (quote, table projection, image placeholder) ends with its
-  // own newline. Without it the MOST COMMON path — "quote + user's question" —
-  // arrived as one unreadable line on the desktop. The user's own text is added
-  // separately below and is NEVER given a newline, so leading composer text
-  // stays byte-identical and uploaded blocks keep their original order.
+  const quoteText = (text: string): string => input.sourceLinks === false ? text : submissionQuote(text)
   const projectedBlocks = (groups: readonly OrderedReferenceGroup[]): HostPromptContentPart[] =>
     perGroup.project({ text: '', uploaded: [], groups }).map(part => {
       const mapped = mapProjected(part, input.admitImage)
-      return mapped.type === 'text' ? { type: 'text', text: `${mapped.text}\n` } : mapped
+      return mapped.type === 'text' ? { type: 'text', text: quoteText(`${mapped.text}\n`) } : mapped
     })
   const placeUserText = (blocks: HostPromptContentPart[]): void => {
     if (text === '') return
@@ -154,7 +149,7 @@ export function wireSubmissionContent(input: WireSubmissionInput): readonly Host
         // A plain label, not markdown: the user's own message text is rendered as text, so asterisks showed
         // up literally ("**引用评论**：123"). Brackets looked like page content; a bare label reads as a
         // label in every renderer.
-        withNotes.push({ type: 'text', text: `${COMMENT_LABEL}：${note}\n` })
+        withNotes.push({ type: 'text', text: quoteText(`${COMMENT_LABEL}：${note}\n`) })
       }
       withNotes.push(...projectedBlocks([group]))
     }
