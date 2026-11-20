@@ -1088,7 +1088,7 @@ const react = require("react")
         const response = await fetch("/dsh-builtin-browser/bridge-maintenance", {
           method: "POST",
           headers: { accept: "application/json", "content-type": "application/json" },
-          body: JSON.stringify({ action }),
+          body: JSON.stringify({ action, locale: currentLocale }),
         })
         const data = await response.json().catch(() => ({}))
         if (response.status === 404) {

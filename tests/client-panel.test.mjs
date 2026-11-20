@@ -2356,7 +2356,7 @@ test('production settings reads host status even when the bridge endpoint is mis
     const install = elements(tree).find(node => node.props.key === 'reinstall')
     await install.props.onClick()
     const post = fixture.calls.find(call => call.init.method === 'POST')
-    assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall' })
+    assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall', locale: 'zh' })
   }
 })
 
@@ -2372,7 +2372,17 @@ test('production unsupported settings reports the capability code and offers the
   assert.match(textOf(install).join(' '), /卸载并重装/)
   await install.props.onClick()
   const post = fixture.calls.find(call => call.init.method === 'POST')
-  assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall' })
+  assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall', locale: 'zh' })
+})
+
+test('English reinstall requests preserve the selected progress locale', async () => {
+  const fixture = maintenanceFixture({ state: 'installed' }), locale = lazyLocale()
+  locale.setLocale('en')
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, locale: locale.api, document: maintenanceDocument(), timers: maintenanceTimers() })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
+  await elements(tree).find(node => node.props.key === 'reinstall').props.onClick()
+  const post = fixture.calls.find(call => call.init.method === 'POST')
+  assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall', locale: 'en' })
 })
 
 test('production settings exposes exactly one fixed reinstall control in every bridge state', async () => {
@@ -2386,7 +2396,7 @@ test('production settings exposes exactly one fixed reinstall control in every b
     assert.ok(button)
     await button.props.onClick()
     const post = fixture.calls.find(call => call.init.method === 'POST')
-    assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall' })
+    assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall', locale: 'zh' })
   }
 })
 
