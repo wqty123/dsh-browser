@@ -66,7 +66,7 @@ node scripts/verify-runtime-status.mjs        # 与上面同一个 profile 解�
 
 位置不是随便选的。DSH 从 0.2.1-alpha.3 之后改成:**有 `engines.dsh` 就只看它,`@deepseek-ai/dsh*` 的 `peerDependencies` 被忽略;没有 `engines.dsh` 才回退到 peer 规则**(`packages/boot/app-boot/src/plugin-compatibility.ts`;官方迁移指南在 `docs/upgrade-guide/v0.2.1-alpha.3/plugin-engines-dsh/`)。
 
-本插件 0.4.12 之前把范围写在 `dsh.compatibility.dsh` 里 —— 那个位置**没有任何代码读取**,当时的兼容性实际是靠 peer 回退蒙对的。现在两处一致(`engines.dsh` 与 peers 同范围),所以哪条规则生效都得到同一个答案。
+本插件 0.4.12 之前把范围写在 `dsh.compatibility.dsh` 里 —— 那个位置**没有任何代码读取**,当时的兼容性实际是靠 peer 回退蒙对的。迁入 monorepo 后,peers 使用 `workspace:^` 追踪宿主工作区;它不是宿主运行时版本范围,不应拿来覆盖 `engines.dsh`。发布形式若使用显式版本范围,应与这里的运行时兼容声明一致。当前工作区宿主 `0.2.2-rc.3` 和上述历史版本都在声明范围内。
 
 这个范围在 **semver 默认语义**下**不匹配**任何带预发布标签的版本(如 `0.2.1-rc.1`)—— 规范如此:预发布只被"同一 major.minor.patch 元组"的比较器允许。
 
