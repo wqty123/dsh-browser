@@ -15,9 +15,7 @@
  * channel all work exactly as they do in the desktop guest.
  *
  * SCOPE AND LIMITS (deliberate, documented rather than hidden)
- * - GET only. POST forms are refused: a proxy that forwards credentials to arbitrary sites on the
- *   user's behalf is a different, much larger decision.
- * - HTML and text-ish documents are rewritten; binary responses are streamed through untouched.
+ * - Methods and bodies are forwarded; only HTML document responses are rewritten.
  * - Frames and scripts inside the page are not executed by the host; they load through the same
  *   prefix so they stay readable.
  * - The overlay is injected on every HTML response, so a rewritten navigation keeps the bar.
@@ -25,6 +23,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { guestRuntimeScript } from './guest-runtime.ts'
 
 /** Prefix every proxied document and subresource lives under. */
 
@@ -39,9 +38,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
  * @returns true for loopback, link-local and private hosts.
  */
 function isSelfTarget(url: URL): boolean {
-  const host = url.hostname.toLowerCase()
+  const host = url.hostname.toLowerCase().replace(/\.$/u, '')
+  if (host.endsWith('.localhost') || host === '[::]' || host.startsWith('[::ffff:')
+    || /^\[(?:f[cd]|fe[89ab])/u.test(host) || /^169\.254\./u.test(host)) return true
   if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1' || host === '0.0.0.0') return true
-  if (/^127\./u.test(host)) return true
+  if (/^(?:0|127)\./u.test(host)) return true
   if (/^10\./u.test(host) || /^192\.168\./u.test(host)) return true
   if (/^172\.(1[6-9]|2\d|3[01])\./u.test(host)) return true
   return false
@@ -64,7 +65,10 @@ function rememberCookies(host: string, values: readonly string[]): void {
     const pair = raw.split(';')[0] ?? ''
     const index = pair.indexOf('=')
     if (index <= 0) continue
-    jar.set(pair.slice(0, index).trim(), pair.slice(index + 1).trim())
+    const name = pair.slice(0, index).trim()
+    const expiry = /;\s*expires=([^;]+)/iu.exec(raw)?.[1]
+    if (/;\s*max-age\s*=\s*0(?:;|$)/iu.test(raw) || (expiry !== undefined && Date.parse(expiry) <= Date.now())) jar.delete(name)
+    else jar.set(name, pair.slice(index + 1).trim())
   }
   cookieJar.set(host, jar)
 }
@@ -80,41 +84,17 @@ function cookiesFor(host: string): string | undefined {
   return [...jar.entries()].map(([name, value]) => `${name}=${value}`).join('; ')
 }
 
-/** Requests larger than this are streamed through without rewriting. */
+/** Responses larger than this pass through without rewriting. */
 const MAX_REWRITE_BYTES = 4 * 1024 * 1024
-
-/** Content types whose bodies are rewritten (everything else passes through byte for byte). */
-const REWRITABLE = /^(text\/|application\/(json|javascript|xhtml\+xml|xml|rss\+xml|atom\+xml))/iu
-
-/**
- * Cookie names that may be replayed to the upstream.
- *
- * The proxied document is same-origin with the host, so anti-bot scripts (Baidu's "安全验证" page is one)
- * set their cookies on OUR origin. Those are the cookies the site itself minted, and replaying them is
- * what lets a challenge that a browser already satisfied stay satisfied. Nothing else is forwarded:
- * the host's own session cookie must never leave for a third party.
- */
-const FORWARD_COOKIE = /^(BAIDUID|BDUSS|BIDUPSID|PSTM|ZFY|BDSVRTM|H_PS_PSSID|__bsi|ab_sr|sug|sugstore|H_PS_|SUB|SUBP|SSOLoginState|SRF|ALF|XSRF)/iu
-
-/**
- * Pick the cookies that may travel to the upstream.
- * @param header - the inbound Cookie header from the proxied document.
- * @returns a cookie header value, or undefined when nothing is forwardable.
- */
-function forwardableCookies(header: string | undefined): string | undefined {
-  if (typeof header !== 'string' || header === '') return undefined
-  const pairs = header.split(';').map(part => part.trim()).filter(part => part !== '')
-  const kept = pairs.filter(part => FORWARD_COOKIE.test(part.split('=')[0] ?? ''))
-  return kept.length === 0 ? undefined : kept.join('; ')
-}
 
 /** A desktop Chrome identity; several sites refuse a request without one. */
 const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
-/** Headers that must not be forwarded verbatim: they are per-connection or proxy-hostile. */
-const DROP_REQUEST_HEADERS = new Set([
-  'host', 'connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'te', 'trailer',
-  'accept-encoding', 'content-length', 'origin', 'referer',
+/** Only site request metadata may leave the app; never forward DSH cookies or internal headers. */
+const SAFE_REQUEST_HEADERS = new Set([
+  'accept', 'accept-language', 'content-type', 'content-language', 'x-requested-with',
+  'authorization', 'x-csrf-token', 'x-xsrf-token', 'range', 'if-range',
+  'if-none-match', 'if-modified-since', 'cache-control',
 ])
 
 /** Response headers that would break a same-origin document. */
@@ -122,7 +102,7 @@ const DROP_RESPONSE_HEADERS = new Set([
   'content-security-policy', 'content-security-policy-report-only', 'x-frame-options',
   'content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive',
   'strict-transport-security', 'cross-origin-opener-policy', 'cross-origin-embedder-policy',
-  'cross-origin-resource-policy', 'permissions-policy', 'set-cookie',
+  'cross-origin-resource-policy', 'permissions-policy', 'set-cookie', 'refresh',
 ])
 
 /**
@@ -232,14 +212,6 @@ export function rewriteDocument(html: string, base: URL): string {
 }
 
 /**
- * Forward a proxied request.
- * @param request - the incoming request (GET only).
- * @param response - the response to write the rewritten body to.
- * @param overlayScript - overlay installer injected into every HTML document.
- * @returns resolves once the response is finished.
- */
-
-/**
  * The last mile for a proxied guest: hand the reference intent to the plugin.
  *
  * The desktop guest exposes a preload bridge; a proxied document does not, so the bar leaves its intent
@@ -250,7 +222,7 @@ export function rewriteDocument(html: string, base: URL): string {
  * @returns the inline script element.
  */
 export function relayTag(sessionId: string): string {
-  const seeded = JSON.stringify(sessionId)
+  const seeded = JSON.stringify(sessionId).replace(/</gu, '\\u003c')
   const body = [
     "(function(){",
     `  var session = ${seeded}`,
@@ -273,7 +245,7 @@ export function relayTag(sessionId: string): string {
     "    console.log('[relay] post intent, session=', session)",
     "    if (typeof session !== 'string' || session === '') return",
     "    try {",
-    "      fetch('/dsh-builtin-browser/reference/capture', {",
+    "      (window.__dshGuestFetch || window.fetch)('/dsh-builtin-browser/reference/capture', {",
     "        method: 'POST',",
     "        headers: { 'content-type': 'application/json' },",
     "        credentials: 'same-origin',",
@@ -289,48 +261,7 @@ export function relayTag(sessionId: string): string {
   return `<script data-dsh-ref-guest-relay="1">${body}</script>`
 }
 
-/**
- * 表单提交中继：代理只认 `?u=<目标地址>`，浏览器默认提交会把字段追加在代理地址后面，
- * 于是目标地址拿不到查询串（侧栏搜索「数独」按回车 → 白屏）。这里拦住 submit，自己拼目标地址。
- * @returns 注入到每个代理 HTML 末尾的 `<script>`。
- */
-function formRelayScript(pageUrl: string): string {
-  const body = [
-    "(() => {",
-    "  if (window.__dshGuestForms) return",
-    "  window.__dshGuestForms = true",
-    "  const script = document.currentScript",
-    "  const BASE = (script && script.dataset && script.dataset.dshGuestBase) ? script.dataset.dshGuestBase : window.location.href",
-    "  const ROUTE = '/dsh-builtin-browser/browser-view/guest?u='",
-    "  const proxied = (absolute) => ROUTE + encodeURIComponent(absolute.href)",
-    "  document.addEventListener('submit', (event) => {",
-    "    const form = event.target",
-    "    if (!form || form.tagName !== 'FORM') return",
-    "    event.preventDefault()",
-    "    try {",
-    "      const declared = form.getAttribute('action') || ''",
-    "      let absolute = new URL(declared === '' ? BASE : declared, BASE)",
-    "      if (absolute.pathname.indexOf('/browser-view/guest') >= 0) {",
-    "        const inner = absolute.searchParams.get('u')",
-    "        if (inner) absolute = new URL(inner)",
-    "      }",
-    "      const params = new URLSearchParams()",
-    "      for (const [key, value] of new FormData(form).entries()) {",
-    "        if (typeof value === 'string') params.append(key, value)",
-    "      }",
-    "      const query = params.toString()",
-    "      if (query !== '') absolute.search = absolute.search === '' ? ('?' + query) : (absolute.search + '&' + query)",
-    "      window.location.assign(proxied(absolute))",
-    "    } catch (error) {",
-    "      window.location.reload()",
-    "    }",
-    "  }, true)",
-    "})()",
-  ].join('\n')
-  const safeBase = pageUrl.replace(/"/gu, '&quot;')
-  return `<script data-dsh-guest-forms="1" data-dsh-guest-base="${safeBase}">${body}</script>`
-}
-
+/** Forward a document or sub-request, keeping upstream cookies off the DSH origin. */
 export async function handleGuest(
   request: IncomingMessage,
   response: ServerResponse,
@@ -338,124 +269,101 @@ export async function handleGuest(
   sessionId: string,
 ): Promise<void> {
   const method = request.method ?? 'GET'
-  if (method !== 'GET' && method !== 'HEAD') {
-    response.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' })
-    response.end('guest proxy: only GET is proxied')
-    return
-  }
-  const query = new URLSearchParams((request.url ?? '').slice((request.url ?? '').indexOf('?') + 1))
-  const session = query.get('s') ?? ''
+  const query = new URLSearchParams((request.url ?? '').split('?')[1] ?? '')
+  const session = query.get('s') ?? sessionId
   const target = guestTarget(request.url ?? '')
   if (target === undefined) {
     response.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
     response.end('guest proxy: a canonical http(s) URL is required')
     return
   }
-  if (isSelfTarget(target)) {
+  const blocked = (url: URL): boolean => {
+    let host = ''
+    try { host = new URL('http://' + (request.headers.host ?? '')).hostname.toLowerCase().replace(/\.$/u, '') } catch {}
+    return !/^https?:$/u.test(url.protocol) || url.username !== '' || url.password !== ''
+      || isSelfTarget(url) || url.hostname.toLowerCase().replace(/\.$/u, '') === host
+  }
+  if (blocked(target)) {
     response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
-    response.end('guest proxy: 侧栏不能打开本机地址（包括 DSH 自身）。调试 DSH 请用内置浏览器打开 DSH 地址。')
+    response.end('guest proxy: local and DSH host targets are not allowed')
     return
   }
+  const destination = request.headers['sec-fetch-dest']
+  const subRequest = request.headers['x-dsh-guest-sub'] === '1'
+    || (typeof destination === 'string' && destination !== 'document' && destination !== 'iframe')
   const headers = new Headers()
   for (const [name, value] of Object.entries(request.headers)) {
-    if (value === undefined || DROP_REQUEST_HEADERS.has(name.toLowerCase())) continue
-    if (typeof value === 'string') headers.set(name, value)
+    if (!SAFE_REQUEST_HEADERS.has(name.toLowerCase()) || value === undefined) continue
+    headers.set(name, Array.isArray(value) ? value.join(', ') : value)
   }
-  // Identify ourselves so a site can attribute the traffic; never forward the host's cookies.
-  // A server-side fetch with no cookies and no user agent looks like a bot to most sites — Baidu
-  // answered every hop with its "安全验证" challenge and the panel showed an empty page.
   headers.set('accept-encoding', 'identity')
   headers.set('user-agent', DESKTOP_UA)
-  headers.set('accept-language', 'zh-CN,zh;q=0.9,en;q=0.8')
-  // 页面内跳转的 Referer 会是我们自己的代理地址（iframe 里的上一页），对站点毫无意义；把它还原成
-  // 「上一页的真实地址」，站点才当成站内导航处理。百度对 `/s?wd=…` 直接服务端拉取一律回「安全验证」，
-  // 带上正确的 Referer 与首页 Cookie 后才会给结果页。
-  const incomingReferer = headers.get('referer') ?? ''
-  if (incomingReferer.includes('/browser-view/guest')) {
+  const referer = request.headers.referer
+  if (typeof referer === 'string') {
     try {
-      const inner = new URL(incomingReferer).searchParams.get('u')
-      if (inner !== null && inner !== '') headers.set('referer', inner)
-      else headers.delete('referer')
-    } catch { headers.delete('referer') }
+      const previous = guestTarget(new URL(referer).pathname + new URL(referer).search)
+      if (previous !== undefined && !blocked(previous)) {
+        headers.set('referer', previous.href)
+        headers.set('origin', previous.origin)
+      }
+    } catch {}
   }
-  const jarCookie = cookiesFor(target.host)
-  const replay = forwardableCookies(request.headers.cookie as string | undefined)
-  const cookie = [jarCookie, replay].filter(part => typeof part === 'string' && part !== '').join('; ')
-  if (cookie !== '') headers.set('cookie', cookie)
-  // 站内导航的伪装头。
-  //
-  // 代理发出去的是「服务端 fetch」：没有 Origin，`sec-fetch-*` 也不存在，站点一眼就能判定这不是
-  // 用户在站内点出来的请求。百度对这类请求一律回「安全验证」，而验证页本身的内容要由它的接口
-  // 再取一次（跨域，取不到），于是侧栏里就是白屏——用户看到的是「点搜索没反应」。
-  // 这几个头全部指向目标站点自己，转发出去与「用户在该站内点了一下」没有区别。
-  headers.set('origin', target.origin)
-  headers.set('sec-fetch-site', 'same-origin')
-  headers.set('sec-fetch-mode', 'navigate')
-  headers.set('sec-fetch-dest', 'document')
-  headers.set('sec-fetch-user', '?1')
-  headers.set('upgrade-insecure-requests', '1')
-  // 深链接预热：直接拉 `https://host/s?…` 这类页面时，站点看到的是「没有站点 Cookie 的首跳」，
-  // 百度会回「安全验证」。先取一次站点根，把服务端种的 Cookie 收进自己的罐子，并把 Referer 指向它，
-  // 这次跳转就变成一次正常的站内导航。只在罐子里还没有该站 Cookie 且目标不是根路径时做一次。
-  if (jarCookie === '' && target.pathname !== '/' && !headers.has('referer')) {
-    try {
-      const warm = await fetch(new URL('/', target.origin).href, { method: 'GET', headers })
-      rememberCookies(target.host, warm.headers.getSetCookie?.() ?? [])
-      headers.set('referer', new URL('/', target.origin).href)
-      const warmed = cookiesFor(target.host)
-      if (warmed !== undefined && warmed !== '') headers.set('cookie', warmed)
-    } catch { /* 预热失败就按原样请求 */ }
-  }
+  const cookie = cookiesFor(target.host)
+  if (cookie !== undefined) headers.set('cookie', cookie)
   let upstream: Response
   try {
-    upstream = await fetch(target, { method, headers, redirect: 'follow' })
-    // 反爬挑战识别 + 一次重试：站点（百度 `/s?wd=…`）在没有「先访问过站点」的痕迹时回「安全验证」。
-    // 罐子里可能已经带着上次挑战页的 Cookie，所以这里不看有没有 Cookie，而是看**内容**：
-    // 命中挑战就先取站点根补一次 Cookie，带上根的 Referer 重试一次。仍失败就把挑战页交给上层。
-    const looksLikeChallenge = /安全验证|wappass|cf-browser-verification|Just a moment/iu
-    if (target.pathname !== '/' && /^text\/html/iu.test(upstream.headers.get('content-type') ?? '')) {
-      const probe = await upstream.clone().text()
-      if (looksLikeChallenge.test(probe)) {
-        try {
-          const origin = new URL('/', target.origin).href
-          const warm = await fetch(origin, { method: 'GET', headers })
-          rememberCookies(target.host, warm.headers.getSetCookie?.() ?? [])
-          const retryHeaders = new Headers(headers)
-          retryHeaders.set('referer', origin)
-          const refreshed = cookiesFor(target.host)
-          if (refreshed !== undefined && refreshed !== '') retryHeaders.set('cookie', refreshed)
-          upstream = await fetch(target, { method, headers: retryHeaders, redirect: 'follow' })
-        } catch { /* 重试失败就用首次响应 */ }
-      }
+    let body: Buffer | undefined
+    if (method !== 'GET' && method !== 'HEAD') {
+      const chunks: Buffer[] = []
+      for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      body = Buffer.concat(chunks)
     }
+    upstream = await fetch(target, { method, headers, body, redirect: 'manual' })
   } catch (error) {
     response.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
     response.end(`guest proxy: cannot reach ${target.host}: ${String((error as Error).message ?? error)}`)
     return
   }
+  rememberCookies(target.host, upstream.headers.getSetCookie?.() ?? [])
   const out = new Headers()
   for (const [name, value] of upstream.headers) {
-    if (DROP_RESPONSE_HEADERS.has(name.toLowerCase())) continue
-    out.set(name, value)
+    if (!DROP_RESPONSE_HEADERS.has(name.toLowerCase())) out.set(name, value)
   }
-  rememberCookies(target.host, upstream.headers.getSetCookie?.() ?? [])
+  const location = upstream.headers.get('location')
+  if (location !== null && upstream.status >= 300 && upstream.status < 400) {
+    let next: URL | undefined
+    try { next = new URL(location, target) } catch {}
+    if (next === undefined || blocked(next)) {
+      await upstream.body?.cancel()
+      response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+      response.end('guest proxy: redirect target is not allowed')
+      return
+    }
+    out.set('location', guestPath(next.href) + (session === '' ? '' : '&s=' + encodeURIComponent(session)))
+  }
   const type = upstream.headers.get('content-type') ?? 'application/octet-stream'
   const length = Number(upstream.headers.get('content-length') ?? '0')
-  if (!REWRITABLE.test(type) || length > MAX_REWRITE_BYTES) {
+  if (method === 'HEAD' || upstream.body === null) {
     response.writeHead(upstream.status, Object.fromEntries(out))
-    if (upstream.body === null) { response.end(); return }
-    const buffer = Buffer.from(await upstream.arrayBuffer())
-    response.end(buffer)
+    response.end()
+    return
+  }
+  if (subRequest || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
+    || length > MAX_REWRITE_BYTES || (upstream.status >= 300 && upstream.status < 400)) {
+    response.writeHead(upstream.status, Object.fromEntries(out))
+    response.end(Buffer.from(await upstream.arrayBuffer()))
     return
   }
   const raw = await upstream.text()
-  const isHtml = /^text\/html/iu.test(type)
-  const body = isHtml
-    // Injected at the END of the body: the bar builds DOM and appends it, so running it in <head>
-    // threw before \`document.body\` existed and the bar never installed (measured in the panel: the
-    // relay queue appeared while the overlay element did not).
-    ? rewriteDocument(raw, target).replace(/<\/body\s*>/iu, match => `\n${overlayScript}\n${formRelayScript(target.href)}\n${relayTag(session)}${match}`)
-    : rewriteDocument(raw, target)
+  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href) + '</script>'
+  let body = rewriteDocument(raw, target)
+  if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
+  else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
+  else body = runtime + body
+  const tail = '\n' + overlayScript + '\n' + relayTag(session)
+  body = /<\/body\s*>/iu.test(body) ? body.replace(/<\/body\s*>/iu, match => tail + match) : body + tail
+  out.delete('etag')
+  out.delete('content-md5')
   out.set('content-type', type)
   response.writeHead(upstream.status, Object.fromEntries(out))
   response.end(body)

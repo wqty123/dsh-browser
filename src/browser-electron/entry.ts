@@ -82,29 +82,8 @@ import {
  * @returns the inline script element.
  */
 function overlayTag(): string {
-  // The overlay source is a FUNCTION BODY (its first statement is `if (...) return ...`), so a bare
-  // `<script>` around it is a syntax error and nothing installs. Measured in the panel: the tag was
-  // present, inline scripts ran, and \`__dshRefOverlayInstalled\` stayed false. Wrapping it in an IIFE is
-  // what the desktop path gets for free from \`executeJavaScript\`.
   const source = overlayScript().replace(/<\/script/giu, '<\\/script')
-  // 运行期兜底：静态改写会把 `target="_blank"` 换成 `_self`（实测百度新闻 49→11），但仍有页面在
-  // 运行期用脚本写 target、或链接在改写之后才插入。捕获阶段拦下这类点击，强制在本 iframe 内导航，
-  // 否则点一下就会新开窗口跳出侧栏。
-  const guard = [
-    'document.addEventListener("click", function (event) {',
-    '  var node = event.target;',
-    '  while (node && node.tagName !== "A") node = node.parentNode;',
-    '  if (!node) return;',
-    '  var href = node.getAttribute("href") || "";',
-    '  var target = node.getAttribute("target") || "";',
-    '  if (target !== "_blank" && target !== "_new" && target !== "_top" && target !== "_parent") return;',
-    '  event.preventDefault();',
-    '  node.setAttribute("target", "_self");',
-    '  if (href) window.location.href = href;',
-    '}, true);',
-  ].join('\n')
   return `<script data-dsh-ref-overlay-src="guest">(function(){\n${source}\n})()</script>`
-    + `<script data-dsh-ref-guest-link-guard="1">(function(){\n${guard}\n})()</script>`
 }
 
 
@@ -1404,4 +1383,3 @@ async function handleSettingsRequest(
     json(400, { ok: false, error: `invalid settings patch: ${String(error)}` })
   }
 }
-
