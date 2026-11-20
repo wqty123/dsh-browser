@@ -58,7 +58,7 @@ test('disposal preserves the in-flight failure and happens on a later turn', asy
 
 test('startedAt records when the bridge started, not when it last said hello', () => {
   const bridge = readFileSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url), 'utf8')
-  const fn = bridge.slice(bridge.indexOf('function publishEndpoint(port, token)'))
+  const fn = bridge.slice(bridge.indexOf('function publishEndpoint('))
   const body = fn.slice(0, fn.indexOf('\n}'))
   assert.match(body, /startedAt: instanceStartedAt\(\)/)
   assert.doesNotMatch(body, /startedAt: new Date\(\)\.toISOString\(\)/)

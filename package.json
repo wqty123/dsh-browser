@@ -94,6 +94,9 @@
     "dsh": ">=0.1.1-rc.2 <0.3.0"
   },
   "dsh": {
+    "desktop": {
+      "main": "./desktop-bridge/main.mjs"
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },

@@ -15,6 +15,7 @@ import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { referenceOwnerKey } from '../../../../reference-owner.ts'
 import { BrowserController, type BrowserControllerOptions } from '../../../browser/BrowserController.ts'
 import { ElectronWebViewImpl } from '../../../electron/ElectronWebViewImpl.ts'
+import { nativeMainReveal } from '../../../../../tests/fixtures/native-main-reveal.mjs'
 import type { ElectronWebviewPresentation, WebviewElement } from '../../../electron/ElectronWebviewPresentation.ts'
 import {
   ASSET_MAP, LONG_TEXT, TAIL_TEXT, assetOf, deliveriesResponse,
@@ -388,17 +389,17 @@ describe('production assembly — shared composer and sent capsules', () => {
     expect(app.runtime.snapshot().reveal).toBeUndefined()
   })
 
-  it.each(['chip', 'dialog'])('completes native %s reveal at DOM-ready while subresources are still loading', async activation => {
+  it.each(['chip', 'dialog'])('completes native %s reveal through the Desktop main extension and bridge at DOM-ready', async activation => {
     const first = await assembled()
     const sourceUrl = first.runtime.cards()[0]!.source.pageUrl
     await send(first.runtime)
     first.runtime.dispose()
     const app = await assembled(first.storage, { client: true, away: true, native: true })
+    const backend = await nativeMainReveal(app.runtime.referenceDetail('ref-mixed-1')!.snapshot, app.live, 42)
+    cleanups.push(() => backend.close())
+    await backend.start()
     app.outcome(async () => {
-      if (!app.reveals.at(-1)?.sourcePageId) return { ok: true, status: 'session-unavailable', pageUrl: sourceUrl }
-      expect(app.live.ready).toBe(true)
-      app.live.highlighted = true
-      return { ok: true, status: 'revealed' }
+      return backend.post(app.reveals.at(-1)!)
     })
     const sent = await app.sent()
     if (activation === 'dialog') await act(async () => { pill(sent).focus() })
@@ -410,7 +411,10 @@ describe('production assembly — shared composer and sent capsules', () => {
     expect(app.navigate).toHaveBeenCalledOnce()
     expect(app.reveals).toEqual([{ referenceId: 'ref-mixed-1' }])
     expect(app.live).toEqual({ url: sourceUrl, ready: false, highlighted: false })
-    await act(async () => { app.ready() })
+    await act(async () => {
+      app.ready()
+      await vi.waitFor(() => { expect(backend.outcomes).toHaveLength(2) })
+    })
     expect(app.frame()).toMatchObject({ loading: true, documentReady: true, address: 'observed' })
     expect(app.initialization()).toMatchObject({ stage: 'attached', guestId: '42', requestId: app.frame().navigationId })
     expect(app.reveals).toEqual([{ referenceId: 'ref-mixed-1' }, { referenceId: 'ref-mixed-1', sourcePageId: '42' }])
@@ -418,9 +422,14 @@ describe('production assembly — shared composer and sent capsules', () => {
       expect.objectContaining({ method: 'POST', credentials: 'include', body: JSON.stringify({ referenceId: 'ref-mixed-1' }) }),
       expect.objectContaining({ method: 'POST', credentials: 'include', body: JSON.stringify({ referenceId: 'ref-mixed-1', sourcePageId: '42' }) }),
     ])
+    expect(backend.outcomes.map(outcome => outcome.status), JSON.stringify(backend.outcomes)).toEqual(['session-unavailable', 'revealed'])
     expect(app.live.highlighted).toBe(true)
+    expect(backend.commands).toHaveLength(3)
     expect(app.openTabIn).not.toHaveBeenCalled()
-    await act(async () => { click() })
+    await act(async () => {
+      click()
+      await vi.waitFor(() => { expect(backend.outcomes).toHaveLength(4) })
+    })
     expect(app.reveals).toHaveLength(4)
     expect(app.navigate).toHaveBeenCalledOnce()
   })

@@ -67,8 +67,8 @@ function codedError(code, message) {
  * Measured on DSH Desktop 0.2.0-rc.2, launched from a shortcut (no DSH_HOME in
  * its environment).
  */
-function endpointFile() {
-  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+function endpointFile(dshHome) {
+  const home = dshHome ?? process.env.DSH_HOME ?? join(homedir(), '.dsh')
   return join(home, 'dsh-builtin-browser-bridge.json')
 }
 
@@ -891,7 +891,7 @@ const instanceStartedAt = (() => {
  * by the process that actually owns the listener, and readers are told the pid
  * so they can verify liveness themselves.
  */
-function publishEndpoint(port, token) {
+function publishEndpoint(port, token, dshHome) {
   const payload = {
     port,
     token,
@@ -900,7 +900,7 @@ function publishEndpoint(port, token) {
     updatedAt: new Date().toISOString(),
   }
   try {
-    const file = endpointFile()
+    const file = endpointFile(dshHome)
     mkdirSync(join(file, '..'), { recursive: true })
     writeFileSync(file, JSON.stringify(payload, null, 2) + '\n')
     return true
@@ -1091,7 +1091,7 @@ export function stop() {
 }
 
 /** Start the bridge: loopback listener + published endpoint file + token. */
-export function start() {
+export function start(api) {
   stop()
   // Sidebar guests are created by the shell at any time (including after a
   // bridge reload), so configure both the existing guests and every future one.
@@ -1238,7 +1238,7 @@ export function start() {
   server.listen(0, '127.0.0.1', () => {
     const address = server.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
-    if (publishEndpoint(port, token)) {
+    if (publishEndpoint(port, token, api?.dshHome)) {
       console.log(`[dsh-browser-bridge] listening on 127.0.0.1:${port} (pid ${process.pid})`)
     }
   })
@@ -1246,7 +1246,7 @@ export function start() {
   const keepalive = setInterval(() => {
     const address = server.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
-    if (port !== 0) publishEndpoint(port, token)
+    if (port !== 0) publishEndpoint(port, token, api?.dshHome)
   }, 15_000)
   keepalive.unref?.()
   const onQuit = () => stop()
