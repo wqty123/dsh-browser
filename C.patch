@@ -1,0 +1,163 @@
+From 29808f191d105c0bd4e3afb10e5861a19b45de25 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B1=B1=E4=B8=8E?= <2315639909@qq.com>
+Date: Fri, 20 Nov 2026 03:51:01 +0000
+Subject: [PATCH] fix: correct panel fixtures, probe whitespace and prompt
+ namespace
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ src/tool-browser/index.ts             |  2 +-
+ src/tool-browser/page-probe.ts        |  6 ++---
+ tests/page-probe.test.mjs             | 33 +++++++++++++++++++++++++++
+ tests/panel-session.test.mjs          |  6 ++---
+ tests/tool-layer-passthrough.test.mjs | 15 ++++++++++++
+ 5 files changed, 55 insertions(+), 7 deletions(-)
+
+diff --git a/src/tool-browser/index.ts b/src/tool-browser/index.ts
+index 1652b85..000de14 100644
+--- a/src/tool-browser/index.ts
++++ b/src/tool-browser/index.ts
+@@ -471,7 +471,7 @@ export function apply(ctx: Context, config: Config = {}): void {
+   state.configRestrictedTo = config.allowedActions !== undefined ? [...config.allowedActions] : undefined
+ 
+   ctx.systemPrompt.section({
+-    name: 'tool:browser',
++    name: 'tool:dsh-builtin-browser',
+     // Tool guidance band is 100-199; 150 keeps clear of the common 110/120
+     // tool sections so ordering does not depend on plugin load sequence.
+     order: 150,
+diff --git a/src/tool-browser/page-probe.ts b/src/tool-browser/page-probe.ts
+index 28fc6be..9296856 100644
+--- a/src/tool-browser/page-probe.ts
++++ b/src/tool-browser/page-probe.ts
+@@ -29,7 +29,7 @@
+ import type { BrowserPageOperationRequest, BrowserProbeMethod } from '../browser/types.ts'
+ 
+ /** Bumped when the probe's shape changes; an older probe is replaced rather than trusted. */
+-export const PROBE_VERSION = 4
++export const PROBE_VERSION = 5
+ 
+ /** Where the probe keeps itself, and the only global it adds. */
+ const PROBE_KEY = '__dshProbe'
+@@ -281,7 +281,7 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
+         range.setEnd(node, at + needle.length)
+         const rect = range.getBoundingClientRect()
+         out.push({
+-          text: short(value.slice(Math.max(0, at - 20), at + needle.length + 20).replace(/\s+/g, ' ').trim(), 80),
++          text: short(value.slice(Math.max(0, at - 20), at + needle.length + 20).replace(/\\s+/g, ' ').trim(), 80),
+           x: Math.round(rect.left + rect.width / 2),
+           y: Math.round(rect.top + rect.height / 2),
+           host: node.parentElement ? describe(node.parentElement) : 'text',
+@@ -331,7 +331,7 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
+       scrollX: Math.round(globalThis.scrollX || 0),
+       scrollY: Math.round(globalThis.scrollY || 0),
+       selection: short(globalThis.getSelection ? String(globalThis.getSelection()) : '', 120),
+-      text: short(String(body || '').replace(/\s+/g, ' ').trim(), 400),
++      text: short(String(body || '').replace(/\\s+/g, ' ').trim(), 400),
+     }
+   }
+   globalThis[KEY] = state
+diff --git a/tests/page-probe.test.mjs b/tests/page-probe.test.mjs
+index f5930aa..e567cee 100644
+--- a/tests/page-probe.test.mjs
++++ b/tests/page-probe.test.mjs
+@@ -77,6 +77,39 @@ test('console lines are captured with their level, newest last', () => {
+   assert.deepEqual([...rows.map(row => `${row.level}:${row.text}`)], ['warn:careful', 'log:value 42'])
+ })
+ 
++test('summary and findText normalize whitespace without deleting lowercase s', () => {
++  const { page, probe } = install()
++  const text = 'This is\t a session\n success'
++  page.document.body.innerText = text
++  assert.equal(probe.summary().text, 'This is a session success')
++  const node = { nodeValue: text, parentElement: null }
++  page.document.createTreeWalker = () => {
++    let next = node
++    return { nextNode: () => { const current = next; next = null; return current } }
++  }
++  page.document.createRange = () => ({
++    setStart() {}, setEnd() {},
++    getBoundingClientRect: () => ({ left: 10, top: 20, width: 40, height: 10 }),
++  })
++  const hits = probe.findText('session', false)
++  assert.equal(hits.length, 1)
++  assert.equal(hits[0].text, 'This is a session success')
++  assert.equal(hits[0].x, 30)
++  assert.equal(hits[0].y, 25)
++  assert.equal(probe.findText('missing', false).length, 0)
++  assert.equal(probe.findText('', false).length, 0)
++  page.document.body.innerText = ''
++  assert.equal(probe.summary().text, '')
++})
++
++test('a probe from before the whitespace fix is disposed and replaced', () => {
++  let disposed = 0
++  const { probe } = install({ __dshProbe: { version: PROBE_VERSION - 1, dispose() { disposed++ } } })
++  assert.equal(disposed, 1)
++  assert.equal(probe.version, PROBE_VERSION)
++  assert.throws(() => install({ __dshProbe: { version: PROBE_VERSION - 1 } }), /reload this page/)
++})
++
+ test('a fetch is recorded with its status, and its rejection still propagates', async () => {
+   const failing = makePage({ fetch: async () => { throw new Error('offline') } })
+   vm.runInNewContext(PROBE_INSTALL_SCRIPT, failing)
+diff --git a/tests/panel-session.test.mjs b/tests/panel-session.test.mjs
+index c166544..8a92935 100644
+--- a/tests/panel-session.test.mjs
++++ b/tests/panel-session.test.mjs
+@@ -49,7 +49,7 @@ function mount(overrides = {}, owner = 'panel-task') {
+ }
+ 
+ const operations = [
+-  ['snapshot', {}], ['a11y', {}], ['content', { format: 'text' }],
++  ['snapshot', {}], ['a11y', {}], ['content', { format: 'txt' }],
+   ['scrape', { item: '.item', fields: { title: 'h2' } }], ['screenshot', {}],
+   ['click', { target: { by: 'css', value: '#go' } }], ['type', { text: 'hello' }],
+   ['upload', { target: { by: 'css', value: '#file' }, path: join(home, 'upload.txt') }],
+@@ -108,7 +108,7 @@ test('builtin -> CDP panel -> builtin switches sessions instead of driving a sta
+   const { run, calls } = mount()
+   await run('open', { url: 'https://old.example/', surface: 'builtin' })
+   await run('open', { url: 'https://new.example/' })
+-  await run('content', { format: 'text' })
++  await run('content', { format: 'txt' })
+   assert.equal(calls.at(-1).session, 'browser:panel')
+   assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:builtin'))
+   await run('open', { url: 'https://third.example/', surface: 'builtin' })
+@@ -122,7 +122,7 @@ test('builtin -> Web panel forgets and closes the old controllable session', asy
+   await run('open', { url: 'https://old.example/', surface: 'builtin' })
+   await run('open', { url: 'https://new.example/' })
+   const before = calls.length
+-  await assert.rejects(run('content', { format: 'text' }), /panel surface/)
++  await assert.rejects(run('content', { format: 'txt' }), /panel surface/)
+   assert.equal(calls.length, before)
+   assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:builtin'))
+ })
+diff --git a/tests/tool-layer-passthrough.test.mjs b/tests/tool-layer-passthrough.test.mjs
+index e92fe40..3298e21 100644
+--- a/tests/tool-layer-passthrough.test.mjs
++++ b/tests/tool-layer-passthrough.test.mjs
+@@ -83,6 +83,21 @@ async function open(tools) {
+   )
+ }
+ 
++test('the prompt section coexists with another browser plugin in either registration order', () => {
++  for (const siblingFirst of [true, false]) {
++    const { ctx, tools } = makeContext()
++    const sections = new Set(siblingFirst ? ['tool:browser'] : [])
++    ctx.systemPrompt.section = ({ name }) => {
++      assert.equal(sections.has(name), false, 'prompt section identity is unique')
++      sections.add(name)
++    }
++    apply(ctx)
++    if (!siblingFirst) ctx.systemPrompt.section({ name: 'tool:browser' })
++    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:dsh-builtin-browser'])
++    assert.ok(tools.has('dsh_browser_open'), 'tool registration completes')
++  }
++})
++
+ test('dsh_browser_a11y hands the selector on', async () => {
+   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
+   apply(ctx)
+-- 
+2.56.0
+
