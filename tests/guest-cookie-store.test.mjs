@@ -12,7 +12,7 @@ function fixture(t) {
   return directory
 }
 
-test('cookies survive a real process restart; session values never reach disk or logs', t => {
+test('persistent and session cookies survive a real process restart without logging values', t => {
   const directory = fixture(t)
   const module = new URL('../lib/browser-electron/guest-cookie-store.js', import.meta.url).href
   const run = body => {
@@ -23,14 +23,14 @@ test('cookies survive a real process restart; session values never reach disk or
     assert.equal(result.stdout, '')
     assert.equal(result.stderr, '')
   }
-  run(`jar.setCookies(url, ['PERSIST=kept; Secure; Max-Age=3600; Path=/', 'SESSION=not-on-disk; Path=/']);
-    assert.equal(jar.getCookieHeader(url), 'PERSIST=kept; SESSION=not-on-disk');`)
-  run(`assert.equal(jar.getCookieHeader(url), 'PERSIST=kept');`)
+  run(`jar.setCookies(url, ['PERSIST=kept; Secure; Max-Age=3600; Path=/', 'SESSION=restored; Path=/']);
+    assert.equal(jar.getCookieHeader(url), 'PERSIST=kept; SESSION=restored');`)
+  run(`assert.equal(jar.getCookieHeader(url), 'PERSIST=kept; SESSION=restored');`)
   const storage = join(directory, 'dsh-builtin-browser-host', 'web-cookies')
   assert.deepEqual(readdirSync(storage), ['cookies.json'], 'one store, with no identity keys or temporary files')
   const file = join(storage, 'cookies.json')
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(file, 'utf8'))).sort(), ['cookies', 'version'])
-  assert.equal(readFileSync(file, 'utf8').includes('not-on-disk'), false)
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).cookies.find(cookie => cookie.name === 'SESSION').expiresAt, undefined)
   if (process.platform !== 'win32') assert.equal(statSync(file).mode & 0o777, 0o600)
 })
 
@@ -40,10 +40,10 @@ test('expiry, replacement by a session cookie, and explicit deletion remain effe
   t.mock.method(Date, 'now', () => now)
   const url = new URL('https://site.example/')
   const jar = loadGuestCookies(directory)
-  jar.setCookies(url, ['SHORT=yes; Max-Age=1', 'LONG=yes; Max-Age=3600', 'DELETE=yes; Max-Age=3600', 'REPLACE=yes; Max-Age=3600'])
-  jar.setCookies(url, ['DELETE=gone; Max-Age=0', 'REPLACE=session-only'])
+  jar.setCookies(url, ['SHORT=yes; Max-Age=1', 'LONG=yes; Max-Age=3600', 'DELETE=yes', 'PAST=yes', 'NEGATIVE=yes', 'REPLACE=yes; Max-Age=3600'])
+  jar.setCookies(url, ['DELETE=gone; Max-Age=0', 'PAST=gone; Expires=Tue, 01 Jan 2000 00:00:00 GMT', 'NEGATIVE=gone; Max-Age=-1', 'REPLACE=session-only'])
   now += 1000
-  assert.equal(loadGuestCookies(directory).getCookieHeader(url), 'LONG=yes')
+  assert.equal(loadGuestCookies(directory).getCookieHeader(url), 'LONG=yes; REPLACE=session-only')
   assert.equal(jar.getCookieHeader(url), 'LONG=yes; REPLACE=session-only')
 })
 

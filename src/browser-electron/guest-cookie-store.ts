@@ -19,7 +19,7 @@ export function loadGuestCookies(directory: string): GuestCookieJar {
       if (record.version !== 1 || !Array.isArray(record.cookies)) throw new Error()
       saved = record.cookies.flatMap(value => {
         const cookie = normalizeStoredCookie(value)
-        return cookie !== undefined && cookie.expiresAt !== undefined && cookie.expiresAt > Date.now() ? [cookie] : []
+        return cookie !== undefined && (cookie.expiresAt === undefined || cookie.expiresAt > Date.now()) ? [cookie] : []
       })
     } finally { if (fd !== undefined) closeSync(fd) }
   } catch {}
