@@ -50,7 +50,8 @@ function observedTargetUrl(frame: HTMLIFrameElement): string | undefined {
   return /^https?:\/\//iu.test(raw) ? raw : undefined
 }
 
-export const WEB_BROWSER_SANDBOX = 'allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox'
+export const WEB_BROWSER_SANDBOX = 'allow-scripts allow-forms allow-same-origin'
+const RELAXED_BROWSER_SANDBOX = `${WEB_BROWSER_SANDBOX} allow-downloads allow-modals allow-pointer-lock allow-top-navigation allow-orientation-lock allow-presentation allow-storage-access-by-user-activation`
 
 interface IframeDocument {
   readonly target: BrowserTarget
@@ -158,7 +159,7 @@ export class IframePresentation implements BrowserPresentation {
     element.title = current.target.title
     element.referrerPolicy = 'no-referrer'
     element.dataset.sidebarBrowserFrame = 'iframe'
-    if (current.sandboxed) element.setAttribute('sandbox', WEB_BROWSER_SANDBOX)
+    element.setAttribute('sandbox', current.sandboxed ? WEB_BROWSER_SANDBOX : RELAXED_BROWSER_SANDBOX)
     element.addEventListener('load', () => {
       if (this.element !== element) return
       // 同源（代理形态）时能读出页面自己走到了哪个地址，交给控制器更新地址栏。

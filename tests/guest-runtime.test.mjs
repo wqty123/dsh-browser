@@ -106,7 +106,7 @@ test('XHR, beacon and window.open stay in the proxy', () => {
   assert.equal(requests[0].input, guestPath('https://ordinary.example/metrics'))
   assert.equal(requests[0].init.headers['x-dsh-guest-sub'], '1')
   assert.equal(requests[0].init.body, 'payload')
-  context.open('next')
+  context.open('next', '_blank')
   assert.equal(navigations[0], guestPath('https://ordinary.example/dir/next'))
 })
 
@@ -134,6 +134,7 @@ test('anchor clicks and GET forms navigate self; POST forms retain native body e
   const anchor = new Element()
   anchor.tagName = 'A'
   anchor.setAttribute('href', '../next')
+  anchor.setAttribute('target', '_blank')
   let prevented = false
   listeners.get('click')({ target: anchor, preventDefault() { prevented = true } })
   assert.equal(prevented, true)
