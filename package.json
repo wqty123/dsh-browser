@@ -21,6 +21,7 @@
     "dist",
     "src",
     "scripts",
+    "tools/accept-desktop.mjs",
     "desktop-bridge",
     "cordis.patch.yml",
     "CHANGELOG.md",
@@ -58,6 +59,12 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "prepack": "node scripts/build.mjs"
+  },
+  "bin": {
+    "dsh-browser-install-electron": "scripts/install-electron.mjs"
+  },
+  "dependencies": {
+    "electron": "^44.10.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
