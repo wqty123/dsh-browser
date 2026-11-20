@@ -72,6 +72,33 @@ async function submit(raw: RawCaptureResult) {
 }
 
 describe('formatted quotations through emitted capture, storage, draft and submission', () => {
+  it.each(['', '\n\n  '])('does not turn inter-block source formatting into blank preview lines (%j)', async gap => {
+    const raw = select(`<p>无序列表</p>${gap}<ul>\n<li>列表项</li>\n<li>列表项</li>\n<li>列表项</li>\n</ul>`)
+    expect(raw.events).toHaveLength(1)
+    const event = raw.events![0]!
+    expect(event.content?.map(node => node.type)).toEqual(['paragraph', 'list'])
+    const { snapshot, group, parts } = await submit(raw)
+    expect(snapshot.parts.map(part => part.type)).toEqual(['text'])
+    expect(parts.map(part => part.type === 'text' ? part.text : '').join('')).not.toMatch(/\n{3}/u)
+    const page = execute<{ text: string }>(pageTextScript())
+    const start = page.text.indexOf(event.exact!)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(execute(highlightScript(), { start, end: start + event.exact!.length })).toMatchObject({ ok: true })
+    const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
+    render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
+    const quote = document.querySelector('[data-part-kind="text"]')!
+    expect([...quote.childNodes].map(node => node.nodeName)).toEqual(['P', 'UL'])
+    expect(quote.querySelectorAll('li')).toHaveLength(3)
+    expect(quote.querySelector('br, p:empty')).toBeNull()
+  })
+
+  it('retains inline spaces, explicit breaks and preformatted inter-block whitespace', () => {
+    const raw = select('<p><strong>a</strong> <em>b</em><br>c</p><pre><code><div>first</div>\n\n<div>second</div></code></pre>')
+    const content = raw.events![0]!.content!
+    expect(renderToStaticMarkup(createElement(ReferenceText, { content }))).toContain('<strong>a</strong> <em>b</em><br/>c')
+    expect(renderToStaticMarkup(createElement(ReferenceText, { content }))).toContain('<div>first</div>\n\n<div>second</div>')
+  })
+
   it.each([
     ['KaTeX inline', '<span class="katex"><span class="katex-mathml"><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x^2</annotation></semantics></math></span><span class="katex-html">garbled glyphs</span></span>', 'x^2', false],
     ['KaTeX display', '<span class="katex-display"><span class="katex"><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x^2</annotation></semantics></math><span>garbled glyphs</span></span></span>', 'x^2', true],
