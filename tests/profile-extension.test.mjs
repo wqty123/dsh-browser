@@ -11,6 +11,7 @@ import { installedProfileExtension, profileExtensionCommand, repairProfileExtens
 import { waitForRestartedBridge } from '../src/browser-electron/bridge-install.ts'
 import { readBridgeStatus } from '../src/browser-electron/bridge-status.ts'
 import { runMaintenanceLifecycle } from '../src/browser-electron/maintenance-lifecycle.ts'
+import { writeAsar } from './fake-asar.mjs'
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'profile-extension-'))
@@ -40,7 +41,13 @@ test('profile repair and removal invoke the trusted CLI and do not change app re
       assert.deepEqual(args.slice(0, 4), [f.cli, 'plugin', '--profile', 'desktop'])
       assert.equal(env.DSH_HOME, f.home); assert.equal(env.ELECTRON_RUN_AS_NODE, '1')
       assert.equal(args[4], action === 'install' ? 'add' : 'remove')
-      assert.equal(args[5], action === 'install' ? `dsh-builtin-browser@file:${join(f.home, 'plugin.tgz')}` : 'dsh-builtin-browser')
+      assert.equal(args[5], action === 'install' ? `file:${join(f.home, 'plugin.tgz')}` : 'dsh-builtin-browser')
+      assert.equal(env.npm_config_offline, 'true')
+      assert.equal(env.npm_config_ignore_scripts, 'true')
+      assert.equal(env.PNPM_CONFIG_OFFLINE, 'true')
+      assert.equal(env.PNPM_CONFIG_IGNORE_SCRIPTS, 'true')
+      assert.equal(env.PNPM_CONFIG_AUTO_INSTALL_PEERS, 'false')
+      assert.equal(env.ELECTRON_NO_ASAR, '1')
       return { code: 0, output: 'profile package operation completed' }
     })
     assert.equal(result.ok, true); assert.equal(result.restarted, false)
@@ -93,6 +100,18 @@ test('missing profiles and missing package specs fail before starting any instal
     calls++; return { code: 1, output: 'EACCES: profile is read-only' }
   })
   assert.equal(calls, 1); assert.equal(result.ok, false); assert.match(result.output, /EACCES/)
+})
+
+test('raw packed CLI discovery works with ASAR disabled in the maintenance worker', async t => {
+  const f = fixture(t), entry = 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js'
+  writeAsar(join(f.app, 'resources/app.asar'), { [entry]: 'export const runDesktopCli = () => {}' })
+  rmSync(f.cli)
+  const previous = process.noAsar
+  process.noAsar = true
+  try {
+    const args = await profileExtensionCommand('uninstall', f.app, f.home)
+    assert.equal(args[0], join(f.app, 'resources/app.asar', entry))
+  } finally { process.noAsar = previous }
 })
 
 test('a rejected profile command remains failed after Desktop recovery instead of reporting a repaired extension', async t => {

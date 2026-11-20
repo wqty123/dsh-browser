@@ -151,7 +151,7 @@ test('captured file dependency survives removal and is used instead of a replace
   const archive = readFileSync(join(f.home, 'plugin.tgz'))
   writeFileSync(f.manifest, JSON.stringify({ dependencies: { other: '^1' } }))
   const command = await profileExtensionCommand('install', f.root, f.home, captured)
-  assert.equal(command.at(-1), `dsh-builtin-browser@file:${join(f.home, 'plugin.tgz')}`)
+  assert.equal(command.at(-1), `file:${join(f.home, 'plugin.tgz')}`)
   assert.deepEqual(readFileSync(join(f.home, 'plugin.tgz')), archive)
 })
 
@@ -232,6 +232,7 @@ test('staged compiled coordinator imports without the installed package or its n
   for (const file of ['desktop-bridge/install.mjs', 'dsh-host-patch/apply.mjs', 'dsh-host-patch/rc3.json']) {
     assert.ok(existsSync(join(destination, 'runtime', file)))
   }
+  assert.equal(existsSync(join(destination, 'runtime/node_modules')), false)
   assert.equal(execFileSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(worker).href)}); console.log('staged runtime loaded')`], { encoding: 'utf8', cwd: destination }).trim(), 'staged runtime loaded')
   await assert.rejects(stageReinstallRuntime(destination, destination), /outside the removed package/)
 })

@@ -14,6 +14,9 @@ import { dshHome } from './paths.ts'
 import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.ts'
 import { renameMaintenanceFile } from '../../desktop-bridge/maintenance-files.mjs'
 import { installedProfileExtension, repairProfileExtension, profileDependencySpec, profileRuntimeDirectory, MAIN_EXTENSION_NAME, type InstalledExtension } from './profile-extension.ts'
+import { withProfileCheckpoint } from './profile-checkpoint.ts'
+import { runProfileCommand } from './profile-command.ts'
+import { cleanProfileResidue, inspectProfileResidue } from './profile-residue.ts'
 
 const { hostPatchStatus }: { hostPatchStatus: (packages: readonly string[], options?: { fs: object }) => HostPatchResult } = await import(new URL('../../dsh-host-patch/apply.mjs', import.meta.url).href)
 const { stripLegacyBridge }: { stripLegacyBridge: (text: string) => string | undefined } = await import(new URL('../../dsh-host-patch/legacy-bridge.mjs', import.meta.url).href)
@@ -36,6 +39,7 @@ interface AutomaticPlan {
   readonly createdAt: string
   readonly locale?: 'zh' | 'en'
   readonly dependency: string
+  readonly nestedResidue?: readonly string[]
 }
 
 export class ReinstallPreflightError extends Error {
@@ -131,6 +135,7 @@ export async function preflightReinstall(root: string, home: string): Promise<st
       if (source === owner || inside(owner, source)) throw new ReinstallPreflightError('REINSTALL_DEPENDENCY_UNSAFE', 'The captured dependency source would be deleted by plugin removal.')
     }
   }
+  await inspectProfileResidue(home)
   const status = inspectReinstallHost(root)
   if (status.status !== 'absent' && status.status !== 'applied') throw new ReinstallPreflightError('REINSTALL_HOST_CONFLICT', status.reason ?? status.status)
   const cli = 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js'
@@ -503,7 +508,7 @@ export async function startAutomaticMaintenance(action: 'reinstall', root: strin
     const stagedWorker = await stageReinstallRuntime(directory)
     await lock.writeFile(id + '\n')
     await lock.close()
-    plan = { version: 1, id, action, dependency, root: resolve(root), nodePath: original.nodePath, electronNode: original.electronNode,
+    plan = { version: 1, id, action, dependency, nestedResidue: await inspectProfileResidue(home), root: resolve(root), nodePath: original.nodePath, electronNode: original.electronNode,
       home, directory, target: mains[0] as DesktopProcess, createdAt: new Date().toISOString(),
       ...options.locale === undefined ? {} : { locale: options.locale } }
     const path = join(directory, 'automatic.json')
@@ -511,7 +516,7 @@ export async function startAutomaticMaintenance(action: 'reinstall', root: strin
     await atomicJson(join(base, 'latest.json'), { id, directory })
     const launched = await launchMaintenanceBroker({ runtimePath: plan.nodePath,
       args: [...plan.electronNode ? ['--expose-internals'] : [], stagedWorker, '--automatic-maintenance', path], cwd: directory,
-      environment: { DSH_HOME: home, ELECTRON_RUN_AS_NODE: plan.electronNode ? '1' : undefined } })
+      environment: { DSH_HOME: home, ELECTRON_RUN_AS_NODE: plan.electronNode ? '1' : undefined, ELECTRON_NO_ASAR: '1' } })
     // WMI's return code proves creation only. The worker must actually load and publish its arm.
     const deadline = Date.now() + 12_000
     while (Date.now() < deadline) {
@@ -596,22 +601,25 @@ async function runWorker(path: string): Promise<void> {
         const bridge = async (action: 'install' | 'uninstall'): Promise<BridgeActionResult> => await runBridgeAction(action, plan.root, {
           node: () => plan.nodePath, installer: defaultInstallerPath, trackResult: true,
           run: async (cmd, args, extra) => await execute(cmd, [...plan.electronNode ? ['--expose-internals'] : [], ...args], 180_000,
-            { ...process.env, ...extra, ELECTRON_RUN_AS_NODE: plan.electronNode ? '1' : undefined }),
+            { ...process.env, ...extra, ELECTRON_RUN_AS_NODE: plan.electronNode ? '1' : undefined, ELECTRON_NO_ASAR: '1' }),
         })
         const profile = async (action: 'install' | 'uninstall'): Promise<BridgeActionResult> => await repairProfileExtension(action, plan.root, plan.home,
-          async (command, argv, environment) => await execute(command, argv, 180_000, environment), plan.dependency)
-        const result = await runReinstallTransaction({
-          remove: () => profile('uninstall'),
-          absent: async () => {
-            const manifest = JSON.parse(await readFile(join(plan.home, 'profiles', 'desktop', 'package.json'), 'utf8')) as { dependencies?: Record<string, unknown> }
-            return manifest.dependencies?.[MAIN_EXTENSION_NAME] === undefined && !existsSync(join(plan.home, 'profiles', 'desktop', 'node_modules', MAIN_EXTENSION_NAME))
-          },
-          revert: () => bridge('uninstall'),
-          hostAbsent: () => inspectReinstallHost(plan.root).status === 'absent',
-          apply: () => bridge('install'), add: () => profile('install'),
+          runProfileCommand, plan.dependency)
+        return await withProfileCheckpoint(plan.home, plan.directory, async () => {
+          const residue = await cleanProfileResidue(plan.home)
+          const result = await runReinstallTransaction({
+            remove: () => profile('uninstall'),
+            absent: async () => {
+              const manifest = JSON.parse(await readFile(join(plan.home, 'profiles', 'desktop', 'package.json'), 'utf8')) as { dependencies?: Record<string, unknown> }
+              return manifest.dependencies?.[MAIN_EXTENSION_NAME] === undefined && !existsSync(join(plan.home, 'profiles', 'desktop', 'node_modules', MAIN_EXTENSION_NAME))
+            },
+            revert: () => bridge('uninstall'),
+            hostAbsent: () => inspectReinstallHost(plan.root).status === 'absent',
+            apply: () => bridge('install'), add: () => profile('install'),
+          })
+          extension = await installedProfileExtension(plan.home)
+          return { ...result, output: [residue, result.output].filter(Boolean).join('\n') }
         })
-        extension = await installedProfileExtension(plan.home)
-        return result
       },
       restart: async () => {
         if ((await desktopProcesses(plan.root)).length > 0) throw new Error('DSH Desktop is already running; not opening a second instance')

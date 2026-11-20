@@ -5,6 +5,7 @@ import { readFile, access, stat } from 'node:fs/promises'
 import { join, resolve, isAbsolute } from 'node:path'
 import type { BridgeAction, BridgeActionResult } from './bridge-install.ts'
 import { BridgeConnection } from './bridge-connection.ts'
+import { readAsarFile } from './desktop-identity.ts'
 
 export const MAIN_EXTENSION_UNSUPPORTED = 'DESKTOP_MAIN_EXTENSION_UNSUPPORTED'
 export const MAIN_EXTENSION_NAME = 'dsh-builtin-browser'
@@ -73,8 +74,12 @@ export async function profileExtensionCommand(action: BridgeAction, root: string
   const dependency = action === 'install' ? capturedSpec ?? await profileDependencySpec(home) : undefined
   if (action === 'install' && (typeof dependency !== 'string' || dependency.trim() === '')) throw new Error('REINSTALL_DEPENDENCY_MISSING')
   const resources = join(root, 'resources')
-  let cli = join(resources, 'app.asar', 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js')
-  try { await access(cli) } catch { cli = join(resources, 'app', 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js'); await access(cli) }
+  const entry = 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js'
+  const archive = join(resources, 'app.asar')
+  let cli = join(archive, entry)
+  if (readAsarFile(archive, entry) === undefined) {
+    try { await access(cli) } catch { cli = join(resources, 'app', entry); await access(cli) }
+  }
   const args = [cli, 'plugin', '--profile', 'desktop']
   if (action === 'uninstall') return [...args, 'remove', MAIN_EXTENSION_NAME]
   let spec = String(dependency)
@@ -82,17 +87,21 @@ export async function profileExtensionCommand(action: BridgeAction, root: string
     const colon = spec.indexOf(':')
     spec = spec.slice(0, colon + 1) + resolve(profile, spec.slice(colon + 1))
   }
-  return [...args, 'add', `${MAIN_EXTENSION_NAME}@${spec}`]
+  return [...args, 'add', /^(?:file|link):/.test(spec) ? spec : `${MAIN_EXTENSION_NAME}@${spec}`]
 }
 
 export async function repairProfileExtension(action: BridgeAction, root: string, home: string, run: (
   command: string, argv: readonly string[], environment: NodeJS.ProcessEnv,
 ) => Promise<{ code: number; output: string }>, capturedSpec?: string): Promise<BridgeActionResult> {
   const support = await profileRuntimeDirectory(root)
-  const script = `import { dirname, resolve } from 'node:path'; import { pathToFileURL } from 'node:url'; const { runDesktopCli } = await import(pathToFileURL(process.argv[1]).href); const support = ${JSON.stringify(support)}; await (runDesktopCli.length >= 2 ? runDesktopCli(resolve(dirname(process.argv[1]), '../../../..'), support) : runDesktopCli(support));`
-  const argv = ['--expose-internals', '--input-type=module', '--eval', script, '--', ...await profileExtensionCommand(action, root, home, capturedSpec)]
+  const invocation = await profileExtensionCommand(action, root, home, capturedSpec)
+  const packedCli = invocation[0].replaceAll('\\', '/').includes('/app.asar/')
+  const script = `process.env.ELECTRON_NO_ASAR = '1'; import { dirname, resolve } from 'node:path'; import { pathToFileURL } from 'node:url'; const { runDesktopCli } = await import(pathToFileURL(process.argv[1]).href); const support = ${JSON.stringify(support)}; await (runDesktopCli.length >= 2 ? runDesktopCli(resolve(dirname(process.argv[1]), '../../../..'), support) : runDesktopCli(support));`
+  const argv = ['--expose-internals', '--input-type=module', '--eval', script, '--', ...invocation]
   const command = join(root, 'DeepSeek Harness.exe')
-  const environment = { ...process.env, DSH_HOME: home, ELECTRON_RUN_AS_NODE: '1' }
+  const environment = { ...process.env, DSH_HOME: home, ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ASAR: packedCli ? undefined : '1',
+    npm_config_offline: 'true', npm_config_ignore_scripts: 'true', npm_config_fetch_retries: '0', npm_config_fetch_timeout: '10000', npm_config_auto_install_peers: 'false',
+    PNPM_CONFIG_OFFLINE: 'true', PNPM_CONFIG_IGNORE_SCRIPTS: 'true', PNPM_CONFIG_FETCH_RETRIES: '0', PNPM_CONFIG_FETCH_TIMEOUT: '10000', PNPM_CONFIG_AUTO_INSTALL_PEERS: 'false' }
   const result = await run(command, argv, environment)
   return { ok: result.code === 0, code: result.code, output: result.output.slice(-20_000), command: [command, ...argv].map(value => JSON.stringify(value)).join(' '), restarted: false }
 }

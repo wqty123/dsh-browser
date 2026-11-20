@@ -4,6 +4,8 @@ import type { BridgeAction, BridgeActionResult } from './bridge-install.ts'
 export type MaintenancePhase = 'armed' | 'closing' | 'installing' | 'restarting' | 'verifying' | 'completed' | 'cancelled' | 'failed'
 export type MaintenanceAction = BridgeAction | 'reinstall'
 
+export class MaintenanceRecoveryError extends Error {}
+
 export interface MaintenanceState {
   readonly phase: MaintenancePhase
   readonly action: MaintenanceAction
@@ -68,6 +70,7 @@ export async function runMaintenanceLifecycle(action: MaintenanceAction, deps: M
     outcome = await deps.maintain()
     if (!outcome.ok) throw new Error(outcome.output || 'bridge maintenance failed')
   } catch (error) { failure = error }
+  if (failure instanceof MaintenanceRecoveryError) return await publish('failed', { ok: false, restarted: false, error: String(failure) })
   try {
     // `closed` is set only by the successful closed-process barrier, never by a timeout.
     if (!closed) throw new Error('Desktop exit was not confirmed')

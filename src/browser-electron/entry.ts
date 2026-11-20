@@ -41,6 +41,7 @@ import { findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
 import { readHostExtensionStatus } from './profile-extension.ts'
 import { readBridgeEndpoint } from './bridge-endpoint.ts'
 import { runBridgeAction } from './bridge-install.ts'
+import { enableElectronPackageRemoval } from './package-removal.ts'
 import { prepareBridgeMaintenance } from './bridge-maintenance.ts'
 import { commitAutomaticMaintenance, readAutomaticMaintenance, startAutomaticMaintenance } from './automatic-maintenance.ts'
 import { AUTOMATIC_MAINTENANCE_ROUTE, createAutomaticMaintenanceHandler } from './maintenance-route.ts'
@@ -223,6 +224,7 @@ function readSessionId(ctx: unknown): string | undefined {
 
 /** Register the Electron browser provider with `ctx.browser`. */
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
+  enableElectronPackageRemoval()
   // Which session is this process serving?
   //
   // The desktop shell keeps ONE sidebar per conversation — measured: two `[class*=_tabStrip]`
