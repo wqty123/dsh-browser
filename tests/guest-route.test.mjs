@@ -57,8 +57,18 @@ before(async () => {
     } else if (req.url === '/doc') {
       res.writeHead(200, { 'content-type': 'text/html', 'x-frame-options': 'DENY' })
       res.end('<html><head><script>original()</script></head><body><img src="pic.png"></body></html>')
+    } else if (req.url === '/csp-doc' || req.url === '/large-csp-doc') {
+      res.writeHead(200, { 'content-type': 'text/html',
+        'content-security-policy': "default-src 'self'; font-src 'none'",
+        'content-security-policy-report-only': "font-src 'none'",
+        ...(req.url === '/large-csp-doc' ? { 'content-length': 5 * 1024 * 1024 } : {}),
+      })
+      const html = '<html><head><meta content="font-src &#39;none&#39;" http-equiv="Content-Security-Policy">'
+        + '<style>@font-face{font-family:embedded;src:url(data:application/font-woff;charset=utf-8;base64,d09GRgABAAAAAA==)}</style></head><body>font</body></html>'
+      res.end(req.url === '/large-csp-doc' ? html.padEnd(5 * 1024 * 1024) : html)
     } else if (req.url === '/styles/site.css') {
-      res.writeHead(200, { 'content-type': 'text/css', etag: 'upstream-css', 'content-md5': 'upstream-digest' })
+      res.writeHead(200, { 'content-type': 'text/css', etag: 'upstream-css', 'content-md5': 'upstream-digest',
+        'content-security-policy': "font-src 'none'" })
       res.end('@import "theme/base.css"; .logo{background:url(../assets/img/logo.png)} @font-face{src:url(../fonts/font.woff2?v=4.7.0)}')
     } else if (req.url === '/styles/theme/base.css') {
       res.writeHead(200, { 'content-type': 'text/css' })
@@ -422,6 +432,40 @@ test('guest CSP permits proxied and data image/font resources without admitting 
   assert.deepEqual(csp['base-uri'], ["'none'"])
   assert.deepEqual(csp['worker-src'], ["'none'"])
   assert.ok(!csp.sandbox.includes('allow-same-origin'))
+})
+
+test('one authoritative guest policy permits data fonts for documents, subrequests, large HTML and stylesheets', async () => {
+  for (const [path, headers] of [
+    ['/csp-doc', {}], ['/csp-doc', { 'x-dsh-guest-sub': '1' }], ['/large-csp-doc', {}],
+    ['/styles/site.css', { 'x-dsh-guest-sub': '1' }],
+  ]) {
+    const result = await call(guestPath('https://ordinary.example' + path), { headers })
+    assert.equal(result.status, 200)
+    assert.match(result.headers['content-security-policy'], /(?:^|;)\s*font-src [^;]*\bdata:/u)
+    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms;/u)
+    assert.doesNotMatch(result.headers['content-security-policy'], /font-src 'none'/u)
+    assert.equal(result.headers['content-security-policy-report-only'], undefined)
+    if (path.endsWith('doc')) {
+      assert.doesNotMatch(result.body, /<meta\b/iu)
+      assert.match(result.body, /url\(data:application\/font-woff;charset=utf-8;base64,d09GRgABAAAAAA==\)/u)
+    }
+  }
+})
+
+test('removes upstream meta policies regardless of attribute order, case, quoting and character references', () => {
+  const base = new URL('https://ordinary.example/')
+  for (const tag of [
+    '<meta http-equiv="Content-Security-Policy" content="font-src data:">',
+    "<META content='default-src &#39;self&#39;' HTTP-EQUIV='content-security-policy'>",
+    '<meta http-equiv=content-security-policy content="font-src https:">',
+    '<meta http-equiv="Content-Security&#45;Policy" content="font-src &gt;">',
+    '<meta http-equiv="Content-Security-Policy-Report-Only" content="font-src https:">',
+  ]) assert.equal(rewriteDocument('<head>' + tag + '</head>', base), '<head></head>')
+  for (const html of ['', '<meta charset="utf-8">', '<meta http-equiv="refresh" content="30">',
+    '<!-- <meta http-equiv="Content-Security-Policy" content="font-src https:"> -->',
+    '<script>const sample = `<meta http-equiv="Content-Security-Policy" content="font-src https:">`</script>',
+    '<meta content="unterminated',
+  ]) assert.equal(rewriteDocument(html, base), html)
 })
 
 test('forwards empty PUT bodies and preserves bodyless HEAD responses', async () => {

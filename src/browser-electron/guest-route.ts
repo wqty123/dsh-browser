@@ -131,6 +131,21 @@ function proxyReference(raw: string, base: URL): string | undefined {
   }
 }
 
+function stripDocumentPolicies(html: string): string {
+  return html.replace(
+    /<!--[\s\S]*?-->|<(script|style|textarea|title)\b(?:[^>"']|"[^"]*"|'[^']*')*>[\s\S]*?<\/\1\s*>|<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu,
+    tag => {
+      if (!/^<meta\s/iu.test(tag)) return tag
+      for (const attribute of tag.matchAll(/\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/gu)) {
+        if (attribute[1]?.toLowerCase() !== 'http-equiv') continue
+        const policy = decodeAttribute(attribute[2] ?? attribute[3] ?? attribute[4] ?? '').trim().toLowerCase()
+        return policy === 'content-security-policy' || policy === 'content-security-policy-report-only' ? '' : tag
+      }
+      return tag
+    },
+  )
+}
+
 /**
  * Rewrite one document so its own links and assets stay inside the proxy.
  * @param html - the fetched document.
@@ -139,7 +154,7 @@ function proxyReference(raw: string, base: URL): string | undefined {
  */
 export function rewriteDocument(html: string, base: URL): string {
   const proxied = (raw: string): string | undefined => proxyReference(raw, base)
-  return html.replace(
+  return stripDocumentPolicies(html).replace(
     // 三种引号形式都要改写，因为真实页面三种都在用：`src="/a.js"`、`src='/a.js'`，以及压缩过/服务端渲染
     // 的 HTML 更偏爱的无引号写法 `src=/a.js`。只处理带引号的两个，会让所有无引号资源指向 DSH 宿主而不是
     // 站点——实测 example.com 唯一的脚本就是 `<script src=/s.js>`：文档看着正常，脚本和样式全部 404。
@@ -408,7 +423,9 @@ export async function handleGuest(
   if (subRequest || !REWRITABLE.test(type) || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
     || length > MAX_REWRITE_BYTES || (upstream.status >= 300 && upstream.status < 400)) {
     response.writeHead(upstream.status, Object.fromEntries(out))
-    response.end(Buffer.from(await upstream.arrayBuffer()))
+    const body = Buffer.from(await upstream.arrayBuffer())
+    response.end(/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
+      ? Buffer.from(stripDocumentPolicies(body.toString('latin1')), 'latin1') : body)
     return
   }
   const raw = await upstream.text()
