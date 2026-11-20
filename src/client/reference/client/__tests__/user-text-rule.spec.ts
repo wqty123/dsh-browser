@@ -37,6 +37,13 @@ describe('native browser source text nodes', () => {
     expect(document.evaluate(input, [browserSourceRule])).toBe(first)
   })
 
+  it('preserves legacy links but emits new capsule metadata without markdown links', () => {
+    const marker = sourceMarker('ref-one', 0, 'Title " & < >')
+    expect(marker).not.toContain('](')
+    expect(browserSourceRule.match(marker, 0)?.data).toMatchObject({ uri: 'dsh-browser-ref:ref-one', label: '引用来源 1：Title " &' })
+    expect(browserSourceRule.match('<dsh-browser-reference uri="dsh-browser-ref:ref-one" label="%broken"/>', 0)).toBeUndefined()
+  })
+
   it.each(['', 'quoted list\n- item\n', '</dsh-browser-quote> 😀 [nested](dsh-browser-ref:ref-other)'])('consumes only the serializer-bounded quote body (%j)', body => {
     const quote = submissionQuote(body)
     const text = 'before ' + quote + sourceMarker('ref-one', 0) + ' after'

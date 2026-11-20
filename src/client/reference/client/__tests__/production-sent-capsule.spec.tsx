@@ -274,8 +274,11 @@ describe('production assembly — shared composer and sent capsules', () => {
     expect(message).toContain(LONG_TEXT)
     expect(message).toContain(TAIL_TEXT)
     expect(message).toContain('My frozen-source comment')
+    expect(message).toContain('Do not repeat their markers, reference URIs, source URLs, or source/citation links in the reply.')
+    expect(message).not.toMatch(/\[[^\]]*\]\(dsh-browser-ref:/u)
     const sent = await h.sentMessage(message)
     expect(sent.querySelectorAll('button[data-reference-id]')).toHaveLength(1)
+    expect(sent.querySelectorAll('a')).toHaveLength(0)
     const textOnly = sent.cloneNode(true) as HTMLElement
     textOnly.querySelector('.dsh-browser-reference-capsules')!.remove()
     expect(textOnly.textContent?.trim()).toBe('my own question')

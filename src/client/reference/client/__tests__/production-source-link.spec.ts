@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { browserSourceRule } from '../production/user-text-rule.ts'
-import { sourceMarker, readSubmissionQuote } from '../production/source-marker.ts'
+import { sourceMarker, readSourceMarker, readSubmissionQuote } from '../production/source-marker.ts'
 /**
  * Report item 7 — the reply-side `dsh-browser-ref:` link had NO producer: the
  * verification script inserted anchors by hand, which only proved the
@@ -69,7 +69,7 @@ function urisIn(parts: readonly HostPromptContentPart[]): string[] {
   const found: string[] = []
   for (const part of parts) {
     if (part.type !== 'text') continue
-    for (const match of part.text.matchAll(/dsh-browser-ref:[^\s)\]]+/gu)) found.push(match[0])
+    for (let marker = readSourceMarker(part.text, 0); marker !== undefined; marker = readSourceMarker(part.text, marker.end)) found.push(marker.uri)
   }
   return found
 }
@@ -118,7 +118,9 @@ describe('item 7 — the real send path produces a locatable source', () => {
     // The marker is its OWN text block, visible to user and model.
     const marker = content.find(part => part.type === 'text' && part.text.includes('dsh-browser-ref:'))
     expect(marker).toBeDefined()
-    expect((marker as { text: string }).text).toContain(`[引用来源 1](${encodeBrowserRefUri({ referenceId: REFERENCE_ID })})`)
+    expect((marker as { text: string }).text).toContain(sourceMarker(REFERENCE_ID, 0))
+    expect((marker as { text: string }).text).not.toMatch(/\]\(dsh-browser-ref:/u)
+    expect((marker as { text: string }).text).toContain('Do not repeat their markers, reference URIs, source URLs, or source/citation links in the reply.')
     expect(content.at(-1)).toEqual({ type: 'text', text: '用户问题' })
   })
 
@@ -166,7 +168,7 @@ describe('item 7 — the real send path produces a locatable source', () => {
     })
     expect(urisIn(content)).toEqual([encodeBrowserRefUri({ referenceId: REFERENCE_ID })])
     const marker = content.find(part => part.type === 'text' && part.text.includes('dsh-browser-ref:')) as { text: string }
-    expect(marker.text).toContain('[引用来源 1：')
+    expect(readSourceMarker(marker.text, 0)?.label).toMatch(/^引用来源 1：/u)
     // No raw bracket/paren survived into the label, so markdown stays one link.
     expect(marker.text).not.toContain('](财报)')
     expect(urisIn(content)[0]).not.toContain('财报')
