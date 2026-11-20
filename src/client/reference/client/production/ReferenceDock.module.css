@@ -115,6 +115,10 @@
 .table { border-collapse: collapse; font: inherit; }
 .table td, .table th { padding: 3px 7px; border: 0.5px solid var(--dsw-alias-border-l2); text-align: start; white-space: pre-wrap; }
 .table th { font-weight: 500; background: var(--dsw-alias-bg-multi-select); }
+.table tr:nth-child(even) td { background: var(--dsw-alias-bg-layer-2); }
+.quote pre { white-space: pre-wrap; }
+.panel figure { margin: 0; }
+.quote [data-reference-math] { font-family: monospace; background: var(--dsw-alias-bg-layer-2); padding: 1px 3px; border-radius: 3px; }
 
 .comment, .editor { display: grid; gap: 4px; }
 .editor label { color: var(--dsw-alias-label-secondary); font-size: 11px; }

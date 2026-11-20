@@ -1078,6 +1078,10 @@ export class BrowserReferenceService {
       }
     }
 
+    if (rawCells.some(cell => isRecord(cell) && cell.content !== undefined && (!isReferenceText(cell.content)
+      || referenceTextContent(cell.content).replace(/\s/gu, '') !== textOf(cell.text, 2000).replace(/\s/gu, '')))) {
+      return { kind: 'table', reason: 'invalid-text-content' }
+    }
     const failures: CaptureFailure[] = []
     const cellImages: ImageReferencePart[] = []
     const cells: TableCellSnapshot[] = []
@@ -1131,6 +1135,7 @@ export class BrowserReferenceService {
         columnSpan: integerOf(cell.columnSpan, 1, 1, 200),
         role,
         text: textOf(cell.text, 2000),
+        ...(cell.content === undefined ? {} : { content: cell.content }),
         includedAs,
         partialText: booleanOf(cell.partialText),
         ...runs.length > 0 ? { inlineContent: runs } : {},

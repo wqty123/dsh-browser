@@ -91,6 +91,7 @@ export interface TableCellSnapshot {
   readonly columnSpan: number
   readonly role: 'header' | 'data'
   readonly text: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly includedAs: 'selection' | 'header-context'
   readonly partialText: boolean
   /** Text and image runs in reading order; images carry their own partId/assetKey. */
