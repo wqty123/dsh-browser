@@ -16,6 +16,7 @@ interface Page {
   url: string
   active: boolean
   seen: number
+  navigationUrl?: string
 }
 
 interface Pending {
@@ -50,6 +51,8 @@ export class BrowserTakeovers {
   private readonly pages = new Map<string, Page>()
   private readonly pending = new Map<string, Pending>()
   private readonly results = new Map<string, Promise<unknown>>()
+  private readonly changed = new Set<() => void>()
+  private disposed = false
 
   private key(page: Pick<Page, 'owner' | 'tabId'>): string { return JSON.stringify([page.owner, page.tabId]) }
 
@@ -57,6 +60,29 @@ export class BrowserTakeovers {
     const candidates = [...this.pages.values()].filter(page => page.owner === referenceOwnerKey(owner) && page.active && Date.now() - page.seen < 3000)
     if (candidates.length !== 1) throw new Error('Browser takeover requires one active, connected sidebar tab. Select the browser tab and retry.')
     return candidates[0]!
+  }
+
+  async adopt(owner: string, signal: AbortSignal, navigationUrl?: string, timeoutMs = 15000): Promise<Page> {
+    signal.throwIfAborted()
+    return new Promise<Page>((resolve, reject) => {
+      const finish = (page?: Page, error?: unknown): void => {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', abort)
+        this.changed.delete(check)
+        if (error !== undefined) reject(error); else resolve(page!)
+      }
+      const abort = (): void => { finish(undefined, signal.reason) }
+      const check = (): void => {
+        if (this.disposed) { finish(undefined, new Error('Browser takeover service was disposed.')); return }
+        const candidates = [...this.pages.values()].filter(page => page.owner === referenceOwnerKey(owner) && page.active && Date.now() - page.seen < 3000)
+        if (candidates.length > 1) finish(undefined, new Error('Browser takeover requires one selected, visible sidebar tab. Close or hide the other browser panes and retry.'))
+        else if (candidates[0] && (navigationUrl === undefined || candidates[0].url === navigationUrl || candidates[0].navigationUrl === navigationUrl)) finish(candidates[0])
+      }
+      const timer = setTimeout(() => finish(undefined, new Error('Browser takeover requires one active, connected sidebar tab in this conversation. Select the browser tab, wait for it to load, and retry.')), timeoutMs)
+      this.changed.add(check)
+      signal.addEventListener('abort', abort, { once: true })
+      check()
+    })
   }
 
   blocks(owner: string, tabId?: string): boolean {
@@ -97,8 +123,10 @@ export class BrowserTakeovers {
   }
 
   dispose(): void {
+    this.disposed = true
     for (const pending of this.pending.values()) pending.controller.abort()
     this.pages.clear()
+    for (const changed of this.changed) changed()
   }
 
   exchange(data: Record<string, unknown>): object {
@@ -113,7 +141,10 @@ export class BrowserTakeovers {
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid takeover URL')
       const lease = randomUUID()
       for (const [old, page] of this.pages) if (page.owner === owner && page.pageId === pageId) this.pages.delete(old)
-      this.pages.set(lease, { lease, owner, tabId, pageId, url: url.href, active: data.active === true, seen: Date.now() })
+      const navigationUrl = data.navigationUrl === undefined ? undefined : new URL(text(data.navigationUrl, 8192)).href
+      if (navigationUrl !== undefined && !/^https?:\/\//u.test(navigationUrl)) throw new Error('invalid takeover navigation URL')
+      this.pages.set(lease, { lease, owner, tabId, pageId, url: url.href, active: data.active === true, seen: Date.now(), ...navigationUrl === undefined ? {} : { navigationUrl } })
+      for (const changed of this.changed) changed()
       return { lease }
     }
     const page = this.pages.get(text(data.lease, 100))
@@ -124,6 +155,10 @@ export class BrowserTakeovers {
       const url = new URL(text(data.url, 8192))
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid takeover URL')
       page.url = url.href; page.active = data.active === true; page.seen = Date.now()
+      const navigationUrl = data.navigationUrl === undefined ? undefined : new URL(text(data.navigationUrl, 8192)).href
+      if (navigationUrl !== undefined && !/^https?:\/\//u.test(navigationUrl)) throw new Error('invalid takeover navigation URL')
+      page.navigationUrl = navigationUrl
+      for (const changed of this.changed) changed()
       const notice: TakeoverNotice | undefined = pending && !pending.signal?.aborted && (pending.phase === 'summary' || !pending.controller.signal.aborted)
         ? { id: pending.id, reason: pending.reason, ...pending.instructions === undefined ? {} : { instructions: pending.instructions }, phase: pending.phase } : undefined
       return { notice }

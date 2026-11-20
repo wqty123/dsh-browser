@@ -148,7 +148,7 @@ export class IframePresentation implements BrowserPresentation {
     this.events.observed(this.document.revision, data.url)
     if (data.ready === true && this.owner !== undefined && this.host !== undefined) {
       this.unregisterPage?.()
-      this.unregisterPage = registerIframePage(this.owner, this.host.id, this.pageId, data.url)
+      this.unregisterPage = registerIframePage(this.owner, this.host.id, this.pageId, data.url, this.document.target.url)
     }
     if (data.ready === true) this.events.guestReady?.(this.document.revision, this.pageId)
   }

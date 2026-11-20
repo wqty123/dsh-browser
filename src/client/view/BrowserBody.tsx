@@ -89,24 +89,20 @@ export function BrowserBody(props: BrowserBodyProps): ReactNode {
   const [enginesOpen, setEnginesOpen] = useState(false)
   const [engineFailure, setEngineFailure] = useState<StartPageFailure>()
   const state = useBrowserState(tab.id)
-  const rootRef = useRef<HTMLDivElement>(null)
-  const takeoverCurrent = useRef({ url: '' })
+  const takeoverCurrent = useRef<{ url: string; active: boolean; navigationUrl?: string }>({ url: '', active: false })
   const [takeover, setTakeover] = useState<{ notice?: TakeoverNotice; error?: boolean }>({})
   const takeoverChannel = useRef<ReturnType<typeof connectBrowserTakeover>>()
   const webPage = useSyncExternalStore(subscribeIframePages, () => iframePage(sessionId, viewportId))
   const observedPage = props.currentPage?.(tab.id)
   const carrierPageId = observedPage?.guestId ?? state?.initialization?.guestId
   const pageId = webPage?.pageId ?? (carrierPageId?.startsWith('iframe:') ? undefined : carrierPageId)
-  takeoverCurrent.current.url = webPage?.url ?? observedPage?.url ?? state?.frame.target?.url ?? ''
+  takeoverCurrent.current = { url: webPage?.url ?? observedPage?.url ?? state?.frame.target?.url ?? '', active: tab.visible === true,
+    ...webPage?.navigationUrl === undefined ? {} : { navigationUrl: webPage.navigationUrl } }
   useEffect(() => {
     if (!pageId) return
     const lifetime = new AbortController()
     takeoverChannel.current = connectBrowserTakeover({ owner: sessionId, tabId: tab.id, pageId,
-      current: () => {
-        const node = rootRef.current
-        return { url: takeoverCurrent.current.url, active: node !== null && (node.checkVisibility?.({ checkVisibilityCSS: true })
-          ?? (node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden')) }
-      },
+      current: () => takeoverCurrent.current,
       changed: (notice, error) => { setTakeover({ notice, error }) },
     }, lifetime.signal)
     return () => { lifetime.abort(); takeoverChannel.current = undefined }
@@ -186,7 +182,7 @@ export function BrowserBody(props: BrowserBodyProps): ReactNode {
     : reportedInitFailure
 
   return (
-    <div className={css.root} ref={rootRef}>
+    <div className={css.root}>
       <div
         style={{ display: 'contents' }}
         onBlur={(event) => {

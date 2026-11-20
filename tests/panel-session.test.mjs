@@ -8,6 +8,7 @@ const home = mkdtempSync(join(tmpdir(), 'dsh-panel-session-'))
 process.env.DSH_HOME = home
 after(() => rmSync(home, { recursive: true, force: true }))
 const { apply } = await import('../lib/tool-browser/index.js')
+const { getLastOpen } = await import('../lib/browser-electron/open-slot.js')
 
 function mount(overrides = {}, owner = 'panel-task') {
   const calls = []
@@ -84,6 +85,7 @@ test('Web panel open records a navigation request; unsupported tools name the su
   const { run, calls } = mount({ openPanel: async () => undefined })
   const opened = await run('open', { url: 'https://example.com/' })
   assert.equal(opened.carrier, 'panel-iframe-navigation-requested')
+  assert.equal(getLastOpen().owner, 'panel-task', 'a different foreground conversation must not consume this tool open')
   assert.deepEqual(opened.elements, [])
   for (const [name, args] of [...operations, ['state', {}]]) {
     await assert.rejects(run(name, args), error => {

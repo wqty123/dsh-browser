@@ -71,7 +71,7 @@ it.each(['42', 'iframe:page'])('shared BrowserBody wires the current Desktop/Web
     return { ok: true, json: async () => data.operation === 'register' ? { lease: 'body-lease' } : data.operation === 'poll' ? { notice: waiting } : {} }
   }))
   const url = 'https://example.test/'
-  const tab = { id: 'sidebar-tab', navigation: { params: { url }, revision: 1 }, actions: { bindCommands: () => () => {} } }
+  const tab = { id: 'sidebar-tab', visible: true, navigation: { params: { url }, revision: 1 }, actions: { bindCommands: () => () => {} } }
   const props = { sessionId: 'session-owner', useTabInfo: () => ({ tab }), useContextMenu: () => ({ getTriggerProps: () => ({}) }),
     useStore: () => undefined, useStartPage: () => ({ status: 'ready', engines: [], shortcuts: [] }),
     useBrowserState: () => ({ frame: { ...emptyBrowserFrame(), target: { kind: 'https', url }, address: 'observed' }, initialization: { guestId: pageId.startsWith('iframe:') ? 'iframe:stale-page' : 'stale-page' } }),
@@ -80,7 +80,7 @@ it.each(['42', 'iframe:page'])('shared BrowserBody wires the current Desktop/Web
     t: (key: keyof typeof zh, params?: Record<string, string>) => zh[key].replace('{reason}', params?.reason ?? ''),
   } as unknown as BrowserBodyProps
   const view = render(<BrowserBody {...props} />)
-  Object.defineProperty(view.container.firstElementChild!, 'checkVisibility', { value: () => true })
+  Object.defineProperty(view.container.firstElementChild!, 'checkVisibility', { value: () => false })
   let unregister: (() => void) | undefined
   if (pageId.startsWith('iframe:')) await act(async () => {
     unregister = registerIframePage('owner', view.container.querySelector('[id]')!.id, pageId, url)
@@ -88,6 +88,10 @@ it.each(['42', 'iframe:page'])('shared BrowserBody wires the current Desktop/Web
   await act(async () => { await vi.advanceTimersByTimeAsync(0) })
   expect(requests[0]).toMatchObject({ operation: 'register', owner: 'session-owner', tabId: 'sidebar-tab', pageId })
   expect(requests.some(request => request.operation === 'poll' && request.active === true)).toBe(true)
+  tab.visible = false
+  view.rerender(<BrowserBody {...props} />)
+  await act(async () => { await vi.advanceTimersByTimeAsync(400) })
+  expect(requests.filter(request => request.operation === 'poll').at(-1)?.active).toBe(false)
   expect(screen.getByRole('status').textContent).toContain(labels.label)
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: '确认完成' })) })
   expect(requests).toContainEqual({ operation: 'answer', lease: 'body-lease', id: waiting.id, outcome: 'done' })

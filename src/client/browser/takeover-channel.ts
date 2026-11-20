@@ -19,7 +19,7 @@ export function connectBrowserTakeover(options: {
   readonly owner: string
   readonly tabId: string
   readonly pageId: string
-  readonly current: () => { url: string; active: boolean }
+  readonly current: () => { url: string; active: boolean; navigationUrl?: string }
   readonly changed: (notice?: TakeoverNotice, error?: boolean) => void
 }, signal: AbortSignal): { answer(outcome: 'done' | 'skipped'): Promise<void> } {
   let lease: string | undefined, notice: TakeoverNotice | undefined, timer: ReturnType<typeof setTimeout> | undefined

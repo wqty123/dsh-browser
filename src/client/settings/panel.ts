@@ -1801,6 +1801,7 @@ const react = require("react")
         .then(body => {
           const open = body && body.open
           if (!open || typeof open.url !== "string" || typeof open.at !== "number") return
+          if (typeof open.owner === "string" && open.owner.replace(/^session-/, "") !== sessionId) return
           // Only act when the HOST says it is in panel mode. A host that predates the single-surface
           // switch still opens its own browser for every call, so placing a tab here as well produced TWO
           // live views of one page (the reported double-open). No echo, no tab.

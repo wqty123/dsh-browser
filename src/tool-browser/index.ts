@@ -18,7 +18,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { BrowserTakeovers, installTakeovers } from './takeover.ts'
 import { TAKEOVER_TOOL, type TakeoverDecision, type TakeoverSummary } from '../takeover-protocol.ts'
-import { setLastOpen } from '../browser-electron/open-slot.ts'
+import { clearLastOpen, getLastOpen, setLastOpen } from '../browser-electron/open-slot.ts'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -605,7 +605,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   registerSafely(defineTool({
     name: 'dsh_browser_request_takeover',
-    description: 'Hand the active sidebar browser tab to the human for a CAPTCHA/slider, login, 2FA or payment. Never solve CAPTCHAs automatically. Requires an active turn and connected sidebar tab; waits for the native card or sidebar Confirm/Skip. Repeated calls on the same tab share one request. Returns done/skipped/cancelled plus a fresh page summary; inspect it before resuming. Never treat skipped/cancelled as success.',
+    description: 'Hand the selected visible sidebar browser tab in this conversation to the human for a CAPTCHA/slider, login, 2FA or payment. Works on the Web iframe without CDP, including user-opened tabs: adopts the selected tab for this request only, without granting agent control. Never solve CAPTCHAs automatically. Requires an active turn; waits for the sidebar connection and the native card or sidebar Confirm/Skip. Repeated calls on the same tab share one request. Returns done/skipped/cancelled plus a fresh page summary; inspect it before resuming. Never treat skipped/cancelled as success.',
     parameters: {
       reason: { type: 'string', required: true, description: 'Why the human must take over (1–1000 characters).' },
       instructions: { type: 'string', description: 'Optional concise instructions for the human (up to 2000 characters).' },
@@ -621,7 +621,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (!exec.agent?.session) throw new Error('Browser takeover requires an active agent turn.')
       if (!args.reason.trim()) throw new Error('Browser takeover reason must not be empty.')
       if (args.reason.length > 1000 || (args.instructions?.length ?? 0) > 2000) throw new Error('Browser takeover reason or instructions are too long.')
-      const page = takeovers.target(taskKey(exec))
+      const owner = taskKey(exec)
+      const opening = state.pendingPanelOpens.get(owner)
+      if (opening) await opening
+      const open = getLastOpen()
+      const navigationUrl = open?.owner === owner && Date.now() - open.at < 10000 ? open.url : undefined
+      const page = await takeovers.adopt(owner, exec.signal, navigationUrl)
+      if (navigationUrl !== undefined && getLastOpen()?.owner === owner) clearLastOpen(open!.at)
       return takeovers.run(page, args.reason.trim(), args.instructions, exec.signal, async pending => {
         const approval = ctx.get('approval' as never) as unknown as { request(request: {
           agent: ToolRunContext['agent']; toolName: string; reason: string; displayReason: { en: string; zh: string };
@@ -806,7 +812,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           if (session === undefined) {
             assertSurfaceCanHost(surface, args.url)
             exec.signal?.throwIfAborted()
-            setLastOpen(args.url, Date.now())
+            setLastOpen(args.url, Date.now(), key)
             rememberSession(browser, state, key, agentOf(exec), undefined, args.url)
             return { url: args.url, carrier: 'panel-iframe-navigation-requested', title: '', elements: [], truncated: false }
           }

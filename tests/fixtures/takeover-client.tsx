@@ -9,7 +9,7 @@ const url = 'https://takeover.example/login'
 const tab = { id: 'sidebar-tab', signal: lifetime.signal, navigation: { params: { url }, revision: 1 },
   actions: { bindCommands: () => () => {} } }
 const props = {
-  sessionId: 'session-owner', useTabInfo: () => ({ tab }), useContextMenu: () => ({ getTriggerProps: () => ({}) }),
+  sessionId: 'session-owner', useTabInfo: () => ({ tab: { ...tab, visible: true } }), useContextMenu: () => ({ getTriggerProps: () => ({}) }),
   useStore: () => undefined, useStartPage: () => ({ status: 'ready', engines: [], shortcuts: [] }),
   useBrowserState: () => ({ frame: { ...emptyBrowserFrame(), target: { kind: 'https', url }, address: 'observed' } }),
   currentPage: () => undefined, bindAddressFocus: () => () => {},

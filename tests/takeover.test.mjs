@@ -8,6 +8,42 @@ import { takeoverHost, until } from './fixtures/takeover-host.mjs'
 
 const registration = { operation: 'register', owner: 'owner', tabId: 'sidebar-tab', pageId: '42', url: 'https://example.test/challenge', active: true }
 
+test('request-only adoption waits for the owning visible iframe and queued navigation, never foreign or hidden tabs', async () => {
+  const state = new BrowserTakeovers(), controller = new AbortController()
+  const navigationUrl = 'https://example.test/login'
+  let adopted = false
+  const adopting = state.adopt('session-owner', controller.signal, navigationUrl).then(page => { adopted = true; return page })
+  state.exchange({ ...registration, owner: 'foreign', pageId: 'iframe:foreign', navigationUrl })
+  const { lease } = state.exchange({ ...registration, pageId: 'iframe:user-opened', active: false, navigationUrl })
+  await Promise.resolve()
+  assert.equal(adopted, false)
+  state.exchange({ operation: 'poll', lease, url: registration.url, active: true })
+  await Promise.resolve()
+  assert.equal(adopted, false, 'the previously visible document cannot satisfy a queued tool open')
+  state.exchange({ operation: 'poll', lease, url: 'https://example.test/redirected', active: true, navigationUrl })
+  const page = await adopting
+  assert.equal(page.pageId, 'iframe:user-opened')
+  assert.equal(state.blocks('owner'), false, 'adoption alone grants no agent browser session or action')
+  assert.equal(await state.adopt('owner', controller.signal), page, 'a human-opened selected tab needs no previous tool open')
+  await state.run(page, 'Human action only', undefined, controller.signal, async () => { assert.equal(state.blocks('owner'), true) })
+  assert.equal(state.blocks('owner'), false, 'ownership fence lasts for this request only')
+  state.dispose()
+})
+
+test('adoption fails closed on empty, ambiguous, stopped or disposed sidebar connections', async () => {
+  const state = new BrowserTakeovers(), controller = new AbortController()
+  await assert.rejects(state.adopt('empty', controller.signal, undefined, 1), /active, connected/)
+  state.exchange(registration)
+  state.exchange({ ...registration, pageId: 'iframe:another', tabId: 'other-tab' })
+  await assert.rejects(state.adopt('owner', controller.signal), /one selected, visible/)
+  const stopped = state.adopt('empty', controller.signal)
+  controller.abort(new Error('turn stopped'))
+  await assert.rejects(stopped, /turn stopped/)
+  const disposed = state.adopt('empty', new AbortController().signal)
+  state.dispose()
+  await assert.rejects(disposed, /disposed/)
+})
+
 test('takeover state is owner/tab scoped, idempotent and first button answer wins', async () => {
   const state = new BrowserTakeovers(), { lease } = state.exchange(registration)
   const page = state.target('session-owner')
