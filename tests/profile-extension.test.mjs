@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path'
 import { createServer } from 'node:net'
 import { once } from 'node:events'
 import { execFileSync } from 'node:child_process'
-import { installedProfileExtension, profileExtensionCommand, repairProfileExtension, extensionHomeId, readHostExtensionStatus } from '../src/browser-electron/profile-extension.ts'
+import { installedProfileExtension, profileExtensionCommand, repairProfileExtension, reconcileProfile, extensionHomeId, readHostExtensionStatus } from '../src/browser-electron/profile-extension.ts'
 import { waitForRestartedBridge } from '../src/browser-electron/bridge-install.ts'
 import { readBridgeStatus } from '../src/browser-electron/bridge-status.ts'
 import { runMaintenanceLifecycle } from '../src/browser-electron/maintenance-lifecycle.ts'
@@ -27,6 +27,28 @@ function fixture(t) {
   for (const file of resources) { mkdirSync(dirname(join(app, file)), { recursive: true }); writeFileSync(join(app, file), 'original ' + file) }
   return { root, home, app, profile, cli, resources }
 }
+
+test('rollback reconciliation uses bounded bundled pnpm with a frozen offline profile and no ASAR or scripts', async t => {
+  const f = fixture(t)
+  let calls = 0
+  await reconcileProfile(f.app, f.home, async (command, argv, env, timeout) => {
+    calls++
+    assert.equal(command, join(f.app, 'DeepSeek Harness.exe'))
+    assert.deepEqual(argv, ['--expose-internals', join(f.app, 'resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs'),
+      '--dir', f.profile, 'install', '--offline', '--frozen-lockfile', '--ignore-scripts', '--config.auto-install-peers=false'])
+    assert.equal(env.ELECTRON_NO_ASAR, '1')
+    assert.equal(env.ELECTRON_RUN_AS_NODE, '1')
+    assert.equal(env.PNPM_CONFIG_OFFLINE, 'true')
+    assert.equal(env.PNPM_CONFIG_IGNORE_SCRIPTS, 'true')
+    assert.equal(env.PNPM_CONFIG_AUTO_INSTALL_PEERS, 'false')
+    assert.equal(timeout, 60_000)
+    return { code: 0, output: 'reconciled' }
+  })
+  assert.equal(calls, 1)
+  await assert.rejects(reconcileProfile(f.app, f.home, async () => ({ code: 1, output: 'offline store missing' })), /REINSTALL_RECONCILE_FAILED: offline store missing/)
+  rmSync(join(f.app, 'resources/runtime'), { recursive: true })
+  await assert.rejects(reconcileProfile(f.app, f.home, async () => assert.fail('must not start')), { code: 'REINSTALL_RUNTIME_MISSING' })
+})
 
 test('profile repair and removal invoke the trusted CLI and do not change app resources, archive or launchers', async t => {
   const f = fixture(t)

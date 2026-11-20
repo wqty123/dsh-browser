@@ -2,11 +2,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync, existsSync, readdirSync, copyFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, symlinkSync, existsSync, readdirSync, copyFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { installedProfileExtension, repairProfileExtension } from '../src/browser-electron/profile-extension.ts'
+import { installedProfileExtension, repairProfileExtension, reconcileProfile } from '../src/browser-electron/profile-extension.ts'
+import { withProfileCheckpoint } from '../src/browser-electron/profile-checkpoint.ts'
 import { runProfileCommand } from '../src/browser-electron/profile-command.ts'
 
 const source = process.env.DSH_RC3_SOURCE
@@ -87,6 +88,24 @@ test('real rc.3 Desktop CLI removes and re-adds a file dependency offline withou
   assertNoNestedDependencies(profile)
   assert.deepEqual(readFileSync(orphan), before)
   assert.equal(existsSync(join(profile, 'node_modules/.ignored')), false)
+  if (archive !== undefined) {
+    const manifestBefore = readFileSync(join(profile, 'package.json')), lockBefore = readFileSync(join(profile, 'pnpm-lock.yaml'))
+    const job = join(root, 'rollback-job')
+    mkdirSync(job)
+    await assert.rejects(withProfileCheckpoint(home, job, async () => {
+      const removed = await repairProfileExtension('uninstall', app, home, run)
+      assert.equal(removed.ok, true, removed.output)
+      mkdirSync(join(profile, 'node_modules/.ignored'), { recursive: true })
+      renameSync(join(profile, 'node_modules/orphan'), join(profile, 'node_modules/.ignored/orphan'))
+      throw new Error('forced failure after real remove')
+    }, { reconcile: () => reconcileProfile(app, home, async (_command, args, env, timeout) =>
+      runProfileCommand(process.env.DSH_ELECTRON_BINARY ?? process.execPath, args, { ...environment, ...env }, timeout)) }), /REINSTALL_PROFILE_RESTORED/)
+    assert.deepEqual(readFileSync(join(profile, 'package.json')), manifestBefore)
+    assert.deepEqual(readFileSync(join(profile, 'pnpm-lock.yaml')), lockBefore)
+    await installedProfileExtension(home)
+    assert.deepEqual(readFileSync(orphan), before)
+    console.log('Real bundled pnpm frozen/offline checkpoint reconciliation and .ignored orphan recovery: PASS')
+  }
   const loaded = readdirSync(coverage).flatMap(name => JSON.parse(readFileSync(join(coverage, name), 'utf8')).result.map(entry => entry.url))
   for (const path of owned) assert.ok(loaded.includes(pathToFileURL(join(source, path)).href), `real rc.3 module did not execute: ${path}`)
   console.log('Real rc.3 CLI + bundled pnpm: offline remove/add, actual module execution, dependency disappearance/return and unrelated packages: PASS')

@@ -13,7 +13,7 @@ import { readAsarFile, readDesktopIdentity } from './desktop-identity.ts'
 import { dshHome } from './paths.ts'
 import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.ts'
 import { renameMaintenanceFile } from '../../desktop-bridge/maintenance-files.mjs'
-import { installedProfileExtension, repairProfileExtension, profileDependencySpec, profileRuntimeDirectory, MAIN_EXTENSION_NAME, type InstalledExtension } from './profile-extension.ts'
+import { installedProfileExtension, repairProfileExtension, reconcileProfile, profileDependencySpec, profileRuntimeDirectory, MAIN_EXTENSION_NAME, type InstalledExtension } from './profile-extension.ts'
 import { withProfileCheckpoint } from './profile-checkpoint.ts'
 import { runProfileCommand } from './profile-command.ts'
 import { cleanProfileResidue, inspectProfileResidue } from './profile-residue.ts'
@@ -619,7 +619,7 @@ async function runWorker(path: string): Promise<void> {
           })
           extension = await installedProfileExtension(plan.home)
           return { ...result, output: [residue, result.output].filter(Boolean).join('\n') }
-        })
+        }, { reconcile: () => reconcileProfile(plan.root, plan.home) })
       },
       restart: async () => {
         if ((await desktopProcesses(plan.root)).length > 0) throw new Error('DSH Desktop is already running; not opening a second instance')

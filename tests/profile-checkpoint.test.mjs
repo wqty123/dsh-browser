@@ -4,13 +4,21 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, lstat
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
-import { withProfileCheckpoint } from '../src/browser-electron/profile-checkpoint.ts'
+import { withProfileCheckpoint as checkpoint } from '../src/browser-electron/profile-checkpoint.ts'
 import { runProfileCommand } from '../src/browser-electron/profile-command.ts'
 import { cleanProfileResidue, inspectProfileResidue } from '../src/browser-electron/profile-residue.ts'
 import { runReinstallTransaction } from '../lib/browser-electron/automatic-maintenance.js'
 import { runMaintenanceLifecycle } from '../src/browser-electron/maintenance-lifecycle.ts'
 import { writeAsar } from './fake-asar.mjs'
-import { copyFile, symlink } from 'node:fs/promises'
+import { copyFile, readdir, symlink } from 'node:fs/promises'
+
+const withProfileCheckpoint = (home, job, operation, options = {}) => checkpoint(home, job, operation, { reconcile: async () => {}, ...options })
+
+function pruneOrphan(profile) {
+  const destination = join(profile, 'node_modules/.ignored/@scope/orphan')
+  mkdirSync(dirname(destination), { recursive: true })
+  renameSync(join(profile, 'node_modules/@scope/orphan'), destination)
+}
 
 function tree(path) {
   if (lstatSync(path).isSymbolicLink()) return { link: readlinkSync(path) }
@@ -50,8 +58,7 @@ for (const failed of ['remove', 'revert', 'apply', 'add']) test(`${failed} failu
         for (const name of readdirSync(f.plugin)) if (name !== 'node_modules') rmSync(join(f.plugin, name), { recursive: true, force: true })
         writeFileSync(join(f.profile, 'package.json'), '{}')
         writeFileSync(join(f.profile, 'pnpm-lock.yaml'), 'changed')
-        renameSync(join(f.profile, 'node_modules/@scope/orphan'), join(f.profile, 'node_modules/moved-orphan'))
-        rmSync(join(f.profile, 'node_modules/dsh-builtin-browser_tmp_52300_4'), { recursive: true })
+        pruneOrphan(f.profile)
         absent = true
         return answer('remove')
       },
@@ -77,7 +84,7 @@ test('success keeps the new plugin but rejects and rolls back any unrelated pack
   const job = join(f.root, 'second-job'); mkdirSync(job)
   const before = tree(f.profile)
   await assert.rejects(withProfileCheckpoint(f.home, job, async () => {
-    renameSync(join(f.profile, 'node_modules/@scope/orphan'), join(f.profile, 'node_modules/pruned-orphan'))
+    pruneOrphan(f.profile)
   }), /REINSTALL_UNRELATED_PACKAGES_CHANGED.*REINSTALL_PROFILE_RESTORED/)
   assert.deepEqual(tree(f.profile), before)
 })
@@ -95,7 +102,7 @@ test('failed rollback suppresses recovery restart and retains the checkpoint', a
   const f = fixture(t)
   const result = await runMaintenanceLifecycle('reinstall', {
     requestQuit: async () => {}, waitUntilClosed: async () => {}, publish: async () => {},
-    maintain: () => withProfileCheckpoint(f.home, f.job, async () => { mkdirSync(join(f.job, 'profile-failed')); writeFileSync(join(f.job, 'profile-failed/block'), 'do not replace'); throw new Error('remove failed') }),
+    maintain: () => withProfileCheckpoint(f.home, f.job, async () => { throw new Error('remove failed') }, { reconcile: async () => { throw new Error('offline reconciliation failed') } }),
     restart: async () => assert.fail('must not restart an unverified profile'), verify: async () => {},
   })
   assert.equal(result.restarted, false)
@@ -131,13 +138,13 @@ for (const linkedPlugin of [false, true]) test(`checkpoint creates no symlinks; 
     }
     walk(checkpoint)
     const metadata = JSON.parse(readFileSync(join(checkpoint, 'metadata.json'), 'utf8'))
-    assert.ok(metadata.entries.some(entry => entry.kind === 'link' && entry.path.endsWith('linked') && entry.type === 'directory'))
+    assert.ok(metadata.modules.some(entry => entry.kind === 'link' && entry.path.endsWith('linked') && entry.type === 'directory'))
     const foreign = join('node_modules', '@scope', 'orphan', 'package.json')
-    assert.equal(lstatSync(join(checkpoint, 'files', foreign)).ino, lstatSync(join(f.profile, foreign)).ino)
+    assert.equal(existsSync(join(checkpoint, 'files', foreign)), false)
     if (!linkedPlugin) assert.notEqual(lstatSync(join(checkpoint, 'files/node_modules/dsh-builtin-browser/package.json')).ino, lstatSync(join(f.plugin, 'package.json')).ino)
     rmSync(f.plugin, { recursive: true, force: true })
     rmSync(join(f.profile, 'node_modules/linked'))
-    rmSync(join(f.profile, foreign))
+    pruneOrphan(f.profile)
     writeFileSync(join(f.profile, 'package.json'), '{}')
     throw new Error('forced remove failure')
   }, { symlink: windowsSymlink }), /REINSTALL_PROFILE_RESTORED/)
@@ -224,11 +231,69 @@ test('declared nested runtime dependencies and external linked development check
   assert.equal(existsSync(join(external, 'node_modules/electron')), true)
 })
 
-for (const path of ['.pnpm/foreign@1.0.0/node_modules/foreign/index.js', '.bin/foreign']) test(`unrelated ${path} pruning is detected and rolled back`, async t => {
+for (const path of ['.pnpm/foreign@1.0.0/node_modules/foreign/index.js', '.bin/foreign']) test(`rollback reconciles ${path} instead of snapshotting unrelated content`, async t => {
   const f = fixture(t), foreign = join(f.profile, 'node_modules', path)
   mkdirSync(dirname(foreign), { recursive: true }); writeFileSync(foreign, 'keep this unrelated package')
   const before = tree(f.profile)
-  await assert.rejects(withProfileCheckpoint(f.home, f.job, async () => { rmSync(foreign) }), /REINSTALL_UNRELATED_PACKAGES_CHANGED/)
+  let reconciled = false
+  await assert.rejects(withProfileCheckpoint(f.home, f.job, async () => { rmSync(foreign); throw new Error('remove failed') }, {
+    reconcile: async () => { reconciled = true; writeFileSync(foreign, 'keep this unrelated package') },
+  }), /REINSTALL_PROFILE_RESTORED/)
+  assert.equal(reconciled, true)
+  assert.deepEqual(tree(f.profile), before)
+})
+
+for (const code of ['EXDEV', 'UNKNOWN']) test(`checkpoint never hardlinks or traverses unrelated cross-volume junctions (${code})`, async t => {
+  const f = fixture(t), external = join(f.root, 'other-volume'), dependency = join(f.profile, 'node_modules/@deepseek-ai/dsh-llm')
+  mkdirSync(join(external, 'node_modules/zod'), { recursive: true })
+  writeFileSync(join(external, 'node_modules/zod/compile.d.cts'), 'external types')
+  mkdirSync(dirname(dependency), { recursive: true })
+  symlinkSync(external, dependency, 'junction')
+  const before = tree(f.profile)
+  await assert.rejects(withProfileCheckpoint(f.home, f.job, async () => {
+    const saved = join(f.job, 'profile-before/files')
+    assert.deepEqual(readdirSync(saved).sort(), ['node_modules', 'package.json', 'pnpm-lock.yaml'])
+    assert.deepEqual(readdirSync(join(saved, 'node_modules')), ['dsh-builtin-browser'])
+    rmSync(f.plugin, { recursive: true })
+    rmSync(dependency)
+    throw new Error('forced remove failure')
+  }, {
+    link: async () => { throw Object.assign(new Error('cross-volume hardlink'), { code }) },
+    readdir: async (path, ...args) => {
+      if (String(path).startsWith(dependency) || String(path).startsWith(external)) throw Object.assign(new Error('cross-volume traversal'), { code })
+      return readdir(path, ...args)
+    },
+    copyFile: async (source, destination) => {
+      if (String(source).startsWith(dependency) || String(source).startsWith(external)) throw Object.assign(new Error('cross-volume file copy'), { code })
+      return copyFile(source, destination)
+    },
+    symlink: async (target, path, type) => {
+      assert.equal(type, 'junction')
+      return symlink(target, path, type)
+    },
+  }), /REINSTALL_PROFILE_RESTORED/)
+  assert.deepEqual(tree(f.profile), before)
+  assert.equal(readFileSync(join(external, 'node_modules/zod/compile.d.cts'), 'utf8'), 'external types')
+})
+
+test('reconciliation precedes orphan recovery from .ignored and preserves exact profile files', async t => {
+  const f = fixture(t), modules = join(f.profile, 'node_modules/.modules.yaml')
+  writeFileSync(modules, 'original metadata\r\n')
+  const before = tree(f.profile)
+  let reconciled = false
+  await assert.rejects(withProfileCheckpoint(f.home, f.job, async () => {
+    writeFileSync(join(f.profile, 'package.json'), '{}')
+    writeFileSync(modules, 'changed')
+    pruneOrphan(f.profile)
+    throw new Error('remove failed')
+  }, { reconcile: async () => {
+    reconciled = true
+    assert.match(readFileSync(join(f.profile, 'package.json'), 'utf8'), /dsh-builtin-browser/)
+    assert.equal(readFileSync(modules, 'utf8'), 'original metadata\r\n')
+    assert.equal(existsSync(join(f.profile, 'node_modules/.ignored/@scope/orphan')), true)
+    writeFileSync(modules, 'pnpm rewrote metadata')
+  } }), /REINSTALL_PROFILE_RESTORED/)
+  assert.equal(reconciled, true)
   assert.deepEqual(tree(f.profile), before)
 })
 
