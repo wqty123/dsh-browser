@@ -27,6 +27,7 @@ export class IframeImpl implements BrowserFrame {
   private readonly navigation: BrowserNavigation
   private readonly store: SnapshotStore<BrowserFrameState>
   private sandboxed = true
+  private frameHistoryForward = false
   private error: BrowserLoadError | undefined
   private disposed = false
   private disposal: Promise<void> | undefined
@@ -83,13 +84,15 @@ export class IframeImpl implements BrowserFrame {
     if (this.disposed) return
     if (this.navigation.canGoBack) { this.load(this.navigation.back()); return }
     this.frameHistoryForward = this.presentation.historyStep(-1) || this.frameHistoryForward
+    this.publish()
   }
 
   /** Move forward: app-known history first, then the iframe's own (page-internal) history. */
   goForward(): void {
     if (this.disposed) return
     if (this.navigation.canGoForward) { this.load(this.navigation.forward()); return }
-    this.presentation.historyStep(1)
+    if (this.presentation.historyStep(1)) this.frameHistoryForward = false
+    this.publish()
   }
   /** Reload the last application-known address. */
   reload(): void { if (!this.disposed) this.load(this.navigation.reload()) }
@@ -115,6 +118,7 @@ export class IframeImpl implements BrowserFrame {
 
   private load(request: ReturnType<BrowserNavigation['navigate']> | undefined): void {
     if (request === undefined) return
+    this.frameHistoryForward = false
     this.error = undefined
     this.publish()
     this.presentation.show({ target: request.target, revision: request.revision, sandboxed: this.sandboxed })

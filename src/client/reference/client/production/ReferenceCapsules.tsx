@@ -21,6 +21,7 @@ import { IconEditOutlineRegular, IconLinkOutlineRegular, IconTrashOutlineRegular
 import type { CardActions, CardPart, CardViewModel } from './reference-card.ts'
 import type { ReferenceLabels } from './reference-labels.ts'
 import css from './ReferenceDock.module.css'
+import { ReferenceText } from './ReferenceText.tsx'
 
 export interface ReferenceCapsulesProps {
   readonly sessionId: string
@@ -41,7 +42,9 @@ const PANEL_MAX_HEIGHT_PX = 420
 
 
 function Part({ part, labels }: { readonly part: CardPart; readonly labels: ReferenceLabels }): ReactNode {
-  if (part.kind === 'text') return <p className={css.quote} data-part-kind="text">{part.value.text}</p>
+  if (part.kind === 'text') return part.value.content === undefined
+    ? <p className={css.quote} data-part-kind="text">{part.value.text}</p>
+    : <div className={css.quote} data-part-kind="text"><ReferenceText content={part.value.content} /></div>
   if (part.kind === 'image') return part.value.bound
     ? <img className={css.image} data-part-kind="image" src={part.value.thumbnailSrc} alt={part.value.alt ?? labels.image} />
     : <p className={css.secondary} data-part-kind="image" role="status">{labels.loadingImage}</p>

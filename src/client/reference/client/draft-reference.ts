@@ -6,6 +6,7 @@
  * Serialization is strict so an unsent draft survives a restart with every
  * fragment and asset binding intact.
  */
+import { isReferenceTable, isReferenceText, MAX_REFERENCE_TEXT } from '../../../reference-text.ts'
 import type {
   BrowserReferencePart,
   OrderedReferenceGroup,
@@ -55,9 +56,11 @@ export function isBrowserReferencePart(value: unknown): value is BrowserReferenc
     && isNonEmptyString(value.partId)
     && isNonEmptyString(value.referenceId)
     && isOptionalString(value.assetKey)
-    && isOptionalString(value.text)
+    && isOptionalString(value.text, MAX_REFERENCE_TEXT)
+    && (value.content === undefined || isReferenceText(value.content))
+    && (value.table === undefined || isReferenceTable(value.table))
     && isOptionalString(value.mimeType)
-    && isOptionalString(value.label)
+    && isOptionalString(value.label, MAX_REFERENCE_TEXT)
     && (value.status === undefined || (typeof value.status === 'string' && statuses.includes(value.status)))
 }
 

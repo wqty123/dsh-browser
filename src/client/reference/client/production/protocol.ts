@@ -13,6 +13,8 @@
  * @module dsh-browser-reference/production/protocol
  */
 
+import type { ReferenceTextNode } from '../../../../reference-text.ts'
+
 /** Exact HTTP paths served by the plugin's reference router. */
 export const ROUTES = {
   deliveries: '/dsh-builtin-browser/reference/deliveries',
@@ -53,6 +55,7 @@ export interface TextReferencePart {
   readonly partId: string
   readonly type: 'text'
   readonly text: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly anchor: TextQuoteAnchor
 }
 

@@ -71,9 +71,13 @@ describe('wireSubmissionContent — ordered, real blocks for Session.prompt', ()
     expect(tableText).toContain('姓名 / Name')
     expect(tableText).toContain('1,234')
     expect(tableText).toContain('含图片的单元格')
-    expect(tableText).toContain('completeness=visible-rows')
-    expect(tableText).toContain(`cell-img@${CELL_IMG_KEY}`)
-    expect(tableText).toContain('[0,1] (1r x 2c; header,header-context,full-text)')
+    expect(tableText).toContain('<table>')
+    expect(tableText).toContain('<th rowspan="1" colspan="2">Q1 营收(千)</th>')
+    expect(tableText).toContain('<td rowspan="2" colspan="1">爱丽丝 Alice</td>')
+    expect(group.parts[2]?.table).toMatchObject({ completeness: 'visible-rows' })
+    expect(group.parts[2]?.table?.cells).toContainEqual(expect.objectContaining({
+      inlineContent: expect.arrayContaining([expect.objectContaining({ assetKey: CELL_IMG_KEY })]),
+    }))
   })
 
   it('an uploaded image asset becomes a {type:file,receiptId} block (host admission)', () => {

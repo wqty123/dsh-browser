@@ -342,14 +342,19 @@ test('selection entry supports keyboard dismissal and stays hidden after activat
 
 test('B32: frame identity comes from the iframe element, not the page payload', () => {
   const page = fakePage()
+  const body = { nodeType: 1, tagName: 'BODY', querySelectorAll: () => [] }
+  const text = { nodeType: 3, nodeValue: 'chosen words', parentElement: body }
+  body.firstChild = text
+  const range = { startContainer: text, endContainer: text, startOffset: 0, endOffset: 12, cloneRange() { return this } }
   const iframe = {
     tagName: 'IFRAME',
     contentDocument: {
-      body: { innerText: 'before chosen words after' },
+      body,
+      createTreeWalker: () => ({ nextNode: () => null }),
       title: 'A frame',
       querySelectorAll: () => [],
     },
-    contentWindow: { location: { href: 'https://example.com/embed#part' }, getSelection: () => ({ rangeCount: 1, isCollapsed: false, toString: () => 'chosen words' }) },
+    contentWindow: { location: { href: 'https://example.com/embed#part' }, getSelection: () => ({ rangeCount: 1, isCollapsed: false, getRangeAt: () => range }) },
     getAttribute: key => key === 'src' ? 'https://example.com/embed' : null,
   }
   page.document.querySelector = () => iframe
@@ -360,6 +365,7 @@ test('B32: frame identity comes from the iframe element, not the page payload', 
   assert.equal(answer.frameRoute, undefined, 'the page cannot self-report frameRoute')
   assert.equal(answer.events[0].kind, 'text')
   assert.equal(answer.events[0].exact, 'chosen words')
+  assert.equal(answer.events[0].content[0].text, 'chosen words')
   const valid = validateFrameCapture({ ...answer, frameRoute: 'admin', frameSelector: 'evil' }, '#frame')
   assert.equal(valid.frameSelector, '#frame', 'host request wins over the payload')
   assert.equal(valid.frameRoute, undefined)

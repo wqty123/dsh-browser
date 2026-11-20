@@ -1,0 +1,188 @@
+// @vitest-environment jsdom
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { captureScript, highlightScript, pageTextScript, type RawCaptureResult } from '../../../../browser-reference/page-script.ts'
+import { BrowserReferenceService } from '../../../../browser-reference/service.ts'
+import { frameCaptureScript } from '../../../../browser-reference/entry.ts'
+import { ReferenceStore } from '../../../../browser-reference/store.ts'
+import { isReferenceText, MAX_REFERENCE_TEXT, renderReferenceText } from '../../../../reference-text.ts'
+import { emptyDraftState, insertGroup, isOrderedReferenceGroup } from '../draft-reference.ts'
+import { toOrderedGroup } from '../production/snapshot-adapter.ts'
+import { wireSubmissionContent } from '../production/production-submission.ts'
+import { ReferenceText } from '../production/ReferenceText.tsx'
+
+const directories: string[] = []
+const box = { x: 10, y: 100, left: 10, top: 100, right: 650, bottom: 120, width: 640, height: 20, toJSON: () => ({}) }
+const oldRects = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects')
+beforeAll(() => { Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [box] }) })
+afterAll(() => {
+  if (oldRects) Object.defineProperty(Range.prototype, 'getClientRects', oldRects)
+  else Reflect.deleteProperty(Range.prototype, 'getClientRects')
+})
+beforeEach(() => { vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(box) })
+afterEach(() => {
+  vi.restoreAllMocks()
+  window.getSelection()?.removeAllRanges()
+  document.body.replaceChildren()
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
+})
+
+function execute<T>(source: string, spec: unknown = {}): T {
+  return JSON.parse(new Function(`return ${source}`).call(window, spec)) as T
+}
+
+function select(html: string): RawCaptureResult {
+  document.body.innerHTML = html
+  const range = document.createRange()
+  range.selectNodeContents(document.body)
+  window.getSelection()!.addRange(range)
+  return execute(captureScript())
+}
+
+async function stored(raw: RawCaptureResult) {
+  const directory = mkdtempSync(join(tmpdir(), 'reference-format-'))
+  directories.push(directory)
+  const path = join(directory, 'references.jsonl')
+  const service = new BrowserReferenceService({ exists: () => false, evaluate: async () => { throw new Error('frozen capture must not read a browser') } },
+    new ReferenceStore(path), { assetDir: join(directory, 'assets') })
+  const outcome = await service.capture({ sessionId: 's', frozenCapture: raw })
+  return { outcome, path }
+}
+
+async function submit(raw: RawCaptureResult) {
+  const { outcome, path } = await stored(raw)
+  expect(outcome.failures).toEqual([])
+  const snapshot = new ReferenceStore(path).get(outcome.reference!.referenceId)!
+  const group = toOrderedGroup(snapshot)
+  expect(insertGroup(emptyDraftState(), group, 0).ok).toBe(true)
+  return { snapshot, group, parts: wireSubmissionContent({ uploaded: [], text: '', groups: [group], sourceLinks: false, admitImage: () => undefined }) }
+}
+
+describe('formatted quotations through emitted capture, storage, draft and submission', () => {
+  it('preserves paragraphs, nested inline emphasis, links, lists and explicit line breaks', async () => {
+    const raw = select('<p>First <strong>bold <em>nested</em></strong> <a href="https://example.com/a?q=1">link</a>.</p><p>Second<br>line</p><ol start="3"><li>Alpha</li><li>Beta</li></ol><ul><li>Gamma</li></ul>')
+    expect(raw.ok).toBe(true)
+    expect(raw.events).toHaveLength(1)
+    expect(raw.events![0]!.exact).toBe('First bold nested link.\n\nSecond\nline\n\nAlpha\nBeta\n\nGamma')
+    const { parts, group, snapshot } = await submit(raw)
+    expect(parts).toEqual([{ type: 'text', text: 'First **bold *nested*** [link](https://example.com/a?q=1).\n\nSecond  \nline\n\n3. Alpha\n4. Beta\n\n- Gamma\n' }])
+    expect(group.parts[0]!.content).toEqual(raw.events![0]!.content)
+    expect(snapshot.parts[0]).toMatchObject({ content: raw.events![0]!.content })
+    const html = renderToStaticMarkup(createElement(ReferenceText, { content: group.parts[0]!.content! }))
+    expect(html).toContain('<strong>bold <em>nested</em></strong>')
+    expect(html).toContain('<ol start="3"><li>Alpha</li><li>Beta</li></ol>')
+    expect(html).toContain('Second<br/>line')
+    expect(html).not.toContain('target=')
+  })
+
+  it('keeps text/table/text order and submits a structural table with merged cells', async () => {
+    const raw = select('<p>Before</p><table><caption>Scores</caption><tr><th colspan="2">Results</th></tr><tr><td>Ada</td><td>42</td></tr></table><p>After</p>')
+    expect(raw.events!.map(event => event.kind)).toEqual(['text', 'table', 'text'])
+    const { parts, group } = await submit(raw)
+    expect(parts).toEqual([
+      { type: 'text', text: 'Before\n' },
+      { type: 'text', text: '<table>\n<caption>Scores</caption>\n<tr><th rowspan="1" colspan="2">Results</th></tr>\n<tr><td rowspan="1" colspan="1">Ada</td><td rowspan="1" colspan="1">42</td></tr>\n</table>\n' },
+      { type: 'text', text: 'After\n' },
+    ])
+    expect(group.parts[1]!.table!.cells[0]).toMatchObject({ role: 'header', columnSpan: 2 })
+  })
+
+  it('clips selected inline content and keeps the original ordered-list numbering', async () => {
+    select('<ol start="7"><li>Unselected</li><li>prefix <strong>selected</strong> suffix</li></ol>')
+    const range = document.createRange()
+    const node = document.querySelector('strong')!.firstChild!
+    range.setStart(node, 1)
+    range.setEnd(node, 6)
+    window.getSelection()!.removeAllRanges()
+    window.getSelection()!.addRange(range)
+    const { parts } = await submit(execute(captureScript()))
+    expect(parts).toEqual([{ type: 'text', text: '8. **elect**\n' }])
+  })
+
+  it('uses identical map offsets for capture, locate and DOM highlighting across blocks and br', () => {
+    const raw = select('<p>First <b>bold</b></p><p>Second<br>line 🦊</p>')
+    const event = raw.events![0]!
+    const page = execute<{ text: string }>(pageTextScript())
+    expect(page.text).toContain(event.exact)
+    const node = document.querySelectorAll('p')[1]!.lastChild!
+    const start = page.text.indexOf('line')
+    const setStart = vi.spyOn(Range.prototype, 'setStart')
+    const setEnd = vi.spyOn(Range.prototype, 'setEnd')
+    expect(execute(highlightScript(), { start, end: start + 'line 🦊'.length })).toMatchObject({ ok: true })
+    expect(setStart).toHaveBeenCalledWith(node, 0)
+    expect(setEnd).toHaveBeenCalledWith(node, 'line 🦊'.length)
+  })
+
+  it('keeps legacy unstructured snapshots locatable with their original map', () => {
+    select('<p>First</p><p>Second</p>')
+    expect(execute<{ text: string }>(pageTextScript(), { legacy: true }).text).toBe('FirstSecond')
+    const node = document.querySelectorAll('p')[1]!.firstChild!
+    const setStart = vi.spyOn(Range.prototype, 'setStart')
+    expect(execute(highlightScript(), { legacy: true, start: 5, end: 11 })).toMatchObject({ ok: true })
+    expect(setStart).toHaveBeenCalledWith(node, 0)
+  })
+
+  it.each([3000, MAX_REFERENCE_TEXT])('admits %i characters through server and draft validation', async length => {
+    const { group } = await submit(select(`<p>${'x'.repeat(length)}</p>`))
+    expect(group.parts[0]!.text).toHaveLength(length)
+    expect(isOrderedReferenceGroup(JSON.parse(JSON.stringify(group)))).toBe(true)
+  })
+
+  it('refuses content above the shared limit on both sides', async () => {
+    const { outcome } = await stored(select(`<p>${'x'.repeat(MAX_REFERENCE_TEXT + 1)}</p>`))
+    expect(outcome.reference).toBeUndefined()
+    expect(outcome.failures).toContainEqual(expect.objectContaining({ reason: 'text-too-long' }))
+    expect(isOrderedReferenceGroup({ referenceId: 'r', parts: [{ kind: 'text', referenceId: 'r', partId: 't', text: 'x'.repeat(MAX_REFERENCE_TEXT + 1) }] })).toBe(false)
+  })
+
+  it('excludes hidden and executable content and refuses malformed semantic payloads', async () => {
+    const raw = select('<p>safe<script>danger()</script><span style="display:none">hidden</span><a href="javascript:alert(1)"> text</a></p>')
+    const { parts } = await submit(raw)
+    expect(parts).toEqual([{ type: 'text', text: 'safe text\n' }])
+    const event = raw.events![0]!
+    const { outcome } = await stored({ ...raw, events: [{ ...event, content: [{ type: 'link', href: 'javascript:alert(1)', children: [{ type: 'text', text: event.exact! }] }] }] })
+    expect(outcome.failures).toContainEqual({ kind: 'text', reason: 'invalid-text-content' })
+    expect(isReferenceText([{ type: 'html', text: '<script>' }])).toBe(false)
+  })
+
+  it('escapes markup-like text while preserving code and treats an empty selection as empty', async () => {
+    const { parts } = await submit(select('<p>&lt;img src=x&gt; [literal] <code>a*b</code></p><pre>one\n  two</pre>'))
+    expect(parts).toEqual([{ type: 'text', text: '\\<img src=x\\> \\[literal\\] ` a*b `\n\n```\none\n  two\n```\n' }])
+    window.getSelection()!.removeAllRanges()
+    expect(execute(captureScript())).toMatchObject({ ok: false, reason: 'no-selection' })
+    expect(renderReferenceText([])).toBe('')
+    expect(wireSubmissionContent({ uploaded: [], text: '', groups: [], admitImage: () => undefined })).toEqual([])
+  })
+
+  it('preserves nested block boundaries without nesting paragraph elements', async () => {
+    const { parts, group } = await submit(select('<main><section>Before<div><p>Inside</p><p>Next</p></div>After</section></main>'))
+    expect(parts).toEqual([{ type: 'text', text: 'Before\n\nInside\n\nNext\n\nAfter\n' }])
+    const html = renderToStaticMarkup(createElement(ReferenceText, { content: group.parts[0]!.content! }))
+    expect(html).toContain('<div>Before<div><p>Inside</p><p>Next</p></div>After</div>')
+  })
+
+  it('uses the same structured capture in same-origin frames', async () => {
+    const iframe = document.createElement('iframe')
+    iframe.id = 'quote-frame'
+    document.body.append(iframe)
+    const frame = iframe.contentWindow!
+    const frameDocument = iframe.contentDocument!
+    vi.spyOn(frameDocument.body, 'getBoundingClientRect').mockReturnValue(box)
+    frameDocument.body.innerHTML = '<p>Frame <strong>bold</strong></p><p>Next<br>line</p>'
+    for (const element of frameDocument.querySelectorAll('*')) vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(box)
+    const range = frameDocument.createRange()
+    range.selectNodeContents(frameDocument.body)
+    frame.getSelection()!.addRange(range)
+    const raw = execute<RawCaptureResult>(frameCaptureScript(), { frameSelector: '#quote-frame' })
+    expect(raw).toMatchObject({ ok: true, url: window.location.href, frameUrl: frame.location.href })
+    const { parts } = await submit(raw)
+    expect(parts).toEqual([{ type: 'text', text: 'Frame **bold**\n\nNext  \nline\n' }])
+    frame.getSelection()!.removeAllRanges()
+    expect(execute<{ ok: boolean; reason: string }>(frameCaptureScript(), { frameSelector: '#quote-frame' })).toMatchObject({ ok: false, reason: 'no-selection' })
+    expect(execute<{ ok: boolean; reason: string }>(frameCaptureScript(), { frameSelector: '#missing' })).toMatchObject({ ok: false, reason: 'frame-not-found' })
+  })
+})
