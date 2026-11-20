@@ -177,6 +177,7 @@ test('caps declared and chunked request bodies at 10 MiB without reading or forw
         assert.fail('must not read the remainder')
       } }
     await handleGuest(request, {
+      setHeader() {},
       writeHead(code, headers) { status = code; responseHeaders = headers },
       end(body) { message = body },
     }, '', '')
@@ -207,11 +208,11 @@ test('stores redirect cookies and rewrites redirect location for a login round-t
   assert.equal(forwarded.at(-1).options.redirect, 'manual')
 })
 
-test('replays only allowlisted inbound site cookies alongside the existing jar', async () => {
+test('never replays browser cookies, including site-looking names, alongside the jar', async () => {
   const result = await call(guestPath('https://ordinary.example/echo'), {
     headers: { cookie: 'DSH=private; BAIDUID=baidu; SUB=weibo; XSRF=site-token; session=private' },
   })
-  assert.equal(JSON.parse(result.body).headers.cookie, 'SID=logged-in; theme=dark; BAIDUID=baidu; SUB=weibo; XSRF=site-token')
+  assert.equal(JSON.parse(result.body).headers.cookie, 'SID=logged-in; theme=dark')
 })
 
 test('proxy cookie round-trip honors directory paths, duplicate names and Secure without leaking Set-Cookie', async () => {
@@ -338,7 +339,7 @@ test('GET challenge warms once and retries once, merging challenge, root and inb
   assert.deepEqual(requests.map(item => item.target), [
     'https://challenge.example/challenge', 'https://challenge.example/', 'https://challenge.example/challenge',
   ])
-  assert.equal(requests[2].options.headers.get('cookie'), 'CHALLENGE=seen; VISITED=root; SUB=weibo')
+  assert.equal(requests[2].options.headers.get('cookie'), 'CHALLENGE=seen; VISITED=root')
   assert.equal(requests[2].options.headers.get('referer'), 'https://challenge.example/')
 })
 
@@ -364,7 +365,7 @@ test('HTML sub-requests stay raw by explicit marker or fetch destination; framin
     assert.equal(result.headers['content-type'], 'text/html')
     assert.equal(result.body, '<a href="/raw">fragment</a>')
     assert.equal(result.headers['x-frame-options'], undefined)
-    assert.equal(result.headers['content-security-policy'], undefined)
+    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms;/)
   }
 })
 

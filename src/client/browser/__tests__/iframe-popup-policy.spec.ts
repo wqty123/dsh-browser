@@ -4,6 +4,7 @@ import { WEB_BROWSER_SANDBOX } from '../../view/IframePresentation.ts'
 
 function sidebar() {
   const frames: { attributes: Map<string, string>; src: string }[] = []
+  vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() })
   vi.stubGlobal('location', { origin: 'https://dsh.test' })
   vi.stubGlobal('document', {
     getElementById: () => ({ append: vi.fn() }),
@@ -27,9 +28,11 @@ function expectNoPopups(frame: { attributes: Map<string, string> } | undefined) 
   const policy = frame?.attributes.get('sandbox')
   expect(policy).toBeDefined()
   const tokens = policy?.split(/\s+/u) ?? []
+  expect(tokens).not.toContain('allow-same-origin')
+  expect(tokens).not.toContain('allow-top-navigation')
   expect(tokens).not.toContain('allow-popups')
   expect(tokens).not.toContain('allow-popups-to-escape-sandbox')
-  for (const token of ['allow-scripts', 'allow-forms', 'allow-same-origin']) expect(tokens).toContain(token)
+  for (const token of ['allow-scripts', 'allow-forms']) expect(tokens).toContain(token)
   return tokens
 }
 
@@ -41,7 +44,7 @@ describe('Web sidebar popup policy', () => {
     page.frame.loadUrl({ kind: 'https', url: 'https://example.test/page', title: 'Example' })
     expectNoPopups(frames.at(-1))
     expect(frames.at(-1)?.attributes.get('sandbox')).toBe(WEB_BROWSER_SANDBOX)
-    expect(frames.at(-1)?.src).toContain('/browser-view/guest?u=')
+    expect(frames.at(-1)?.src).toContain('/browser-view/isolated-guest?u=')
     void page.frame.dispose()
   })
 

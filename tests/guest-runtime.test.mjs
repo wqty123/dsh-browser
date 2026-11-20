@@ -45,6 +45,7 @@ function page() {
     Object.defineProperty(context[name].prototype, prop, { configurable: true,
       get() { return this.value }, set(value) { this.value = value } })
   }
+  context.parent = { postMessage() {} }
   context.window = context
   vm.createContext(context)
   vm.runInContext(guestRuntimeScript('https://ordinary.example/dir/page'), context)
@@ -174,14 +175,18 @@ test('download anchors, including empty download attributes, retain native brows
   }
 })
 
-test('the reference relay bypasses site request interception', async () => {
-  const { context, requests } = page()
+test('the reference relay sends data to the parent without authenticated requests', async () => {
+  const { context, requests, listeners } = page()
   const tag = relayTag('owner')
   vm.runInContext(tag.slice(tag.indexOf('>') + 1, tag.lastIndexOf('</script>')), context)
-  context.__dshRefIntents.push({ comment: 'quote' })
+  const sent = []
+  context.parent.postMessage = (intent, target) => sent.push({ intent, target })
+  listeners.get('message')({ source: vm.runInContext('window', context), data: { type: 'dsh-browser-ref:intent', comment: 'quote' } })
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(requests[0].input, '/dsh-builtin-browser/reference/capture')
-  assert.equal(JSON.parse(requests[0].init.body).sessionId, 'owner')
+  assert.equal(requests.length, 0)
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].intent.comment, 'quote')
+  assert.equal(sent[0].target, '*')
 })
 
 test('observer proxies parsed resource subtrees and attribute mutations without rewrite loops', () => {

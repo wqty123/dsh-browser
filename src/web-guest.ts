@@ -1,11 +1,4 @@
-/**
- * 侧栏 guest 代理的路由注册。
- *
- * 这条路由原先只在 `browser-electron` 行里注册。web 端没有可用的 Electron 二进制时那行会被关掉，
- * 结果侧栏 iframe 请求 `/dsh-builtin-browser/browser-view/guest` 直接 404 —— 表现为「搜索后白屏」。
- * 代理与载体无关，注册放到根行，任何载体组合下侧栏都能打开页面。
- * @module dsh-builtin-browser/web-guest
- */
+/** Register only the CSP-sandboxed opaque-origin guest endpoint. */
 import type { Context } from '@deepseek-ai/cordis'
 import { overlayScript } from './browser-reference/entry.ts'
 import { GUEST_ROUTE, handleGuest } from './browser-electron/guest-route.ts'
