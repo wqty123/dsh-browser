@@ -473,11 +473,12 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       entry.guest = id
       return { id }
     }
+    const hintGuest = url !== undefined && url !== '' ? entry?.guest : undefined
     const ask = (): Promise<Record<string, unknown>> => this.connection.call({
       op: 'ensureSidebar',
       owner,
       viewId,
-      ...entry?.guest === undefined ? {} : { guestId: entry.guest },
+      ...hintGuest === undefined ? {} : { guestId: hintGuest },
       ...url !== undefined && url !== '' ? { url, attachOnly: true } : {},
     }, 30_000)
     let answer = await ask()

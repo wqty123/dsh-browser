@@ -11,7 +11,11 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { BrowserPanelNotDisplayedError, DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
+import { typescriptSourceLoader } from './typescript-source.mjs'
+
+const loader = typescriptSourceLoader()
+const { BrowserPanelNotDisplayedError, DesktopBridgeViewHost } = await import('../src/browser-electron/desktop-bridge-host.ts')
+loader.deregister()
 
 /** A fake shell bridge: records requests, answers with scripted state. */
 async function startFakeBridge(state = { tabs: 1, dead: [] }) {
@@ -210,6 +214,32 @@ test('legacy bridges retain their shared page for non-navigating handles', async
       'the strip is never grown to satisfy a second view: there is no second page to grow it for')
   } finally {
     bridge.close()
+  }
+})
+
+test('cached guest hints accompany URL opens but not empty-URL sidebar materialization', async () => {
+  const bridge = await startFakeBridge({ tabs: 0, dead: [], protocol: 3 })
+  withEndpoint(bridge.port)
+  let host
+  try {
+    host = await DesktopBridgeViewHost.discover('session-a', () => true)
+    const view = host.createView('session-a')
+    const first = await host.guestFor(view.id, 'https://page.example/')
+    const empty = await host.guestFor(view.id, '')
+    const cached = await host.guestFor(view.id)
+    const reopened = await host.guestFor(view.id, 'https://next.example/')
+    const requests = bridge.requests.filter(request => request.op === 'ensureSidebar')
+    assert.equal(requests.length, 3)
+    assert.equal(requests[0].guestId, undefined)
+    assert.equal(requests[1].guestId, undefined)
+    assert.equal(requests[1].url, undefined)
+    assert.equal(requests[2].guestId, first.id)
+    assert.equal(requests[2].attachOnly, true)
+    assert.equal(empty.id, cached.id)
+    assert.equal(reopened.id, cached.id)
+  } finally {
+    host?.dispose()
+    await bridge.close()
   }
 })
 
