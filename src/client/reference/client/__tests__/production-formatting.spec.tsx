@@ -70,6 +70,44 @@ async function submit(raw: RawCaptureResult) {
 }
 
 describe('formatted quotations through emitted capture, storage, draft and submission', () => {
+  it('preserves selected article headings and lists inside a layout table as structured text', async () => {
+    document.body.innerHTML = '<table><tr><td>navigation</td><td id="article"><h3>Examples</h3><ul><li>One</li><li>Two</li></ul></td></tr></table>'
+    const range = document.createRange()
+    range.selectNodeContents(document.getElementById('article')!)
+    window.getSelection()!.addRange(range)
+    const raw = execute<RawCaptureResult>(captureScript())
+    expect(raw.events!.map(event => event.kind)).toEqual(['text'])
+    const { parts, snapshot } = await submit(raw)
+    expect(snapshot.parts.map(part => part.type)).toEqual(['text'])
+    expect(parts).toEqual([{ type: 'text', text: 'Examples\n\n- One\n- Two\n' }])
+  })
+
+  it.each(['presentation', 'none'])('honors role=%s even when a layout table contains header cells', async role => {
+    const raw = select(`<table role="${role}"><tr><th>Heading</th><td>Content</td></tr><tr><td>A</td><td>B</td></tr></table>`)
+    expect(raw.events!.map(event => event.kind)).toEqual(['text'])
+    expect((await submit(raw)).snapshot.parts[0]?.type).toBe('text')
+  })
+
+  it('keeps a real nested data table without promoting its layout ancestor', async () => {
+    const raw = select('<table><tr><td><h3>Article</h3><table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>1</td></tr></table><p>After</p></td></tr></table>')
+    expect(raw.events!.map(event => event.kind)).toEqual(['text', 'table', 'text'])
+    const { snapshot } = await submit(raw)
+    expect(snapshot.parts[1]).toMatchObject({ type: 'table', table: { rowCount: 2, columnCount: 2 } })
+  })
+
+  it('recognizes a regular headerless data matrix', async () => {
+    const raw = select('<table><tr><td>A</td><td>1</td></tr><tr><td>B</td><td>2</td></tr></table>')
+    expect(raw.events!.map(event => event.kind)).toEqual(['table'])
+    expect((await submit(raw)).snapshot.parts[0]).toMatchObject({ type: 'table', table: { rowCount: 2, columnCount: 2 } })
+  })
+
+  it('honors an explicit whole-table request even for a presentation table', async () => {
+    document.body.innerHTML = '<table id="layout" role="presentation"><tr><td>A</td><td>B</td></tr></table>'
+    const raw = execute<RawCaptureResult>(captureScript(), { tableSelector: '#layout' })
+    expect(raw.events!.map(event => event.kind)).toEqual(['table'])
+    expect((await submit(raw)).snapshot.parts[0]).toMatchObject({ type: 'table', table: { rowCount: 1, columnCount: 2 } })
+  })
+
   it('keeps partial table columns under their own headers through capture and submission', async () => {
     document.body.innerHTML = '<table><thead><tr><th>A</th><th>B</th><th>C</th><th>D</th></tr></thead><tbody><tr><td>omit</td><td colspan="2">selected</td><td>omit too</td></tr></tbody></table>'
     const range = document.createRange()

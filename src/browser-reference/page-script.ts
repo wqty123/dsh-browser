@@ -520,6 +520,33 @@ const PAGE_LIB = String.raw`
     return { selected: true, partial: collapse(picked, 0) !== collapse(full, 0) }
   }
 
+  function dataTable(table) {
+    var role = String(table.getAttribute && table.getAttribute('role') || '').toLowerCase()
+    if (role === 'presentation' || role === 'none') return false
+    if (role === 'table' || role === 'grid' || table.caption) return true
+    var rows = table.rows || []
+    for (var r = 0; r < rows.length; r++) {
+      var cells = rows[r].cells || []
+      for (var c = 0; c < cells.length; c++) {
+        if (String(cells[c].tagName).toUpperCase() === 'TH') return true
+      }
+    }
+    if (rows.length < 2) return false
+    var columns = 0
+    for (var r = 0; r < rows.length; r++) {
+      var cells = rows[r].cells || []
+      if (cells.length < 2) return false
+      var width = 0
+      for (var c = 0; c < cells.length; c++) {
+        if (cells[c].querySelector && cells[c].querySelector('h1,h2,h3,h4,h5,h6,ul,ol,nav,main,article,section,aside,form,table')) return false
+        width += Math.max(1, Number(cells[c].colSpan) || 1)
+      }
+      if (r === 0) columns = width
+      else if (width !== columns) return false
+    }
+    return true
+  }
+
   function tableSnapshot(table, ranges, spec) {
     // An explicit right-click table target is a whole-table action too: the
     // selection was cleared on purpose, so judging cells by "selected" would
@@ -780,6 +807,7 @@ const PAGE_LIB = String.raw`
     else {
       var allTables = body.querySelectorAll ? body.querySelectorAll('table') : []
       for (var t = 0; t < allTables.length && t < 200; t++) {
+        if (!dataTable(allTables[t])) continue
         for (var q = 0; q < ranges.length; q++) {
           var hitTable = false
           try { hitTable = ranges[q].intersectsNode(allTables[t]) } catch (error) { hitTable = false }
