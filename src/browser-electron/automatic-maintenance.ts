@@ -42,6 +42,13 @@ export class ReinstallPreflightError extends Error {
   constructor(readonly code: string, message: string) { super(message) }
 }
 
+function archiveExists(path: string): boolean {
+  const runtime = process as NodeJS.Process & { noAsar?: boolean }
+  const previous = runtime.noAsar
+  runtime.noAsar = true
+  try { return existsSync(path) } finally { runtime.noAsar = previous }
+}
+
 function patchDirectories(root: string): string[] {
   const app = join(root, 'resources', 'app')
   return [app, join(app, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
@@ -84,7 +91,7 @@ export function inspectReinstallHost(root: string): ReturnType<typeof hostPatchS
   const identity = readDesktopIdentity(root)
   if (!identity.ok) throw new ReinstallPreflightError('REINSTALL_DESKTOP_INVALID', identity.reason)
   const archive = join(root, 'resources', 'app.asar')
-  if (existsSync(archive) && existsSync(archive + '.before-bridge')) {
+  if (archiveExists(archive) && existsSync(archive + '.before-bridge')) {
     throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'Both the Desktop archive and its restore baseline exist.')
   }
   if (identity.layout === 'unpacked') return hostPatchStatus(patchDirectories(root))
@@ -127,7 +134,7 @@ export async function preflightReinstall(root: string, home: string): Promise<st
   if (status.status !== 'absent' && status.status !== 'applied') throw new ReinstallPreflightError('REINSTALL_HOST_CONFLICT', status.reason ?? status.status)
   const cli = 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js'
   const archive = join(root, 'resources', 'app.asar')
-  if (status.status === 'applied' && (existsSync(archive) || ![
+  if (status.status === 'applied' && (archiveExists(archive) || ![
     join(root, 'resources', 'app', 'lib', 'main.js'), join(root, 'resources', 'app', 'lib', 'preload-app.cjs'),
     join(patchDirectories(root)[1]!, 'lib', 'client.js'),
   ].every(path => existsSync(path + '.before-dsh-host-patch')))) {
@@ -139,7 +146,7 @@ export async function preflightReinstall(root: string, home: string): Promise<st
   validateCliBackup(join(root, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'), 'shim')
   if (!existsSync(archive)) validateCliBackup(join(root, 'resources', 'app', cli), 'host')
   const main = join(root, 'resources', 'app', 'lib', 'main.js')
-  if (!existsSync(join(root, 'resources', 'app.asar')) && existsSync(main + '.before-bridge')) {
+  if (!archiveExists(join(root, 'resources', 'app.asar')) && existsSync(main + '.before-bridge')) {
     const original = readFileSync(main + '.before-bridge', 'utf8')
     const current = readFileSync(existsSync(main + '.before-dsh-host-patch') ? main + '.before-dsh-host-patch' : main, 'utf8')
     if ((stripLegacyBridge(current) ?? current) !== original) {

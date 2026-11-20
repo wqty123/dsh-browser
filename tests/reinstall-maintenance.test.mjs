@@ -1,4 +1,6 @@
 import { test } from 'node:test'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -54,6 +56,25 @@ test('read-only preflight admits clean and installed hosts, preserving restore b
   assert.equal(restoreHostPatch(f.packages).status, 'absent')
   assert.equal(await preflightReinstall(f.root, f.home), f.spec)
   for (const file of ['lib/main.js', 'lib/preload-app.cjs']) assert.equal(readFileSync(join(f.app, file), 'utf8'), f.files[file])
+})
+
+test('packed preflight probes archives without Electron caching and restores noAsar', async t => {
+  const f = fixture(t)
+  writeAsar(join(f.root, 'resources/app.asar'), f.files)
+  const original = fs.existsSync, previous = process.noAsar, probes = []
+  fs.existsSync = path => {
+    if (String(path).endsWith('app.asar')) {
+      probes.push(process.noAsar)
+      assert.equal(process.noAsar, true)
+    }
+    return original(path)
+  }
+  syncBuiltinESMExports()
+  try {
+    assert.equal(await preflightReinstall(f.root, f.home), f.spec)
+    assert.ok(probes.length > 0)
+    assert.equal(process.noAsar, previous)
+  } finally { fs.existsSync = original; syncBuiltinESMExports(); process.noAsar = previous }
 })
 
 test('missing dependency refuses with a structured error and zero writes', async t => {
