@@ -80,7 +80,11 @@
           "after": "ckend.start(async () => {\n\t\t\t\tawait Promise.all([manager.applyRelease(), prepareHostEnvironment()]);\n\t\t\t\tif (!mainExtensionsStarted) {\n\t\t\t\t\tmainExtensionsStarted = true;\n\t\t\t\t\tawait startDesktopMainExtensions(activeProject, mainExtensionApi);\n\t\t\t\t}\n\t\t\t});\n\t\t\tif (backend.host !== void 0) await openInitialWindow();\n\t\t\tif (backend.host !== void 0) u"
         }
       ],
-      "sha256": "f808749c7a1a907e1acb354e774d1cebf1d1c2561fd789d8fbee1e9c412caa00"
+      "sha256": "f808749c7a1a907e1acb354e774d1cebf1d1c2561fd789d8fbee1e9c412caa00",
+      "legacyBridge": {
+        "marker": "// dsh-builtin-browser: hand the plugin a way to drive the sidebar",
+        "backupSuffix": ".before-bridge"
+      }
     }
   ]
 }

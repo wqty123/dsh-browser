@@ -862,6 +862,10 @@ if (revert) {
     console.error('refusing to uninstall over a host patch that cannot be safely restored: ' + hostPatch.reason)
     process.exit(1)
   }
+  if (hasHostBackup && readFileSync(mainPath, 'utf8').includes(MARKER)) {
+    console.log('restored the pre-install legacy bridge and sidebar; preserving its module copies, CLI and archive layout')
+    process.exit(0)
+  }
   // Tracked separately: restoring a CLI launcher or the runtime resolution is NOT an
   // uninstall. `reverted` only means some component was restored; whether the bridge is
   // actually gone is decided from the entry Electron loads, at the end of this branch.
@@ -1032,7 +1036,6 @@ const current = readFileSync(mainPath, 'utf8')
 const hostTargets = [appDir, join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
 hostPatch = applyHostPatch(hostTargets, {
   fs: archiveFs,
-  normalize: (text, target) => target.id === 'main' ? withoutOurSnippet(text) ?? text : text,
 })
 console.log('DSH host patch: ' + JSON.stringify(hostPatch))
 if (hostPatch.status === 'applied' || current.includes('//#region lib/types/main-extensions.js')) {

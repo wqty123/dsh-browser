@@ -62,6 +62,43 @@ test('web package directory and hardlinked npm content are patched without chang
   assert.equal(fs.readFileSync(file('client'), 'utf8'), fixture('client', 'after'))
 })
 
+test('legacy bridge migration preserves exact restore bytes independently of the installer snippet version', t => {
+  const { packages, file } = setup(t)
+  const target = spec.targets.find(target => target.id === 'main')
+  const pristine = fixture('main', 'before')
+  const legacy = pristine.replace('export {};', `${target.legacyBridge.marker} pages.\napp.whenReady().then(() => import('./plugin-browser-bridge.js'));\nexport {};`)
+  assert.notEqual(legacy, pristine)
+  fs.writeFileSync(file('main'), legacy)
+  fs.writeFileSync(file('main') + '.before-bridge', pristine)
+  const store = file('main') + '.store'
+  fs.linkSync(file('main'), store)
+  assert.deepEqual(hostPatchStatus(packages), { status: 'absent' })
+  assert.deepEqual(applyHostPatch(packages), { status: 'applied', changed: true })
+  assert.equal(fs.readFileSync(file('main'), 'utf8'), fixture('main', 'after'))
+  assert.equal(fs.readFileSync(file('main') + backupSuffix, 'utf8'), legacy)
+  assert.equal(fs.readFileSync(store, 'utf8'), legacy)
+  assert.deepEqual(hostPatchStatus(packages), { status: 'applied' })
+  assert.deepEqual(applyHostPatch(packages), { status: 'applied', changed: false })
+  assert.deepEqual(restoreHostPatch(packages), { status: 'absent', changed: true })
+  assert.equal(fs.readFileSync(file('main'), 'utf8'), legacy)
+  assert.equal(fs.readFileSync(file('client'), 'utf8'), fixture('client', 'before'))
+  assert.deepEqual(restoreHostPatch(packages), { status: 'absent', changed: false })
+  assert.deepEqual(applyHostPatch(packages), { status: 'applied', changed: true })
+})
+
+test('legacy migration validates sidebar anchors before changing either file or creating backups', t => {
+  const { packages, file } = setup(t)
+  const marker = spec.targets.find(target => target.id === 'main').legacyBridge.marker
+  const legacy = fixture('main', 'before') + '\n' + marker + '\n'
+  fs.writeFileSync(file('main'), legacy)
+  fs.writeFileSync(file('main') + '.before-bridge', fixture('main', 'before'))
+  fs.writeFileSync(file('client'), 'unknown client build')
+  assert.equal(applyHostPatch(packages).status, 'anchors mismatch')
+  assert.equal(fs.readFileSync(file('main'), 'utf8'), legacy)
+  assert.equal(fs.readFileSync(file('client'), 'utf8'), 'unknown client build')
+  for (const id of ['main', 'client']) assert.equal(fs.existsSync(file(id) + backupSuffix), false)
+})
+
 for (const [name, mutate, status] of [
   ['unsupported version', ({ packages }) => fs.writeFileSync(join(packages[1], 'package.json'), JSON.stringify({ name: spec.targets[1].packageName, version: '0.2.2-rc.4' })), 'unsupported version'],
   ['missing anchor', ({ file }) => fs.writeFileSync(file('client'), fixture('client', 'before').replace(spec.targets[0].edits[1].before, 'missing')), 'anchors mismatch'],

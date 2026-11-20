@@ -38,7 +38,16 @@ export function patchText(text, target) {
   return text
 }
 
-function plan(packages, restoring, io, normalize = text => text) {
+function patchSource(text, target, path, io) {
+  if (!target.legacyBridge || !text.includes(target.legacyBridge.marker)) return text
+  const backup = path + target.legacyBridge.backupSuffix
+  if (!io.lstatSync(backup).isFile() || io.lstatSync(backup).isSymbolicLink()) throw new Error('legacy bridge backup is not a regular file')
+  const pristine = io.readFileSync(backup, 'utf8')
+  if (digest(pristine) !== target.sha256) throw new Error('legacy bridge backup pristine main.js hash mismatch')
+  return pristine
+}
+
+function plan(packages, restoring, io) {
   const directories = typeof packages === 'string' ? [packages] : packages
   if (!Array.isArray(directories) || directories.length === 0) throw new Error('at least one package directory is required')
   const entries = directories.map(directory => {
@@ -60,14 +69,13 @@ function plan(packages, restoring, io, normalize = text => text) {
     }
     if (!io.lstatSync(path).isFile() || io.lstatSync(path).isSymbolicLink()) throw new Error('target is not a regular file')
     const text = io.readFileSync(path, 'utf8')
-    const source = restoring ? text : normalize(text, target)
     const backup = path + suffix
     const held = io.existsSync(backup)
     if (held && (!io.lstatSync(backup).isFile() || io.lstatSync(backup).isSymbolicLink())) throw new Error('backup is not a regular file')
     const original = held ? io.readFileSync(backup, 'utf8') : undefined
     const applied = text.includes(target.marker)
     if (applied) {
-      if (original !== undefined && patchText(original, target) !== text) throw new Error('patched file differs from its recorded backup; refusing to overwrite other edits')
+      if (original !== undefined && patchText(patchSource(original, target, path, io), target) !== text) throw new Error('patched file differs from its recorded backup; refusing to overwrite other edits')
       if (restoring && original === undefined) throw new Error('no backup for this already patched host')
       return { path, backup, text, output: restoring ? original : text, applied, held, mode: io.statSync(path).mode }
     }
@@ -75,8 +83,8 @@ function plan(packages, restoring, io, normalize = text => text) {
       if (original !== undefined && original !== text) throw new Error('file changed after restore or Desktop update')
       return { path, backup, text, output: text, applied, held, mode: io.statSync(path).mode }
     }
-    if (original !== undefined && original !== source) throw new Error('backup belongs to different bytes; refusing to overwrite it')
-    return { path, backup, text, backupText: source, output: patchText(source, target), applied, held, mode: io.statSync(path).mode }
+    if (original !== undefined && original !== text) throw new Error('backup belongs to different bytes; refusing to overwrite it')
+    return { path, backup, text, backupText: text, output: patchText(patchSource(text, target, path, io), target), applied, held, mode: io.statSync(path).mode }
   })
   if (new Set(entries.map(entry => entry.path)).size !== entries.length) throw new Error('duplicate package target')
   if (!restoring && entries.some(entry => entry.applied) && !entries.every(entry => entry.applied)) {
@@ -85,9 +93,9 @@ function plan(packages, restoring, io, normalize = text => text) {
   return entries
 }
 
-function inspect(packages, restoring, io, normalize) {
+function inspect(packages, restoring, io) {
   try {
-    const entries = plan(packages, restoring, io, normalize)
+    const entries = plan(packages, restoring, io)
     return { status: entries.every(entry => entry.applied) ? 'applied' : 'absent', entries }
   } catch (error) {
     return { status: error.status ?? 'anchors mismatch', reason: String(error.message ?? error) }
@@ -96,13 +104,13 @@ function inspect(packages, restoring, io, normalize) {
 
 /** Read-only validation. A valid absent patch is ready to apply; a mismatch never writes. */
 export function hostPatchStatus(packages, options = {}) {
-  const { entries, ...status } = inspect(packages, false, options.fs ?? fs, options.normalize)
+  const { entries, ...status } = inspect(packages, false, options.fs ?? fs)
   return status
 }
 
 function change(packages, restoring, options) {
   const io = options.fs ?? fs
-  const checked = inspect(packages, restoring, io, options.normalize)
+  const checked = inspect(packages, restoring, io)
   if (!checked.entries) return { ...checked, changed: false }
   const changed = checked.entries.filter(entry => entry.text !== entry.output)
   const staged = []
