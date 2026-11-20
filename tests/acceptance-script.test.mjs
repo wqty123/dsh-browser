@@ -16,6 +16,11 @@ import assert from 'node:assert/strict'
 /** A fake bridge that answers the ops the acceptance script uses. */
 function makeBridge (broken = '') {
   const guests = []
+  if (broken.startsWith('protected-')) {
+    guests.push({ id: 90, owner: 'session-acceptance', title: 'user page', url: 'https://user.example/' })
+    guests.push({ id: 91, owner: 'session-other', title: 'other user page', url: 'https://other.example/' })
+  }
+  const requests = []
   const views = new Map()
   let nextId = 2
   const server = createServer(socket => {
@@ -29,6 +34,7 @@ function makeBridge (broken = '') {
         buffer = buffer.slice(cut + 1)
         if (line.trim() === '') continue
         const request = JSON.parse(line)
+        requests.push(request)
         const reply = (body) => socket.write(JSON.stringify({ ...body, bridgeRequestId: request.bridgeRequestId }) + '\n')
         const owner = request.owner ?? 'anonymous'
 
@@ -39,6 +45,10 @@ function makeBridge (broken = '') {
           continue
         }
         if (request.op === 'list') {
+          if (broken === 'list-error') {
+            reply({ ok: false, error: 'list unavailable' })
+            continue
+          }
           const mine = guests.filter(g => g.owner === owner)
           // The shell window travels with every list answer, which is what lets a FAILING run read
           // the tab strip back and say what it saw instead of just "FAIL".
@@ -56,6 +66,13 @@ function makeBridge (broken = '') {
             continue
           }
           const key = JSON.stringify([owner, request.viewId])
+          if ((broken === 'protected-first' && views.size === 0)
+            || (broken === 'protected-second' && views.size === 1)
+            || (broken === 'protected-other' && owner === 'session-other')
+            || (broken === 'protected-reopen' && views.has(key))) {
+            reply({ ok: true, id: owner === 'session-other' ? 91 : 90, reused: true })
+            continue
+          }
           if (views.has(key)) {
             reply({ ok: true, id: views.get(key), owner })
             continue
@@ -93,6 +110,8 @@ function makeBridge (broken = '') {
       }
     })
   })
+  server.requests = requests
+  server.guests = guests
   return server
 }
 
@@ -114,7 +133,7 @@ async function runAgainst (broken) {
   const code = await new Promise(resolve => child.on('exit', resolve))
   server.close()
   rmSync(dir, { recursive: true, force: true })
-  return { code, out }
+  return { code, out, requests: server.requests, guests: server.guests }
 }
 
 test('the acceptance script passes against a correct bridge', async () => {
@@ -141,6 +160,24 @@ test('the acceptance script FAILS when sidebar initialization is refused', async
   const { code, out } = await runAgainst('refuse')
   assert.notEqual(code, 0, out)
   assert.match(out, /\[diag\]/)
+})
+
+test('pre-existing pages are never navigated or closed, even when any ensureSidebar call reuses them', async () => {
+  for (const stage of ['first', 'second', 'other', 'reopen']) {
+    const { code, out, requests, guests } = await runAgainst('protected-' + stage)
+    assert.notEqual(code, 0, out)
+    assert.match(out, /FAIL ensureSidebar reused pre-existing page/)
+    assert.ok(requests.filter(r => r.op === 'ensureSidebar').every(r => r.url === undefined), 'identity must be checked before navigation')
+    assert.deepEqual(requests.filter(r => ['cdp', 'closePage'].includes(r.op) && [90, 91].includes(r.id)), [], 'no mutations or cleanup may target protected pages')
+    assert.deepEqual(guests.map(g => [g.id, g.url]), [[90, 'https://user.example/'], [91, 'https://other.example/']], 'only test-owned pages are cleaned up on failure')
+  }
+})
+
+test('the acceptance script does not open pages when the initial inventory fails', async () => {
+  const { code, out, requests } = await runAgainst('list-error')
+  assert.notEqual(code, 0, out)
+  assert.match(out, /cannot identify pre-existing pages/)
+  assert.deepEqual(requests.filter(r => ['ensureSidebar', 'cdp', 'closePage'].includes(r.op)), [])
 })
 
 test('the acceptance CLI is included in the published package and the export fixup', () => {

@@ -65,9 +65,27 @@ async function check(name, ok, detail = '') {
   } catch (error) { console.log('[diag] strip unavailable: ' + error.message) }
 }
 async function open(session, viewId, url) {
-  const answer = await call('ensureSidebar', { owner: session, viewId, url })
-  if (answer.ok === true && Number.isSafeInteger(answer.id) && !protectedIds.has(answer.id)) opened.push({ owner: session, id: answer.id })
+  const answer = await call('ensureSidebar', { owner: session, viewId })
+  requireTestPage(answer)
+  opened.push({ owner: session, id: answer.id })
+  const navigated = await call('cdp', { owner: session, id: answer.id, method: 'Page.navigate', params: { url } })
+  if (navigated.ok !== true) throw new Error('test page navigation failed: ' + (navigated.error ?? answer.id))
   return answer
+}
+function requireTestPage(answer) {
+  if (answer.ok !== true || !Number.isSafeInteger(answer.id)) throw new Error('ensureSidebar failed: ' + (answer.error ?? 'missing page id'))
+  if (protectedIds.has(answer.id)) throw new Error(`FAIL ensureSidebar reused pre-existing page ${answer.id}; refusing to navigate or close it`)
+}
+async function closeTestPage(page) {
+  if (protectedIds.has(page.id) || !opened.some(p => p.id === page.id && p.owner === page.owner)) throw new Error('refusing to close a page not created by this check')
+  return await call('closePage', page)
+}
+async function initialPages(session) {
+  const answer = await call('list', { owner: session })
+  if (answer.ok !== true || !Array.isArray(answer.sidebar) || answer.sidebar.some(page => !Number.isSafeInteger(page.id))) {
+    throw new Error('cannot identify pre-existing pages; refusing to open test pages')
+  }
+  return answer.sidebar
 }
 try {
   await new Promise((resolve, reject) => {
@@ -78,8 +96,8 @@ try {
   const version = await call('version')
   await check('the current bridge build is loaded', version.ok === true && version.protocol >= 3
     && Date.parse(version.loadedAt) >= statSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url)).mtimeMs)
-  const before = (await call('list')).sidebar ?? []
-  const otherInitial = (await call('list', { owner: otherOwner })).sidebar ?? []
+  const before = await initialPages(owner)
+  const otherInitial = await initialPages(otherOwner)
   for (const page of [...before, ...otherInitial]) protectedIds.add(page.id)
   const prefix = 'accept-' + randomUUID()
   const firstView = prefix + '-first', secondView = prefix + '-second'
@@ -104,9 +122,10 @@ try {
   const theirs = (await call('list', { owner: otherOwner })).sidebar ?? []
   await check('neither can see the other’s page', mine.some(g => g.id === first.id) && theirs.some(g => g.id === other.id)
     && !mine.some(g => g.id === other.id) && theirs.every(g => g.id !== first.id && g.id !== second.id))
-  const reopened = await call('ensureSidebar', { viewId: firstView, guestId: first.id, url: 'https://example.com/' })
+  const reopened = await call('ensureSidebar', { viewId: firstView, guestId: first.id })
+  requireTestPage(reopened)
   await check('reopening a logical view reuses its page', reopened.ok === true && reopened.id === first.id)
-  const closed = await call('closePage', { id: second.id })
+  const closed = await closeTestPage({ owner, id: second.id })
   const remaining = (await call('list')).sidebar ?? []
   await check('closing one page actually closes it', closed.ok === true && closed.closed === 1 && remaining.every(g => g.id !== second.id))
   await check('the other page survives', remaining.some(g => g.id === first.id))
@@ -118,7 +137,7 @@ try {
   process.exitCode = 1
 } finally {
   for (const page of opened) {
-    try { await call('closePage', page) } catch { /* best effort */ }
+    try { await closeTestPage(page) } catch { /* best effort */ }
   }
   socket.destroy()
 }
