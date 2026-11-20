@@ -1,11 +1,30 @@
-/** Host-isolated cookies with path, expiry and Secure matching for guest requests. */
+/** Origin-isolated cookies with path, expiry and Secure matching for guest requests. */
 export interface StoredCookie {
-  readonly host: string
+  readonly origin: string
   readonly name: string
   readonly value: string
   readonly path: string
   readonly secure: boolean
   readonly expiresAt?: number
+}
+
+export function normalizeStoredCookie(value: unknown): StoredCookie | undefined {
+  if (value === null || typeof value !== 'object') return undefined
+  const c = value as Record<string, unknown>
+  if (typeof c.origin !== 'string' || typeof c.name !== 'string' || typeof c.value !== 'string'
+    || typeof c.path !== 'string' || typeof c.secure !== 'boolean'
+    || (c.expiresAt !== undefined && (typeof c.expiresAt !== 'number' || !Number.isFinite(c.expiresAt)))
+    || !c.path.startsWith('/') || /[\x00-\x1f\x7f]/u.test(c.path)
+    || !/^[!#$%&'*+\-.^_`|~\da-z]+$/iu.test(c.name) || /[^\x21-\x7e]|["\\;,]/u.test(c.value)) return undefined
+  try {
+    const url = new URL(c.origin)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
+      || url.pathname !== '/' || url.search || url.hash || (c.secure && url.protocol !== 'https:')
+      || (c.name.startsWith('__Secure-') && !c.secure)
+      || (c.name.startsWith('__Host-') && (!c.secure || c.path !== '/'))) return undefined
+    return { origin: url.origin, name: c.name, value: c.value, path: c.path, secure: c.secure,
+      expiresAt: c.expiresAt as number | undefined }
+  } catch { return undefined }
 }
 
 function defaultPath(pathname: string): string {
@@ -21,9 +40,10 @@ export class GuestCookieJar {
   private readonly store = new Map<string, StoredCookie>()
 
   constructor(private readonly changed?: (cookies: readonly StoredCookie[]) => void, saved: readonly StoredCookie[] = []) {
-    for (const cookie of saved) {
-      if (cookie.expiresAt !== undefined && cookie.expiresAt > Date.now()) {
-        this.store.set(cookie.host + '\0' + cookie.path + '\0' + cookie.name, cookie)
+    for (const value of saved) {
+      const cookie = normalizeStoredCookie(value)
+      if (cookie !== undefined && cookie.expiresAt !== undefined && cookie.expiresAt > Date.now()) {
+        this.store.set(cookie.origin + '\0' + cookie.path + '\0' + cookie.name, cookie)
       }
     }
   }
@@ -58,9 +78,10 @@ export class GuestCookieJar {
       if (name.startsWith('__Secure-') && !secure) continue
       if (name.startsWith('__Host-') && (!secure || domain !== undefined || path !== '/')) continue
       // Without a public-suffix list, never widen the existing host/port isolation for Domain cookies.
-      const cookie: StoredCookie = { host: target.host, name, value, path, secure,
-        expiresAt: maxAge === undefined ? expires : maxAge <= 0 ? 0 : now + maxAge * 1000 }
-      const key = cookie.host + '\0' + path + '\0' + name
+      const cookie = normalizeStoredCookie({ origin: target.origin, name, value, path, secure,
+        expiresAt: maxAge === undefined ? expires : maxAge <= 0 ? 0 : now + maxAge * 1000 })
+      if (cookie === undefined) continue
+      const key = cookie.origin + '\0' + path + '\0' + name
       const existing = this.store.get(key)
       if (existing?.secure && target.protocol !== 'https:') continue
       if (cookie.expiresAt !== undefined && cookie.expiresAt <= now) this.store.delete(key)
@@ -72,12 +93,13 @@ export class GuestCookieJar {
   getCookieHeader(target: URL): string | undefined {
     const now = Date.now()
     const matched: StoredCookie[] = []
-    for (const [key, cookie] of this.store) {
-      if (cookie.expiresAt !== undefined && cookie.expiresAt <= now) {
+    for (const [key, value] of this.store) {
+      const cookie = normalizeStoredCookie(value)
+      if (cookie === undefined || (cookie.expiresAt !== undefined && cookie.expiresAt <= now)) {
         this.store.delete(key)
         continue
       }
-      if (cookie.host !== target.host || (cookie.secure && target.protocol !== 'https:')
+      if (cookie.origin !== target.origin || (cookie.secure && target.protocol !== 'https:')
         || !pathMatches(target.pathname, cookie.path)) continue
       matched.push(cookie)
     }
