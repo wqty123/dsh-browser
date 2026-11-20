@@ -29,6 +29,7 @@ import { readFileSync, rmSync, statSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { acquireProfileLease, type ProfileLease } from './profile-lease.ts'
+import { BrowserProcessOwnership, type ProcessOwnershipOptions } from './process-ownership.ts'
 // Type-only: settings-store imports BrowserChannel from here, so a value import would be a cycle.
 // `hasDisplay` lives here instead of there for the same reason — it is a runtime function.
 import type { HeadlessMode } from './settings-store.ts'
@@ -81,6 +82,7 @@ const PORT_PROBE_MS = 250
 export type BrowserLauncher = (path: string, args: readonly string[]) => ReturnType<typeof spawn>
 
 export interface SystemBrowserLaunchDiagnostic {
+  cleanup?: 'ownership-unverified'
   stderrTail: string
   exitCode: number | null
   signal: string | null
@@ -539,7 +541,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * are still running, still holding the profile, and still something release must try to
    * stop. Forgetting them is what allowed a launch this host could not undo.
    */
-  private readonly stubborn: { kill: () => void; exitCode: number | null; signalCode: NodeJS.Signals | null }[] = []
+  private readonly stubborn: ChildProcess[] = []
+  private readonly ownership: BrowserProcessOwnership
+  private readonly ownedClients = new WeakMap<CdpClient, ChildProcess>()
+  private readonly ownedChildren = new WeakSet<ChildProcess>()
+  private readonly createdTargets = new WeakMap<CdpClient, Map<string, BrowserTabWireId>>()
 
   /**
    * @param browser - the detected installation to launch on first use.
@@ -568,7 +574,18 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     private readonly headlessMode: HeadlessMode = 'auto',
     private readonly isQuiet: () => boolean = () => false,
     private readonly profileError?: string,
-  ) {}
+    ownership: ProcessOwnershipOptions = { managed: false },
+  ) {
+    this.ownership = new BrowserProcessOwnership(browser.path, profileDir, ownership)
+  }
+
+  private async stopChild(child: ChildProcess): Promise<boolean> {
+    if (child.exitCode !== null || child.signalCode !== null) return true
+    if (await this.ownership.terminate(child)) return true
+    this.lastLaunchError = 'Cleanup refused: process ownership could not be verified; browser left running.'
+    if (this.launchDiagnostic) this.launchDiagnostic.cleanup = 'ownership-unverified'
+    return false
+  }
 
   async prepare(): Promise<void> {
     try {
@@ -829,7 +846,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // exit would then be treated as the launch failing.
     if (this.child !== undefined) {
       const dying = this.child
-      try { dying.kill() } catch { /* already gone */ }
+      if (!await this.stopChild(dying)) throw new Error(this.lastLaunchError)
       this.child = undefined
 
       // Whatever the old browser issued is worthless now, and its exit listener cannot clean
@@ -952,6 +969,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // Clearing these is what makes the restart usable rather than merely alive.
       this.forgetBrowserState()
     })
+    await this.ownership.capture(child)
     /**
      * The port this launch wrote, or undefined while it has not written one yet.
      *
@@ -989,9 +1007,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // browser that dispose() has already killed, which would leave a connection
       // to a dead process behind. The child is killed here too — dispose() may have
       // run before this child was recorded, leaving nobody else to do it.
-      if (this.disposed) { child.kill(); if (this.child === child) this.child = undefined; stopped = 'released'; break }
+      if (this.disposed) { await this.stopChild(child); if (this.child === child) this.child = undefined; stopped = 'released'; break }
       if (launchError !== undefined) { if (this.child === child) this.child = undefined; stopped = 'launch-failed'; break }
-      if (Date.now() > deadline) { child.kill(); stopped = 'timeout'; break }
+      if (Date.now() > deadline) { await this.stopChild(child); stopped = 'timeout'; break }
       // signalCode too: a browser killed by a signal never sets exitCode, so checking exitCode
       // alone made a killed browser look alive and the launch run out its full 30s deadline
       // before reporting "did not expose CDP" — a timeout for something that died at once.
@@ -1024,6 +1042,17 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
               // Still wanted? A dispose() during the handshake has already killed the
               // process, so publishing the client would leave a dangling connection.
               if (this.disposed || Date.now() >= deadline) { client.close(); break }
+              if (await this.ownership.verify(child)) {
+                try {
+                  const processes = await client.send('SystemInfo.getProcessInfo', {}, undefined, 1000) as { processInfo?: { type: string; id: number }[] }
+                  if (processes.processInfo?.some(entry => entry.type === 'browser' && entry.id === child.pid)
+                    && await this.ownership.verify(child)) {
+                    this.ownedClients.set(client, child)
+                    this.ownedChildren.add(child)
+                  }
+                } catch { /* An unidentified endpoint is borrowed, never owned. */ }
+              }
+              if (this.disposed) { client.close(); break }
               this.client = client
               return client
             }
@@ -1141,9 +1170,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   /**
    * Close one page by the target id {@link listPages} reported.
    *
-   * `Target.closeTarget` is the browser's own close, so it works for pages this plugin never
-   * created. The page may already be gone if the human closed it in the meantime — the caller
-   * asked for it to be closed and it is, so that is not an error.
+   * Only targets created by this owner/session on this connection may be closed.
    * @param id - the CDP target id.
    */
   async closePage(id: BrowserTabWireId, scope = sessionWireId(readTabHandle(id))): Promise<void> {
@@ -1153,8 +1180,12 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     const client = await this.ensureClient()
     const targetId = view === undefined ? identity.tab.replace(/^page:/, '') : this.sessions.get(view.session)
     if (targetId === undefined) throw new Error('dsh-builtin-browser: browser page is stale')
+    const creator = this.createdTargets.get(client)?.get(targetId)
+    if (creator === undefined) throw new Error('dsh-builtin-browser: personal or adopted tabs are detach-only; close the tab in the browser')
+    resolveTabHandle(resolveSessionHandle(scope), creator)
     const answer = await client.send('Target.closeTarget', { targetId }) as { success?: boolean }
     if (answer.success !== true) throw new Error('dsh-builtin-browser: browser close was not acknowledged')
+    this.createdTargets.get(client)?.delete(targetId)
   }
 
   createView(identity?: BrowserTabWireId): ElectronViewHandle {
@@ -1166,6 +1197,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // provider may pass format and quality through instead of falling back to PNG.
       supportsCdpJpeg: true,
       sendCommand: async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Browser.close' || method === 'Target.closeTarget' || method === 'Page.close') {
+        throw new Error('dsh-builtin-browser: use explicit tab close; browser-wide and unowned-tab closes are not allowed')
+      }
       // A command that never answered is the only signal that a client has wedged — the
       // socket can stay OPEN while nothing comes back, which is the form the reporter saw with
       // a live, healthy-looking Edge. Dropping the client here means the next call starts a new
@@ -1253,23 +1287,16 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-  destroyView(handle: ElectronViewHandle, options?: { readonly keepPage?: boolean }): void {
+  destroyView(handle: ElectronViewHandle, _options?: { readonly keepPage?: boolean }): void {
     const cachedView = this.views.get(handle.id)
     this.views.delete(handle.id)
     if (cachedView === undefined) return
     const session = cachedView.session
-    // A session id is not a target id: closing the page needs the target the session
-    // was attached to, which is why they are tracked separately.
     const targetId = this.sessions.get(session)
     this.sessions.delete(session)
     // Nothing to close if the browser was never started.
     if (targetId !== undefined && this.client !== undefined) {
-      if (options?.keepPage === true) {
-        void this.client.send('Target.detachFromTarget', { sessionId: session }).catch(() => undefined)
-        return
-      }
-      // Best-effort: a page that is already gone is not an error.
-      void this.client.send('Target.closeTarget', { targetId }).catch(() => undefined)
+      void cachedView.client.send('Target.detachFromTarget', { sessionId: session }).catch(() => undefined)
     }
   }
 
@@ -1317,7 +1344,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * view-level concern and not available to the host.
    */
   async focus(): Promise<void> {
-    try { this.child?.kill('SIGCONT') } catch { /* Windows has no SIGCONT; nothing to do */ }
+    if (this.child && await this.ownership.verify(this.child)) {
+      try { this.child.kill('SIGCONT') } catch { /* Windows has no SIGCONT. */ }
+    }
   }
 
 
@@ -1335,13 +1364,19 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     const client = this.client
     this.forgetBrowserState()
     this.client = undefined
-    // Ask before killing. `kill()` on Windows is TerminateProcess, which gives the browser no
-    // chance to flush its profile — and Chrome records how it ended in that profile, so a
-    // hard kill leaves it marked as a crash and the NEXT launch offers to restore a session.
-    // That is a visible symptom (an extra window) traced all the way back to this line.
-    if (client !== undefined) {
-      try { void client.send('Browser.close', {}).catch(() => { /* it is closing, not talking */ }) } catch { /* already gone */ }
+    const disconnect = async (): Promise<void> => {
+      if (!client) return
+      const owner = this.ownedClients.get(client)
+      try {
+        if (owner && await this.ownership.verify(owner)) {
+          const result = await client.send('SystemInfo.getProcessInfo', {}, undefined, 1000) as { processInfo?: { type: string; id: number }[] }
+          if (result.processInfo?.some(entry => entry.type === 'browser' && entry.id === owner.pid)
+            && await this.ownership.verify(owner)) await client.send('Browser.close', {}, undefined, 1000)
+        }
+      } catch { /* An unverified endpoint is detach-only. */ }
+      finally { client.close() }
     }
+    void disconnect()
     // Both the browser we launched and anything that ignored an earlier kill. They hold this
     // profile, so leaving them running means the next launch contends with a browser nobody owns.
     const doomed = [this.child, ...this.stubborn.splice(0)].filter(
@@ -1356,7 +1391,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
        * ending does not wait for this, and the browser — having been asked to close — generally
        * gets there on its own. If it does not, the kill still lands while the process lives.
        */
-      const force = (): void => { try { dying.kill() } catch { /* already gone */ } }
+      const force = (): void => { void this.stopChild(dying) }
       const timer = setTimeout(force, CLOSE_GRACE_MS)
       timer.unref?.()
       dying.once('exit', () => { clearTimeout(timer) })
@@ -1365,7 +1400,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     const cleanup = (): void => {
       void (async () => {
         const removeProfile = (): void => {
-          if (ephemeral !== undefined) rmSync(ephemeral, { recursive: true, force: true })
+          if (ephemeral !== undefined && doomed.length > 0 && doomed.every(child => this.ownership.ownsDirectory(child, ephemeral) && this.ownedChildren.has(child)
+            && (child.exitCode !== null || child.signalCode !== null))) rmSync(ephemeral, { recursive: true, force: true })
         }
         if (this.profileLease !== undefined) await this.profileLease.release(removeProfile)
         else removeProfile()
@@ -1427,7 +1463,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // through the tools. Taking the blank instead makes the page the browser already opened the
       // one the caller gets.
       const adopted = await this.adoptBlankTarget(client)
-      const targetId = adopted ?? await this.createTarget(client)
+      const targetId = adopted ?? await this.createTarget(client, viewId)
       const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
       const sessionId = attached?.sessionId
       if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
@@ -1498,13 +1534,16 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /** Create one page, refusing to go on without an id. */
-  private async createTarget(client: CdpClient): Promise<string> {
+  private async createTarget(client: CdpClient, viewId: string): Promise<string> {
     const created = await client.send('Target.createTarget', {
       url: 'about:blank',
       ...this.isQuiet() ? { background: true } : {},
     }) as { targetId?: string }
     const targetId = created?.targetId
     if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')
+    let targets = this.createdTargets.get(client)
+    if (!targets) { targets = new Map(); this.createdTargets.set(client, targets) }
+    targets.set(targetId, viewId as BrowserTabWireId)
     return targetId
   }
 

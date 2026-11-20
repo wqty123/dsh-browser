@@ -550,7 +550,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         : 'launched-user-profile'
       adopt(new SystemBrowserViewHost(detected, profileDir, [], !wantUserProfile && !persist ? profileDir : undefined,
         undefined, settings.get().browser.headless, () => settings.get().ui.quiet,
-        wantUserProfile && userProfile === undefined ? 'The selected user browser profile could not be located. No plugin profile was substituted.' : undefined),
+        wantUserProfile && userProfile === undefined ? 'The selected user browser profile could not be located. No plugin profile was substituted.' : undefined,
+        { managed: !wantUserProfile }),
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
   }

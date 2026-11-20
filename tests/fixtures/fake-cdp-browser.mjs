@@ -35,6 +35,7 @@ function createFakeBrowser(options = {}) {
   const closed = []
   /** Target ids attached through `Target.attachToTarget`, oldest first. */
   const attached = []
+  const commands = []
   /** Whether discovery was turned on before the first listing. */
   let discoveryEnabled = false
   let listedBeforeDiscovery = 0
@@ -96,6 +97,10 @@ function createFakeBrowser(options = {}) {
   /** Answer the commands the carrier sends, on the live target. */
   function handleCommand(message, state) {
     if (message.id === undefined) return undefined
+    commands.push(message)
+    if (message.method === 'SystemInfo.getProcessInfo') {
+      return { id: message.id, result: { processInfo: options.browserPid ? [{ type: 'browser', id: options.browserPid }] : [] } }
+    }
     if (message.method === 'Target.setDiscoverTargets') {
       discoveryEnabled = true
       return { id: message.id, result: {} }
@@ -148,6 +153,7 @@ function createFakeBrowser(options = {}) {
     get port() { return server.address().port },
     get sessionId() { return lastSessionId },
     get connections() { return connections },
+    get commands() { return [...commands] },
     /** Target ids closed through the protocol, so a test can see what was tidied away. */
     get closed() { return [...closed] },
     /** Target ids attached, so a test can see WHICH page a view ended up on. */
