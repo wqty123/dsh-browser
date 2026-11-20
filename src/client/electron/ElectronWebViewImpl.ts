@@ -45,7 +45,8 @@ export class ElectronWebViewImpl implements BrowserFrame {
    */
   constructor(private readonly options: BrowserPageOptions, private readonly bridge: DesktopBrowserBridge,
     private readonly workspace: (signal: AbortSignal) => Promise<string>,
-    private readonly presentation: ElectronWebviewPresentation, private readonly sessionId: string) {
+    private readonly presentation: ElectronWebviewPresentation, private readonly sessionId: string,
+    private readonly capture: (intent: object, owner?: string) => Promise<void> = (intent, owner) => captureReferenceIntent(intent, owner ?? '')) {
     this.checkpoint = currentBrowserTarget(options.initial)
     this.store = createSnapshotStore(emptyBrowserFrame())
     this.carrier = createSnapshotStore<BrowserCarrierState>({ stage: 'idle' })
@@ -219,7 +220,7 @@ export class ElectronWebViewImpl implements BrowserFrame {
       this.documentLifetime?.abort()
       this.documentLifetime = new AbortController()
       installReferenceOverlay(source => element.executeJavaScript(source),
-        intent => captureReferenceIntent(intent, this.sessionId),
+        intent => this.capture(intent, this.sessionId),
         AbortSignal.any([signal, this.documentLifetime.signal]))
       this.ready = true
       const guestId = element.getWebContentsId?.()

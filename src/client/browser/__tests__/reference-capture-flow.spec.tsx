@@ -19,6 +19,7 @@ import { createProductionRuntime } from '../../reference/client/production/runti
 import { apply as applyClient } from '../../reference/client/plugin.ts'
 import type { HostContext } from '../../reference/client/production/assembly.ts'
 import { captureReferenceIntent } from '../../reference-intents.ts'
+import { createReferenceCapture } from '../../reference-capture-owner.ts'
 import { ReferenceCapsules } from '../../reference/client/production/ReferenceCapsules.tsx'
 import { referenceLabels } from '../../reference/client/production/reference-labels.ts'
 import { fakeHostInput, manualScheduler, memoryKV } from '../../reference/client/__tests__/production.fixtures.ts'
@@ -291,4 +292,89 @@ it('an empty delivery stream leaves the composer empty without capturing another
     expect(runtime.cards()).toEqual([])
     expect(request.mock.calls.every(([url]) => !url.endsWith('/capture'))).toBe(true)
   } finally { runtime.dispose(); queue.dispose() }
+})
+
+it.each(['native', 'web'] as const)('%s first quote survives home → selected Session → dock → first send', async surface => {
+  const { service, queue, request, runtime: unused } = harness()
+  unused.dispose()
+  let dock!: (props: unknown) => unknown
+  const disposers: (() => void)[] = []
+  const ctx: HostContext = {
+    get: name => name === 'uiConversation' ? { userText: { register: () => () => {} } } : undefined,
+    set() {}, effect: effect => { const stop = effect(); if (stop) disposers.push(stop) },
+    slots: {
+      inject: (name, produce) => { if (['conversation.input.dock', 'conversation.user.text.node', 'shell.overlay'].includes(name)) [...produce()] },
+      register: (registration, component) => { if ((registration as { name: string }).name === 'conversation.input.dock') dock = component as typeof dock },
+    },
+  }
+  const runtime = applyClient(ctx, { request, storage: memoryKV(), scheduler: manualScheduler() })
+  let selected: string | undefined = surface === 'native' ? `session-${nextOwner}` : undefined
+  const listeners = new Set<() => void>()
+  const current = { getSnapshot: () => ({ key: selected }), subscribe: (listener: () => void) => {
+    listeners.add(listener); return () => { listeners.delete(listener) }
+  } }
+  const bind = () => dock({ sessionId: selected, useInput: () => ({ draft: '' }), inputActions: {
+    captureInsertion: () => ({ start: 0, end: 0, draftRev: 1 }), insertText: () => true, persistDraft() {},
+  } })
+  if (selected !== undefined) expect(renderToStaticMarkup(bind() as ReturnType<typeof createElement>)).toContain('data-cards="0"')
+  let open!: () => void
+  const openWorkspace = vi.fn(async (_id: string, beforeOpen: (id: string) => void) => {
+    beforeOpen(`session-${nextOwner}`)
+    open = () => {
+      selected = `session-${nextOwner}`
+      bind()
+      for (const listener of listeners) listener()
+    }
+  })
+  const lifetime = new AbortController()
+  const services: Record<string, unknown> = {
+    uiSession: { adapter: { current } }, uiWorkspace: { openWorkspace },
+    workspaces: { list: { getSnapshot: () => ({ phase: 'ready', state: 'idle', items: [] }), subscribe: () => () => {} },
+      initializeDefault: async () => ({ workspaceId: 'workspace:default' }) },
+  }
+  const capture = createReferenceCapture({ get: name => services[name] }, lifetime.signal)
+  let dispose = async (): Promise<void> => {}
+  try {
+    if (surface === 'web') {
+      const page = createIframePage({ initial: undefined, persist() {}, openRequested() {} }, undefined, capture)
+      const host = document.createElement('div')
+      host.id = 'home-first-quote'
+      document.body.append(host)
+      page.presentation.mount(host.id)
+      page.frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' })
+      window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: host.querySelector('iframe')!.contentWindow, data: intent }))
+      dispose = () => page.frame.dispose()
+      await vi.waitFor(() => expect(openWorkspace).toHaveBeenCalledTimes(1))
+      expect(request.mock.calls.some(([url]) => url.endsWith('/capture'))).toBe(false)
+      open()
+    } else {
+      const element = document.createElement('div') as unknown as WebviewElement
+      const intents = [intent]
+      Object.assign(element, {
+        loadURL: async () => {}, getURL: () => intent.capture.url, getTitle: () => intent.capture.title,
+        canGoBack: () => false, canGoForward: () => false, isLoading: () => false,
+        executeJavaScript: async (source: string) => source.startsWith('JSON.stringify(') ? JSON.stringify(intents.splice(0)) : undefined,
+      })
+      const presentation = { createElement: () => element, present: () => element.dispatchEvent(new Event('dom-ready')), clear() {}, dispose() {} } as unknown as ElectronWebviewPresentation
+      const bridge = { acquire: async () => ({ lease: 'lease', partition: 'persist:first' }), release: async () => {}, onOpenRequested: () => () => {} } as unknown as DesktopBrowserBridge
+      const frame = new ElectronWebViewImpl({ initial: undefined, persist() {}, openRequested() {} }, bridge, async () => 'workspace', presentation, `session-${firstOwner}`, capture)
+      frame.attach()
+      frame.loadUrl({ kind: 'https', url: intent.capture.url, title: '' })
+      dispose = () => frame.dispose()
+    }
+    await vi.waitFor(() => expect(queue.list({ sessionId: nextOwner }).deliveries).toHaveLength(1))
+    expect(service.list({ sessionId: firstOwner })).toEqual([])
+    expect(service.list({ sessionId: nextOwner })).toHaveLength(1)
+    expect(openWorkspace).toHaveBeenCalledTimes(surface === 'web' ? 1 : 0)
+    await runtime.pollOnce()
+    expect(renderToStaticMarkup(bind() as ReturnType<typeof createElement>)).toContain('data-cards="1"')
+    const content = runtime.submission.buildContent({ sessionId: selected!, uploaded: [], text: '', requestId: 'first-send' })
+    expect(JSON.stringify(content)).toContain('selected words')
+    await runtime.submission.commit(selected!, 'first-send')
+    expect(runtime.cards()).toHaveLength(0)
+    expect(runtime.draftState(nextOwner).sent).toHaveLength(1)
+  } finally {
+    lifetime.abort(); await dispose(); runtime.dispose(); queue.dispose()
+    for (const stop of disposers.reverse()) stop()
+  }
 })

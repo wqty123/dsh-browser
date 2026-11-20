@@ -18,6 +18,7 @@ import type { BrowserInjected } from './browser/BrowserController.ts'
 import { createBrowserInitializationReader } from './browser/initialization.ts'
 import type { BrowserInitializationReader } from './browser/initialization.ts'
 import { createIframePage } from './pages.ts'
+import { createReferenceCapture, type ReferenceCaptureContext } from './reference-capture-owner.ts'
 import { createElectronPage } from './electron/pages.ts'
 import type { DesktopBrowserBridge } from '../types.ts'
 import { browserWorkspace } from './electron/workspace.ts'
@@ -249,10 +250,15 @@ export function apply(ctx: Context): void {
       },
     }, BrowserBody)), 'ui-sidebar-browser.body')
   }
-  if (desktop === undefined) installFrames(ctx, sessionId => options => createIframePage(options, sessionId))
+  const lifetime = new AbortController()
+  ctx.effect(() => () => { lifetime.abort() }, 'dsh-builtin-browser: reference capture')
+  const capture = createReferenceCapture(ctx as unknown as ReferenceCaptureContext, lifetime.signal)
+  if (desktop === undefined) {
+    installFrames(ctx, sessionId => options => createIframePage(options, sessionId, capture))
+  }
   else ctx.inject(['workspaces'], (scope) => {
     installFrames(scope, sessionId => options => createElectronPage(options, desktop,
-      signal => browserWorkspace(scope.workspaces.list, sessionId, signal), sessionId))
+      signal => browserWorkspace(scope.workspaces.list, sessionId, signal), sessionId, capture))
   })
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab.title', key: BROWSER_ID, store,

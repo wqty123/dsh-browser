@@ -1,9 +1,10 @@
 /** Submit low-trust page intents in the authenticated app context. */
 import { referenceOwnerKey } from '../reference-owner.ts'
 
-export async function captureReferenceIntent(intent: object, sessionId: string): Promise<void> {
+export async function captureReferenceIntent(intent: object, sessionId: string, signal?: AbortSignal): Promise<void> {
   if (typeof sessionId !== 'string' || sessionId.trim() === '') throw new Error('reference owner is unavailable')
   const response = await fetch('/dsh-builtin-browser/reference/capture', {
+    signal,
     method: 'POST',
     credentials: 'include',
     headers: { 'content-type': 'application/json' },
