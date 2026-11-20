@@ -5,12 +5,17 @@ import { once } from 'node:events'
 import { promises as dns } from 'node:dns'
 import { handleGuest, guestPath, rewriteDocument } from '../src/browser-electron/guest-route.ts'
 import { GuestCookieJar } from '../src/browser-electron/guest-cookie-jar.ts'
+import { GuestCookieStore, LOCAL_GUEST_PROFILE } from '../src/browser-electron/guest-cookie-store.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const nativeFetch = globalThis.fetch
 const nativeLookup = dns.lookup
 const resolved = new Map()
 let upstream, proxy, upstreamOrigin, proxyPort
 const forwarded = []
+let cookieJar = new GuestCookieJar()
 
 before(async () => {
   dns.lookup = async (hostname, options) => {
@@ -22,7 +27,10 @@ before(async () => {
   upstream = createServer(async (req, res) => {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
-    if (req.url === '/login') {
+    if (req.url === '/persistent-login') {
+      res.writeHead(303, { location: '/account', 'set-cookie': ['SAVED=yes; Max-Age=3600; HttpOnly; Path=/', 'SESSION=temporary; Path=/'] })
+      res.end()
+    } else if (req.url === '/login') {
       res.writeHead(303, { location: '/account', 'set-cookie': ['SID=logged-in; HttpOnly; Path=/', 'theme=dark; Path=/'] })
       res.end()
     } else if (req.url === '/cookie-scopes/set') {
@@ -93,7 +101,7 @@ before(async () => {
     return nativeFetch(upstreamOrigin + url.pathname + url.search, { ...options, headers })
   }
   proxy = createServer((req, res) => {
-    void handleGuest(req, res, '<script>overlay()</script>', 'owner').catch(error => res.destroy(error))
+    void handleGuest(req, res, '<script>overlay()</script>', 'owner', cookieJar).catch(error => res.destroy(error))
   }).listen(0, '127.0.0.1')
   await once(proxy, 'listening')
   proxyPort = proxy.address().port
@@ -215,6 +223,21 @@ test('accepts empty bodies and bodies exactly at the request limit', async () =>
     assert.equal(result.status, 200)
     assert.equal(JSON.parse(result.body).body, body)
   }
+})
+
+test('proxy restores persistent login cookies after profile restart, not session cookies', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'guest-profile-http-'))
+  const previous = cookieJar
+  t.after(() => { cookieJar = previous; rmSync(directory, { recursive: true, force: true }) })
+  cookieJar = new GuestCookieStore(directory).forProfile(LOCAL_GUEST_PROFILE)
+  const login = await call(guestPath('https://ordinary.example/persistent-login'), { method: 'POST' })
+  assert.equal(login.status, 303)
+  assert.equal(login.headers['set-cookie'], undefined)
+  let account = await call(login.headers.location)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SAVED=yes; SESSION=temporary')
+  cookieJar = new GuestCookieStore(directory).forProfile(LOCAL_GUEST_PROFILE)
+  account = await call(login.headers.location)
+  assert.equal(JSON.parse(account.body).headers.cookie, 'SAVED=yes')
 })
 
 test('stores redirect cookies and rewrites redirect location for a login round-trip', async () => {

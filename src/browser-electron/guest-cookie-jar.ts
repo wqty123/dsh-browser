@@ -1,5 +1,5 @@
 /** Host-isolated cookies with path, expiry and Secure matching for guest requests. */
-interface StoredCookie {
+export interface StoredCookie {
   readonly host: string
   readonly name: string
   readonly value: string
@@ -19,6 +19,18 @@ function pathMatches(pathname: string, path: string): boolean {
 
 export class GuestCookieJar {
   private readonly store = new Map<string, StoredCookie>()
+
+  constructor(private readonly changed?: (cookies: readonly StoredCookie[]) => void, saved: readonly StoredCookie[] = []) {
+    for (const cookie of saved) {
+      if (cookie.expiresAt !== undefined && cookie.expiresAt > Date.now()) {
+        this.store.set(cookie.host + '\0' + cookie.path + '\0' + cookie.name, cookie)
+      }
+    }
+  }
+
+  private save(): void {
+    this.changed?.([...this.store.values()].filter(cookie => cookie.expiresAt !== undefined && cookie.expiresAt > Date.now()))
+  }
 
   setCookies(target: URL, values: readonly string[]): void {
     const now = Date.now()
@@ -54,6 +66,7 @@ export class GuestCookieJar {
       if (cookie.expiresAt !== undefined && cookie.expiresAt <= now) this.store.delete(key)
       else this.store.set(key, cookie)
     }
+    if (values.length > 0) this.save()
   }
 
   getCookieHeader(target: URL): string | undefined {

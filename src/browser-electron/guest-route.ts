@@ -7,7 +7,8 @@
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import { promises as dns } from 'node:dns'
 import { guestRuntimeScript } from './guest-runtime.ts'
-import { GuestCookieJar } from './guest-cookie-jar.ts'
+import type { GuestCookieJar } from './guest-cookie-jar.ts'
+import { localGuestCookies } from './guest-cookie-store.ts'
 import { rewriteCss } from './guest-css.ts'
 
 /** Prefix every proxied document and subresource lives under. */
@@ -36,8 +37,6 @@ function isSelfTarget(url: URL): boolean {
 export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/isolated-guest'
 
 class UnsafeGuestTargetError extends Error {}
-
-const cookieJar = new GuestCookieJar()
 
 /** HTML responses larger than this pass through without rewriting. */
 const MAX_REWRITE_BYTES = 4 * 1024 * 1024
@@ -223,6 +222,7 @@ export async function handleGuest(
   response: ServerResponse,
   overlayScript: string,
   sessionId: string,
+  cookies?: GuestCookieJar,
 ): Promise<void> {
   const method = request.method ?? 'GET'
   const authority = request.headers.host ?? ''
@@ -303,6 +303,12 @@ export async function handleGuest(
         headers.set('referer', previous.href)
       }
     } catch {}
+  }
+  let cookieJar: GuestCookieJar
+  try { cookieJar = cookies ?? localGuestCookies() } catch {
+    writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
+    response.end('guest proxy: cookie storage unavailable')
+    return
   }
   const jarCookie = cookieJar.getCookieHeader(target)
   const refreshCookies = (url = target): void => {
