@@ -8,27 +8,32 @@ export interface StoredCookie {
   readonly expiresAt?: number
 }
 
-function validCookieValue(value: string): boolean {
-  const octets = value.length >= 2 && value.startsWith('"') && value.endsWith('"')
-    ? value.slice(1, -1) : value
-  return !/[^\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]/u.test(octets)
+function trimCookieWhitespace(value: string): string {
+  return value.replace(/^[ \t]+|[ \t]+$/gu, '')
 }
 
-export function normalizeStoredCookie(value: unknown): StoredCookie | undefined {
-  if (value === null || typeof value !== 'object') return undefined
-  const c = value as Record<string, unknown>
+function validCookiePair(name: string, value: string): boolean {
+  return name.length + value.length > 0 && name.length + value.length <= 4096
+    && !/[^\x20-\xff]|[\x7f;=]/u.test(name)
+    && !/[^\x20-\xff]|[\x7f;]/u.test(value)
+}
+
+export function normalizeStoredCookie(input: unknown): StoredCookie | undefined {
+  if (input === null || typeof input !== 'object') return undefined
+  const c = input as Record<string, unknown>
   if (typeof c.origin !== 'string' || typeof c.name !== 'string' || typeof c.value !== 'string'
     || typeof c.path !== 'string' || typeof c.secure !== 'boolean'
     || (c.expiresAt !== undefined && (typeof c.expiresAt !== 'number' || !Number.isFinite(c.expiresAt)))
-    || !c.path.startsWith('/') || /[\x00-\x1f\x7f]/u.test(c.path)
-    || !/^[!#$%&'*+\-.^_`|~\da-z]+$/iu.test(c.name) || !validCookieValue(c.value)) return undefined
+    || !c.path.startsWith('/') || /[\x00-\x1f\x7f]/u.test(c.path)) return undefined
+  const name = trimCookieWhitespace(c.name), value = trimCookieWhitespace(c.value)
+  if (!validCookiePair(name, value) || (name === '' && /^(?:__Secure-|__Host-)/iu.test(value))) return undefined
   try {
     const url = new URL(c.origin)
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
       || url.pathname !== '/' || url.search || url.hash || (c.secure && url.protocol !== 'https:')
-      || (c.name.startsWith('__Secure-') && !c.secure)
-      || (c.name.startsWith('__Host-') && (!c.secure || c.path !== '/'))) return undefined
-    return { origin: url.origin, name: c.name, value: c.value, path: c.path, secure: c.secure,
+      || (name.startsWith('__Secure-') && !c.secure)
+      || (name.startsWith('__Host-') && (!c.secure || c.path !== '/'))) return undefined
+    return { origin: url.origin, name, value, path: c.path, secure: c.secure,
       expiresAt: c.expiresAt as number | undefined }
   } catch { return undefined }
 }
@@ -61,26 +66,27 @@ export class GuestCookieJar {
   setCookies(target: URL, values: readonly string[]): void {
     const now = Date.now()
     for (const raw of values) {
-      if (/[\r\n]/u.test(raw)) continue
-      const [pair = '', ...attributes] = raw.split(';').map(part => part.trim())
+      if (/[\x00-\x08\x0a-\x1f\x7f]/u.test(raw)) continue
+      const [pair = '', ...attributes] = raw.split(';').map(trimCookieWhitespace)
       const index = pair.indexOf('=')
-      if (index <= 0) continue
-      const name = pair.slice(0, index).trim()
-      const value = pair.slice(index + 1).trim()
-      if (!/^[!#$%&'*+\-.^_`|~\da-z]+$/iu.test(name) || !validCookieValue(value)) continue
+      const name = index === -1 ? '' : trimCookieWhitespace(pair.slice(0, index))
+      const value = trimCookieWhitespace(index === -1 ? pair : pair.slice(index + 1))
+      if (!validCookiePair(name, value)) continue
       let path = defaultPath(target.pathname), secure = false, domain: string | undefined
       let expires: number | undefined, maxAge: number | undefined
+      let validAttributes = true
       for (const attribute of attributes) {
         const equals = attribute.indexOf('=')
-        const key = (equals === -1 ? attribute : attribute.slice(0, equals)).trim().toLowerCase()
-        const content = equals === -1 ? '' : attribute.slice(equals + 1).trim()
+        const key = trimCookieWhitespace(equals === -1 ? attribute : attribute.slice(0, equals)).toLowerCase()
+        const content = equals === -1 ? '' : trimCookieWhitespace(attribute.slice(equals + 1))
+        if (/[\x00-\x1f\x7f]/u.test(key + content)) { validAttributes = false; break }
         if (key === 'domain' && content !== '') domain = content.replace(/^\./u, '').toLowerCase()
         else if (key === 'path' && content.startsWith('/')) path = content
         else if (key === 'secure') secure = true
         else if (key === 'max-age' && /^-?\d+$/u.test(content) && Number.isFinite(Number(content))) maxAge = Number(content)
         else if (key === 'expires' && Number.isFinite(Date.parse(content))) expires = Date.parse(content)
       }
-      if (domain !== undefined && target.hostname !== domain && !target.hostname.endsWith('.' + domain)) continue
+      if (!validAttributes || (domain !== undefined && target.hostname !== domain && !target.hostname.endsWith('.' + domain))) continue
       if (secure && target.protocol !== 'https:') continue
       if (name.startsWith('__Secure-') && !secure) continue
       if (name.startsWith('__Host-') && (!secure || domain !== undefined || path !== '/')) continue
@@ -111,6 +117,6 @@ export class GuestCookieJar {
       matched.push(cookie)
     }
     matched.sort((a, b) => b.path.length - a.path.length)
-    return matched.length === 0 ? undefined : matched.map(cookie => cookie.name + '=' + cookie.value).join('; ')
+    return matched.length === 0 ? undefined : matched.map(cookie => cookie.name === '' ? cookie.value : cookie.name + '=' + cookie.value).join('; ')
   }
 }
