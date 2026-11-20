@@ -108,6 +108,7 @@ it.each(['native', 'web'] as const)('%s overlay intent reaches its owning compos
     expect(posts).toHaveLength(1)
     expect(JSON.parse(String(posts[0]![1]!.body)).sessionId).toBe('owner-B')
     expect(service.list({ sessionId: 'owner-B' })).toHaveLength(1)
+    expect(service.list({ sessionId: 'owner-B' })[0]?.source.carrier).toBe('sidebar')
     const report = await runtime.pollOnce()
     expect(report?.outcomes[0]?.outcome.kind).toBe('acknowledged')
     expect(runtime.cards()).toHaveLength(1)

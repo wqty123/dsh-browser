@@ -228,7 +228,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
       ...browserSessionId !== undefined ? { browserSessionId } : {},
       origin,
       entry,
-      carrier: oneOf(body.carrier, CARRIERS) ?? carrier(),
+      carrier: entry === 'page-overlay' && frozenCapture !== undefined ? 'sidebar' : oneOf(body.carrier, CARRIERS) ?? carrier(),
       ...typeof body.allowPartial === 'boolean' ? { allowPartial: body.allowPartial } : {},
       ...tableSelector !== undefined ? { tableSelector } : {},
       ...excerptText !== undefined ? { excerptText } : {},
