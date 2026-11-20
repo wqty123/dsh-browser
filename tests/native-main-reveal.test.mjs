@@ -2,14 +2,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import { nativeMainReveal } from './fixtures/native-main-reveal.mjs'
 import { chromiumPage } from './fixtures/chromium-page.mjs'
 import { captureScript } from '../lib/browser-reference/page-script.js'
-import { BrowserReferenceService } from '../lib/browser-reference/service.js'
-import { ReferenceStore } from '../lib/browser-reference/store.js'
 
 test('the shipped Desktop main entry starts the bridge needed for source-bound reveal after restart', async t => {
   const snapshot = {
@@ -49,8 +45,6 @@ test('Desktop source binding reveals real Runoob cells and structured math throu
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) })
   await once(server, 'listening')
   const page = await chromiumPage(t)
-  const folder = mkdtempSync(join(tmpdir(), 'dsh-native-capture-'))
-  t.after(() => rmSync(folder, { recursive: true, force: true }))
   const url = `http://127.0.0.1:${server.address().port}/source`
   const away = `http://127.0.0.1:${server.address().port}/away`
   for (const kind of ['table', 'formula']) {
@@ -68,17 +62,18 @@ test('Desktop source binding reveals real Runoob cells and structured math throu
       const raw = JSON.parse((function() { return ${captureScript()} })());
       return { raw, expected };
     })()`)
-    const capture = new BrowserReferenceService({ exists: () => false, evaluate: async () => { throw new Error('frozen capture must not evaluate') } },
-      new ReferenceStore(join(folder, `${kind}.jsonl`)), { assetDir: join(folder, 'assets') })
-    const stored = await capture.capture({ sessionId: 'owner', frozenCapture: frozen.raw })
-    assert.deepEqual(stored.failures, [])
     const live = { url, ready: true }
-    const backend = await nativeMainReveal(stored.reference, live, 2, page.command)
+    const owner = `fresh-${kind}`
+    const backend = await nativeMainReveal({ owner: { sessionId: owner }, parts: [] }, live, 2, page.command)
     try {
       await backend.start()
-      assert.equal((await backend.post({ referenceId: stored.reference.referenceId })).status, 'unavailable')
+      const stored = await backend.post({ sessionId: owner, origin: 'user-selection', entry: 'page-overlay', capture: frozen.raw }, true)
+      assert.equal(stored.ok, true, JSON.stringify(stored))
+      const referenceId = stored.reference.referenceId
+      assert.equal(backend.get(referenceId).owner.browserSessionId, undefined, 'a frozen overlay capture never registered a native session')
+      assert.equal((await backend.post({ referenceId })).note, 'reference has no live source binding')
       await page.navigate(away); live.url = away
-      const request = { referenceId: stored.reference.referenceId, sourcePageId: '2' }
+      const request = { referenceId, sourcePageId: '2' }
       assert.equal((await backend.post(request)).status, 'page-mismatch')
       await page.navigate(url); live.url = url
       const outcome = await backend.post(request)
