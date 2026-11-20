@@ -148,7 +148,8 @@ export function apply(ctx: Context): void {
   }, listener => {
     initializationListeners.add(listener)
     return () => { initializationListeners.delete(listener) }
-  }, (sessionId, tabId) => controllers.get(sessionId as BrowserBodyProps['sessionId'])?.currentPage(tabId)))
+  }, (sessionId, tabId) => controllers.get(sessionId as BrowserBodyProps['sessionId'])?.currentPage(tabId),
+  (sessionId, tabId, url) => controllers.get(sessionId as BrowserBodyProps['sessionId'])?.loadUrl(tabId, url).ok === true))
   ctx.inject(['shortcuts'], (scope) => {
     scope.effect(() => scope.shortcuts.register({
       id: 'browser.address' as ShortcutCommandId, label: () => t('address.focus'), aliases: ['address bar', 'focus address'],

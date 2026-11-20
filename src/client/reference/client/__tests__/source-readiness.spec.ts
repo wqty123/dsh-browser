@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { createBrowserInitializationJournal, createBrowserInitializationReader, type BrowserObservedPage } from '../../../browser/initialization.ts'
 import { openReferenceSource } from '../production/source-opener.ts'
@@ -7,7 +7,7 @@ import { BrowserController, type BrowserControllerOptions } from '../../../brows
 import { emptyBrowserFrame, type BrowserCarrierState } from '../../../browser/BrowserFrame.ts'
 
 const owner = '79b4e5bd-5bf4-49f3-b911-5d1a92b7002b'
-const sessionId = `session-${owner}`
+const sessionId = owner
 const tabId = 'source-tab' as TabId
 const url = 'https://example.com/article'
 
@@ -67,8 +67,8 @@ describe('source page readiness', () => {
   it.each([url, 'https://EXAMPLE.com:443/article#section'])('keeps an already-visible source document at %s without reloading', async currentUrl => {
     const { sidebar, reader } = fixture(() => ({ url: currentUrl, guestId: '42' }))
     sidebar.openTabIn(sessionId)
-    const navigateTabIn = () => { throw new Error('must preserve the visible document') }
-    await expect(openReferenceSource({ ...sidebar, navigateTabIn }, reader, owner, url,
+    const navigate = () => { throw new Error('must preserve the visible document') }
+    await expect(openReferenceSource(sidebar, { ...reader, navigate }, owner, url,
       new AbortController().signal)).resolves.toEqual({ pageId: '42' })
   })
 
@@ -131,11 +131,11 @@ describe('source page readiness', () => {
     journal.advance(tabId, 'attached', { guestId: '42' })
     let navigate!: () => void
     let opened = false
-    const source = {
-      ...sidebar,
-      openTabIn() { opened = true },
-      navigateTabIn(id: string, tab: string) {
-        expect([id, tab]).toEqual([sessionId, tabId])
+    const source = { ...sidebar, openTabIn() { opened = true } }
+    const navigation = {
+      ...reader,
+      navigate(query: { sessionId: string; tabId: TabId }) {
+        expect([query.sessionId, query.tabId]).toEqual([sessionId, tabId])
         navigate = () => {
           journal.begin({ sessionId, tabId, occurrenceId: 'mount-1', navigationRevision: 2, url })
           journal.advance(tabId, 'attached', { guestId: '42' })
@@ -143,7 +143,7 @@ describe('source page readiness', () => {
         return true
       },
     }
-    const result = openReferenceSource(source, reader, owner, url, new AbortController().signal)
+    const result = openReferenceSource(source, navigation, owner, url, new AbortController().signal)
     let settled = false
     void result.then(() => { settled = true })
     await Promise.resolve()
@@ -164,6 +164,16 @@ describe('source page readiness', () => {
     expect(listeners.size).toBe(1)
     cancellation.abort()
     await expect(result).rejects.toThrow('aborted')
+  })
+
+  it.each([undefined, () => false])('refuses unavailable or rejected controller navigation without opening another tab: %s', async (navigate) => {
+    const { sidebar, reader, journal } = fixture()
+    sidebar.openTabIn(sessionId)
+    journal.advance(tabId, 'attached', { guestId: '42' })
+    const openTabIn = vi.fn()
+    await expect(openReferenceSource({ ...sidebar, openTabIn }, { ...reader, navigate }, sessionId, url,
+      new AbortController().signal)).rejects.toThrow('acknowledged sidebar navigation unavailable')
+    expect(openTabIn).not.toHaveBeenCalled()
   })
 
   it('rejects missing owner, missing tab and a tab-open refusal', async () => {

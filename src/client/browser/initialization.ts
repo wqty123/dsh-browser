@@ -97,6 +97,7 @@ export interface BrowserObservedPage {
 
 export interface BrowserInitializationReader {
   readonly protocolVersion: 1
+  navigate?(query: { readonly sessionId: string; readonly tabId: TabId; readonly url: string }): boolean
   current(query: { readonly sessionId: string; readonly tabId: TabId }): BrowserObservedPage | undefined
   read(query: { readonly sessionId: string; readonly tabId: TabId; readonly url: string; readonly requestId?: string; readonly afterRequestId?: string }): BrowserInitReceipt | undefined
   wait(query: { readonly sessionId: string; readonly tabId: TabId; readonly url: string; readonly requestId?: string; readonly afterRequestId?: string }, signal: AbortSignal): Promise<BrowserInitReceipt>
@@ -107,12 +108,14 @@ export function createBrowserInitializationReader(
   lookup: (sessionId: string, tabId: TabId) => BrowserInitReceipt | undefined,
   subscribe?: (listener: () => void) => () => void,
   observe?: (sessionId: string, tabId: TabId) => BrowserObservedPage | undefined,
+  navigate?: (sessionId: string, tabId: TabId, url: string) => boolean,
 ): BrowserInitializationReader {
   const canonical = (value: string): string => {
     try { return new URL(value).href } catch { return value }
   }
   const reader: BrowserInitializationReader = {
     protocolVersion: 1,
+    ...(navigate === undefined ? {} : { navigate: (query: { readonly sessionId: string; readonly tabId: TabId; readonly url: string }) => navigate(query.sessionId, query.tabId, query.url) }),
     current: query => observe?.(query.sessionId, query.tabId),
     read(query) {
       const receipt = lookup(query.sessionId, query.tabId)

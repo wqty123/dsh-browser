@@ -115,19 +115,19 @@ it.each([false, true])('highlights the same sidebar tab without unnecessary navi
   const sidebar = {
     tabsIn: () => [{ id: tabId, kind: 'browser' }],
     openTabIn() { throw new Error('must reuse the same tab') },
-    navigateTabIn(owner: string, tab: string, options: { params: { url: string } }) {
-      expect([owner, tab]).toEqual([sessionId, tabId])
-      live.url = options.params.url
-      journal.begin({ sessionId, tabId, occurrenceId: 'original', navigationRevision: 2, url: live.url })
-      journal.advance(tabId, 'navigating')
-      requested()
-      return true
-    },
+  }
+  reader.navigate = (query) => {
+    expect([query.sessionId, query.tabId]).toEqual([sessionId, tabId])
+    live.url = query.url
+    journal.begin({ sessionId, tabId, occurrenceId: 'original', navigationRevision: 2, url: live.url })
+    journal.advance(tabId, 'navigating')
+    requested()
+    return true
   }
   try {
     await captureReferenceIntent(intent, sessionId)
     await runtime.pollOnce()
-    runtime.setSourceOpener((url, signal) => openReferenceSource(sidebar, reader, firstOwner, url, signal))
+    runtime.setSourceOpener((url, signal) => openReferenceSource(sidebar, reader, sessionId, url, signal))
     const activation = runtime.revealReference(runtime.cards()[0]!.referenceId)
     if (!alreadyAtSource) {
       await navigated

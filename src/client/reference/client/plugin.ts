@@ -86,6 +86,7 @@ const inertFace: HostInputFace = {
 
 export function apply(ctx: HostContext, config: AssemblyConfig = {}): ProductionRuntime {
   const bindings = new Map<string, InputBinding>()
+  const hostSessions = new Map<string, string>()
 
   const bindingFor = (sessionId: string): HostInputFace =>
     (sessionId === '' ? undefined : bindings.get(sessionId)?.face) ?? inertFace
@@ -100,7 +101,8 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
       const rawSession = dock?.sessionId ?? dock?.session?.sessionId
       const sessionId = typeof rawSession === 'string' ? referenceOwnerKey(rawSession) : undefined
       const actions = dock?.inputActions
-      if (typeof sessionId !== 'string' || sessionId === '') { runtime.setSession(''); return }
+      if (typeof rawSession !== 'string' || typeof sessionId !== 'string' || sessionId === '') { runtime.setSession(''); return }
+      hostSessions.set(sessionId, rawSession.trim())
       // The visible Session becomes the active one: this is what makes the
       // default entry poll a real conversation instead of the empty id, and it
       // keeps an async delivery bound to the Session it belongs to.
@@ -181,7 +183,7 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
     const sessionId = runtime.currentSessionId()
     if (sessionId === '') throw new Error('reference source requires a conversation')
     return openReferenceSource(ctx.get('sidebarRight') as SourceSidebar,
-      ctx.get('sidebarBrowserInitialization') as BrowserInitializationReader, sessionId, url, signal)
+      ctx.get('sidebarBrowserInitialization') as BrowserInitializationReader, hostSessions.get(sessionId) ?? sessionId, url, signal)
   })
   return runtime
 }
