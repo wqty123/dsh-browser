@@ -144,7 +144,7 @@ export function guestRuntimeScript(pageUrl: string): string {
     attempt(() => {
       let node = event.target;
       while (node && node.tagName !== 'A') node = node.parentNode;
-      if (!node || !node.hasAttribute('href')) return;
+      if (!node || !node.hasAttribute('href') || node.hasAttribute('download')) return;
       const href = node.getAttribute('href');
       const url = realURL(href);
       if (!/^https?:$/.test(url.protocol)) return;

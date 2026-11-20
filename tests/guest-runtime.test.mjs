@@ -161,6 +161,18 @@ test('installer tolerates missing optional APIs and safely embeds unusual URLs',
   assert.doesNotThrow(() => vm.runInNewContext(source, context))
 })
 
+test('download anchors, including empty download attributes, retain native browser handling', () => {
+  const { listeners, navigations, Element } = page()
+  for (const filename of ['', 'report.pdf']) {
+    const anchor = new Element()
+    anchor.tagName = 'A'
+    anchor.setAttribute('href', '/download/report.pdf')
+    anchor.setAttribute('download', filename)
+    listeners.get('click')({ target: { parentNode: anchor }, preventDefault() { assert.fail('download intercepted') } })
+    assert.equal(navigations.length, 0)
+  }
+})
+
 test('the reference relay bypasses site request interception', async () => {
   const { context, requests } = page()
   const tag = relayTag('owner')
