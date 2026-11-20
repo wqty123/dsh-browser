@@ -63,7 +63,10 @@ export function projectOrderedContent(
   const text = plainTextBlock(input.text)
   if (options.textPosition === 'leading') parts.push(...text)
   for (const group of input.groups) {
-    for (const part of group.parts) parts.push(projectPart(part))
+    for (const part of group.parts) {
+      if (part.kind === 'image' && part.text) parts.push({ type: 'text', text: part.text })
+      parts.push(projectPart(part))
+    }
   }
   if (options.textPosition !== 'leading') parts.push(...text)
   return parts

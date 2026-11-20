@@ -19,7 +19,7 @@ import { nativeMainReveal } from '../../../../../tests/fixtures/native-main-reve
 import type { ElectronWebviewPresentation, WebviewElement } from '../../../electron/ElectronWebviewPresentation.ts'
 import {
   ASSET_MAP, LONG_TEXT, TAIL_TEXT, assetOf, deliveriesResponse,
-  fakeHostInput, makeDelivery, manualScheduler, memoryKV,
+  fakeHostInput, makeDelivery, makeSnapshot, manualScheduler, memoryKV,
 } from './production.fixtures.ts'
 
 const roots: Root[] = []
@@ -37,6 +37,7 @@ afterEach(async () => {
 
 async function assembled(storage = memoryKV(), options: {
   empty?: boolean; client?: boolean; acknowledged?: boolean; hostSessionId?: string; away?: boolean; native?: boolean
+  snapshot?: ReturnType<typeof makeSnapshot>
 } = {}) {
   const hostSessionId = options.hostSessionId ?? 'sess-A'
   const sessionId = referenceOwnerKey(hostSessionId)
@@ -46,7 +47,7 @@ async function assembled(storage = memoryKV(), options: {
   services.uiConversation = { userText: { register(rule: typeof browserSourceRule) { sourceRule = rule; return () => {} } } }
   const reveals: { referenceId: string; partId?: string; navigate?: boolean; sourcePageId?: string }[] = []
   let outcome: () => Promise<RevealResultWire> = async () => ({ ok: true, status: 'revealed' })
-  let deliveries = options.empty ? [] : [makeDelivery({ sessionId, state: options.acknowledged ? 'acknowledged' : 'prepared', sequence: 1 })]
+  let deliveries = options.empty ? [] : [makeDelivery({ sessionId, state: options.acknowledged ? 'acknowledged' : 'prepared', sequence: 1, ...(options.snapshot === undefined ? {} : { snapshot: options.snapshot }) })]
   const tabs: { id: TabId; kind: string }[] = []
   const listeners = new Set<() => void>()
   const journal = createBrowserInitializationJournal({ onChange: () => { for (const listener of listeners) listener() } })
@@ -225,6 +226,32 @@ function pill(container: HTMLElement): HTMLButtonElement {
 }
 
 describe('production assembly — shared composer and sent capsules', () => {
+  it.each([false, true])('preserves structured math through send, capsule-only bubble, preview and reveal retry (native=%s)', async native => {
+    const snapshot = { ...makeSnapshot(), parts: [{ partId: 'math', type: 'text' as const, text: 'x^2', content: [{ type: 'math' as const, latex: 'x^2', display: false }], anchor: { exact: 'x^2', prefix: '', suffix: '' } }] }
+    const app = await assembled(undefined, { snapshot, client: true, away: true, native })
+    const sourceUrl = app.runtime.cards()[0]!.source.pageUrl
+    const message = await send(app.runtime, '')
+    expect(message).toContain('$x^2$')
+    const sent = await app.sentMessage(message)
+    expect(sent.querySelectorAll('button[data-reference-id]')).toHaveLength(1)
+    const bubble = sent.cloneNode(true) as HTMLElement
+    bubble.querySelector('.dsh-browser-reference-capsules')!.remove()
+    expect(bubble.textContent?.trim()).toBe('')
+    await act(async () => { pill(sent).focus() })
+    expect(document.querySelector('[role="dialog"] [data-reference-math]')?.textContent).toBe('x^2')
+    app.outcome(async () => {
+      if (!app.reveals.at(-1)?.sourcePageId) return { ok: true, status: 'session-unavailable', pageUrl: sourceUrl }
+      expect(app.live.ready).toBe(true)
+      app.live.highlighted = true
+      return { ok: true, status: 'revealed' }
+    })
+    await act(async () => { pill(sent).click() })
+    expect(app.live.url).toBe(sourceUrl)
+    await act(async () => { app.ready() })
+    expect(app.reveals).toEqual([{ referenceId: snapshot.referenceId }, { referenceId: snapshot.referenceId, sourcePageId: '42' }])
+    expect(app.live.highlighted).toBe(true)
+  })
+
   it('projects an inserted composer source token into exactly one sent capsule', async () => {
     const h = await assembled(undefined, { acknowledged: true })
     expect(h.hostInput.text).toContain('dsh-browser-ref:')

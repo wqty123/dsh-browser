@@ -3377,6 +3377,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         referenceId = referenceId.slice(0, slash)
       }
       const outcome = await references().reveal(referenceId, {
+        ownerSessionId: taskKey(exec),
         ...partId !== undefined && partId !== '' ? { partId } : {},
       }, exec.signal)
       return {

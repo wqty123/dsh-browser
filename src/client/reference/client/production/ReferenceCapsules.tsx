@@ -47,7 +47,8 @@ function Part({ part, labels }: { readonly part: CardPart; readonly labels: Refe
     ? <p className={css.quote} data-part-kind="text">{part.value.text}</p>
     : <div className={css.quote} data-part-kind="text"><ReferenceText content={part.value.content} /></div>
   if (part.kind === 'image') return part.value.bound
-    ? <img className={css.image} data-part-kind="image" src={part.value.thumbnailSrc} alt={part.value.alt ?? labels.image} />
+    ? <figure data-part-kind="image"><img className={css.image} src={part.value.thumbnailSrc} alt={part.value.alt ?? labels.image} />
+      {part.value.caption !== undefined && <figcaption>{part.value.caption}</figcaption>}</figure>
     : <p className={css.secondary} data-part-kind="image" role="status">{labels.loadingImage}</p>
   const rows = referenceTableRows(part.value)
   return <div className={css.tableScroll} data-part-kind="table" tabIndex={0} aria-label={part.value.caption ?? labels.table}>
@@ -57,7 +58,7 @@ function Part({ part, labels }: { readonly part: CardPart; readonly labels: Refe
         {cells.map(({ column, columnSpan, rowSpan, value: cell }) => {
           if (cell === undefined) return <td key={column} colSpan={columnSpan} />
           const Cell = cell.role === 'header' ? 'th' : 'td'
-          return <Cell key={column} rowSpan={rowSpan} colSpan={columnSpan}>{cell.text}
+          return <Cell key={column} rowSpan={rowSpan} colSpan={columnSpan}>{cell.content === undefined ? cell.text : <ReferenceText content={cell.content} />}
             {cell.inlineImages.map(image => image.thumbnailSrc === undefined
               ? <span key={image.partId} className={css.secondary}>{labels.loadingImage}</span>
               : <img key={image.partId} className={css.image} src={image.thumbnailSrc} alt={labels.image} />)}

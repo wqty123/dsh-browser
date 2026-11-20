@@ -511,7 +511,7 @@ test('a frozen capture is refused when the page has navigated since it was taken
     events: [{ kind: 'text', exact: 'old words' }],
   }
   const { service } = fixture(t, { facts: { ok: true, url: 'https://example.com/new', title: 'New' } })
-  const outcome = await service.capture({ sessionId: 'session-1', frozenCapture: frozen })
+  const outcome = await service.capture({ sessionId: 'session-1', browserSessionId: 'session-1', frozenCapture: frozen })
   assert.equal(outcome.reference, undefined, 'a different document must not become a quote of the old text')
   assert.ok(outcome.failures.some(failure => failure.reason === 'page-changed'), JSON.stringify(outcome.failures))
 })

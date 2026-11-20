@@ -9,6 +9,7 @@ import { createIframePage } from '../../pages.ts'
 import { iframeReferenceSource } from '../iframe-reference.ts'
 import { openReferenceSource } from '../../reference/client/production/source-opener.ts'
 import { makeSnapshot } from '../../reference/client/__tests__/production.fixtures.ts'
+import { webReferenceHttp } from '../../../../tests/fixtures/web-reference-http.mjs'
 
 const owner = '79b4e5bd-5bf4-49f3-b911-5d1a92b7002b'
 const sessionId = `session-${owner}`
@@ -73,6 +74,41 @@ function fixture(initial = url) {
   }
   return { connect, controller, reader, sidebar, navigate, journal, page: () => page }
 }
+
+it('captures from the isolated Web guest and completes a registered model-tool reveal over real HTTP through the same owned client source', async () => {
+  const server = await webReferenceHttp()
+  disposers.push(() => server.close())
+  const previousFetch = globalThis.fetch
+  let captured: { referenceId: string } | undefined
+  let removed = false
+  globalThis.fetch = vi.fn(async (input, init) => {
+    const path = new URL(String(input), server.baseUrl).pathname
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined
+    const response = await server.call(path, body)
+    if (path.endsWith('/capture') && response.status === 200) captured = response.json().reference
+    if (body?.operation === 'remove') removed = true
+    return new Response(response.text, { status: response.status })
+  })
+  disposers.push(() => { globalThis.fetch = previousFetch })
+  const f = fixture()
+  const guest = f.connect()
+  guest.receive({ type: 'dsh-browser-ref:intent', origin: 'user-selection', entry: 'page-overlay', capture: {
+    ok: true, url, title: 'Article', events: [{ kind: 'text', exact: 'selected words', prefix: '', suffix: '' }],
+  } })
+  await vi.waitFor(() => { expect(captured).toBeDefined() })
+  const reference = server.service.get(captured!.referenceId)
+  expect(reference.owner).toEqual({ sessionId: owner, sourcePageId: f.controller.currentPage()!.guestId })
+  expect(reference.owner.browserSessionId).toBeUndefined()
+  expect((await server.reveal(reference.referenceId, sessionId)).status).toBe('revealed')
+  expect(guest.guest.window.document.querySelector('#__dsh-ref-highlight')?.children.length).toBe(1)
+  const opened = await openReferenceSource(f.sidebar, f.reader, sessionId, url, new AbortController().signal)
+  expect(opened.pageId).toBe(reference.owner.sourcePageId)
+  expect(await opened.reveal!(reference, undefined, new AbortController().signal)).toBe('revealed')
+  expect((await server.reveal(reference.referenceId, 'session-other-owner')).status).toBe('unavailable')
+  await f.controller.dispose()
+  await vi.waitFor(() => { expect(removed).toBe(true) })
+  expect((await server.reveal(reference.referenceId, sessionId)).status).toBe('unavailable')
+})
 
 it.each([true, false])('reveals through the actual Web guest runtime after readiness (already at source: %s)', async samePage => {
   const f = fixture(samePage ? url : 'https://cn.bing.com/')

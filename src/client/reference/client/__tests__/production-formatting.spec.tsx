@@ -5,8 +5,8 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { cleanup, render } from '@testing-library/react'
-import { captureScript, highlightScript, pageTextScript, type RawCaptureResult } from '../../../../browser-reference/page-script.ts'
+import { cleanup, fireEvent, render } from '@testing-library/react'
+import { captureScript, highlightScript, pageTextScript, revealElementScript, type RawCaptureResult } from '../../../../browser-reference/page-script.ts'
 import { BrowserReferenceService } from '../../../../browser-reference/service.ts'
 import { frameCaptureScript } from '../../../../browser-reference/entry.ts'
 import { ReferenceStore } from '../../../../browser-reference/store.ts'
@@ -29,7 +29,7 @@ afterAll(() => {
   if (oldRects) Object.defineProperty(Range.prototype, 'getClientRects', oldRects)
   else Reflect.deleteProperty(Range.prototype, 'getClientRects')
 })
-beforeEach(() => { vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(box) })
+beforeEach(() => { vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(box) })
 afterEach(() => {
   window.dispatchEvent(new Event('pointerdown'))
   cleanup()
@@ -47,6 +47,7 @@ function select(html: string): RawCaptureResult {
   document.body.innerHTML = html
   const range = document.createRange()
   range.selectNodeContents(document.body)
+  window.getSelection()!.removeAllRanges()
   window.getSelection()!.addRange(range)
   return execute(captureScript())
 }
@@ -71,6 +72,142 @@ async function submit(raw: RawCaptureResult) {
 }
 
 describe('formatted quotations through emitted capture, storage, draft and submission', () => {
+  it.each([
+    ['KaTeX inline', '<span class="katex"><span class="katex-mathml"><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x^2</annotation></semantics></math></span><span class="katex-html">garbled glyphs</span></span>', 'x^2', false],
+    ['KaTeX display', '<span class="katex-display"><span class="katex"><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x^2</annotation></semantics></math><span>garbled glyphs</span></span></span>', 'x^2', true],
+    ['MathJax 2', '<span class="MathJax_Display"><span class="MathJax">garbled glyphs</span></span><script type="math/tex; mode=display">\\frac{a}{b}</script>', '\\frac{a}{b}', true],
+    ['MathJax 2 SVG', '<span class="MathJax_SVG"><svg><text>garbled glyphs</text></svg></span><script type="math/tex">x^2</script>', 'x^2', false],
+    ['MathJax 3 annotation', '<mjx-container display="true"><mjx-math>garbled glyphs</mjx-math><mjx-assistive-mml><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x^2</annotation></semantics></math></mjx-assistive-mml></mjx-container>', 'x^2', true],
+    ['MathJax 3 data-latex', '<mjx-container data-latex="x^2"><mjx-math>garbled glyphs</mjx-math></mjx-container>', 'x^2', false],
+    ['MathJax 3 assistive MathML', '<mjx-container><mjx-math>garbled glyphs</mjx-math><mjx-assistive-mml><math><mfrac><mi>a</mi><mi>b</mi></mfrac></math></mjx-assistive-mml></mjx-container>', '\\frac{a}{b}', false],
+    ['MathML annotation', '<math display="block"><semantics><mi>x</mi><annotation encoding="application/x-tex">x^2</annotation></semantics></math>', 'x^2', true],
+    ['MathML fallback', '<math><mrow><msup><mi>x</mi><mn>2</mn></msup><mo>+</mo><msqrt><mi>y</mi></msqrt></mrow></math>', 'x^{2}+\\sqrt{y}', false],
+  ] as const)('preserves %s through capture, frozen storage, model, both capsule previews and source range', async (_name, html, latex, display) => {
+    const raw = select(html)
+    expect(raw.events).toHaveLength(1)
+    expect(raw.events![0]).toMatchObject({ kind: 'text', exact: latex, content: [{ type: 'math', latex, display }] })
+    const formula = document.body.firstElementChild!
+    const { snapshot, group, parts } = await submit(raw)
+    expect(parts).toEqual([{ type: 'text', text: display ? `$$\n${latex}\n$$\n` : `$${latex}$\n` }])
+    const startBefore = vi.spyOn(Range.prototype, 'setStartBefore')
+    const endAfter = vi.spyOn(Range.prototype, 'setEndAfter')
+    expect(execute(highlightScript(), { start: 0, end: latex.length })).toMatchObject({ ok: true })
+    expect(startBefore).toHaveBeenCalledWith(formula)
+    expect(endAfter).toHaveBeenCalledWith(formula)
+    const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
+    const composer = render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels() }))
+    expect(document.querySelector('[data-reference-math]')).toBeNull()
+    fireEvent.mouseEnter(composer.getByRole('button'))
+    expect(document.querySelector('[data-reference-math]')?.textContent).toBe(latex)
+    composer.unmount()
+    render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
+    expect(document.querySelector('[data-reference-math]')?.getAttribute('data-reference-math')).toBe(display ? 'display' : 'inline')
+    expect(document.querySelector('[data-reference-math]')?.textContent).toBe(latex)
+  })
+
+  it('expands a partial rendered-formula selection atomically, without capturing adjacent text', async () => {
+    document.body.innerHTML = '<p>Before <span class="katex"><span id="glyph">garbled</span><math><annotation encoding="application/x-tex">x^2</annotation></math></span> after</p>'
+    const glyph = document.querySelector('#glyph')!.firstChild!
+    const range = document.createRange()
+    range.setStart(glyph, 1)
+    range.setEnd(glyph, 3)
+    window.getSelection()!.addRange(range)
+    const raw = execute<RawCaptureResult>(captureScript())
+    expect(raw.events![0]).toMatchObject({ exact: 'x^2', content: [{ type: 'paragraph', children: [{ type: 'math', latex: 'x^2', display: false }] }] })
+    expect((await submit(raw)).parts).toEqual([{ type: 'text', text: '$x^2$\n' }])
+    const page = execute<{ text: string }>(pageTextScript())
+    expect(page.text).toBe('Before x^2 after\n\n')
+    const startBefore = vi.spyOn(Range.prototype, 'setStartBefore')
+    expect(execute(highlightScript(), { start: 7, end: 10 })).toMatchObject({ ok: true })
+    expect(startBefore).toHaveBeenCalledWith(document.querySelector('.katex'))
+  })
+
+  it.each([
+    ['code', '<pre><code class="language-js">const x = 1;\n  x++;\n</code></pre><p>Use <code>a`b</code>.</p>', ['```js\nconst x = 1;\n  x++;\n\n```', '`` a`b ``'], 'pre[data-language="js"]', 'const x = 1;\n  x++;\n'],
+    ['pre language', '<pre class="lang-python">  print(1)\n</pre>', ['```python\n  print(1)\n\n```'], 'pre[data-language="python"]', '  print(1)\n'],
+    ['blockquote', '<blockquote><p>Outer</p><blockquote><p>Inner</p></blockquote></blockquote>', ['> Outer', '> > Inner'], 'blockquote blockquote', 'Inner'],
+    ['nested list numbering', '<ol start="3"><li>Three<ul><li>Nested</li></ul></li><li value="8">Eight</li><li>Nine</li></ol>', ['3. Three', '  - Nested', '8. Eight', '9. Nine'], 'ol[start="3"] li[value="8"]', 'Eight'],
+    ['definitions', '<dl><dt>Term</dt><dd>Definition</dd></dl>', ['Term', ': Definition'], 'dl dd', 'Definition'],
+    ['headings', '<h1>Title</h1><h4>Section</h4>', ['# Title', '#### Section'], 'h4', 'Section'],
+    ['sup/sub', '<p>x<sup>2</sup> H<sub>2</sub>O</p>', ['x<sup>2</sup> H<sub>2</sub>O'], 'sub', '2'],
+    ['ruby', '<p><ruby>漢<rp>(</rp><rt>kan</rt><rp>)</rp></ruby></p>', ['<ruby>漢<rt>kan</rt></ruby>'], 'ruby rt', 'kan'],
+    ['hr/br', '<p>First<br>Second</p><hr><p>Third</p>', ['First  \nSecond', '---', 'Third'], 'hr', ''],
+  ] as const)('preserves %s semantics and source-map range', async (_name, html, expected, selector, preview) => {
+    const raw = select(html)
+    const { snapshot, group, parts } = await submit(raw)
+    const model = parts.map(part => part.type === 'text' ? part.text : '').join('')
+    for (const text of expected) expect(model).toContain(text)
+    const page = execute<{ text: string }>(pageTextScript())
+    const exact = raw.events![0]!.exact!
+    const start = page.text.indexOf(exact)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(execute(highlightScript(), { start, end: start + exact.length })).toMatchObject({ ok: true })
+    const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
+    render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
+    expect(document.querySelector(`[data-part-kind="text"] ${selector}`)?.textContent).toBe(preview)
+  })
+
+  it('captures a Runoob-style thead/zebra table across cells as a real table and Markdown', async () => {
+    document.body.innerHTML = '<table class="reference"><thead><tr><th>Firstname</th><th>Lastname</th></tr></thead><tbody><tr style="background:#eee"><td id="first">Peter</td><td>Griffin</td></tr><tr><td>Lois</td><td id="last">Griffin</td></tr></tbody></table>'
+    const range = document.createRange()
+    range.setStart(document.querySelector('#first')!.firstChild!, 1)
+    range.setEnd(document.querySelector('#last')!.firstChild!, 3)
+    window.getSelection()!.addRange(range)
+    const raw = execute<RawCaptureResult>(captureScript())
+    const { snapshot, group, parts } = await submit(raw)
+    expect(snapshot.parts.map(part => part.type)).toEqual(['table'])
+    expect(parts).toEqual([{ type: 'text', text: '| Firstname | Lastname |\n| --- | --- |\n| Peter | Griffin |\n| Lois | Griffin |\n' }])
+    expect(execute(revealElementScript(), { kind: 'table', anchor: raw.events![0] })).toMatchObject({ ok: true })
+    const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
+    render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
+    expect(document.querySelectorAll('[data-part-kind="table"] th')).toHaveLength(2)
+    expect(document.querySelectorAll('[data-part-kind="table"] td')).toHaveLength(4)
+  })
+
+  it('keeps math/code semantics inside merged table cells', async () => {
+    const raw = select('<table><tr><th colspan="2">Formula</th></tr><tr><td rowspan="2"><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x^2</annotation></semantics></math></td><td><code>a*b</code></td></tr><tr><td>End</td></tr></table>')
+    const { snapshot, group, parts } = await submit(raw)
+    expect(parts.map(part => part.type === 'text' ? part.text : '').join('')).toContain('| $x^2$ | ` a*b ` |')
+    const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
+    render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
+    expect(document.querySelector('[data-part-kind="table"] th[colspan="2"]')).not.toBeNull()
+    expect(document.querySelector('[data-part-kind="table"] td[rowspan="2"] [data-reference-math]')?.textContent).toBe('x^2')
+  })
+
+  it('keeps image alt, caption, source identity and caption model text', async () => {
+    const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGZkAAAAASUVORK5CYII='
+    const raw = select(`<figure><img src="data:image/png;base64,${data}" alt="A diagram"><figcaption>Figure one</figcaption></figure>`)
+    const { snapshot, group, parts } = await submit(raw)
+    const image = snapshot.parts.find(part => part.type === 'image')!
+    expect(image).toMatchObject({ type: 'image', alt: 'A diagram', caption: 'Figure one' })
+    if (image.type !== 'image') throw new Error('missing image')
+    expect(parts).toContainEqual({ type: 'text', text: 'Figure one\n' })
+    expect(parts).toContainEqual({ type: 'text', text: 'Image: A diagram\nFigure one\n' })
+    expect(execute(revealElementScript(), { kind: 'image', anchor: image.anchor })).toMatchObject({ ok: true })
+    const assets = createAssetStore(memoryKV(), 's')
+    assets.bind({ ok: true, key: image.assetKey, sha256: image.assetKey, mime: 'image/png', bytes: Buffer.from(data, 'base64').length, data })
+    const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, assets)
+    render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
+    expect(document.querySelector('[data-part-kind="image"] img')?.getAttribute('alt')).toBe('A diagram')
+    expect(document.querySelector('[data-part-kind="image"] figcaption')?.textContent).toBe('Figure one')
+  })
+
+  it('rejects malformed/oversized rich nodes and never fabricates rendered math glyph text', async () => {
+    for (const node of [
+      { type: 'math', latex: '', display: false }, { type: 'math', latex: 'x', display: 'yes' },
+      { type: 'math', latex: 'x'.repeat(MAX_REFERENCE_TEXT + 1), display: false },
+      { type: 'heading', level: 7, children: [] }, { type: 'pre', language: 'js\n```', children: [] },
+      { type: 'list-item', value: 1.5, children: [] },
+    ]) expect(isReferenceText([node])).toBe(false)
+    const raw = select('<span class="katex">garbled glyphs</span>')
+    expect((await submit(raw)).parts).toEqual([{ type: 'text', text: '$[math source unavailable]$\n' }])
+    expect(execute(captureScript(), { maxChars: 2 })).toMatchObject({ truncated: true, events: [] })
+    const table = select('<table><tr><th>Heading</th></tr><tr><td>Value</td></tr></table>')
+    const badTable = JSON.parse(JSON.stringify(table)) as RawCaptureResult
+    Object.assign(badTable.events![0]!.table!.cells![0]!, { content: [{ type: 'math', latex: 'fabricated', display: false }] })
+    expect((await stored(badTable)).outcome.failures).toContainEqual(expect.objectContaining({ kind: 'table', reason: 'invalid-text-content' }))
+  })
+
   it('preserves selected article headings and lists inside a layout table as structured text', async () => {
     document.body.innerHTML = '<table><tr><td>navigation</td><td id="article"><h3>Examples</h3><ul><li>One</li><li>Two</li></ul></td></tr></table>'
     const range = document.createRange()
@@ -80,7 +217,7 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     expect(raw.events!.map(event => event.kind)).toEqual(['text'])
     const { parts, snapshot } = await submit(raw)
     expect(snapshot.parts.map(part => part.type)).toEqual(['text'])
-    expect(parts).toEqual([{ type: 'text', text: 'Examples\n\n- One\n- Two\n' }])
+    expect(parts).toEqual([{ type: 'text', text: '### Examples\n\n- One\n- Two\n' }])
   })
 
   it.each(['presentation', 'none'])('honors role=%s even when a layout table contains header cells', async role => {
@@ -166,7 +303,7 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     if (table.type !== 'table') throw new Error('missing table')
     expect(table.table.cells.find(cell => cell.role === 'data')).toMatchObject({ column: 1, columnSpan: 2, text: 'selected' })
     const html = parts.filter(part => part.type === 'text').map(part => part.text).join('\n')
-    expect(html).toContain('<tr><td colspan="1"></td><td rowspan="1" colspan="2">selected</td><td colspan="1"></td></tr>')
+    expect(html).toContain('|  | selected | selected |  |')
     expect(referenceTableRows(table.table)[1]!.cells.map(cell => cell.column)).toEqual([0, 1, 3])
     const card = buildCardViewModel({ referenceId: snapshot.referenceId, intentId: 'intent', browserSessionId: 'browser:s', group, addedAt: 1, snapshot, deliveryState: 'prepared', failures: [] }, createAssetStore(memoryKV(), 's'))
     render(createElement(ReferenceCapsules, { sessionId: 's', cards: [card], actions: {}, labels: referenceLabels(), anchor: document.body }))
@@ -207,7 +344,7 @@ describe('formatted quotations through emitted capture, storage, draft and submi
     const { parts, group } = await submit(raw)
     expect(parts).toEqual([
       { type: 'text', text: 'Before\n' },
-      { type: 'text', text: '<table>\n<caption>Scores</caption>\n<tr><th rowspan="1" colspan="2">Results</th></tr>\n<tr><td rowspan="1" colspan="1">Ada</td><td rowspan="1" colspan="1">42</td></tr>\n</table>\n' },
+      { type: 'text', text: 'Scores\n| Results | Results |\n| --- | --- |\n| Ada | 42 |\n' },
       { type: 'text', text: 'After\n' },
     ])
     expect(group.parts[1]!.table!.cells[0]).toMatchObject({ role: 'header', columnSpan: 2 })

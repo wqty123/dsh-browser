@@ -50,6 +50,7 @@ export function composerText(text: string, attachedIds: ReadonlySet<string>): st
   for (let marker = readSourceMarker(text, from); marker !== undefined; marker = readSourceMarker(text, from)) {
     output += text.slice(from, marker.start)
     if (!attachedIds.has(marker.referenceId) || marker.partId !== undefined) output += text.slice(marker.start, marker.end)
+    else output = output.replace(/(^|\n)> $/u, '$1')
     from = marker.end
   }
   return output + text.slice(from)

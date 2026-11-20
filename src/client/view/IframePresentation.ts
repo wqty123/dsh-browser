@@ -4,6 +4,7 @@ import type { BrowserTarget } from '../browser/url.ts'
 import type { BrowserPresentation } from './BrowserPresentation.ts'
 import css from './Browser.module.css'
 import { registerIframeReference, type GuestReferenceCommand } from '../browser/iframe-reference.ts'
+import { connectWebReferenceSource } from '../browser/web-reference-source.ts'
 import { sameReferenceDocument } from '../../reference-page.ts'
 import { dispatchChildTab } from '../browser/child-tabs.ts'
 import { reportReferenceCaptureFailure } from '../reference-intents.ts'
@@ -45,6 +46,8 @@ export interface IframePresentationEvents {
 export class IframePresentation implements BrowserPresentation {
   private readonly pageId = `iframe:${crypto.randomUUID()}`
   private readonly unregisterReference: (() => void) | undefined
+  private readonly sourceLifetime = new AbortController()
+  private sourceConnection: Promise<void> | undefined
   private observedUrl: string | undefined
   private nextRequestId = 0
   private readonly pending = new Map<number, { readonly loadId: number; readonly url: string; readonly resolve: (value: Record<string, unknown>) => void; readonly reject: (error: Error) => void }>()
@@ -77,7 +80,7 @@ export class IframePresentation implements BrowserPresentation {
       return
     }
     if (data?.type === 'dsh-browser-ref:intent') {
-      void this.events.reference?.(data).catch(reportReferenceCaptureFailure)
+      void this.capture(data).catch(reportReferenceCaptureFailure)
       return
     }
     if (!data || data.type !== 'dsh.browser.guest.navigation' || typeof data.url !== 'string'
@@ -94,7 +97,7 @@ export class IframePresentation implements BrowserPresentation {
   }
 
   /** @param events - provider-owned load and remount callbacks. */
-  constructor(private readonly events: IframePresentationEvents, owner?: string) {
+  constructor(private readonly events: IframePresentationEvents, private readonly owner?: string) {
     if (owner !== undefined) this.unregisterReference = registerIframeReference(this.pageId, owner, url => {
       const loadId = this.loadId
       return (operation, spec, signal) => this.command(operation, spec, signal, url, loadId)
@@ -131,6 +134,16 @@ export class IframePresentation implements BrowserPresentation {
     this.observedUrl = undefined
     for (const request of this.pending.values()) request.reject(new Error('source iframe document changed'))
     this.events.guestPending?.()
+  }
+
+  private async capture(data: object): Promise<void> {
+    if (this.owner !== undefined) {
+      this.sourceConnection ??= connectWebReferenceSource(this.owner, this.pageId, () => this.observedUrl ?? this.document?.target.url ?? '', this.sourceLifetime.signal)
+      try { await this.sourceConnection }
+      catch (error) { this.sourceConnection = undefined; throw error }
+      if (this.sourceLifetime.signal.aborted) throw new Error('source iframe was disposed')
+    }
+    await this.events.reference?.({ ...data, ...this.owner === undefined ? {} : { sourcePageId: this.pageId } })
   }
 
   /** Request history movement in the guest without reading its cross-origin window. */
@@ -182,6 +195,7 @@ export class IframePresentation implements BrowserPresentation {
 
   /** Remove the owned DOM and retained presentation data. */
   dispose(): void {
+    this.sourceLifetime.abort()
     window.removeEventListener('message', this.receive)
     this.invalidateGuest()
     this.unregisterReference?.()
