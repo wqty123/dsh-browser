@@ -55,8 +55,8 @@ export function carrierHarness(t, { channel = 'sidebar', discover = async () => 
   return {
     get current() { return current }, registered, warnings,
     openPanel: () => panelFactory?.(),
-    async choose(nextChannel) {
-      const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel } })])
+    async choose(nextChannel, systemProfile) {
+      const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel, ...systemProfile ? { systemProfile } : {} } })])
       request.method = 'PUT'
       request.headers = { host: 'localhost:3000', origin: 'http://localhost:3000' }
       let response

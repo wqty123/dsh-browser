@@ -145,7 +145,12 @@ export class ExtensionController {
       || sessionId !== undefined && (typeof sessionId !== 'string' || sessionId.length > 128)
       || !params || typeof params !== 'object' || Array.isArray(params)) throw Error('CDP capability is unavailable in personal-browser quiet mode')
     if (method === 'Page.navigate' && !allowedUrl(params.url)) throw Error('navigation requires an http(s) URL')
-    if (method === 'Input.insertText') { method = 'Input.dispatchKeyEvent'; params = { type: 'char', text: String(params.text ?? '') } }
+    if (method === 'Input.insertText') {
+      for (const text of String(params.text ?? '')) {
+        await this.api.debugger.sendCommand({ tabId: lease.tabId, ...(sessionId ? { sessionId } : {}) }, 'Input.dispatchKeyEvent', { type: 'char', text })
+      }
+      return {}
+    }
     if (method === 'Page.captureScreenshot') {
       if (!params.clip) {
         const metrics = await this.api.debugger.sendCommand({ tabId: lease.tabId, ...(sessionId ? { sessionId } : {}) }, 'Page.getLayoutMetrics', {})

@@ -23,10 +23,12 @@
 import type { BridgeStatus } from './bridge-status.ts'
 import type { BridgeEndpointState } from './bridge-endpoint.ts'
 import type { ProvisionSnapshot } from './electron-provision.ts'
+import type { ExtensionConnectionStatus } from '../../native-host/client.mjs'
+import type { extensionInstallHelp } from './extension-browser.ts'
 import { detectBrowser, type BrowserChannel, type DetectedBrowser, type SystemBrowserLaunchDiagnostic } from './system-browser.ts'
 
 /** The part of the carrier the channel names, in the terms the panel has to explain. */
-export type CarrierKind = 'sidebar' | 'bundled' | 'system' | 'auto'
+export type CarrierKind = 'sidebar' | 'bundled' | 'system' | 'extension' | 'auto'
 
 /** Whether the chosen carrier's required files or running bridge are available. */
 export type Readiness = 'ready' | 'blocked'
@@ -78,6 +80,8 @@ export interface BridgeReadiness {
 
 /** The whole report. */
 export interface RuntimeStatusReport {
+  readonly controlledProfile: 'plugin' | 'user' | 'sidebar'
+  readonly extension?: ExtensionConnectionStatus & { readonly install?: ReturnType<typeof extensionInstallHelp> }
   /** What the settings document says, verbatim: the panel shows the switch it is honouring. */
   readonly channel: BrowserChannel
   /** What that channel resolves to, in panel terms. */
@@ -97,6 +101,8 @@ export interface RuntimeStatusReport {
 
 /** Everything the report reads, so a test can answer without any of the real machinery. */
 export interface RuntimeStatusDeps {
+  readonly systemProfile?: () => 'user' | 'plugin'
+  readonly extensionConnection?: () => RuntimeStatusReport['extension']
   /** The stored `browser.channel`. */
   readonly channel: () => BrowserChannel
   /** Whether a launch would find an Electron binary — the launch path's own probe. */
@@ -131,7 +137,10 @@ function carrierOf(channel: BrowserChannel): CarrierKind {
  */
 export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport {
   const channel = deps.channel()
-  const carrier = carrierOf(channel)
+  const carrier = (channel === 'edge' || channel === 'chrome') && deps.systemProfile?.() === 'user' ? 'extension' : carrierOf(channel)
+  const extension = carrier === 'extension' ? deps.extensionConnection?.() ?? {
+    state: 'extension-missing' as const, connected: false, browser: channel as 'edge' | 'chrome', detail: 'Install and pair the browser extension. No profile fallback.',
+  } : undefined
 
   // The binary check comes first and wins: a runtime that is on disk is ready whatever the
   // provisioning state machine last said, which is also how a runtime installed by hand (or by an
@@ -194,12 +203,17 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
   if (carrier === 'sidebar') {
     resolvedCarrier = 'sidebar'
     readiness = sidebarReady ? 'ready' : 'blocked'
+  } else if (carrier === 'extension') {
+    resolvedCarrier = 'extension'
+    readiness = extension?.state === 'connected' && extension.connected ? 'ready' : 'blocked'
   } else {
     resolvedCarrier = 'system'
     readiness = detected !== undefined && connection?.connected === true ? 'ready' : 'blocked'
   }
 
   return {
+    controlledProfile: carrier === 'extension' ? 'user' : carrier === 'system' ? 'plugin' : 'sidebar',
+    ...extension === undefined ? {} : { extension },
     channel,
     carrier,
     resolvedCarrier,

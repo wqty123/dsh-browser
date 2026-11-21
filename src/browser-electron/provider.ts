@@ -4246,6 +4246,14 @@ export class ElectronBrowserProvider implements BrowserProvider {
     return [...this.sessions.keys()]
   }
 
+  takeoverTargets(owner: string): readonly { session: BrowserSessionId; owner: string; tabId: string; pageId: string; url: string }[] {
+    return [...this.sessions.values()].filter(s => (s.label ?? 'default').replace(/^session-/u, '') === owner).flatMap(s => {
+      const tab = s.tabs[s.activeIndex]
+      return tab && !tab.failure && /^https?:\/\//u.test(tab.url)
+        ? [{ session: s.id, owner: s.label ?? 'default', tabId: tab.id, pageId: tab.id, url: tab.url }] : []
+    })
+  }
+
   /**
    * The human closed a browser window: the session that window showed is over.
    * Ending it here is what makes the next call a clean start rather than a

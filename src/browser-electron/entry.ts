@@ -26,6 +26,8 @@ import { dshHome } from './paths.ts'
 import { setTimeout as wait } from 'node:timers/promises'
 import { DesktopBridgeViewHost } from './desktop-bridge-host.ts'
 import { SidebarOnlyHost } from './sidebar-only-host.ts'
+import { ExtensionBrowserViewHost, extensionInstallHelp } from './extension-browser.ts'
+import { registerCarrierTakeover } from '../browser/takeover-target.ts'
 import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.ts'
 import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralProfiles } from './ephemeral-profile.ts'
 import { MissingSystemBrowserHost } from './missing-system-browser.ts'
@@ -143,23 +145,6 @@ export type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 
-/**
- * The human's own profile directory for a detected browser.
- *
- * Chromium keeps everything that makes a browser "yours" in this directory. Reading it is what makes an
- * explicitly chosen Edge actually signed in; a separate profile would open a stranger's window.
- * @param kind - the detected browser family.
- * @returns the profile root, or undefined when this platform/path is unknown.
- */
-function userProfileRoot(kind: string): string | undefined {
-  const local = process.env.LOCALAPPDATA
-  if (typeof local !== 'string' || local === '') return undefined
-  if (kind === 'edge') return join(local, 'Microsoft', 'Edge', 'User Data')
-  if (kind === 'chrome') return join(local, 'Google', 'Chrome', 'User Data')
-  if (kind === 'brave') return join(local, 'BraveSoftware', 'Brave-Browser', 'User Data')
-  return undefined
-}
-
 function carrierSettingsKey(settings: ReturnType<SettingsStore['get']>): string {
   return JSON.stringify([settings.browser.channel, settings.browser.systemProfile, settings.browser.headless,
     settings.browser.systemProfile === 'plugin' ? settings.cookies.persist : undefined])
@@ -273,27 +258,6 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     settings: () => settings.get(),
   }
 
-  // A host supplied by the composition (the desktop shell's own seam) wins and is
-  // synchronous, so registration stays synchronous on that path.
-  if (config.viewHost !== undefined) {
-    const provider = trackProvider(new ElectronBrowserProvider(config.viewHost as ElectronBrowserViewHost, providerConfig))
-    const external = ctx.browser.registerBrowserProvider(provider)
-    ctx.browser.registerPanelProvider(async () => provider)
-    ctx.effect(() => () => { external() })
-    // The composition supplied the carrier, so `browser.channel` is not ours to honour on this
-    // surface. Saying so is the difference between a setting that cannot apply and a setting that
-    // appears not to have worked — the second is what sends people looking for a bug elsewhere.
-    const asked = settings.get().browser.channel
-    if (asked !== 'sidebar' && asked !== 'bundled') {
-      ctx.logger?.warn?.(
-        `dsh-builtin-browser: browser.channel is "${asked}", but this surface's carrier was `
-        + 'supplied by its composition (the desktop shell), which outranks the setting. Set it to '
-        + '"sidebar" to record the intent, or run on a surface that picks its own carrier.',
-      )
-    }
-    return
-  }
-
   let panelOpening: Promise<{ host: DesktopBridgeViewHost; provider: ElectronBrowserProvider } | undefined> | undefined
   let panelsDisposed = false
   const retirePanel = (panel: { host: DesktopBridgeViewHost; provider: ElectronBrowserProvider }, lost = false): void => {
@@ -305,6 +269,11 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       })
   }
   const unregisterPanel = ctx.browser.registerPanelProvider(async () => {
+    const selected = settings.get().browser
+    if ((selected.channel === 'edge' || selected.channel === 'chrome') && selected.systemProfile === 'user') {
+      if (!(adoptedCarrier instanceof ExtensionBrowserViewHost) || !referenceProvider) throw new Error('Selected personal-browser extension carrier is unavailable; no sidebar fallback.')
+      return referenceProvider
+    }
     if (panelOpening === undefined) {
       const opening = (async () => {
         const host = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
@@ -367,9 +336,11 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   let carrierChoice = 0
   /** The carrier an `adopt` installed, so a later choice can release it. */
   let adoptedCarrier: ElectronBrowserViewHost | undefined = initialHost
+  let unregisterTakeover = (): void => {}
 
   ctx.effect(() => () => {
     disposed = true
+    unregisterTakeover()
     carrierChoice += 1
     unregister()
     // The reference pump is a real interval, not a one-shot: `unref` alone lets
@@ -377,7 +348,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     // must stop with the provider it belongs to. Retiring also silences its
     // user-action listeners, which the view host never unsubscribes.
     referenceProvider?.dispose()
-    adoptedCarrier?.dispose?.()
+    if (adoptedCarrier !== config.viewHost) adoptedCarrier?.dispose?.()
   })
 
   /**
@@ -435,13 +406,21 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       unregister()
       unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(host, providerConfig)))
       adoptedCarrier = host
+      unregisterTakeover()
+      if (host instanceof ExtensionBrowserViewHost) {
+        const provider = referenceProvider!
+        unregisterTakeover = registerCarrierTakeover(ctx.browser, owner => provider.takeoverTargets(owner).map(target => ({
+          ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
+        })))
+        void host.refreshStatus()
+      }
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
       // A borrowed carrier can lose the process behind it, and this is the only notification that
       // will ever arrive. Registering AFTER the swap succeeded means a listener can never fire
       // against a provider that was never installed.
       if (!(host instanceof SidebarOnlyHost)) host.onLost?.(reason => { restoreSidebar(host, reason) })
       // Released AFTER the replacement is installed, so the surface is never without a provider.
-      if (previous !== undefined && previous !== host) {
+      if (previous !== undefined && previous !== host && previous !== config.viewHost) {
         try { previous.dispose?.() } catch { /* the replacement is already serving */ }
       }
     } catch (error) {
@@ -450,6 +429,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // process, and dropping it on the floor is how a failed upgrade becomes a leak that only
       // shows up as a stray Electron in the task manager.
       try { host.dispose?.() } catch { /* the fallback below matters more than this */ }
+      if (host instanceof ExtensionBrowserViewHost) {
+        ctx.logger?.warn?.(`dsh-builtin-browser: could not adopt the selected personal-browser extension (${String(error)}); no profile fallback`)
+        return
+      }
       // The fallback registration gets its own guard, because THIS is the path taken when the
       // context is already gone — and then `ctx.browser` throws `cannot get required service
       // "browser" in inactive context`. Unguarded, that second throw escaped the async retry
@@ -502,9 +485,15 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // and a user who picked a browser that is not installed would never see the explanation
   // written for exactly that case, because the sidebar would quietly replace it.
   if (channel !== 'chrome' && channel !== 'edge') {
-    if (!(adoptedCarrier instanceof SidebarOnlyHost)) adopt(requiredSidebar(), 'using only the selected DSH sidebar', choice)
+    if (config.viewHost !== undefined) {
+      if (adoptedCarrier !== config.viewHost) adopt(config.viewHost as ElectronBrowserViewHost, 'using the composition-provided sidebar carrier', choice)
+    } else if (!(adoptedCarrier instanceof SidebarOnlyHost)) adopt(requiredSidebar(), 'using only the selected DSH sidebar', choice)
     return
   }
+    if (settings.get().browser.systemProfile === 'user') {
+      adopt(new ExtensionBrowserViewHost(channel), `attach to the paired ${channel} personal profile (extension; background tabs only)`)
+      return
+    }
     const detected = detectBrowser(channel)
     if (detected === undefined) {
         adopt(new MissingSystemBrowserHost(channel, searchSummary(channel)),
@@ -524,19 +513,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       const persist = settings.get().cookies.persist
       const profileRoot = join(home, BROWSER_PROFILE_DIR)
       adoptLegacyProfileRoot(profileRoot)
-      // Which profile a chosen Edge/Chrome runs on.
-      //
-      // "user" (the default for an explicitly chosen system browser) means the human's OWN profile
-      // directory: their logins, cookies, extensions and bookmarks are simply there. That is the whole
-      // point of picking "Edge" in settings — a fresh plugin profile opens a window that looks like Edge
-      // and is signed out of everything, which reads as "it did not use my browser".
-      // "plugin" keeps the old behaviour: a separate directory the plugin owns and may delete.
-      const wantUserProfile = (settings.get() as { browser?: { systemProfile?: unknown } }).browser?.systemProfile !== 'plugin'
-      const userProfile = wantUserProfile ? userProfileRoot(detected.kind) : undefined
-      const profileDir = userProfile ?? (wantUserProfile ? join(profileRoot, 'unavailable-user-profile') : persist
+      const profileDir = persist
         ? join(profileRoot, `${detected.kind}-profile`)
-        : join(profileRoot, ephemeralProfileName(detected.kind, randomUUID())))
-      if (!persist && !wantUserProfile) {
+        : join(profileRoot, ephemeralProfileName(detected.kind, randomUUID()))
+      if (!persist) {
         // A process killed outright never runs its own cleanup (see ephemeral-profile.ts),
         // so the sweep happens HERE — at the only moment that can still act on a profile
         // whose owner is gone — and before this run claims a directory of its own.
@@ -545,13 +525,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       }
       // The headless mode rides along so a display-less host (systemd, container, SSH-only server)
       // still gets a working browser instead of "exited immediately after launch" — issue #32.
-      ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = !wantUserProfile
-        ? 'launched-plugin-profile'
-        : 'launched-user-profile'
-      adopt(new SystemBrowserViewHost(detected, profileDir, [], !wantUserProfile && !persist ? profileDir : undefined,
+      ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = 'launched-plugin-profile'
+      adopt(new SystemBrowserViewHost(detected, profileDir, [], !persist ? profileDir : undefined,
         undefined, settings.get().browser.headless, () => settings.get().ui.quiet,
-        wantUserProfile && userProfile === undefined ? 'The selected user browser profile could not be located. No plugin profile was substituted.' : undefined,
-        { managed: !wantUserProfile }),
+        undefined, { managed: true }),
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
   }
@@ -619,7 +596,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       }
       const last = getLastOpen()
       const fresh = last !== undefined && Date.now() - last.at <= OPEN_REQUEST_TTL_MS ? last : undefined
-      replyJson(response, 200, { ok: true, surface: readSurfaceForRoute(), open: fresh ?? null })
+      replyJson(response, 200, { ok: true, surface: readSurfaceForRoute(), open: adoptedCarrier instanceof ExtensionBrowserViewHost ? null : fresh ?? null })
     }),
   }, 'dsh-builtin-browser: open request slot'))
   // guest 代理由根行注册（见 src/web-guest.ts）：web 上 Electron 行可能被关闭。
@@ -775,8 +752,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     const deps = {
       report: () => readRuntimeStatus({
         channel: () => settings.get().browser.channel,
+        systemProfile: () => settings.get().browser.systemProfile,
+        extensionConnection: () => adoptedCarrier instanceof ExtensionBrowserViewHost ? {
+          ...adoptedCarrier.connectionStatus(), install: extensionInstallHelp(adoptedCarrier.browser),
+        } : undefined,
         selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
-          : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
+          : adoptedCarrier instanceof ExtensionBrowserViewHost ? 'extension' : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
         systemConnection: () => adoptedCarrier instanceof SystemBrowserViewHost ? adoptedCarrier.connectionStatus() : undefined,
         hasBinary: hasElectronRuntime,
         provision: provisionSnapshot,
@@ -805,7 +786,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: RUNTIME_STATUS_ROUTE,
-          handler: authenticated(ctx, (request, response) => handleRuntimeStatus(request, response, deps)),
+          handler: authenticated(ctx, async (request, response) => {
+            if (request.method === 'GET' && adoptedCarrier instanceof ExtensionBrowserViewHost) await adoptedCarrier.refreshStatus()
+            await handleRuntimeStatus(request, response, deps)
+          }),
         }, 'dsh-builtin-browser: runtime status'))
         host.effect(() => host.webServer.register({
           kind: 'exact',

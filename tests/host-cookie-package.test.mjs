@@ -16,6 +16,7 @@ test('packed host and cookie jar load after extraction without plugin node_modul
   assert.equal(manifest.dependencies['tldts-core'], undefined)
   assert.equal(manifest.devDependencies.esbuild, undefined)
   cpSync(new URL('../lib/', import.meta.url), join(staging, 'lib'), { recursive: true })
+  for (const name of ['native-host', 'browser-extension']) cpSync(new URL(`../${name}/`, import.meta.url), join(staging, name), { recursive: true })
   writeFileSync(join(staging, 'package.json'), JSON.stringify(manifest))
   const run = (command, args, cwd = directory) => {
     const result = spawnSync(command, args, { cwd, encoding: 'utf8', env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, shell: process.platform === 'win32' && command === 'npm.cmd' })

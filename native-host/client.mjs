@@ -24,7 +24,7 @@ export class NativeBrowserClient {
     const state = this.#socket && !this.#socket.destroyed && this.#epoch ? 'connected'
       : config && !config.installId ? 'not-paired' : 'extension-missing'
     return { state, connected: state === 'connected', browser: this.browser,
-      profile: config?.label, connectionId: config?.installId,
+      profile: config?.label, connectionId: config?.installId, epoch: this.#epoch,
       detail: state === 'connected' ? `Connected to ${this.browser}: ${config.label} (personal profile; background tabs)`
         : state === 'not-paired' ? 'Extension is not paired. Enter the one-time install token in extension options.'
           : 'Extension/native host is missing or disconnected. Install it and connect the selected browser profile.' }

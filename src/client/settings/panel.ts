@@ -14,6 +14,13 @@ export interface LegacyClientModule {
   readonly apply: (ctx: never) => void
 }
 
+export function extensionInstallCommand(install: { platform: string; node: string; installer: string; directory: string }, browser: string): string {
+  const windows = install.platform === 'win32'
+  const quote = (value: string) => windows ? "'" + value.replace(/'/g, "''") + "'" : "'" + value.replace(/'/g, "'\\''") + "'"
+  return (windows ? '& ' : '') + quote(install.node) + ' ' + quote(install.installer)
+    + ' --browser ' + browser + ' --extension-id EXTENSION_ID --directory ' + quote(install.directory) + ' --label ' + quote('My ' + browser + ' profile')
+}
+
 /**
  * 装配旧面板：调用一次返回它的 `{ name, inject, apply }`。
  * @param require - 模块加载器注入的 require（与旧加载器同签名）。
@@ -101,6 +108,15 @@ const react = require("react")
     "vision.nonVisual": "禁止",
     "credentials.allowRead": "允许 Agent 读取 cookies / 导出登录状态",
     "browser.channel": "默认浏览器",
+    "browser.systemProfile": "浏览器模式",
+    "browser.mode.plugin": "DSH 独立浏览器（默认，保留登录）",
+    "browser.mode.user": "连接当前浏览器（扩展，使用本人登录）",
+    "readiness.carrier.extension": "已配对的浏览器扩展",
+    "extension.title": "安装并配对扩展（一次）",
+    "extension.load": "在要控制的已登录配置中打开下列地址，启用开发者模式，加载下列解压目录并复制扩展 ID：",
+    "extension.install": "在外部 PowerShell / 终端中运行下列命令，将 EXTENSION_ID 替换为刚复制的 ID（不要关闭本人浏览器）：",
+    "extension.pair": "打开扩展选项，点 Connect / resume，将终端的一次性 token 粘贴并在五分钟内点 Pair this profile。然后点「再次检查」。",
+    "extension.quiet": "仅控制此已配对配置；后台标签页，不抢焦点、不移动鼠标，接管只显示 DSH 聊天卡片。调试信息栏仍会出现；网站弹窗、下载与浏览器权限界面有例外。断开只释放调试连接，不关闭标签页。",
     "browser.sidebar": "DSH 侧栏面板",
     "browser.bundled": "DSH 侧栏（旧版内置选项）",
     "browser.chrome": "本机 Chrome",
@@ -265,6 +281,15 @@ const react = require("react")
     "vision.nonVisual": "Blocked",
     "credentials.allowRead": "Allow the agent to read cookies / export login state",
     "browser.channel": "Default browser",
+    "browser.systemProfile": "Browser mode",
+    "browser.mode.plugin": "Separate DSH browser (default, persistent logins)",
+    "browser.mode.user": "Attach to current browser (extension, personal logins)",
+    "readiness.carrier.extension": "Paired browser extension",
+    "extension.title": "Install and pair extension (once)",
+    "extension.load": "In the intended signed-in profile, open this address, enable Developer mode, load the extracted directory below and copy the extension ID:",
+    "extension.install": "Run this command in an external PowerShell / terminal, replacing EXTENSION_ID with that ID. Leave your browser running:",
+    "extension.pair": "Open extension Options, click Connect / resume, paste the terminal's one-time token and click Pair this profile within five minutes. Then click Check again.",
+    "extension.quiet": "Controls only this paired profile, in background tabs: no focus or mouse movement; takeover uses only the DSH chat card. The debugger infobar remains; site popups, downloads and browser permission UI have exceptions. Disconnect detaches only, leaving tabs open.",
     "browser.sidebar": "DSH sidebar",
     "browser.bundled": "DSH sidebar (legacy bundled setting)",
     "browser.chrome": "Installed Chrome",
@@ -1031,7 +1056,8 @@ const react = require("react")
     const systemLabel = runtime.systemBrowser?.checked === true
       ? t(runtime.systemBrowser.present ? "readiness.status.systemReady" : "readiness.status.systemMissing").replace("{browser}", systemName)
       : t("readiness.status.checkPending")
-    const stateLabel = resolvedCarrier === "system" ? systemLabel
+    const stateLabel = resolvedCarrier === "extension" ? runtime.extension?.detail ?? t("readiness.state.blocked")
+      : resolvedCarrier === "system" ? systemLabel
       : resolvedCarrier === "sidebar"
         ? t(runtime.bridge.state === "installed"
           ? runtime.bridge.running === true ? "readiness.status.bridgeReady"
@@ -1055,6 +1081,18 @@ const react = require("react")
         h("span", { key: "title" }, t("readiness.title")),
         h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, stateLabel),
       ]),
+      runtime.extension ? h("div", { key: "extension" }, [
+        h("p", { key: "profile", role: "status", style: styles.hint }, [runtime.extension.browser, runtime.extension.profile, runtime.extension.connectionId, runtime.extension.state].filter(Boolean).join(" · ")),
+        h("p", { key: "quiet", style: styles.hint }, t("extension.quiet")),
+        runtime.extension.install ? h("details", { key: "install", open: runtime.extension.connected ? undefined : true }, [
+          h("summary", { key: "title" }, t("extension.title")),
+          h("ol", { key: "steps", style: styles.hint }, [
+            h("li", { key: "load" }, [t("extension.load"), h("pre", { key: "paths", style: styles.mono }, runtime.extension.install.extensionsUrl + "\n" + runtime.extension.install.extensionDirectory)]),
+            h("li", { key: "host" }, [t("extension.install"), h("pre", { key: "command", style: { ...styles.mono, whiteSpace: "pre-wrap", overflowWrap: "anywhere" } }, extensionInstallCommand(runtime.extension.install, runtime.extension.browser))]),
+            h("li", { key: "pair" }, t("extension.pair")),
+          ]),
+        ]) : null,
+      ]) : null,
       canManageBridge ? h("div", { key: "bridge-controls" }, [
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
@@ -1499,7 +1537,9 @@ const react = require("react")
       selector("browser.channel", settings.browser.channel,
         options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
-      h(Readiness, { key: "readiness", channel: settings.browser.channel }),
+      systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
+        options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
+      h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel }),
       section("ui.title", [
         toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
         toggle("ui", "autoExpandOnce"),
@@ -1520,8 +1560,8 @@ const react = require("react")
           { value: "auto", label: t("vision.auto") },
           { value: "nonVisual", label: t("vision.nonVisual") },
         ], strategy => patch({ vision: { strategy } })),
-        systemBrowser ? toggle("cookies", "persist", "browser.profile", "browser.profile.hint") : null,
-        systemBrowser ? selector("browser.headless", settings.browser.headless ?? "auto",
+        systemBrowser && settings.browser.systemProfile !== "user" ? toggle("cookies", "persist", "browser.profile", "browser.profile.hint") : null,
+        systemBrowser && settings.browser.systemProfile !== "user" ? selector("browser.headless", settings.browser.headless ?? "auto",
           options("browser.headless.", ["auto", "windowed", "headless"]),
           headless => patch({ browser: { headless } }), "browser.headless.hint") : null,
         settings.delivery ? section("delivery.title", [

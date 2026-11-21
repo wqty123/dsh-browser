@@ -29,7 +29,7 @@ test('quiet creation, background input and screenshot use no activation or OS in
   await cdp(controller, lease, 'Runtime.evaluate', { expression: 'document.title' })
   await cdp(controller, lease, 'Input.insertText', { text: '你好' })
   await cdp(controller, lease, 'Page.captureScreenshot', { clip: { x: 0, y: 0, width: 1280, height: 960, scale: 1 } })
-  assert.deepEqual(calls.find(([method]) => method === 'Input.dispatchKeyEvent')[2], { type: 'char', text: '你好' })
+  assert.deepEqual(calls.filter(([method]) => method === 'Input.dispatchKeyEvent').map(call => call[2]), [{ type: 'char', text: '你' }, { type: 'char', text: '好' }])
   assert.equal(calls.find(([method]) => method === 'Page.captureScreenshot')[2].captureBeyondViewport, false)
   assert.doesNotMatch(JSON.stringify(calls), /bringToFront|activateTarget|"active":true|"focused":true/)
   assert.equal(calls.some(([method]) => method === 'Page.setDownloadBehavior'), false)
@@ -37,6 +37,18 @@ test('quiet creation, background input and screenshot use no activation or OS in
     const source = readFileSync(new URL(`../browser-extension/${name}`, import.meta.url), 'utf8')
     assert.doesNotMatch(source, /\b(?:windows|tabs)\.(?:update|highlight|createWindow)\s*\(|captureVisibleTab|chrome\.notifications|child_process/)
   }
+})
+
+test('text insertion dispatches code points in order, does nothing for empty text and never retries failed input', async () => {
+  const { controller, api, calls } = fake(), { lease } = await create(controller)
+  await cdp(controller, lease, 'Input.insertText', { text: '' })
+  assert.equal(calls.some(([method]) => method === 'Input.dispatchKeyEvent'), false)
+  await cdp(controller, lease, 'Input.insertText', { text: 'hello😀' })
+  assert.deepEqual(calls.filter(([method]) => method === 'Input.dispatchKeyEvent').map(call => call[2].text), [...'hello😀'])
+  let count = 0
+  api.debugger.sendCommand = async () => { if (++count === 2) throw Error('input refused') }
+  await assert.rejects(cdp(controller, lease, 'Input.insertText', { text: 'abcd' }), /input refused/)
+  assert.equal(count, 2)
 })
 
 test('site popups are opener-scoped and moved without activation; unrelated tabs and close authority are untouched', async () => {
