@@ -141,7 +141,7 @@ test('runtime transport status does not claim readiness for missing, unpaired or
   await assert.rejects(client.request({ kind: 'list', scope: 's' }), /not paired/)
   pair(path, 'one-time-test', randomUUID())
   const wrong = new NativeBrowserClient(directory, 'chrome'); t.after(() => wrong.dispose())
-  await assert.rejects(wrong.connect(), /missing|disconnected/)
+  await assert.rejects(wrong.connect(), /Extension is not connected.*CDP/)
   const absent = new NativeBrowserClient(join(directory, 'absent'), 'edge'); t.after(() => absent.dispose())
   assert.equal(absent.status().connected, false)
 })

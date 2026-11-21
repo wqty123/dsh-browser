@@ -1,14 +1,14 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>DSH Browser Bridge status</title></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title data-message="title"></title></head>
 <body>
-  <h1>DSH Browser Bridge</h1>
-  <p>This explicitly grants DSH control of tabs in this browser profile. Browser debugging warnings remain visible. No extension popup or automatic window activation is used.</p>
-  <p>DSH registers the native host automatically. This extension connects automatically; no token or configuration is needed.</p>
+  <h1 data-message="heading"></h1>
+  <p data-message="consent"></p>
+  <p data-message="automatic"></p>
   <p id="identity"></p><pre id="status" role="status"></pre>
-  <p><button id="disconnect" type="button">Disconnect</button></p>
-  <p>Disconnect leaves all tabs open and pauses reconnects. Remove and add the extension again to resume. The native-host --revoke command disables access persistently, including across plugin restarts.</p>
-  <p>Quiet-mode limits: the normal debugger infobar cannot be hidden; browser/OS permission prompts, website-initiated downloads and page-created windows cannot be guaranteed invisible. File choosers are intercepted on attached tabs. Never use this mode when absolutely no browser-owned UI is acceptable.</p>
+  <p><button id="disconnect" type="button" data-message="disconnect"></button></p>
+  <p data-message="pause"></p>
+  <p data-message="quiet"></p>
   <script type="module" src="options.mjs"></script>
 </body>
 </html>

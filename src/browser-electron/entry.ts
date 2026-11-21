@@ -1,3 +1,5 @@
+import { referenceCaptureMessages, referenceCaptureErrors } from '../../assets/browser-messages.mjs'
+import { BROWSER_PROFILE_DIR, SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../assets/browser-policy.mjs'
 /**
  * Electron browser provider plugin entry: registers the Electron-backed
  * `BrowserProvider` with `ctx.browser`. The provider needs a view host (real
@@ -114,27 +116,6 @@ function readSurfaceForRoute(): 'panel' | 'builtin' {
   } catch { return 'panel' }
 }
 
-
-/**
- * Locate the plugin's settings file.
- *
- * The host process does not always export DSH_HOME, so a single-environment read silently fell back to
- * "panel" for every call — which looked like the switch doing nothing. Try the documented variable, then
- * the conventional install locations.
- * @returns an existing settings path, or '' when none is readable.
- */
-function localSettingsPath(): string {
-  const candidates = [
-    process.env.DSH_HOME === undefined ? undefined : process.env.DSH_HOME + '/dsh-builtin-browser-host/settings.json',
-    'D:/dsh-home/dsh-builtin-browser-host/settings.json',
-    'C:/Users/FB/dsh-home/dsh-builtin-browser-host/settings.json',
-  ].filter((value): value is string => typeof value === 'string')
-  const fs = (process as unknown as { getBuiltinModule?: (id: string) => { existsSync: (p: string) => boolean } }).getBuiltinModule?.('fs')
-  for (const candidate of candidates) {
-    try { if (fs !== undefined && fs.existsSync(candidate)) return candidate } catch { /* next */ }
-  }
-  return candidates[1] ?? ''
-}
 
 export const OPEN_REQUEST_ROUTE = '/dsh-builtin-browser/browser/open-request'
 /** open 记录的有效期：超过就不再重放。这是一次即时事件，客户端 2 秒轮询一次，10 秒足够送达；
@@ -791,7 +772,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }
     try {
       injectRuntime(['webServer'], (host) => {
-        host.effect(() => host.webServer.register({ kind: 'exact', path: '/dsh-builtin-browser/extension/install', handler: authenticated(ctx, async (request, response) => {
+        host.effect(() => host.webServer.register({ kind: 'exact', path: EXTENSION_INSTALL_ROUTE, handler: authenticated(ctx, async (request, response) => {
           if (request.method !== 'POST') { response.writeHead(405); response.end(); return }
           if (!sameOrigin(request, true)) { response.writeHead(403); response.end(); return }
           try {
@@ -1066,53 +1047,20 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * which internal step failed.
    */
   const captureRefusalText = (failures: readonly { readonly reason: string }[]): string => {
-    const SESSION_NOT_READY = '当前会话还没准备好，请稍后重新添加这条引用。'
-    const UNSUPPORTED_FORMAT = '这段内容格式不受支持，请换一段内容再添加。'
-    const IMAGE_UNREADABLE = '图片没能读取，请右键图片单独添加或重新选择。'
-    const copy: Readonly<Record<string, string>> = {
-      'nothing-captured': '没能读取选中内容，请重新选中后再添加。',
-      'empty-text': '选中的是空白内容，请重新选择。',
-      'page-changed': '网页刚刚跳转了，请在新页面重新选择。',
-      'page-url-missing': '没能获取网页地址，这条引用没有加入。',
-      'too-many-parts': '选中的内容片段太多，请分几次添加。',
-      'text-too-long': '选中的文字太长，请减少一些再添加。',
-      'table-too-large': '这个表格太大，请缩小选择范围。',
-      'frame-capture-invalid': '这个内嵌页面无法读取，请在主页面中选择。',
-      'frame-capture-refused': '内嵌页面不允许引用，请在主页面中选择。',
-      // Session identity could not be established. The old wording blamed the
-      // sidebar page; the actionable fix is to wait for the conversation and
-      // retry. The key stays, so an existing reason still resolves to a copy.
-      'session-unavailable': SESSION_NOT_READY,
-      'session-id-required': SESSION_NOT_READY,
-      'browser-session-id-required': SESSION_NOT_READY,
-      'no-selection': '请先选中网页内容，再点添加引用。',
-      'nothing-selected': '请先选中网页内容，再点添加引用。',
-      'excerpt-not-found': '没能定位选中的文字，请重新选择。',
-      'image-unavailable': '这张图片没能读取，请右键图片单独引用或重新选择。',
-      'image-timeout': '图片加载超时，请重试或改选其它内容。',
-      'image-too-large': '图片太大，无法加入引用。',
-      'image-version-changed': '网页图片已更新，请重新选择后再添加。',
-      'image-not-an-image': '选中的不是可引用的图片，请重新选择。',
-      'image-has-no-source': IMAGE_UNREADABLE,
-      'unsupported-part': UNSUPPORTED_FORMAT,
-      'table-missing': UNSUPPORTED_FORMAT,
-      'table-empty': UNSUPPORTED_FORMAT,
-      'invalid-frame-selector': UNSUPPORTED_FORMAT,
-      'capture-refused': '这条引用没有加入，请重新选择后再试。',
-    }
+    const copy = referenceCaptureMessages
     for (const failure of failures) {
       const reason = failure.reason
       const exact = copy[reason]
       if (exact !== undefined) return exact
       // Machine-coded reasons carry a detail suffix. A reader still deserves an
       // actionable sentence instead of the generic fallback.
-      if (reason.startsWith('capture-failed:')) return '网页内容读取失败，请重新选择后再试。'
-      if (reason.startsWith('store-refused:')) return '引用保存失败，请稍后重试。'
-      if (reason.startsWith('frame-capture-refused:')) return '内嵌页面不允许引用，请在主页面中选择。'
-      if (reason.startsWith('cell-image:')) return IMAGE_UNREADABLE
-      if (reason.startsWith('image-')) return '图片引用失败，请右键图片单独添加或重新选择。'
+      if (reason.startsWith('capture-failed:')) return referenceCaptureErrors.captureFailed
+      if (reason.startsWith('store-refused:')) return referenceCaptureErrors.storeRefused
+      if (reason.startsWith('frame-capture-refused:')) return copy['frame-capture-refused']
+      if (reason.startsWith('cell-image:')) return referenceCaptureErrors.imageUnreadable
+      if (reason.startsWith('image-')) return referenceCaptureErrors.imageFailed
     }
-    return '这条引用没有加入，请重新选择后再试。'
+    return copy['capture-refused']
   }
 
   // The self-hosted Electron host reports a right-click or a floating-button
@@ -1176,18 +1124,6 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   ctx.effect(() => disposeReferenceAction, 'dsh-builtin-browser: reference action handler')
   ctx.effect(() => () => deliveryQueue.dispose(), 'dsh-builtin-browser: reference delivery queue')
 }
-
-/** Route the settings panel reads and writes. */
-const SETTINGS_ROUTE = '/dsh-builtin-browser/settings'
-
-/**
- * The directory under the DSH home that holds this plugin's browser profile.
- *
- * Named once, because every consumer of it must agree: `settingsPath()` and the history
- * store resolve their own copy from `$DSH_HOME`, and a profile written under a different
- * root than the settings document is a pair that silently never meets.
- */
-const BROWSER_PROFILE_DIR = 'dsh-builtin-browser-host'
 
 /**
  * Move a browser profile left behind by the old layout into the directory the plugin uses now.

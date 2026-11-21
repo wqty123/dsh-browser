@@ -1,3 +1,5 @@
+import { extensionMessages } from '../assets/browser-messages.mjs'
+import { AUTH_TIMEOUT_MS, CLIENT_OPERATION_TIMEOUT_MS, MAX_IN_FLIGHT, NATIVE_FILES } from '../browser-extension/constants.mjs'
 import { createConnection } from 'node:net'
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -8,7 +10,7 @@ export const proof = (secret, nonce, epoch, installId) => createHmac('sha256', s
   .update(`dsh-extension/v1\0${nonce}\0${epoch}\0${installId}`).digest('hex')
 
 export function readConfiguration(directory) {
-  try { return JSON.parse(readFileSync(join(directory, 'config.json'), 'utf8')) } catch { return undefined }
+  try { return JSON.parse(readFileSync(join(directory, NATIVE_FILES.config), 'utf8')) } catch { return undefined }
 }
 
 export class NativeBrowserClient {
@@ -27,7 +29,7 @@ export class NativeBrowserClient {
       profile: config?.label, connectionId: config?.installId, epoch: this.#epoch,
       detail: state === 'disabled' ? 'Extension access is disabled.' : state === 'connected' ? `Connected to ${this.browser}: ${config.label} (personal profile; background tabs)`
         : state === 'not-paired' ? 'Extension is not paired. Enter the one-time install token in extension options.'
-          : 'Extension/native host is missing or disconnected. Install it and connect the selected browser profile.' }
+          : extensionMessages.en.notConnected }
   }
   onEvent(listener) { this.#listeners.add(listener); return () => this.#listeners.delete(listener) }
   async connect() {
@@ -40,12 +42,12 @@ export class NativeBrowserClient {
     const config = readConfiguration(this.directory)
     if (config?.disabled || !config?.installId || !/^[a-f0-9]{64}$/.test(config.secret ?? '') || config.browser !== this.browser) throw Error(this.status().detail)
     let endpoint
-    try { endpoint = JSON.parse(readFileSync(join(this.directory, 'relay.json'), 'utf8')) } catch { throw Error(this.status().detail) }
+    try { endpoint = JSON.parse(readFileSync(join(this.directory, NATIVE_FILES.relay), 'utf8')) } catch { throw Error(this.status().detail) }
     if (typeof endpoint.endpoint !== 'string' || typeof endpoint.epoch !== 'string') throw Error('invalid extension relay descriptor')
     await new Promise((resolve, reject) => {
       const socket = createConnection(endpoint.endpoint)
       this.#socket = socket
-      const timer = setTimeout(() => { reject(Error('extension authentication timed out')); socket.destroy() }, 5000)
+      const timer = setTimeout(() => { reject(Error('extension authentication timed out')); socket.destroy() }, AUTH_TIMEOUT_MS)
       const fail = error => { clearTimeout(timer); reject(error); socket.destroy() }
       const chunks = new Reassembler()
       let authenticatedServer = false
@@ -85,10 +87,10 @@ export class NativeBrowserClient {
   }
   async request(operation) {
     await this.connect()
-    if (this.#pending.size >= 32) throw Error('extension request limit reached')
+    if (this.#pending.size >= MAX_IN_FLIGHT) throw Error('extension request limit reached')
     const id = randomUUID()
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.#pending.delete(id); reject(Error('extension operation timed out; it was not replayed')); this.#socket?.destroy() }, 20000)
+      const timer = setTimeout(() => { this.#pending.delete(id); reject(Error('extension operation timed out; it was not replayed')); this.#socket?.destroy() }, CLIENT_OPERATION_TIMEOUT_MS)
       this.#pending.set(id, { resolve, reject, timer })
       try { send(this.#socket, { type: 'request', id, operation }) }
       catch (error) { clearTimeout(timer); this.#pending.delete(id); reject(error) }

@@ -1,3 +1,5 @@
+import { PERSONAL_PROFILE_DIRS } from '../../assets/browser-products.mjs'
+import { windowsPowerShellPath } from './windows-system.ts'
 import { execFile } from 'node:child_process'
 import { readFile, readlink } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
@@ -61,7 +63,7 @@ export async function inspectProcess(pid: number, diagnose?: (reason: string) =>
   if (!Number.isSafeInteger(pid) || pid <= 0) return undefined
   try {
     if (process.platform === 'win32') {
-      const { stdout } = await execute(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      const { stdout } = await execute(windowsPowerShellPath(),
         ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsInspection, 'utf16le').toString('base64')],
         { windowsHide: true, timeout: 15000, maxBuffer: 128 * 1024, env: { ...process.env, DSH_INSPECT_PID: String(pid) } })
       const result = JSON.parse(stdout.replace(/^\uFEFF/u, ''))
@@ -92,11 +94,11 @@ function canonical(path: string): string {
 
 function personalProfile(path: string): boolean {
   const roots = process.platform === 'win32'
-    ? ['Microsoft/Edge/User Data', 'Google/Chrome/User Data', 'BraveSoftware/Brave-Browser/User Data']
+    ? PERSONAL_PROFILE_DIRS.win32
       .map(name => join(process.env.LOCALAPPDATA || homedir(), name))
     : process.platform === 'darwin'
-      ? ['Microsoft Edge', 'Google/Chrome', 'BraveSoftware/Brave-Browser'].map(name => join(homedir(), 'Library', 'Application Support', name))
-      : ['microsoft-edge', 'google-chrome', 'chromium', 'BraveSoftware/Brave-Browser'].map(name => join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), name))
+      ? PERSONAL_PROFILE_DIRS.darwin.map(name => join(homedir(), 'Library', 'Application Support', name))
+      : PERSONAL_PROFILE_DIRS.linux.map(name => join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), name))
   return roots.some(root => {
     let actual: string
     try { actual = canonical(root) } catch { actual = resolve(root); if (process.platform === 'win32') actual = actual.toLowerCase() }

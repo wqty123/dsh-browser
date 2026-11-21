@@ -1,3 +1,6 @@
+import { zh, en } from '../assets/browser-panel-locales.mjs'
+import * as browserPolicy from '../assets/browser-policy.mjs'
+import { extensionMessages } from '../assets/browser-messages.mjs'
 // The settings panel, actually executed.
 //
 // The bundle is a ModuleLoader entry that reaches for `react`, `ctx.slots` and `ctx.locale`
@@ -24,9 +27,9 @@ const { createBrowserInitializationJournal, createBrowserInitializationReader } 
 
 const { DEFAULT_SETTINGS } = await import('../lib/browser-electron/settings-store.js')
 
-const panelSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8')).replace(/^export /gm, '')
+const panelSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8')).replace(/^export /gm, '').replace(/^import[^\n]+\n/gm, '')
 const SOURCE = `window.__ModuleLoader__.load({ factory(require) {
-  ${panelSource}
+  const { ${Object.keys(browserPolicy).join(', ')} } = ${JSON.stringify(browserPolicy)};\n  const extensionMessages = ${JSON.stringify(extensionMessages)};\n  const zh = ${JSON.stringify(zh)}; const en = ${JSON.stringify(en)};\n  ${panelSource}
   return loadSettingsPanel(require);
 } })`
 const ROUTE = '/dsh-builtin-browser/settings'

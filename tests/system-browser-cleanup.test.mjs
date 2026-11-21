@@ -137,6 +137,7 @@ test('Windows inspection validates CIM output and fails closed with diagnostics 
         created: 'creation-ticks', executable: 'C:/node.exe', commandLine: 'node.exe --user-data-dir="C:/profile space"' }) };
     };`
   const loader = `export function resolve(specifier, context, next) {
+    if (specifier === './windows-system.js') return { url: 'data:text/javascript,export function windowsPowerShellPath() { return "powershell.exe" }', shortCircuit: true };
     return specifier === 'node:child_process' ? { url: ${JSON.stringify('data:text/javascript,' + encodeURIComponent(substitute))}, shortCircuit: true } : next(specifier, context)
   }`
   const program = `import assert from 'node:assert/strict'; import { register } from 'node:module';

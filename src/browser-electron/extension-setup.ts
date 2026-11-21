@@ -1,3 +1,5 @@
+import { extensionMessages } from '../../assets/browser-messages.mjs'
+import { EXTENSION_PROBE_TIMEOUT_MS, NATIVE_REGISTRATION_TIMEOUT_MS, NATIVE_REGISTRATION_MAX_BUFFER, extensionPageUrl, folderOpener } from '../../assets/browser-policy.mjs'
 import { execFile, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { extensionDirectory, extensionInstallHelp } from './extension-browser.ts'
@@ -15,7 +17,7 @@ export function registerExtensionHosts(): Promise<void> {
     if (!task) {
       task = new Promise<void>(resolve => {
         execFile(process.execPath, [fileURLToPath(new URL('../../native-host/install.mjs', import.meta.url)), '--browser', browser, '--directory', directory],
-          { windowsHide: true, timeout: 60000, maxBuffer: 1024 * 1024 }, error => {
+          { windowsHide: true, timeout: NATIVE_REGISTRATION_TIMEOUT_MS, maxBuffer: NATIVE_REGISTRATION_MAX_BUFFER }, error => {
             registrationStatus.set(browser, { registered: !error, detail: error ? `Native host registration failed: ${error.message}` : 'Native host registered automatically.' })
             resolve()
           })
@@ -34,7 +36,7 @@ export async function probeExtension(browser: 'edge' | 'chrome'): Promise<boolea
   try {
     const { NativeBrowserClient } = await import('../../native-host/client.mjs')
     client = new NativeBrowserClient(extensionDirectory(browser), browser)
-    return await Promise.race([client.connect().then(() => true), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 1500) })])
+    return await Promise.race([client.connect().then(() => true), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), EXTENSION_PROBE_TIMEOUT_MS) })])
   } catch { return false }
   finally { clearTimeout(timer); client?.dispose() }
 }
@@ -51,15 +53,15 @@ export async function installExtension(browser: 'edge' | 'chrome', connected: bo
   register: nativeRegistration.ensure, detect: detectBrowser, launch, platform: process.platform, storeUrl: EXTENSION_STORE_URL,
 }) {
   await deps.register()
-  if (connected) return { ok: true, connected: true, detail: '已连接' }
+  if (connected) return { ok: true, connected: true, detail: extensionMessages.zh.connected }
   const status = registrationStatus.get(browser)
   if (status?.registered === false) return { ok: false, connected: false, detail: status.detail }
   const executable = deps.detect(browser)
   if (!executable) return { ok: false, connected: false, detail: `${browser} is not installed` }
-  await deps.launch(executable.path, [deps.storeUrl || `${browser}://extensions`])
+  await deps.launch(executable.path, [deps.storeUrl || extensionPageUrl(browser)])
   if (!deps.storeUrl) {
     const folder = extensionInstallHelp(browser).extensionDirectory
-    await deps.launch(deps.platform === 'win32' ? 'explorer.exe' : deps.platform === 'darwin' ? 'open' : 'xdg-open', [folder])
+    await deps.launch(folderOpener(deps.platform), [folder])
   }
-  return { ok: true, connected: false, store: !!deps.storeUrl, detail: deps.storeUrl ? '请在商店中安装扩展' : '点「加载解压缩的扩展」并选择已打开的文件夹' }
+  return { ok: true, connected: false, store: !!deps.storeUrl, detail: deps.storeUrl ? extensionMessages.zh.storeHint : extensionMessages.zh.loadHint }
 }

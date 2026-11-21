@@ -1,3 +1,4 @@
+import { extensionPageUrl, BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { access } from 'node:fs/promises'
@@ -66,7 +67,7 @@ class LazyNativeBrowserClient implements NativeBrowserClient {
 }
 
 export function extensionDirectory(browser: 'edge' | 'chrome'): string {
-  return join(dshHome(), 'dsh-builtin-browser-host', 'extension', browser)
+  return join(dshHome(), BROWSER_PROFILE_DIR, 'extension', browser)
 }
 
 export function extensionInstallHelp(browser: 'edge' | 'chrome') {
@@ -76,7 +77,7 @@ export function extensionInstallHelp(browser: 'edge' | 'chrome') {
     installer: fileURLToPath(new URL('../../native-host/install.mjs', import.meta.url)),
     directory: extensionDirectory(browser),
     node: process.execPath,
-    extensionsUrl: `${browser}://extensions`,
+    extensionsUrl: extensionPageUrl(browser),
   }
 }
 

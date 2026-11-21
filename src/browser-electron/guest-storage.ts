@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -109,7 +110,7 @@ export class GuestStorage {
 
 const stores = new Map<string, GuestStorage>()
 export function localGuestStorage(): GuestStorage {
-  const directory = join(dshHome(), 'dsh-builtin-browser-host', 'web-storage')
+  const directory = join(dshHome(), BROWSER_PROFILE_DIR, 'web-storage')
   let store = stores.get(directory)
   if (store === undefined) { store = new GuestStorage(directory); stores.set(directory, store) }
   return store

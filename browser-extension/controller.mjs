@@ -1,10 +1,11 @@
+import { EXTENSION_LIMITS } from './constants.mjs'
 import { permissionGuard } from './permission-guard.mjs'
 
 const DOMAINS = new Set(['Accessibility', 'DOM', 'DOMSnapshot', 'CSS', 'Emulation', 'Input', 'Log', 'Network', 'Page', 'Runtime', 'Target'])
 const DENIED = new Set(['Page.close', 'Page.bringToFront', 'Page.setDownloadBehavior', 'Page.setInterceptFileChooserDialog',
   'Target.activateTarget', 'Target.createTarget', 'Target.closeTarget', 'Target.attachToTarget', 'Target.attachToBrowserTarget',
   'Target.detachFromTarget', 'Target.sendMessageToTarget', 'Target.exposeDevToolsProtocol', 'DOM.setFileInputFiles', 'Page.printToPDF'])
-const validScope = value => typeof value === 'string' && value.length > 0 && value.length <= 4096
+const validScope = value => typeof value === 'string' && value.length > 0 && value.length <= EXTENSION_LIMITS.scopeLength
 const allowedUrl = url => typeof url === 'string' && (url === 'about:blank' || /^https?:\/\//i.test(url))
 
 export class ExtensionController {
@@ -40,7 +41,7 @@ export class ExtensionController {
       const lease = this.tabLeases.get(root)
       if (lease) {
         lease.notices.push(`Site-created tab ${tab.id} detected${window.type === 'popup' ? '; moved to opener window without activation' : ''}. Site activation may precede browser events.`)
-        lease.notices = lease.notices.slice(-16)
+        lease.notices = lease.notices.slice(-EXTENSION_LIMITS.notices)
       }
       this.emit({ type: 'event', method: 'target.popup', lease: lease?.id, params: { tabId: tab.id, openerTabId: tab.openerTabId, containment: window.type === 'popup' ? 'moved' : 'observed', siteActivated: tab.active === true } })
     } catch {
@@ -53,13 +54,13 @@ export class ExtensionController {
     if (method === 'Page.javascriptDialogOpening') {
       try {
         await this.api.debugger.sendCommand(source, 'Page.handleJavaScriptDialog', { accept: false })
-        lease.notices.push(`Quiet mode dismissed JavaScript ${params.type ?? 'dialog'}: ${String(params.message ?? '').slice(0, 256)}`)
+        lease.notices.push(`Quiet mode dismissed JavaScript ${params.type ?? 'dialog'}: ${String(params.message ?? '').slice(0, EXTENSION_LIMITS.dialogPreview)}`)
       } catch { lease.notices.push('Quiet mode could not dismiss a JavaScript dialog; human action may be required.') }
-      lease.notices = lease.notices.slice(-16)
+      lease.notices = lease.notices.slice(-EXTENSION_LIMITS.notices)
     }
     if (method === 'Page.fileChooserOpened') {
       lease.notices.push('Quiet mode blocked a file chooser; file uploads are unavailable.')
-      lease.notices = lease.notices.slice(-16)
+      lease.notices = lease.notices.slice(-EXTENSION_LIMITS.notices)
     }
     if (method.startsWith('Network.')) {
       params = JSON.parse(JSON.stringify(params))
@@ -68,7 +69,7 @@ export class ExtensionController {
       }
     }
     const event = { type: 'event', lease: lease.id, method, params, ...(source.sessionId ? { sessionId: source.sessionId } : {}) }
-    if (new TextEncoder().encode(JSON.stringify(event)).length <= 32 * 1024) this.emit(event)
+    if (new TextEncoder().encode(JSON.stringify(event)).length <= EXTENSION_LIMITS.eventBytes) this.emit(event)
   }
   async attach(tabId, scope, view) {
     if (!Number.isInteger(tabId) || tabId < 0 || !validScope(scope) || !validScope(view)) throw Error('invalid tab lease')
@@ -155,13 +156,13 @@ export class ExtensionController {
       if (!params.clip) {
         const metrics = await this.api.debugger.sendCommand({ tabId: lease.tabId, ...(sessionId ? { sessionId } : {}) }, 'Page.getLayoutMetrics', {})
         const viewport = metrics.cssVisualViewport ?? metrics.visualViewport
-        const width = viewport?.clientWidth ?? 1280, height = viewport?.clientHeight ?? 960
-        params = { ...params, clip: { x: viewport?.pageX ?? 0, y: viewport?.pageY ?? 0, width, height, scale: Math.min(1, 1280 / width, 960 / height) } }
+        const width = viewport?.clientWidth ?? EXTENSION_LIMITS.screenshotWidth, height = viewport?.clientHeight ?? EXTENSION_LIMITS.screenshotHeight
+        params = { ...params, clip: { x: viewport?.pageX ?? 0, y: viewport?.pageY ?? 0, width, height, scale: Math.min(1, EXTENSION_LIMITS.screenshotWidth / width, EXTENSION_LIMITS.screenshotHeight / height) } }
       }
       if (params.captureBeyondViewport === true || params.fromSurface === false || params.clip && (
         !Number.isFinite(params.clip.width) || !Number.isFinite(params.clip.height) || !Number.isFinite(params.clip.scale)
         || params.clip.width <= 0 || params.clip.height <= 0 || !Number.isFinite(params.clip.x) || !Number.isFinite(params.clip.y)
-        || params.clip.width * params.clip.scale > 1280 || params.clip.height * params.clip.scale > 960 || params.clip.scale <= 0)) throw Error('screenshot exceeds quiet-mode dimensions')
+        || params.clip.width * params.clip.scale > EXTENSION_LIMITS.screenshotWidth || params.clip.height * params.clip.scale > EXTENSION_LIMITS.screenshotHeight || params.clip.scale <= 0)) throw Error('screenshot exceeds quiet-mode dimensions')
       params = { ...params, fromSurface: true, captureBeyondViewport: false }
     }
     return this.api.debugger.sendCommand({ tabId: lease.tabId, ...(sessionId ? { sessionId } : {}) }, method, params)

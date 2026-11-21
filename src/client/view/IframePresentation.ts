@@ -1,4 +1,5 @@
 /// <reference path="../css-modules.d.ts" />
+import { GUEST_ROUTE } from '../../../assets/browser-policy.mjs'
 /** Iframe DOM and revision-tagged load observations. */
 import type { BrowserTarget } from '../browser/url.ts'
 import type { BrowserPresentation } from './BrowserPresentation.ts'
@@ -15,15 +16,15 @@ import type { BrowserChildTabRequest } from '../../types.ts'
 /** Route Web pages through the opaque-origin proxy. */
 function guestProxyUrl(url: string, context: string): string {
   if (!/^https?:\/\//iu.test(url)) return url
-  if (url.includes('/dsh-builtin-browser/browser-view/isolated-guest')) return url
-  return `${location.origin}/dsh-builtin-browser/browser-view/isolated-guest?u=${encodeURIComponent(url)}&runtime=3&storage-context=${encodeURIComponent(context)}`
+  if (url.includes(GUEST_ROUTE)) return url
+  return `${location.origin}${GUEST_ROUTE}?u=${encodeURIComponent(url)}&runtime=3&storage-context=${encodeURIComponent(context)}`
 }
 
 function capturedSourceUrl(value: unknown): unknown {
   if (typeof value !== 'string') return value
   try {
     const proxy = new URL(value)
-    if (proxy.origin === location.origin && proxy.pathname === '/dsh-builtin-browser/browser-view/isolated-guest') {
+    if (proxy.origin === location.origin && proxy.pathname === GUEST_ROUTE) {
       const source = proxy.searchParams.get('u')
       if (source !== null && /^https?:\/\//iu.test(source)) return new URL(source).href
     }

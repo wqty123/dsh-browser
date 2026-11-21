@@ -1,3 +1,5 @@
+import { PATH_NAMES, INSTALL_LOCATIONS } from '../../assets/browser-products.mjs'
+import { cdpVersionUrl, CDP_DEFAULT_ATTACH_PORT, CDP_ATTACH_PROBE_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 /**
  * Drive the browser the user already has (Chrome / Edge / any Chromium) instead of
  * the Electron we ship — the same approach Codex Browser Use takes.
@@ -117,99 +119,6 @@ export interface DetectedBrowser {
   readonly path: string
 }
 
-/**
- * Launcher names to look for on PATH, per product and per platform.
- *
- * The names genuinely differ: Linux distributions package the launcher under a
- * versioned name (`microsoft-edge-stable`, `google-chrome-stable`), Windows puts
- * `chrome.exe` in an Application directory that may or may not be on PATH, and macOS
- * ships the executable inside the .app bundle. PATH is still consulted first on every
- * platform — it is what reflects how the user actually installed the browser.
- */
-const PATH_NAMES: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.Platform, string[]>>> = {
-  chrome: {
-    win32: ['chrome'],
-    darwin: ['Google Chrome', 'Chromium'],
-    linux: ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser'],
-  },
-  edge: {
-    win32: ['msedge'],
-    darwin: ['Microsoft Edge'],
-    linux: ['microsoft-edge-stable', 'microsoft-edge', 'microsoft-edge-dev'],
-  },
-  brave: {
-    win32: ['brave'],
-    darwin: ['Brave Browser'],
-    linux: ['brave-browser', 'brave'],
-  },
-}
-
-/**
- * Where each product installs when its launcher is not on PATH.
- *
- * Windows keeps the executable inside a version-less Application directory; macOS
- * keeps it inside the .app bundle; Linux distributions that do not use a launcher
- * put it under /usr/bin or /opt. All are checked, and anything missed can be named
- * explicitly with DSH_BROWSER_<KIND>_PATH.
- */
-const INSTALL_LOCATIONS: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.Platform, string[]>>> = {
-  chrome: {
-    win32: [
-      String.raw`%ProgramFiles%\Google\Chrome\Application\chrome.exe`,
-      String.raw`%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe`,
-      // Where a per-user install lands, which is what Chrome's own installer chooses when it
-      // cannot (or should not) write to Program Files. Missing this meant the plugin reported
-      // "no browser found" on machines that plainly had one.
-      String.raw`%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`,
-      String.raw`%LOCALAPPDATA%\Chromium\Application\chrome.exe`,
-    ],
-    darwin: [
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    ],
-    linux: [
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/google-chrome',
-      '/usr/bin/chromium',
-      '/opt/google/chrome/chrome',
-      '/snap/bin/chromium',
-    ],
-  },
-  edge: {
-    win32: [
-      String.raw`%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe`,
-      String.raw`%ProgramFiles%\Microsoft\Edge\Application\msedge.exe`,
-      String.raw`%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe`,
-    ],
-    darwin: ['/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'],
-    linux: [
-      '/usr/bin/microsoft-edge-stable',
-      '/usr/bin/microsoft-edge',
-      '/usr/bin/microsoft-edge-dev',
-    ],
-  },
-  brave: {
-    win32: [
-      String.raw`%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe`,
-      String.raw`%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe`,
-      String.raw`%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe`,
-    ],
-    darwin: ['/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'],
-    linux: ['/usr/bin/brave-browser', '/usr/bin/brave', '/snap/bin/brave'],
-  },
-}
-
-/**
- * Resolve the environment references in one install location.
- *
- * The list is static strings, but a per-user install lands under %LOCALAPPDATA%, so the entry
- * has to be resolved against the environment detection was HANDED rather than process.env — a
- * caller that supplies a platform and an environment (which is what makes detection testable)
- * must not end up reading the developer's real machine.
- * @param location - one entry from the install-location table.
- * @param env - the environment to resolve against.
- * @returns the path with %NAME% references replaced, or the entry unchanged when unknown.
- */
 /**
  * Whether a browser's self-reported product name is one this carrier could have launched.
  *
@@ -742,7 +651,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     let client: CdpClient | undefined
     let identified = false
     try {
-      const version = await (await fetch(`http://127.0.0.1:${port}/json/version`, {
+      const version = await (await fetch(cdpVersionUrl(port), {
         signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
       })).json() as { webSocketDebuggerUrl?: string; Browser?: string }
       if (typeof version.webSocketDebuggerUrl !== 'string') return undefined
@@ -1020,7 +929,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
           const port = freshPort()
           if (port !== undefined) {
         try {
-            const version = await (await fetch(`http://127.0.0.1:${port}/json/version`, {
+            const version = await (await fetch(cdpVersionUrl(port), {
               // Bounded: an unanswered loopback request would otherwise park inside this
               // iteration for the rest of the budget, and the deadline above is only re-checked
               // between iterations. Deliberately no larger than the 250 ms sleep — see
@@ -1567,11 +1476,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
  * @param timeoutMs - how long to wait for the endpoint.
  * @returns the browser banner when an endpoint answers, undefined otherwise.
  */
-export async function probeAttach(port: number = 9222, timeoutMs: number = 600): Promise<string | undefined> {
+export async function probeAttach(port: number = CDP_DEFAULT_ATTACH_PORT, timeoutMs: number = CDP_ATTACH_PROBE_TIMEOUT_MS): Promise<string | undefined> {
   const controller = new AbortController()
   const timer = setTimeout(() => { controller.abort() }, timeoutMs)
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: controller.signal })
+    const response = await fetch(cdpVersionUrl(port), { signal: controller.signal })
     if (!response.ok) return undefined
     const body = await response.json() as { Browser?: unknown }
     return typeof body.Browser === 'string' ? body.Browser : 'unknown'

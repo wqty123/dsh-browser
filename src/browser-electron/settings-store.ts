@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Plugin-owned settings document — the switches the browser settings panel
  * exposes, stored next to the browsing history so both follow the same rules:
@@ -197,7 +198,7 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
  */
 export function settingsPath(): string {
   const home = dshHome()
-  return join(home, 'dsh-builtin-browser-host', 'settings.json')
+  return join(home, BROWSER_PROFILE_DIR, 'settings.json')
 }
 
 /** Coerce one boolean field, keeping the default when absent or mistyped. */

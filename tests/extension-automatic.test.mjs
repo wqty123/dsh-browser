@@ -1,3 +1,5 @@
+import * as extensionConstants from '../browser-extension/constants.mjs'
+import { en } from '../browser-extension/locales.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, createPublicKey, randomUUID } from 'node:crypto'
@@ -5,14 +7,14 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync, renameSync, unlinkSyn
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { PassThrough } from 'node:stream'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { EXTENSION_ID } from '../native-host/identity.mjs'
-import { install, publishLauncher } from '../native-host/install.mjs'
+import { install, publishLauncher, launcherSource } from '../native-host/install.mjs'
 import { serve, saveConfiguration } from '../native-host/host.mjs'
 import { NativeBrowserClient } from '../native-host/client.mjs'
-import { decoder, send } from '../native-host/protocol.mjs'
+import { decoder, send, encode } from '../native-host/protocol.mjs'
 import { PreferredBrowserViewHost, extensionReady } from '../lib/browser-electron/preferred-browser.js'
 import { EXTENSION_ID as PLUGIN_EXTENSION_ID, installExtension, registrationStatus } from '../lib/browser-electron/extension-setup.js'
 import { testTab, testScope } from './canonical-fixtures.mjs'
@@ -23,6 +25,41 @@ function directory(t) {
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   return dir
 }
+
+test('Windows launcher flushes each stdin and stdout chunk before waiting for EOF', () => {
+  const source = launcherSource('C:\\Program Files\\node.exe', 'C:\\plugin\\host.mjs', 'C:\\state\\config.json')
+  assert.match(source, /while\(\(count=input\.Read\(buffer,0,buffer\.Length\)\)>0\)\s*\{\s*output\.Write\(buffer,0,count\);\s*output\.Flush\(\);\s*\}/)
+  assert.ok(source.includes('Relay(Console.OpenStandardInput(),process.StandardInput.BaseStream)'))
+  assert.ok(source.includes('Relay(process.StandardOutput.BaseStream,Console.OpenStandardOutput())'))
+  assert.doesNotMatch(source, /OpenStandardInput\(\)\.CopyTo|StandardOutput\.BaseStream\.CopyTo/)
+})
+
+test('published Windows launcher answers a small hello while stdin remains open', { skip: process.platform !== 'win32' }, async t => {
+  const dir = directory(t)
+  const installed = install({ browser: 'edge', directory: dir, register: false })
+  const manifest = JSON.parse(readFileSync(installed.manifestPath, 'utf8'))
+  const child = spawn(manifest.path, [`chrome-extension://${EXTENSION_ID}/`], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  const exited = new Promise(resolve => { child.once('exit', resolve); child.once('error', resolve) })
+  child.stdin.on('error', () => {})
+  let timer
+  try {
+    const status = new Promise((resolve, reject) => {
+      const frames = decoder(message => { if (message.type === 'status') resolve(message) }, reject)
+      child.stdout.on('data', chunk => frames.push(chunk))
+      child.once('error', reject)
+      timer = setTimeout(() => reject(new Error('launcher did not answer hello within 2 seconds with stdin open')), 2000)
+    })
+    child.stdin.write(encode({ type: 'hello', browser: 'edge', installId: randomUUID() }))
+    assert.equal((await status).state, 'connected')
+    assert.equal(child.stdin.writableEnded, false)
+    assert.equal(typeof JSON.parse(readFileSync(join(dir, extensionConstants.NATIVE_FILES.relay), 'utf8')).endpoint, 'string')
+  } finally {
+    clearTimeout(timer)
+    child.stdin.end()
+    const kill = setTimeout(() => child.kill(), 5000)
+    try { await exited } finally { clearTimeout(kill) }
+  }
+})
 
 test('bundled public key derives the same stable extension ID exported to the plugin and host', () => {
   const manifest = JSON.parse(readFileSync(new URL('../browser-extension/manifest.json', import.meta.url)))
@@ -153,8 +190,8 @@ test('worker auto-connects at boot, install and startup without opening Options;
         const port = { onMessage: event('native-message'), onDisconnect: event('disconnect'), postMessage() {} }
         ports.push(port); return port
       } }, debugger: { onDetach: event('detach') }, alarms: { onAlarm: event('alarm'), create: async () => {}, clear: async () => {} } }
-    const source = readFileSync(new URL('../browser-extension/worker.mjs', import.meta.url), 'utf8').replace(/^import[^\n]+\n/, '')
-    runInNewContext(source, { chrome: api, navigator: { userAgent: 'Edg/' }, crypto: { randomUUID }, ExtensionController: class { release() {} }, TextEncoder, setTimeout, clearTimeout })
+    const source = readFileSync(new URL('../browser-extension/worker.mjs', import.meta.url), 'utf8').replace(/^import[^\n]+\n/gm, '')
+    runInNewContext(source, { ...extensionConstants, en, chrome: api, navigator: { userAgent: 'Edg/' }, crypto: { randomUUID }, ExtensionController: class { release() {} }, TextEncoder, setTimeout, clearTimeout })
     await new Promise(setImmediate)
     assert.equal(ports.length, paused ? 0 : 1)
     if (!paused) callbacks.disconnect()

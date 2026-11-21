@@ -1,6 +1,5 @@
-export const MAX_FRAME = 256 * 1024
-export const MAX_MESSAGE = 8 * 1024 * 1024
-export const CHUNK_BYTES = 48 * 1024
+import { MAX_FRAME, MAX_MESSAGE, CHUNK_BYTES, MAX_ID_LENGTH, MAX_CHUNKS, MAX_IN_FLIGHT } from '../browser-extension/constants.mjs'
+export { MAX_FRAME, MAX_MESSAGE, CHUNK_BYTES }
 
 export function encode(value) {
   const body = Buffer.from(JSON.stringify(value), 'utf8')
@@ -55,11 +54,11 @@ export class Reassembler {
   accept(message) {
     if (message.type !== 'chunk') return message
     const { id, index, total, data } = message
-    if (typeof id !== 'string' || id.length > 128 || !Number.isInteger(total) || total < 1 || total > 256
+    if (typeof id !== 'string' || id.length > MAX_ID_LENGTH || !Number.isInteger(total) || total < 1 || total > MAX_CHUNKS
       || !Number.isInteger(index) || index < 0 || index >= total || typeof data !== 'string' || data.length > CHUNK_BYTES) throw Error('invalid native chunk')
     let state = this.#pending.get(id)
     if (!state) {
-      if (index !== 0 || this.#pending.size >= 32) throw Error('unexpected native chunk')
+      if (index !== 0 || this.#pending.size >= MAX_IN_FLIGHT) throw Error('unexpected native chunk')
       state = { total, parts: [], bytes: 0 }; this.#pending.set(id, state)
     }
     if (state.total !== total || index !== state.parts.length) throw Error('out-of-order native chunk')

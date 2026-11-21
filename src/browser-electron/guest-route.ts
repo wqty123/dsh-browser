@@ -1,3 +1,5 @@
+import { hostMessages } from '../../assets/browser-messages.mjs'
+import { GUEST_ROUTE } from '../../assets/browser-policy.mjs'
 /**
  * Web guests execute in CSP-sandboxed opaque origins, including direct document loads.
  * Only this proxy prefix is available to guest network requests. App storage, APIs,
@@ -36,7 +38,7 @@ function isSelfTarget(url: URL): boolean {
   return false
 }
 
-export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/isolated-guest'
+export { GUEST_ROUTE }
 
 class UnsafeGuestTargetError extends Error {}
 
@@ -341,12 +343,12 @@ export async function handleGuest(
     })
     if (subRequest) { response.end(message); return }
     const code = upstreamErrorCode(error)
-    response.end('<!doctype html><html><head><meta charset="utf-8"><title>页面加载失败 / Page unavailable</title>'
+    response.end('<!doctype html><html><head><meta charset="utf-8"><title>' + hostMessages.bilingual.unavailableTitle + '</title>'
       + '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href) + '</script>'
       + '<style>body{font:16px/1.6 system-ui,sans-serif;margin:48px auto;padding:0 24px;max-width:640px;color:#334155}h1{font-size:24px}code{overflow-wrap:anywhere}button{font:inherit;padding:6px 20px;cursor:pointer}</style>'
-      + '</head><body><h1>页面加载失败 / Page unavailable</h1><p>无法获取上游网页，请检查网络后重试。 / The upstream page could not be loaded. Check your connection and try again.</p>'
+      + '</head><body><h1>' + hostMessages.bilingual.unavailableTitle + '</h1><p>' + hostMessages.bilingual.unavailableDetail + '</p>'
       + '<p><code>' + message + (code === undefined ? '' : ' (' + code + ')') + '</code></p>'
-      + '<button type="button" onclick="location.reload()">重试 / Retry</button></body></html>')
+      + '<button type="button" onclick="location.reload()">' + hostMessages.bilingual.retry + '</button></body></html>')
   }
   const headers = new Headers()
   const siteHeaders = new Set(request.headers['x-dsh-guest-sub'] === '1'

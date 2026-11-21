@@ -1,3 +1,4 @@
+import { AUTH_TIMEOUT_MS, HOST_OPERATION_TIMEOUT_MS, MAX_IN_FLIGHT, MAX_ID_LENGTH, MAX_PEERS, NATIVE_FILES } from '../browser-extension/constants.mjs'
 import { createServer } from 'node:net'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { readFileSync, writeFileSync, renameSync, openSync, closeSync, unlinkSync, watch } from 'node:fs'
@@ -17,7 +18,7 @@ const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && a.leng
   && timingSafeEqual(Buffer.from(a), Buffer.from(b))
 
 export function pair(path, token, installId) {
-  if (typeof token !== 'string' || token.length > 128 || !/^[a-f0-9-]{36}$/.test(installId ?? '')) throw Error('invalid pairing request')
+  if (typeof token !== 'string' || token.length > MAX_ID_LENGTH || !/^[a-f0-9-]{36}$/.test(installId ?? '')) throw Error('invalid pairing request')
   const lock = join(dirname(path), 'pair.lock')
   const fd = openSync(lock, 'wx', 0o600)
   try {
@@ -54,14 +55,14 @@ export async function serve({ input, output, configPath, origin }) {
     for (const socket of peers) socket.destroy()
     server?.close()
     try {
-      const descriptor = JSON.parse(readFileSync(join(dirname(configPath), 'relay.json'), 'utf8'))
-      if (descriptor.epoch === epoch) unlinkSync(join(dirname(configPath), 'relay.json'))
+      const descriptor = JSON.parse(readFileSync(join(dirname(configPath), NATIVE_FILES.relay), 'utf8'))
+      if (descriptor.epoch === epoch) unlinkSync(join(dirname(configPath), NATIVE_FILES.relay))
     } catch {}
     if (process.platform !== 'win32' && endpoint) { try { unlinkSync(endpoint) } catch {} }
     input.destroy(); output.end()
   }
   watcher = watch(dirname(configPath), { persistent: false }, (_event, file) => {
-    if (String(file) !== 'config.json') return
+    if (String(file) !== NATIVE_FILES.config) return
     try {
       const current = JSON.parse(readFileSync(configPath, 'utf8'))
       if (current.disabled || current.secret !== config.secret || current.installId !== config.installId) stop()
@@ -72,11 +73,11 @@ export async function serve({ input, output, configPath, origin }) {
     endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\dsh-browser-${epoch}` : join(dirname(configPath), `relay-${epoch.slice(0, 8)}.sock`)
     if (process.platform !== 'win32' && Buffer.byteLength(endpoint) > 100) throw Error('native-host directory is too long for a local socket')
     server = createServer(socket => {
-      if (peers.size >= 8) { socket.destroy(); return }
+      if (peers.size >= MAX_PEERS) { socket.destroy(); return }
       peers.add(socket)
       const nonce = randomBytes(32).toString('hex')
       let authenticated = false
-      const timer = setTimeout(() => socket.destroy(), 5000)
+      const timer = setTimeout(() => socket.destroy(), AUTH_TIMEOUT_MS)
       send(socket, { type: 'challenge', nonce, epoch, proof: proof(config.secret, nonce, epoch, `${config.installId}:server`) })
       const frames = decoder(message => {
         if (!authenticated) {
@@ -85,12 +86,12 @@ export async function serve({ input, output, configPath, origin }) {
           send(socket, { type: 'ready', epoch, installId: config.installId, browser: config.browser })
           return
         }
-        if (message.type !== 'request' || typeof message.id !== 'string' || message.id.length > 128 || pending.has(message.id)
-          || pending.size >= 32 || !message.operation || typeof message.operation !== 'object') { socket.destroy(); return }
+        if (message.type !== 'request' || typeof message.id !== 'string' || message.id.length > MAX_ID_LENGTH || pending.has(message.id)
+          || pending.size >= MAX_IN_FLIGHT || !message.operation || typeof message.operation !== 'object') { socket.destroy(); return }
         const timeout = setTimeout(() => {
           pending.delete(message.id); chunks.forget(message.id)
           try { forward({ type: 'result', id: message.id, error: 'extension operation timed out; not replayed' }) } catch { socket.destroy() }
-        }, 15000)
+        }, HOST_OPERATION_TIMEOUT_MS)
         pending.set(message.id, timeout)
         post(message)
       }, () => socket.destroy())
@@ -103,7 +104,7 @@ export async function serve({ input, output, configPath, origin }) {
     })
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(endpoint, resolve) })
     if (stopped) { stop(); return }
-    saveConfiguration(join(dirname(configPath), 'relay.json'), { endpoint, epoch })
+    saveConfiguration(join(dirname(configPath), NATIVE_FILES.relay), { endpoint, epoch })
     status('connected', `Connected ${config.browser}: ${config.label}`)
   }
   const frames = decoder(part => {

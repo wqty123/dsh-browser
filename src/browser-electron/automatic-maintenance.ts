@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /** User-requested Windows maintenance, coordinated outside the Desktop process tree. */
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
@@ -42,7 +43,7 @@ function reportMaintenanceFailure(label: string, error: unknown): void {
 }
 
 function homePath(): string { return resolve(dshHome()) }
-function basePath(home = homePath()): string { return join(home, 'dsh-builtin-browser-host', 'maintenance') }
+function basePath(home = homePath()): string { return join(home, BROWSER_PROFILE_DIR, 'maintenance') }
 function inside(base: string, path: string): boolean {
   const part = relative(base, path)
   return part !== '' && !isAbsolute(part) && part !== '..' && !part.startsWith('..\\') && !part.startsWith('../')

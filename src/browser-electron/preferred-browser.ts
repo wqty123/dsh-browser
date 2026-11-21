@@ -1,10 +1,11 @@
+import { EXTENSION_READY_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 import { ExtensionBrowserViewHost } from './extension-browser.ts'
 import type { NativeBrowserClient } from '../../native-host/client.mjs'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
 import { readTabHandle, sessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 import type { BrowserSessionId } from '../browser/types.ts'
 
-export async function extensionReady(connect: () => Promise<void>, milliseconds = 2500): Promise<boolean> {
+export async function extensionReady(connect: () => Promise<void>, milliseconds = EXTENSION_READY_TIMEOUT_MS): Promise<boolean> {
   const deadline = Date.now() + milliseconds
   let timer: ReturnType<typeof setTimeout> | undefined
   const attempt = async () => {
@@ -27,7 +28,7 @@ export class PreferredBrowserViewHost implements ElectronBrowserViewHost {
   fallbackReason?: string
   private readonly extension: ExtensionBrowserViewHost
 
-  constructor(readonly browser: 'edge' | 'chrome', readonly fallback: ElectronBrowserViewHost & { connectionStatus?: () => { connected: boolean; detail: string } }, client?: NativeBrowserClient, private readonly bound = 2500) {
+  constructor(readonly browser: 'edge' | 'chrome', readonly fallback: ElectronBrowserViewHost & { connectionStatus?: () => { connected: boolean; detail: string } }, client?: NativeBrowserClient, private readonly bound = EXTENSION_READY_TIMEOUT_MS) {
     this.extension = new ExtensionBrowserViewHost(browser, client)
   }
 

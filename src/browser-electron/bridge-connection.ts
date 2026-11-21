@@ -1,3 +1,4 @@
+import { LOOPBACK_IPV4 } from '../../assets/browser-policy.mjs'
 import { readFileSync } from 'node:fs'
 /**
  * Transport for the desktop shell's browser bridge: one long-lived connection to a
@@ -255,7 +256,7 @@ export class BridgeConnection {
   /** The live socket, connecting and authenticating it on first use. */
   private ensureSocket(): Socket {
     if (this.socket !== undefined) return this.socket
-    const socket = connect({ host: '127.0.0.1', port: this.endpoint.port })
+    const socket = connect({ host: LOOPBACK_IPV4, port: this.endpoint.port })
     socket.setEncoding('utf8')
     socket.on('data', chunk => this.onData(String(chunk)))
     // Both handlers pass the socket they belong to, so a late event from a socket that was

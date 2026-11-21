@@ -1,3 +1,5 @@
+import { NATIVE_PRODUCTS, WINDOWS_TOOLS } from '../assets/browser-products.mjs'
+import { nativeHostName, LEGACY_PAIR_TTL_MS, NATIVE_FILES } from '../browser-extension/constants.mjs'
 import { mkdirSync, chmodSync, writeFileSync, existsSync, unlinkSync, readFileSync, renameSync } from 'node:fs'
 import { join, resolve, dirname, isAbsolute, posix } from 'node:path'
 import { homedir } from 'node:os'
@@ -12,15 +14,44 @@ const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
 const literal = value => JSON.stringify(value)
 
 export function registration(browser, manifest, { platform = process.platform, home = homedir(), xdg = process.env.XDG_CONFIG_HOME } = {}) {
-  const name = `com.dsh.browser.${browser}`
-  if (platform === 'win32') return { registry: `HKCU\\Software\\${browser === 'edge' ? 'Microsoft\\Edge' : 'Google\\Chrome'}\\NativeMessagingHosts\\${name}`, manifest }
-  if (platform === 'darwin') return { file: posix.join(home, 'Library', 'Application Support', browser === 'edge' ? 'Microsoft Edge' : 'Google/Chrome', 'NativeMessagingHosts', `${name}.json`) }
-  if (platform === 'linux') return { file: posix.join(xdg || posix.join(home, '.config'), browser === 'edge' ? 'microsoft-edge' : 'google-chrome', 'NativeMessagingHosts', `${name}.json`) }
+  const name = nativeHostName(browser)
+  if (platform === 'win32') return { registry: `HKCU\\Software\\${NATIVE_PRODUCTS[browser].win32}\\NativeMessagingHosts\\${name}`, manifest }
+  if (platform === 'darwin') return { file: posix.join(home, 'Library', 'Application Support', NATIVE_PRODUCTS[browser].darwin, 'NativeMessagingHosts', `${name}.json`) }
+  if (platform === 'linux') return { file: posix.join(xdg || posix.join(home, '.config'), NATIVE_PRODUCTS[browser].linux, 'NativeMessagingHosts', `${name}.json`) }
   throw Error('native messaging is unsupported on this platform')
 }
 
+const LAUNCHER_BUFFER_BYTES = 8192
+
+export function launcherSource(nodePath, hostScript, configPath) {
+  return `using System; using System.Diagnostics; using System.Threading.Tasks;
+      class NativeHost {
+        static void Relay(System.IO.Stream input, System.IO.Stream output) {
+          var buffer=new byte[${LAUNCHER_BUFFER_BYTES}];
+          int count;
+          while((count=input.Read(buffer,0,buffer.Length))>0) {
+            output.Write(buffer,0,count);
+            output.Flush();
+          }
+        }
+        static int Main(string[] args) {
+        if(args.Length<1) return 1;
+        var info=new ProcessStartInfo(${literal(nodePath)});
+        info.Arguments="\\\""+${literal(hostScript)}+"\\\" --config \\\""+${literal(configPath)}+"\\\" \\\""+args[0].Replace("\\\"", "")+"\\\"";
+        info.UseShellExecute=false; info.CreateNoWindow=true;
+        info.RedirectStandardInput=true; info.RedirectStandardOutput=true; info.RedirectStandardError=true;
+        using(var process=Process.Start(info)) {
+          Task.Run(()=>{try{Relay(Console.OpenStandardInput(),process.StandardInput.BaseStream);}catch{}finally{try{process.StandardInput.Close();}catch{}}});
+          var output=Task.Run(()=>Relay(process.StandardOutput.BaseStream,Console.OpenStandardOutput()));
+          Task.Run(()=>process.StandardError.BaseStream.CopyTo(System.IO.Stream.Null));
+          process.WaitForExit(); output.Wait(); return process.ExitCode;
+        }
+      }}
+    `
+}
+
 export function secureWindowsDirectory(directory, execute = execFileSync) {
-  execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+  execute(WINDOWS_TOOLS.powershell, ['-NoProfile', '-NonInteractive', '-Command', `
     $ErrorActionPreference='Stop'
     $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $d=Get-Item -LiteralPath $env:DSH_NATIVE_DIR
@@ -69,37 +100,23 @@ export function install({ browser, extensionId = EXTENSION_ID, directory, label,
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   if (process.platform !== 'win32') chmodSync(directory, 0o700)
   else secureWindowsDirectory(directory)
-  const configPath = join(directory, 'config.json'), previous = readConfiguration(directory)
+  const configPath = join(directory, NATIVE_FILES.config), previous = readConfiguration(directory)
   const token = revoke ? undefined : randomBytes(24).toString('base64url')
   let config = { browser, extensionId, label: String(label ?? `${browser === 'edge' ? 'Edge' : 'Chrome'} personal profile`).slice(0, 120),
-    secret: randomBytes(32).toString('hex'), ...(revoke ? {} : { pairDigest: createHash('sha256').update(token).digest('hex'), pairExpires: Date.now() + 5 * 60 * 1000 }) }
+    secret: randomBytes(32).toString('hex'), ...(revoke ? {} : { pairDigest: createHash('sha256').update(token).digest('hex'), pairExpires: Date.now() + LEGACY_PAIR_TTL_MS }) }
   if (previous && (previous.browser !== browser || (previous.extensionId !== extensionId && extensionId !== EXTENSION_ID))) throw Error('directory belongs to a different browser/extension; use a separate directory')
   if (extensionId === EXTENSION_ID) config = { browser, extensionId, label: config.label,
     secret: previous?.secret ?? config.secret, installId: EXTENSION_ID, disabled: revoke || previous?.disabled === true }
   if (JSON.stringify(previous) !== JSON.stringify(config)) saveConfiguration(configPath, config)
-  if (revoke || extensionId !== EXTENSION_ID) { try { unlinkSync(join(directory, 'relay.json')) } catch {} }
+  if (revoke || extensionId !== EXTENSION_ID) { try { unlinkSync(join(directory, NATIVE_FILES.relay)) } catch {} }
   if (revoke) return { revoked: true, detail: 'Extension access disabled. Disconnect the extension to release any existing control connection immediately.' }
-  const name = `com.dsh.browser.${browser}`
+  const name = nativeHostName(browser)
   let launcher = join(directory, process.platform === 'win32' ? 'dsh-browser-native.exe' : 'dsh-browser-native')
   const hostScript = fileURLToPath(new URL('./host.mjs', import.meta.url))
   if (process.platform === 'win32') {
-    const source = `using System; using System.Diagnostics; using System.Threading.Tasks;
-      class NativeHost { static int Main(string[] args) {
-        if(args.Length<1) return 1;
-        var info=new ProcessStartInfo(${literal(process.execPath)});
-        info.Arguments="\\\""+${literal(hostScript)}+"\\\" --config \\\""+${literal(configPath)}+"\\\" \\\""+args[0].Replace("\\\"", "")+"\\\"";
-        info.UseShellExecute=false; info.CreateNoWindow=true;
-        info.RedirectStandardInput=true; info.RedirectStandardOutput=true; info.RedirectStandardError=true;
-        using(var process=Process.Start(info)) {
-          Task.Run(()=>{try{Console.OpenStandardInput().CopyTo(process.StandardInput.BaseStream);}catch{}finally{try{process.StandardInput.Close();}catch{}}});
-          var output=Task.Run(()=>process.StandardOutput.BaseStream.CopyTo(Console.OpenStandardOutput()));
-          Task.Run(()=>process.StandardError.BaseStream.CopyTo(System.IO.Stream.Null));
-          process.WaitForExit(); output.Wait(); return process.ExitCode;
-        }
-      }}
-    `
+    const source = launcherSource(process.execPath, hostScript, configPath)
     launcher = join(directory, `dsh-browser-native-${createHash('sha256').update(source).digest('hex').slice(0, 24)}.exe`)
-    publishLauncher(launcher, source, temporary => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    publishLauncher(launcher, source, temporary => execFileSync(WINDOWS_TOOLS.powershell, ['-NoProfile', '-NonInteractive', '-Command',
       '$ErrorActionPreference="Stop"; Add-Type -TypeDefinition $env:DSH_NATIVE_SOURCE -OutputAssembly $env:DSH_NATIVE_EXE -OutputType ConsoleApplication'],
     { env: { ...process.env, DSH_NATIVE_SOURCE: source, DSH_NATIVE_EXE: temporary }, windowsHide: true, stdio: 'pipe' }))
   } else {
@@ -118,10 +135,10 @@ export function install({ browser, extensionId = EXTENSION_ID, directory, label,
   saveConfiguration(manifestPath, manifest)
   const target = registration(browser, manifestPath)
   if (register) {
-    if (target.registry) execFileSync('reg.exe', ['add', target.registry, '/ve', '/t', 'REG_SZ', '/d', manifestPath, '/f', '/reg:64'], { stdio: 'pipe', windowsHide: true })
+    if (target.registry) execFileSync(WINDOWS_TOOLS.registry, ['add', target.registry, '/ve', '/t', 'REG_SZ', '/d', manifestPath, '/f', '/reg:64'], { stdio: 'pipe', windowsHide: true })
     else { mkdirSync(dirname(target.file), { recursive: true, mode: 0o700 }); saveConfiguration(target.file, manifest) }
   }
-  return { browser, directory, manifestPath, registration: target, registered: register, ...(extensionId === EXTENSION_ID ? {} : { token, expiresInSeconds: 300 }),
+  return { browser, directory, manifestPath, registration: target, registered: register, ...(extensionId === EXTENSION_ID ? {} : { token, expiresInSeconds: LEGACY_PAIR_TTL_MS / 1000 }),
     extensionDirectory: fileURLToPath(new URL('../browser-extension/', import.meta.url)),
     next: extensionId === EXTENSION_ID ? 'The bundled extension connects automatically. Keep this package and Node installation in place.' : 'Enter this one-time token in extension Options in the intended profile. Keep this extracted package and Node installation in place.' }
 }

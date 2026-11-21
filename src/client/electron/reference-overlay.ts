@@ -1,3 +1,4 @@
+import { hostMessages } from '../../../assets/browser-messages.mjs'
 import { overlayScript, standaloneScript } from '../../browser-reference/entry.ts'
 import { noticeScript } from '../../browser-reference/page-script.ts'
 import { reportReferenceCaptureFailure } from '../reference-intents.ts'
@@ -35,7 +36,7 @@ export function installReferenceOverlay(execute: (source: string) => Promise<unk
         } catch (error) {
           reportReferenceCaptureFailure(error)
           if (!signal.aborted) {
-            try { await execute(standaloneScript(noticeScript('引用未能加入当前会话，请重试。'))) }
+            try { await execute(standaloneScript(noticeScript(hostMessages.zh.referenceFailed))) }
             catch { /* The app notice survives navigation of the guest. */ }
           }
         }
@@ -45,7 +46,7 @@ export function installReferenceOverlay(execute: (source: string) => Promise<unk
   }
   void (async () => {
     if (signal.aborted) return
-    try { await execute(standaloneScript(overlayScript(), { label: '引用到 DSH' })) }
+    try { await execute(standaloneScript(overlayScript(), { label: hostMessages.zh.referenceLabel })) }
     catch { /* Navigation can invalidate the installer. */ }
     await poll()
   })()

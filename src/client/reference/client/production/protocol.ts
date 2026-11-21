@@ -1,3 +1,4 @@
+import { REFERENCE_REVEAL_ROUTE, REFERENCE_EXPORT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERIES_ROUTE, REFERENCE_DELIVERY_ACK_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, REFERENCE_ASSET_ROUTE } from '../../../../../assets/browser-policy.mjs'
 /**
  * Wire contract of the built-in browser's durable reference hand-off.
  *
@@ -17,13 +18,13 @@ import type { ReferenceTextNode } from '../../../../reference-text.ts'
 
 /** Exact HTTP paths served by the plugin's reference router. */
 export const ROUTES = {
-  deliveries: '/dsh-builtin-browser/reference/deliveries',
-  asset: '/dsh-builtin-browser/reference/asset',
-  ack: '/dsh-builtin-browser/reference/delivery/ack',
-  remove: '/dsh-builtin-browser/reference/delivery/remove',
-  reveal: '/dsh-builtin-browser/reference/reveal',
-  export: '/dsh-builtin-browser/reference/export',
-  import: '/dsh-builtin-browser/reference/import',
+  deliveries: REFERENCE_DELIVERIES_ROUTE,
+  asset: REFERENCE_ASSET_ROUTE,
+  ack: REFERENCE_DELIVERY_ACK_ROUTE,
+  remove: REFERENCE_DELIVERY_REMOVE_ROUTE,
+  reveal: REFERENCE_REVEAL_ROUTE,
+  export: REFERENCE_EXPORT_ROUTE,
+  import: REFERENCE_IMPORT_ROUTE,
 } as const
 
 /** A part that could not be captured, kept visible so the user can retry/remove. */
