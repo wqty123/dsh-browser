@@ -2865,6 +2865,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       await installProbe(browser, session, exec.signal)
       const cursor = await probe<{ startedAt: number; sequence: number }>(browser, session, 'networkCursor', [], exec.signal)
+      // Batched code holds back the triggering action until the cursor is captured.
+      ;(exec as { armed?: () => void }).armed?.()
       const budget = Math.min(args.timeoutMs ?? 15_000, maxWaitMs)
       const found = await poll(async () => {
         const current = await probe<{ startedAt: number; sequence: number }>(browser, session, 'networkCursor', [], exec.signal)

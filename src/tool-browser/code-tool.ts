@@ -24,6 +24,8 @@ const MAX_IMAGES = 4
 const MAX_PARALLEL_CALLS = 10
 /** Calls that wait for something a later action causes: they must not hold that action back. */
 const WATCHERS: ReadonlySet<string> = new Set(['dsh_browser_wait_for_response', 'dsh_browser_wait'])
+/** Watchers that only see events after they arm: later actions wait for `exec.armed()`. */
+const ARMING: ReadonlySet<string> = new Set(['dsh_browser_wait_for_response'])
 /** An idle REPL worker is ended after this long; DSH does not tell the plugin when a task ends. */
 const IDLE_MS = 15 * 60_000
 
@@ -223,10 +225,13 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
       const waiters: (() => void)[] = []
       const acquire = async () => { while (slots === 0) await new Promise<void>(go => waiters.push(go)); slots-- }
       const release = () => { slots++; waiters.shift()?.() }
-      const schedule = (safe: boolean, watcher: boolean, run: () => Promise<void>): void => {
-        if (watcher) {
+      const schedule = (safe: boolean, watcher: 'arming' | boolean, run: (armed?: () => void) => Promise<void>): void => {
+        if (watcher !== false) {
           const gate = barrier
-          void (async () => { await gate; await run() })()
+          let arm = (): void => {}
+          const armed = new Promise<void>(go => { arm = go })
+          void (async () => { await gate; await run(arm) })().finally(arm)
+          if (watcher === 'arming') barrier = Promise.all([gate, armed])
         } else if (safe) {
           const gate = barrier
           const call = (async () => { await gate; await acquire(); try { await run() } finally { release() } })()
@@ -272,10 +277,13 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
             else if (message.type === 'call') {
               const { id, name, args: toolArgs } = message
               if (name === '__help') void dispatch(id, name, toolArgs)
-              else schedule(concurrencySafe(name, toolArgs), WATCHERS.has(name.startsWith(PREFIX) ? name : PREFIX + name), () => dispatch(id, name, toolArgs))
+              else {
+                const full = name.startsWith(PREFIX) ? name : PREFIX + name
+                schedule(concurrencySafe(name, toolArgs), ARMING.has(full) ? 'arming' : WATCHERS.has(full), armed => dispatch(id, name, toolArgs, armed))
+              }
             }
           }
-          const dispatch = async (id: number, name: string, toolArgs: Record<string, unknown>) => {
+          const dispatch = async (id: number, name: string, toolArgs: Record<string, unknown>, armed?: () => void) => {
             try {
               if (name === '__help') {
                 const value = typeof toolArgs.name === 'string'
@@ -287,7 +295,7 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
               controller.signal.throwIfAborted()
               const target = resolve(name)
               calls++
-              const value = await target.execute(toolArgs as never, { ...exec, signal: controller.signal } as never)
+              const value = await target.execute(toolArgs as never, { ...exec, signal: controller.signal, ...armed !== undefined ? { armed } : {} } as never)
               const blocks = (target.output?.render?.(toolArgs as never, value as never) ?? [{ type: 'text', text: format(value) }]) as readonly Block[]
               for (const block of blocks) {
                 if (block.type === 'image' && block.attachment !== undefined && images.length < MAX_IMAGES) images.push(block.attachment as ImageAttachment)
