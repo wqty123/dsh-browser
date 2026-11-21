@@ -3663,7 +3663,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     try {
       const code = createCodeTool(catalog)
       // Registration options (`when`) arrived with DSH 0.2.2; older registries ignore them.
-      ;(ctx.tools.register as (tool: unknown, options?: { when: () => boolean }) => unknown)(code.tool, { when: () => !ptcMode() })
+      // On the code surface it is the only browser tool, so it stays even under PTC.
+      ;(ctx.tools.register as (tool: unknown, options?: { when: () => boolean }) => unknown)(code.tool, surface === 'core' ? { when: () => !ptcMode() } : undefined)
       ctx.effect(() => code.dispose)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-builtin-browser: could not register ${CODE_TOOL} (${String(error)}).`)
