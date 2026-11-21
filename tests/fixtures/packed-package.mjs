@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 
 export function packInvocation(packageManager, destination, {
   npmExecpath = process.env.npm_execpath,
@@ -44,10 +43,29 @@ export function extractPackedPackage(run, directory, archive) {
   return run('tar', ['-xzf', archive, '-C', 'extracted'], directory)
 }
 
+export function stagePackage(source, destination) {
+  const excluded = new Set(['.git', 'node_modules', 'lib', 'dist'])
+  cpSync(source, destination, { recursive: true,
+    filter: path => !excluded.has(relative(source, path).split(sep)[0]),
+  })
+  let directory = source
+  for (;;) {
+    const dependencies = join(directory, 'node_modules')
+    if (existsSync(dependencies)) {
+      symlinkSync(realpathSync(dependencies), join(destination, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
+      return destination
+    }
+    const parent = dirname(directory)
+    assert.notEqual(parent, directory, 'node_modules is unavailable for the isolated pack fixture')
+    directory = parent
+  }
+}
+
 export function packedPackage(t) {
   const root = mkdtempSync(join(tmpdir(), 'dsh-real-pack-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const source = fileURLToPath(new URL('../../', import.meta.url))
+  const staging = stagePackage(source, join(root, 'source'))
   const extracted = join(root, 'extracted')
   mkdirSync(extracted)
   const run = (command, args, cwd = root, options = {}) => {
@@ -58,22 +76,11 @@ export function packedPackage(t) {
     assert.equal(result.status, 0, result.stdout + result.stderr)
     return result.stdout
   }
-  const lock = join(tmpdir(), 'dsh-pack-' + createHash('sha256').update(source).digest('hex'))
-  const deadline = Date.now() + 180000
-  for (;;) {
-    try { mkdirSync(lock); break }
-    catch (error) {
-      if (error.code !== 'EEXIST' || Date.now() >= deadline) throw error
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100)
-    }
-  }
-  try {
-    const manifest = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8'))
-    const { command, args, shell } = packInvocation(manifest.packageManager, root)
-    run(command, args, source, { shell })
-  } finally { rmSync(lock, { recursive: true }) }
+  const manifest = JSON.parse(readFileSync(join(staging, 'package.json'), 'utf8'))
+  const { command, args, shell } = packInvocation(manifest.packageManager, root)
+  run(command, args, staging, { shell })
   const archives = readdirSync(root).filter(name => name.endsWith('.tgz'))
   assert.equal(archives.length, 1)
   extractPackedPackage(run, root, archives[0])
-  return { root, pkg: join(extracted, 'package'), manifest: JSON.parse(readFileSync(join(source, 'package.json'), 'utf8')), run }
+  return { root, pkg: join(extracted, 'package'), manifest: JSON.parse(readFileSync(join(staging, 'package.json'), 'utf8')), run }
 }

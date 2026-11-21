@@ -6,7 +6,12 @@ import { spawnSync } from 'node:child_process'
 import { packedPackage } from './fixtures/packed-package.mjs'
 
 test('pack includes the extension and dependency-free native host; extract-only installation works', t => {
+  const sourceManifest = new URL('../package.json', import.meta.url)
+  const before = readFileSync(sourceManifest)
+  const modified = statSync(sourceManifest, { bigint: true }).mtimeNs
   const { root, pkg, manifest, run } = packedPackage(t)
+  assert.deepEqual(readFileSync(sourceManifest), before, 'pack must not rewrite the checkout manifest')
+  assert.equal(statSync(sourceManifest, { bigint: true }).mtimeNs, modified, 'even transient manifest rewrites must stay in staging')
   assert.ok(manifest.files.includes('browser-extension')); assert.ok(manifest.files.includes('native-host'))
   const directory = join(root, 'native'), extensionId = 'a'.repeat(32)
   assert.equal(existsSync(join(pkg, 'node_modules')), false)

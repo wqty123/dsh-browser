@@ -1,9 +1,43 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { extractPackedPackage, packInvocation } from './fixtures/packed-package.mjs'
+import { extractPackedPackage, packInvocation, stagePackage } from './fixtures/packed-package.mjs'
+
+test('pack lifecycle writes are isolated from the checkout and other pack runs', t => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-pack-isolation-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const source = join(root, 'checkout')
+  for (const directory of ['node_modules', '.git', 'lib', 'dist', 'src', 'scripts', 'assets']) mkdirSync(join(source, directory), { recursive: true })
+  const manifest = JSON.stringify({ name: 'fixture', publishConfig: { exports: { '.': './lib/index.js', './client': './dist/client.cjs' } } })
+  writeFileSync(join(source, 'package.json'), manifest)
+  for (const directory of ['node_modules', '.git', 'lib', 'dist', 'src', 'scripts', 'assets']) writeFileSync(join(source, directory, 'sentinel'), directory)
+  const first = stagePackage(source, join(root, 'first'))
+  const second = stagePackage(source, join(root, 'second'))
+  assert.equal(realpathSync(join(first, 'node_modules')), realpathSync(join(source, 'node_modules')))
+  for (const directory of ['.git', 'lib', 'dist']) assert.equal(existsSync(join(first, directory)), false)
+  for (const directory of ['src', 'scripts', 'assets']) {
+    assert.equal(readFileSync(join(first, directory, 'sentinel'), 'utf8'), directory)
+    writeFileSync(join(first, directory, 'sentinel'), 'changed')
+    assert.equal(readFileSync(join(source, directory, 'sentinel'), 'utf8'), directory)
+    assert.equal(readFileSync(join(second, directory, 'sentinel'), 'utf8'), directory)
+  }
+  writeFileSync(join(first, 'package.json'), '{"publishConfig":{"exports":{"./client":{"import":"./dist/client.mjs"}}}}')
+  mkdirSync(join(first, 'dist'))
+  writeFileSync(join(first, 'dist', 'client.mjs'), 'intermediate build output')
+  assert.equal(readFileSync(join(source, 'package.json'), 'utf8'), manifest)
+  assert.equal(readFileSync(join(second, 'package.json'), 'utf8'), manifest)
+  assert.equal(readFileSync(join(source, 'dist', 'sentinel'), 'utf8'), 'dist')
+  assert.equal(existsSync(join(second, 'dist')), false)
+})
+
+test('pack staging refuses a missing source instead of building against the checkout', t => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-pack-missing-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  assert.throws(() => stagePackage(join(root, 'missing'), join(root, 'staging')), { code: 'ENOENT' })
+  assert.equal(existsSync(join(root, 'staging')), false)
+})
 
 function cliFixture(t, name = 'pnpm', version = '11.7.0') {
   const root = mkdtempSync(join(tmpdir(), 'dsh pnpm entry '))
