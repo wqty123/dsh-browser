@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "DSH Browser Bridge",
+  "version": "0.1.0",
+  "description": "Explicitly pair DSH with this Edge or Chrome profile. Browser debugging warnings remain visible.",
+  "minimum_chrome_version": "125",
+  "permissions": ["debugger", "tabs", "storage", "nativeMessaging", "alarms"],
+  "background": { "service_worker": "worker.mjs", "type": "module" },
+  "options_page": "options.html",
+  "incognito": "not_allowed"
+}

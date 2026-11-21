@@ -23,6 +23,8 @@
     "scripts",
     "tools/accept-desktop.mjs",
     "desktop-bridge",
+    "browser-extension",
+    "native-host",
     "cordis.patch.yml",
     "CHANGELOG.md",
     "README.md",
