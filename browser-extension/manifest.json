@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1hDzFuWdQi+Tu5v9275Mqd8Ql6F/Kgl72RyLiX6hTh1/TU89i/0pX5DK9L6NFZAuTTrAXWaP86gKJO/XUvDr+cTI0fJ4lpKn6EGTK75/r1g2m23LGPgNQZRwVM6xnx4t5qaKvgrW7F+E7xUwtO6NkzDNsh3Lw6piDzVuN8MhWxAkwCKxQ3S4PFQA4U/yD+knEq6rQk/7MILe+rrZ1SgMOMuxm01I0Dgbkowvu/LHRkQnrNTMAhQW0VRjb8c1947HTwc5t4inN4fIFY3Vl8RMZSH4FbaSir7CwZZrpC8yjSlnRuGHDBXXnVSWe6Qw/ZhNGQqdgXH+vuiqrMYTyQFUEwIDAQAB",
   "name": "DSH Browser Bridge",
   "version": "0.1.0",
   "description": "Explicitly pair DSH with this Edge or Chrome profile. Browser debugging warnings remain visible.",

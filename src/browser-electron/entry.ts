@@ -27,6 +27,8 @@ import { setTimeout as wait } from 'node:timers/promises'
 import { DesktopBridgeViewHost } from './desktop-bridge-host.ts'
 import { SidebarOnlyHost } from './sidebar-only-host.ts'
 import { ExtensionBrowserViewHost, extensionInstallHelp } from './extension-browser.ts'
+import { PreferredBrowserViewHost } from './preferred-browser.ts'
+import { nativeRegistration, installExtension, registrationStatus, probeExtension } from './extension-setup.ts'
 import { registerCarrierTakeover } from '../browser/takeover-target.ts'
 import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.ts'
 import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralProfiles } from './ephemeral-profile.ts'
@@ -73,6 +75,10 @@ import {
   CLIENT_VERSION_ROUTE,
   REFERENCE_STATUS_ROUTE,
 } from './reference-route.ts'
+
+function isPreferredCarrier(host: ElectronBrowserViewHost | undefined): host is ExtensionBrowserViewHost | PreferredBrowserViewHost {
+  return host instanceof ExtensionBrowserViewHost || host instanceof PreferredBrowserViewHost
+}
 
 /**
  * The reference bar as a <script> element, for documents served through the Web guest proxy.
@@ -271,7 +277,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   const unregisterPanel = ctx.browser.registerPanelProvider(async () => {
     const selected = settings.get().browser
     if ((selected.channel === 'edge' || selected.channel === 'chrome') && selected.systemProfile === 'user') {
-      if (!(adoptedCarrier instanceof ExtensionBrowserViewHost) || !referenceProvider) throw new Error('Selected personal-browser extension carrier is unavailable; no sidebar fallback.')
+      if (!isPreferredCarrier(adoptedCarrier) || !referenceProvider) throw new Error('Selected personal-browser carrier is unavailable; no sidebar fallback.')
       return referenceProvider
     }
     if (panelOpening === undefined) {
@@ -407,7 +413,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(host, providerConfig)))
       adoptedCarrier = host
       unregisterTakeover()
-      if (host instanceof ExtensionBrowserViewHost) {
+      if (isPreferredCarrier(host)) {
         const provider = referenceProvider!
         unregisterTakeover = registerCarrierTakeover(ctx.browser, owner => provider.takeoverTargets(owner).map(target => ({
           ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
@@ -429,7 +435,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // process, and dropping it on the floor is how a failed upgrade becomes a leak that only
       // shows up as a stray Electron in the task manager.
       try { host.dispose?.() } catch { /* the fallback below matters more than this */ }
-      if (host instanceof ExtensionBrowserViewHost) {
+      if (isPreferredCarrier(host)) {
         ctx.logger?.warn?.(`dsh-builtin-browser: could not adopt the selected personal-browser extension (${String(error)}); no profile fallback`)
         return
       }
@@ -490,13 +496,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     } else if (!(adoptedCarrier instanceof SidebarOnlyHost)) adopt(requiredSidebar(), 'using only the selected DSH sidebar', choice)
     return
   }
-    if (settings.get().browser.systemProfile === 'user') {
-      adopt(new ExtensionBrowserViewHost(channel), `attach to the paired ${channel} personal profile (extension; background tabs only)`)
-      return
-    }
     const detected = detectBrowser(channel)
     if (detected === undefined) {
-        adopt(new MissingSystemBrowserHost(channel, searchSummary(channel)),
+        const missing = new MissingSystemBrowserHost(channel, searchSummary(channel))
+        adopt(settings.get().browser.systemProfile === 'user' ? new PreferredBrowserViewHost(channel, missing) : missing,
           `the selected ${channel} is not installed — commands will explain how to fix it`)
     } else {
       // Same profile root as settings-store, history-store and desktop-bridge-host: the
@@ -526,14 +529,16 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // The headless mode rides along so a display-less host (systemd, container, SSH-only server)
       // still gets a working browser instead of "exited immediately after launch" — issue #32.
       ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = 'launched-plugin-profile'
-      adopt(new SystemBrowserViewHost(detected, profileDir, [], !persist ? profileDir : undefined,
+      const managed = new SystemBrowserViewHost(detected, profileDir, [], !persist ? profileDir : undefined,
         undefined, settings.get().browser.headless, () => settings.get().ui.quiet,
-        undefined, { managed: true }),
+        undefined, { managed: true })
+      adopt(settings.get().browser.systemProfile === 'user' ? new PreferredBrowserViewHost(channel, managed) : managed,
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
   }
 
   chooseCarrier()
+  void nativeRegistration.ensure().catch(() => {})
 
   // Wired AFTER the chooser exists, because the handler re-runs it: a settings write that changes
   // `browser.channel` is a request to switch carriers, and answering `ok` without switching is the
@@ -596,7 +601,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       }
       const last = getLastOpen()
       const fresh = last !== undefined && Date.now() - last.at <= OPEN_REQUEST_TTL_MS ? last : undefined
-      replyJson(response, 200, { ok: true, surface: readSurfaceForRoute(), open: adoptedCarrier instanceof ExtensionBrowserViewHost ? null : fresh ?? null })
+      replyJson(response, 200, { ok: true, surface: readSurfaceForRoute(), open: isPreferredCarrier(adoptedCarrier) ? null : fresh ?? null })
     }),
   }, 'dsh-builtin-browser: open request slot'))
   // guest 代理由根行注册（见 src/web-guest.ts）：web 上 Electron 行可能被关闭。
@@ -751,14 +756,17 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     if (typeof injectRuntime !== 'function') return
     const deps = {
       report: () => readRuntimeStatus({
+        nativeHostRegistration: () => Object.fromEntries(registrationStatus),
         channel: () => settings.get().browser.channel,
         systemProfile: () => settings.get().browser.systemProfile,
-        extensionConnection: () => adoptedCarrier instanceof ExtensionBrowserViewHost ? {
-          ...adoptedCarrier.connectionStatus(), install: extensionInstallHelp(adoptedCarrier.browser),
+        extensionConnection: () => isPreferredCarrier(adoptedCarrier) ? {
+          ...adoptedCarrier.connectionStatus(), install: extensionInstallHelp(adoptedCarrier.browser), registration: registrationStatus.get(adoptedCarrier.browser),
         } : undefined,
         selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
+          : adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.activeCarrier()
           : adoptedCarrier instanceof ExtensionBrowserViewHost ? 'extension' : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
-        systemConnection: () => adoptedCarrier instanceof SystemBrowserViewHost ? adoptedCarrier.connectionStatus() : undefined,
+        fallbackReason: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallbackReason : undefined,
+        systemConnection: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallback.connectionStatus?.() : adoptedCarrier instanceof SystemBrowserViewHost ? adoptedCarrier.connectionStatus() : undefined,
         hasBinary: hasElectronRuntime,
         provision: provisionSnapshot,
         bridgeError: () => DesktopBridgeViewHost.compatibilityError(),
@@ -783,11 +791,22 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }
     try {
       injectRuntime(['webServer'], (host) => {
+        host.effect(() => host.webServer.register({ kind: 'exact', path: '/dsh-builtin-browser/extension/install', handler: authenticated(ctx, async (request, response) => {
+          if (request.method !== 'POST') { response.writeHead(405); response.end(); return }
+          if (!sameOrigin(request, true)) { response.writeHead(403); response.end(); return }
+          try {
+            const browser = settings.get().browser.channel === 'chrome' ? 'chrome' : 'edge'
+            if (isPreferredCarrier(adoptedCarrier)) await adoptedCarrier.refreshStatus()
+            const connected = isPreferredCarrier(adoptedCarrier) ? adoptedCarrier.connectionStatus().connected : await probeExtension(browser)
+            const result = await installExtension(browser, connected)
+            response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(result))
+          } catch (error) { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ ok: false, detail: String(error) })) }
+        }) }, 'dsh-builtin-browser: install extension'))
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: RUNTIME_STATUS_ROUTE,
           handler: authenticated(ctx, async (request, response) => {
-            if (request.method === 'GET' && adoptedCarrier instanceof ExtensionBrowserViewHost) await adoptedCarrier.refreshStatus()
+            if (request.method === 'GET' && isPreferredCarrier(adoptedCarrier)) await adoptedCarrier.refreshStatus()
             await handleRuntimeStatus(request, response, deps)
           }),
         }, 'dsh-builtin-browser: runtime status'))

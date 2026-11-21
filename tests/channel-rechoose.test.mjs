@@ -50,7 +50,7 @@ test('explicit browser modes outrank a composition sidebar and can switch back w
   const h = carrierHarness(t, { viewHost: supplied })
   assert.equal(h.current, supplied)
   await h.choose('edge', 'user')
-  assert.equal(h.current.constructor.name, 'ExtensionBrowserViewHost')
+  assert.equal(h.current.constructor.name, 'PreferredBrowserViewHost')
   assert.equal(supplied.disposed, false)
   await h.choose('sidebar')
   assert.equal(h.current, supplied)

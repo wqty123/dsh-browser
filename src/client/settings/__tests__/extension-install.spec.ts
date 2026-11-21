@@ -1,15 +1,16 @@
-import { describe, expect, it } from 'vitest'
-import { extensionInstallCommand } from '../panel.ts'
+import { expect, it } from 'vitest'
+import { requestExtensionSetup } from '../panel.ts'
 
-describe('extension install helper', () => {
-  it('quotes Windows paths for PowerShell without putting a token in settings', () => {
-    const command = extensionInstallCommand({ platform: 'win32', node: 'C:\\Program Files\\nodejs\\node.exe', installer: "D:\\User's files\\native-host\\install.mjs", directory: 'D:\\dsh-home\\extension\\edge' }, 'edge')
-    expect(command).toBe("& 'C:\\Program Files\\nodejs\\node.exe' 'D:\\User''s files\\native-host\\install.mjs' --browser edge --extension-id EXTENSION_ID --directory 'D:\\dsh-home\\extension\\edge' --label 'My edge profile'")
-    expect(command).not.toContain('--token')
-  })
+it('Web and Desktop extension setup POST to the plugin without commands, IDs or tokens', async () => {
+  const calls: unknown[][] = []
+  const result = await requestExtensionSetup((async (...args: unknown[]) => {
+    calls.push(args)
+    return { ok: true, json: async () => ({ ok: true, connected: true, detail: '已连接' }) }
+  }) as typeof fetch)
+  expect(calls).toEqual([['/dsh-builtin-browser/extension/install', { method: 'POST', headers: { accept: 'application/json' } }]])
+  expect(result.connected).toBe(true)
+})
 
-  it('quotes POSIX paths without invoking a shell or installing from the UI', () => {
-    expect(extensionInstallCommand({ platform: 'linux', node: '/usr/bin/node', installer: "/home/user's app/install.mjs", directory: '/home/user/.dsh/extension/chrome' }, 'chrome'))
-      .toContain("'/home/user'\\''s app/install.mjs' --browser chrome --extension-id EXTENSION_ID")
-  })
+it('reports server installation errors rather than claiming success', async () => {
+  await expect(requestExtensionSetup((async () => ({ ok: true, json: async () => ({ ok: false, detail: 'Registration refused' }) })) as typeof fetch)).rejects.toThrow('Registration refused')
 })

@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { decoder, send, chunkMessage, Reassembler } from './protocol.mjs'
 import { proof } from './client.mjs'
+import { EXTENSION_ID } from './identity.mjs'
 
 export function saveConfiguration(path, value) {
   const temporary = `${path}.${randomUUID()}.tmp`
@@ -32,7 +33,7 @@ export function pair(path, token, installId) {
 
 export async function serve({ input, output, configPath, origin }) {
   let config = JSON.parse(readFileSync(configPath, 'utf8'))
-  if (!/^chrome-extension:\/\/[a-p]{32}\/$/.test(origin ?? '') || origin !== `chrome-extension://${config.extensionId}/`
+  if (config.disabled || !/^chrome-extension:\/\/[a-p]{32}\/$/.test(origin ?? '') || origin !== `chrome-extension://${config.extensionId}/`
     || !/^[a-f0-9]{64}$/.test(config.secret ?? '') || !['edge', 'chrome'].includes(config.browser)) throw Error('native origin is not allowed')
   let installId, server, controller, endpoint, watcher, stopped = false
   const epoch = randomUUID(), pending = new Map(), peers = new Set(), chunks = new Reassembler()
@@ -63,7 +64,7 @@ export async function serve({ input, output, configPath, origin }) {
     if (String(file) !== 'config.json') return
     try {
       const current = JSON.parse(readFileSync(configPath, 'utf8'))
-      if (current.secret !== config.secret || current.installId !== config.installId) stop()
+      if (current.disabled || current.secret !== config.secret || current.installId !== config.installId) stop()
     } catch { stop() }
   })
   async function listen() {
@@ -103,13 +104,14 @@ export async function serve({ input, output, configPath, origin }) {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(endpoint, resolve) })
     if (stopped) { stop(); return }
     saveConfiguration(join(dirname(configPath), 'relay.json'), { endpoint, epoch })
-    status('connected', `Paired ${config.browser}: ${config.label}`)
+    status('connected', `Connected ${config.browser}: ${config.label}`)
   }
   const frames = decoder(part => {
     void (async () => {
       if (part.type === 'hello') {
         if (installId || part.browser !== config.browser || !/^[a-f0-9-]{36}$/.test(part.installId ?? '')) throw Error('invalid extension identity')
         installId = part.installId
+        if (config.extensionId === EXTENSION_ID) { await listen(); return }
         if (config.installId && config.installId !== installId) { status('not-paired', 'A different browser profile is paired. Re-pair explicitly to replace it.'); return }
         if (config.installId) await listen()
         else status('not-paired', 'Enter the one-time token in extension options.')

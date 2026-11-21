@@ -132,9 +132,9 @@ test('uninstalled and unpaired carrier errors precede navigation/quarantine, wit
 for (const state of ['extension-missing', 'not-paired', 'connected']) test(`runtime extension readiness: ${state}`, () => {
   const report = readRuntimeStatus({ channel: () => 'edge', systemProfile: () => 'user', hasBinary: () => false,
     provision: () => ({ state: 'idle', detail: 'Idle', at: '' }), bridge: () => undefined, endpoint: () => undefined,
-    detectBrowser: () => assert.fail('personal mode must not discover/launch executables'),
+    detectBrowser: () => undefined,
     extensionConnection: () => ({ state, connected: state === 'connected', browser: 'edge', profile: 'Personal', detail: state }) })
-  assert.equal(report.resolvedCarrier, 'extension'); assert.equal(report.controlledProfile, 'user')
+  assert.equal(report.resolvedCarrier, state === 'connected' ? 'extension' : 'cdp'); assert.equal(report.controlledProfile, state === 'connected' ? 'user' : 'plugin')
   assert.equal(report.readiness, state === 'connected' ? 'ready' : 'blocked')
   assert.equal(report.extension.profile, 'Personal')
 })

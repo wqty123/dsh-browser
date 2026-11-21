@@ -21,11 +21,11 @@ export class NativeBrowserClient {
   constructor(directory, browser) { this.directory = directory; this.browser = browser; this.state = 'extension-missing' }
   status() {
     const config = readConfiguration(this.directory)
-    const state = this.#socket && !this.#socket.destroyed && this.#epoch ? 'connected'
-      : config && !config.installId ? 'not-paired' : 'extension-missing'
+    const state = config?.disabled ? 'disabled' : this.#socket && !this.#socket.destroyed && this.#epoch ? 'connected'
+      : config && !config.installId ? 'not-paired' : config ? 'not-connected' : 'extension-missing'
     return { state, connected: state === 'connected', browser: this.browser,
       profile: config?.label, connectionId: config?.installId, epoch: this.#epoch,
-      detail: state === 'connected' ? `Connected to ${this.browser}: ${config.label} (personal profile; background tabs)`
+      detail: state === 'disabled' ? 'Extension access is disabled.' : state === 'connected' ? `Connected to ${this.browser}: ${config.label} (personal profile; background tabs)`
         : state === 'not-paired' ? 'Extension is not paired. Enter the one-time install token in extension options.'
           : 'Extension/native host is missing or disconnected. Install it and connect the selected browser profile.' }
   }
@@ -38,7 +38,7 @@ export class NativeBrowserClient {
   }
   async #connect() {
     const config = readConfiguration(this.directory)
-    if (!config?.installId || !/^[a-f0-9]{64}$/.test(config.secret ?? '') || config.browser !== this.browser) throw Error(this.status().detail)
+    if (config?.disabled || !config?.installId || !/^[a-f0-9]{64}$/.test(config.secret ?? '') || config.browser !== this.browser) throw Error(this.status().detail)
     let endpoint
     try { endpoint = JSON.parse(readFileSync(join(this.directory, 'relay.json'), 'utf8')) } catch { throw Error(this.status().detail) }
     if (typeof endpoint.endpoint !== 'string' || typeof endpoint.epoch !== 'string') throw Error('invalid extension relay descriptor')

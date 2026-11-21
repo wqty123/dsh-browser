@@ -124,7 +124,7 @@ test('authenticated native relay carries chunked debugger responses, refuses una
   const oldProof = proof('b'.repeat(64), challenge.nonce, challenge.epoch, installId)
   await invalid(() => ({ type: 'auth', proof: oldProof }))
   const client = new NativeBrowserClient(directory, 'edge'); t.after(() => client.dispose())
-  assert.equal(client.status().state, 'extension-missing')
+  assert.equal(client.status().state, 'not-connected')
   const result = await client.request({ kind: 'cdp', scope: 's', method: 'Page.captureScreenshot' })
   assert.equal(result.image.length, 600000); assert.equal(client.status().state, 'connected')
   assert.equal(client.status().profile, 'Controlled test profile')

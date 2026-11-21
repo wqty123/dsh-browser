@@ -1,14 +1,13 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>DSH Browser Bridge pairing</title></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>DSH Browser Bridge status</title></head>
 <body>
   <h1>DSH Browser Bridge</h1>
   <p>This explicitly grants DSH control of tabs in this browser profile. Browser debugging warnings remain visible. No extension popup or automatic window activation is used.</p>
-  <p>Install the native host using the DSH settings instructions, then enter its one-time token. The token expires after five minutes. Pair only the profile you intend DSH to use.</p>
+  <p>DSH registers the native host automatically. This extension connects automatically; no token or configuration is needed.</p>
   <p id="identity"></p><pre id="status" role="status"></pre>
-  <form id="pair"><label>One-time pairing token <input id="token" type="password" autocomplete="off" required maxlength="128"></label><button>Pair this profile</button></form>
-  <p><button id="connect" type="button">Connect / resume</button> <button id="disconnect" type="button">Disconnect / revoke this connection</button></p>
-  <p>Disconnect leaves every tab and window open. To revoke pairing permanently, run the native-host installer with --revoke and remove this extension.</p>
+  <p><button id="disconnect" type="button">Disconnect</button></p>
+  <p>Disconnect leaves all tabs open and pauses reconnects. Remove and add the extension again to resume. The native-host --revoke command disables access persistently, including across plugin restarts.</p>
   <p>Quiet-mode limits: the normal debugger infobar cannot be hidden; browser/OS permission prompts, website-initiated downloads and page-created windows cannot be guaranteed invisible. File choosers are intercepted on attached tabs. Never use this mode when absolutely no browser-owned UI is acceptable.</p>
   <script type="module" src="options.mjs"></script>
 </body>

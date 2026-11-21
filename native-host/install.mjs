@@ -1,4 +1,4 @@
-import { mkdirSync, chmodSync, writeFileSync, existsSync, unlinkSync } from 'node:fs'
+import { mkdirSync, chmodSync, writeFileSync, existsSync, unlinkSync, readFileSync, renameSync } from 'node:fs'
 import { join, resolve, dirname, isAbsolute, posix } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { saveConfiguration } from './host.mjs'
 import { readConfiguration } from './client.mjs'
+import { EXTENSION_ID } from './identity.mjs'
 
 const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
 const literal = value => JSON.stringify(value)
@@ -44,7 +45,25 @@ export function secureWindowsDirectory(directory, execute = execFileSync) {
   `], { env: { ...process.env, DSH_NATIVE_DIR: directory }, stdio: 'pipe', windowsHide: true })
 }
 
-export function install({ browser, extensionId, directory, label, register = true, revoke = false }) {
+export function publishLauncher(launcher, source, compile, io = { readFileSync, renameSync, unlinkSync }) {
+  const digest = bytes => createHash('sha256').update(bytes).digest('hex')
+  const sourceHash = digest(source), metadata = `${launcher}.build.json`
+  try {
+    const previous = JSON.parse(io.readFileSync(metadata, 'utf8'))
+    if (previous.sourceHash === sourceHash && previous.binaryHash === digest(io.readFileSync(launcher))) return
+  } catch {}
+  const temporary = `${launcher}.${randomBytes(8).toString('hex')}.exe`
+  try {
+    compile(temporary)
+    const bytes = io.readFileSync(temporary)
+    let identical = false
+    try { identical = bytes.equals(io.readFileSync(launcher)) } catch {}
+    if (!identical) io.renameSync(temporary, launcher)
+    saveConfiguration(metadata, { sourceHash, binaryHash: digest(bytes) })
+  } finally { try { io.unlinkSync(temporary) } catch {} }
+}
+
+export function install({ browser, extensionId = EXTENSION_ID, directory, label, register = true, revoke = false }) {
   if (!['edge', 'chrome'].includes(browser) || !/^[a-p]{32}$/.test(extensionId ?? '') || !isAbsolute(directory ?? '')) throw Error('--browser edge|chrome, --extension-id (32 a-p letters), and an absolute --directory are required')
   directory = resolve(directory)
   mkdirSync(directory, { recursive: true, mode: 0o700 })
@@ -52,14 +71,16 @@ export function install({ browser, extensionId, directory, label, register = tru
   else secureWindowsDirectory(directory)
   const configPath = join(directory, 'config.json'), previous = readConfiguration(directory)
   const token = revoke ? undefined : randomBytes(24).toString('base64url')
-  const config = { browser, extensionId, label: String(label ?? `${browser === 'edge' ? 'Edge' : 'Chrome'} personal profile`).slice(0, 120),
+  let config = { browser, extensionId, label: String(label ?? `${browser === 'edge' ? 'Edge' : 'Chrome'} personal profile`).slice(0, 120),
     secret: randomBytes(32).toString('hex'), ...(revoke ? {} : { pairDigest: createHash('sha256').update(token).digest('hex'), pairExpires: Date.now() + 5 * 60 * 1000 }) }
-  if (previous && (previous.browser !== browser || previous.extensionId !== extensionId)) throw Error('directory belongs to a different browser/extension; use a separate directory')
-  saveConfiguration(configPath, config)
-  try { unlinkSync(join(directory, 'relay.json')) } catch {}
-  if (revoke) return { revoked: true, detail: 'Pairing revoked. Disconnect the extension to release any existing control connection immediately.' }
+  if (previous && (previous.browser !== browser || (previous.extensionId !== extensionId && extensionId !== EXTENSION_ID))) throw Error('directory belongs to a different browser/extension; use a separate directory')
+  if (extensionId === EXTENSION_ID) config = { browser, extensionId, label: config.label,
+    secret: previous?.secret ?? config.secret, installId: EXTENSION_ID, disabled: revoke || previous?.disabled === true }
+  if (JSON.stringify(previous) !== JSON.stringify(config)) saveConfiguration(configPath, config)
+  if (revoke || extensionId !== EXTENSION_ID) { try { unlinkSync(join(directory, 'relay.json')) } catch {} }
+  if (revoke) return { revoked: true, detail: 'Extension access disabled. Disconnect the extension to release any existing control connection immediately.' }
   const name = `com.dsh.browser.${browser}`
-  const launcher = join(directory, process.platform === 'win32' ? 'dsh-browser-native.exe' : 'dsh-browser-native')
+  let launcher = join(directory, process.platform === 'win32' ? 'dsh-browser-native.exe' : 'dsh-browser-native')
   const hostScript = fileURLToPath(new URL('./host.mjs', import.meta.url))
   if (process.platform === 'win32') {
     const source = `using System; using System.Diagnostics; using System.Threading.Tasks;
@@ -77,29 +98,36 @@ export function install({ browser, extensionId, directory, label, register = tru
         }
       }}
     `
-    if (existsSync(launcher)) unlinkSync(launcher)
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    launcher = join(directory, `dsh-browser-native-${createHash('sha256').update(source).digest('hex').slice(0, 24)}.exe`)
+    publishLauncher(launcher, source, temporary => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       '$ErrorActionPreference="Stop"; Add-Type -TypeDefinition $env:DSH_NATIVE_SOURCE -OutputAssembly $env:DSH_NATIVE_EXE -OutputType ConsoleApplication'],
-    { env: { ...process.env, DSH_NATIVE_SOURCE: source, DSH_NATIVE_EXE: launcher }, windowsHide: true, stdio: 'pipe' })
+    { env: { ...process.env, DSH_NATIVE_SOURCE: source, DSH_NATIVE_EXE: temporary }, windowsHide: true, stdio: 'pipe' }))
   } else {
-    writeFileSync(launcher, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(hostScript)} --config ${shellQuote(configPath)} "$@"\n`, { mode: 0o700 })
+    const bytes = `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(hostScript)} --config ${shellQuote(configPath)} "$@"\n`
+    let same = false
+    try { same = readFileSync(launcher, 'utf8') === bytes } catch {}
+    if (!same) {
+      const temporary = `${launcher}.${randomBytes(8).toString('hex')}`
+      try { writeFileSync(temporary, bytes, { mode: 0o700 }); renameSync(temporary, launcher) }
+      finally { try { unlinkSync(temporary) } catch {} }
+    }
     chmodSync(launcher, 0o700)
   }
   const manifestPath = join(directory, `${name}.json`)
-  const manifest = { name, description: 'DSH paired browser bridge', path: launcher, type: 'stdio', allowed_origins: [`chrome-extension://${extensionId}/`] }
+  const manifest = { name, description: 'DSH browser bridge', path: launcher, type: 'stdio', allowed_origins: [`chrome-extension://${extensionId}/`] }
   saveConfiguration(manifestPath, manifest)
   const target = registration(browser, manifestPath)
   if (register) {
     if (target.registry) execFileSync('reg.exe', ['add', target.registry, '/ve', '/t', 'REG_SZ', '/d', manifestPath, '/f', '/reg:64'], { stdio: 'pipe', windowsHide: true })
     else { mkdirSync(dirname(target.file), { recursive: true, mode: 0o700 }); saveConfiguration(target.file, manifest) }
   }
-  return { browser, directory, manifestPath, registration: target, registered: register, token, expiresInSeconds: 300,
+  return { browser, directory, manifestPath, registration: target, registered: register, ...(extensionId === EXTENSION_ID ? {} : { token, expiresInSeconds: 300 }),
     extensionDirectory: fileURLToPath(new URL('../browser-extension/', import.meta.url)),
-    next: 'Enter this one-time token in extension Options in the intended profile. Keep this extracted package and Node installation in place.' }
+    next: extensionId === EXTENSION_ID ? 'The bundled extension connects automatically. Keep this package and Node installation in place.' : 'Enter this one-time token in extension Options in the intended profile. Keep this extracted package and Node installation in place.' }
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  const args = process.argv.slice(2), get = name => args[args.indexOf(name) + 1]
+  const args = process.argv.slice(2), get = name => args.includes(name) ? args[args.indexOf(name) + 1] : undefined
   try {
     const browser = get('--browser')
     const result = install({ browser, extensionId: get('--extension-id'), directory: get('--directory'), label: args.includes('--label') ? get('--label') : undefined,

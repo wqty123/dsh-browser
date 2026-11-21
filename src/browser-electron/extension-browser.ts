@@ -20,7 +20,7 @@ class LazyNativeBrowserClient implements NativeBrowserClient {
   private client?: NativeBrowserClient
   private loading?: Promise<void>
   private disposed = false
-  private detail = 'Install and pair the browser extension/native host.'
+  private detail = 'Optional browser extension is not connected; managed CDP fallback is available.'
   private readonly listeners = new Set<Parameters<NativeBrowserClient['onEvent']>[0]>()
 
   constructor(private readonly directory: string, private readonly browser: 'edge' | 'chrome') {}
@@ -37,7 +37,7 @@ class LazyNativeBrowserClient implements NativeBrowserClient {
       this.client = new NativeBrowserClient(this.directory, this.browser)
       this.client.onEvent(event => { for (const listener of this.listeners) listener(event) })
     } catch (error) {
-      this.detail = `Extension carrier unavailable: ${String(error)}. Reinstall the complete package; no profile fallback.`
+      this.detail = `Extension carrier unavailable: ${String(error)}. Managed CDP fallback is available.`
       throw new Error(this.detail, { cause: error })
     }
   }
@@ -81,7 +81,7 @@ export function extensionInstallHelp(browser: 'edge' | 'chrome') {
 }
 
 export class ExtensionBrowserViewHost implements ElectronBrowserViewHost {
-  readonly referenceOverlayOwner = 'client' as const
+  get referenceOverlayOwner(): 'client' | undefined { return 'client' }
   private readonly views = new Map<string, View>()
   private readonly unsubscribe: () => void
   private disposed = false

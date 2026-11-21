@@ -138,8 +138,9 @@ export const ELECTRON_BROWSER_PROVIDER_ID = 'electron'
  * desktop shell with a real `WebContentsView`; a fake implements it in tests.
  */
 export interface ElectronBrowserViewHost {
-  prepare?(): Promise<void>
+  prepare?(scope?: BrowserSessionId): Promise<void>
   readonly referenceOverlayOwner?: 'client'
+  referenceOverlayOwnerFor?(scope: BrowserSessionId): 'client' | undefined
   retireSession?(scope: BrowserSessionId): Promise<void>
   /**
    * Create a new browser view and return a handle to its webContents-like
@@ -968,6 +969,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     try {
       await this.adoptSidebarPageForReference().catch(() => undefined)
       for (const session of [...this.sessions.values()]) {
+        if (this.host.referenceOverlayOwnerFor?.(session.id) === 'client') continue
         for (const tab of [...session.tabs]) {
           await this.pumpOneTab(session, tab)
           // A tab is never dropped for being unreachable: the page is the
@@ -1204,11 +1206,11 @@ export class ElectronBrowserProvider implements BrowserProvider {
     return Promise.resolve(id)
   }
 
-  private async prepareCarrier(signal?: AbortSignal): Promise<void> {
+  private async prepareCarrier(signal?: AbortSignal, scope?: BrowserSessionId): Promise<void> {
     if (this.host.prepare === undefined) return
     signal?.throwIfAborted()
     try {
-      await withTimeout(this.host.prepare(), 31_000, signal, 'browser: carrier launch timed out before navigating a guest')
+      await withTimeout(this.host.prepare(scope), 31_000, signal, 'browser: carrier launch timed out before navigating a guest')
       this.carrierLaunchError = undefined
     } catch (error) {
       if (!signal?.aborted) this.carrierLaunchError = error
@@ -1247,7 +1249,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   async openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void> {
     try { setLastOpen(request.url, Date.now()) } catch { /* best effort */ }
     const s = this.session(session)
-    await this.prepareCarrier(signal)
+    await this.prepareCarrier(signal, s.id)
     if (request.newTab === true) {
       this.newTab(s)
     }
@@ -1481,7 +1483,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Navigate the active tab's view to a URL, honoring HTTP(S)-only admission. */
   async navigate(session: BrowserSessionId, request: { readonly url: string }, signal?: AbortSignal): Promise<void> {
     const s = this.session(session)
-    await this.prepareCarrier(signal)
+    await this.prepareCarrier(signal, s.id)
     const tab = this.activeTab(s)
     const transaction = this.beginNavigation(tab, signal)
     const { navigation } = transaction

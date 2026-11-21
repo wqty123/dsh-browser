@@ -1,5 +1,5 @@
 export interface ExtensionConnectionStatus {
-  state: 'extension-missing' | 'not-paired' | 'connected'
+  state: 'extension-missing' | 'not-paired' | 'not-connected' | 'connected' | 'disabled'
   connected: boolean
   browser: 'edge' | 'chrome'
   profile?: string

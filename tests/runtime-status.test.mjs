@@ -314,7 +314,7 @@ test('the state vocabulary the panel localizes matches what the host can emit', 
   assert.ok(snapshot, 'the provisioning state union is the one this test enumerates')
   const readiness = /export type Readiness = 'ready' \| 'blocked'/.test(source)
   assert.ok(readiness, 'and so is the readiness union')
-  const carrier = /export type CarrierKind = 'sidebar' \| 'bundled' \| 'system' \| 'extension' \| 'auto'/.test(source)
+  const carrier = /export type CarrierKind = 'sidebar' \| 'bundled' \| 'system' \| 'extension' \| 'cdp' \| 'auto'/.test(source)
   assert.ok(carrier, 'and the carrier union')
 })
 

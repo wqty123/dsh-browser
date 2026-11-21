@@ -14,11 +14,11 @@ export interface LegacyClientModule {
   readonly apply: (ctx: never) => void
 }
 
-export function extensionInstallCommand(install: { platform: string; node: string; installer: string; directory: string }, browser: string): string {
-  const windows = install.platform === 'win32'
-  const quote = (value: string) => windows ? "'" + value.replace(/'/g, "''") + "'" : "'" + value.replace(/'/g, "'\\''") + "'"
-  return (windows ? '& ' : '') + quote(install.node) + ' ' + quote(install.installer)
-    + ' --browser ' + browser + ' --extension-id EXTENSION_ID --directory ' + quote(install.directory) + ' --label ' + quote('My ' + browser + ' profile')
+export async function requestExtensionSetup(fetcher = fetch) {
+  const response = await fetcher('/dsh-builtin-browser/extension/install', { method: 'POST', headers: { accept: 'application/json' } })
+  const result = await response.json()
+  if (!response.ok || !result.ok) throw new Error(result.detail ?? `HTTP ${response.status}`)
+  return result
 }
 
 /**
@@ -110,13 +110,13 @@ const react = require("react")
     "browser.channel": "默认浏览器",
     "browser.systemProfile": "浏览器模式",
     "browser.mode.plugin": "DSH 独立浏览器（默认，保留登录）",
-    "browser.mode.user": "连接当前浏览器（扩展，使用本人登录）",
-    "readiness.carrier.extension": "已配对的浏览器扩展",
-    "extension.title": "安装并配对扩展（一次）",
-    "extension.load": "在要控制的已登录配置中打开下列地址，启用开发者模式，加载下列解压目录并复制扩展 ID：",
-    "extension.install": "在外部 PowerShell / 终端中运行下列命令，将 EXTENSION_ID 替换为刚复制的 ID（不要关闭本人浏览器）：",
-    "extension.pair": "打开扩展选项，点 Connect / resume，将终端的一次性 token 粘贴并在五分钟内点 Pair this profile。然后点「再次检查」。",
-    "extension.quiet": "仅控制此已配对配置；后台标签页，不抢焦点、不移动鼠标，接管只显示 DSH 聊天卡片。调试信息栏仍会出现；网站弹窗、下载与浏览器权限界面有例外。断开只释放调试连接，不关闭标签页。",
+    "browser.mode.user": "优先使用本人浏览器（不可用时使用 DSH 独立浏览器）",
+    "extension.button": "一键安装扩展",
+    "extension.loadHint": "可选：点「加载解压缩的扩展」并选择已打开的文件夹。无需 token 或配置。",
+    "extension.connected": "已连接",
+    "extension.storeHint": "请在商店中安装扩展",
+    "readiness.carrier.extension": "浏览器扩展",
+    "extension.quiet": "扩展使用后台标签页，不抢焦点、不移动鼠标，接管只显示 DSH 聊天卡片。调试信息栏仍会出现；网站弹窗、下载与浏览器权限界面有例外。断开只释放调试连接，不关闭标签页。",
     "browser.sidebar": "DSH 侧栏面板",
     "browser.bundled": "DSH 侧栏（旧版内置选项）",
     "browser.chrome": "本机 Chrome",
@@ -182,6 +182,7 @@ const react = require("react")
     "readiness.carrier.sidebar": "侧栏浏览器",
     "readiness.carrier.bundled": "内置 Electron",
     "readiness.carrier.system": "本机 Chrome / Edge",
+    "readiness.carrier.cdp": "DSH 独立浏览器（CDP）",
     "readiness.carrier.auto": "自动",
     "readiness.state.ready": "可用",
     "readiness.state.blocked": "尚不可用",
@@ -283,13 +284,13 @@ const react = require("react")
     "browser.channel": "Default browser",
     "browser.systemProfile": "Browser mode",
     "browser.mode.plugin": "Separate DSH browser (default, persistent logins)",
-    "browser.mode.user": "Attach to current browser (extension, personal logins)",
-    "readiness.carrier.extension": "Paired browser extension",
-    "extension.title": "Install and pair extension (once)",
-    "extension.load": "In the intended signed-in profile, open this address, enable Developer mode, load the extracted directory below and copy the extension ID:",
-    "extension.install": "Run this command in an external PowerShell / terminal, replacing EXTENSION_ID with that ID. Leave your browser running:",
-    "extension.pair": "Open extension Options, click Connect / resume, paste the terminal's one-time token and click Pair this profile within five minutes. Then click Check again.",
-    "extension.quiet": "Controls only this paired profile, in background tabs: no focus or mouse movement; takeover uses only the DSH chat card. The debugger infobar remains; site popups, downloads and browser permission UI have exceptions. Disconnect detaches only, leaving tabs open.",
+    "browser.mode.user": "Prefer my browser (otherwise use a separate DSH browser)",
+    "extension.button": "Install extension",
+    "extension.loadHint": "Optional: click Load unpacked and select the opened folder. No token or configuration needed.",
+    "extension.connected": "Connected",
+    "extension.storeHint": "Install the extension from the store",
+    "readiness.carrier.extension": "Browser extension",
+    "extension.quiet": "Extension tabs run in the background: no focus or mouse movement; takeover uses only the DSH chat card. The debugger infobar remains; site popups, downloads and browser permission UI have exceptions. Disconnect detaches only, leaving tabs open.",
     "browser.sidebar": "DSH sidebar",
     "browser.bundled": "DSH sidebar (legacy bundled setting)",
     "browser.chrome": "Installed Chrome",
@@ -355,6 +356,7 @@ const react = require("react")
     "readiness.carrier.sidebar": "Sidebar browser",
     "readiness.carrier.bundled": "Bundled Electron",
     "readiness.carrier.system": "Installed Chrome / Edge",
+    "readiness.carrier.cdp": "Separate DSH browser (CDP)",
     "readiness.carrier.auto": "Automatic",
     "readiness.state.ready": "Ready",
     "readiness.state.blocked": "Not ready yet",
@@ -890,6 +892,7 @@ const react = require("react")
     const [bridgeJob, setBridgeJob] = useState(null)
     const [bridgePollVersion, setBridgePollVersion] = useState(0)
     const [bridgeError, setBridgeError] = useState(null)
+    const [extensionMessage, setExtensionMessage] = useState('')
     const bridgePending = useRef(false)
     const bridgeSubmitting = useRef(false)
     const bridgeJobId = useRef(null)
@@ -1057,7 +1060,7 @@ const react = require("react")
       ? t(runtime.systemBrowser.present ? "readiness.status.systemReady" : "readiness.status.systemMissing").replace("{browser}", systemName)
       : t("readiness.status.checkPending")
     const stateLabel = resolvedCarrier === "extension" ? runtime.extension?.detail ?? t("readiness.state.blocked")
-      : resolvedCarrier === "system" ? systemLabel
+      : resolvedCarrier === "system" || resolvedCarrier === "cdp" ? systemLabel
       : resolvedCarrier === "sidebar"
         ? t(runtime.bridge.state === "installed"
           ? runtime.bridge.running === true ? "readiness.status.bridgeReady"
@@ -1068,6 +1071,15 @@ const react = require("react")
           : runtime.electron.state === "preparing" ? "readiness.status.bundledPreparing"
             : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
     const controlsBusy = busy || bridgeBusy !== null || bridgeActive
+    const extensionAction = async () => {
+      setBusy(true)
+      try {
+        const result = await requestExtensionSetup()
+        setExtensionMessage(t(result.connected ? 'extension.connected' : result.store ? 'extension.storeHint' : 'extension.loadHint'))
+      } catch (failure) { setExtensionMessage(String(failure.message ?? failure)) }
+      finally { setBusy(false); void read() }
+    }
+    const extensionButton = h("button", { key: "install-extension", type: "button", style: styles.button, disabled: controlsBusy, onClick: extensionAction }, t('extension.button'))
     const canManageBridge = runtime.bridge.present === true && runtime.bridge.state !== "absent"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
     const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
@@ -1084,22 +1096,20 @@ const react = require("react")
       runtime.extension ? h("div", { key: "extension" }, [
         h("p", { key: "profile", role: "status", style: styles.hint }, [runtime.extension.browser, runtime.extension.profile, runtime.extension.connectionId, runtime.extension.state].filter(Boolean).join(" · ")),
         h("p", { key: "quiet", style: styles.hint }, t("extension.quiet")),
-        runtime.extension.install ? h("details", { key: "install", open: runtime.extension.connected ? undefined : true }, [
-          h("summary", { key: "title" }, t("extension.title")),
-          h("ol", { key: "steps", style: styles.hint }, [
-            h("li", { key: "load" }, [t("extension.load"), h("pre", { key: "paths", style: styles.mono }, runtime.extension.install.extensionsUrl + "\n" + runtime.extension.install.extensionDirectory)]),
-            h("li", { key: "host" }, [t("extension.install"), h("pre", { key: "command", style: { ...styles.mono, whiteSpace: "pre-wrap", overflowWrap: "anywhere" } }, extensionInstallCommand(runtime.extension.install, runtime.extension.browser))]),
-            h("li", { key: "pair" }, t("extension.pair")),
-          ]),
-        ]) : null,
+        h('p', { key: 'hint', style: styles.hint }, t('extension.loadHint')),
       ]) : null,
       canManageBridge ? h("div", { key: "bridge-controls" }, [
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
           h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: bridgeAction }, t("readiness.bridge.reinstall")),
+          extensionButton,
         ]),
         h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
       ]) : null,
+      !canManageBridge ? extensionButton : null,
+      extensionMessage ? h('p', { key: 'extension-message', role: 'status', style: styles.hint }, extensionMessage) : null,
+      h('p', { key: 'active-carrier', role: 'status', style: styles.hint }, [runtime.resolvedCarrier, runtime.controlledProfile, runtime.fallbackReason, runtime.extension?.registration?.detail].filter(Boolean).join(' · ')),
+      ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered).map(([browser, status]) => h('p', { key: 'registration-' + browser, role: 'status', style: styles.hint }, browser + ': ' + status.detail)),
       bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase}`)) : null,
       bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t("readiness.bridge.installedDone")) : null,
       bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
