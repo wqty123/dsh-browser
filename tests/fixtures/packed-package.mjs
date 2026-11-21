@@ -39,6 +39,11 @@ export function packInvocation(packageManager, destination, {
   return { command: 'corepack', args: [packageManager, ...args], shell: false }
 }
 
+export function extractPackedPackage(run, directory, archive) {
+  assert.ok(typeof archive === 'string' && archive.length > 0 && !/[:/\\]/.test(archive), 'archive must be a relative filename')
+  return run('tar', ['-xzf', archive, '-C', 'extracted'], directory)
+}
+
 export function packedPackage(t) {
   const root = mkdtempSync(join(tmpdir(), 'dsh-real-pack-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -69,6 +74,6 @@ export function packedPackage(t) {
   } finally { rmSync(lock, { recursive: true }) }
   const archives = readdirSync(root).filter(name => name.endsWith('.tgz'))
   assert.equal(archives.length, 1)
-  run('tar', ['-xzf', join(root, archives[0]), '-C', extracted])
+  extractPackedPackage(run, root, archives[0])
   return { root, pkg: join(extracted, 'package'), manifest: JSON.parse(readFileSync(join(source, 'package.json'), 'utf8')), run }
 }

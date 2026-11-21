@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { packInvocation } from './fixtures/packed-package.mjs'
+import { extractPackedPackage, packInvocation } from './fixtures/packed-package.mjs'
 
 function cliFixture(t, name = 'pnpm', version = '11.7.0') {
   const root = mkdtempSync(join(tmpdir(), 'dsh pnpm entry '))
@@ -49,5 +49,19 @@ test('empty, missing, shim, wrong-manager and wrong-version entries fall back to
 test('pack rejects missing, unpinned or shell-injected package manager specifications', () => {
   for (const value of [undefined, '', 'pnpm', 'pnpm@latest', 'npm@11.7.0', 'pnpm@11.7.0 & echo unsafe']) {
     assert.throws(() => packInvocation(value, 'output'), /packageManager must pin a pnpm version/)
+  }
+})
+
+test('shared extraction uses archive-directory cwd and relative tar paths, including Windows drives', () => {
+  for (const directory of ['/tmp/archive with spaces', String.raw`C:\Users\test user\archive`, String.raw`D:\archive`]) {
+    const calls = []
+    extractPackedPackage((...args) => calls.push(args), directory, 'dsh-builtin-browser-0.7.42.tgz')
+    assert.deepEqual(calls, [['tar', ['-xzf', 'dsh-builtin-browser-0.7.42.tgz', '-C', 'extracted'], directory]])
+  }
+})
+
+test('shared extraction rejects empty or non-filename archive arguments before invoking tar', () => {
+  for (const archive of [undefined, '', '/tmp/archive.tgz', String.raw`C:\temp\archive.tgz`, 'C:archive.tgz', 'sub/archive.tgz', String.raw`sub\archive.tgz`]) {
+    assert.throws(() => extractPackedPackage(() => assert.fail('tar must not run'), 'directory', archive), /archive must be a relative filename/)
   }
 })
