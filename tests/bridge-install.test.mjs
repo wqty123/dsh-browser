@@ -9,7 +9,43 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { createServer } from 'node:net'
 
-import { bridgeActionArgv, runBridgeAction, waitForBridgeActionCompletion, waitForRestartedBridge } from '../lib/browser-electron/bridge-install.js'
+import { bridgeActionArgv, runBridgeAction, runBridgeReinstall, waitForBridgeActionCompletion, waitForRestartedBridge } from '../lib/browser-electron/bridge-install.js'
+
+test('reinstall removes an installed bridge before adding it, and can run again', async () => {
+  const calls = []
+  let present = true
+  const deps = { absent: () => !present, run: async action => {
+    calls.push(action)
+    present = action === 'install'
+    return { ok: true, code: 0, output: action, command: action }
+  } }
+  for (let i = 0; i < 2; i++) assert.equal((await runBridgeReinstall(deps)).ok, true)
+  assert.deepEqual(calls, ['uninstall', 'install', 'uninstall', 'install'])
+})
+
+test('reinstall treats verified absence as an empty uninstall, not an error', async () => {
+  const calls = []
+  const result = await runBridgeReinstall({ absent: () => true, run: async action => {
+    calls.push(action)
+    return { ok: true, code: 0, output: 'added', command: action }
+  } })
+  assert.equal(result.ok, true)
+  assert.deepEqual(calls, ['install'])
+})
+
+test('reinstall stops on removal, incomplete removal, or addition failure', async () => {
+  for (const failure of ['remove', 'incomplete', 'add']) {
+    let present = true
+    const calls = []
+    await assert.rejects(runBridgeReinstall({ absent: () => !present, run: async action => {
+      calls.push(action)
+      if (action === 'uninstall' && failure !== 'incomplete') present = false
+      return { ok: !(action === 'uninstall' && failure === 'remove') && !(action === 'install' && failure === 'add'),
+        code: 1, output: 'installer diagnostic', command: action }
+    } }), failure === 'add' ? /REINSTALL_ADD_FAILED: installer diagnostic/ : /REINSTALL_REMOVE_FAILED/)
+    assert.deepEqual(calls, failure === 'add' ? ['uninstall', 'install'] : ['uninstall'])
+  }
+})
 
 /** Effects that record the call and answer with a chosen result. */
 function deps(answer = { code: 0, output: 'installed' }) {
@@ -209,7 +245,7 @@ test('panel completion rejects a reported restarted Desktop PID', async () => {
 })
 
 /** A real authenticated loopback protocol peer; it implements no mutating operation. */
-async function bridgePeer({ response = { ok: true, guests: [], sidebar: [] } } = {}) {
+async function bridgePeer({ response = { ok: true, protocol: 4 } } = {}) {
   const requests = []
   const sockets = new Set()
   const token = 'isolated-install-readiness-token'

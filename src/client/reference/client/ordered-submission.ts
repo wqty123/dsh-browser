@@ -9,6 +9,7 @@
  * Both are pure functions; the host selects one through an injected projector
  * interface. This module does NOT import or modify the host `service.ts`.
  */
+import { renderReferenceText } from '../../../reference-text.ts'
 import type {
   OrderedReferenceGroup,
   BrowserReferencePart,
@@ -33,14 +34,15 @@ export interface OrderedProjectionOptions {
 function projectPart(part: BrowserReferencePart): PromptContentPart {
   switch (part.kind) {
     case 'text':
-      return { type: 'text', text: part.text ?? '' }
+      return { type: 'text', text: part.content === undefined ? part.text ?? '' : renderReferenceText(part.content) }
     case 'image':
       // A failed image keeps its slot instead of being silently dropped (B20).
       return part.assetKey === undefined
         ? { type: 'text', text: `[image unavailable: ${part.partId}]` }
         : { type: 'image', assetKey: part.assetKey, partId: part.partId, referenceId: part.referenceId }
     case 'table':
-      return { type: 'table', text: part.text ?? '', partId: part.partId, referenceId: part.referenceId }
+      return { type: 'table', text: part.text ?? '', partId: part.partId, referenceId: part.referenceId,
+        ...(part.table === undefined ? {} : { table: part.table }) }
     default: {
       const exhaustive: never = part.kind
       throw new Error(`unhandled browser reference part kind: ${String(exhaustive)}`)
@@ -61,7 +63,10 @@ export function projectOrderedContent(
   const text = plainTextBlock(input.text)
   if (options.textPosition === 'leading') parts.push(...text)
   for (const group of input.groups) {
-    for (const part of group.parts) parts.push(projectPart(part))
+    for (const part of group.parts) {
+      if (part.kind === 'image' && part.text) parts.push({ type: 'text', text: part.text })
+      parts.push(projectPart(part))
+    }
   }
   if (options.textPosition !== 'leading') parts.push(...text)
   return parts

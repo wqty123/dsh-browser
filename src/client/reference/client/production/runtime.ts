@@ -17,6 +17,8 @@
  * @module dsh-browser-reference/production/runtime
  */
 import type { KeyValueStorage, OrderedReferenceGroup } from '../types.ts'
+import { referenceOwnerKey } from '../../../../reference-owner.ts'
+import type { ReferenceSourcePage } from '../../../browser/iframe-reference.ts'
 import { createDeliveryQueue, type DeliveryQueue } from '../pending-delivery.ts'
 import type { TextPosition } from '../ordered-submission.ts'
 import {
@@ -35,14 +37,14 @@ import {
   buildCardViewModel,
   type CardViewModel,
 } from './reference-card.ts'
-import { encodeBrowserRefUri } from '../scheme.ts'
+import { encodeBrowserRefUri, parseBrowserRefUri } from '../scheme.ts'
 import type { RevealStatus } from '../types.ts'
 import {
   createSubmissionSeam,
-  SOURCE_LINK_LABEL,
   type HostPromptContentPart,
   type SubmissionSeam,
 } from './production-submission.ts'
+import { sourceMarker } from './source-marker.ts'
 import {
   createProductionRevealer,
   type ProductionRevealer,
@@ -119,7 +121,7 @@ export interface DockSnapshot {
   readonly cards: readonly CardViewModel[]
   readonly availability: AvailabilityState
   /** Outcome of the last "回到原文" attempt, so a failure is never silent. */
-  readonly reveal?: { readonly status: string; readonly message: string }
+  readonly reveal?: { readonly status: string; readonly message: string; readonly referenceId?: string }
   /** Why a captured reference has not reached the composer yet, in one sentence. */
   readonly issue?: string
 }
@@ -200,7 +202,7 @@ export interface ProductionRuntime {
   /** Remove a card for good: tombstoned locally and dropped on the plugin side. */
   removeCard(referenceId: string): Promise<void>
   /** Jump the sidebar browser back to a reference's原文 and highlight it. */
-  revealReference(referenceId: string): Promise<void>
+  revealReference(referenceId: string, partId?: string): Promise<RevealStatus>
   /**
    * "Open this URL in the sidebar browser", supplied by the client shell.
    *
@@ -208,11 +210,11 @@ export interface ProductionRuntime {
    * another page (or none at all) the only useful answer is to open the stored
    * URL there and try again, not to explain that it could not.
    */
-  setSourceOpener(opener: ((url: string) => boolean) | undefined): void
+  setSourceOpener(opener: ((url: string, signal: AbortSignal) => Promise<ReferenceSourcePage>) | undefined): void
   /** 一条引用的可展示详情（消息胶囊悬停卡用）。 */
-  referenceDetail(referenceId: string): { readonly title: string; readonly host: string; readonly quote: string; readonly comment?: string } | undefined
+  referenceDetail(referenceId: string): (StoredReflection & { readonly sessionId: string; readonly card: CardViewModel }) | undefined
   /** Activate a canonical `dsh-browser-ref:` URI (reply-side link bridge). */
-  activateUri(uri: string): Promise<void>
+  activateUri(uri: string): Promise<RevealStatus>
   /** Edit the draft's own copy of the user's note (§5); never rewrites the snapshot. */
   setComment(referenceId: string, comment: string): boolean
   /** Production revealer (activate a `dsh-browser-ref:` link). */
@@ -236,7 +238,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
   const admitAsset = options.admitAsset
   const hostInputFor = options.hostInputFor
   const cancellation = options.cancellation ?? createCancellationSource()
-  let current = options.initialSessionId
+  let current = referenceOwnerKey(options.initialSessionId)
   /** 会话切换的订阅者：侧栏页要在 id 到手后立刻收到，而不是只能靠下一次询问。 */
   const sessionListeners = new Set<(sessionId: string) => void>()
   /** 每条引用的插入尝试次数（本运行时实例内有效），用于限次重试。 */
@@ -264,11 +266,11 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
    * the source page: only the outcome the person ends up with is reported.
    */
   let mutedReveal = 0
-  let sourceOpener: ((url: string) => boolean) | undefined
+  let sourceOpener: ((url: string, signal: AbortSignal) => Promise<ReferenceSourcePage>) | undefined
+  let sourceOpening: AbortController | undefined
+  let revealIntent = 0
+  let pendingReveal: { readonly referenceId: string; readonly partId: string | undefined; readonly intent: number; readonly promise: Promise<RevealStatus> } | undefined
   let lastIssue: string | undefined
-  // A failed "回到原文" used to stay on screen forever: the hint was only
-  // rewritten by the NEXT reveal attempt, so recovering the sidebar never
-  // cleared it. Failures now expire; successes are silent immediately.
   const REVEAL_HINT_MS = 5_000
   let revealTimer: ReturnType<typeof setTimeout> | undefined
   const clearRevealHint = (): void => {
@@ -276,12 +278,12 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     clearTimeout(revealTimer)
     revealTimer = undefined
   }
-  const showReveal = (status: string): void => {
+  const showReveal = (status: string, detail?: string, referenceId?: string): void => {
     clearRevealHint()
-    lastReveal = { status, message: REVEAL_MESSAGES[status] ?? '' }
+    lastReveal = { status, message: [REVEAL_MESSAGES[status] ?? '', detail].filter(Boolean).join(' '), ...(referenceId === undefined ? {} : { referenceId }) }
     markDirty()
     publish()
-    if (lastReveal.message === '') return
+    if (lastReveal.message === '' || detail?.includes('桥接版本过旧') || detail?.includes('浏览器桥接不可用')) return
     revealTimer = setTimeout(() => {
       revealTimer = undefined
       lastReveal = undefined
@@ -291,15 +293,13 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     const unref = (revealTimer as unknown as { unref?: () => void }).unref
     if (typeof unref === 'function') unref.call(revealTimer)
   }
-  const activateUri = async (uri: string): Promise<void> => {
-    try {
-      // The revealer reports its own status through `showReveal` (injected as
-      // `report`), so the bridge path and the React source link give the SAME
-      // user-facing feedback. Only a thrown activation needs a fallback.
-      await revealer.activate(uri)
-    } catch {
-      showReveal('unavailable')
-    }
+  const activateUri = async (uri: string): Promise<RevealStatus> => {
+    const parsed = parseBrowserRefUri(uri)
+    if (parsed !== undefined) return revealReference(parsed.referenceId, parsed.partId)
+    revealIntent += 1
+    sourceOpening?.abort()
+    showReveal('unknown-reference')
+    return 'unknown-reference'
   }
 
   // --- wake-on-visible --------------------------------------------------------
@@ -492,44 +492,19 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
    */
   const insertChip = (delivery: DeliveryRecord, sessionId: string): boolean => {
     const host = hostInputFor(sessionId)
-    const snapshot = delivery.snapshot as {
-      readonly source?: { readonly title?: string }
-      readonly parts?: readonly { readonly type?: string; readonly kind?: string; readonly text?: string }[]
-    }
-    const title = snapshot.source?.title
-    // 快照部件的判别字段是 `type`（`TextReferencePart.type === 'text'`），不是 `kind`。
-    const quoteText = (snapshot.parts ?? [])
-      .filter(part => (part.type ?? part.kind) === 'text')
-      .map(part => part.text ?? '').join('\n').trim()
-
-    // 只插入**标记行**，不插入引文正文：
-    //   · 消息里出现整段原文属于信息泄露（用户明确要求只留胶囊）；
-    //   · 标记行让草稿非空，上游发送闸门因此放行（「只有引用也能发」）；
-    //   · 引文内容本身保存在引用快照里，点胶囊可以查看/回到原文。
+    const title = delivery.snapshot.source.title
     const index = (draftStoreFor(sessionId).state().reflections ?? []).length
-    const label = title === undefined || title === ''
-      ? `${SOURCE_LINK_LABEL} ${index}`
-      : `${SOURCE_LINK_LABEL} ${index}：${title}`
-    const marker = `[${label}](${encodeBrowserRefUri({ referenceId: delivery.referenceId })})`
+    const marker = sourceMarker(delivery.referenceId, index - 1, title)
     // 插入需要编辑器里有光标：确认按钮是在侧栏 iframe 里点的，先聚焦编辑器。
     try { host.focusEditor?.() } catch { /* 没有编辑器就交给下面的失败路径 */ }
-    try {
-      if (host.insertText(host.captureInsertion(), marker)) return true
-    } catch {
-      // 文本插入失败时退回下面旧内核的芯片通道。
-    }
-    // 3) 宿主若提供原生引用芯片（旧内核），仍然优先走它。
-    if (typeof host.insertReference !== 'function') return false
-    const quote = quoteText
     const uri = encodeBrowserRefUri({ referenceId: delivery.referenceId })
     try {
-      return host.insertReference({
-        source: 'browser-reference',
-        ref: uri,
-        label: title !== undefined && title !== '' ? title : '网页引用',
-        appearance: 'session',
-        clipboardText: quote === '' ? (title ?? uri) : quote,
-      }, host.captureInsertion())
+      if (host.insertQuote?.(marker)) return true
+      if (host.insertReference?.({
+        source: 'browser-reference', ref: uri, label: title || '网页引用',
+        appearance: 'session', clipboardText: marker,
+      }, host.captureInsertion())) return true
+      return false
     } catch {
       return false
     }
@@ -813,6 +788,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
   // object as `browserReferenceSubmission`, so service.ts can reach it.
   Object.assign(submission, {
     prepare: async (sessionId: string): Promise<void> => {
+      sessionId = referenceOwnerKey(sessionId)
       if (http.consume === undefined) return
       const state = draftStoreFor(sessionId).state()
       const visible = new Set(state.groups.map(group => group.referenceId))
@@ -836,7 +812,8 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     },
   })
 
-  const ownerFor = (referenceId: string): RevealOwner | undefined => {
+  const referenceDetail = (referenceId: string): (StoredReflection & { readonly sessionId: string; readonly card: CardViewModel }) | undefined => {
+    draftStoreFor(current)
     for (const [sessionId, store] of stores) {
       // A reference carried by a sent message lives in the archive, not in the
       // draft: its source link must keep working after the card clears. It may
@@ -847,28 +824,87 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
         ?? store.sentReflection(referenceId)
         ?? store.pendingReflection(referenceId)
       if (reflection === undefined) continue
-      const snapshot = reflection.snapshot
-      return {
-        sessionId: snapshot.owner.sessionId ?? sessionId,
-        browserSessionId: reflection.browserSessionId,
-        label: snapshot.source.title,
-        ...(snapshot.source.frameRoute === undefined ? {} : { frameRoute: snapshot.source.frameRoute }),
-        ...(snapshot.source.frameSelector === undefined ? {} : { frameSelector: snapshot.source.frameSelector }),
-      }
+      const index = store.state().reflections.indexOf(reflection) + 1
+      return { ...reflection, sessionId, card: buildCardViewModel(reflection, assetStoreFor(sessionId), index || 1) }
     }
     return undefined
+  }
+
+  const ownerFor = (referenceId: string): RevealOwner | undefined => {
+    const detail = referenceDetail(referenceId)
+    if (detail === undefined) return undefined
+    const { snapshot } = detail
+    return {
+      sessionId: referenceOwnerKey(snapshot.owner.sessionId ?? detail.sessionId),
+      browserSessionId: detail.browserSessionId,
+      label: snapshot.source.title,
+      ...(snapshot.source.frameRoute === undefined ? {} : { frameRoute: snapshot.source.frameRoute }),
+      ...(snapshot.source.frameSelector === undefined ? {} : { frameSelector: snapshot.source.frameSelector }),
+    }
   }
 
   const revealer = createProductionRevealer({
     http,
     resolveOwner: ownerFor,
     currentSessionId: () => current,
+    onActivate: activateUri,
     // A failed reply-side source link (linkSpec.onActivate) now surfaces the
     // same dock hint as the document-level bridge (B6). A retry in progress
     // stays quiet: intermediate "still on the wrong page" hints would flash
     // while the source page is loading.
     report: status => { if (mutedReveal === 0) showReveal(status) },
   })
+
+  const revealReference = (referenceId: string, partId?: string): Promise<RevealStatus> => {
+    if (!disposed && pendingReveal?.intent === revealIntent && pendingReveal.referenceId === referenceId && pendingReveal.partId === partId) {
+      return pendingReveal.promise
+    }
+    const promise = performReveal(referenceId, partId)
+    const pending = { referenceId, partId, intent: revealIntent, promise }
+    pendingReveal = pending
+    const clear = (): void => { if (pendingReveal === pending) pendingReveal = undefined }
+    void promise.then(clear, clear)
+    return promise
+  }
+
+  const performReveal = async (referenceId: string, partId?: string): Promise<RevealStatus> => {
+    sourceOpening?.abort()
+    const opening = new AbortController()
+    sourceOpening = opening
+    const intent = ++revealIntent
+    const sessionId = current
+    const active = (): boolean => !disposed && intent === revealIntent && current === sessionId
+    const uri = encodeBrowserRefUri({ referenceId, ...(partId === undefined ? {} : { partId }) })
+    const attempt = async (sourcePageId?: string): Promise<RevealStatus> => {
+      if (!active()) return 'superseded'
+      mutedReveal += 1
+      try { return await revealer.activate(uri, { sourcePageId }) }
+      finally { mutedReveal -= 1 }
+    }
+    let status = await attempt()
+    const bridgeFailure = (): string | undefined => {
+      const reason = revealer.lastReason()
+      return reason?.includes('桥接版本过旧') || reason?.includes('浏览器桥接不可用') ? reason : undefined
+    }
+    let sourceFailure: string | undefined
+    try {
+      const url = referenceDetail(referenceId)?.snapshot.source.pageUrl
+      if (active() && bridgeFailure() === undefined && (status === 'session-unavailable' || status === 'page-mismatch' || status === 'unavailable') && url && sourceOpener !== undefined) {
+        const ready = await sourceOpener(url, opening.signal)
+        const detail = referenceDetail(referenceId)
+        if (!active()) return 'superseded'
+        status = ready.reveal !== undefined && detail !== undefined
+          ? await ready.reveal(detail.snapshot, partId, opening.signal)
+          : await attempt(ready.pageId)
+      }
+    } catch (error) {
+      status = 'unavailable'
+      sourceFailure = errorMessage(error)
+    }
+    if (!active()) return 'superseded'
+    showReveal(status, sourceFailure ?? bridgeFailure(), referenceId)
+    return status
+  }
 
   const snapshot = (): DockSnapshot => {
     const availability = availabilityOf(poller.lastError)
@@ -944,7 +980,10 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       publish()
     },
     setSession(sessionId) {
+      sessionId = referenceOwnerKey(sessionId)
       if (disposed || sessionId === current) return
+      sourceOpening?.abort()
+      revealIntent += 1
       clearRevealHint()
       lastReveal = undefined
       lastIssue = undefined
@@ -1001,6 +1040,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       stores.clear()
       assets.clear()
       disposed = true
+      sourceOpening?.abort()
     },
     get disposed() { return disposed },
     poller,
@@ -1039,66 +1079,9 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       if (!store.state().reflections.some(entry => entry.referenceId === referenceId)) return
       removeReferences(current, [referenceId])
     },
-    async revealReference(referenceId) {
-      const uri = encodeBrowserRefUri({ referenceId })
-      const url = snapshot().cards.find(entry => entry.referenceId === referenceId)?.source.pageUrl
-      const attempt = async (navigate: boolean): Promise<RevealStatus> => {
-        mutedReveal += 1
-        try {
-          return await revealer.activate(uri, { navigate })
-        } finally {
-          mutedReveal -= 1
-        }
-      }
-      let status = await attempt(false)
-      // The sidebar is on another page: the plugin owns that page, so it is the
-      // one that can take it to the stored URL.
-      if (status === 'page-mismatch') status = await attempt(true)
-      // No page at all: only the shell can create the sidebar's browser tab.
-      if (status === 'session-unavailable' && url !== undefined && url !== '' && sourceOpener?.(url) === true) {
-        for (const delay of [700, 1100, 1600, 2200, 3000]) {
-          await new Promise(resolve => { setTimeout(resolve, delay) })
-          status = await attempt(false)
-          if (status === 'revealed') break
-          // Still loading elsewhere: keep waiting, but a real answer is final.
-          if (status !== 'page-mismatch' && status !== 'session-unavailable' && status !== 'unavailable') break
-        }
-      }
-      // Web 形态（同源代理）没有浏览器会话，宿主的 reveal 只能回答 session-unavailable。
-      // 这时用引用快照里的原文拼 text-fragment 打开页面，由浏览器原生高亮——这是 web 端
-      // 「点胶囊回原文」唯一可靠的路径。
-      if (status !== 'revealed' && url !== undefined && url !== '') {
-        const owner = ownerFor(referenceId)
-        const stored = owner?.snapshot as { readonly parts?: readonly { readonly type?: string; readonly text?: string }[] } | undefined
-        const quote = (stored?.parts ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join(' ').replace(/\s+/g, ' ').trim()
-        const excerpt = quote.slice(0, 80)
-        const target = excerpt === '' ? url : `${url.split('#')[0]}#:~:text=${encodeURIComponent(excerpt)}`
-        if (sourceOpener?.(target) === true) {
-          showReveal('revealed')
-          return
-        }
-      }
-      showReveal(status)
-    },
+    revealReference,
     setSourceOpener(opener) { sourceOpener = opener },
-    referenceDetail(referenceId) {
-      const owner = ownerFor(referenceId)
-      if (owner === undefined) return undefined
-      const snapshot = owner.snapshot as {
-        readonly source?: { readonly title?: string; readonly pageUrl?: string }
-        readonly parts?: readonly { readonly type?: string; readonly text?: string }[]
-      }
-      const quote = (snapshot.parts ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join('\n').trim()
-      const pageUrl = snapshot.source?.pageUrl ?? ''
-      let host = ''
-      try { host = pageUrl === '' ? '' : new URL(pageUrl).host } catch { host = '' }
-      return {
-        title: snapshot.source?.title ?? (host === '' ? referenceId : host),
-        host,
-        quote,
-        ...(owner.comment === undefined || owner.comment === '' ? {} : { comment: owner.comment }),
-      }
-    },
+    referenceDetail,
     activateUri,
     revealer,
     exportBundle(format, sessionId) {

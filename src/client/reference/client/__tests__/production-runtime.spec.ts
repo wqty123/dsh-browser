@@ -61,6 +61,34 @@ function firstOutcome(report: { outcomes: readonly { intentId: string; outcome: 
 }
 
 describe('createProductionRuntime — prepared delivery full apply (content-level)', () => {
+  it.each(['absent', 'refused', 'throwing'])('never inserts an editable source marker when atomic insertion is %s', async mode => {
+    const { http, runtime, hosts } = harness()
+    const host = hosts['sess-A']!
+    Object.assign(host, { insertQuote: undefined })
+    if (mode !== 'absent') Object.assign(host, { insertQuote: () => {
+      if (mode === 'throwing') throw new Error('editor unavailable')
+      return false
+    } })
+    http.enqueue(deliveriesResponse([makeDelivery({ state: 'acknowledged', sequence: 1 })], 1))
+    await runtime.pollOnce()
+    expect(host.calls).not.toContain('insertText')
+    expect(host.text).toBe('帮我总结这段网页内容')
+    runtime.dispose()
+  })
+
+  it('uses an available atomic reference API when the host has no quote API', async () => {
+    const { http, runtime, hosts } = harness()
+    let inserted: { clipboardText: string } | undefined
+    Object.assign(hosts['sess-A']!, { insertQuote: undefined, insertReference: (ref: { clipboardText: string }) => { inserted = ref; return true } })
+    http.enqueue(deliveriesResponse([makeDelivery({ state: 'acknowledged', sequence: 1 })], 1))
+    await runtime.pollOnce()
+    expect(inserted!.clipboardText).toMatch(/^<dsh-browser-reference /u)
+    expect(inserted!.clipboardText).toContain('uri="dsh-browser-ref:ref-mixed-1"')
+    expect(inserted!.clipboardText).not.toContain(LONG_TEXT)
+    expect(hosts['sess-A']!.calls).not.toContain('insertText')
+    runtime.dispose()
+  })
+
   it('binds every asset, appends the ordered group, then ACKs with a saved draftRev and all hashes', async () => {
     const { http, runtime, hosts } = harness()
     http.enqueue(deliveriesResponse([makeDelivery({ state: 'prepared', sequence: 1 })], 1))
@@ -335,26 +363,29 @@ describe('polling lifecycle', () => {
 })
 
 describe('revealReference — it goes to the source page', () => {
-  async function withCard() {
+  async function withCard(web = false) {
     const { http, runtime } = harness()
-    http.enqueue(deliveriesResponse([makeDelivery({ state: 'prepared', sequence: 1 })], 1))
+    const delivery = makeDelivery({ state: 'prepared', sequence: 1 })
+    http.enqueue(deliveriesResponse([{ ...delivery, snapshot: { ...delivery.snapshot,
+      owner: web ? { sessionId: 'sess-A', sourcePageId: 'iframe:closed' } : delivery.snapshot.owner,
+    } }], 1))
     await runtime.pollOnce()
     return { http, runtime, card: runtime.cards()[0]! }
   }
 
-  it('asks the plugin to navigate its page to the source, then locates the quote', async () => {
+  it('opens and acknowledges the source before locating a mismatched page', async () => {
     const { http, runtime, card } = await withCard()
     http.revealOutcome = { ok: true, status: 'page-mismatch' }
-    const seen: (boolean | undefined)[] = []
+    const seen: (string | undefined)[] = []
     const original = http.reveal.bind(http)
-    http.reveal = async (referenceId, partId, navigate) => {
-      seen.push(navigate)
-      // The navigating call is the one that lands on the page.
-      if (navigate === true) http.revealOutcome = { ok: true, status: 'revealed' }
+    http.reveal = async (referenceId, partId, navigate, sourcePageId) => {
+      seen.push(sourcePageId)
+      if (sourcePageId === '42') http.revealOutcome = { ok: true, status: 'revealed' }
       return await original(referenceId, partId, navigate)
     }
+    runtime.setSourceOpener(async () => ({ pageId: '42' }))
     await runtime.revealReference(card.referenceId)
-    expect(seen).toEqual([false, true])
+    expect(seen).toEqual([undefined, '42'])
     // Success is silent: the person is looking at the source, not at a toast.
     expect(runtime.snapshot().reveal).toBeUndefined()
   })
@@ -363,24 +394,111 @@ describe('revealReference — it goes to the source page', () => {
     const { http, runtime, card } = await withCard()
     http.revealOutcome = { ok: true, status: 'session-unavailable' }
     const opened: string[] = []
-    runtime.setSourceOpener((url) => {
+    runtime.setSourceOpener(async (url) => {
       opened.push(url)
       // Stands for the page finishing its load: the next attempt locates it.
       http.revealOutcome = { ok: true, status: 'revealed' }
-      return true
+      return { pageId: '42' }
     })
     await runtime.revealReference(card.referenceId)
     expect(opened).toEqual([card.source.pageUrl])
-    expect(http.revealCalls.length).toBeGreaterThanOrEqual(2)
+    expect(http.revealCalls.length).toBe(2)
     expect(runtime.snapshot().reveal).toBeUndefined()
   })
 
   it('keeps the specific reason when the host cannot open a page', async () => {
     const { http, runtime, card } = await withCard()
     http.revealOutcome = { ok: true, status: 'session-unavailable' }
-    runtime.setSourceOpener(() => false)
+    runtime.setSourceOpener(async () => { throw new Error('sidebar tab API is unavailable') })
     await runtime.revealReference(card.referenceId)
-    expect(runtime.snapshot().reveal?.status).toBe('session-unavailable')
-    expect(runtime.snapshot().reveal?.message).toContain('标签页')
+    expect(runtime.snapshot().reveal?.status).toBe('unavailable')
+    expect(runtime.snapshot().reveal?.message).toContain('sidebar tab API is unavailable')
+  })
+
+  it('shows bridge skew from a native reveal retry instead of hiding the server note', async () => {
+    const { http, runtime, card } = await withCard()
+    http.revealOutcome = { ok: true, status: 'unavailable' }
+    runtime.setSourceOpener(async () => {
+      http.revealOutcome = { ok: true, status: 'unavailable', note: '桥接版本过旧，请点击 卸载并重装' }
+      return { pageId: '2' }
+    })
+    await expect(runtime.revealReference(card.referenceId)).resolves.toBe('unavailable')
+    expect(http.revealCalls).toHaveLength(2)
+    expect(runtime.snapshot().reveal?.message).toContain('桥接版本过旧，请点击 卸载并重装')
+  })
+
+  it('does not navigate or retry when the initial reveal identifies bridge skew', async () => {
+    const { http, runtime, card } = await withCard()
+    http.revealOutcome = { ok: true, status: 'unavailable', note: '桥接版本过旧，请点击 卸载并重装' }
+    runtime.setSourceOpener(async () => { throw new Error('must not open a source') })
+    await runtime.revealReference(card.referenceId)
+    expect(http.revealCalls).toHaveLength(1)
+    expect(runtime.snapshot().reveal?.message).toContain('桥接版本过旧，请点击 卸载并重装')
+  })
+
+  it.each(['code', 'note', 'reason'] as const)('shows a missing bridge package from reveal %s without navigating', async field => {
+    const { http, runtime, card } = await withCard()
+    http.revealOutcome = { ok: true, status: 'unavailable', [field]: 'DSH_BRIDGE_PACKAGE_UNAVAILABLE' }
+    runtime.setSourceOpener(async () => { throw new Error('must not open a source') })
+    await expect(runtime.revealReference(card.referenceId)).resolves.toBe('unavailable')
+    expect(http.revealCalls).toHaveLength(1)
+    expect(runtime.snapshot().reveal?.message).toContain('浏览器桥接不可用，请点击 卸载并重装')
+  })
+
+  it.each([
+    ['BROWSER_BRIDGE_OUTDATED', '桥接版本过旧，请点击 卸载并重装'],
+    ['BROWSER_NATIVE_SURFACE_UNAVAILABLE', '浏览器桥接不可用（原生侧栏未就绪），请打开 Desktop 浏览器侧栏后重试'],
+  ])('shows %s from reveal without navigating', async (code, message) => {
+    const { http, runtime, card } = await withCard()
+    http.revealOutcome = { ok: false, code }
+    runtime.setSourceOpener(async () => { throw new Error('must not open a source') })
+    await expect(runtime.revealReference(card.referenceId)).resolves.toBe('unavailable')
+    expect(http.revealCalls).toHaveLength(1)
+    expect(runtime.snapshot().reveal?.message).toContain(message)
+  })
+
+  it('shows a missing bridge package after source binding is retried', async () => {
+    const { http, runtime, card } = await withCard()
+    http.revealOutcome = { ok: true, status: 'unavailable' }
+    runtime.setSourceOpener(async () => {
+      http.revealOutcome = { ok: true, status: 'unavailable', note: '浏览器桥接不可用，请点击 卸载并重装' }
+      return { pageId: '2' }
+    })
+    await runtime.revealReference(card.referenceId)
+    expect(http.revealCalls).toHaveLength(2)
+    expect(runtime.snapshot().reveal?.message).toContain('浏览器桥接不可用，请点击 卸载并重装')
+  })
+
+  it('maps a loader exception thrown by the reveal transport to the reinstall error', async () => {
+    const { http, runtime, card } = await withCard()
+    http.reveal = async () => { throw Object.assign(new Error('package unavailable'), { code: 'DSH_BRIDGE_PACKAGE_UNAVAILABLE' }) }
+    await runtime.revealReference(card.referenceId)
+    expect(runtime.snapshot().reveal?.message).toContain('浏览器桥接不可用，请点击 卸载并重装')
+  })
+
+  it.each(['GUEST_DOCUMENT_IDENTITY_UNAVAILABLE', 'GUEST_REFERENCE_IDENTITY_MISMATCH', 'GUEST_REFERENCE_TIMEOUT', 'GUEST_SOURCE_TIMEOUT'])(
+    'shows the source-channel failure %s instead of retaining page-mismatch or hanging', async reason => {
+      const { http, runtime, card } = await withCard()
+      http.revealOutcome = { ok: true, status: 'page-mismatch' }
+      runtime.setSourceOpener(async () => ({ pageId: 'iframe:owned', reveal: async () => { throw new Error(reason) } }))
+      await expect(runtime.revealReference(card.referenceId)).resolves.toBe('unavailable')
+      expect(runtime.snapshot().reveal).toMatchObject({ status: 'unavailable', message: expect.stringContaining(reason) })
+    },
+  )
+
+  it.each([false, true])('uses the acknowledged Web source channel instead of retrying native reveal (expired Web source: %s)', async web => {
+    const { http, runtime, card } = await withCard(web)
+    http.revealOutcome = { ok: true, status: web ? 'unavailable' : 'session-unavailable' }
+    let highlighted = false
+    runtime.setSourceOpener(async () => ({ pageId: 'iframe:owned', reveal: async (snapshot, partId, signal) => {
+      expect(snapshot.referenceId).toBe(card.referenceId)
+      expect(partId).toBeUndefined()
+      expect(signal.aborted).toBe(false)
+      highlighted = true
+      return 'revealed'
+    } }))
+    expect(await runtime.revealReference(card.referenceId)).toBe('revealed')
+    expect(highlighted).toBe(true)
+    expect(http.revealCalls).toHaveLength(1)
   })
 })

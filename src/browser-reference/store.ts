@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Persistent reference store: append-only JSONL beside the browser profile, so
  * a reference survives the browser process, the page, and a DSH restart.
@@ -10,6 +11,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { referenceOwnerKey } from '../reference-owner.ts'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { writeFileAtomic } from '../browser-electron/settings-store.ts'
@@ -28,7 +30,7 @@ const PRUNE_SLACK = 200
 
 /** Absolute path of the reference file, beside the browser profile. */
 export function referenceStorePath(): string {
-  return join(dshHome(), 'dsh-builtin-browser-host', 'references.jsonl')
+  return join(dshHome(), BROWSER_PROFILE_DIR, 'references.jsonl')
 }
 
 /** Canonical JSON: sorted keys, so hashing never depends on construction order. */
@@ -149,7 +151,7 @@ export class ReferenceStore {
    */
   list(filter: { readonly sessionId?: string; readonly pageUrl?: string; readonly limit?: number } = {}): BrowserReference[] {
     let records = readRecords(this.path)
-    if (filter.sessionId !== undefined) records = records.filter(record => record.owner.sessionId === filter.sessionId)
+    if (filter.sessionId !== undefined) records = records.filter(record => referenceOwnerKey(record.owner.sessionId ?? '') === referenceOwnerKey(filter.sessionId!))
     if (filter.pageUrl !== undefined) records = records.filter(record => record.source.pageUrl === filter.pageUrl)
     const limit = filter.limit
     return limit !== undefined && limit > 0 ? records.slice(-limit) : records

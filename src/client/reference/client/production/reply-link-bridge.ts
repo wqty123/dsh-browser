@@ -24,8 +24,7 @@ export interface ReplyLinkBridgeOptions {
   readonly isAvailable: (uri: string) => boolean
   /** Primary activation; the runtime decides the outcome and shows feedback. */
   readonly activate: (uri: string) => void
-  /** 悬停时要展示的详情（标题/域名/原文/评论）；缺省则不显示卡片。 */
-  readonly cardFor?: (uri: string) => Promise<{ readonly title: string; readonly host: string; readonly quote: string; readonly comment?: string } | undefined>
+  readonly mountCard?: (uri: string, anchor: HTMLElement) => (() => void) | undefined
 }
 
 export interface ReplyLinkBridge {
@@ -121,75 +120,38 @@ export function installReplyLinkBridge(options: ReplyLinkBridgeOptions): ReplyLi
     options.activate(uri)
   }
 
-  // —— 悬停详情卡（消息里的引用胶囊）——
-  let card: HTMLElement | undefined
-  let hideTimer: ReturnType<typeof setTimeout> | undefined
-  const hideCard = (): void => {
-    if (hideTimer !== undefined) { clearTimeout(hideTimer); hideTimer = undefined }
-    card?.remove()
-    card = undefined
-  }
-  const scheduleHide = (): void => {
-    if (hideTimer !== undefined) clearTimeout(hideTimer)
-    hideTimer = setTimeout(hideCard, 160)
-  }
-  const showCard = async (anchor: Element): Promise<void> => {
-    if (options.cardFor === undefined) return
-    const uri = anchor.getAttribute('href') ?? ''
-    const data = await options.cardFor(uri).catch(() => undefined)
-    if (data === undefined) return
-    hideCard()
-    const panel = doc.createElement('div')
-    panel.className = 'dsh-browser-ref-card'
-    panel.setAttribute('role', 'dialog')
-    const title = doc.createElement('div')
-    title.className = 'dsh-browser-ref-card-title'
-    title.textContent = data.title
-    const host = doc.createElement('div')
-    host.className = 'dsh-browser-ref-card-host'
-    host.textContent = data.host
-    const quote = doc.createElement('div')
-    quote.className = 'dsh-browser-ref-card-quote'
-    quote.textContent = data.quote
-    panel.append(title, host, quote)
-    if (data.comment !== undefined && data.comment !== '') {
-      const comment = doc.createElement('div')
-      comment.className = 'dsh-browser-ref-card-comment'
-      comment.textContent = data.comment
-      panel.append(comment)
-    }
-    const go = doc.createElement('button')
-    go.type = 'button'
-    go.className = 'dsh-browser-ref-card-go'
-    go.textContent = '回到原文'
-    go.addEventListener('click', (event) => { event.preventDefault(); options.activate(uri); hideCard() })
-    panel.append(go)
-    panel.addEventListener('mouseenter', () => { if (hideTimer !== undefined) { clearTimeout(hideTimer); hideTimer = undefined } })
-    panel.addEventListener('mouseleave', scheduleHide)
-    const box = anchor.getBoundingClientRect()
-    panel.style.left = `${Math.max(8, box.left)}px`
-    panel.style.top = `${Math.min(window.innerHeight - 200, box.bottom + 8)}px`
-    doc.body.append(panel)
-    card = panel
+  let activeAnchor: Element | undefined
+  let unmountCard: (() => void) | undefined
+  const clearCard = (): void => {
+    const unmount = unmountCard
+    activeAnchor = undefined
+    unmountCard = undefined
+    unmount?.()
   }
   const onOver = (event: Event): void => {
     const target = event.target as Element | null
     const anchor = target && typeof (target as ClosestElement).closest === 'function'
       ? (target as ClosestElement).closest?.(REPLY_LINK_SELECTOR) ?? null
       : null
-    if (anchor === null) return
-    void showCard(anchor)
+    if (anchor === null || anchor === activeAnchor) return
+    clearCard()
+    activeAnchor = anchor
+    unmountCard = options.mountCard?.(anchor.getAttribute('href') ?? '', anchor as HTMLElement)
   }
-  const onOut = (event: Event): void => {
-    const target = event.target as Element | null
-    const anchor = target && typeof (target as ClosestElement).closest === 'function'
-      ? (target as ClosestElement).closest?.(REPLY_LINK_SELECTOR) ?? null
-      : null
-    if (anchor === null) return
-    scheduleHide()
+  const onKeyDown = (event: Event): void => {
+    const typed = event as KeyboardEvent
+    if (typed.defaultPrevented || (typed.key !== 'Enter' && typed.key !== ' ')) return
+    const anchor = (typed.target as Element | null)?.closest?.(REPLY_LINK_SELECTOR)
+    if (anchor == null) return
+    typed.preventDefault()
+    const uri = anchor.getAttribute('href') ?? ''
+    if (typed.ctrlKey || typed.metaKey || typed.shiftKey || typed.altKey || parseBrowserRefUri(uri) === undefined) return
+    typed.stopPropagation()
+    options.activate(uri)
   }
   doc.addEventListener('pointerover', onOver, true)
-  doc.addEventListener('pointerout', onOut, true)
+  doc.addEventListener('focusin', onOver, true)
+  doc.addEventListener('keydown', onKeyDown, true)
 
   doc.addEventListener('click', onClick, true)
   doc.addEventListener('auxclick', onClick, true)
@@ -198,12 +160,14 @@ export function installReplyLinkBridge(options: ReplyLinkBridgeOptions): ReplyLi
   const observer = typeof MutationObserver === 'undefined'
     ? undefined
     : new MutationObserver((records) => {
+      if (activeAnchor !== undefined && !activeAnchor.isConnected) clearCard()
       for (const record of records) {
         // Streamed rendering assigns `href` AFTER the anchor already exists in
         // the DOM. An attribute record (filtered to href) is the only way to
         // see that; childList alone never fires for a late attribute write.
         if (record.type === 'attributes') {
           const target = record.target
+          if (target === activeAnchor) clearCard()
           if (target.nodeType === 1) {
             const element = target as Element & ClosestElement
             if (typeof element.matches === 'function' && element.matches(REPLY_LINK_SELECTOR)) {
@@ -249,8 +213,9 @@ export function installReplyLinkBridge(options: ReplyLinkBridgeOptions): ReplyLi
       doc.removeEventListener('click', onClick, true)
       doc.removeEventListener('auxclick', onClick, true)
       doc.removeEventListener('pointerover', onOver, true)
-      doc.removeEventListener('pointerout', onOut, true)
-      hideCard()
+      doc.removeEventListener('focusin', onOver, true)
+      doc.removeEventListener('keydown', onKeyDown, true)
+      clearCard()
       observer?.disconnect()
     },
   }

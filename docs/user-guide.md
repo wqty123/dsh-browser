@@ -3,9 +3,8 @@
 ## 环境要求
 
 - DeepSeek Harness(dsh),已安装对应 profile(`web` / `desktop` 等)
-- **Electron 运行时**(必装依赖,随插件自动安装):
-  - **DSH Desktop**:侧栏可驱动时使用外壳的页面;自托管回退使用插件的 electron。打包宿主 exe(`DSH Desktop.exe`)**不能作为自托管运行时复用**——打包应用无法按脚本参数拉起,误用会秒退(issue #6);开发模式的**裸** Electron 宿主仍可复用;
-  - **纯 `dsh web` 自托管**:使用随插件安装的 electron 包。0.4.16 声明 `^44.10.0`(即 `>=44.10.0 <45`),锁文件解析到 `44.10.0`;本插件在获准执行安装脚本时准备二进制,需网络,详见下节。
+- **DSH Desktop**：需要宿主提供可驱动的侧栏。插件不依赖独立 Electron 包，也不打开独立窗口作为回退。
+- **Web**：侧栏使用隔离 iframe；无法提供的原生操作会明确报能力错误。
 
 ## 安装
 
@@ -68,13 +67,13 @@ node node_modules/dsh-builtin-browser/desktop-bridge/install.mjs "<DSH Desktop �
 
 **DSH rc.5 使用 pnpm 11.7 的 `strict-dep-builds`。** 本插件不再声明 `postinstall`,所以正常安装不会出现构建脚本审批提示;若仍有别的包需要审批,请在宿主原生插件管理器中审阅。插件不会自行改写 `allowBuilds`。
 
-需要在安装阶段就把运行时准备好(离线部署、CI 镜像),或要手工重试下载时,进入**安装本插件的 profile 目录**(通常为 `$DSH_HOME/profiles/web` 或 `$DSH_HOME/profiles/desktop`),运行本插件已经安装的本地命令:
+侧栏无需独立 Electron。仅供使用旧版外部宿主接口的操作者：在插件 profile / generation 以外的目录自行安装运行时，例如 `npm install --prefix "$HOME/dsh-browser-runtime" --ignore-scripts electron@44.10.0`。再显式选择该包准备二进制：
 
 ```sh
-npx --no dsh-browser-install-electron
+DSH_BROWSER_ELECTRON_PACKAGE="$HOME/dsh-browser-runtime/node_modules/electron" npx --no dsh-browser-install-electron
 ```
 
-`--no` 用于拒绝临时下载缺失命令;命令不存在时先检查 profile 与插件安装,不要改用同名第三方包。该命令遵守 `ELECTRON_SKIP_BINARY_DOWNLOAD`:若之前有意设置该变量,需要下载时先撤销跳过设置,否则就绪状态会显示「已跳过」。离线部署可保留跳过设置并预装合适的裸 Electron,通过 `ELECTRON_PATH` 指向它。只有明确知道本插件所依赖 electron 包目录时,才可改用 `node "<已安装的 electron 包目录>/install.js"`。
+`--no` 拒绝临时下载缺失命令。`DSH_BROWSER_ELECTRON_PACKAGE` 必须是绝对路径；命令不解析插件依赖，也不修改 generation。它遵守 `ELECTRON_SKIP_BINARY_DOWNLOAD`。外部接口可通过 `ELECTRON_PATH` 显式使用准备好的裸 Electron 二进制；这不会启用独立窗口回退。
 
 ## 配置
 
@@ -170,12 +169,12 @@ npx --no dsh-browser-install-electron
 ## FAQ
 
 **Q:纯 `dsh web` 能用吗?**
-能。插件自托管:自己拉起 Electron 窗口,无需桌面外壳。
+能显示隔离 iframe 侧栏；需要原生宿主的工具会明确报能力错误，不会自行拉起 Electron 窗口。
 
 **Q:找不到 Electron?**
 插件按顺序自动定位:① `ELECTRON_PATH` 环境变量(显式覆盖,优先于一切自动发现)→ ② 随插件安装的 electron 包(纯文件系统探测,不触发 44+ 懒下载)→ ③ DSH 锚点(profile / 全局 prefix 中单独安装的 electron)中版本最新者 → ④ 当前进程就是**裸** Electron(dev 模式)时复用宿主二进制 → ⑤ 进程祖先树中的裸 Electron 二进制。**打包应用不参与复用**:旁有 `resources/app.asar` 的可执行文件(如 DSH Desktop.exe)无法按脚本参数拉起,spawn 会启动应用本体并秒退(单实例锁)——一律跳过。
 
-DSH Desktop 上②命中即可用;dev 模式宿主仍可走④复用。插件在运行时只探测现有文件,不会在 DSH 启动时隐式下载。0.4.16 的安装脚本通常提前准备二进制,但脚本批准、网络、`--ignore-scripts` 与下载跳过设置都可能影响结果。缺失时按[准备 Electron 二进制](#准备-electron-二进制)在正确 profile 执行 `npx --no dsh-browser-install-electron`。必要时可把 `ELECTRON_PATH` 指向已核验版本的裸 Electron 二进制,不能指向 `DSH Desktop.exe`。
+以上探测仅供旧外部接口，不是侧栏的就绪条件。插件不再随附 Electron 依赖；默认侧栏不会触发独立运行时准备或启动。不能把 `ELECTRON_PATH` 指向 `DSH Desktop.exe`。
 
 **Q:截图失败或挂起?**
 先核对实际使用的 Electron 版本和 `ELECTRON_PATH`。0.4.16 依赖为 `^44.10.0`;旧覆盖仍可能选中旧内核,安全最低阈值为 `44.9.1`。自托管截图优先走原生 `capturePage`,多视图/窗口未激活时自动兜底到 CDP。
@@ -231,7 +230,7 @@ DSH Desktop 上②命中即可用;dev 模式宿主仍可走④复用。插件在
 1. 先保存正在进行的任务并关闭相关浏览器。备份实际 `$DSH_HOME` 下的对应 profile 和 `dsh-builtin-browser-host/`(设置、历史与浏览器登录数据)。若使用侧栏 bridge,还要关闭 DSH Desktop 并备份其安装目录的 `resources/`。
 2. 按下节对实际使用的 `web` 或 `desktop` profile **先移除插件、再安装目标版本**。版本发布后目标版本填 `0.4.16`;测试本地候选包时,`add` 后传入已提供的 `.tgz` 绝对路径。按宿主提示批准构建脚本;脚本被跳过或二进制缺失时按上方说明手动准备。这里移除的是 profile 中的插件,不涉及卸载 DSH Desktop。
 3. 检查启动 DSH 的环境中的 `ELECTRON_PATH`。它是最高优先级的显式覆盖,**旧路径仍存在就会盖过新版插件依赖**。需要自托管时,清除不再使用的覆盖或改指向已核验的裸 Electron `44.10.0` 等 `44.x` 二进制(安全最低阈值为 `44.9.1`);环境变量改变后重启 DSH 进程。
-4. 使用侧栏时,从**新版插件目录**运行下节的 bridge 安装脚本并重启桌面端。插件更新不会更新外壳或外壳内 bridge;外壳升级也不会更新 profile 中的插件。外壳缺少可驱动的 `<webview>` 时仍回退自托管。
+4. 当前默认载体为 `sidebar`，旧值 `bundled` / `auto` 也是仅侧栏的兼容别名。宿主缺少可驱动的侧栏/webview API 时返回能力错误，不再回退自托管，也不会自动选择 Chrome / Edge。禁止修改 DSH 上游的部署不要运行旧 bridge 安装/修复脚本；需要宿主正式提供载体能力。
 5. 重启对应宿主后,让 agent 打开测试页、列出本任务标签并保存一张截图,确认载体、页面归属与保存路径符合预期。原有设置与数据通常保留;先保留备份,再继续正式任务。
 
 本次未扩展服务器上的内置 Electron 无头能力。`browser.headless` 与 `cookies.persist` 仍只控制本机 Chrome / Edge,详见[已知限制](limitations.md)。

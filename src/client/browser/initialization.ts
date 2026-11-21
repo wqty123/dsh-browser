@@ -89,29 +89,83 @@ export interface BrowserInitializationJournal {
   dispose(): void
 }
 
-/** Exact read capability for a caller observing its own pending navigation. */
+/** Ready document observed in the live frame, independent of its last requested URL. */
+export interface BrowserObservedPage {
+  readonly url: string
+  readonly guestId?: string
+}
+
 export interface BrowserInitializationReader {
   readonly protocolVersion: 1
-  read(query: { readonly sessionId: string; readonly tabId: TabId; readonly url: string; readonly requestId?: string }): BrowserInitReceipt | undefined
+  navigate?(query: { readonly sessionId: string; readonly tabId: TabId; readonly url: string }): boolean
+  current(query: { readonly sessionId: string; readonly tabId: TabId }): BrowserObservedPage | undefined
+  read(query: { readonly sessionId: string; readonly tabId: TabId; readonly url: string; readonly requestId?: string; readonly afterRequestId?: string }): BrowserInitReceipt | undefined
+  wait(query: { readonly sessionId: string; readonly tabId: TabId; readonly url: string; readonly requestId?: string; readonly afterRequestId?: string }, signal: AbortSignal): Promise<BrowserInitReceipt>
 }
 
 /** Scope reads to a Session/tab and the requested document before exposing a receipt. */
 export function createBrowserInitializationReader(
   lookup: (sessionId: string, tabId: TabId) => BrowserInitReceipt | undefined,
+  subscribe?: (listener: () => void) => () => void,
+  observe?: (sessionId: string, tabId: TabId) => BrowserObservedPage | undefined,
+  navigate?: (sessionId: string, tabId: TabId, url: string) => boolean,
 ): BrowserInitializationReader {
   const canonical = (value: string): string => {
     try { return new URL(value).href } catch { return value }
   }
-  return {
+  const reader: BrowserInitializationReader = {
     protocolVersion: 1,
+    ...(navigate === undefined ? {} : { navigate: (query: { readonly sessionId: string; readonly tabId: TabId; readonly url: string }) => navigate(query.sessionId, query.tabId, query.url) }),
+    current: query => observe?.(query.sessionId, query.tabId),
     read(query) {
       const receipt = lookup(query.sessionId, query.tabId)
       if (receipt?.sessionId !== query.sessionId || receipt.tabId !== query.tabId
         || canonical(receipt.url) !== canonical(query.url)
-        || (query.requestId !== undefined && receipt.requestId !== query.requestId)) return undefined
+        || (query.requestId !== undefined && receipt.requestId !== query.requestId)
+        || receipt.requestId === query.afterRequestId) return undefined
       return receipt
     },
+    wait(query, signal) {
+      if (subscribe === undefined) return Promise.reject(new Error('initialization subscriptions unavailable'))
+      return new Promise((resolve, reject) => {
+        let done = false
+        let requestId = query.requestId
+        let unsubscribe = (): void => {}
+        const finish = (error?: Error, receipt?: BrowserInitReceipt): void => {
+          if (done) return
+          done = true
+          unsubscribe()
+          signal.removeEventListener('abort', abort)
+          if (error !== undefined) reject(error)
+          else resolve(receipt!)
+        }
+        const abort = (): void => finish(signal.reason ?? new Error('source initialization aborted'))
+        const check = (): void => {
+          if (signal.aborted) { abort(); return }
+          const latest = lookup(query.sessionId, query.tabId)
+          if (requestId !== undefined && latest !== undefined && latest.requestId !== requestId) {
+            finish(Object.assign(new Error('source initialization superseded'), { code: 'panel-navigation-superseded' }))
+            return
+          }
+          const receipt = reader.read(query)
+          if (receipt !== undefined) requestId ??= receipt.requestId
+          if (receipt?.stage === 'failed') {
+            const code = receipt.reason === 'timeout' ? 'BROWSER_DOCUMENT_TIMEOUT'
+              : receipt.reason === 'occurrence-aborted' ? 'BROWSER_NAVIGATION_CANCELLED'
+              : receipt.reason === 'navigation-failed' || receipt.reason === 'navigation-rejected' ? 'BROWSER_NAVIGATION_FAILED'
+              : 'panel-initialization-failed'
+            finish(Object.assign(new Error(receipt.detail ?? receipt.reason ?? 'source initialization failed'), { code }))
+          }
+          else if (receipt?.stage === 'attached') finish(undefined, receipt)
+        }
+        unsubscribe = subscribe(check)
+        if (done) { unsubscribe(); return }
+        signal.addEventListener('abort', abort, { once: true })
+        check()
+      })
+    },
   }
+  return reader
 }
 
 const HISTORY_LIMIT = 200
@@ -122,7 +176,7 @@ const HISTORY_LIMIT = 200
  * @returns the journal.
  */
 export function createBrowserInitializationJournal(
-  options: { readonly now?: () => number; readonly historyLimit?: number } = {},
+  options: { readonly now?: () => number; readonly historyLimit?: number; readonly onChange?: () => void } = {},
 ): BrowserInitializationJournal {
   const now = options.now ?? (() => Date.now())
   const limit = options.historyLimit ?? HISTORY_LIMIT
@@ -135,6 +189,7 @@ export function createBrowserInitializationJournal(
     latest.set(receipt.tabId, receipt)
     history.push(receipt)
     if (history.length > limit) history = history.slice(history.length - limit)
+    options.onChange?.()
     return receipt
   }
 

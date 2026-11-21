@@ -11,6 +11,10 @@ export const zh = {
   reload: '刷新',
   go: '前往',
   external: '在系统浏览器中打开',
+  'takeover.waiting': 'AI 正在等待你完成操作：{reason}',
+  'takeover.done': '确认完成',
+  'takeover.skip': '跳过',
+  'takeover.failed': '确认失败，请重试或使用聊天中的权限卡片。',
   'sandbox.disable': '关闭沙箱限制',
   'sandbox.enable': '恢复沙箱限制',
   'sandbox.warning': '沙箱限制已关闭；页面可以导航顶层应用，并使用下载、模态对话框与输入锁定。',
@@ -116,6 +120,10 @@ export const en = {
   reload: 'Reload',
   go: 'Go',
   external: 'Open in system browser',
+  'takeover.waiting': 'AI is waiting for you: {reason}',
+  'takeover.done': 'Confirm completion',
+  'takeover.skip': 'Skip',
+  'takeover.failed': 'Could not confirm. Retry or use the permission card in chat.',
   'sandbox.disable': 'Disable sandbox restrictions',
   'sandbox.enable': 'Restore sandbox restrictions',
   'sandbox.warning': 'Sandbox restrictions are disabled; the page can navigate the top-level app and use downloads, modal dialogs, and input locks.',
@@ -214,6 +222,10 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 /** Japanese copy, checked against the English keys. */
 export const ja = {
+  'takeover.waiting': 'AI は操作の完了を待っています：{reason}',
+  'takeover.done': '完了を確認',
+  'takeover.skip': 'スキップ',
+  'takeover.failed': '確認できませんでした。再試行するか、チャットの許可カードを使用してください。',
   'type.label': 'ブラウザ',
   'guide.title': 'ブラウザ',
   'guide.description': 'Webページを閲覧',
@@ -316,6 +328,10 @@ export const ja = {
 
 /** Spanish dictionary, checked against the English keys. */
 export const es = {
+  'takeover.waiting': 'La IA espera tu intervención: {reason}',
+  'takeover.done': 'Confirmar finalización',
+  'takeover.skip': 'Omitir',
+  'takeover.failed': 'No se pudo confirmar. Reintenta o usa la tarjeta de permiso del chat.',
   'type.label': 'Navegador',
   'guide.title': 'Navegador',
   'guide.description': 'Navegar por páginas web',
@@ -418,6 +434,10 @@ export const es = {
 
 /** French dictionary, checked against the English keys. */
 export const fr = {
+  'takeover.waiting': 'L’IA attend votre intervention : {reason}',
+  'takeover.done': 'Confirmer la fin',
+  'takeover.skip': 'Ignorer',
+  'takeover.failed': 'Confirmation impossible. Réessayez ou utilisez la carte d’autorisation du chat.',
   'type.label': 'Navigateur',
   'guide.title': 'Navigateur',
   'guide.description': 'Parcourir les pages Web',
@@ -520,6 +540,10 @@ export const fr = {
 
 /** German dictionary, checked against the English keys. */
 export const de = {
+  'takeover.waiting': 'Die KI wartet auf deine Eingabe: {reason}',
+  'takeover.done': 'Abschluss bestätigen',
+  'takeover.skip': 'Überspringen',
+  'takeover.failed': 'Bestätigung fehlgeschlagen. Erneut versuchen oder die Berechtigungskarte im Chat verwenden.',
   'type.label': 'Browser',
   'guide.title': 'Browser',
   'guide.description': 'Durchsuchen Sie Webseiten',
@@ -622,6 +646,10 @@ export const de = {
 
 /** Russian dictionary, checked against the English keys. */
 export const ru = {
+  'takeover.waiting': 'ИИ ожидает вашего действия: {reason}',
+  'takeover.done': 'Подтвердить завершение',
+  'takeover.skip': 'Пропустить',
+  'takeover.failed': 'Не удалось подтвердить. Повторите попытку или используйте карточку разрешения в чате.',
   'type.label': 'Браузер',
   'guide.title': 'Браузер',
   'guide.description': 'Просмотр веб-страниц',
@@ -724,6 +752,10 @@ export const ru = {
 
 /** Portuguese dictionary, checked against the English keys. */
 export const pt = {
+  'takeover.waiting': 'A IA aguarda sua intervenção: {reason}',
+  'takeover.done': 'Confirmar conclusão',
+  'takeover.skip': 'Pular',
+  'takeover.failed': 'Não foi possível confirmar. Tente novamente ou use o cartão de permissão no chat.',
   'type.label': 'Navegador',
   'guide.title': 'Navegador',
   'guide.description': 'Navegar em páginas da web',
@@ -823,4 +855,3 @@ export const pt = {
   'error.failed': 'Falha ao salvar; tente novamente.',
 
 } satisfies Record<keyof typeof en, string>
-

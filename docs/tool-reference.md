@@ -1,5 +1,15 @@
 # 工具参考
 
+`dsh_browser_list_tabs` and `dsh_browser_session` return versioned opaque handles.
+Pass the complete tab `id` unchanged to `dsh_browser_switch_tab` or
+`dsh_browser_close_tab`. Handles include the calling owner and browser session;
+raw provider ids (`tab:…`, `page:…`), foreign-owner handles and handles from a
+closed/replaced session are refused. List again after a session reset. Handles
+identify a target, not authorization. The same handles travel through the runtime,
+provider and protocol-4 desktop bridge. The bridge binds them to live native guests
+at discovery/adoption and refuses released or replaced bindings. Legacy bridges
+must be restarted/upgraded; raw owner/guest/view-id RPC requests are not accepted.
+
 全部 51 个 `dsh_browser_*` 工具。守卫列:✅ 表示该动作受 `dsh_browser_restrict` 白名单约束;**「– 豁免」表示无论白名单怎么写都不拦截**(豁免集合为 `READ_ONLY_TOOLS`,`src/tool-browser/index.ts` 导出:**只观察的工具** —— `snapshot`/`a11y`/`content`/`scrape`/`screenshot`/`get_value`/`wait`/`challenge`/`list_tabs`/`session`/`history`/`visited` —— 加上 **解除限制 / 从坏状态恢复的工具** `restrict`/`reset_session`/`reset`;`restrict` 在其中,否则限制到空的任务再也解不开);**「–」表示该工具只观察、不做动作**,故没有可拦的东西。两者之外的工具都受白名单约束 —— 例如 `dsh_browser_close_tab`、`dsh_browser_auth` 都不属于豁免集合(`dsh_browser_auth` 的 `restore` 会向任意域写 cookie,是动作,不是观察)。
 
 ## 批量、观测与断言（待发布）

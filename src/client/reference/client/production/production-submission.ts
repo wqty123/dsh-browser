@@ -21,9 +21,11 @@
  *
  * @module dsh-browser-reference/production/production-submission
  */
+import { renderReferenceMarkdownTable } from '../../../../reference-text.ts'
+import { referenceOwnerKey } from '../../../../reference-owner.ts'
 import type { OrderedReferenceGroup } from '../types.ts'
 import { createSubmissionProjector, type TextPosition } from '../ordered-submission.ts'
-import { encodeBrowserRefUri } from '../scheme.ts'
+import { composerText, sourceMarker, submissionQuote } from './source-marker.ts'
 import type { AssetStore } from './asset-store.ts'
 
 /** Mirror of `session-controller/src/types.ts:78` (no cross-package import). */
@@ -94,39 +96,7 @@ export interface WireSubmissionInput {
 /** The prefix that keeps a note distinguishable from the quoted original. */
 export const COMMENT_LABEL = '引用评论'
 /** Stable visible label for one attached reference's source marker. */
-export const SOURCE_LINK_LABEL = '引用来源'
-
-/**
- * Keep a page title from breaking the markdown link syntax. Titles are display
- * text only: the URI is built from the referenceId alone and never from any
- * user-controlled string.
- */
-function markerTitle(value: string | undefined): string {
-  if (value === undefined) return ''
-  return value
-    .replace(/[\r\n\t]+/gu, ' ')
-    .replace(/[\[\]()\\`<>*_]/gu, '')
-    .replace(/\s+/gu, ' ')
-    .trim()
-    .slice(0, 80)
-    .trim()
-}
-
-/** One `[引用来源 N：标题](dsh-browser-ref:...)` line for a single group. */
-function sourceMarker(
-  group: OrderedReferenceGroup,
-  index: number,
-  titleOf: ((referenceId: string) => string | undefined) | undefined,
-): string {
-  // encodeBrowserRefUri percent-encodes the referenceId and is the exact
-  // inverse of decodeBrowserRefUri. No title, comment or page text is ever
-  // concatenated into the URI.
-  const uri = encodeBrowserRefUri({ referenceId: group.referenceId })
-  const fallback = `${SOURCE_LINK_LABEL} ${index + 1}`
-  const title = markerTitle(titleOf?.(group.referenceId))
-  const label = title === '' ? fallback : `${fallback}：${title}`
-  return `[${label}](${uri})`
-}
+export { SOURCE_LINK_LABEL } from './source-marker.ts'
 
 /**
  * Build the `content` array for `Session.prompt`. With `groups === []` the
@@ -134,20 +104,16 @@ function sourceMarker(
  */
 export function wireSubmissionContent(input: WireSubmissionInput): readonly HostPromptContentPart[] {
   const perGroup = createSubmissionProjector({ mode: 'ordered' })
-  // The host renders adjacent text blocks as one run, so EVERY projected
-  // text/table block (quote, table projection, image placeholder) ends with its
-  // own newline. Without it the MOST COMMON path — "quote + user's question" —
-  // arrived as one unreadable line on the desktop. The user's own text is added
-  // separately below and is NEVER given a newline, so leading composer text
-  // stays byte-identical and uploaded blocks keep their original order.
+  const text = composerText(input.text, new Set(input.groups.map(group => group.referenceId)))
+  const quoteText = (text: string): string => input.sourceLinks === false ? text : submissionQuote(text)
   const projectedBlocks = (groups: readonly OrderedReferenceGroup[]): HostPromptContentPart[] =>
     perGroup.project({ text: '', uploaded: [], groups }).map(part => {
       const mapped = mapProjected(part, input.admitImage)
-      return mapped.type === 'text' ? { type: 'text', text: `${mapped.text}\n` } : mapped
+      return mapped.type === 'text' ? { type: 'text', text: quoteText(`${mapped.text}\n`) } : mapped
     })
   const placeUserText = (blocks: HostPromptContentPart[]): void => {
-    if (input.text === '') return
-    const block: HostPromptContentPart = { type: 'text', text: input.text }
+    if (text === '') return
+    const block: HostPromptContentPart = { type: 'text', text }
     if (input.textPosition === 'leading') blocks.unshift(block)
     else blocks.push(block)
   }
@@ -161,14 +127,14 @@ export function wireSubmissionContent(input: WireSubmissionInput): readonly Host
     const markers: string[] = []
     input.groups.forEach((group, index) => {
       try {
-        markers.push(sourceMarker(group, index, input.sourceTitleFor))
+        markers.push(sourceMarker(group.referenceId, index, input.sourceTitleFor?.(group.referenceId)))
       } catch {
         // A referenceId that cannot be canonicalized must not break the whole
         // send: that single group simply has no marker (B20 partial visibility).
       }
     })
     if (markers.length === 0) return
-    blocks.push({ type: 'text', text: `${markers.join('\n')}\n` })
+    blocks.push({ type: 'text', text: `${markers.join('\n')}\n${submissionQuote('Browser reference presentation: the attached references are already displayed as interactive capsules. Do not repeat their markers, reference URIs, source URLs, or source/citation links in the reply. Answer using the quoted content; the capsules provide source navigation.')}` })
   }
   const noted = input.comments === undefined
     ? undefined
@@ -183,7 +149,7 @@ export function wireSubmissionContent(input: WireSubmissionInput): readonly Host
         // A plain label, not markdown: the user's own message text is rendered as text, so asterisks showed
         // up literally ("**引用评论**：123"). Brackets looked like page content; a bare label reads as a
         // label in every renderer.
-        withNotes.push({ type: 'text', text: `${COMMENT_LABEL}：${note}\n` })
+        withNotes.push({ type: 'text', text: quoteText(`${COMMENT_LABEL}：${note}\n`) })
       }
       withNotes.push(...projectedBlocks([group]))
     }
@@ -206,7 +172,7 @@ function mapProjected(
     case 'text':
       return { type: 'text', text: part.text }
     case 'table':
-      return { type: 'text', text: part.text }
+      return { type: 'text', text: part.table === undefined ? part.text : renderReferenceMarkdownTable(part.table) }
     case 'image': {
       const admitted = admitImage(part.assetKey, part.partId ?? part.assetKey)
       return admitted ?? { type: 'text', text: `[image unavailable: ${part.partId ?? part.assetKey}]` }
@@ -298,6 +264,7 @@ export function createSubmissionSeam(options: CreateSubmissionSeamOptions): Subm
 
   return {
     async bind(sessionId, requestId, hostRequestId) {
+      sessionId = referenceOwnerKey(sessionId)
       const ids = tokenized.get(requestId)
       if (ids !== undefined && ids.length > 0) await options.bind?.(sessionId, hostRequestId, ids)
     },
@@ -306,7 +273,7 @@ export function createSubmissionSeam(options: CreateSubmissionSeamOptions): Subm
       // bindings are all keyed on the bare id. Without this the chips were visible in the composer while
       // buildContent saw ZERO groups, so the message went out with the typed text alone and the model
       // answered "there is nothing attached".
-      const sessionId = rawSessionId.startsWith('session-') ? rawSessionId.slice('session-'.length) : rawSessionId
+      const sessionId = referenceOwnerKey(rawSessionId)
       const groups = options.groupsFor(sessionId)
       const content = wireSubmissionContent({
         uploaded,
@@ -329,12 +296,14 @@ export function createSubmissionSeam(options: CreateSubmissionSeamOptions): Subm
       return content
     },
     commit(sessionId, requestId) {
+      sessionId = referenceOwnerKey(sessionId)
       const referenceIds = consume(sessionId, requestId)
       if (referenceIds !== undefined && referenceIds.length > 0) {
         return options.submitted?.(sessionId, referenceIds)
       }
     },
     rollback(sessionId, requestId) {
+      sessionId = referenceOwnerKey(sessionId)
       consume(sessionId, requestId)
     },
   }

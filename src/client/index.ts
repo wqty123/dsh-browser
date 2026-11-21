@@ -1,3 +1,4 @@
+import { CLIENT_VERSION_ROUTE } from '../../assets/browser-policy.mjs'
 /** Register the HTTP(S) Browser tab type in the right Sidebar. */
 import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client'
 import type { Context } from '@deepseek-ai/cordis'
@@ -18,6 +19,7 @@ import type { BrowserInjected } from './browser/BrowserController.ts'
 import { createBrowserInitializationReader } from './browser/initialization.ts'
 import type { BrowserInitializationReader } from './browser/initialization.ts'
 import { createIframePage } from './pages.ts'
+import { createReferenceCapture, type ReferenceCaptureContext } from './reference-capture-owner.ts'
 import { createElectronPage } from './electron/pages.ts'
 import type { DesktopBrowserBridge } from '../types.ts'
 import { browserWorkspace } from './electron/workspace.ts'
@@ -85,7 +87,7 @@ const CLIENT_VERSION_WATCH = 'dsh-builtin-browser:client-version'
 function watchClientVersion(ctx: Context): void {
   const check = async (): Promise<void> => {
     try {
-      const response = await fetch('/dsh-builtin-browser/client-version', { credentials: 'same-origin', cache: 'no-store' })
+      const response = await fetch(CLIENT_VERSION_ROUTE, { credentials: 'same-origin', cache: 'no-store' })
       if (!response.ok) return
       const body = await response.json() as { readonly version?: string }
       const version = body.version
@@ -141,9 +143,15 @@ export function apply(ctx: Context): void {
   const store = createBrowserStore()
   const startPage = new StartPageBinding()
   const controllers = new Map<BrowserBodyProps['sessionId'], BrowserInjected>()
-  ctx.provide('sidebarBrowserInitialization', createBrowserInitializationReader((sessionId, tabId) => {
+  const initializationListeners = new Set<() => void>()
+  ctx.provide('sidebarBrowserInitialization')
+  ctx.set('sidebarBrowserInitialization', createBrowserInitializationReader((sessionId, tabId) => {
     return controllers.get(sessionId as BrowserBodyProps['sessionId'])?.initialization(tabId)
-  }))
+  }, listener => {
+    initializationListeners.add(listener)
+    return () => { initializationListeners.delete(listener) }
+  }, (sessionId, tabId) => controllers.get(sessionId as BrowserBodyProps['sessionId'])?.currentPage(tabId),
+  (sessionId, tabId, url) => controllers.get(sessionId as BrowserBodyProps['sessionId'])?.loadUrl(tabId, url).ok === true))
   ctx.inject(['shortcuts'], (scope) => {
     scope.effect(() => scope.shortcuts.register({
       id: 'browser.address' as ShortcutCommandId, label: () => t('address.focus'), aliases: ['address bar', 'focus address'],
@@ -237,16 +245,21 @@ export function apply(ctx: Context): void {
         }
         const controller = createBrowserControllers(actions, factory(sessionId), tabId =>
           openTabs.getSnapshot().some(tab => tab.sessionId === sessionId && tab.tabId === tabId), startPage,
-          { sessionId })
+          { sessionId, onInitializationChange: () => { for (const listener of initializationListeners) listener() } })
         controllers.set(sessionId, controller)
         return controller
       },
     }, BrowserBody)), 'ui-sidebar-browser.body')
   }
-  if (desktop === undefined) installFrames(ctx, () => createIframePage)
+  const lifetime = new AbortController()
+  ctx.effect(() => () => { lifetime.abort() }, 'dsh-builtin-browser: reference capture')
+  const capture = createReferenceCapture(ctx as unknown as ReferenceCaptureContext, lifetime.signal)
+  if (desktop === undefined) {
+    installFrames(ctx, sessionId => options => createIframePage(options, sessionId, capture))
+  }
   else ctx.inject(['workspaces'], (scope) => {
     installFrames(scope, sessionId => options => createElectronPage(options, desktop,
-      signal => browserWorkspace(scope.workspaces.list, sessionId, signal)))
+      signal => browserWorkspace(scope.workspaces.list, sessionId, signal), sessionId, capture))
   })
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab.title', key: BROWSER_ID, store,

@@ -1,3 +1,4 @@
+import { testTab, testScope, tabIn } from './canonical-fixtures.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:net'
@@ -37,16 +38,20 @@ async function peer({ oldDelay = 4200, navigationDelay = 2500, ready = true } = 
         if (request.token && !request.op) continue
         requests.push({ ...request, at: Date.now() })
         const reply = async () => {
-          if (request.op === 'list') return { ok: true, guests: [], sidebar: [] }
+          if (request.op === 'list') return { ok: true, protocol: 4, sidebar: [] }
           if (request.op === 'ensureSidebar') {
             if (!request.url) return await later(oldDelay, { ok: false, error: "this conversation's browser panel produced no page within its budget" })
             await later(navigationDelay, null)
             return state.ready
-              ? { ok: true, id: 7 }
+              ? { ok: true, id: request.handle, navigation: { frameId: 'main', loaderId: 'document' } }
               : { ok: false, code: 'panel-initializing', error: "this conversation's browser panel produced no page within its budget" }
           }
-          if (request.op === 'cdp') return { ok: true, result: request.method === 'Runtime.evaluate'
-            ? { result: { value: 'late-document|complete' } } : {} }
+          if (request.op === 'cdp') {
+            const result = request.method === 'Runtime.evaluate' ? { result: { value: 'complete' } }
+              : request.method === 'Page.getFrameTree' ? { frameTree: { frame: { id: 'main', loaderId: 'document', url: 'https://example.com/' } } }
+                : request.method === 'Page.createIsolatedWorld' ? { executionContextId: 1 } : {}
+            return { ok: true, result }
+          }
           return { ok: true }
         }
         void reply().then(value => {
@@ -92,7 +97,7 @@ test('an abandoned 3s probe failure at 4.2s cannot close the following URL navig
   const losses = []
   bridge.host.onLost(reason => { losses.push(reason); setImmediate(() => bridge.host.dispose()) })
   try {
-    const view = bridge.host.createView('session-issue47')
+    const view = bridge.host.createView(testTab('session-issue47'))
     // Reproduce the old caller leaving a 4s initialization request in flight after a 3s budget.
     const stale = view.sendCommand('Runtime.evaluate', { expression: '1' }).then(
       () => null,
@@ -100,14 +105,12 @@ test('an abandoned 3s probe failure at 4.2s cannot close the following URL navig
     )
     await pause(3000)
     const navigated = await view.sendCommand('Page.navigate', { url: 'https://example.com/' })
-    assert.deepEqual(navigated, {})
+    assert.deepEqual(navigated, { frameId: 'main', loaderId: 'document' })
     const error = await stale
-    assert.ok(error instanceof BrowserPanelNotDisplayedError)
-    assert.equal(error.code, 'panel-initializing')
-    assert.match(error.message, /produced no page/)
+    assert.match(error.message, /newer navigation/)
     assert.deepEqual(losses, [])
     const reading = await view.sendCommand('Runtime.evaluate', { expression: 'document.readyState' })
-    assert.equal(reading.result.value, 'late-document|complete')
+    assert.equal(reading.result.value, 'complete')
   } finally { await bridge.close() }
 })
 
@@ -116,7 +119,7 @@ test('initialization budget failure stays recoverable on the same host when the 
   const losses = []
   bridge.host.onLost(reason => losses.push(reason))
   try {
-    const view = bridge.host.createView('session-issue47')
+    const view = bridge.host.createView(testTab('session-issue47'))
     await assert.rejects(
       view.sendCommand('Page.navigate', { url: 'https://example.com/' }),
       error => error instanceof BrowserPanelNotDisplayedError && error.code === 'panel-initializing',

@@ -41,8 +41,10 @@ import { buildBrowserRefLinkProps } from '../BrowserRefLink.tsx'
 import { installReplyLinkBridge } from './reply-link-bridge.ts'
 import { browserSourceRule } from './user-text-rule.ts'
 import { decodeBrowserRefUri } from '../scheme.ts'
-import { createElement as element } from 'react'
+import { createElement as element, useSyncExternalStore } from 'react'
+import { createRoot } from 'react-dom/client'
 import { ReferenceDock } from './ReferenceDock.tsx'
+import { ReferenceCapsules } from './ReferenceCapsules.tsx'
 import { ReferenceFeedback } from './ReferenceFeedback.tsx'
 import { referenceCopy, referenceLabels, REFERENCE_LOCALE, type ReferenceLabels, type ReferenceLabelKey } from './reference-labels.ts'
 
@@ -228,23 +230,7 @@ export function createReplyLinkComponent(
     // fallback; without this gate it was rendered as a disabled "来源不可用"
     // dead button. createBrowserRefRenderer applies the same scheme check.
     if (!candidate.startsWith(BROWSER_REF_SCHEME)) return null
-    const dom = buildBrowserRefLinkProps(runtime.revealer.linkSpec(candidate, typed?.children ?? typed?.node?.data?.label))
-    // This is the path a USER message takes, so it is the one the reader sees after sending: the
-    // composer chip is a numbered badge plus a label, and without this split the sent pill is only
-    // its outer shell ("胶囊只做了一半").
-    const badge = splitSourceLabel(dom.children, createElement)
-    return createElement('button', {
-      type: dom.type,
-      role: dom.role,
-      'aria-disabled': dom['aria-disabled'],
-      disabled: dom.disabled,
-      ...(dom.className === undefined ? {} : { className: dom.className }),
-      ...(dom.title === undefined ? {} : { title: dom.title }),
-      onClick: dom.onClick,
-      onKeyDown: dom.onKeyDown,
-      onAuxClick: dom.onAuxClick,
-      onMouseDown: dom.onMouseDown,
-    }, badge ?? dom.children)
+    return renderSentCapsule(runtime, createElement, candidate, typed?.children ?? typed?.node?.data?.label)
   }
 }
 
@@ -260,24 +246,34 @@ export const BROWSER_REF_RENDERER_GLOBAL = '__DSH_BROWSER_REF_RENDERER__'
 export const REPLY_LINK_BRIDGE_GLOBAL = '__DSH_BROWSER_REF_LINK_BRIDGE__'
 export const BROWSER_REF_SCHEME = 'dsh-browser-ref:'
 
-/**
- * Split the reply-side wire label back into the two halves the composer chip shows.
- *
- * `wireSubmissionContent` writes `引用来源 N：标题`; rendering that as one string leaves the sent pill
- * without the numbered badge the dock chip has, which is what "胶囊只做了一半" described.
- * @param label - the wire label.
- * @param createElement - the host's element factory.
- * @returns a badge + label pair, or undefined to keep the plain string.
- */
-function splitSourceLabel(label: string | undefined, createElement: HostElementFactory): readonly unknown[] | undefined {
-  if (label === undefined) return undefined
-  const match = /^\s*(引用来源\s*\d+)\s*[：:]\s*(.*)$/u.exec(label)
-  if (match === null) return undefined
-  const number = /(\d+)/u.exec(match[1] ?? '')
-  return [
-    createElement('span', { className: 'dsh-browser-ref-badge', 'aria-hidden': 'true' }, number?.[1] ?? ''),
-    createElement('span', { className: 'dsh-browser-ref-label' }, match[2] ?? ''),
-  ]
+function SentReferenceCapsules(props: { readonly runtime: ProductionRuntime; readonly capsule: Parameters<typeof ReferenceCapsules>[0] }): ReturnType<typeof ReferenceCapsules> {
+  const view = useSyncExternalStore(props.runtime.subscribe, props.runtime.snapshot, props.runtime.snapshot)
+  const notice = view.reveal?.referenceId === props.capsule.cards[0]?.referenceId ? view.reveal?.message : undefined
+  return element(ReferenceCapsules, { ...props.capsule, ...(notice === undefined ? {} : { notice }) })
+}
+
+function renderSentCapsule(runtime: ProductionRuntime, createElement: HostElementFactory, uri: string, label?: string, key?: unknown, anchor?: HTMLElement): unknown {
+  let referenceId: string | undefined
+  try { referenceId = decodeBrowserRefUri(uri).referenceId } catch { /* invalid URI */ }
+  const detail = referenceId === undefined ? undefined : runtime.referenceDetail(referenceId)
+  const owner = referenceId === undefined ? undefined : runtime.ownerFor(referenceId)
+  if (detail !== undefined && owner?.sessionId === runtime.currentSessionId()) {
+    const index = Number(/引用来源\s*(\d+)/u.exec(label ?? '')?.[1]) || detail.card.index
+    return element(SentReferenceCapsules, {
+      key: String(key ?? uri),
+      runtime,
+      capsule: {
+        sessionId: runtime.currentSessionId(),
+        cards: [{ ...detail.card, index }],
+        labels: referenceLabels(),
+        actions: { onReveal: () => { void runtime.activateUri(uri) } },
+        ...(anchor === undefined ? {} : { anchor }),
+      },
+    })
+  }
+  if (anchor !== undefined) return null
+  const dom = buildBrowserRefLinkProps(runtime.revealer.linkSpec(uri, label))
+  return createElement('button', { ...dom, key }, dom.children)
 }
 
 /**
@@ -293,25 +289,7 @@ export function createBrowserRefRenderer(
   return (url, children, key) => {
     if (!url.startsWith(BROWSER_REF_SCHEME)) return undefined
     const first = children[0]
-    const label = typeof first === 'string' ? first : undefined
-    const dom = buildBrowserRefLinkProps(runtime.revealer.linkSpec(url, label))
-    // The composer chip is a numbered badge plus a label; the sent message used to be one run of
-    // text, so the pill was only "half" of the same control. Split the wire label back into its two
-    // halves so both surfaces have the identical anatomy.
-    const badge = splitSourceLabel(dom.children, createElement)
-    return createElement('button', {
-      key,
-      type: dom.type,
-      role: dom.role,
-      'aria-disabled': dom['aria-disabled'],
-      disabled: dom.disabled,
-      ...(dom.className === undefined ? {} : { className: dom.className }),
-      ...(dom.title === undefined ? {} : { title: dom.title }),
-      onClick: dom.onClick,
-      onKeyDown: dom.onKeyDown,
-      onAuxClick: dom.onAuxClick,
-      onMouseDown: dom.onMouseDown,
-    }, badge ?? dom.children)
+    return renderSentCapsule(runtime, createElement, url, typeof first === 'string' ? first : undefined, key)
   }
 }
 
@@ -399,15 +377,14 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
   const replyLinkBridge = installReplyLinkBridge({
     isAvailable: uri => runtime.revealer.linkSpec(uri).available,
     activate: (uri) => { void runtime.activateUri(uri) },
-    // 消息里的胶囊悬停时给出与输入栏一致的详情：标题、域名、原文、用户评论。
-    cardFor: async (uri) => {
-      let referenceId: string
-      try {
-        referenceId = decodeBrowserRefUri(uri).referenceId
-      } catch {
-        return undefined
-      }
-      return runtime.referenceDetail(referenceId)
+    mountCard: (uri, anchor) => {
+      const card = renderSentCapsule(runtime, elementFactory, uri, anchor.textContent ?? undefined, undefined, anchor)
+      if (card === null) return undefined
+      const container = anchor.ownerDocument.createElement('span')
+      anchor.ownerDocument.body.append(container)
+      const root = createRoot(container)
+      root.render(card as Parameters<typeof root.render>[0])
+      return () => { root.unmount(); container.remove() }
     },
   })
   globalHost[REPLY_LINK_BRIDGE_GLOBAL] = replyLinkBridge
@@ -419,20 +396,13 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
   }, 'ui-browser-reference: reply link bridge')
 
   /**
-   * The dock reads the Session id and the live draft off its owner props. The
-   * rail it lands on declares no owner share, so the adapter rebuilds those two
-   * fields from the Session standard kit (`sessionId`, `useInput`) the slot
-   * runtime injects anyway.
+   * Prefer the Session standard kit over stale owner snapshots.
    */
   const dockComponent = (props: unknown): unknown => {
-    // 这一行是「只有引用发不出去」的根因所在：座位把标准 props（`sessionId`/`useInput`/`inputActions`）
-    // 交给**组件**，而 `inject()` 工厂参数里没有它们。原实现只在注槽时用 `noteDockProps` 回传，
-    // 于是 `inputActions` 恒为 undefined → `hostInputFor()` 里没有 `insertReference` → 引用只画成浮层
-    // 胶囊、没进编辑器 → 上游闸门（rc.3：`draft.trim()==='' && attachments===0`）判为空 → 发送禁用。
-    // 在组件里回传真实 props，`inputActions.insertReference` 才能拿到，胶囊才会成为原生引用节点。
-    config.onDockProps?.(props)
     const face = props as {
       readonly sessionId?: string
+      readonly session?: { readonly sessionId?: string }
+      readonly input?: { readonly draft?: string }
       readonly useInput?: (
         selector: (state: { readonly draft?: string }) => { readonly draft?: string },
       ) => { readonly draft?: string }
@@ -440,26 +410,23 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
     const input = face?.useInput === undefined ? undefined : face.useInput(value => value)
     // Delegated by call rather than through an element so the seat renders the
     // dock itself: one React boundary, same hook order on every render.
-    return cardComponent({
+    const dockProps = {
       ...(props as Readonly<Record<string, unknown>>),
-      session: { sessionId: face?.sessionId ?? '' },
-      input: { draft: input?.draft ?? '' },
-    })
+      session: { sessionId: face?.sessionId ?? face?.session?.sessionId ?? '' },
+      input: { draft: input?.draft ?? face?.input?.draft ?? '' },
+    }
+    config.onDockProps?.(dockProps)
+    return cardComponent(dockProps)
   }
-  // 胶囊行属于输入框内部布局：注册进宿主在 composer card 里提供的 `conversation.input.chips`。
-  // 注册到 `conversation.input.overlay` 会让胶囊浮在输入框之上——占位文字与附件图片都会与它重叠。
-  ctx.slots.inject('conversation.input.chips', function* () {
+  ctx.slots.inject('conversation.input.dock', function* () {
     yield ctx.slots.register({
-      name: 'conversation.input.chips', id: 'dsh-browser-reference', priority: 50,
+      name: 'conversation.input.dock', id: 'dsh-browser-reference', priority: 50,
       // The dictionary rides the same namespace `apply` registers with the host
       // locale service, so the rail's copy follows the active language.
       locale: REFERENCE_LOCALE,
-      // `hooks.dockCards` becomes the component's `useDockCards` selector hook,
-      // bound by the host's React; `noteDockProps` hands the Session-scope props
-      // (session id, input actions) back to the runtime on each render.
+      // `hooks.dockCards` becomes the host-bound selector hook.
       inject: () => ({
         hooks: { dockCards: { getSnapshot: () => runtime.snapshot(), subscribe: (listener: () => void) => runtime.subscribe(listener) } },
-        noteDockProps: (props: unknown) => { config.onDockProps?.(props) },
       }),
     }, dockComponent)
   })

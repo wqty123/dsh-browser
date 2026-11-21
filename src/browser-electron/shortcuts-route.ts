@@ -1,3 +1,4 @@
+import { SHORTCUTS_ROUTE, SHORTCUT_ADD_ROUTE, SHORTCUT_REMOVE_ROUTE } from '../../assets/browser-policy.mjs'
 /**
  * HTTP face of the shared start-page shortcut list.
  *
@@ -16,11 +17,11 @@ import { sameOrigin } from './settings-route.ts'
 import { ShortcutError, type createShortcutStore } from './startpage-shortcuts.ts'
 
 /** Read the shared shortcut list. */
-export const SHORTCUTS_ROUTE = '/dsh-builtin-browser/shortcuts'
+export { SHORTCUTS_ROUTE }
 /** Append one shortcut. */
-export const SHORTCUT_ADD_ROUTE = '/dsh-builtin-browser/shortcuts/add'
+export { SHORTCUT_ADD_ROUTE }
 /** Drop one shortcut by id. */
-export const SHORTCUT_REMOVE_ROUTE = '/dsh-builtin-browser/shortcuts/remove'
+export { SHORTCUT_REMOVE_ROUTE }
 
 type Store = ReturnType<typeof createShortcutStore>
 

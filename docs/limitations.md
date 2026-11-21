@@ -2,7 +2,23 @@
 
 这些是本插件**有意接受**或**受宿主约束**的边界。它们不是待办事项：写在这里是因为"知道为什么"能省掉一次排查。
 
+## Web 登录态持久化
+
+DSH 是本地单用户应用：每个 `DSH_HOME` 只有一个持久 Cookie 存储，所有工作区、会话和标签共享站点登录 Cookie。不使用用户、profile、工作区或会话 ID 分罐。
+
+Web 代理的上游 Cookie 保存在 `<DSH_HOME>/dsh-builtin-browser-host/web-cookies/cookies.json`，临时文件原子替换，权限 0600（Windows 仍需 DSH_HOME 的用户 ACL 保护）。它们不是加密保险库；不要共享或上传该目录。Cookie 值不写日志，也不回传到 DSH 页面的 Cookie 存储。关闭标签及重启 Web 服务均保留登录 Cookie，包括没有 Expires/Max-Age 的 session Cookie，类似 Chrome“继续浏览上次打开的网页”的恢复策略；session Cookie 不会被人为添加有效期。显式有效期与删除仍生效：过期 Expires、非正 Max-Age 会删除 Cookie，且不会在重启时恢复；Max-Age 优先于 Expires。Cookie 按规范化的 origin（协议、主机、端口）隔离。无效条目逐条丢弃；文件损坏或不可读时使用空罐并尝试原子重写。磁盘写入失败不阻断网页，但此次变更可能无法跨重启保留。
+
+这不保证所有网站均可登录：opaque-origin guest 的隔离、第三方登录流程和依赖浏览器存储的站点仍有限制。桌面侧栏使用 #64 宿主提供的 Electron partition；Web 的持久化不改变 Desktop 的 partition 行为。
+
+## Web 代理文档的嵌套与隔离
+
+Web 页面和嵌套 iframe 都受响应级 `sandbox allow-scripts allow-forms` 约束，不带 `allow-same-origin`。代理不转发 DSH cookie/token，CSP 的网络目标仍只允许 guest 路由，不能访问 DSH API 或存储。
+
+**嵌入限制的取舍：** opaque-origin 祖先不匹配 CSP 的 `'self'`，也没有可单独授权的源表达式。因此 guest 路由不设置 `frame-ancestors`，以支持嵌套文档；外部站点也可能嵌入这些隔离页面（包括点击劫持风险），但不会获得 DSH 同源权限。若必须拒绝所有外部嵌入，需要独立 guest origin 或由宿主支持的已认证嵌入协议，不能仅靠给 opaque 祖先添加 CSP 白名单实现。
+
 ## 截图
+
+当前默认与回退载体仅限 DSH 侧栏：`bundled`、`auto` 是 `sidebar` 的旧设置别名，不再启动自托管 Electron 或自动选择本机浏览器。下文自托管实现的描述仅供历史诊断，不代表可选载体。外部 Chrome / Edge 需要显式选择。缺少宿主侧栏 API 时，工具报告能力错误；不要用修改 `app.asar` 的旧 bridge 安装器补齐该能力。
 
 - JPEG 在**自托管**与**本机 Chrome / Edge** 上可用;**桌面端侧栏**走外壳的 `webContents.debugger`,其 Electron 的 CDP JPEG 编码会挂起,因此该载体下请求 JPEG 会返回 PNG。
 - 降采样(`maxWidth`/`maxHeight`)**三种载体都支持**(经 CDP `clip.scale`,或自托管走原生 `capturePage`)。
@@ -58,7 +74,7 @@
 
 - **侧栏载体不上报"用户操作"事件**:人在那个页面里点击是外壳自己的事件,而 bridge 没有用于回报它的操作。因此依赖该事件的功能(如自定义的接管提示)在桌面端侧栏下不会触发;换到自托管载体则可以。
 - **本机 Chrome / Edge 载体使用插件自己的 profile**:插件用它自己的用户数据目录启动浏览器(`$DSH_HOME/dsh-builtin-browser-host/<chrome|edge>-profile`),所以你日常浏览器里的书签、扩展与登录态**不会自动继承** —— 这是刻意的,避免插件操作与你的个人会话混在一起;登录态是否跨重启保留由 `cookies.persist` 决定。
-- 页面弹窗(`window.open` / `target=_blank`)不再覆盖当前视图:HTTP(S) 弹窗会在同一会话窗口**新开一个标签页**并计入历史,原页面与 opener 上下文保留;非 HTTP(S) 弹窗(空 URL 弹窗承接、`mailto:`、自定义协议)仍**放行原生窗口**,交给系统处理 —— 这类弹窗不纳入会话模型。
+- 页面不能打开原生弹窗。Web 的普通 `target=_blank` 链接、GET 表单及显式 `window.open(url, '_blank', 'noopener')` 只请求同会话侧栏中的 URL 标签，不建立 child/opener、命名窗口、`WindowProxy` 或跨窗口通信；`window.open` 的该受限模式返回 `null`。需要 opener、命名目标、空白子窗口或 POST 新目标的请求会明确报 `native-child-opener-unavailable`，不会改为覆盖原页面。Desktop 的旧 `onOpenRequested` 也只是 URL 通知，不能证明支持原生 child/opener。新宿主可实现 `DesktopBrowserBridge.childTabs` v1 的结构化请求/拒绝协议（见 `docs/child-tabs.md`）；当前插件仍不支持原生子窗口接管。
 - 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建** —— 仅页面状态丢失,无需手动 `dsh_browser_reset_session`。`dsh_browser_reset_session` 仍可用于主动重置。
 - 新视图创建前会先有界加载 `about:blank`(3 秒上限,保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时。
 - 子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`;写之前若该文件已超过 2 MiB,则**丢弃旧内容、只写入一行带时间戳的轮转记录**(形如 `<ISO 时间戳> log rotated: previous content exceeded 2097152 bytes and was discarded`)—— 旧内容就此消失不留副本,但那一行证明"曾发生过轮转",纯 `dsh web` 自托管可据此自助排查崩溃循环。
@@ -88,6 +104,6 @@
 
 ## Electron 运行时
 
-- Electron 包自身在 44+ 使用懒下载。0.4.16 通过**本插件的 `postinstall`**明确准备二进制(约 100MB,需网络);这要求宿主允许构建脚本且下载可用,不保证所有环境自动完成。DSH rc.5 的 pnpm 11.7 `strict-dep-builds` 首次可能需在原生插件管理器批准脚本,插件不会改写 `allowBuilds`。
+- Electron 包自身在 44+ 使用懒下载。本插件没有安装期生命周期脚本,不会在安装过程中下载二进制。需要修复运行时的操作员可显式运行准备命令(约 100MB,需网络);这不启用独立 Electron 窗口作为侧栏回退。
 - `--ignore-scripts` 或显式跳过下载会保留未下载状态。可在正确 profile 目录运行 `npx --no dsh-browser-install-electron`,它也遵守 `ELECTRON_SKIP_BINARY_DOWNLOAD`;需要下载时先撤销跳过设置。运行时探测仍为纯文件系统操作,不自动下载。离线时可用 `ELECTRON_PATH` 指定预装二进制,详见[用户指南](user-guide.md#准备-electron-二进制)。
 - 0.4.16 的依赖为 `^44.10.0`,锁文件解析到 `44.10.0`,安全最低阈值为 `44.9.1`。**已有且有效的 `ELECTRON_PATH` 优先于这份依赖**,升级插件不会更改该覆盖;旧覆盖可能让实际使用的内核继续停在旧版。侧栏使用的是桌面外壳的内核,也不随插件升级。

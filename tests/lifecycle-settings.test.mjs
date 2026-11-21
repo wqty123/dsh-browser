@@ -18,12 +18,16 @@ function makeHost() {
   return {
     calls,
     createView() {
+      let loader = 0
       return {
         id: 'view1',
         async sendCommand(method, params) {
+          if (method === 'Page.navigate') return { frameId: 'main', loaderId: String(++loader) }
+          if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main', loaderId: String(loader), url: 'https://example.com/' } } }
+          if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 }
           if (method === 'Runtime.evaluate') {
             const expression = params.expression ?? ''
-            if (expression.includes('timeOrigin')) return { result: { value: '1|complete' } }
+            if (expression === 'document.readyState') return { result: { value: 'complete' } }
             if (expression.includes('document.title')) return { result: { value: 'https://example.com/\u0000Example' } }
             return { result: { value: { ok: true } } }
           }

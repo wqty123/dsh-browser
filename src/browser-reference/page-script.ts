@@ -12,12 +12,14 @@
  * reveal agree on what "visible text" means — a map built differently in the two
  * places would make every anchor miss.
  *
- * Text is flattened from visible text nodes in document order. Element
- * boundaries contribute nothing, so a selection spanning `A <b>B</b> C` is
- * `AB C`, exactly the string a later locate searches. Hidden subtrees, script,
+ * Capture and reveal share a text map with semantic block/line separators.
+ * Text nodes and atomic formulas carry DOM ranges; separators occupy map offsets.
+ * Hidden subtrees, script,
  * style, template and the plugin's own highlight overlay are excluded.
  * @module dsh-browser/browser-reference/page-script
  */
+
+import type { ReferenceTextNode } from '../reference-text.ts'
 
 /** Options the capture script accepts as its single argument. */
 export interface CaptureScriptOptions {
@@ -40,6 +42,7 @@ export interface CaptureScriptOptions {
 export interface RawCaptureEvent {
   readonly kind?: string
   readonly exact?: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly prefix?: string
   readonly suffix?: string
   readonly src?: string
@@ -77,6 +80,7 @@ export interface RawCell {
   readonly columnSpan?: number
   readonly role?: string
   readonly text?: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly includedAs?: string
   readonly partialText?: boolean
   readonly inlineContent?: readonly RawCellRun[]
@@ -221,31 +225,188 @@ const PAGE_LIB = String.raw`
     return false
   }
 
-  function flatTextMap(maxChars) {
-    var body = pageBody()
-    var out = { text: '', nodes: [], truncated: false }
+  var MATH_SELECTOR = '.katex-display, .katex, .MathJax, .MathJax_Display, .MathJax_SVG, .MathJax_SVG_Display, .MathJax_CHTML, .MathJax_CHTML_Display, mjx-container, math'
+
+  function mathMLText(node, depth) {
+    if ((depth || 0) > 64) return '[math truncated]'
+    if (node.nodeType === 3) return node.nodeValue || ''
+    var tag = String(node.localName || '').toLowerCase()
+    if (tag === 'annotation' || tag === 'annotation-xml') return ''
+    var children = Array.prototype.filter.call(node.childNodes || [], function (child) {
+      return child.nodeType === 1 || /^(mi|mn|mo|mtext|ms)$/.test(tag)
+    }).map(function (child) { return mathMLText(child, (depth || 0) + 1) })
+    if (tag === 'mfrac') return '\\frac{' + (children[0] || '') + '}{' + (children[1] || '') + '}'
+    if (tag === 'msup' || tag === 'msub' || tag === 'mover' || tag === 'munder') return (children[0] || '') + (tag === 'msup' || tag === 'mover' ? '^{' : '_{') + (children[1] || '') + '}'
+    if (tag === 'msubsup' || tag === 'munderover') return (children[0] || '') + '_{' + (children[1] || '') + '}^{' + (children[2] || '') + '}'
+    if (tag === 'msqrt') return '\\sqrt{' + children.join('') + '}'
+    if (tag === 'mroot') return '\\sqrt[' + (children[1] || '') + ']{' + (children[0] || '') + '}'
+    return children.join('')
+  }
+
+  function mathSource(node) {
+    var tag = String(node.tagName || '').toUpperCase()
+    var matches = function (selector) { return node.matches && node.matches(selector) }
+    var script = tag === 'SCRIPT' && /^math\/tex/i.test(node.getAttribute('type') || '')
+    if (script && node.previousElementSibling && node.previousElementSibling.matches(MATH_SELECTOR)) return null
+    if (!script && !matches(MATH_SELECTOR)) return null
+    var annotations = node.querySelectorAll('annotation')
+    var annotation = ''
+    for (var a = 0; a < annotations.length; a++) {
+      if (/^(application\/(x-tex|x-latex)|text\/(x-tex|tex))$/i.test(String(annotations[a].getAttribute('encoding') || '').split(';')[0].trim())) {
+        annotation = String(annotations[a].textContent || '').trim()
+        if (annotation) break
+      }
+    }
+    var data = node.getAttribute('data-latex') || (node.querySelector('[data-latex]') || {}).getAttribute?.('data-latex')
+    var next = node.nextElementSibling
+    var sourceScript = next && /^math\/tex/i.test(next.getAttribute('type') || '') ? next : null
+    var math = tag === 'MATH' ? node : node.querySelector('math')
+    var sourceTex = script ? String(node.textContent || '').trim() : annotation || String(data || '').trim() || String(sourceScript ? sourceScript.textContent || '' : '').trim()
+    var latex = sourceTex || (math ? mathMLText(math) : '[math source unavailable]')
+    return { latex: String(latex || '[math source unavailable]').trim() || '[math source unavailable]',
+      mathml: math && !sourceTex && String(math.outerHTML || '').length <= 64000 ? String(math.outerHTML) : undefined,
+      display: matches('.katex-display, .MathJax_Display, .MathJax_SVG_Display, .MathJax_CHTML_Display') || node.getAttribute('display') === 'block' || node.getAttribute('display') === 'true' || /mode\s*=\s*display/i.test((script ? node : sourceScript)?.getAttribute('type') || '') }
+  }
+
+  function flatTextMap(maxChars, structured, legacy, root) {
+    var body = root || pageBody()
+    var out = { text: '', nodes: [], content: [], truncated: false }
     if (!body || typeof document.createTreeWalker !== 'function') return out
     var limit = maxChars && maxChars > 0 ? maxChars : 2000000
-    var walker = document.createTreeWalker(body, 4, null, false)
-    var node = walker.nextNode()
-    while (node) {
-      var value = node.nodeValue || ''
-      if (value !== '' && !skippedText(node) && textVisible(node)) {
-        var room = limit - out.text.length
-        if (value.length > room) {
-          if (room > 0) {
-            out.nodes.push({ node: node, start: out.text.length, end: out.text.length + room })
-            out.text += value.slice(0, room)
-          }
-          out.truncated = true
-          return out
-        }
-        out.nodes.push({ node: node, start: out.text.length, end: out.text.length + value.length })
-        out.text += value
+    function append(value) {
+      var room = Math.max(0, limit - out.text.length)
+      if (value.length > room) out.truncated = true
+      out.text += value.slice(0, room)
+    }
+    function boundary(value) {
+      if (legacy || !out.text) return []
+      var overlap = 0
+      for (var i = 1; i <= value.length; i++) if (out.text.endsWith(value.slice(0, i))) overlap = i
+      var start = out.text.length
+      append(value.slice(overlap))
+      var end = out.text.length
+      return structured && end > start ? [{ type: 'text', text: out.text.slice(start, end), start: start, end: end }] : []
+    }
+    function visit(node, depth) {
+      if (out.truncated) return []
+      if (depth > 64) { out.truncated = true; return [] }
+      if (node.nodeType === 3) {
+        var value = node.nodeValue || ''
+        if (!value || skippedText(node) || !textVisible(node)) return []
+        var start = out.text.length
+        append(value)
+        var end = out.text.length
+        if (end === start) return []
+        out.nodes.push({ node: node, start: start, end: end })
+        return structured ? [{ type: 'text', text: out.text.slice(start, end), start: start, end: end }] : []
       }
-      node = walker.nextNode()
+      if (node.nodeType !== 1 || node.id === HIGHLIGHT_ID) return []
+      var formula = !legacy && mathSource(node)
+      if (formula) {
+        if (node.tagName !== 'SCRIPT' && !visibleNode(node)) return []
+        if (formula.latex.length > limit - out.text.length) { out.truncated = true; return [] }
+        var at = out.text.length
+        append(formula.latex)
+        out.nodes.push({ node: node, start: at, end: out.text.length, atomic: true })
+        return structured ? [Object.assign({ type: 'math', latex: formula.latex, display: Boolean(formula.display), start: at, end: out.text.length }, formula.mathml === undefined ? {} : { mathml: formula.mathml })] : []
+      }
+      if (SKIP_TAGS[node.tagName] || !visibleNode(node)) return []
+      var tag = node.tagName
+      if (!legacy && tag === 'RP') return []
+      if (tag === 'HR' && !legacy) {
+        var at = out.text.length
+        append('\n---\n')
+        out.nodes.push({ node: node, start: at, end: out.text.length, atomic: true })
+        return structured ? [{ type: 'rule', start: at, end: out.text.length }] : []
+      }
+      if (tag === 'BR') {
+        if (legacy) return []
+        var at = out.text.length
+        append('\n')
+        return structured ? [{ type: 'break', start: at, end: out.text.length }] : []
+      }
+      var block = /^(P|DIV|MAIN|ASIDE|NAV|SECTION|ARTICLE|HEADER|FOOTER|FIGURE|FIGCAPTION|DL|DT|DD|H[1-6]|UL|OL|PRE|BLOCKQUOTE|TABLE)$/.test(tag)
+      if (block) boundary('\n\n')
+      if (tag === 'LI') boundary('\n')
+      var prefix = tag === 'TR' ? boundary('\n') : []
+      if ((tag === 'TD' || tag === 'TH') && !out.text.endsWith('\n')) prefix = boundary('\t')
+      var start = out.text.length
+      var children = []
+      for (var child = node.firstChild; child; child = child.nextSibling) {
+        var added = visit(child, depth + 1)
+        for (var a = 0; a < added.length; a++) children.push(added[a])
+      }
+      var end = out.text.length
+      if (block) boundary('\n\n')
+      if (tag === 'LI') boundary('\n')
+      var suffix = tag === 'TR' ? boundary('\n') : []
+      if (!children.length) return prefix.concat(suffix)
+      var types = { P: 'paragraph', DIV: 'paragraph', H1: 'heading', H2: 'heading', H3: 'heading', H4: 'heading', H5: 'heading', H6: 'heading', STRONG: 'strong', B: 'strong', EM: 'emphasis', I: 'emphasis', CODE: 'code', PRE: 'pre', BLOCKQUOTE: 'blockquote', LI: 'list-item', UL: 'list', OL: 'list', DL: 'definition-list', DT: 'term', DD: 'definition', SUP: 'sup', SUB: 'sub', RUBY: 'ruby', RT: 'ruby-text' }
+      var type = types[tag] || (block ? 'block' : undefined)
+      if (tag === 'DIV') type = 'block'
+      var result = { type: type, children: children, start: start, end: end }
+      if (type === 'heading') result.level = Number(tag.slice(1))
+      if (type === 'pre') {
+        var code = node.querySelector('code') || node
+        var language = /(?:^|\s)(?:language-|lang-)([\w+-]{1,64})(?=\s|$)/.exec(code.className || node.className || '')
+        if (language) result.language = language[1]
+      }
+      if (type === 'list-item' && node.hasAttribute('value')) {
+        var value = Number(node.getAttribute('value'))
+        if (Number.isSafeInteger(value) && Math.abs(value) <= 1000000) result.value = value
+      }
+      if (tag === 'A' && /^https?:\/\//i.test(node.href || '')) { result.type = 'link'; result.href = String(node.href).slice(0, 4000) }
+      if (type === 'list') {
+        result.ordered = tag === 'OL'
+        var first = Number(node.getAttribute('start') || 1)
+        result.listStart = Number.isSafeInteger(first) && Math.abs(first) <= 1000000 ? first : 1
+        result.children = children.filter(function (child) { return child.type === 'list-item' })
+      }
+      return prefix.concat(result.type ? [result] : children, suffix)
+    }
+    for (var child = body.firstChild; child && !out.truncated; child = child.nextSibling) {
+      var added = visit(child, 0)
+      for (var a = 0; a < added.length; a++) out.content.push(added[a])
     }
     return out
+  }
+
+  function selectedContent(nodes, start, end, preserveWhitespace) {
+    var result = []
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i]
+      if (node.end <= start || node.start >= end) continue
+      if (node.type === 'text') {
+        result.push({ type: 'text', text: node.text.slice(Math.max(0, start - node.start), Math.min(node.text.length, end - node.start)) })
+      } else if (node.type === 'break' || node.type === 'rule') result.push({ type: node.type })
+      else if (node.type === 'math') result.push(Object.assign({ type: 'math', latex: node.latex, display: node.display }, node.mathml === undefined ? {} : { mathml: node.mathml }))
+      else {
+        var children = selectedContent(node.children, start, end, preserveWhitespace || node.type === 'pre' || node.type === 'code')
+        if (!children.length) continue
+        var part = { type: node.type, children: children }
+        if (node.level !== undefined) part.level = node.level
+        if (node.language !== undefined) part.language = node.language
+        if (node.value !== undefined) part.value = node.value
+        if (node.type === 'link') part.href = node.href
+        if (node.type === 'list') {
+          part.ordered = node.ordered
+          part.start = node.listStart
+          for (var li = 0; li < node.children.length && node.children[li].end <= start; li++) {
+            if (node.children[li].value !== undefined) part.start = node.children[li].value
+            part.start += 1
+          }
+        }
+        result.push(part)
+      }
+    }
+    if (preserveWhitespace) return result
+    function block(node) {
+      return node && /^(block|paragraph|heading|list|list-item|definition-list|term|definition|pre|blockquote|rule)$/.test(node.type)
+    }
+    return result.filter(function (node, index) {
+      return node.type !== 'text' || !/^\s*$/.test(node.text)
+        || (!block(result[index - 1]) && !block(result[index + 1]))
+    })
   }
 
   function safeStart(text, index) {
@@ -275,8 +436,11 @@ const PAGE_LIB = String.raw`
 
   function selectedPart(range, entry) {
     var node = entry.node
+    if (entry.atomic) {
+      try { return range.intersectsNode(node) ? { start: entry.start, end: entry.end, node: node } : null } catch (error) { return null }
+    }
     var value = node.nodeValue || ''
-    var length = value.length
+    var length = Math.min(value.length, entry.end === undefined ? value.length : entry.end - entry.start)
     var start = 0
     var end = length
     try {
@@ -289,13 +453,13 @@ const PAGE_LIB = String.raw`
     return { start: entry.start + start, end: entry.start + end, node: node }
   }
 
-  function mergeRanges(ranges) {
+  function mergeRanges(ranges, text) {
     ranges.sort(function (a, b) { return a.start - b.start })
     var out = []
     for (var i = 0; i < ranges.length; i++) {
       var run = ranges[i]
       var last = out.length ? out[out.length - 1] : null
-      if (last && run.start <= last.end) last.end = Math.max(last.end, run.end)
+      if (last && (run.start <= last.end || (text !== undefined && /^\s*$/.test(text.slice(last.end, run.start))))) last.end = Math.max(last.end, run.end)
       else out.push({ start: run.start, end: run.end, node: run.node })
     }
     return out
@@ -340,8 +504,8 @@ const PAGE_LIB = String.raw`
         var index = 1
         var sibling = node.previousElementSibling
         while (sibling) { if (sibling.tagName === node.tagName) index += 1; sibling = sibling.previousElementSibling }
-        parts.unshift(tag + (index > 1 ? ':nth-of-type(' + index + ')' : ''))
         if (node.id && /^[A-Za-z][A-Za-z0-9_-]*$/.test(node.id)) { parts.unshift('#' + node.id); break }
+        parts.unshift(tag + (index > 1 ? ':nth-of-type(' + index + ')' : ''))
         node = node.parentElement
         depth += 1
       }
@@ -450,6 +614,33 @@ const PAGE_LIB = String.raw`
     return { selected: true, partial: collapse(picked, 0) !== collapse(full, 0) }
   }
 
+  function dataTable(table) {
+    var role = String(table.getAttribute && table.getAttribute('role') || '').toLowerCase()
+    if (role === 'presentation' || role === 'none') return false
+    if (role === 'table' || role === 'grid' || table.caption) return true
+    var rows = table.rows || []
+    for (var r = 0; r < rows.length; r++) {
+      var cells = rows[r].cells || []
+      for (var c = 0; c < cells.length; c++) {
+        if (String(cells[c].tagName).toUpperCase() === 'TH') return true
+      }
+    }
+    if (rows.length < 2) return false
+    var columns = 0
+    for (var r = 0; r < rows.length; r++) {
+      var cells = rows[r].cells || []
+      if (cells.length < 2) return false
+      var width = 0
+      for (var c = 0; c < cells.length; c++) {
+        if (cells[c].querySelector && cells[c].querySelector('h1,h2,h3,h4,h5,h6,ul,ol,nav,main,article,section,aside,form,table')) return false
+        width += Math.max(1, Number(cells[c].colSpan) || 1)
+      }
+      if (r === 0) columns = width
+      else if (width !== columns) return false
+    }
+    return true
+  }
+
   function tableSnapshot(table, ranges, spec) {
     // An explicit right-click table target is a whole-table action too: the
     // selection was cleared on purpose, so judging cells by "selected" would
@@ -483,19 +674,21 @@ const PAGE_LIB = String.raw`
         column += columnSpan
         if (column > maxColumns) maxColumns = column
         if (r + rowSpan > maxRow) maxRow = r + rowSpan
-        var rowIsHead = cell.parentElement && String(cell.parentElement.tagName).toUpperCase() === 'THEAD'
+        var rowIsHead = cell.parentElement && cell.parentElement.parentElement && String(cell.parentElement.parentElement.tagName).toUpperCase() === 'THEAD'
         var role = String(cell.tagName).toUpperCase() === 'TH' || rowIsHead ? 'header' : 'data'
         var facts = cellFacts(cell, ranges)
         if (facts.selected) selectedAny = true
         if (scope === 'selection' && !facts.selected && role !== 'header') continue
         if (cells.length >= maxCells) { truncated = true; continue }
+        var cellMap = flatTextMap(2000, true, false, cell)
         cells.push({
           row: r,
           column: column - columnSpan,
           rowSpan: rowSpan,
           columnSpan: columnSpan,
           role: role,
-          text: collapse(cell.innerText || cell.textContent, 2000),
+          text: collapse(cellMap.text, 2000),
+          content: selectedContent(cellMap.content, 0, cellMap.text.length),
           includedAs: facts.selected || scope === 'table' ? 'selection' : 'header-context',
           partialText: facts.selected ? facts.partial : false,
           inlineContent: cellImageRuns(cell),
@@ -595,8 +788,19 @@ const PAGE_LIB = String.raw`
     }
   }
 
-  function trimmedRun(map, start, end) {    while (start < end && /\s/.test(map.text.charAt(start))) start += 1
-    while (end > start && /\s/.test(map.text.charAt(end - 1))) end -= 1
+  function trimmedRun(map, start, end) {
+    function preformatted(offset) {
+      for (var i = 0; i < map.nodes.length; i++) {
+        var entry = map.nodes[i]
+        if (offset >= entry.start && offset < entry.end) {
+          var parent = entry.node.parentElement
+          return parent && parent.closest && parent.closest('pre, code')
+        }
+      }
+      return false
+    }
+    while (start < end && /\s/.test(map.text.charAt(start)) && !preformatted(start)) start += 1
+    while (end > start && /\s/.test(map.text.charAt(end - 1)) && !preformatted(end - 1)) end -= 1
     return end > start ? { start: start, end: end } : null
   }
 
@@ -685,7 +889,7 @@ const PAGE_LIB = String.raw`
       if (!spec.excerptText) return { ok: false, reason: 'no-selection' }
     }
 
-    var map = flatTextMap(spec.maxChars)
+    var map = flatTextMap(spec.maxChars, true)
     if (ranges.length === 0 && !targetTable && !targetImage) {
       excerpt = excerptRun(map, String(spec.excerptText))
       if (!excerpt) return { ok: false, reason: 'excerpt-not-found' }
@@ -699,7 +903,7 @@ const PAGE_LIB = String.raw`
         var part = selectedPart(ranges[r], map.nodes[n])
         if (part) found.push(part)
       }
-      var merged = mergeRanges(found)
+      var merged = mergeRanges(found, map.text)
       for (var m = 0; m < merged.length; m++) textRuns.push(merged[m])
     }
     if (excerpt) textRuns = [{ start: excerpt.start, end: excerpt.end, node: nodeForOffset(map, excerpt.start) }]
@@ -710,6 +914,7 @@ const PAGE_LIB = String.raw`
     else {
       var allTables = body.querySelectorAll ? body.querySelectorAll('table') : []
       for (var t = 0; t < allTables.length && t < 200; t++) {
+        if (!dataTable(allTables[t])) continue
         for (var q = 0; q < ranges.length; q++) {
           var hitTable = false
           try { hitTable = ranges[q].intersectsNode(allTables[t]) } catch (error) { hitTable = false }
@@ -752,6 +957,7 @@ const PAGE_LIB = String.raw`
       var allImages = body.querySelectorAll ? body.querySelectorAll('img, svg, canvas') : []
       for (var g = 0; g < allImages.length && g < 400; g++) {
         var image = allImages[g]
+        if (image.closest && image.closest(MATH_SELECTOR)) continue
         var canvasImage = String(image.tagName || '').toUpperCase() === 'CANVAS'
         if (!canvasImage && isSvg(image) && image.parentElement && isSvg(image.parentElement)) continue
         if (!visibleNode(image)) continue
@@ -777,20 +983,15 @@ const PAGE_LIB = String.raw`
     // carry that text a second time; cut each table's span out and keep the text on both sides.
     var tableSpans = []
     if (typeof Map === 'function' && typeof document.createTreeWalker === 'function') {
-      var nodeOffsets = new Map()
-      for (var no = 0; no < map.nodes.length; no++) nodeOffsets.set(map.nodes[no].node, map.nodes[no])
       for (var ts = 0; ts < tables.length; ts++) {
         var min = Infinity
         var max = -1
-        var tableWalker = document.createTreeWalker(tables[ts], 4, null, false)
-        var tableNode = tableWalker.nextNode()
-        while (tableNode) {
-          var offset = nodeOffsets.get(tableNode)
-          if (offset) {
+        for (var tn = 0; tn < map.nodes.length; tn++) {
+          var offset = map.nodes[tn]
+          if (isInside(offset.node, tables[ts])) {
             if (offset.start < min) min = offset.start
             if (offset.end > max) max = offset.end
           }
-          tableNode = tableWalker.nextNode()
         }
         if (max > min) tableSpans.push({ start: min, end: max })
       }
@@ -817,6 +1018,7 @@ const PAGE_LIB = String.raw`
         payload: {
           kind: 'text',
           exact: exact,
+          content: selectedContent(map.content, start, end),
           prefix: map.text.slice(safeStart(map.text, Math.max(0, start - context)), start),
           suffix: map.text.slice(end, safeEnd(map.text, Math.min(map.text.length, end + context))),
         },
@@ -911,14 +1113,31 @@ const PAGE_LIB = String.raw`
     if (!host.firstChild) return 0
     ;(document.body || document.documentElement).appendChild(host)
     var count = host.childNodes.length
-    var lifetime = Math.max(500, Math.min(Number(spec.durationMs) || 2500, 10000))
-    setTimeout(clearHighlight, lifetime)
+    var events = ['pointerdown', 'keydown', 'touchstart', 'wheel', 'resize']
+    var dispose = function () {
+      for (var i = 0; i < events.length; i++) window.removeEventListener(events[i], clearHighlight, true)
+      if (host.parentNode) host.parentNode.removeChild(host)
+    }
+    window.__dshRefHighlightDispose = dispose
+    for (var j = 0; j < events.length; j++) window.addEventListener(events[j], clearHighlight, true)
     return count
   }
 
   function clearHighlight() {
+    var dispose = window.__dshRefHighlightDispose
+    delete window.__dshRefHighlightDispose
+    if (typeof dispose === 'function') dispose()
     var existing = document.getElementById(HIGHLIGHT_ID)
     if (existing && existing.parentNode) existing.parentNode.removeChild(existing)
+  }
+
+  function visibleRect(rects) {
+    for (var i = 0; i < rects.length; i++) {
+      var rect = rects[i]
+      if (rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight
+        && rect.right > 0 && rect.left < window.innerWidth) return true
+    }
+    return false
   }
 
   function scrollRect(rect) {
@@ -927,7 +1146,7 @@ const PAGE_LIB = String.raw`
       var height = window.innerHeight || 0
       if (height > 0 && (rect.top < 48 || rect.bottom > height - 48)) {
         var target = (window.scrollY || 0) + rect.top - height / 2 + rect.height / 2
-        window.scrollTo({ left: window.scrollX || 0, top: Math.max(0, target), behavior: 'auto' })
+        window.scrollTo({ left: window.scrollX || 0, top: Math.max(0, target), behavior: 'instant' })
         return true
       }
     } catch (error) { /* a page that refuses scrolling still gets the highlight */ }
@@ -935,7 +1154,7 @@ const PAGE_LIB = String.raw`
   }
 
   function highlightText(spec) {
-    var map = flatTextMap(spec.maxChars)
+    var map = flatTextMap(spec.maxChars, false, spec.legacy)
     var start = Math.max(0, Math.min(Number(spec.start) || 0, map.text.length))
     var end = Math.max(0, Math.min(Number(spec.end) || 0, map.text.length))
     if (end <= start) return { ok: false, reason: 'range-not-found' }
@@ -943,18 +1162,32 @@ const PAGE_LIB = String.raw`
     var endEntry = null
     for (var i = 0; i < map.nodes.length; i++) {
       var entry = map.nodes[i]
-      if (start >= entry.start && start < entry.end) startEntry = { node: entry.node, offset: start - entry.start }
-      if (end > entry.start && end <= entry.end) endEntry = { node: entry.node, offset: end - entry.start }
+      if (start >= entry.start && start < entry.end) startEntry = { node: entry.node, offset: start - entry.start, atomic: entry.atomic }
+      if (end > entry.start && end <= entry.end) endEntry = { node: entry.node, offset: end - entry.start, atomic: entry.atomic }
     }
     if (!startEntry || !endEntry) return { ok: false, reason: 'range-not-found' }
     var range = document.createRange()
-    range.setStart(startEntry.node, startEntry.offset)
-    range.setEnd(endEntry.node, endEntry.offset)
+    if (startEntry.atomic) range.setStartBefore(startEntry.node)
+    else range.setStart(startEntry.node, startEntry.offset)
+    if (endEntry.atomic) range.setEndAfter(endEntry.node)
+    else range.setEnd(endEntry.node, endEntry.offset)
+    var parent = startEntry.node.parentElement
+    if (parent && parent.scrollIntoView) {
+      try { parent.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }) } catch (error) {}
+    }
     var rects = range.getClientRects ? range.getClientRects() : []
     var first = rects.length ? rects[0] : range.getBoundingClientRect()
-    var scrolled = scrollRect(first)
+    scrollRect(first)
+    rects = range.getClientRects ? range.getClientRects() : []
+    if (!visibleRect(rects)) return { ok: false, reason: 'range-not-visible', rects: 0, scrolled: false }
     var count = highlightRects(rects, spec)
-    return { ok: true, rects: count, scrolled: scrolled }
+    if (!count) return { ok: false, reason: 'highlight-not-drawn', rects: 0, scrolled: false }
+    var selection = window.getSelection()
+    if (selection) {
+      selection.removeAllRanges()
+      selection.addRange(range)
+    }
+    return { ok: true, rects: count, scrolled: true }
   }
 
   function loadImage(url) {
@@ -1107,6 +1340,14 @@ const PAGE_LIB = String.raw`
     if (!best || bestScore <= 0) return { ok: true, status: 'missing', matches: 0, reason: 'no-candidate' }
     if (ties > 1) return { ok: true, status: 'ambiguous', matches: ties, reason: 'several-candidates' }
     var target = best
+    var selectedCells = []
+    if (kind === 'table' && Array.isArray(spec.cells)) {
+      for (var sc = 0; sc < spec.cells.length && sc < 5000; sc++) {
+        var selectedCell = cellAt(best, spec.cells[sc].row, spec.cells[sc].column)
+        if (selectedCell && selectedCells.indexOf(selectedCell) === -1) selectedCells.push(selectedCell)
+      }
+      selectedCells.sort(documentOrder)
+    }
     if (kind === 'table' && anchor.cell) {
       var at = cellAt(best, anchor.cell.row, anchor.cell.column)
       if (at) target = at
@@ -1114,9 +1355,26 @@ const PAGE_LIB = String.raw`
     try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }) } catch (error) {
       try { target.scrollIntoView() } catch (ignored) { /* highlight still lands */ }
     }
-    var rects = target.getClientRects ? target.getClientRects() : []
-    var count = highlightRects(rects.length ? rects : [target.getBoundingClientRect()], spec)
-    return { ok: true, status: 'found', matches: 1, described: selectorOf(target), rects: count, scrolled: true }
+    var rects = []
+    var targets = selectedCells.length ? selectedCells : [target]
+    for (var sr = 0; sr < targets.length; sr++) {
+      var selectedRects = targets[sr].getClientRects ? targets[sr].getClientRects() : []
+      if (!selectedRects.length) selectedRects = [targets[sr].getBoundingClientRect()]
+      for (var cr = 0; cr < selectedRects.length; cr++) rects.push(selectedRects[cr])
+    }
+    if (!visibleRect(rects)) return { ok: false, status: 'missing', matches: 1, reason: 'element-not-visible' }
+    var count = highlightRects(rects, spec)
+    if (kind === 'table' && count > 0) {
+      var selectionRange = document.createRange()
+      selectionRange.selectNodeContents(selectedCells.length ? selectedCells[0] : target)
+      if (selectedCells.length) {
+        var lastCell = selectedCells[selectedCells.length - 1]
+        selectionRange.setEnd(lastCell, lastCell.childNodes.length)
+      }
+      var selection = window.getSelection()
+      if (selection) { selection.removeAllRanges(); selection.addRange(selectionRange) }
+    }
+    return { ok: count > 0, status: count > 0 ? 'found' : 'missing', matches: 1, described: selectorOf(target), rects: count, scrolled: count > 0 }
   }
 
   function cellAt(table, row, column) {
@@ -1131,12 +1389,19 @@ const PAGE_LIB = String.raw`
       return null
     }
     if (row < 0 || row >= rows.length) return null
-    var cells = rows[row].cells || []
-    var at = 0
-    for (var i = 0; i < cells.length; i++) {
-      var span = Math.max(1, Number(cells[i].colSpan) || 1)
-      if (at <= column && column < at + span) return cells[i]
-      at += span
+    var occupied = []
+    for (var r = 0; r <= row; r++) {
+      if (r === row && occupied[column] && occupied[column].end > r) return occupied[column].cell
+      var cells = rows[r].cells || []
+      var at = 0
+      for (var i = 0; i < cells.length; i++) {
+        while (occupied[at] && occupied[at].end > r) at++
+        var span = Math.max(1, Math.min(Number(cells[i].colSpan) || 1, 200))
+        if (r === row && at <= column && column < at + span) return cells[i]
+        var end = r + Math.max(1, Math.min(Number(cells[i].rowSpan) || 1, 1000))
+        for (var c = at; c < at + span; c++) occupied[c] = { end: end, cell: cells[i] }
+        at += span
+      }
     }
     return null
   }
@@ -1238,7 +1503,7 @@ export function validateFrozenCapture(value: unknown): RawCaptureResult | undefi
 
 /** Read the page's visible text, for a host-side text-quote locate. */
 export function pageTextScript(): string {
-  return script(`var map = flatTextMap(spec.maxChars)
+  return script(`var map = flatTextMap(spec.maxChars, false, spec.legacy)
     return JSON.stringify({ ok: true, url: String(location.href), title: String(document.title || ''), text: map.text, truncated: map.truncated })`)
 }
 
@@ -1250,6 +1515,15 @@ export function pageFactsScript(): string {
 /** Highlight one flat [start, end) range of the page text. */
 export function highlightScript(): string {
   return script('return JSON.stringify(highlightText(spec))')
+}
+
+export function guestReferenceHandlerScript(): string {
+  return `function (operation, spec) { ${PAGE_LIB}
+    if (operation === 'text') { var map = flatTextMap(spec.maxChars, false, spec.legacy); return { ok: true, text: map.text } }
+    if (operation === 'highlight') return highlightText(spec)
+    if (operation === 'element') return revealElement(spec)
+    throw new Error('unsupported reference operation')
+  }`
 }
 
 /** Locate one image or table by its stored anchor, scroll to it and highlight it. */

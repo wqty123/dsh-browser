@@ -9,6 +9,8 @@
  * @module dsh-browser/browser-reference/types
  */
 
+import type { ReferenceTextNode } from '../reference-text.ts'
+
 /** Where the capture happened; reveal routes back to the same carrier. */
 export type BrowserReferenceCarrier = 'sidebar' | 'bundled' | 'chrome' | 'edge'
 
@@ -33,6 +35,7 @@ export interface TextReferencePart {
   readonly partId: string
   readonly type: 'text'
   readonly text: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly anchor: TextQuoteAnchor
 }
 
@@ -88,6 +91,7 @@ export interface TableCellSnapshot {
   readonly columnSpan: number
   readonly role: 'header' | 'data'
   readonly text: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly includedAs: 'selection' | 'header-context'
   readonly partialText: boolean
   /** Text and image runs in reading order; images carry their own partId/assetKey. */
@@ -156,6 +160,8 @@ export interface BrowserReference {
      * outlive the conversation that first asked for the page.
      */
     readonly browserSessionId?: string
+    /** App-owned opaque iframe source, never a native browser session. */
+    readonly sourcePageId?: string
   }
   readonly provenance: {
     readonly origin: BrowserReferenceOrigin

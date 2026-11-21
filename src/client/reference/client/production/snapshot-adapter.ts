@@ -91,6 +91,7 @@ function projectPart(part: BrowserReferencePart, referenceId: string): ContractP
         partId: part.partId,
         referenceId,
         text: part.text,
+        ...(part.content === undefined ? {} : { content: part.content }),
         label: part.anchor.exact,
       }
     case 'image':
@@ -99,6 +100,7 @@ function projectPart(part: BrowserReferencePart, referenceId: string): ContractP
         partId: part.partId,
         referenceId,
         assetKey: part.assetKey,
+        ...((part.alt ?? part.caption) === undefined ? {} : { text: [part.alt === undefined ? undefined : `Image: ${part.alt}`, part.caption].filter(value => value !== undefined).join('\n') }),
         ...(part.alt === undefined ? {} : { label: part.alt }),
         // No `mimeType`: the contract field is a real MIME type, and a frozen
         // snapshot does not carry one (bytes and their sidecar do). Claiming
@@ -110,6 +112,7 @@ function projectPart(part: BrowserReferencePart, referenceId: string): ContractP
         partId: part.partId,
         referenceId,
         text: projectTableText(part.table, part.table.caption ?? part.anchor.caption),
+        table: part.table,
       }
     default: {
       const exhaustive: never = part

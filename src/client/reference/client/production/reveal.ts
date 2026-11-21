@@ -21,6 +21,7 @@ import { createRevealer, RevealFailed, type RevealAdapter, type RevealLocation }
 import { parseBrowserRefUri } from '../scheme.ts'
 import type { BrowserRefLinkSpec } from '../BrowserRefLink.tsx'
 import type { ReferenceHttpClient } from './http-transport.ts'
+import { bridgePackageError } from '../../../../bridge-compatibility.ts'
 
 /** Frozen identity of a captured reference, resolved from the stored snapshot. */
 export interface RevealOwner {
@@ -37,6 +38,7 @@ export interface ProductionRevealerOptions {
   readonly resolveOwner: (referenceId: string) => RevealOwner | undefined
   /** Current DSH session id (for session-mismatch validation). */
   readonly currentSessionId: () => string
+  readonly onActivate?: (uri: string) => Promise<RevealStatus>
   /**
    * Report the outcome of EVERY activation (including the reply-side link's
    * `onActivate`, which used to call `run` directly and stay silent). The
@@ -54,11 +56,12 @@ export interface ProductionRevealer {
    * @param options - `navigate` asks the plugin to move its page to the source.
    * @returns an understandable status.
    */
-  activate(uri: string, options?: { readonly navigate?: boolean }): Promise<RevealStatus>
+  activate(uri: string, options?: { readonly navigate?: boolean; readonly sourcePageId?: string }): Promise<RevealStatus>
   /** Build the dedicated button props for a reply-side link. */
   linkSpec(uri: string, label?: string): BrowserRefLinkSpec
   /** Last activation status, for the UI to render a hint. */
   lastStatus(): RevealStatus | undefined
+  lastReason(): string | undefined
   dispose(): void
 }
 
@@ -73,7 +76,6 @@ class RevealUnavailableError extends Error {}
  */
 function wireStatus(status: string | undefined): RevealStatus {
   switch (status) {
-    case undefined:
     case 'revealed':
     case 'ok':
     case 'partial':
@@ -108,12 +110,15 @@ export function createRevealAdapter(options: ProductionRevealerOptions): RevealA
     async locate(request: RevealRequest, _signal: AbortSignal): Promise<RevealLocation> {
       const owner = resolveOwner(request.referenceId)
       if (owner === undefined) throw new RevealUnavailableError('unknown reference')
-      const wire = await http.reveal(request.referenceId, request.partId, request.navigate === true)
+      const wire = await http.reveal(request.referenceId, request.partId, request.navigate === true, request.sourcePageId)
+        .catch((error: unknown) => { throw bridgePackageError(error) ?? error })
+      const packageError = bridgePackageError(wire)
+      if (packageError !== undefined) throw packageError
       // A transport-level refusal (ok !== true) has no cause to report; a
       // decoded answer always does, so it travels with the status.
       if (wire.ok !== true) throw new RevealUnavailableError(wire.reason ?? 'reveal was refused')
       const status = wireStatus(wire.status)
-      if (status !== 'revealed') throw new RevealFailed(status, wire.reason ?? wire.status)
+      if (status !== 'revealed') throw new RevealFailed(status, wire.reason ?? wire.note ?? wire.status)
       // Identity facts (owner.sessionId + browserSessionId + label/frame) are
       // carried for audit; the plugin resolves the actual tab from the frozen
       // reference server-side.
@@ -140,8 +145,10 @@ export function createRevealAdapter(options: ProductionRevealerOptions): RevealA
 export function createProductionRevealer(options: ProductionRevealerOptions): ProductionRevealer {
   const revealer = createRevealer({ adapter: createRevealAdapter(options) })
   let last: RevealStatus | undefined
+  let reason: string | undefined
 
-  const run = async (parsed: ReturnType<typeof parseBrowserRefUri>, navigate = false): Promise<RevealStatus> => {
+  const run = async (parsed: ReturnType<typeof parseBrowserRefUri>, navigate = false, sourcePageId?: string): Promise<RevealStatus> => {
+    reason = undefined
     let status: RevealStatus
     if (parsed === undefined) {
       status = 'unknown-reference'
@@ -150,11 +157,13 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
         referenceId: parsed.referenceId,
         ...(parsed.partId === undefined ? {} : { partId: parsed.partId }),
         sessionId: options.currentSessionId(),
+        ...sourcePageId === undefined ? {} : { sourcePageId },
         ...navigate ? { navigate: true } : {},
       }
       try {
         const result: RevealResult = await revealer.reveal(request)
         status = result.status
+        reason = result.reason
       } catch {
         status = 'unavailable'
       }
@@ -168,8 +177,9 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
 
   return {
     revealer,
+    lastReason: () => reason,
     async activate(uri, activateOptions) {
-      return run(parseBrowserRefUri(uri), activateOptions?.navigate === true)
+      return run(parseBrowserRefUri(uri), activateOptions?.navigate === true, activateOptions?.sourcePageId)
     },
     linkSpec(uri, label) {
       const owner = (() => {
@@ -190,13 +200,7 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
         // chip (26px tall, 999px radius, the same two theme tokens).
         className: 'dsh-browser-ref-link',
         onActivate: (activated) => {
-          // The Web sidebar's guest is not a plugin browser session, so the host revealer has nothing to
-          // aim. Try it anyway (desktop path) and then hand the URI to the shell's panel hook.
-          void run(parseBrowserRefUri(activated))
-          try {
-            const hook = (globalThis as unknown as { __DSH_BROWSER_REF_REVEAL__?: (uri: string) => boolean }).__DSH_BROWSER_REF_REVEAL__
-            if (typeof hook === 'function') hook(activated)
-          } catch { /* the host path already reported */ }
+          void (options.onActivate === undefined ? run(parseBrowserRefUri(activated)) : options.onActivate(activated))
         },
         ...(label === undefined ? {} : { children: label }),
         // Always carry a tooltip: a chip with no title reads as decoration. When the reference is not

@@ -1,3 +1,4 @@
+import { testTab, testScope, tabIn } from './canonical-fixtures.mjs'
 // The two startup behaviours from #29, exercised against a browser that can be observed.
 //
 // The guards in startup-lifecycle.test.mjs assert the SHAPE of the code (adoption before launch,
@@ -45,12 +46,12 @@ async function hostFor(browser, { spawn = false } = {}) {
   return { host, profileDir, launches }
 }
 
-test('a view adopts the page the browser opened, and the surplus is closed', async () => {
+test('a view adopts one startup page without closing other pages', async () => {
   // Two blanks, which is what a real Chrome has by the time a client can talk to it.
   const browser = createFakeBrowser({ blanks: ['blank-kept', 'blank-surplus'] })
   await browser.listen()
   const { host, profileDir } = await hostFor(browser)
-  const view = host.createView()
+  const view = host.createView(testTab())
   try {
     const outcome = await view.sendCommand('Runtime.evaluate', { expression: '1' })
       .then(() => 'ok', error => String(error.message))
@@ -65,8 +66,7 @@ test('a view adopts the page the browser opened, and the surplus is closed', asy
     assert.deepEqual(browser.attached, ['blank-kept'], 'the view adopted the page that was already there')
     assert.deepEqual(browser.created, [], 'and nothing was created, so nothing was discarded')
 
-    // Exactly the surplus went away — one blank is kept for the view to adopt.
-    assert.deepEqual(browser.closed, ['blank-surplus'], 'the surplus blank was closed')
+    assert.deepEqual(browser.closed, [], 'initial allocation does not close other startup pages')
   } finally {
     host.dispose()
     await browser.kill()
@@ -80,7 +80,7 @@ test('with a single blank, nothing is closed and that one is adopted', async () 
   const browser = createFakeBrowser({ blanks: ['only-blank'] })
   await browser.listen()
   const { host, profileDir } = await hostFor(browser)
-  const view = host.createView()
+  const view = host.createView(testTab())
   try {
     await view.sendCommand('Runtime.evaluate', { expression: '1' })
     assert.deepEqual(browser.attached, ['only-blank'], 'the single blank is adopted')
@@ -97,7 +97,7 @@ test('a browser left running by a previous DSH is adopted, and none is launched'
   const browser = createFakeBrowser({ browserName: 'Chrome/154.0.0.0' })
   await browser.listen()
   const { host, profileDir, launches } = await hostFor(browser, { spawn: true })
-  const view = host.createView()
+  const view = host.createView(testTab())
   try {
     const outcome = await view.sendCommand('Runtime.evaluate', { expression: '1' })
       .then(() => 'ok', error => String(error.message))
@@ -119,7 +119,7 @@ test('an endpoint that is not a browser is refused, and a launch happens instead
   const browser = createFakeBrowser({ browserName: 'not-a-browser/1.0' })
   await browser.listen()
   const { host, profileDir, launches } = await hostFor(browser, { spawn: true })
-  const view = host.createView()
+  const view = host.createView(testTab())
   try {
     await view.sendCommand('Runtime.evaluate', { expression: '1' }).catch(() => {})
     assert.ok(launches.length >= 1, 'the endpoint was refused and a launch was attempted')

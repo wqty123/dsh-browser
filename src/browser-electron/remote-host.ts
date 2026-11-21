@@ -1,10 +1,9 @@
+import { LOOPBACK_IPV4 } from '../../assets/browser-policy.mjs'
 /**
- * Self-hosted Electron browser host (parent side): an
+ * Legacy standalone Electron browser host (not a supported package export): an
  * {@link ElectronBrowserViewHost} implementation that spawns the plugin's own
  * Electron child process (host-main.js) and drives it over line-delimited
- * JSON-RPC on a loopback TCP socket. This is what makes the plugin work on
- * surfaces without a desktop shell's electronViewHost (plain dsh web):
- * installing the plugin is enough — the browser window appears on first use.
+ * JSON-RPC on a loopback TCP socket.
  *
  * Protocol (one JSON object per line, both directions):
  *   -> { id, op: 'createView' } | { id, op: 'destroyView', viewId } |
@@ -29,15 +28,17 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { withTimeoutShared } from './timing.ts'
+import { browserHostLogPath } from './paths.ts'
 import { fileURLToPath } from 'node:url'
 import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, PresentOptions, ScreenshotOptions } from './provider.ts'
 import type { ExportedCookie } from '../browser/types.ts'
+import { readTabHandle, tabWireId, type BrowserTabWireId } from '../browser/handles.ts'
 
 /** How long to wait for the child to signal readiness before failing. */
 const READY_TIMEOUT_MS = 20_000
@@ -1089,7 +1090,7 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     })
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => resolve())
+      server.listen(0, LOOPBACK_IPV4, () => resolve())
     })
     // A later server error (rare on a loopback ephemeral port) must not crash
     // the process; the client's fail path handles the actual recovery.
@@ -1162,10 +1163,11 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     // of going stale (only the page state is lost).
   }
 
-  createView(): ElectronViewHandle {
+  createView(identity?: BrowserTabWireId): ElectronViewHandle {
     // The seam is synchronous; the provider uses the handle immediately, so
     // commands are deferred until the child is up and the view materialized.
-    const id = `view:${Math.random().toString(36).slice(2, 10)}`
+    const id = identity ?? tabWireId({ owner: 'standalone', session: randomUUID(), tab: randomUUID() })
+    readTabHandle(id)
     const view = new DeferredRemoteView(id, () => this.ensureView(id))
     this.views.set(id, view)
     return view
@@ -1415,11 +1417,9 @@ function hostStamp(): string {
 }
 
 function appendHostLog(text: string): void {
-  const home = process.env.DSH_HOME
-  if (home === undefined || home === '') return
   try {
-    const dir = join(home, 'logs')
-    const file = join(dir, 'dsh-builtin-browser-host.log')
+    const file = browserHostLogPath()
+    const dir = dirname(file)
     try {
       if (statSync(file).size > HOST_LOG_MAX_BYTES) {
         // Discard the old bytes but leave a dated marker: truncating to empty

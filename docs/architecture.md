@@ -122,7 +122,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 
 ### ② 用你自己的浏览器(Chrome / Edge)
 
-设置里可以把载体改成**本机已安装的 Chrome 或 Edge**(`browser.channel`:`bundled` / `auto` / `chrome` / `edge`)。做法与 Codex Browser Use 一致:以 `--remote-debugging-port=0` 启动,读浏览器自己写下的 `DevToolsActivePort` 得到端口,再全程走 CDP(用 Node 22 内置的 `WebSocket`,**不新增依赖**)。
+只有显式设置 `browser.channel: "chrome"` 或 `"edge"` 才会启动本机浏览器。默认 `"sidebar"`，旧值 `"bundled"` / `"auto"` 同样只使用侧栏，缺失时返回能力错误。外部浏览器以 `--remote-debugging-port=0` 启动，读取 `DevToolsActivePort` 后通过 CDP 操作。
 
 **你自己的数据不会被碰**:插件用的是**独立 profile**(`$DSH_HOME/dsh-builtin-browser-host/<chrome|edge>-profile`),不会打开、占用或修改你日常的窗口、书签与登录状态;插件退出也不会关掉你的浏览器。
 

@@ -57,33 +57,30 @@ test('a hand-off reads as "the browser is already there", not as a failure', () 
   const branch = text.slice(exitedAt, text.indexOf('if (stopped === ', exitedAt + 10))
   // Exit code 0 is the hand-off signature: the request went to the instance holding the profile.
   // That instance is the browser this host wanted, so the right answer is to connect to it.
-  assert.match(branch, /if \(clean\) \{[\s\S]{0,200}adoptRunningBrowser/, 'a clean exit retries adoption')
+  assert.match(text, /child\.exitCode !== null && child\.exitCode !== 0/, 'a clean launcher exit leaves endpoint discovery running')
   // The non-zero case still has to reach the user: a crash or a missing library is not a hand-off.
-  assert.match(branch, /clean\s*\n?\s*\?/, 'and the message still distinguishes the two')
+  assert.match(branch, /hand the request anywhere/, 'a failed launch is not described as a hand-off')
 })
 
-test('blank pages are collapsed, with discovery enabled first', () => {
-  const normalize = body('normalizeBlankPages')
+test('startup discovers targets without closing surplus pages', () => {
+  const normalize = body('start')
   // Without discovery the browser may omit pages that existed before this client connected —
   // which is exactly the page that needs closing. Skipping it is how the first attempt failed
   // silently.
   const discoverAt = normalize.indexOf('Target.setDiscoverTargets')
-  const getAt = normalize.indexOf('Target.getTargets')
   assert.notEqual(discoverAt, -1, 'discovery is turned on')
-  assert.notEqual(getAt, -1, 'and the targets are listed')
-  assert.ok(discoverAt < getAt, 'discovery comes first')
 
   // One blank is KEPT — buildSession adopts it. Closing all of them would put the plugin back to
   // creating a page while the browser's own page sits there unclaimed.
-  assert.match(normalize, /if \(!kept\) \{ kept = true; continue \}/, 'exactly one blank is kept')
+  assert.doesNotMatch(source(), /normalizeBlankPages|blanksNormalized/)
   // And a page the plugin is already driving is never closed, however blank it looks.
-  assert.match(normalize, /claimed\.has\(targetId\)/, 'claimed targets are skipped')
+  assert.doesNotMatch(normalize, /Target.closeTarget/)
 })
 
 test('a view adopts a blank page instead of discarding the one the browser opened', () => {
   const build = body('buildSession')
   assert.match(build, /await this\.adoptBlankTarget\(client\)/, 'adoption is attempted')
-  assert.match(build, /adopted \?\? await this\.createTarget\(client\)/, 'and creation is the fallback')
+  assert.match(build, /adopted \?\? await this\.createTarget\(client, viewId\)/, 'and creation records the owning view')
 
   const adopt = body('adoptBlankTarget')
   // Two views sharing one page would be worse than an extra tab, so an already-claimed target is

@@ -15,24 +15,31 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { setLastOpen } from '../browser-electron/open-slot.ts'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ImageBlock } from '@deepseek-ai/dsh-llm'
+import { SCREENSHOT_MAX_WIDTH, SCREENSHOT_MAX_HEIGHT, screenshotDimension, screenshotBytes, screenshotVisionEnabled, saveScreenshotImage } from './screenshot-image.ts'
+import { BrowserTakeovers, installTakeovers } from './takeover.ts'
+import { TAKEOVER_TOOL, type TakeoverDecision, type TakeoverSummary } from '../takeover-protocol.ts'
+import { clearLastOpen, getLastOpen, setLastOpen } from '../browser-electron/open-slot.ts'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { pageOperationScript } from './page-probe.ts'
-import { readPanelPage } from './panel-page.ts'
 import { SettingsStore, settingsPath } from '../browser-electron/settings-store.ts'
 import { createShortcutStore, type ShortcutSettings } from '../browser-electron/startpage-shortcuts.ts'
 import { createReferenceService, summarizeReference, type BrowserReferenceService } from '../browser-reference/service.ts'
 import type { BrowserReferenceCarrier } from '../browser-reference/types.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { BrowserSessionId, BrowserPageOperationRequest, BrowserProbeMethod } from '../browser/types.ts'
+import { browserSessionHandle, resolveSessionHandle, resolveTabHandle, scopedTabs, sessionWireId, tabWireId } from '../browser/handles.ts'
 import {
   ELEMENT_ITEM_SCHEMA,
   NODE_ITEM_SCHEMA,
   projectElement,
   projectNode,
 } from './element-fields.ts'
+
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
 /**
  * Register a cleanup that runs once when the process exits.
@@ -165,21 +172,15 @@ interface ToolBrowserState {
    */
   configRestrictedTo: readonly string[] | undefined
   restrictedByTask: Map<string, readonly string[]>
-  /**
-   * Panel-surface page per task.
-   *
-   * On the Web shell `dsh_browser_open` hands the address to the sidebar instead of starting a
-   * carrier session, so read tools had no way to see the page they had just opened ("nothing is
-   * open in this task yet"). The address recorded here lets those tools read the same page through
-   * the plugin's own proxy.
-   */
+  /** Active panel opens, including Web iframes that cannot be driven over CDP. */
   panelUrlByTask: Map<string, string>
+  pendingPanelOpens: Map<string, Promise<void>>
 }
 
 function createState(): ToolBrowserState {
   return {
     sessionsByTask: new Map(), pendingOpens: new Map(), configRestrictedTo: undefined,
-    restrictedByTask: new Map(), panelUrlByTask: new Map(),
+    restrictedByTask: new Map(), panelUrlByTask: new Map(), pendingPanelOpens: new Map(),
   }
 }
 
@@ -315,30 +316,69 @@ function taskKey(exec: { agent?: { id?: string } } | undefined): string {
   return exec?.agent?.id ?? 'default'
 }
 
-/**
- * Panel 面已知地址：`dsh_browser_open` 在 panel 面只交给侧栏，读工具据此读同一页。
- * @param state - the calling context's tool state.
- * @param key - the task key.
- * @returns the recorded address, or undefined when nothing was opened on the panel.
- */
-function panelUrlFor(state: ToolBrowserState, key: string): string | undefined {
-  return state.panelUrlByTask.get(key)
+const effectProperties = {
+  verified: { type: 'boolean' as const, description: 'Whether a visible change was observed. Absent when it could not be checked.' },
+  note: { type: 'string' as const, description: 'Why the effect is uncertain.' },
 }
 
-/**
- * 本进程自己的源（用于回环直连代理页）。
- * @param ctx - the plugin context (carries the webServer service).
- * @returns origin such as `http://127.0.0.1:3080`.
- */
-function selfOrigin(ctx: Context): string {
+async function pageFingerprint(browser: NonNullable<Context['browser']>, session: BrowserSessionId): Promise<string | undefined> {
   try {
-    const server = ctx.get('webServer') as { getOrigin?: () => string } | undefined
-    const origin = server?.getOrigin?.()
-    if (typeof origin === 'string' && origin !== '') return origin
-  } catch { /* 读不到就退回环境变量 */ }
-  const fromEnv = process.env.DSH_WEB_ORIGIN
-  if (typeof fromEnv === 'string' && fromEnv !== '') return fromEnv
-  return `http://127.0.0.1:${process.env.DSH_PORT ?? '3080'}`
+    const result = await browser.execute(session, {
+      script: `(() => {
+        const a = document.activeElement
+        return JSON.stringify([
+          location.href, document.title,
+          a ? [a.tagName, a.id || a.getAttribute('name') || a.className || '',
+            typeof a.value === 'string' ? a.value.length : null, a.checked, a.selectedIndex,
+            a.selectionStart, a.selectionEnd, a.scrollLeft, a.scrollTop] : null,
+          window.scrollX, window.scrollY,
+          document.body ? document.body.childElementCount : 0,
+          document.body ? document.body.innerHTML.length : 0,
+        ])
+      })()`,
+    })
+    return result.ok && typeof result.value === 'string' ? result.value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function observedEffect(browser: NonNullable<Context['browser']>, session: BrowserSessionId, before: string | undefined): Promise<{ verified?: boolean; note?: string }> {
+  const after = await pageFingerprint(browser, session)
+  if (before === undefined || after === undefined) return { note: 'The effect could not be checked.' }
+  return before !== after
+    ? { verified: true }
+    : { verified: false, note: 'No visible change observed; the effect is uncertain.' }
+}
+
+function effectText(value: { verified?: boolean; note?: string }): string {
+  return value.verified === true ? ' Visible change observed.' : ` ${value.note ?? 'The effect could not be checked.'}`
+}
+
+function rememberSession(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string, agent: ExecAgent | undefined, session: BrowserSessionId | undefined, panelUrl?: string): void {
+  const previous = state.sessionsByTask.get(key)
+  const previousPanelUrl = state.panelUrlByTask.get(key)
+  if (session === undefined) state.sessionsByTask.delete(key)
+  else state.sessionsByTask.set(key, session)
+  if (panelUrl === undefined) state.panelUrlByTask.delete(key)
+  else state.panelUrlByTask.set(key, panelUrl)
+  if (previous === session && (previousPanelUrl !== undefined) === (panelUrl !== undefined)) return
+  const cleanup = (): void => {
+    if (state.sessionsByTask.get(key) !== session || state.panelUrlByTask.has(key) !== (panelUrl !== undefined)) return
+    state.sessionsByTask.delete(key)
+    state.panelUrlByTask.delete(key)
+    if (session !== undefined) void browser.close(session).catch(() => {})
+  }
+  try {
+    if (agent?.ctx !== undefined) agent.ctx.effect(() => cleanup)
+    else if (key === 'default' && session !== undefined) registerExitCleanup(() => browser.close(session).catch(() => {}))
+  } catch (error) {
+    cleanup()
+    if (previous !== undefined) state.sessionsByTask.set(key, previous)
+    if (previousPanelUrl !== undefined) state.panelUrlByTask.set(key, previousPanelUrl)
+    throw error
+  }
+  if (previous !== undefined && previous !== session) void browser.close(previous).catch(() => {})
 }
 
 /**
@@ -354,6 +394,7 @@ function selfOrigin(ctx: Context): string {
  * @returns the task's session id.
  */
 async function ensureSession(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string, agent?: ExecAgent, create = false): Promise<BrowserSessionId> {
+  await state.pendingPanelOpens.get(key)
   const existing = state.sessionsByTask.get(key)
   if (existing !== undefined) {
     // The human closing a browser window ends that session, so a cached id can
@@ -363,6 +404,12 @@ async function ensureSession(browser: NonNullable<Context['browser']>, state: To
   }
   const pending = state.pendingOpens.get(key)
   if (pending !== undefined) return pending
+  if (state.panelUrlByTask.has(key)) {
+    throw new Error('dsh-builtin-browser: the panel surface has no live CDP session for this operation. '
+      + 'Use the CDP-backed DSH desktop sidebar with a connected desktop bridge and call dsh_browser_open again. '
+      + 'The Web iframe panel cannot provide live snapshots, a11y, content, scrape, screenshots, interactions, '
+      + 'uploads, downloads, or reference capture. Reading tools never start a separate browser.')
+  }
   // Starting a browser is `dsh_browser_open`'s job and nobody else's. A read tool asking "what is on
   // screen" used to start one — which, with the human's own Edge already running, handed the command over
   // and opened yet another window, reported as "one look, two Edge windows". A reader with nothing open
@@ -375,35 +422,8 @@ async function ensureSession(browser: NonNullable<Context['browser']>, state: To
   // which task's page is currently visible to the human.
   const opening = browser.open(key).then(
     session => {
-      // Tie the session's lifetime to the agent's scoped context FIRST: when
-      // the agent (and its DSH session) is disposed, the effect's disposer
-      // runs and closes the browser session. Registration happens once per
-      // session (only on first open for the key). If the agent is already
-      // gone, close the fresh session instead of leaking it.
-      state.sessionsByTask.set(key, session)
       state.pendingOpens.delete(key)
-      try {
-        if (agent?.ctx !== undefined) {
-          agent.ctx.effect(() => () => {
-            const current = state.sessionsByTask.get(key)
-            if (current === undefined) return
-            state.sessionsByTask.delete(key)
-            void browser.close(current).catch(() => {})
-          })
-        } else if (key === 'default') {
-          // Agentless / CLI probe: close the session on process exit so the
-          // window is not orphaned.
-          // One hook for the whole process, not one listener per session: a default session can
-          // be created repeatedly (a CLI probe does), and each registration lived for the life of
-          // the process — so the listener list grew without bound and Node warned at eleven.
-          registerExitCleanup(() => browser.close(session).catch(() => {}))
-        }
-      } catch (error) {
-        // effect() failed — undo the registration so future calls retry.
-        state.sessionsByTask.delete(key)
-        void browser.close(session).catch(() => {})
-        throw error
-      }
+      rememberSession(browser, state, key, agent, session)
       return session
     },
     error => { state.pendingOpens.delete(key); throw error },
@@ -490,13 +510,27 @@ export function apply(ctx: Context, config: Config = {}): void {
   // scoped to THIS plugin apply, so parallel contexts never share sessions
   // or leak restrictions into each other.
   const state = createState()
+  const takeovers = new BrowserTakeovers()
+  installTakeovers(ctx, takeovers)
   liveStates.add(state)
   ctx.effect(() => () => { liveStates.delete(state) })
   // Re-apply resets the restriction: an omitted allowedActions lifts it.
   state.configRestrictedTo = config.allowedActions !== undefined ? [...config.allowedActions] : undefined
 
   ctx.systemPrompt.section({
-    name: 'tool:browser',
+    name: 'tool:browser-human-takeover',
+    order: 152,
+    text: 'For CAPTCHAs, sliders, logins, two-factor authentication (2FA), and payments, call dsh_browser_request_takeover with a clear reason and any instructions. Never attempt automatic CAPTCHA or slider solving. Wait for the human, then re-read the fresh page summary and inspect the page before continuing. A skipped or cancelled takeover is not successful completion; do not bypass it or retry protected actions automatically.',
+  })
+
+  ctx.systemPrompt.section({
+    name: 'tool:dsh-browser-reference-presentation',
+    order: 151,
+    text: 'Browser references are already displayed as interactive capsules. The capsules provide source navigation. Do not repeat browser-reference markers, dsh-browser-ref: URIs, source URLs, or source/citation links in replies; answer using the quoted content instead.',
+  })
+
+  ctx.systemPrompt.section({
+    name: 'tool:dsh-builtin-browser',
     // Tool guidance band is 100-199; 150 keeps clear of the common 110/120
     // tool sections so ordering does not depend on plugin load sequence.
     order: 150,
@@ -530,7 +564,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // whose source URL cannot be downloaded still become a real reference.
     referenceService = createReferenceService(browser, {
       visibleCapture: async (sessionId, clip, signal) => {
-        const shot = await browser.screenshot(sessionId, { clip, format: 'png' }, signal)
+        const shot = await browser.screenshot(sessionWireId(resolveSessionHandle(sessionId)), { clip, format: 'png' }, signal)
         return { dataUrl: shot.dataUrl, mime: 'image/png' }
       },
     })
@@ -543,6 +577,24 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   const registerSafely = (definition: ReturnType<typeof defineTool>): void => {
     try {
+      const execute = definition.execute.bind(definition)
+      const name = definition.name
+      definition = { ...definition, execute: async (args, exec) => {
+        const owner = taskKey(exec)
+        if (name !== TAKEOVER_TOOL && takeovers.blocks(owner)
+          && (!READ_ONLY_TOOLS.has(name) || ['dsh_browser_reset', 'dsh_browser_reset_session', 'dsh_browser_reference_reveal'].includes(name))) {
+          const requested = (args as { tabId?: string }).tabId
+          let tab = requested
+          if (requested?.startsWith('dsh-tab:')) {
+            const session = state.sessionsByTask.get(owner)
+            if (session) tab = resolveTabHandle(browserSessionHandle(owner, session), requested).tab
+          }
+          if (tab === undefined || takeovers.blocks(owner, tab)) {
+            throw new Error('Browser tab is awaiting human takeover. Agent browser actions are refused until the human confirms completion or skips the request.')
+          }
+        }
+        return execute(args, exec)
+      } }
       ctx.tools.register(definition)
     } catch (error) {
       ctx.logger?.warn?.(
@@ -552,6 +604,74 @@ export function apply(ctx: Context, config: Config = {}): void {
       )
     }
   }
+
+  registerSafely(defineTool({
+    name: 'dsh_browser_request_takeover',
+    description: 'Hand the selected visible sidebar browser tab in this conversation to the human for a CAPTCHA/slider, login, 2FA or payment. Works on the Web iframe without CDP, including user-opened tabs: adopts the selected tab for this request only, without granting agent control. Never solve CAPTCHAs automatically. Requires an active turn; waits for the sidebar connection and the native card or sidebar Confirm/Skip. Repeated calls on the same tab share one request. Returns done/skipped/cancelled plus a fresh page summary; inspect it before resuming. Never treat skipped/cancelled as success.',
+    parameters: {
+      reason: { type: 'string', required: true, description: 'Why the human must take over (1–1000 characters).' },
+      instructions: { type: 'string', description: 'Optional concise instructions for the human (up to 2000 characters).' },
+    },
+    output: { schema: { type: 'object', additionalProperties: false, properties: {
+      outcome: { type: 'string', required: true, enum: ['done', 'skipped', 'cancelled'] },
+      page: { type: 'object', required: true, additionalProperties: false, properties: {
+        url: { type: 'string', required: true }, title: { type: 'string', required: true },
+        snapshotHint: { type: 'string', required: true }, fresh: { type: 'boolean', required: true },
+      } },
+    } }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    async execute(args, exec) {
+      if (!exec.agent?.session) throw new Error('Browser takeover requires an active agent turn.')
+      if (!args.reason.trim()) throw new Error('Browser takeover reason must not be empty.')
+      if (args.reason.length > 1000 || (args.instructions?.length ?? 0) > 2000) throw new Error('Browser takeover reason or instructions are too long.')
+      const owner = taskKey(exec)
+      const opening = state.pendingPanelOpens.get(owner)
+      if (opening) await opening
+      const open = getLastOpen()
+      const navigationUrl = open?.owner === owner && Date.now() - open.at < 10000 ? open.url : undefined
+      const page = await takeovers.adopt(owner, exec.signal, navigationUrl)
+      if (navigationUrl !== undefined && getLastOpen()?.owner === owner) clearLastOpen(open!.at)
+      return takeovers.run(page, args.reason.trim(), args.instructions, exec.signal, async pending => {
+        const approval = ctx.get('approval' as never) as unknown as { request(request: {
+          agent: ToolRunContext['agent']; toolName: string; reason: string; displayReason: { en: string; zh: string };
+          callId: ToolRunContext['callId']; signal: AbortSignal;
+        }): Promise<TakeoverDecision> } | undefined
+        let decision: TakeoverDecision = 'unavailable'
+        try {
+          if (approval) decision = await approval.request({ agent: exec.agent, toolName: TAKEOVER_TOOL, callId: exec.callId,
+            reason: pending.reason, displayReason: {
+              en: `Please take over the browser: ${pending.reason}. When finished, click Allow once or Confirm completion in the sidebar.${pending.instructions ? '\n' + pending.instructions : ''}`,
+              zh: `请接管浏览器：${pending.reason}（完成后点「允许一次」或侧栏「确认完成」）${pending.instructions ? '\n' + pending.instructions : ''}`,
+            }, signal: pending.controller.signal })
+        } finally { pending.controller.abort() }
+        const outcome = decision === 'allowed-once' ? 'done' : decision === 'rejected' ? 'skipped' : 'cancelled'
+        const unavailable = (error: unknown): TakeoverSummary => ({ url: page.url, title: '', snapshotHint: `Live page summary unavailable: ${String(error).slice(0, 300)}. Re-read the page before continuing.`, fresh: false })
+        if (exec.signal.aborted) return { outcome: 'cancelled', page: unavailable('turn stopped') }
+        pending.phase = 'summary'
+        let fresh: TakeoverSummary
+        try {
+          if (!page.pageId.startsWith('iframe:')) {
+            const browser = ctx.get('browser')!
+            const session = await browser.bindPanelPage(`session-${page.owner}`, page.pageId)
+            const snapshot = await browser.snapshot(session, AbortSignal.any([exec.signal, AbortSignal.timeout(5000)]))
+            fresh = { url: snapshot.url, title: (snapshot.title ?? '').slice(0, 1000), snapshotHint: formatSnapshot(snapshot, {}).slice(0, 1500), fresh: true }
+          } else {
+            fresh = await new Promise<TakeoverSummary>((resolve, reject) => {
+              const finish = (value?: TakeoverSummary, error?: unknown): void => {
+                clearTimeout(timer); exec.signal.removeEventListener('abort', abort)
+                if (error !== undefined) reject(error); else resolve(value!)
+              }
+              const abort = (): void => { finish(undefined, exec.signal.reason) }
+              const timer = setTimeout(() => { finish(undefined, new Error('sidebar summary timed out')) }, 8000)
+              exec.signal.addEventListener('abort', abort, { once: true })
+              void pending.summary.then(value => { finish(value) })
+              if (exec.signal.aborted) abort()
+            })
+          }
+        } catch (error) { fresh = unavailable(error) }
+        return { outcome: exec.signal.aborted ? 'cancelled' : outcome, page: fresh }
+      })
+    },
+  }))
 
   // The start page's shared shortcut list, reached through the settings section the
   // sidebar edits. Built lazily for the same reason `references()` is: the settings
@@ -625,7 +745,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   registerSafely(defineTool({
     name: 'dsh_browser_open',
-    description: 'Open a URL in the shared browser window and return the resulting snapshot. Opens this task\'s session on first use; newTab is optional. A fresh session starts on a blank tab: call this with the REAL target URL before reading, because reading that tab returns an empty page instead of waiting. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
+    description: 'Open a URL on the selected surface (default: panel). The CDP-backed desktop sidebar returns a live snapshot and supports subsequent browser tools on that same page. The Web iframe panel only queues sidebar navigation: carrier=panel-iframe-navigation-requested, with no snapshot or live-control capability. Reading tools never start another browser. newTab is optional on CDP surfaces. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
     parameters: {
       url: { type: 'string', required: true, description: 'The URL to open (HTTP/HTTPS).' },
       newTab: { type: 'boolean', description: 'Open in a new tab instead of the active one.' },
@@ -675,38 +795,60 @@ export function apply(ctx: Context, config: Config = {}): void {
       // places the page in the sidebar and opens no window; "builtin" is the debugging surface.
       const surfaceHint = (args as { surface?: 'panel' | 'builtin' }).surface
       const surface = enforceSurface(surfaceHint ?? readSurface(), args.url)
-      assertSurfaceCanHost(surface, args.url)
-      if (surface === 'panel') {
-        try { setLastOpen(args.url, Date.now()) } catch { /* best effort */ }
-        // 侧栏展示这份地址；读工具据此通过代理读同一页（panel 面没有 CDP 会话）。
-        state.panelUrlByTask.set(taskKey(exec), args.url)
-        // Same declared shape as the builtin path: the tool schema is strict about extra properties.
-        // 能读到页面就把真实标题与元素一并返回：panel 面「只返回空壳」正是「打开了却什么都读不到」的来源。
-        try {
-          const page = await readPanelPage(args.url, selfOrigin(ctx), {
-            ...exec.signal === undefined ? {} : { signal: exec.signal },
-          })
-          return {
-            url: page.url,
-            title: page.title,
-            elements: page.elements.map(element => ({
-              ref: element.index,
-              kind: element.kind,
-              label: element.name,
-              ...element.detail === undefined ? {} : { selector: element.detail },
-              x: 0,
-              y: 0,
-              frame: false,
-            })),
-            truncated: page.truncated,
-          }
-        } catch {
-          return { url: args.url, title: '', elements: [], truncated: false }
-        }
-      }
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
-      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec), true)
+      const key = taskKey(exec)
+      if (surface === 'panel') {
+        const preceding = state.pendingPanelOpens.get(key)
+        let previous: BrowserSessionId | undefined
+        let session: BrowserSessionId | undefined
+        const opening = (async () => {
+          await preceding
+          await state.pendingOpens.get(key)
+          previous = state.sessionsByTask.get(key)
+          const target = new URL(args.url)
+          if (target.protocol !== 'http:' && target.protocol !== 'https:') throw new Error('dsh_browser_open: panel requires an HTTP/HTTPS URL')
+          exec.signal?.throwIfAborted()
+          session = state.panelUrlByTask.has(key) && previous !== undefined && browser.exists(previous)
+            ? previous : await browser.openPanel?.(key)
+          if (session === undefined) {
+            assertSurfaceCanHost(surface, args.url)
+            exec.signal?.throwIfAborted()
+            setLastOpen(args.url, Date.now(), key)
+            rememberSession(browser, state, key, agentOf(exec), undefined, args.url)
+            return { url: args.url, carrier: 'panel-iframe-navigation-requested', title: '', elements: [], truncated: false }
+          }
+          await browser.openUrl(session, { url: args.url, ...args.newTab === true ? { newTab: true } : {} }, exec.signal)
+          const snapshot = await browser.snapshot(session, exec.signal)
+          exec.signal?.throwIfAborted()
+          rememberSession(browser, state, key, agentOf(exec), session, args.url)
+          return {
+            url: snapshot.url,
+            ...snapshot.title !== undefined ? { title: snapshot.title } : {},
+            elements: snapshot.elements.map(el => projectElement(el)),
+            truncated: snapshot.truncated,
+            ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
+          }
+        })()
+        const pending = opening.then(() => {})
+        state.pendingPanelOpens.set(key, pending)
+        void pending.catch(() => {})
+        try { return await opening } catch (error) {
+          if (session !== undefined && session !== previous) await browser.close(session).catch(() => {})
+          throw error
+        } finally {
+          if (state.pendingPanelOpens.get(key) === pending) state.pendingPanelOpens.delete(key)
+        }
+      }
+      await state.pendingPanelOpens.get(key)
+      await state.pendingOpens.get(key)
+      if (state.panelUrlByTask.has(key)) {
+        const previous = state.sessionsByTask.get(key)
+        state.sessionsByTask.delete(key)
+        state.panelUrlByTask.delete(key)
+        if (previous !== undefined) await browser.close(previous)
+      }
+      const session = await ensureSession(browser, state, key, agentOf(exec), true)
       try {
         await browser.openUrl(session, {
           url: args.url,
@@ -808,26 +950,6 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const key = taskKey(exec)
-      if (!state.sessionsByTask.has(key) && panelUrlFor(state, key) !== undefined) {
-        // panel 面没有 CDP 会话：直接读代理页，而不是报「nothing is open」。
-        const page = await readPanelPage(panelUrlFor(state, key) as string, selfOrigin(ctx), {
-          ...exec.signal === undefined ? {} : { signal: exec.signal },
-        })
-        return {
-          url: page.url,
-          title: page.title,
-          elements: page.elements.map(element => ({
-            ref: element.index,
-            kind: element.kind,
-            label: element.name,
-            ...element.detail === undefined ? {} : { selector: element.detail },
-            x: 0,
-            y: 0,
-            frame: false,
-          })),
-          truncated: page.truncated,
-        }
-      }
       const session = await ensureSession(browser, state, key, agentOf(exec))
       const snapshot = await browser.snapshot(session, exec.signal)
       return {
@@ -1157,8 +1279,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       y: { type: 'number', description: 'Viewport y coordinate (CSS px), taken from the same screenshot as x.' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { clicked: { type: 'boolean', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: value.clicked ? 'Clicked.' : 'Click failed.' }],
+      schema: { type: 'object', additionalProperties: false, properties: { clicked: { type: 'boolean', required: true }, ...effectProperties } },
+      render: (_args, value) => [{ type: 'text', text: value.clicked ? 'Clicked.' + effectText(value) : 'Click failed.' }],
     },
     timeoutMs,
     isConcurrencySafe: () => false,
@@ -1175,6 +1297,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         throw new Error('target.value is empty; pass a css selector, visible text or XPath, or omit target entirely to use x/y')
       }
       const index = targetIndex(target)
+      const before = await pageFingerprint(browser, session)
       if (target !== undefined && typeof target.value === 'string' && target.value !== '') {
         await browser.click(session, {
           target: {
@@ -1189,7 +1312,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         await browser.click(session, { x: args.x, y: args.y }, exec.signal)
       }
-      return { clicked: true }
+      return { clicked: true, ...await observedEffect(browser, session, before) }
     },
   }))
 
@@ -1218,6 +1341,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         additionalProperties: false,
         properties: {
           clicked: { type: 'number', required: true, description: 'How many points landed.' },
+          ...effectProperties,
           failedAt: { type: 'number', description: 'Index of the point that failed, when one did.' },
           error: { type: 'string', description: 'Why that point failed.' },
         },
@@ -1225,7 +1349,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       render: (_args, value) => [{
         type: 'text',
         text: value.failedAt === undefined
-          ? `Clicked ${String(value.clicked)} point(s).`
+          ? `Clicked ${String(value.clicked)} point(s).` + effectText(value)
           : `Clicked ${String(value.clicked)} point(s), then stopped at index ${String(value.failedAt)}: ${String(value.error ?? 'unknown')}`,
       }],
     },
@@ -1238,7 +1362,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const points = Array.isArray(args.points) ? args.points : []
       const intervalMs = typeof args.intervalMs === 'number' ? args.intervalMs : undefined
-      return browser.clickSequence(session, { points, ...intervalMs === undefined ? {} : { intervalMs } })
+      const before = await pageFingerprint(browser, session)
+      const result = await browser.clickSequence(session, { points, ...intervalMs === undefined ? {} : { intervalMs } })
+      return { ...result, ...await observedEffect(browser, session, before) }
     },
   }))
 
@@ -1259,8 +1385,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { typed: { type: 'boolean', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: value.typed ? `Typed ${String(_args.text).length} chars.` : 'Type failed.' }],
+      schema: { type: 'object', additionalProperties: false, properties: { typed: { type: 'boolean', required: true }, ...effectProperties } },
+      render: (_args, value) => [{ type: 'text', text: value.typed ? `Typed ${String(_args.text).length} chars.` + effectText(value) : 'Type failed.' }],
     },
     timeoutMs,
     isConcurrencySafe: () => false,
@@ -1277,6 +1403,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         throw new Error('target.value is empty; pass a css selector, visible text or XPath, or omit target entirely to use x/y')
       }
       const index = targetIndex(target)
+      const before = await pageFingerprint(browser, session)
       if (target !== undefined && typeof target.value === 'string' && target.value !== '') {
         await browser.type(session, {
           text: args.text,
@@ -1289,7 +1416,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       } else {
         await browser.type(session, { text: args.text }, exec.signal)
       }
-      return { typed: true }
+      return { typed: true, ...await observedEffect(browser, session, before) }
     },
   }))
 
@@ -1304,8 +1431,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       toBottom: { type: 'boolean', description: 'Scroll to the bottom of the page.' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { scrolled: { type: 'boolean', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: value.scrolled ? 'Scrolled.' : 'Scroll failed.' }],
+      schema: { type: 'object', additionalProperties: false, properties: { scrolled: { type: 'boolean', required: true }, ...effectProperties } },
+      render: (_args, value) => [{ type: 'text', text: value.scrolled ? 'Scrolled.' + effectText(value) : 'Scroll failed.' }],
     },
     timeoutMs,
     isConcurrencySafe: () => false, // mutates page scroll state; exclusive within a task
@@ -1314,6 +1441,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const before = await pageFingerprint(browser, session)
       await browser.scroll(session, {
         ...args.deltaX !== undefined ? { deltaX: args.deltaX } : {},
         ...args.deltaY !== undefined ? { deltaY: args.deltaY } : {},
@@ -1321,7 +1449,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...args.toTop === true ? { toTop: true } : {},
         ...args.toBottom === true ? { toBottom: true } : {},
       }, exec.signal)
-      return { scrolled: true }
+      return { scrolled: true, ...await observedEffect(browser, session, before) }
     },
   }))
 
@@ -1392,8 +1520,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       key: { type: 'string', required: true, enum: ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Space'], description: 'The key to press.' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { pressed: { type: 'boolean', required: true } } },
-      render: (_args, value) => [{ type: 'text', text: value.pressed ? `Pressed ${String(_args.key)}.` : 'Key press failed.' }],
+      schema: { type: 'object', additionalProperties: false, properties: { pressed: { type: 'boolean', required: true }, ...effectProperties } },
+      render: (_args, value) => [{ type: 'text', text: value.pressed ? `Pressed ${String(_args.key)}.` + effectText(value) : 'Key press failed.' }],
     },
     timeoutMs,
     isConcurrencySafe: () => false, // mutates page state; exclusive within a task
@@ -1402,8 +1530,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const before = await pageFingerprint(browser, session)
       await browser.key(session, { key: args.key }, exec.signal)
-      return { pressed: true }
+      return { pressed: true, ...await observedEffect(browser, session, before) }
     },
   }))
 
@@ -1706,10 +1835,10 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   registerSafely(defineTool({
     name: 'dsh_browser_screenshot',
-    description: 'Screenshot the shared-browser page (PNG default, JPEG optional) for models that can read images: layout, charts, CAPTCHAs, or locating an element before clicking its coordinates. Without image input it gains nothing — dsh_browser_snapshot/a11y/content carry the same page as text, dsh_browser_scrape extracts structured data. Supports fullPage, savePath, JPEG quality, and maxWidth/maxHeight downscaling to cut vision tokens. JPEG needs a carrier whose CDP encoder works (self-hosted, installed Chrome/Edge); the desktop sidebar returns PNG. Downscaling works everywhere.',
+    description: 'Screenshot the Desktop browser (PNG default, JPEG where supported). Vision-capable active models receive the image directly; non-vision or unknown models receive text metadata only. Images are downscaled to at most 1280x960 and limited to 4 MiB; retry with smaller dimensions if encoding exceeds the limit. Supports fullPage and savePath. Web iframe screenshots are unavailable. Never solve CAPTCHAs automatically; request human takeover instead.',
     parameters: {
       fullPage: { type: 'boolean', description: 'Capture the full scrollable page instead of the viewport (default false).' },
-      savePath: { type: 'string', description: 'Absolute file path to also save the image to (e.g. for read_image vision location). Must resolve inside the configured downloadDir (default: the system Downloads folder, localized names such as ~/下载 included); an existing file is never overwritten.' },
+      savePath: { type: 'string', description: 'Absolute file path to also save the image to. Must resolve inside the configured downloadDir (default: the system Downloads folder, localized names such as ~/下载 included); an existing file is never overwritten.' },
       format: { type: 'string', enum: ['png', 'jpeg'], description: 'Image format (default png; jpeg needs the self-hosted browser or an installed Chrome/Edge; the desktop sidebar returns PNG because the Electron CDP JPEG encoder hangs).' },
       quality: { type: 'number', description: 'JPEG quality 1-100 (default 80); ignored for PNG.' },
       maxWidth: { type: 'number', description: 'Downscale to fit within this width (aspect preserved).' },
@@ -1720,35 +1849,58 @@ export function apply(ctx: Context, config: Config = {}): void {
         type: 'object',
         additionalProperties: false,
         properties: {
-          dataUrl: { type: 'string', required: true, description: 'Base64 data URL of the screenshot (PNG, or JPEG when the carrier uses CDP JPEG).' },
+          bytes: { type: 'number', required: true, description: 'Encoded screenshot byte count.' },
+          attachment: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              attachmentId: { type: 'string', required: true },
+              mediaType: { type: 'string', required: true },
+              bytes: { type: 'number', required: true },
+              width: { type: 'number', required: true },
+              height: { type: 'number', required: true },
+            },
+          },
           width: { type: 'number', description: 'Pixel width of the returned image, when the capture was measured (present with maxWidth/maxHeight).' },
           height: { type: 'number', description: 'Pixel height of the returned image, when the capture was measured.' },
           path: { type: 'string', description: 'The file path the screenshot was saved to, when savePath was given.' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: `Screenshot captured (${Math.round(value.dataUrl.length * 3 / 4 / 1024)} KiB${value.width !== undefined && value.height !== undefined ? `, ${value.width}x${value.height}` : ''})${value.path !== undefined ? ` saved to ${value.path}` : ''}.` }],
+      render: (_args, value) => [
+        { type: 'text', text: `Screenshot captured (${Math.round(value.bytes / 1024)} KiB${value.width !== undefined && value.height !== undefined ? `, ${value.width}x${value.height}` : ''})${value.path !== undefined ? ` saved to ${value.path}` : ''}.` },
+        ...value.attachment === undefined ? [] : [{ type: 'image' as const, attachment: value.attachment as ImageBlock['attachment'] }],
+      ],
     },
     timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const key = taskKey(exec)
+      await state.pendingPanelOpens.get(key)
+      const existing = state.sessionsByTask.get(key)
+      if (state.panelUrlByTask.has(key) && (existing === undefined || !browser.exists(existing))) {
+        throw new Error('Web 侧栏暂不支持截图：iframe 无法被网页静默截图 (panel surface unavailable). Use the CDP-backed DSH desktop sidebar with a connected desktop bridge for screenshots.')
+      }
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const vision = await screenshotVisionEnabled(ctx, exec, exec.signal)
+      const maxWidth = screenshotDimension(args.maxWidth, SCREENSHOT_MAX_WIDTH)
+      const maxHeight = screenshotDimension(args.maxHeight, SCREENSHOT_MAX_HEIGHT)
       const shot = await browser.screenshot(session, {
         ...args.fullPage === true ? { fullPage: true } : {},
         ...args.savePath !== undefined ? { savePath: args.savePath } : {},
         ...args.format !== undefined ? { format: args.format } : {},
         ...args.quality !== undefined ? { quality: args.quality } : {},
-        ...args.maxWidth !== undefined ? { maxWidth: args.maxWidth } : {},
-        ...args.maxHeight !== undefined ? { maxHeight: args.maxHeight } : {},
+        maxWidth,
+        maxHeight,
       }, exec.signal)
+      exec.signal?.throwIfAborted()
+      const image = screenshotBytes(shot.dataUrl)
+      const attachment = vision ? await saveScreenshotImage(ctx, image, maxWidth, maxHeight) : undefined
+      exec.signal?.throwIfAborted()
       return {
-        dataUrl: shot.dataUrl,
+        bytes: image.data.length,
+        ...attachment === undefined ? {} : { attachment },
         ...shot.path !== undefined ? { path: shot.path } : {},
-        // The provider measures these when it scales, the schema declares them, and the seam
-        // type carries them — but this mapping is an allow-list, so leaving them out dropped
-        // them silently. Same shape of bug as the a11y selector, found the same way: by
-        // reading the three places that mention a field and noticing this one did not.
         ...shot.width !== undefined ? { width: shot.width } : {},
         ...shot.height !== undefined ? { height: shot.height } : {},
       }
@@ -1793,7 +1945,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
         const tabs = await browser.listTabs(session)
-        return { tabs: tabs.map(t => ({ id: t.id, url: t.url, active: t.active })) }
+        return { tabs: scopedTabs(browserSessionHandle(taskKey(exec), session), tabs).map(t => ({ id: t.id, url: t.url, active: t.active })) }
       },
     }))
 
@@ -1814,7 +1966,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
-        await browser.switchTab(session, args.tabId)
+        const handle = resolveTabHandle(browserSessionHandle(taskKey(exec), session), args.tabId)
+        await browser.switchTab(session, tabWireId(handle))
         return { switched: true }
       },
     }))
@@ -1836,7 +1989,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         const browser = ctx.get('browser')
         if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
         const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
-        await browser.closeTab(session, args.tabId)
+        const handle = resolveTabHandle(browserSessionHandle(taskKey(exec), session), args.tabId)
+        await browser.closeTab(session, tabWireId(handle))
         return { closed: true }
       },
     }))
@@ -2197,7 +2351,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const tabs = await browser.listTabs(session)
-      return { session, tabs: tabs.map(t => ({ id: t.id, url: t.url, active: t.active })) }
+      const scope = browserSessionHandle(taskKey(exec), session)
+      return { session: sessionWireId(scope), tabs: scopedTabs(scope, tabs).map(t => ({ id: t.id, url: t.url, active: t.active })) }
     },
   }))
 
@@ -2216,6 +2371,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const key = taskKey(exec)
+      await state.pendingPanelOpens.get(key)
+      state.panelUrlByTask.delete(key)
       const session = state.sessionsByTask.get(key)
       if (session !== undefined) {
         try {
@@ -3194,27 +3351,6 @@ export function apply(ctx: Context, config: Config = {}): void {
       const browser = ctx.get('browser')
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const key = taskKey(exec)
-      if (!state.sessionsByTask.has(key) && panelUrlFor(state, key) !== undefined) {
-        const page = await readPanelPage(panelUrlFor(state, key) as string, selfOrigin(ctx), {
-          ...exec.signal === undefined ? {} : { signal: exec.signal },
-        })
-        const count = (kind: string): number => page.elements.filter(element => element.kind === kind).length
-        return {
-          summary: {
-            url: page.url,
-            title: page.title,
-            readyState: 'panel-proxy',
-            pending: 0,
-            quietMs: 0,
-            inputs: page.elements.filter(element => ['input', 'select', 'textarea'].includes(element.kind)).length,
-            buttons: count('button'),
-            links: count('link'),
-            scrollY: 0,
-            selection: '',
-            text: page.text.slice(0, 400),
-          },
-        }
-      }
       const session = await ensureSession(browser, state, key, agentOf(exec))
       await installProbe(browser, session, exec.signal)
       const summary = await probe<ProbeRow>(browser, session, 'summary', [], exec.signal)
@@ -3224,7 +3360,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   registerSafely(defineTool({
     name: 'dsh_browser_reference_capture',
-    description: 'Capture what the human has selected in the shared-browser page as a durable reference, so it can be quoted and found again later. The reference keeps the selected text with enough surrounding context to relocate it, any images selected with their real bytes, and any table as a structural snapshot. Cite it in a reply as dsh-browser-ref:<referenceId> (or dsh-browser-ref:<referenceId>/<partId>); the human can click it to return to the exact place in the page. Re-capturing the same region creates a NEW reference, because a stored reference is an immutable snapshot.',
+    description: 'Capture what the human has selected in the shared-browser page as a durable reference, so it can be quoted and found again later. The reference keeps the selected text with enough surrounding context to relocate it, any images selected with their real bytes, and any table as a structural snapshot. References are already displayed as interactive capsules for source navigation. Do not repeat reference URIs, source URLs, markers, or source/citation links in the reply. Re-capturing the same region creates a NEW reference, because a stored reference is an immutable snapshot.',
     parameters: {
       allowPartial: { type: 'boolean', description: 'Commit the fragments that succeeded when another fragment failed (default false: a group with a broken image or oversized table is refused as a whole).' },
       tableSelector: { type: 'string', description: 'Capture this table whole (CSS selector) even when the selection does not touch it.' },
@@ -3273,7 +3409,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         const lines = [
           `Reference ${value.referenceId} captured from ${value.title !== undefined && value.title !== '' ? value.title : value.pageUrl}.`,
-          `Cite it as dsh-browser-ref:${value.referenceId}.`,
+          'The reference capsule provides source navigation. Do not repeat its URI, source URL, marker, or a source/citation link in the reply.',
           ...value.parts.map(part => `  ${part.partId} (${part.type}): ${part.preview}`),
         ]
         if (value.failures.length > 0) lines.push(`(${value.failures.length} fragment(s) failed and were left out: ${value.failures.map(failure => failure.reason).join('; ')})`)
@@ -3293,7 +3429,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         browserSessionId: session,
         origin: args.excerptText !== undefined ? 'agent-excerpt' : 'user-selection',
         entry: 'agent-tool',
-        carrier: referenceCarrier(),
+        carrier: state.panelUrlByTask.has(taskKey(exec)) ? 'sidebar' : referenceCarrier(),
         ...args.allowPartial !== undefined ? { allowPartial: args.allowPartial } : {},
         ...args.tableSelector !== undefined ? { tableSelector: args.tableSelector } : {},
         ...args.excerptText !== undefined ? { excerptText: args.excerptText } : {},
@@ -3369,6 +3505,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         referenceId = referenceId.slice(0, slash)
       }
       const outcome = await references().reveal(referenceId, {
+        ownerSessionId: taskKey(exec),
         ...partId !== undefined && partId !== '' ? { partId } : {},
       }, exec.signal)
       return {
@@ -3390,7 +3527,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   registerSafely(defineTool({
     name: 'dsh_browser_reference_list',
-    description: 'List the browser references stored for this task, newest first: id, page, capture time, and one preview line per fragment. Use it to re-cite a reference from earlier in the conversation, or to see what a citation\'s id refers to.',
+    description: 'List the browser references stored for this task, newest first: id, page, capture time, and one preview line per fragment. Use it to identify a reference from earlier in the conversation. Source navigation is provided by reference capsules; do not repeat reference URIs, source URLs, markers, or source/citation links in the reply.',
     parameters: {
       limit: { type: 'number', description: 'Most references to return (default 20, maximum 100).' },
     },
@@ -3437,7 +3574,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         return [{
           type: 'text',
           text: value.references.map(reference => [
-            `dsh-browser-ref:${reference.referenceId} — ${reference.title !== '' ? reference.title : reference.pageUrl} (${reference.capturedAt})`,
+            `Reference ${reference.referenceId} — ${reference.title !== '' ? reference.title : reference.pageUrl} (${reference.capturedAt}); source navigation is in its capsule, not a reply link.`,
             ...reference.parts.map(part => `  ${part.partId} (${part.type}): ${part.preview}`),
           ].join('\n')).join('\n\n'),
         }]

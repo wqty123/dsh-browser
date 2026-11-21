@@ -67,8 +67,7 @@ export const DEFAULT_SEARCH_ENGINES: readonly BrowserSearchEngine[] = Object.fre
 
 /** Initial website entries; editable, deletable, and never re-added after removal. */
 export const DEFAULT_SHORTCUTS: readonly BrowserShortcut[] = Object.freeze([
-  { id: 'bing', title: 'Bing', url: 'https://www.bing.com/', iconKey: 'bing' },
-  { id: 'baidu', title: '百度', url: 'https://www.baidu.com/', iconKey: 'baidu' },
+  ...DEFAULT_SEARCH_ENGINES.map(({ id, label, homeUrl }) => ({ id, title: label, url: homeUrl, iconKey: id })),
   { id: 'deepseek', title: 'DeepSeek', url: 'https://chat.deepseek.com/', iconKey: 'deepseek' },
 ])
 

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { detectBrowser, SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
+import { testScope, tabIn } from './canonical-fixtures.mjs'
 
 /** An env where every candidate path exists. */
 const everything = {
@@ -41,7 +42,8 @@ test('the Edge account confirmation dialog is excluded from web tabs', async () 
       { type: 'page', targetId: 'web', url: 'https://example.com/' },
     ] }),
   })
-  assert.deepEqual((await host.listPages()).map(page => page.id), ['web'])
+  const scope = testScope('session-edge')
+  assert.deepEqual((await host.listPages(scope)).map(page => page.id), [tabIn(scope, 'page:web')])
   host.dispose()
 })
 
@@ -156,7 +158,7 @@ test('a released host refuses to start a browser', async () => {
 // platform can actually verify — the Windows separator, the lookup order, the
 // per-platform isolation — plus the Linux table's contents, read from the source.
 test('the Linux launcher names are the packaged ones', () => {
-  const source = readFileSync(new URL('../src/browser-electron/system-browser.ts', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../assets/browser-products.mjs', import.meta.url), 'utf8')
   assert.match(source, /linux: \['microsoft-edge-stable'/, 'the versioned Edge launcher is listed')
   assert.match(source, /linux: \['google-chrome-stable'/, 'the versioned Chrome launcher is listed')
   assert.match(source, /'\/usr\/bin\/microsoft-edge-stable'/, 'and a fixed Linux location too')

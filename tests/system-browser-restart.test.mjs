@@ -19,12 +19,14 @@ import { createFakeBrowser } from './fixtures/fake-cdp-browser.mjs'
 /** A fake browser process: enough of a ChildProcess for the host, and it can die. */
 function fakeChild() {
   const child = new EventEmitter()
+  child.pid = 900001
   child.exitCode = null
   child.signalCode = null
   child.kill = () => {
     if (child.exitCode !== null) return
     child.exitCode = 0
     queueMicrotask(() => child.emit('exit', 0, null))
+    return true
   }
   return child
 }
@@ -66,7 +68,9 @@ test("a replaced browser is usable and does not carry the dead one's session", a
     return child
   }
 
-  const host = new SystemBrowserViewHost({ kind: 'chrome', path: 'fake-browser' }, profileDir, [], undefined, launcher)
+  const host = new SystemBrowserViewHost({ kind: 'chrome', path: process.execPath }, profileDir, [], undefined, launcher,
+    'auto', () => false, undefined, { managed: true, inspect: async pid => ({ pid, created: 'fake-birth',
+      executable: process.execPath, argv: [process.execPath, `--user-data-dir=${profileDir}`] }) })
   const view = host.createView()
 
   try {
@@ -132,7 +136,9 @@ test('a browser that drops its connection without dying does not carry its sessi
     return fakeChild()
   }
 
-  const host = new SystemBrowserViewHost({ kind: 'chrome', path: 'fake-browser' }, profileDir, [], undefined, launcher)
+  const host = new SystemBrowserViewHost({ kind: 'chrome', path: process.execPath }, profileDir, [], undefined, launcher,
+    'auto', () => false, undefined, { managed: true, inspect: async pid => ({ pid, created: 'fake-birth',
+      executable: process.execPath, argv: [process.execPath, `--user-data-dir=${profileDir}`] }) })
   const view = host.createView()
   try {
     await view.sendCommand('Runtime.evaluate', { expression: '1' })

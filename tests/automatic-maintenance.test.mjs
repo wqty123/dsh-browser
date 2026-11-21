@@ -13,7 +13,7 @@ function fixture(t) {
   })
   const home = join(directory, 'home')
   const root = join(directory, 'desktop')
-  const id = 'install-test123'
+  const id = 'reinstall-test123'
   const base = join(home, 'dsh-builtin-browser-host', 'maintenance')
   const jobDirectory = join(base, id)
   mkdirSync(join(root, 'resources', 'app', 'lib'), { recursive: true })
@@ -21,11 +21,11 @@ function fixture(t) {
   writeFileSync(join(root, 'resources', 'app', 'lib', 'main.js'), '// private identity fixture')
   mkdirSync(jobDirectory, { recursive: true })
   const plan = {
-    version: 1, id, action: 'install', root, nodePath: process.execPath, electronNode: false, home,
+    version: 1, id, action: 'reinstall', root, nodePath: process.execPath, electronNode: false, home,
     directory: jobDirectory, target: { pid: 1234, path: join(root, 'DeepSeek Harness.exe'), command: '"DeepSeek Harness.exe"', started: new Date(Date.now() - 1_000).toISOString() },
     createdAt: new Date().toISOString(),
   }
-  const state = { id, action: 'install', phase: 'armed', workerPid: 5678, at: new Date().toISOString() }
+  const state = { id, action: 'reinstall', phase: 'armed', workerPid: 5678, at: new Date().toISOString() }
   const save = () => {
     writeFileSync(join(jobDirectory, 'automatic.json'), JSON.stringify(plan))
     writeFileSync(join(jobDirectory, 'state.json'), JSON.stringify(state))
@@ -36,7 +36,7 @@ function fixture(t) {
 }
 
 test('an automatic launch is prohibited in the test process before discovery or broker creation', async () => {
-  await assert.rejects(startAutomaticMaintenance('install', 'C:/not-a-real-target'), /forbidden in a test process|requires Windows Desktop/)
+  await assert.rejects(startAutomaticMaintenance('reinstall', 'C:/not-a-real-target'), /forbidden in a test process|requires Windows Desktop/)
 })
 
 test('committing the current armed job writes a process-bound permission without changing its phase', async t => {
@@ -55,7 +55,7 @@ test('committing the current armed job writes a process-bound permission without
 test('a different, finished, cancelled or malformed job cannot be committed', async t => {
   const f = fixture(t)
   await assert.rejects(commitAutomaticMaintenance('../escape', f.home), /invalid.*id/)
-  await assert.rejects(commitAutomaticMaintenance('install-another123', f.home), /no longer armed/)
+  await assert.rejects(commitAutomaticMaintenance('reinstall-another123', f.home), /no longer armed/)
   f.state.phase = 'completed'
   f.save()
   await assert.rejects(commitAutomaticMaintenance(f.id, f.home), /no longer armed/)

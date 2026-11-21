@@ -20,16 +20,16 @@ const SLOT = '__dshBuiltinBrowserLastOpen'
  * @param url - the page a tool asked to open.
  * @param at - arrival time in epoch milliseconds.
  */
-export function setLastOpen(url: string, at: number): void {
-  (globalThis as unknown as Record<string, unknown>)[SLOT] = { url, at }
+export function setLastOpen(url: string, at: number, owner?: string): void {
+  (globalThis as unknown as Record<string, unknown>)[SLOT] = { url, at, ...owner === undefined ? {} : { owner } }
 }
 
 /**
  * Read the most recent open request.
  * @returns the request, or undefined when nothing was opened since start.
  */
-export function getLastOpen(): { readonly url: string; readonly at: number } | undefined {
-  return (globalThis as unknown as Record<string, { url: string; at: number } | undefined>)[SLOT]
+export function getLastOpen(): { readonly url: string; readonly at: number; readonly owner?: string } | undefined {
+  return (globalThis as unknown as Record<string, { url: string; at: number; owner?: string } | undefined>)[SLOT]
 }
 
 /**

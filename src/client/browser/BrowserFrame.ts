@@ -4,15 +4,19 @@ import type { BrowserTarget } from './url.ts'
 
 /** A loading failure, optionally carrying the underlying browser's diagnostic. */
 export interface BrowserLoadError {
-  readonly code: number | undefined
+  readonly code: number | string | undefined
   readonly description: string | undefined
 }
 
 /** State consumed by common browser chrome, without DOM or carrier identifiers. */
 export interface BrowserFrameState {
+  /** Controller request whose navigation this frame is observing. */
+  readonly navigationId?: string
   readonly target: BrowserTarget | undefined
   readonly address: 'empty' | 'requested' | 'observed' | 'unknown'
   readonly loading: boolean
+  /** The current document's DOM is ready even if its subresources are still loading. */
+  readonly documentReady?: boolean
   readonly canGoBack: boolean
   readonly canGoForward: boolean
   readonly error: BrowserLoadError | undefined
@@ -50,7 +54,7 @@ export interface BrowserFrame extends HostObservable<BrowserFrameState> {
    */
   readonly lifecycle?: HostObservable<BrowserCarrierState>
   /** @param target - validated HTTP(S) address; loading failures are published in state. */
-  loadUrl(target: BrowserTarget): void
+  loadUrl(target: BrowserTarget, navigationId?: string): void
   /** Move backward when the provider reports an available entry. */
   goBack(): void
   /** Move forward when the provider reports an available entry. */

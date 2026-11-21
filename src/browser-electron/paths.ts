@@ -12,7 +12,11 @@ import { join } from 'node:path'
 
 /** Absolute path of the DSH home directory; DSH_HOME overrides the per-user default. */
 export function dshHome(): string {
-  return process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return process.env.DSH_HOME || join(homedir(), '.dsh')
+}
+
+export function browserHostLogPath(): string {
+  return join(dshHome(), 'logs', 'dsh-builtin-browser-host.log')
 }
 
 /** Absolute path of the endpoint file the running desktop shell publishes. */

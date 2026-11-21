@@ -7,6 +7,33 @@ import { join } from 'node:path'
 import { SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
 import { createFakeBrowser } from './fixtures/fake-cdp-browser.mjs'
+import { tabWireId } from '../lib/browser/handles.js'
+
+test('closing an unmaterialized blank tab does not launch a browser', async () => {
+  const folder = mkdtempSync(join(tmpdir(), 'dsh-close-blank-'))
+  let launches = 0
+  const host = new SystemBrowserViewHost({ kind: 'chrome', path: 'unused' }, folder, [], undefined,
+    () => { launches++; throw new Error('unexpected launch') })
+  const views = []
+  const createView = host.createView.bind(host)
+  host.createView = identity => {
+    const view = createView(identity)
+    views.push(view)
+    return view
+  }
+  const provider = new ElectronBrowserProvider(host, { history: { enabled: false } })
+  try {
+    const session = await provider.open('blank-owner')
+    await provider.closeTab(session, views[0].id)
+    assert.equal(launches, 0)
+    assert.equal(views.length, 2, 'the session receives a replacement blank tab')
+    assert.notEqual(views[0].id, views[1].id)
+    await assert.rejects(host.closePage(tabWireId({ owner: 'other', session: 'other', tab: 'blank' }), session), /not open in this owner\/session/)
+  } finally {
+    host.dispose()
+    rmSync(folder, { recursive: true, force: true })
+  }
+})
 
 test('different tasks concurrently claim different browser targets', async () => {
   const folder = mkdtempSync(join(tmpdir(), 'dsh-concurrent-targets-'))
@@ -31,7 +58,7 @@ test('different tasks concurrently claim different browser targets', async () =>
   }
 })
 
-test('an ephemeral profile is removed after its launched browser exits, not while it is still alive', async () => {
+test('an ephemeral profile with unverified process ownership is retained even after its launcher exits', async () => {
   const folder = mkdtempSync(join(tmpdir(), 'dsh-ephemeral-exit-'))
   writeFileSync(join(folder, 'Cookies'), 'sample')
   const child = Object.assign(new EventEmitter(), {
@@ -46,7 +73,7 @@ test('an ephemeral profile is removed after its launched browser exits, not whil
     child.exitCode = 0
     child.emit('exit', 0, null)
     await new Promise(setImmediate)
-    assert.equal(existsSync(folder), false, 'profile cleanup runs after the exit notification')
+    assert.equal(existsSync(folder), true, 'launcher exit alone does not prove its profile is unused')
   } finally {
     child.exitCode = 0
     child.emit('exit', 0, null)

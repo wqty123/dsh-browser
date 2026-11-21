@@ -16,7 +16,6 @@ const devExports = {
   './browser': './src/browser/runtime.ts',
   './browser-electron': './src/browser-electron/entry.ts',
   './tool-browser': './src/tool-browser/index.ts',
-  './host-main': './src/browser-electron/host-main.ts',
   './startpage': './src/startpage.ts',
   './client': './src/client/index.ts',
   './cordis.patch.yml': './cordis.patch.yml',
@@ -29,7 +28,6 @@ const publishExports = {
   './browser': './lib/browser/runtime.js',
   './browser-electron': './lib/browser-electron/entry.js',
   './tool-browser': './lib/tool-browser/index.js',
-  './host-main': './lib/browser-electron/host-main.js',
   './startpage': './lib/startpage.js',
   './client': './dist/client.cjs',
   './cordis.patch.yml': './cordis.patch.yml',
@@ -46,7 +44,7 @@ manifest.publishConfig = { exports: publishExports }
 // 与 `automatic-maintenance.ts` 全都按 `../../desktop-bridge/…` 取安装器、桥本体与两个 PowerShell 脚本，
 // 少了它桌面端的桥接功能在安装后就是坏的（缺文件，不是逻辑问题）。
 // `tests` 不进包（发布不需要），它跑在仓库里。
-manifest.files = ['lib', 'dist', 'src', 'scripts', 'desktop-bridge', 'cordis.patch.yml', 'CHANGELOG.md', 'README.md', 'docs', 'skills', 'assets', '!src/**/__tests__']
+manifest.files = ['lib', 'dist', 'src', 'scripts', 'tools/accept-desktop.mjs', 'desktop-bridge', 'browser-extension', 'native-host', 'cordis.patch.yml', 'CHANGELOG.md', 'README.md', 'docs', 'skills', 'assets', '!src/**/__tests__']
 
 writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 console.log('exports 已写回：dev→src（源码），publish→lib + dist/client.cjs')
