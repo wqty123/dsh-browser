@@ -10,6 +10,7 @@ const controller = new ExtensionController(chrome, event => { try { port?.postMe
 async function connect() {
   if (port) return
   connecting ??= (async () => {
+    await controller.ready
     const stored = await chrome.storage.local.get('installId')
     const installId = stored.installId ?? crypto.randomUUID()
     if (!stored.installId) await chrome.storage.local.set({ installId })
@@ -18,7 +19,7 @@ async function connect() {
     native.onMessage.addListener(message => {
       if (native !== port) return
       if (message.type === 'status') status = { state: message.state, detail: message.detail }
-      else if (message.type === 'release') void controller.release()
+      else if (message.type === 'release') void controller.release().catch(() => {})
       else if (message.type === 'request') {
         if (inFlight >= MAX_IN_FLIGHT) { native.postMessage({ type: 'result', id: message.id, error: 'extension concurrency limit' }); return }
         inFlight++
@@ -33,7 +34,7 @@ async function connect() {
       if (native !== port) return
       port = undefined
       status = { state: 'extension-missing', detail: en.reconnect }
-      void controller.release()
+      void controller.release().catch(() => {})
       if (reconnectAllowed) void chrome.alarms.create(RECONNECT_ALARM, { delayInMinutes: RECONNECT_DELAY_MINUTES })
     })
     native.postMessage({ type: 'hello', installId, browser })
@@ -63,10 +64,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
 })
 chrome.debugger.onDetach.addListener((_source, reason) => {
   if (reason === 'canceled_by_user') {
-    reconnectAllowed = false
-    void chrome.storage.local.set({ paused: true })
-    void chrome.alarms.clear(RECONNECT_ALARM)
-    port?.disconnect()
+    status = { ...status, detail: en.debuggerCanceled }
   }
 })
 chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === RECONNECT_ALARM && reconnectAllowed) void connect().catch(() => {}) })

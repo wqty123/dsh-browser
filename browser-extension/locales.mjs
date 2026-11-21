@@ -11,4 +11,5 @@ export const en = {
   unavailable: 'Extension worker unavailable.',
   disconnected: 'Native host is disconnected.',
   reconnect: 'Native host disconnected or is not installed. Reconnect after installing.',
+  debuggerCanceled: 'Debugging was canceled. The detached tab requires an explicit new request to reacquire it.',
 }

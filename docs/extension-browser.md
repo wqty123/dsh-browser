@@ -17,7 +17,17 @@ The button registers both native hosts immediately. If already connected, it rep
 
 The fixed manifest public key gives ID **`ljobhenplklfnkbmhamljjnpgalgcjgc`** independent of folder location. Only a public key is shipped. `assets/browser-extension-identity.mjs` exports the shared ID and the currently empty `EXTENSION_STORE_URL`; setting the latter makes the button open the store instead of the extensions page/folder.
 
-The worker connects at installation, startup and boot, with reconnect alarms. Options is status + Disconnect only. Disconnect or cancelling the debugging infobar pauses reconnection without closing tabs; remove and add the extension again to clear that pause. Native-host `--revoke` persists a disabled flag; automatic registration never clears it.
+The worker connects at installation, startup and boot, with reconnect alarms. Options is status + Disconnect only. Options Disconnect pauses reconnection without closing tabs; remove and add the extension again to clear that pause. Canceling the debugging infobar invalidates the affected tab lease and reports detachment, without automatically reattaching it. A new explicit acquisition is required. Native-host `--revoke` persists a disabled flag; automatic registration never clears it.
+
+## Debugger ownership and lifecycle
+
+One controller serializes requests and holds at most one physical debugger attachment. Switching between tasks detaches the previous tab before attaching the requested tab; logical leases remain valid and resume on their next request. Screenshots and takeover use this same owner, not additional debugger clients. Suspended tabs do not receive debugger dialog/file-chooser interception until resumed.
+
+After 30 seconds without a completed request, a browser alarm detaches the debugger while retaining logical leases. The named policy is `DEBUGGER_IDLE_TIMEOUT_MS` in `browser-extension/constants.mjs`. Session/task cleanup awaits scoped detach through both the direct and preferred carriers. Native/plugin transport disconnect releases every lease and detaches the physical debugger; cleanup never closes personal or agent tabs.
+
+Leases, agent-tab ownership and the active tab are stored in `chrome.storage.session`. On worker restart, `chrome.debugger.getTargets()` reconciles surviving attachments: a still-live recorded attachment is reused, expired/unrecorded owned attachments are detached, and foreign debuggers are left alone. Ownership of an attached target is checked with a debugger command, because `getTargets().attached` alone does not identify the attaching extension. No tab is attached automatically during reconciliation.
+
+This bounds this extension's attachments, not Edge's warning UI. Chromium groups warnings by extension ID rather than simply showing one per attached tab; Edge-specific behavior and duplicate installations require separate diagnosis. Do not treat these lifecycle guarantees as proof that the reported two-warning issue is resolved.
 
 ## Native host and security
 

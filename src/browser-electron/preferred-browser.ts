@@ -107,7 +107,10 @@ export class PreferredBrowserViewHost implements ElectronBrowserViewHost {
     const view = this.mapped.get(id)
     if (view) this.destroyView(view.handle)
   }
-  async retireSession(scope: BrowserSessionId) { this.routes.delete(scope); this.decisions.delete(scope) }
+  async retireSession(scope: BrowserSessionId) {
+    try { await (await this.routes.get(scope))?.retireSession?.(scope) }
+    finally { this.routes.delete(scope); this.decisions.delete(scope) }
+  }
   dispose() {
     if (this.released) return
     this.released = true

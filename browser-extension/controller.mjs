@@ -1,4 +1,4 @@
-import { EXTENSION_LIMITS } from './constants.mjs'
+import { EXTENSION_LIMITS, DEBUGGER_IDLE_TIMEOUT_MS, DEBUGGER_IDLE_ALARM, DEBUGGER_SESSION_KEY } from './constants.mjs'
 import { permissionGuard } from './permission-guard.mjs'
 
 const DOMAINS = new Set(['Accessibility', 'DOM', 'DOMSnapshot', 'CSS', 'Emulation', 'Input', 'Log', 'Network', 'Page', 'Runtime', 'Target'])
@@ -12,16 +12,105 @@ export class ExtensionController {
   constructor(api, emit) {
     this.api = api; this.emit = emit; this.leases = new Map(); this.created = new Map(); this.tabLeases = new Map(); this.attaching = new Set(); this.generation = 0
     this.related = new Map(); this.containing = new Set()
+    this.active = undefined; this.expectedDetach = new Set(); this.tail = Promise.resolve()
+    this.ready = this.restore()
+    this.ready.catch(() => {})
+    api.alarms?.onAlarm.addListener(alarm => {
+      if (alarm.name === DEBUGGER_IDLE_ALARM) return this.enqueue(async () => {
+        if (Date.now() >= this.idleAt) await this.suspend()
+      }).catch(() => {})
+    })
     api.debugger.onEvent.addListener((source, method, params) => { void this.event(source, method, params) })
     api.debugger.onDetach.addListener((source, reason) => {
+      if (reason !== 'canceled_by_user' && this.expectedDetach.delete(source.tabId)) return
+      if (this.active === source.tabId) this.active = undefined
       const lease = this.tabLeases.get(source.tabId)
       if (lease) { this.leases.delete(lease.id); this.tabLeases.delete(source.tabId); this.emit({ type: 'event', lease: lease.id, method: 'target.detached', params: { reason } }) }
+      void this.enqueue(() => this.persist()).catch(() => {})
     })
     api.tabs.onRemoved.addListener(tabId => { this.created.delete(tabId); this.related.delete(tabId) })
     api.tabs.onCreated.addListener(tab => { void this.containPopup(tab) })
     api.windows.onCreated.addListener(window => {
       void api.tabs.query({ windowId: window.id }).then(tabs => Promise.all(tabs.map(tab => this.containPopup(tab)))).catch(() => {})
     })
+  }
+  enqueue(work) {
+    const result = this.tail.then(() => this.ready).then(work)
+    this.tail = result.catch(() => {})
+    return result
+  }
+  async persist() {
+    await this.api.storage?.session?.set({ [DEBUGGER_SESSION_KEY]: {
+      leases: [...this.leases.values()], created: [...this.created], active: this.active, activeReady: this.activeReady, idleAt: this.idleAt,
+    } })
+  }
+  async restore() {
+    if (!this.api.storage?.session) return
+    const stored = (await this.api.storage.session.get(DEBUGGER_SESSION_KEY))[DEBUGGER_SESSION_KEY]
+    for (const lease of stored?.leases ?? []) {
+      if (validScope(lease.id) && validScope(lease.scope) && validScope(lease.view) && Number.isInteger(lease.tabId)) {
+        this.leases.set(lease.id, lease); this.tabLeases.set(lease.tabId, lease)
+      }
+    }
+    this.created = new Map(stored?.created ?? [])
+    const targets = await this.api.debugger.getTargets()
+    let retained
+    for (const target of targets.filter(target => target.attached && Number.isInteger(target.tabId))) {
+      // getTargets also includes other debuggers. Only our own sessions accept commands.
+      try { await this.api.debugger.sendCommand({ tabId: target.tabId }, 'Runtime.getIsolateId', {}) }
+      catch { continue }
+      if (target.tabId === stored?.active && stored.activeReady && this.tabLeases.has(target.tabId) && stored.idleAt > Date.now()) {
+        retained = target.tabId
+      } else { this.active = target.tabId; await this.suspend() }
+    }
+    this.active = retained
+    this.activeReady = retained !== undefined
+    this.idleAt = stored?.idleAt
+    if (this.active !== undefined) await this.api.alarms.create(DEBUGGER_IDLE_ALARM, { when: this.idleAt })
+    await this.persist()
+  }
+  suspend() {
+    return this.suspending ??= this.detachActive().finally(() => { this.suspending = undefined })
+  }
+  async detachActive() {
+    if (this.active === undefined) return
+    const tabId = this.active
+    this.expectedDetach.add(tabId)
+    try { await this.api.debugger.detach({ tabId }) }
+    finally { this.expectedDetach.delete(tabId) }
+    this.active = undefined
+    this.activeReady = false
+    await this.api.alarms?.clear(DEBUGGER_IDLE_ALARM)
+    await this.persist()
+  }
+  async activate(lease) {
+    if (this.active === lease.tabId) return
+    const generation = this.generation
+    await this.suspend()
+    const tab = await this.api.tabs.get(lease.tabId)
+    if (tab.incognito || !allowedUrl(tab.url || tab.pendingUrl) || !allowedUrl(tab.pendingUrl || tab.url)) throw Error('restricted/internal, extension and incognito pages are unavailable')
+    this.active = lease.tabId
+    this.activeReady = false
+    await this.persist()
+    if (generation !== this.generation) { this.active = undefined; throw Error('connection released') }
+    try { await this.api.debugger.attach({ tabId: lease.tabId }, '1.3') }
+    catch (error) { this.active = undefined; await this.persist(); throw error }
+    if (generation !== this.generation) { this.active = lease.tabId; await this.suspend(); throw Error('connection released') }
+    try {
+      for (const [method, params] of [
+        ['Page.enable', {}], ['Page.setInterceptFileChooserDialog', { enabled: true }],
+        ['Emulation.setFocusEmulationEnabled', { enabled: true }], ['Page.setWebLifecycleState', { state: 'active' }],
+      ]) await this.api.debugger.sendCommand({ tabId: lease.tabId }, method, params)
+      if (this.created.get(lease.tabId) === lease.scope) {
+        await this.api.debugger.sendCommand({ tabId: lease.tabId }, 'Page.addScriptToEvaluateOnNewDocument', { source: permissionGuard })
+        await this.api.debugger.sendCommand({ tabId: lease.tabId }, 'Runtime.evaluate', { expression: permissionGuard })
+      }
+      if (generation !== this.generation || !this.leases.has(lease.id)) throw Error('connection released')
+      this.activeReady = true
+    } catch (error) {
+      await this.suspend()
+      throw error
+    }
   }
   async containPopup(tab) {
     const root = this.created.has(tab.openerTabId) ? tab.openerTabId : this.related.get(tab.openerTabId)?.root
@@ -81,29 +170,34 @@ export class ExtensionController {
       const tab = await this.api.tabs.get(tabId)
       const url = tab.url || tab.pendingUrl || (this.created.get(tabId) === scope ? 'about:blank' : undefined)
       if (tab.incognito || !allowedUrl(url) || !allowedUrl(tab.pendingUrl || url)) throw Error('restricted/internal, extension and incognito pages are unavailable')
-      await this.api.debugger.attach({ tabId }, '1.3')
-      if (generation !== this.generation) { await this.api.debugger.detach({ tabId }).catch(() => {}); throw Error('connection released during attach') }
       const lease = { id: crypto.randomUUID(), tabId, scope, view, notices: [] }
       this.leases.set(lease.id, lease); this.tabLeases.set(tabId, lease)
       try {
-        await this.api.debugger.sendCommand({ tabId }, 'Page.enable', {})
-        await this.api.debugger.sendCommand({ tabId }, 'Page.setInterceptFileChooserDialog', { enabled: true })
-        await this.api.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled: true })
-        await this.api.debugger.sendCommand({ tabId }, 'Page.setWebLifecycleState', { state: 'active' })
-        if (this.created.get(tabId) === scope) {
-          await this.api.debugger.sendCommand({ tabId }, 'Page.addScriptToEvaluateOnNewDocument', { source: permissionGuard })
-          await this.api.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression: permissionGuard })
-        }
-        if (generation !== this.generation) throw Error('connection released')
+        await this.activate(lease)
+        if (generation !== this.generation || !this.leases.has(lease.id)) throw Error('connection released')
         return { lease: lease.id, tabId, url, title: tab.title ?? '', created: this.created.get(tabId) === scope }
       } catch {
         this.leases.delete(lease.id); this.tabLeases.delete(tabId)
-        await this.api.debugger.detach({ tabId }).catch(() => {})
+        if (this.active === tabId) await this.suspend()
         throw Error('quiet-mode interception is unavailable on this browser/tab; no control lease was granted')
       }
     } finally { this.attaching.delete(tabId) }
   }
-  async request(operation) {
+  request(operation) {
+    const generation = this.generation
+    return this.enqueue(async () => {
+      if (generation !== this.generation) throw Error('connection released')
+      try { return await this.perform(operation) }
+      finally {
+        if (this.active !== undefined) {
+          this.idleAt = Date.now() + DEBUGGER_IDLE_TIMEOUT_MS
+          await this.api.alarms?.create(DEBUGGER_IDLE_ALARM, { when: this.idleAt })
+        }
+        await this.persist()
+      }
+    })
+  }
+  async perform(operation) {
     if (!operation || typeof operation !== 'object' || !validScope(operation.scope)) throw Error('a scoped operation is required')
     const { kind, scope } = operation
     if (kind === 'create') {
@@ -126,15 +220,20 @@ export class ExtensionController {
     if (kind === 'attach') return this.attach(operation.tabId, scope, operation.view)
     if (kind === 'close') {
       if (!Number.isInteger(operation.tabId) || this.created.get(operation.tabId) !== scope) throw Error('personal, adopted or other-session tabs are detach-only')
+      if (this.active === operation.tabId) await this.suspend()
       await this.api.tabs.remove(operation.tabId)
+      const lease = this.tabLeases.get(operation.tabId)
+      if (lease) this.leases.delete(lease.id)
+      this.tabLeases.delete(operation.tabId)
       this.created.delete(operation.tabId)
       return {}
     }
     const lease = this.leases.get(operation.lease)
+    if (kind === 'detach' && !lease) return {}
     if (!lease || lease.scope !== scope || lease.view !== operation.view) throw Error('stale or foreign tab lease; explicitly reacquire the tab')
     if (kind === 'detach') {
       this.leases.delete(lease.id); this.tabLeases.delete(lease.tabId)
-      await this.api.debugger.detach({ tabId: lease.tabId }).catch(() => {})
+      if (this.active === lease.tabId) await this.suspend()
       return {}
     }
     if (kind === 'events') return lease.notices.splice(0)
@@ -146,6 +245,8 @@ export class ExtensionController {
       || sessionId !== undefined && (typeof sessionId !== 'string' || sessionId.length > 128)
       || !params || typeof params !== 'object' || Array.isArray(params)) throw Error('CDP capability is unavailable in personal-browser quiet mode')
     if (method === 'Page.navigate' && !allowedUrl(params.url)) throw Error('navigation requires an http(s) URL')
+    await this.activate(lease)
+    if (!this.leases.has(lease.id)) throw Error('tab detached during request')
     if (method === 'Input.insertText') {
       for (const text of String(params.text ?? '')) {
         await this.api.debugger.sendCommand({ tabId: lease.tabId, ...(sessionId ? { sessionId } : {}) }, 'Input.dispatchKeyEvent', { type: 'char', text })
@@ -167,11 +268,16 @@ export class ExtensionController {
     }
     return this.api.debugger.sendCommand({ tabId: lease.tabId, ...(sessionId ? { sessionId } : {}) }, method, params)
   }
-  async release() {
+  release() {
     this.generation++
-    this.related.clear()
-    const leases = [...this.leases.values()]
-    this.leases.clear(); this.tabLeases.clear()
-    await Promise.allSettled(leases.map(lease => this.api.debugger.detach({ tabId: lease.tabId })))
+    const interrupt = this.ready.then(() => this.suspend())
+    interrupt.catch(() => {})
+    return this.enqueue(async () => {
+      await interrupt.catch(() => {})
+      await this.suspend()
+      this.related.clear()
+      this.leases.clear(); this.tabLeases.clear()
+      await this.persist()
+    })
   }
 }

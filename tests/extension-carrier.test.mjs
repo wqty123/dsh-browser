@@ -9,6 +9,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { NativeBrowserClient } from '../native-host/client.mjs'
 import { ExtensionController } from '../browser-extension/controller.mjs'
 import { ExtensionBrowserViewHost } from '../src/browser-electron/extension-browser.ts'
+import { PreferredBrowserViewHost } from '../src/browser-electron/preferred-browser.ts'
 import { ElectronBrowserProvider } from '../src/browser-electron/provider.ts'
 import { BrowserRuntime } from '../src/browser/runtime.ts'
 import { registerCarrierTakeover, carrierTakeoverTarget } from '../src/browser/takeover-target.ts'
@@ -63,6 +64,7 @@ test('extension carrier uses scoped inactive tabs, explicit close only, and no p
   assert.deepEqual(h.calls.filter(([name]) => name === 'remove'), [['remove', 2]])
   h.host.destroyView(adopted)
   await new Promise(setImmediate)
+  await h.host.retireSession(scope)
   assert.equal(h.tabs.has(1), true)
   assert.doesNotMatch(JSON.stringify(h.calls), /bringToFront|activateTarget|"active":true|"focused":true/)
   h.host.dispose()
@@ -80,6 +82,29 @@ test('disconnect invalidates old views and epoch page handles, with no replay or
   await assert.rejects(h.host.adoptPage(personal.id, scope), /stale or foreign/)
   assert.equal(h.calls.length, before)
   h.host.dispose()
+})
+
+for (const preferred of [false, true]) test(`session close awaits actual scoped detach through ${preferred ? 'preferred' : 'direct'} extension carrier`, async () => {
+  const h = fixture()
+  const host = preferred ? new PreferredBrowserViewHost('edge', { createView() { throw Error('unexpected fallback') }, destroyView() {} }, h.client) : h.host
+  const provider = new ElectronBrowserProvider(host, { history: { enabled: false } })
+  const session = await provider.open('owner')
+  const tab = provider.sessions.get(session).tabs[0]
+  await tab.handle.sendCommand('Runtime.evaluate', {})
+  let unblock
+  const barrier = new Promise(resolve => { unblock = resolve })
+  const detach = h.api.debugger.detach
+  h.api.debugger.detach = async target => { await barrier; return detach(target) }
+  let closed = false
+  const closing = provider.close(session).then(() => { closed = true })
+  await new Promise(setImmediate)
+  assert.equal(closed, false, 'session close must wait for debugger detach')
+  unblock(); await closing
+  assert.equal(h.controller.leases.size, 0)
+  assert.equal(h.controller.active, undefined)
+  assert.equal(h.calls.filter(([name]) => name === 'detach').length, 1)
+  assert.equal(h.calls.some(([name]) => name === 'remove'), false)
+  provider.dispose(); host.dispose()
 })
 
 test('empty and malformed extension inventories are distinguished', async () => {

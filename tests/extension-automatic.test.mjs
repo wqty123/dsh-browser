@@ -184,6 +184,7 @@ test('session routing pins a live CDP session and selects a later extension for 
 test('worker auto-connects at boot, install and startup without opening Options; pause is respected', async () => {
   for (const paused of [false, true]) {
     const callbacks = {}, ports = []
+    let releases = 0
     const event = name => ({ addListener(fn) { callbacks[name] = fn } })
     const api = { storage: { local: { get: async key => key === 'paused' ? { paused } : { installId: randomUUID() }, set: async () => {} } },
       runtime: { onInstalled: event('installed'), onStartup: event('startup'), onMessage: event('message'), connectNative() {
@@ -191,7 +192,7 @@ test('worker auto-connects at boot, install and startup without opening Options;
         ports.push(port); return port
       } }, debugger: { onDetach: event('detach') }, alarms: { onAlarm: event('alarm'), create: async () => {}, clear: async () => {} } }
     const source = readFileSync(new URL('../browser-extension/worker.mjs', import.meta.url), 'utf8').replace(/^import[^\n]+\n/gm, '')
-    runInNewContext(source, { ...extensionConstants, en, chrome: api, navigator: { userAgent: 'Edg/' }, crypto: { randomUUID }, ExtensionController: class { release() {} }, TextEncoder, setTimeout, clearTimeout })
+    runInNewContext(source, { ...extensionConstants, en, chrome: api, navigator: { userAgent: 'Edg/' }, crypto: { randomUUID }, ExtensionController: class { async release() { releases++ } }, TextEncoder, setTimeout, clearTimeout })
     await new Promise(setImmediate)
     assert.equal(ports.length, paused ? 0 : 1)
     if (!paused) callbacks.disconnect()
@@ -200,6 +201,13 @@ test('worker auto-connects at boot, install and startup without opening Options;
     if (!paused) callbacks.disconnect()
     callbacks.startup(); await new Promise(setImmediate)
     assert.equal(ports.length, paused ? 0 : 3)
+    assert.equal(releases, paused ? 0 : 2, 'every native disconnect releases debugger ownership')
+    if (!paused) {
+      callbacks['native-message']({ type: 'release' })
+      assert.equal(releases, 3, 'plugin transport closure releases ownership')
+      callbacks.detach({ tabId: 1 }, 'canceled_by_user')
+      assert.equal(ports.length, 3, 'Cancel does not reconnect or attach')
+    }
   }
 })
 

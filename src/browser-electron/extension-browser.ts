@@ -84,6 +84,7 @@ export function extensionInstallHelp(browser: 'edge' | 'chrome') {
 export class ExtensionBrowserViewHost implements ElectronBrowserViewHost {
   get referenceOverlayOwner(): 'client' | undefined { return 'client' }
   private readonly views = new Map<string, View>()
+  private readonly detaching = new Map<BrowserSessionId, Set<Promise<unknown>>>()
   private readonly unsubscribe: () => void
   private disposed = false
 
@@ -148,7 +149,22 @@ export class ExtensionBrowserViewHost implements ElectronBrowserViewHost {
     if (!view) return
     this.views.delete(handle.id)
     view.invalid = true
-    if (view.lease && this.client.status().connected) void this.client.request({ kind: 'detach', scope: view.scope, view: handle.id, lease: view.lease.lease }).catch(() => {})
+    const pending = view.lease && this.client.status().connected
+      ? this.client.request({ kind: 'detach', scope: view.scope, view: handle.id, lease: view.lease.lease })
+      : view.pending?.catch(() => {})
+    if (pending) {
+      const tasks = this.detaching.get(view.scope) ?? new Set<Promise<unknown>>()
+      this.detaching.set(view.scope, tasks)
+      tasks.add(pending)
+      void pending.catch(() => {})
+    }
+  }
+
+  async retireSession(scope: BrowserSessionId): Promise<void> {
+    for (const view of this.views.values()) if (view.scope === scope) this.destroyView(view.handle)
+    const tasks = this.detaching.get(scope)
+    try { if (tasks) await Promise.all(tasks) }
+    finally { this.detaching.delete(scope) }
   }
 
   async listPages(scope: BrowserSessionId, options: { readonly requireRunning?: boolean } = {}): Promise<readonly CarrierPage[]> {
