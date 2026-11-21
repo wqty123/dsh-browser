@@ -30,6 +30,23 @@ async function ask(name: string, args: Record<string, unknown> = {}): Promise<Re
   return reply
 }
 const value = async (name: string, args?: Record<string, unknown>): Promise<unknown> => (await ask(name, args)).value
+
+/** A failed `tools.*` call, named after the tool, like DSH run_code's ToolCallError. */
+class ToolCallError extends Error {
+  readonly toolName: string
+  constructor(toolName: string, message: string) {
+    super(message)
+    this.name = 'ToolCallError'
+    this.toolName = toolName
+  }
+}
+
+/** DSH run_code-style bindings: `await tools.dsh_browser_snapshot({})` resolves to the tool's JSON value. */
+const tools: Record<string, (args?: Record<string, unknown>) => Promise<unknown>> = new Proxy(Object.create(null), {
+  get: (_target, name) => typeof name !== 'string' || name === 'then' ? undefined : async (args: Record<string, unknown> = {}) => {
+    try { return (await ask(name, args)).value } catch (error) { throw new ToolCallError(name, error instanceof Error ? error.message : String(error)) }
+  },
+})
 const text = async (name: string, args?: Record<string, unknown>): Promise<string> => (await ask(name, args)).text ?? ''
 
 export type Target = string | { css?: string; text?: string; xpath?: string; by?: string; value?: string; index?: number; x?: number; y?: number }
@@ -192,7 +209,7 @@ async function js(script: string): Promise<unknown> {
   return out.value === undefined ? undefined : JSON.parse(out.value)
 }
 
-const context = createContext({ ...helpers, open: helpers.goto_url, press: helpers.press_key })
+const context = createContext({ ...helpers, open: helpers.goto_url, press: helpers.press_key, tools, ToolCallError })
 
 process.on('message', (message: Reply | Run) => {
   if (message.type === 'reply') {

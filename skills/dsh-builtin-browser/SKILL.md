@@ -5,10 +5,18 @@ description: Use when a task needs a real web page — opening a URL, reading or
 
 # Driving the browser
 
-The browser is a real Chromium the human can watch and take over. You drive it with one tool,
-`dsh_browser_code`, after Browser Use 1.0's `python` tool: each call is a JavaScript cell in a
-persistent REPL. Top-level `const`/`let`/`function` survive calls, the last expression is printed,
-and every browser helper is async (`await` it).
+The browser is a real Chromium the human can watch and take over. The core `dsh_browser_*`
+tools (open, snapshot, click, type, key, scroll, fill, wait, content, find, scrape, screenshot,
+execute, tabs, references, takeover) are always available; load the rest by group with
+`dsh_browser_load_tools` (forms, navigation, debug, session, more) when a task needs them.
+
+To batch, use `dsh_browser_do` for a fixed list of steps, or `dsh_browser_code` for a program:
+each call is a JavaScript cell in a persistent REPL, after Browser Use 1.0's `python` tool.
+Top-level `const`/`let`/`function` survive calls, the last expression is printed, and every
+browser tool is bound as `await tools.dsh_browser_<name>(args)` (same arguments as the tool,
+resolving to its JSON value). Independent reads may overlap under `Promise.all`; actions run in
+order. Print findings as you go: a cell that hits its deadline still returns what it printed.
+When DSH runs in PTC mode (`run_code`), call the same tools from `run_code` instead.
 
 ```js
 await goto_url('https://example.com/search')

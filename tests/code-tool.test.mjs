@@ -6,8 +6,9 @@ import assert from 'node:assert/strict'
 import { apply } from '../lib/tool-browser/index.js'
 import { targetArgs, prepare } from '../lib/tool-browser/code-worker.js'
 
-function mount(overrides = {}, config = {}) {
+function mount(overrides = {}, config = {}, services = {}) {
   const tools = new Map()
+  const options = new Map()
   const calls = []
   const sections = []
   const disposers = []
@@ -27,18 +28,56 @@ function mount(overrides = {}, config = {}) {
     ...overrides,
   }
   apply({
-    tools: { register: tool => { tools.set(tool.name, tool) } },
+    tools: { register: (tool, opts) => { tools.set(tool.name, tool); if (opts) options.set(tool.name, opts) } },
     systemPrompt: { section: section => { sections.push(section) } },
     effect: fn => { disposers.push(fn()) },
-    get: name => name === 'browser' ? browser : undefined,
+    get: name => name === 'browser' ? browser : services[name],
   }, config)
   const exec = { agent: { id: 'code-owner' } }
   const run = code => tools.get('dsh_browser_code').execute({ code }, exec)
-  return { tools, calls, sections, run }
+  return { tools, options, calls, sections, run, exec }
 }
 
-test('the default surface is the code tool plus human takeover', () => {
-  const { tools, sections } = mount()
+test('the default surface is the core tools, the loader and the code tool', async () => {
+  const { tools, exec } = mount()
+  for (const name of ['dsh_browser_open', 'dsh_browser_click', 'dsh_browser_do', 'dsh_browser_reference_capture', 'dsh_browser_request_takeover', 'dsh_browser_code', 'dsh_browser_load_tools']) assert.ok(tools.has(name), name)
+  assert.equal(tools.has('dsh_browser_network'), false)
+  const value = await tools.get('dsh_browser_load_tools').execute({ groups: ['debug'] }, exec)
+  assert.ok(value.loaded.includes('dsh_browser_network') && tools.has('dsh_browser_network'))
+  assert.deepEqual((await tools.get('dsh_browser_load_tools').execute({ groups: ['debug'] }, exec)).loaded, [])
+  const more = await tools.get('dsh_browser_load_tools').execute({ groups: ['forms', 'navigation', 'session', 'more'] }, exec)
+  assert.ok(more.available.length > 0)
+  const { tools: all } = mount({}, { surface: 'tools' })
+  for (const name of all.keys()) assert.ok(tools.has(name), `${name} is reachable by loading a group`)
+  await assert.rejects(tools.get('dsh_browser_load_tools').execute({ groups: ['nope'] }, exec), /must be one of|unknown tool group/)
+})
+
+test('the code tool steps aside when DSH runs in PTC mode', () => {
+  assert.equal(mount().options.get('dsh_browser_code').when(), true)
+  assert.equal(mount({}, {}, { ptcRuntime: {} }).options.get('dsh_browser_code').when(), false)
+})
+
+test('tools.* bindings return JSON values, overlap safe reads and keep actions in order', async () => {
+  let active = 0
+  let peak = 0
+  const order = []
+  const slow = name => async () => { active++; peak = Math.max(peak, active); order.push(`${name}:start`); await new Promise(r => setTimeout(r, 30)); active--; order.push(`${name}:end`); return { content: name, truncated: false } }
+  const { run } = mount({ content: slow('content'), click: async () => { order.push('click'); return { clicked: true } } })
+  const value = await run(`
+    await tools.dsh_browser_open({ url: 'https://example.test/', surface: 'builtin' })
+    const [a, b] = await Promise.all([tools.dsh_browser_content({ format: 'markdown' }), tools.dsh_browser_content({ format: 'markdown' })])
+    let failed
+    try { await tools.dsh_browser_nope({}) } catch (e) { failed = e.name + ':' + e.toolName }
+    ({ a: typeof a, failed })
+  `)
+  assert.equal(value.ok, true, value.output)
+  assert.match(value.output, /"a":"object"/)
+  assert.match(value.output, /ToolCallError:dsh_browser_nope/)
+  assert.equal(peak, 2)
+})
+
+test('the code surface keeps only the code tool plus human takeover', () => {
+  const { tools, sections } = mount({}, { surface: 'code' })
   assert.deepEqual([...tools.keys()].sort(), ['dsh_browser_code', 'dsh_browser_request_takeover'])
   assert.doesNotMatch(tools.get('dsh_browser_code').description, /\d{4}-\d{2}-\d{2}/, 'static description keeps the prompt prefix cacheable')
   const guide = sections.find(section => section.name === 'tool:dsh-builtin-browser')
