@@ -116,6 +116,9 @@ test('runtime transport status does not claim readiness for missing, unpaired or
 test('native registration is per-user and browser-specific on Windows, macOS and Linux', () => {
   assert.equal(registration('edge', 'manifest', { platform: 'win32' }).registry, 'HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.dsh.browser.edge')
   assert.equal(registration('chrome', 'manifest', { platform: 'win32' }).registry, 'HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.dsh.browser.chrome')
-  assert.match(registration('edge', 'manifest', { platform: 'darwin', home: '/user' }).file, /Library\/Application Support\/Microsoft Edge\/NativeMessagingHosts/)
+  assert.equal(registration('edge', 'manifest', { platform: 'darwin', home: '/user' }).file, '/user/Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.dsh.browser.edge.json')
+  assert.equal(registration('chrome', 'manifest', { platform: 'darwin', home: '/user' }).file, '/user/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.dsh.browser.chrome.json')
   assert.equal(registration('chrome', 'manifest', { platform: 'linux', home: '/user', xdg: '/xdg' }).file, '/xdg/google-chrome/NativeMessagingHosts/com.dsh.browser.chrome.json')
+  assert.equal(registration('edge', 'manifest', { platform: 'linux', home: '/user', xdg: '' }).file, '/user/.config/microsoft-edge/NativeMessagingHosts/com.dsh.browser.edge.json')
+  assert.throws(() => registration('edge', 'manifest', { platform: 'unknown' }), /unsupported/)
 })

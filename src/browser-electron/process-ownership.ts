@@ -23,42 +23,52 @@ const execute = promisify(execFile)
 const windowsInspection = String.raw`
 $ErrorActionPreference='Stop'
 try {
-  Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class DshCommandLine {
-  [DllImport("shell32.dll", SetLastError=true)]
-  static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string command, out int count);
-  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
-  public static string[] Parse(string command) {
-    int count; var memory=CommandLineToArgvW(command, out count);
-    if(memory==IntPtr.Zero) throw new Exception();
-    try { var result=new string[count];
-      for(int i=0;i<count;i++) result[i]=Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory,i*IntPtr.Size));
-      return result;
-    } finally { LocalFree(memory); }
-  }
-}
-'@
+  [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
   $p=Get-CimInstance Win32_Process -Filter ('ProcessId='+$env:DSH_INSPECT_PID)
-  if($null -eq $p -or !$p.ExecutablePath -or !$p.CommandLine -or !$p.CreationDate) { exit 2 }
+  if($null -eq $p -or !$p.ExecutablePath -or !$p.CommandLine -or !$p.CreationDate) { throw 'Process identity is unavailable' }
   @{pid=[int]$p.ProcessId;created=$p.CreationDate.ToUniversalTime().Ticks.ToString();
-    executable=$p.ExecutablePath;argv=@([DshCommandLine]::Parse($p.CommandLine))} | ConvertTo-Json -Compress
-} catch { exit 2 }
+    executable=$p.ExecutablePath;commandLine=$p.CommandLine} | ConvertTo-Json -Compress
+} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }
 `
 
-export async function inspectProcess(pid: number): Promise<ProcessIdentity | undefined> {
+export function parseWindowsCommandLine(command: string): string[] {
+  const argv: string[] = []
+  let value = '', quoted = false, started = false
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]!
+    if ((char === ' ' || char === '\t') && !quoted) {
+      if (started) argv.push(value)
+      value = ''; started = false
+      continue
+    }
+    started = true
+    if (char === '\\') {
+      let count = 1
+      while (command[i + 1] === '\\') { count++; i++ }
+      if (command[i + 1] !== '"') { value += '\\'.repeat(count); continue }
+      value += '\\'.repeat(Math.floor(count / 2))
+      if (count % 2) { value += '"'; i++; continue }
+      i++
+    } else if (char !== '"') { value += char; continue }
+    if (quoted && command[i + 1] === '"') { value += '"'; i++ }
+    else quoted = !quoted
+  }
+  if (started) argv.push(value)
+  return argv
+}
+
+export async function inspectProcess(pid: number, diagnose?: (reason: string) => void): Promise<ProcessIdentity | undefined> {
   if (!Number.isSafeInteger(pid) || pid <= 0) return undefined
   try {
     if (process.platform === 'win32') {
       const { stdout } = await execute(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
         ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsInspection, 'utf16le').toString('base64')],
-        { windowsHide: true, timeout: 5000, maxBuffer: 128 * 1024, env: { ...process.env, DSH_INSPECT_PID: String(pid) } })
-      const result = JSON.parse(stdout)
+        { windowsHide: true, timeout: 15000, maxBuffer: 128 * 1024, env: { ...process.env, DSH_INSPECT_PID: String(pid) } })
+      const result = JSON.parse(stdout.replace(/^\uFEFF/u, ''))
       if (result.pid !== pid || typeof result.created !== 'string' || !result.created
-        || typeof result.executable !== 'string' || !Array.isArray(result.argv)
-        || !result.argv.every((arg: unknown) => typeof arg === 'string')) return undefined
-      return result as ProcessIdentity
+        || typeof result.executable !== 'string' || !result.executable
+        || typeof result.commandLine !== 'string' || !result.commandLine) throw new Error('Windows returned an incomplete or mismatched process identity')
+      return { pid, created: result.created, executable: result.executable, argv: parseWindowsCommandLine(result.commandLine) }
     }
     if (process.platform === 'linux') {
       const root = `/proc/${pid}`
@@ -71,7 +81,7 @@ export async function inspectProcess(pid: number): Promise<ProcessIdentity | und
       if (!created || created !== start(after) || !command.endsWith('\0')) return undefined
       return { pid, created, executable, argv: command.slice(0, -1).split('\0') }
     }
-  } catch { /* An unreadable identity grants no cleanup authority. */ }
+  } catch (error) { diagnose?.(String(error).slice(-2000)) }
   return undefined
 }
 

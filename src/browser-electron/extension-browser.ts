@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { NativeBrowserClient, type ExtensionConnectionStatus } from '../../native-host/client.mjs'
+import { access } from 'node:fs/promises'
+import type { NativeBrowserClient, ExtensionConnectionStatus } from '../../native-host/client.mjs'
 import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserTabWireId } from '../browser/handles.ts'
 import type { BrowserSessionId, CarrierPage } from '../browser/types.ts'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
@@ -13,6 +14,55 @@ interface View {
   lease?: Lease
   pending?: Promise<Lease>
   invalid: boolean
+}
+
+class LazyNativeBrowserClient implements NativeBrowserClient {
+  private client?: NativeBrowserClient
+  private loading?: Promise<void>
+  private disposed = false
+  private detail = 'Install and pair the browser extension/native host.'
+  private readonly listeners = new Set<Parameters<NativeBrowserClient['onEvent']>[0]>()
+
+  constructor(private readonly directory: string, private readonly browser: 'edge' | 'chrome') {}
+
+  status(): ExtensionConnectionStatus {
+    return this.client?.status() ?? { state: 'extension-missing', connected: false, browser: this.browser, detail: this.detail }
+  }
+
+  private async load(): Promise<void> {
+    try {
+      await access(new URL('../../browser-extension/manifest.json', import.meta.url))
+      const { NativeBrowserClient } = await import('../../native-host/client.mjs')
+      if (this.disposed) throw new Error('extension carrier was released')
+      this.client = new NativeBrowserClient(this.directory, this.browser)
+      this.client.onEvent(event => { for (const listener of this.listeners) listener(event) })
+    } catch (error) {
+      this.detail = `Extension carrier unavailable: ${String(error)}. Reinstall the complete package; no profile fallback.`
+      throw new Error(this.detail, { cause: error })
+    }
+  }
+
+  async connect(): Promise<void> {
+    if (this.disposed) throw new Error('extension carrier was released')
+    await (this.loading ??= this.load())
+    await this.client!.connect()
+  }
+
+  async request(operation: Record<string, unknown>): Promise<unknown> {
+    await this.connect()
+    return this.client!.request(operation)
+  }
+
+  onEvent(listener: Parameters<NativeBrowserClient['onEvent']>[0]): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  dispose(): void {
+    this.disposed = true
+    this.listeners.clear()
+    this.client?.dispose()
+  }
 }
 
 export function extensionDirectory(browser: 'edge' | 'chrome'): string {
@@ -36,7 +86,7 @@ export class ExtensionBrowserViewHost implements ElectronBrowserViewHost {
   private readonly unsubscribe: () => void
   private disposed = false
 
-  constructor(readonly browser: 'edge' | 'chrome', private readonly client = new NativeBrowserClient(extensionDirectory(browser), browser)) {
+  constructor(readonly browser: 'edge' | 'chrome', private readonly client: NativeBrowserClient = new LazyNativeBrowserClient(extensionDirectory(browser), browser)) {
     this.unsubscribe = client.onEvent(event => {
       if (event.method === 'transport.disconnected') for (const view of this.views.values()) view.invalid = true
       if (event.method === 'target.detached' || event.method === 'target.closed') {

@@ -1,12 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { BrowserProcessOwnership, inspectProcess } from '../lib/browser-electron/process-ownership.js'
+import { BrowserProcessOwnership, inspectProcess, parseWindowsCommandLine } from '../lib/browser-electron/process-ownership.js'
 import { SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
 import { sessionWireId, tabWireId } from '../lib/browser/handles.js'
@@ -94,13 +94,18 @@ test('default personal profile is never a managed cleanup target', async t => {
 
 test('real OS inspection identifies and terminates only a separately spawned test child', {
   skip: !['linux', 'win32'].includes(process.platform) && 'unsupported inspection platform fails closed',
+  timeout: 120000,
 }, async t => {
   const s = setup(t)
-  const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/owned-process-child.mjs', import.meta.url)), `--user-data-dir=${s.directory}`], { stdio: 'ignore' })
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/owned-process-child.mjs', import.meta.url)), `--user-data-dir=${s.directory}`, 'space and 中文', 'quote"inside', 'trailing\\'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true })
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill() })
-  await once(child, 'spawn')
-  const identity = await inspectProcess(child.pid)
-  assert.equal(identity?.pid, child.pid)
+  const [reported] = await Promise.race([once(child, 'message'), once(child, 'exit').then(([code]) => { throw new Error(`inspection fixture exited before reporting its identity (${code})`) })])
+  assert.equal(reported.pid, child.pid)
+  const failures = []
+  const identity = await inspectProcess(child.pid, reason => failures.push(reason))
+  assert.equal(identity?.pid, child.pid, failures.join('\n'))
+  assert.equal(identity.executable.toLowerCase(), reported.executable.toLowerCase())
+  assert.deepEqual(identity.argv, reported.argv)
   assert.ok(identity.created)
   const ownership = new BrowserProcessOwnership(process.execPath, s.directory, { managed: true })
   await ownership.capture(child)
@@ -109,6 +114,46 @@ test('real OS inspection identifies and terminates only a separately spawned tes
   assert.equal(await ownership.terminate(child), true)
   await exited
   assert.equal(await ownership.verify(child), false)
+})
+
+test('Windows command-line parsing preserves quoted profile paths and escaped arguments', () => {
+  assert.deepEqual(parseWindowsCommandLine(String.raw`"C:\Program Files\node.exe" "" "--user-data-dir=C:\Users\中文 space\profile" a\\\"b "quoted""word"`),
+    ['C:\\Program Files\\node.exe', '', '--user-data-dir=C:\\Users\\中文 space\\profile', 'a\\"b', 'quoted"word'])
+  assert.deepEqual(parseWindowsCommandLine(''), [])
+  assert.deepEqual(parseWindowsCommandLine('node.exe\t--user-data-dir="C:\\with spaces\\profile"'), ['node.exe', '--user-data-dir=C:\\with spaces\\profile'])
+})
+
+test('Windows inspection validates CIM output and fails closed with diagnostics on rejection or timeout', () => {
+  const substitute = `import assert from 'node:assert/strict';
+    export function execFile() {}
+    execFile[Symbol.for('nodejs.util.promisify.custom')] = async (file, args, options) => {
+      assert.equal(options.windowsHide, true); assert.equal(options.timeout, 15000);
+      assert.equal(options.env.DSH_INSPECT_PID, '123');
+      const script = Buffer.from(args.at(-1), 'base64').toString('utf16le');
+      assert.match(script, /Get-CimInstance Win32_Process/); assert.doesNotMatch(script, /Add-Type/);
+      if (globalThis.inspectionCase === 'timeout') throw new Error('inspection timed out');
+      if (globalThis.inspectionCase === 'malformed') return { stdout: '{' };
+      return { stdout: '\\uFEFF' + JSON.stringify({ pid: globalThis.inspectionCase === 'wrong-pid' ? 124 : 123,
+        created: 'creation-ticks', executable: 'C:/node.exe', commandLine: 'node.exe --user-data-dir="C:/profile space"' }) };
+    };`
+  const loader = `export function resolve(specifier, context, next) {
+    return specifier === 'node:child_process' ? { url: ${JSON.stringify('data:text/javascript,' + encodeURIComponent(substitute))}, shortCircuit: true } : next(specifier, context)
+  }`
+  const program = `import assert from 'node:assert/strict'; import { register } from 'node:module';
+    register(${JSON.stringify('data:text/javascript,' + encodeURIComponent(loader))});
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const { inspectProcess } = await import(${JSON.stringify(new URL('../lib/browser-electron/process-ownership.js', import.meta.url).href)});
+    for (const kind of ['valid', 'wrong-pid', 'malformed', 'timeout']) {
+      globalThis.inspectionCase = kind; const failures = [];
+      const result = await inspectProcess(123, reason => failures.push(reason));
+      if (kind === 'valid') { assert.equal(result.pid, 123); assert.equal(result.created, 'creation-ticks');
+        assert.deepEqual(result.argv, ['node.exe', '--user-data-dir=C:/profile space']); assert.deepEqual(failures, []); }
+      else { assert.equal(result, undefined); assert.equal(failures.length, 1); }
+    }
+    for (const pid of [0, -1, NaN]) assert.equal(await inspectProcess(pid), undefined);`
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', program], { encoding: 'utf8', windowsHide: true })
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, result.stderr)
 })
 
 async function until(predicate) {

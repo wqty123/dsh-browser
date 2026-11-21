@@ -1,29 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { spawnSync } from 'node:child_process'
+import { packedPackage } from './fixtures/packed-package.mjs'
 
 test('packed host and cookie jar load after extraction without plugin node_modules or runtime PSL dependencies', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'dsh-host-package-'))
-  t.after(() => rmSync(directory, { recursive: true, force: true }))
-  const staging = join(directory, 'staging'), extracted = join(directory, 'extracted')
-  mkdirSync(staging); mkdirSync(extracted)
-  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const { root: directory, pkg, manifest, run } = packedPackage(t)
+  const staging = join(directory, 'no-esbuild')
+  mkdirSync(join(staging, 'lib/browser-electron'), { recursive: true })
   assert.equal(manifest.dependencies.tldts, undefined)
   assert.equal(manifest.dependencies['tldts-core'], undefined)
   assert.equal(manifest.devDependencies.esbuild, undefined)
-  cpSync(new URL('../lib/', import.meta.url), join(staging, 'lib'), { recursive: true })
-  for (const name of ['native-host', 'browser-extension']) cpSync(new URL(`../${name}/`, import.meta.url), join(staging, name), { recursive: true })
-  writeFileSync(join(staging, 'package.json'), JSON.stringify(manifest))
-  const run = (command, args, cwd = directory) => {
-    const result = spawnSync(command, args, { cwd, encoding: 'utf8', env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, shell: process.platform === 'win32' && command === 'npm.cmd' })
-    assert.equal(result.error, undefined)
-    assert.equal(result.status, 0, result.stdout + result.stderr)
-    return result.stdout
-  }
   const blocker = `export function resolve(specifier, context, next) {
     if (specifier === 'esbuild' || /[/\\\\]esbuild[/\\\\]/u.test(specifier)) {
       throw Object.assign(new Error('esbuild is unavailable for this regression'), { code: 'ERR_MODULE_NOT_FOUND' })
@@ -41,9 +29,6 @@ test('packed host and cookie jar load after extraction without plugin node_modul
     assert.ok(modules.some(path => path.replaceAll('\\', '/').includes(`/node_modules/${dependency}/`)
       || path.replaceAll('\\', '/').startsWith(`node_modules/${dependency}/`)), `${dependency} must be bundled without esbuild`)
   }
-  const packed = JSON.parse(run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', directory], staging))
-  run('tar', ['-xzf', packed[0].filename, '-C', 'extracted'])
-  const pkg = join(extracted, 'package')
   assert.equal(existsSync(join(pkg, 'node_modules')), false)
   const license = readFileSync(join(pkg, 'lib/browser-electron/guest-cookie-jar.LICENSE.txt'), 'utf8')
   assert.match(license, /tldts-core/); assert.match(license, /Permission is hereby granted, free of charge/)
@@ -67,4 +52,17 @@ test('packed host and cookie jar load after extraction without plugin node_modul
       const plugin = await import(new URL(entry, ${JSON.stringify(pathToFileURL(pkg + '/').href)})); assert.equal(typeof plugin.apply, 'function');
     }
     console.log('extracted host entries and cookie jar loaded; no plugin node_modules');`], pkg)
+  for (const missing of ['native-host', 'browser-extension']) {
+    const saved = join(directory, missing)
+    renameSync(join(pkg, missing), saved)
+    run(process.execPath, [...imports, '--import', `data:text/javascript,${encodeURIComponent(register)}`, '--input-type=module', '-e', `import assert from 'node:assert/strict';
+      const plugin = await import('./lib/browser-electron/entry.js'); assert.equal(typeof plugin.apply, 'function');
+      const { ExtensionBrowserViewHost } = await import('./lib/browser-electron/extension-browser.js');
+      const host = new ExtensionBrowserViewHost('edge');
+      await assert.rejects(host.prepare(), /Extension carrier unavailable/);
+      assert.equal(host.connectionStatus().connected, false);
+      assert.match(host.connectionStatus().detail, /unavailable/);
+      host.dispose();`], pkg)
+    renameSync(saved, join(pkg, missing))
+  }
 })

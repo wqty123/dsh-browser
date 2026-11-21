@@ -1,5 +1,5 @@
 import { mkdirSync, chmodSync, writeFileSync, existsSync, unlinkSync } from 'node:fs'
-import { join, resolve, dirname, isAbsolute } from 'node:path'
+import { join, resolve, dirname, isAbsolute, posix } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
@@ -13,8 +13,8 @@ const literal = value => JSON.stringify(value)
 export function registration(browser, manifest, { platform = process.platform, home = homedir(), xdg = process.env.XDG_CONFIG_HOME } = {}) {
   const name = `com.dsh.browser.${browser}`
   if (platform === 'win32') return { registry: `HKCU\\Software\\${browser === 'edge' ? 'Microsoft\\Edge' : 'Google\\Chrome'}\\NativeMessagingHosts\\${name}`, manifest }
-  if (platform === 'darwin') return { file: join(home, 'Library', 'Application Support', browser === 'edge' ? 'Microsoft Edge' : 'Google/Chrome', 'NativeMessagingHosts', `${name}.json`) }
-  if (platform === 'linux') return { file: join(xdg || join(home, '.config'), browser === 'edge' ? 'microsoft-edge' : 'google-chrome', 'NativeMessagingHosts', `${name}.json`) }
+  if (platform === 'darwin') return { file: posix.join(home, 'Library', 'Application Support', browser === 'edge' ? 'Microsoft Edge' : 'Google/Chrome', 'NativeMessagingHosts', `${name}.json`) }
+  if (platform === 'linux') return { file: posix.join(xdg || posix.join(home, '.config'), browser === 'edge' ? 'microsoft-edge' : 'google-chrome', 'NativeMessagingHosts', `${name}.json`) }
   throw Error('native messaging is unsupported on this platform')
 }
 
