@@ -10,9 +10,42 @@ import { createHash, randomUUID } from 'node:crypto'
 import { encode, decoder, MAX_FRAME, MAX_MESSAGE, chunkMessage, Reassembler, send } from '../native-host/protocol.mjs'
 import { serve, pair, saveConfiguration } from '../native-host/host.mjs'
 import { NativeBrowserClient, proof } from '../native-host/client.mjs'
-import { registration } from '../native-host/install.mjs'
+import { registration, secureWindowsDirectory } from '../native-host/install.mjs'
 
 const extensionId = 'a'.repeat(32)
+
+test('Windows directory hardening writes and verifies only the DACL, without owner or SACL changes', () => {
+  const directory = String.raw`C:\Users\test user\native-host`
+  let calls = 0
+  secureWindowsDirectory(directory, (command, args, options) => {
+    calls++
+    assert.equal(command, 'powershell.exe')
+    assert.equal(options.env.DSH_NATIVE_DIR, directory)
+    assert.equal(options.windowsHide, true)
+    const script = args.at(-1)
+    assert.match(script, /\$ErrorActionPreference='Stop'/)
+    assert.equal(script.match(/\.GetAccessControl\('Access'\)/g)?.length, 2)
+    assert.doesNotMatch(script, /SetOwner|Set-Acl|DirectorySecurity|Sacl|Audit|AccessControlSections.*All/i)
+    assert.match(script, /SetAccessRuleProtection\(\$true,\$false\)/)
+    assert.match(script, /RemoveAccessRuleSpecific\(\$existing\)/)
+    assert.match(script, /'FullControl','ContainerInherit,ObjectInherit','None','Allow'/)
+    assert.match(script, /\$d\.SetAccessControl\(\$acl\)/)
+    for (const property of ['AreAccessRulesProtected', 'IsInherited', 'IdentityReference.Value', 'AccessControlType', 'FileSystemRights', 'InheritanceFlags', 'PropagationFlags']) {
+      assert.ok(script.includes(property), property)
+    }
+    assert.match(script, /\$rules\.Count -ne 1/)
+    assert.match(script, /throw 'Native-host directory DACL verification failed'/)
+  })
+  assert.equal(calls, 1)
+})
+
+test('Windows directory hardening fails closed on permission or verification errors', () => {
+  for (const message of ['Permission denied', 'Native-host directory DACL verification failed']) {
+    const error = new Error(message)
+    assert.throws(() => secureWindowsDirectory('directory', () => { throw error }), value => value === error)
+  }
+})
+
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-ext-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))

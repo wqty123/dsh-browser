@@ -18,21 +18,38 @@ export function registration(browser, manifest, { platform = process.platform, h
   throw Error('native messaging is unsupported on this platform')
 }
 
+export function secureWindowsDirectory(directory, execute = execFileSync) {
+  execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+    $ErrorActionPreference='Stop'
+    $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $d=Get-Item -LiteralPath $env:DSH_NATIVE_DIR
+    $acl=$d.GetAccessControl('Access')
+    $acl.SetAccessRuleProtection($true,$false)
+    foreach($existing in @($acl.GetAccessRules($true,$false,[System.Security.Principal.SecurityIdentifier]))) {
+      $acl.RemoveAccessRuleSpecific($existing)
+    }
+    $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
+    $acl.AddAccessRule($rule)
+    $d.SetAccessControl($acl)
+    $check=$d.GetAccessControl('Access')
+    $rules=@($check.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]))
+    if(!$check.AreAccessRulesProtected -or $rules.Count -ne 1) { throw 'Native-host directory DACL verification failed' }
+    $actual=$rules[0]
+    if($actual.IsInherited -or $actual.IdentityReference.Value -ne $sid.Value -or
+       $actual.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
+       $actual.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl -or
+       $actual.InheritanceFlags -ne $rule.InheritanceFlags -or $actual.PropagationFlags -ne $rule.PropagationFlags) {
+      throw 'Native-host directory DACL verification failed'
+    }
+  `], { env: { ...process.env, DSH_NATIVE_DIR: directory }, stdio: 'pipe', windowsHide: true })
+}
+
 export function install({ browser, extensionId, directory, label, register = true, revoke = false }) {
   if (!['edge', 'chrome'].includes(browser) || !/^[a-p]{32}$/.test(extensionId ?? '') || !isAbsolute(directory ?? '')) throw Error('--browser edge|chrome, --extension-id (32 a-p letters), and an absolute --directory are required')
   directory = resolve(directory)
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   if (process.platform !== 'win32') chmodSync(directory, 0o700)
-  else {
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
-      $ErrorActionPreference='Stop'
-      $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
-      $acl=New-Object System.Security.AccessControl.DirectorySecurity
-      $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false)
-      $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
-      $acl.AddAccessRule($rule); Set-Acl -LiteralPath $env:DSH_NATIVE_DIR -AclObject $acl
-    `], { env: { ...process.env, DSH_NATIVE_DIR: directory }, stdio: 'pipe', windowsHide: true })
-  }
+  else secureWindowsDirectory(directory)
   const configPath = join(directory, 'config.json'), previous = readConfiguration(directory)
   const token = revoke ? undefined : randomBytes(24).toString('base64url')
   const config = { browser, extensionId, label: String(label ?? `${browser === 'edge' ? 'Edge' : 'Chrome'} personal profile`).slice(0, 120),
