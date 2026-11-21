@@ -22,6 +22,8 @@ const MAX_OUTPUT_CHARS = 12_000
 const MAX_IMAGES = 4
 /** Concurrency-safe tool calls one cell may overlap, as DSH run_code's maxParallelSubCalls. */
 const MAX_PARALLEL_CALLS = 10
+/** Calls that wait for something a later action causes: they must not hold that action back. */
+const WATCHERS: ReadonlySet<string> = new Set(['dsh_browser_wait_for_response', 'dsh_browser_wait'])
 /** An idle REPL worker is ended after this long; DSH does not tell the plugin when a task ends. */
 const IDLE_MS = 15 * 60_000
 
@@ -221,8 +223,11 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
       const waiters: (() => void)[] = []
       const acquire = async () => { while (slots === 0) await new Promise<void>(go => waiters.push(go)); slots-- }
       const release = () => { slots++; waiters.shift()?.() }
-      const schedule = (safe: boolean, run: () => Promise<void>): void => {
-        if (safe) {
+      const schedule = (safe: boolean, watcher: boolean, run: () => Promise<void>): void => {
+        if (watcher) {
+          const gate = barrier
+          void (async () => { await gate; await run() })()
+        } else if (safe) {
           const gate = barrier
           const call = (async () => { await gate; await acquire(); try { await run() } finally { release() } })()
           inflight.add(call)
@@ -267,7 +272,7 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
             else if (message.type === 'call') {
               const { id, name, args: toolArgs } = message
               if (name === '__help') void dispatch(id, name, toolArgs)
-              else schedule(concurrencySafe(name, toolArgs), () => dispatch(id, name, toolArgs))
+              else schedule(concurrencySafe(name, toolArgs), WATCHERS.has(name.startsWith(PREFIX) ? name : PREFIX + name), () => dispatch(id, name, toolArgs))
             }
           }
           const dispatch = async (id: number, name: string, toolArgs: Record<string, unknown>) => {
