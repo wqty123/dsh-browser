@@ -32,7 +32,7 @@ test('untrusted wire handles reject malformed, noncanonical, stale and foreign i
 function toolsFor(browser) {
   const tools = new Map()
   apply({ tools: { register: tool => tools.set(tool.name, tool) }, systemPrompt: { section() {} }, effect() {},
-    get: name => name === 'browser' ? browser : undefined })
+    get: name => name === 'browser' ? browser : undefined }, { surface: 'tools' })
   return async (name, args = {}, owner = 'owner') => JSON.parse(JSON.stringify(await tools.get('dsh_browser_' + name).execute(
     JSON.parse(JSON.stringify(args)), { signal: new AbortController().signal, agent: { id: owner } },
   )))

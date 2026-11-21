@@ -43,7 +43,7 @@ function mount(overrides = {}, owner = 'panel-task') {
   const exec = { signal: new AbortController().signal, agent: { id: owner,
     session: { header: { cwd: home } }, ctx: { effect: effect => { cleanups.push(effect()) } } } }
   apply({ tools: { register: tool => tools.set(tool.name, tool) },
-    systemPrompt: { section() {} }, effect() {}, get: name => name === 'browser' ? browser : undefined })
+    systemPrompt: { section() {} }, effect() {}, get: name => name === 'browser' ? browser : undefined }, { surface: 'tools' })
   return { browser, calls, exec, cleanups,
     navigate: (next, heading) => { url = next; title = heading },
     run: (name, args = {}) => tools.get('dsh_browser_' + name).execute(args, exec) }
