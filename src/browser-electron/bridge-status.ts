@@ -14,9 +14,9 @@
  * - `stale` — the archive is back, or the deployed bridge module is missing or outdated.
  * @module dsh-browser/browser-electron/bridge-status
  */
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
@@ -177,10 +177,10 @@ function repairCommand(installRoot: string | undefined): string | undefined {
  */
 export function readBridgeStatus(installRoot: string, mainExtension?: MainExtensionStatus): BridgeStatus {
   const disk = readBridgeInstallStatus(installRoot)
-  if (mainExtension === undefined) return { ...disk, code: MAIN_EXTENSION_UNSUPPORTED }
+  if (mainExtension === undefined) return { ...disk, code: disk.code ?? MAIN_EXTENSION_UNSUPPORTED }
   return { ...disk, mainExtension, command: undefined, detail: `desktop main extension: ${mainExtension.state}`,
     state: mainExtension.state === 'loaded' ? 'installed' : mainExtension.state === 'not-installed' ? 'missing' : 'stale',
-    ...mainExtension.code === undefined ? {} : { code: mainExtension.code } }
+    code: mainExtension.code }
 }
 
 function readBridgeInstallStatus(installRoot: string): BridgeStatus {
@@ -281,15 +281,34 @@ function readBridgeInstallStatus(installRoot: string): BridgeStatus {
   }
   const bridgePath = join(appDir, 'lib', 'plugin-browser-bridge.js')
   let bridgeDetail: string | undefined
+  let bridgeCode: string | undefined
   try {
     const deployed = readFileSync(bridgePath)
     const shipped = readFileSync(new URL('../../desktop-bridge/plugin-browser-bridge.js', import.meta.url))
-    if (!deployed.equals(shipped)) bridgeDetail = BRIDGE_VERSION_MESSAGE
+    const loader = readFileSync(new URL('../../desktop-bridge/profile-loader.mjs', import.meta.url))
+    if (deployed.equals(loader)) {
+      try {
+        const profile = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'profiles', 'desktop')
+        const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8'))
+        if (!Object.hasOwn(manifest.dependencies ?? {}, 'dsh-builtin-browser')) throw new Error('not a direct profile dependency')
+        const directory = realpathSync(join(profile, 'node_modules', 'dsh-builtin-browser'))
+        const entry = realpathSync(join(directory, 'desktop-bridge', 'plugin-browser-bridge.js'))
+        const child = relative(directory, entry)
+        if (!child || isAbsolute(child) || child === '..' || child.startsWith('../') || child.startsWith('..\\')) {
+          throw new Error('bridge entry resolves outside its package')
+        }
+        if (!readFileSync(entry).equals(shipped)) bridgeDetail = BRIDGE_VERSION_MESSAGE
+      } catch {
+        bridgeCode = 'DSH_BRIDGE_PACKAGE_UNAVAILABLE'
+        bridgeDetail = `${bridgeCode}: the profile loader's package bridge is missing, unreadable or outside its package`
+      }
+    } else if (!deployed.equals(shipped)) bridgeDetail = BRIDGE_VERSION_MESSAGE
   } catch {
     bridgeDetail = 'the bridge module is missing or cannot be verified; reinstall the bridge to restore it'
   }
   return {
     state: bridgeDetail === undefined ? 'installed' : 'stale',
+    ...bridgeCode === undefined ? {} : { code: bridgeCode },
     present: true,
     installRoot,
     archivePresent,
