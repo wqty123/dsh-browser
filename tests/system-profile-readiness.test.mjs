@@ -124,7 +124,7 @@ test('registered builtin open returns a slow launch refusal, never a quarantined
     openUrl: (id, request, signal) => provider.openUrl(id, request, signal), snapshot: (id, signal) => provider.snapshot(id, signal),
   }
   apply({ tools: { register: tool => tools.set(tool.name, tool) }, systemPrompt: { section() {} }, effect() {},
-    get: name => name === 'browser' ? browser : undefined })
+    get: name => name === 'browser' ? browser : undefined }, { surface: 'tools' })
   const exec = { signal: new AbortController().signal, agent: { id: 'launch-refusal-owner', ctx: { effect() {} } } }
   for (let attempt = 0; attempt < 2; attempt++) {
     await assert.rejects(tools.get('dsh_browser_open').execute({ surface: 'builtin', url: 'https://example.test/' }, exec), error => {

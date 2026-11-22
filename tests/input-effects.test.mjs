@@ -47,7 +47,7 @@ async function mount(samples, operationError) {
     get: name => name === 'browser' ? browser : undefined,
     tools: { register: tool => tools.set(tool.name, tool) },
     systemPrompt: { section() {} }, effect() {},
-  })
+  }, { surface: 'tools' })
   await tools.get('dsh_browser_open').execute({ url: 'https://example.test/', surface: 'builtin' }, {})
   return { tools, calls, get script() { return script } }
 }

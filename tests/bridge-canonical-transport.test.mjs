@@ -94,7 +94,7 @@ test('registered tools retain canonical identity through runtime, provider, host
   runtime.registerPanelProvider(async () => provider)
   const tools = new Map()
   apply({ tools: { register: tool => tools.set(tool.name, tool) }, systemPrompt: { section() {} }, effect() {},
-    get: name => name === 'browser' ? runtime : undefined })
+    get: name => name === 'browser' ? runtime : undefined }, { surface: 'tools' })
   const run = async (name, args = {}, owner = 'session-a') => JSON.parse(JSON.stringify(await tools.get(`dsh_browser_${name}`).execute(
     JSON.parse(JSON.stringify(args)), { signal: new AbortController().signal, agent: { id: owner } },
   )))
