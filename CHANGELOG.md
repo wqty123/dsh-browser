@@ -50,7 +50,7 @@ Desktop 和 Web 各有独立 profile。从 0.5.8 升级时，在要升级的 pro
 - 自定义安装目录只记录在卸载登记表里，不读注册表就找不到（实测：`E:\Applications\DeepSeek Harness`，不设任何环境变量时返回 `undefined`）；
 - macOS / Linux 上多根扫描完全由 Windows 环境变量驱动，全为空，一律返回 `undefined`。
 
-现在在原有顺序之后追加两级来源：卸载登记表的 `InstallLocation`、平台的约定安装位置（macOS 的 `*.app/Contents`，Linux 的 `/opt`、`/usr/lib`、`~/.local/share`）。另外同时认可 `tools/install-web-plugin.mjs` 早已使用的 `DSH_DESKTOP_APP`（与 `DSH_DESKTOP_PATH` 并存）。
+现在在原有顺序之后追加两级来源：卸载登记表的 `InstallLocation`、平台的约定安装位置（macOS 的 `/Applications`、`~/Applications` 下的 `DeepSeek Harness.app` / `DSH Desktop.app`，Linux 的 `/opt`、`/usr/lib`、`~/.local/share`）。另外同时认可 `tools/install-web-plugin.mjs` 早已使用的 `DSH_DESKTOP_APP`（与 `DSH_DESKTOP_PATH` 并存）。
 
 每一处候选仍要通过 `readDesktopIdentity()`，放宽的只是"去哪找"，不是"什么算安装"；原有根仍然优先，残留的注册表值不会改掉正常安装的判定。两级新来源都做成可注入参数，供测试隔离。
 
