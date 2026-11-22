@@ -14,7 +14,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/morlay/dsh-plugin.git"
+    "url": "https://github.com/wqty123/dsh-browser.git"
   },
   "files": [
     "lib",

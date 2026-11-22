@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The build plugin (@local/tsdown-plugin-cordis) lives in the public dsh-plugin monorepo; it is
+      # built from this commit in a throwaway workspace (tools/ci-workspace.mjs). No secrets involved.
+      DSH_PLUGIN_REF: a48fa9ea05a3cd092dc588201f3579b3496350a9
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: dsh-browser
+      - uses: actions/checkout@v5
+        with:
+          repository: morlay/dsh-plugin
+          ref: ${{ env.DSH_PLUGIN_REF }}
+          path: dsh-plugin
+          persist-credentials: false
+          sparse-checkout: |
+            devpackages/tsdown-plugin-cordis
+            devpackages/dts-prepare
+            devpackages/devkit
+            packages/tooling/dsh-cordis-assets
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: echo "WORKSPACE=$RUNNER_TEMP/ws" >> "$GITHUB_ENV"
+      - name: Assemble the build workspace
+        run: node dsh-browser/tools/ci-workspace.mjs dsh-plugin "$WORKSPACE"
+      - name: Install
+        working-directory: ${{ env.WORKSPACE }}
+        run: pnpm install
+      - name: Typecheck
+        working-directory: ${{ env.WORKSPACE }}/packages/web/dsh-browser
+        run: node node_modules/typescript/bin/tsc -p tsconfig.build.json --noEmit
+      - name: Build
+        working-directory: ${{ env.WORKSPACE }}/packages/web/dsh-browser
+        run: node scripts/build.mjs
+      - name: Test
+        working-directory: ${{ env.WORKSPACE }}/packages/web/dsh-browser
+        # These two rebuild a staged copy outside the workspace, where the build plugin cannot find
+        # the monorepo declaration tree; the pack check below covers the packed contents instead.
+        run: >-
+          node tests/run.mjs
+          "--test-skip-pattern=^pack includes the extension and dependency-free native host"
+          "--test-skip-pattern=^packed host and cookie jar load after extraction"
+      - name: Pack check
+        working-directory: ${{ env.WORKSPACE }}/packages/web/dsh-browser
+        run: node tools/check-pack.mjs

@@ -8,7 +8,8 @@
  * `SyntaxError: Invalid or unexpected token` before a single assertion runs. A loader that
  * transforms types solves it, so this finds one and runs the suite under it.
  *
- * Extra arguments are forwarded, so `node tests/run.mjs tests/delivery.test.mjs` runs one file.
+ * Extra arguments are forwarded, so `node tests/run.mjs tests/delivery.test.mjs` runs one file;
+ * `--` options go to the test runner (`node tests/run.mjs --test-skip-pattern=<name>`).
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
@@ -62,7 +63,8 @@ if (loader === undefined) {
   process.exit(1)
 }
 
-const requested = process.argv.slice(2)
+const options = process.argv.slice(2).filter(arg => arg.startsWith('--'))
+const requested = process.argv.slice(2).filter(arg => !arg.startsWith('--'))
 const files = requested.length > 0
   ? requested
   : readdirSync(here)
@@ -73,7 +75,7 @@ const files = requested.length > 0
 console.log(`[tests] loader: ${loader}`)
 console.log(`[tests] files:  ${String(files.length)}`)
 
-const result = spawnSync(process.execPath, ['--import', loader, '--test', ...files], {
+const result = spawnSync(process.execPath, ['--import', loader, '--test', ...options, ...files], {
   cwd: pkg,
   stdio: 'inherit',
   windowsHide: true,
