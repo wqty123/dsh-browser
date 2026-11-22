@@ -9,7 +9,7 @@ import { launchMaintenanceBroker, type MaintenanceBrokerOptions, type Maintenanc
 import { runMaintenanceLifecycle, type MaintenanceState } from './maintenance-lifecycle.ts'
 import { defaultInstallerPath, runBridgeAction, runBridgeReinstall, waitForRestartedBridge } from './bridge-install.ts'
 import { readBridgeStatus } from './bridge-status.ts'
-import { desktopPaths, readDesktopIdentity } from './desktop-identity.ts'
+import { desktopLayout, desktopPaths, readDesktopIdentity } from './desktop-identity.ts'
 import { dshHome } from './paths.ts'
 import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.ts'
 
@@ -51,11 +51,13 @@ function inside(base: string, path: string): boolean {
 export function automaticMaintenanceSupported(platform: NodeJS.Platform = process.platform): boolean {
   return platform === 'win32' || platform === 'darwin'
 }
+function canonicalPath(path: string): string {
+  try { return realpathSync.native(path) } catch { return resolve(path) }
+}
 /** Same-path comparison: case-insensitive on Windows, by on-disk spelling elsewhere (APFS may be either). */
 function samePath(a: string, b: string): boolean {
   if (process.platform === 'win32') return resolve(a).toLowerCase() === resolve(b).toLowerCase()
-  const canonical = (path: string): string => { try { return realpathSync.native(path) } catch { return resolve(path) } }
-  return canonical(a) === canonical(b)
+  return canonicalPath(a) === canonicalPath(b)
 }
 function requireLiveDesktop(): void {
   if (!automaticMaintenanceSupported()) throw new Error('automatic bridge maintenance requires DSH Desktop on Windows or macOS')
@@ -72,10 +74,11 @@ async function execute(command: string, args: readonly string[], timeout = 15_00
   })
 }
 /** The Desktop GUI process on macOS: `ps` gives pid, start time, executable path and argv. */
-async function posixDesktopProcesses(root: string): Promise<DesktopProcess[]> {
+async function posixDesktopProcesses(root: string, includeBundleHelpers = false): Promise<DesktopProcess[]> {
+  const psEnv: NodeJS.ProcessEnv = { ...process.env, LC_ALL: 'C', LANG: 'C' }
   const [started, commands] = await Promise.all([
-    execute('ps', ['-axww', '-o', 'pid=,lstart=,comm=']),
-    execute('ps', ['-axww', '-o', 'pid=,args=']),
+    execute('ps', ['-axww', '-o', 'pid=,lstart=,comm='], 15_000, psEnv),
+    execute('ps', ['-axww', '-o', 'pid=,args='], 15_000, psEnv),
   ])
   if (started.code !== 0 || commands.code !== 0) throw new Error('cannot inspect running DSH Desktop processes')
   const argv = new Map<number, string>()
@@ -84,13 +87,19 @@ async function posixDesktopProcesses(root: string): Promise<DesktopProcess[]> {
     if (match !== null) argv.set(Number(match[1]), match[2] as string)
   }
   const expected = desktopPaths(root).executable
+  const layout = desktopLayout(root)
+  const bundlePrefix = includeBundleHelpers && !('error' in layout) && layout.name === 'macos-bundle'
+    ? `${canonicalPath(root).replace(/\/+$/, '')}/`
+    : undefined
   const rows: DesktopProcess[] = []
   for (const line of started.stdout.split('\n')) {
-    // lstart is always five fields: "Fri Nov 20 04:10:00 2026".
+    // lstart is always five fields under C locale: "Fri Nov 20 04:10:00 2026".
     const match = /^\s*(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d{4})\s+(.+)$/.exec(line)
     if (match === null) continue
     const path = (match[3] as string).trim()
-    if (!isAbsolute(path) || !samePath(path, expected)) continue
+    if (!isAbsolute(path)) continue
+    const matched = samePath(path, expected) || (bundlePrefix !== undefined && canonicalPath(path).startsWith(bundlePrefix))
+    if (!matched) continue
     const at = Date.parse(match[2] as string)
     if (!Number.isFinite(at)) throw new Error('cannot identify a running DSH Desktop process')
     rows.push({ pid: Number(match[1]), path, command: argv.get(Number(match[1])) ?? '', started: new Date(at).toISOString() })
@@ -99,8 +108,8 @@ async function posixDesktopProcesses(root: string): Promise<DesktopProcess[]> {
 }
 // The Desktop also ships a Node-mode CLI under its executable; it is not a GUI to close.
 const NODE_MODE = /(?:^|\s)--expose-internals(?:\s|$)|\.[cm]?js(?:"|\s|$)|(?:^|\s)(?:--eval|--print|--input-type)(?:=|\s|$)|(?:^|\s)-(?:e|p)(?:\s|$)/i
-async function desktopProcesses(root: string): Promise<DesktopProcess[]> {
-  if (process.platform !== 'win32') return await posixDesktopProcesses(root)
+async function desktopProcesses(root: string, includeBundleHelpers = false): Promise<DesktopProcess[]> {
+  if (process.platform !== 'win32') return await posixDesktopProcesses(root, includeBundleHelpers)
   const script = "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $rows = @((Get-CimInstance Win32_Process -Filter \"Name='DeepSeek Harness.exe'\" -ErrorAction Stop) | ForEach-Object { @{pid=[int]$_.ProcessId;path=$_.ExecutablePath;command=$_.CommandLine;started=$_.CreationDate.ToUniversalTime().ToString('o')} }); ConvertTo-Json -InputObject $rows -Compress"
   const r = await execute(windowsPowerShellPath(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePowerShellScript(script)])
   if (r.code !== 0) throw new Error('cannot inspect running DSH Desktop processes')
@@ -429,14 +438,14 @@ async function runWorker(path: string): Promise<void> {
         const deadline = Date.now() + 60_000
         while (Date.now() < deadline) {
           checkCancelled()
-          if ((await desktopProcesses(plan.root)).length === 0) return
+          if ((await desktopProcesses(plan.root, true)).length === 0) return
           await delay(1_000)
         }
         throw new Error('Desktop did not exit; maintenance was cancelled. Any running-task confirmation remains under your control.')
       },
       maintain: async () => {
         checkCancelled()
-        if ((await desktopProcesses(plan.root)).length > 0) throw new Error('DSH Desktop was reopened during maintenance; refusing to modify its files')
+        if ((await desktopProcesses(plan.root, true)).length > 0) throw new Error('DSH Desktop was reopened during maintenance; refusing to modify its files')
         return await runBridgeReinstall({
           absent: () => readBridgeStatus(plan.root).state === 'missing',
           run: async action => await runBridgeAction(action, plan.root, {
@@ -447,7 +456,7 @@ async function runWorker(path: string): Promise<void> {
         })
       },
       restart: async () => {
-        if ((await desktopProcesses(plan.root)).length > 0) throw new Error('DSH Desktop is already running; not opening a second instance')
+        if ((await desktopProcesses(plan.root, true)).length > 0) throw new Error('DSH Desktop is already running; not opening a second instance')
         const identity = readDesktopIdentity(plan.root)
         if (!identity.ok) throw new Error(`Desktop cannot be safely reopened: ${identity.reason}`)
         const environment = { ...process.env }
