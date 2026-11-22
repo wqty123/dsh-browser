@@ -91,7 +91,7 @@ test('the prompt section coexists with another browser plugin in either registra
       assert.equal(sections.has(name), false, 'prompt section identity is unique')
       sections.add(name)
     }
-    apply(ctx)
+    apply(ctx, { surface: 'tools' })
     if (!siblingFirst) ctx.systemPrompt.section({ name: 'tool:browser' })
     assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:browser-human-takeover', 'tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
     assert.ok(tools.has('dsh_browser_open'), 'tool registration completes')
@@ -102,7 +102,7 @@ test('reference guidance leaves source navigation in capsules, not model-generat
   const { ctx, tools } = makeContext()
   const sections = []
   ctx.systemPrompt.section = section => { sections.push(section) }
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
   const guidance = sections.find(section => section.name === 'tool:dsh-browser-reference-presentation')
   assert.match(guidance.text, /Do not repeat.*source\/citation links/u)
   const capture = tools.get('dsh_browser_reference_capture')
@@ -121,7 +121,7 @@ test('reference guidance leaves source navigation in capsules, not model-generat
 
 test('dsh_browser_a11y hands the selector on', async () => {
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
   await open(tools)
 
   const value = await run(tools, 'dsh_browser_a11y')
@@ -136,7 +136,7 @@ test('dsh_browser_a11y hands the selector on', async () => {
 
 test('dsh_browser_snapshot hands the selector on', async () => {
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
   await open(tools)
 
   const value = await run(tools, 'dsh_browser_snapshot')
@@ -147,7 +147,7 @@ test('both element mappings carry the same field set', async () => {
   // The two mappings reimplement the same idea, and they disagreed: one listed selector, the
   // other did not. Comparing them catches the next field that only lands in one of them.
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
   await open(tools)
 
   const a11y = await run(tools, 'dsh_browser_a11y')
@@ -169,7 +169,7 @@ test('a required field in the output schema is one the tool can actually produce
   // Invisible to the type checker (the mapping is an object literal) and to the suite (nothing
   // ran a tool). Optional fields are exempt, since those may legitimately be absent.
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
   await open(tools)
 
   const problems = []

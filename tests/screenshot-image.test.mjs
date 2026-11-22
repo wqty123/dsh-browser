@@ -54,7 +54,7 @@ function mount({ modalities = ['text', 'image'], unknown = false, resolve, shot,
       return { attachmentId: 'opaque-image-id', mediaType: 'image/png', bytes: png.length, width: 1, height: 1, name: 'must-not-propagate', ...ref }
     } },
   }
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
   return { calls, ctx, exec, controller, tools, async open() { await tools.get('dsh_browser_open').execute({ url: 'https://example.test/' }, exec) },
     async capture(args = {}) {
       const tool = tools.get('dsh_browser_screenshot')
