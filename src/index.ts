@@ -15,6 +15,8 @@
 
 /** Plugin identity for the root row (the composition surface is the subpath rows). */
 
+import type { Context } from '@deepseek-ai/cordis'
+
 export const name = 'dsh-builtin-browser'
 
 /**
@@ -24,11 +26,18 @@ export const name = 'dsh-builtin-browser'
  * client scan finds no row to resolve `dsh.client` from, and the settings panel
  * never reaches the browser (the plugin works, its client half is invisible).
  */
-export function apply(): void {
+import { registerWebGuest } from './web-guest.ts'
+
+/**
+ * 根行只做与载体无关的装配：侧栏 guest 代理必须始终存在，不能依赖 Electron 行。
+ * @param ctx - 插件容器。
+ */
+export function apply(ctx: Context): void {
+  registerWebGuest(ctx)
 }
 
 
-export { BrowserError } from './browser/types.js'
+export { BrowserError } from './browser/types.ts'
 export type {
   BrowserA11yNode,
   BrowserA11yRequest,
@@ -66,8 +75,36 @@ export type {
   BrowserTab,
   BrowserTypeRequest,
   ExportedCookie,
-} from './browser/types.js'
-export { BrowserRuntime } from './browser/runtime.js'
-export { ElectronBrowserProvider } from './browser-electron/provider.js'
-export type { ElectronBrowserViewHost, ElectronViewHandle } from './browser-electron/provider.js'
-export { RemoteElectronViewHost, defaultHostMainPath } from './browser-electron/remote-host.js'
+} from './browser/types.ts'
+export { BrowserRuntime } from './browser/runtime.ts'
+export { BrowserReferenceService, createReferenceService, summarizeReference } from './browser-reference/service.ts'
+export type {
+  BrowserReferenceDraftAdapter,
+  CaptureFailure,
+  CaptureOutcome,
+  CaptureRequest,
+  ReferenceHost,
+  ReferenceSummary,
+  RevealOutcome,
+  RevealPartResult,
+} from './browser-reference/service.ts'
+export type {
+  BrowserReference,
+  BrowserReferenceCarrier,
+  BrowserReferenceEntry,
+  BrowserReferenceOrigin,
+  BrowserReferencePart,
+  ImageAnchor,
+  ImageReferencePart,
+  TableAnchor,
+  TableCellRun,
+  TableCellSnapshot,
+  TableReferencePart,
+  TableSnapshot,
+  TextQuoteAnchor,
+  TextReferencePart,
+} from './browser-reference/types.ts'
+export { manifestHashOf, ReferenceStore, referenceStorePath } from './browser-reference/store.ts'
+export { buildTextAnchor, findTextQuote } from './browser-reference/text-quote.ts'
+export { ElectronBrowserProvider } from './browser-electron/provider.ts'
+export type { ElectronBrowserViewHost, ElectronViewHandle } from './browser-electron/provider.ts'

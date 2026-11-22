@@ -22,9 +22,9 @@
  */
 import { existsSync, readFileSync, statSync } from 'node:fs'
 
-import { ENDPOINT_STALE_AFTER_MS } from './bridge-connection.js'
-import { bridgeEndpointPath } from './desktop-bridge-host.js'
-import { pidAlive } from './process.js'
+import { ENDPOINT_STALE_AFTER_MS } from './bridge-connection.ts'
+import { bridgeEndpointPath } from './desktop-bridge-host.ts'
+import { pidAlive } from './process.ts'
 
 /** What the panel needs to know about the running shell. */
 export interface BridgeEndpointState {

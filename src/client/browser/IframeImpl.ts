@@ -1,0 +1,176 @@
+/** Iframe navigation provider with bounded application-known history. */
+import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import type { IframePresentation } from '../view/IframePresentation.ts'
+import { emptyBrowserFrame, type BrowserCarrierState, type BrowserFrame, type BrowserFrameState, type BrowserLoadError, type BrowserSandboxControl } from './BrowserFrame.ts'
+import type { BrowserPageOptions } from './BrowserPage.ts'
+import { BrowserNavigation } from './BrowserNavigation.ts'
+import type { BrowserTarget } from './url.ts'
+import { parseBrowserAddress } from './url.ts'
+
+/**
+ * 把观测到的地址变成合法目标（只接受 http(s)，其余返回 undefined）。
+ * @param url - 从 frame 自身地址解出的真实地址。
+ * @param title - 沿用当前标题的占位值。
+ */
+function toTarget(url: string, title: string): BrowserTarget | undefined {
+  const parsed = parseBrowserAddress(url)
+  if (!parsed.ok) return undefined
+  const target = parsed.target
+  return target.kind === 'https' || target.kind === 'http'
+    ? { ...target, title: target.title === '' ? title : target.title }
+    : undefined
+}
+
+/** Owns iframe navigation; the view reports loads without reading cross-origin content. */
+export class IframeImpl implements BrowserFrame {
+  private readonly carrier = createSnapshotStore<BrowserCarrierState>({ stage: 'idle' })
+  readonly lifecycle = { getSnapshot: () => this.carrier.getSnapshot(), subscribe: (listener: () => void) => this.carrier.subscribe(listener) }
+  readonly sandbox: BrowserSandboxControl = { setEnabled: (enabled) => { this.setSandbox(enabled) } }
+  private readonly navigation: BrowserNavigation
+  private readonly store: SnapshotStore<BrowserFrameState>
+  private sandboxed = true
+  private frameHistoryForward = false
+  private error: BrowserLoadError | undefined
+  private disposed = false
+  private disposal: Promise<void> | undefined
+  private navigationId: string | undefined
+
+  /** @param options - initial checkpoint and persistence writer. @param presentation - iframe DOM adapter. */
+  constructor(private readonly options: BrowserPageOptions, private readonly presentation: IframePresentation) {
+    this.navigation = new BrowserNavigation(options.initial)
+    this.store = createSnapshotStore({ ...emptyBrowserFrame(), sandboxEnabled: this.sandboxed })
+  }
+
+  /**
+   * Complete a native iframe navigation, including documents without a guest runtime.
+   * @param revision - document generation whose iframe emitted load.
+   */
+  handleLoaded(revision: number): void {
+    if (this.disposed) return
+    const navigation = this.navigation.snapshot.navigation
+    if (navigation.status !== 'empty' && navigation.revision !== revision) return
+    this.navigation.frameLoaded(revision)
+    this.publish()
+  }
+
+  handleGuestPending(): void {
+    this.carrier.set({ stage: 'guest' })
+  }
+
+  handleGuestFailed(revision: number, description: string): void {
+    if (this.disposed || this.navigation.snapshot.navigation.status === 'empty'
+      || this.navigation.snapshot.navigation.revision !== revision) return
+    this.carrier.set({ stage: 'failed', reason: 'guest-bootstrap-failed', detail: description })
+    this.error = { code: 'browser-capability-unavailable', description }
+    this.publish()
+  }
+
+  handleCapabilityFailure(description: string): void {
+    if (this.disposed) return
+    this.error = { code: 'browser-capability-unavailable', description }
+    this.publish()
+  }
+
+  handleGuestReady(revision: number, pageId: string): void {
+    if (this.disposed || this.navigation.snapshot.navigation.status === 'empty'
+      || this.navigation.snapshot.navigation.revision !== revision) return
+    this.carrier.set({ stage: 'ready', guestId: pageId })
+    this.publish()
+  }
+
+  /** Accept metadata correlated to the current completed native load, without completing it again. */
+  handleObserved(revision: number, observedUrl: string): void {
+    if (this.disposed) return
+    const navigation = this.navigation.snapshot.navigation
+    if (navigation.status === 'empty' || navigation.status === 'loading' || navigation.revision !== revision) return
+    const current = BrowserNavigation.current(this.navigation.snapshot)
+    const target = toTarget(observedUrl, current?.title ?? '')
+    if (target !== undefined) this.navigation.recordObserved(target)
+    this.publish()
+  }
+
+  /**
+   * Publish a failure only for the current document generation.
+   * @param revision - document generation whose iframe reported failure.
+   */
+  handleLoadFailed(revision: number): void {
+    if (this.disposed || this.navigation.snapshot.request?.revision !== revision) return
+    this.error = { code: undefined, description: undefined }
+    this.publish()
+  }
+
+  /** @returns immutable navigation state. */
+  getSnapshot = (): BrowserFrameState => this.store.getSnapshot()
+  /** @param listener - state invalidation. @returns unsubscribe callback. */
+  subscribe = (listener: () => void): (() => void) => this.store.subscribe(listener)
+
+  /** @param target - validated address; submitting the current address reloads it. */
+  loadUrl(target: BrowserTarget, navigationId?: string): void {
+    if (this.disposed) return
+    this.navigationId = navigationId
+    const request = BrowserNavigation.current(this.navigation.snapshot)?.url === target.url
+      ? this.navigation.reload() : this.navigation.navigate(target)
+    this.load(request)
+  }
+
+  /** Move back: app-known history first, then the iframe's own (page-internal) history. */
+  goBack(): void {
+    if (this.disposed) return
+    if (this.navigation.canGoBack) { this.load(this.navigation.back()); return }
+    this.frameHistoryForward = this.presentation.historyStep(-1) || this.frameHistoryForward
+    this.publish()
+  }
+
+  /** Move forward: app-known history first, then the iframe's own (page-internal) history. */
+  goForward(): void {
+    if (this.disposed) return
+    if (this.navigation.canGoForward) { this.load(this.navigation.forward()); return }
+    if (this.presentation.historyStep(1)) this.frameHistoryForward = false
+    this.publish()
+  }
+  /** Reload the last application-known address. */
+  reload(): void { if (!this.disposed) this.load(this.navigation.reload()) }
+
+  /** @returns after the presentation has been removed; repeated calls join disposal. */
+  dispose(): Promise<void> {
+    if (this.disposal !== undefined) return this.disposal
+    this.disposed = true
+    this.presentation.dispose()
+    this.disposal = Promise.resolve()
+    return this.disposal
+  }
+
+  private setSandbox(enabled: boolean): void {
+    if (this.disposed || enabled === this.sandboxed) return
+    this.sandboxed = enabled
+    if (this.store.getSnapshot().target === undefined) {
+      this.store.set({ ...this.store.getSnapshot(), sandboxEnabled: enabled })
+      return
+    }
+    this.load(this.navigation.reload())
+  }
+
+  private load(request: ReturnType<BrowserNavigation['navigate']> | undefined): void {
+    if (request === undefined) return
+    this.frameHistoryForward = false
+    this.error = undefined
+    this.publish()
+    this.presentation.show({ target: request.target, revision: request.revision, sandboxed: this.sandboxed })
+  }
+
+  private snapshot(): BrowserFrameState {
+    const state = this.navigation.snapshot
+    const target = BrowserNavigation.current(state)
+    return { navigationId: this.navigationId, target, address: target === undefined ? 'empty' : state.navigation.status === 'unknown' ? 'unknown'
+      : this.carrier.getSnapshot().stage === 'ready' ? 'observed' : 'requested',
+      loading: state.navigation.status === 'loading' && this.error === undefined,
+      canGoBack: this.navigation.canGoBack || this.presentation.historyDepth() > 1,
+      canGoForward: this.navigation.canGoForward || this.frameHistoryForward,
+      error: this.error, sandboxEnabled: this.sandboxed }
+  }
+
+  private publish(): void {
+    this.store.set(this.snapshot())
+    this.options.persist(this.navigation.snapshot)
+  }
+}

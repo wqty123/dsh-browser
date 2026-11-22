@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Compatibility for historical automatic-install settings and explicit bridge-maintenance intent.
  * Runtime automatic installation is disabled. Bridge maintenance requires the user to close DSH
@@ -8,9 +9,9 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import type { BridgeStatus } from './bridge-status.js'
-import type { BrowserChannel } from './system-browser.js'
-import { writeFileAtomic } from './settings-store.js'
+import type { BridgeStatus } from './bridge-status.ts'
+import type { BrowserChannel } from './system-browser.ts'
+import { writeFileAtomic } from './settings-store.ts'
 
 /** What the last automatic attempt was, and for which desktop build. */
 export interface AutoInstallMarker {
@@ -114,7 +115,7 @@ export async function runWithManualBridgePreference<T>(
 
 /** Where the attempt record lives, beside the settings the plugin already owns. */
 export function autoInstallMarkerPath(dshHome: string): string {
-  return join(dshHome, 'dsh-builtin-browser-host', 'bridge-auto-install.json')
+  return join(dshHome, BROWSER_PROFILE_DIR, 'bridge-auto-install.json')
 }
 
 /**

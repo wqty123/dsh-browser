@@ -7,7 +7,9 @@
  * @module dsh-browser/browser
  */
 
-import { pageOperationScript } from '../tool-browser/page-probe.js'
+import { pageOperationScript } from '../tool-browser/page-probe.ts'
+import { carrierTakeoverTarget, hasCarrierTakeover } from './takeover-target.ts'
+import { resolveSessionHandle, resolveTabHandle, tabWireId, type BrowserTabWireId } from './handles.ts'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {
@@ -53,12 +55,15 @@ import type {
   BrowserChallenge,
   ExportedCookie,
   VisitedPage,
-} from './types.js'
-import { BrowserError } from './types.js'
+} from './types.ts'
+import { BrowserError } from './types.ts'
+
+export { browserSessionHandle, resolveTabHandle, scopedTabs, sessionWireId, tabWireId } from './handles.ts'
+export type { BrowserOwnerHandle, BrowserSessionHandle, BrowserTabHandle, BrowserSessionWireId, BrowserTabWireId } from './handles.ts'
 
 export {
   BrowserError,
-} from './types.js'
+} from './types.ts'
 export type {
   BrowserA11yNode,
   BrowserA11yRequest,
@@ -105,7 +110,7 @@ export type {
   BrowserTab,
   BrowserTypeRequest,
   ExportedCookie,
-} from './types.js'
+} from './types.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -142,6 +147,9 @@ export class BrowserRuntime extends Service {
 
   private providers = new Map<string, BrowserProvider>()
   private readonly providerId: string | undefined
+  private panelProvider: { create: (label?: string) => Promise<BrowserProvider | undefined> } | undefined
+  private readonly panelSessions = new Map<BrowserSessionId, BrowserProvider>()
+  private readonly panelPages = new Map<string, Promise<BrowserSessionId>>()
 
   constructor(ctx: Context, config: BrowserRuntimeConfig = {}) {
     super(ctx, 'browser')
@@ -171,7 +179,9 @@ export class BrowserRuntime extends Service {
   }
 
   /** Resolve the selected provider or throw the matching {@link BrowserError}. */
-  private resolveProvider(): BrowserProvider {
+  private resolveProvider(session?: BrowserSessionId): BrowserProvider {
+    const panel = session === undefined ? undefined : this.panelSessions.get(session)
+    if (panel !== undefined) return panel
     const { providerId, providers } = this
     if (providerId !== undefined) {
       const provider = providers.get(providerId)
@@ -214,44 +224,120 @@ export class BrowserRuntime extends Service {
     return this.resolveProvider().open(label)
   }
 
+  /** Register an explicit sidebar-only opener, independent of the default carrier. */
+  registerPanelProvider(factory: (label?: string) => Promise<BrowserProvider | undefined>): () => void {
+    const owned = new Set<BrowserProvider>()
+    const tracked = async (label?: string): Promise<BrowserProvider | undefined> => {
+      const provider = await factory(label)
+      if (provider !== undefined) owned.add(provider)
+      return provider
+    }
+    const registration = { create: tracked }
+    const dispose = this.ctx.effect(() => {
+      this.panelProvider = registration
+      return () => {
+        if (this.panelProvider === registration) this.panelProvider = undefined
+        for (const [session, provider] of this.panelSessions) {
+          if (owned.has(provider)) this.panelSessions.delete(session)
+        }
+        this.panelPages.clear()
+        owned.clear()
+      }
+    }, 'browser.registerPanelProvider()')
+    return () => void dispose()
+  }
+
+  /** Undefined means this surface has no controllable sidebar; never use the default carrier. */
+  async openPanel(label?: string): Promise<BrowserSessionId | undefined> {
+    const factory = this.panelProvider
+    const provider = await factory?.create(label)
+    if (provider === undefined) return undefined
+    const session = await provider.open(label)
+    if (this.panelProvider !== factory) {
+      await provider.close(session)
+      throw new BrowserError('panel surface provider was disposed during open; reconnect the desktop sidebar and retry', 'BROWSER_SURFACE_UNAVAILABLE')
+    }
+    this.panelSessions.set(session, provider)
+    return session
+  }
+
+  /** Bind a ready sidebar page without launching or navigating another carrier. */
+  async bindPanelPage(owner: string, pageId: string): Promise<BrowserSessionId> {
+    const carrier = carrierTakeoverTarget(this, owner, pageId)
+    if (carrier && this.exists(carrier.session)) return carrier.session
+    if (hasCarrierTakeover(this)) throw new Error('The selected personal-browser source tab is disconnected or foreign; list tabs again. No sidebar fallback.')
+    const key = JSON.stringify([owner, pageId])
+    const existing = this.panelPages.get(key)
+    if (existing !== undefined) {
+      const session = await existing
+      if (this.panelSessions.has(session) && this.exists(session)) return session
+      this.panelPages.delete(key)
+    }
+    const binding = this.bindNewPanelPage(owner, pageId)
+    this.panelPages.set(key, binding)
+    try { return await binding }
+    catch (error) {
+      if (this.panelPages.get(key) === binding) this.panelPages.delete(key)
+      throw error
+    }
+  }
+
+  private async bindNewPanelPage(owner: string, pageId: string): Promise<BrowserSessionId> {
+    const session = await this.openPanel(owner)
+    if (session === undefined) throw new BrowserError('sidebar page binding unavailable', 'BROWSER_SURFACE_UNAVAILABLE')
+    const provider = this.resolveProvider(session)
+    try {
+      if (provider.bindPage === undefined) throw new BrowserError('sidebar page binding unsupported', 'BROWSER_SURFACE_UNAVAILABLE')
+      const scope = resolveSessionHandle(session)
+      if (scope.owner !== owner) throw new Error('browser: source session belongs to another owner')
+      const handle = pageId.startsWith('dsh-tab:') ? resolveTabHandle(scope, pageId) : { ...scope, tab: `page:${pageId}` }
+      await provider.bindPage(session, tabWireId(handle))
+      return session
+    } catch (error) {
+      this.panelSessions.delete(session)
+      await provider.close(session)
+      throw error
+    }
+  }
+
   /** Open a URL through the selected provider, optionally in a new tab. */
   async openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void> {
-    return this.resolveProvider().openUrl(session, request, signal)
+    return this.resolveProvider(session).openUrl(session, request, signal)
   }
 
   /** List the session's tabs through the selected provider. */
   async listTabs(session: BrowserSessionId): Promise<readonly BrowserTab[]> {
-    return this.resolveProvider().listTabs(session)
+    return this.resolveProvider(session).listTabs(session)
   }
 
   /** Switch to a tab through the selected provider. */
-  async switchTab(session: BrowserSessionId, tabId: string): Promise<void> {
-    return this.resolveProvider().switchTab(session, tabId)
+  async switchTab(session: BrowserSessionId, tabId: BrowserTabWireId): Promise<void> {
+    return this.resolveProvider(session).switchTab(session, tabId)
   }
 
   /** Close one tab through the selected provider. */
-  async closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
-    return this.resolveProvider().closeTab(session, tabId)
+  async closeTab(session: BrowserSessionId, tabId: BrowserTabWireId): Promise<void> {
+    return this.resolveProvider(session).closeTab(session, tabId)
   }
 
   /** Close every tab and reset the session through the selected provider. */
   async reset(session: BrowserSessionId): Promise<void> {
-    return this.resolveProvider().reset(session)
+    return this.resolveProvider(session).reset(session)
   }
 
   /** Navigate the session's page through the selected provider. */
   async navigate(session: BrowserSessionId, request: BrowserNavigateRequest, signal?: AbortSignal): Promise<void> {
-    return this.resolveProvider().navigate(session, request, signal)
+    return this.resolveProvider(session).navigate(session, request, signal)
   }
 
   /** Execute JS in the session's page context through the selected provider. */
   async execute(session: BrowserSessionId, request: BrowserExecuteRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
-    return this.resolveProvider().execute(session, request, signal)
+    return this.resolveProvider(session).execute(session, request, signal)
   }
 
   /** Execute one provider-owned page operation with validated operation names. */
   async pageOperation(session: BrowserSessionId, request: BrowserPageOperationRequest, signal?: AbortSignal): Promise<BrowserExecuteResult> {
-    const provider = this.resolveProvider()
+    const provider = this.resolveProvider(session)
     // Legacy providers retain their execute permission checks.
     return provider.pageOperation
       ? provider.pageOperation(session, request, signal)
@@ -260,101 +346,101 @@ export class BrowserRuntime extends Service {
 
   /** Wait until the session's page is ready (and optional URL/selector match). */
   async waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult> {
-    return this.resolveProvider().waitFor(session, request, signal)
+    return this.resolveProvider(session).waitFor(session, request, signal)
   }
 
   /** Produce an AI-friendly snapshot of the session's page. */
   async snapshot(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserSnapshotResult> {
-    return this.resolveProvider().snapshot(session, signal)
+    return this.resolveProvider(session).snapshot(session, signal)
   }
 
   /** Read the session's page accessibility tree through the selected provider. */
   async a11y(session: BrowserSessionId, request: BrowserA11yRequest, signal?: AbortSignal): Promise<BrowserA11yResult> {
-    return this.resolveProvider().a11y(session, request, signal)
+    return this.resolveProvider(session).a11y(session, request, signal)
   }
 
   /** Reload the session's active tab through the selected provider. */
   async reload(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
-    return this.resolveProvider().reload(session, signal)
+    return this.resolveProvider(session).reload(session, signal)
   }
 
   /** Fetch page content in a requested format. */
   async content(session: BrowserSessionId, request: BrowserContentRequest, signal?: AbortSignal): Promise<BrowserContentResult> {
-    return this.resolveProvider().content(session, request, signal)
+    return this.resolveProvider(session).content(session, request, signal)
   }
 
   /** Click at viewport coordinates (or a located element) through the selected provider. */
   async click(session: BrowserSessionId, request: BrowserClickRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void> {
-    return this.resolveProvider().click(session, request, signal)
+    return this.resolveProvider(session).click(session, request, signal)
   }
 
   /** Click several points in order through the selected provider. */
   async clickSequence(session: BrowserSessionId, request: BrowserClickSequenceRequest, signal?: AbortSignal): Promise<BrowserClickSequenceResult> {
-    return this.resolveProvider().clickSequence(session, request, signal)
+    return this.resolveProvider(session).clickSequence(session, request, signal)
   }
   /** Type into the focused element (or a located one) through the selected provider. */
   async type(session: BrowserSessionId, request: BrowserTypeRequest | { readonly target: BrowserElementTarget }, signal?: AbortSignal): Promise<void> {
-    return this.resolveProvider().type(session, request, signal)
+    return this.resolveProvider(session).type(session, request, signal)
   }
 
   /** Scroll the session's page through the selected provider. */
   async scroll(session: BrowserSessionId, request: BrowserScrollRequest, signal?: AbortSignal): Promise<void> {
-    return this.resolveProvider().scroll(session, request, signal)
+    return this.resolveProvider(session).scroll(session, request, signal)
   }
 
   /** Go back in the session's page history through the selected provider. */
   async back(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
-    return this.resolveProvider().back(session, signal)
+    return this.resolveProvider(session).back(session, signal)
   }
 
   /** Go forward in the session's page history through the selected provider. */
   async forward(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
-    return this.resolveProvider().forward(session, signal)
+    return this.resolveProvider(session).forward(session, signal)
   }
 
   /** Press one named key through the selected provider. */
   async key(session: BrowserSessionId, request: BrowserKeyRequest, signal?: AbortSignal): Promise<void> {
-    return this.resolveProvider().key(session, request, signal)
+    return this.resolveProvider(session).key(session, request, signal)
   }
 
   /** Fill a form's fields in one batch through the selected provider. */
   async fillForm(session: BrowserSessionId, request: BrowserFillRequest, signal?: AbortSignal): Promise<BrowserFillResult> {
-    return this.resolveProvider().fillForm(session, request, signal)
+    return this.resolveProvider(session).fillForm(session, request, signal)
   }
 
   /** Set one element's value through the selected provider. */
   async setValue(session: BrowserSessionId, request: BrowserSetValueRequest, signal?: AbortSignal): Promise<BrowserSetValueResult> {
-    return this.resolveProvider().setValue(session, request, signal)
+    return this.resolveProvider(session).setValue(session, request, signal)
   }
 
   /** Check or uncheck one checkbox/radio through the selected provider. */
   async check(session: BrowserSessionId, request: BrowserCheckRequest, signal?: AbortSignal): Promise<{ readonly checked: boolean }> {
-    return this.resolveProvider().check(session, request, signal)
+    return this.resolveProvider(session).check(session, request, signal)
   }
 
   /** Select one option of a `<select>` through the selected provider. */
   async selectOption(session: BrowserSessionId, request: BrowserSelectRequest, signal?: AbortSignal): Promise<BrowserSelectResult> {
-    return this.resolveProvider().selectOption(session, request, signal)
+    return this.resolveProvider(session).selectOption(session, request, signal)
   }
 
   /** Clear one element through the selected provider. */
   async clearField(session: BrowserSessionId, request: BrowserClearRequest, signal?: AbortSignal): Promise<{ readonly cleared: boolean }> {
-    return this.resolveProvider().clearField(session, request, signal)
+    return this.resolveProvider(session).clearField(session, request, signal)
   }
 
   /** Read one element's value through the selected provider. */
   async getValue(session: BrowserSessionId, request: BrowserGetValueRequest, signal?: AbortSignal): Promise<BrowserGetValueResult> {
-    return this.resolveProvider().getValue(session, request, signal)
+    return this.resolveProvider(session).getValue(session, request, signal)
   }
 
   /** Extract structured data through the selected provider. */
   async scrape(session: BrowserSessionId, request: BrowserScrapeRequest, signal?: AbortSignal): Promise<BrowserScrapeResult> {
-    return this.resolveProvider().scrape(session, request, signal)
+    return this.resolveProvider(session).scrape(session, request, signal)
   }
 
   /** Capture the current page through the selected provider. */
   async screenshot(session: BrowserSessionId, request?: BrowserScreenshotRequest, signal?: AbortSignal): Promise<BrowserScreenshotResult> {
-    return this.resolveProvider().screenshot(session, request, signal)
+    return this.resolveProvider(session).screenshot(session, request, signal)
   }
 
   /**
@@ -368,7 +454,7 @@ export class BrowserRuntime extends Service {
    * @returns the encoded frame.
    */
   async capturePassive(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserPreviewFrame> {
-    const provider = this.resolveProvider()
+    const provider = this.resolveProvider(session)
     if (typeof provider.capturePassive !== 'function') {
       throw new BrowserError(
         'browser: this carrier cannot provide a passive preview (watching is unavailable here)',
@@ -380,12 +466,12 @@ export class BrowserRuntime extends Service {
 
   /** Check for a human-verification challenge on the active tab. */
   async detectChallenge(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserChallenge> {
-    return this.resolveProvider().detectChallenge(session, signal)
+    return this.resolveProvider(session).detectChallenge(session, signal)
   }
 
   /** Return the session's chronological operation log through the provider. */
   async history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]> {
-    return this.resolveProvider().history(session)
+    return this.resolveProvider(session).history(session)
   }
 
   /**
@@ -405,48 +491,57 @@ export class BrowserRuntime extends Service {
    * @param session - the session id to test.
    */
   exists(session: BrowserSessionId): boolean {
-    const provider = this.resolveProvider()
+    const provider = this.resolveProvider(session)
     return provider.exists === undefined ? true : provider.exists(session)
   }
 
   /**
-   * The sessions a viewer may watch, through the selected provider.
+   * The sessions a viewer may watch, including independently owned sidebar panels.
    *
    * Empty when the provider cannot preview at all: a viewer then has nothing to offer, which is the
    * honest answer rather than an error.
    * @returns the live session ids.
    */
   watchableSessions(): readonly BrowserSessionId[] {
-    const provider = this.resolveProvider()
-    if (typeof provider.capturePassive !== 'function') return []
-    return provider.watchableSessions?.() ?? []
+    const sessions = new Set<BrowserSessionId>()
+    for (const [session, provider] of this.panelSessions) {
+      if (typeof provider.capturePassive === 'function' && (provider.exists?.(session) ?? true)) sessions.add(session)
+    }
+    let provider: BrowserProvider | undefined
+    try { provider = this.resolveProvider() } catch (error) {
+      if (!(error instanceof BrowserError)) throw error
+    }
+    if (typeof provider?.capturePassive === 'function') {
+      for (const session of provider.watchableSessions?.() ?? []) sessions.add(session)
+    }
+    return [...sessions]
   }
 
   /** Replay one recorded operation by sequence number through the provider. */
   async replay(session: BrowserSessionId, seq: number): Promise<void> {
-    return this.resolveProvider().replay(session, seq)
+    return this.resolveProvider(session).replay(session, seq)
   }
 
   /** Download a URL to a local file through the provider. */
   async download(session: BrowserSessionId, request: BrowserDownloadRequest, signal?: AbortSignal): Promise<{ readonly path: string }> {
-    return this.resolveProvider().download(session, request, signal)
+    return this.resolveProvider(session).download(session, request, signal)
   }
 
   /** Export the session's cookies through the provider. */
   async flushAuth(session: BrowserSessionId): Promise<readonly ExportedCookie[]> {
-    return this.resolveProvider().flushAuth(session)
+    return this.resolveProvider(session).flushAuth(session)
   }
 
   /** Import cookies into the session through the provider. */
   async restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number> {
-    return this.resolveProvider().restoreAuth(session, cookies)
+    return this.resolveProvider(session).restoreAuth(session, cookies)
   }
 
   /** Close the session through the selected provider. Idempotent; a missing
    *  provider is treated as already-closed so teardown paths stay no-ops. */
   async close(session: BrowserSessionId): Promise<void> {
     try {
-      await this.resolveProvider().close(session)
+      await this.resolveProvider(session).close(session)
     } catch (error) {
       const code = error instanceof BrowserError ? (error as { code?: string }).code : undefined
       if (code === 'BROWSER_PROVIDER_UNAVAILABLE'
@@ -456,9 +551,10 @@ export class BrowserRuntime extends Service {
         return // provider gone; nothing to close
       }
       throw error
+    } finally {
+      this.panelSessions.delete(session)
     }
   }
 }
 
 export default BrowserRuntime
-

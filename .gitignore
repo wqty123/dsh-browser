@@ -1,4 +1,5 @@
-node_modules/
-package-lock.json
-.npm-cache/
-*.tgz
+
+# local probe/session artifacts
+*cookies*.txt
+p-live.json
+.dsh-sdk-types/

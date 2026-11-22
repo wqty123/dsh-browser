@@ -1,38 +1,9 @@
-/**
- * Prepare the Electron runtime *when it is needed*, instead of making installation depend on it.
- *
- * Reported as issue #41, from a real plugin-market install of 0.5.2:
- *
- *   [ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: dsh-builtin-browser@0.5.2
- *
- * and, once the build script was allowed:
- *
- *   postinstall: Preparing Electron 44.10.1 … TypeError: fetch failed
- *   postinstall: Electron installation failed (exit 1). … [ELIFECYCLE] Command failed with exit code 1
- *
- * Two defects in one design, and both are about WHERE the download lives:
- *
- * 1. A `postinstall` puts a ~100 MB network download inside package installation. pnpm blocks
- *    install scripts by default (`strict-dep-builds`), so the plugin could not be installed at all
- *    on a default pnpm 11 profile; and if the download fails for any reason the *whole install*
- *    fails, which is a network condition reported as "the plugin is broken".
- * 2. Nothing forced the download to happen at install time. The carrier that needs Electron is one
- *    of four, and on the desktop the sidebar needs none.
- *
- * So installation is offline by construction now, and this module does the work later: on plugin
- * start when the operator explicitly asked for the bundled carrier, and never fatally — a failure
- * here is a log line plus the existing, actionable resolution error that names the command to run.
- *
- * Being non-fatal is the point, not a detail: this runs inside a request-serving process, and a
- * download that hangs must not be able to hold a browser tool call open.
- * @module dsh-browser/browser-electron/electron-provision
- */
+/** Prepare an explicitly supplied external Electron runtime, never the plugin generation. */
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 
-import { internals } from './remote-host.js'
+import { internals } from './remote-host.ts'
 
 /** How long a background provision may run before it is abandoned. */
 export const PROVISION_TIMEOUT_MS = 180_000
@@ -121,18 +92,15 @@ export function hasElectronRuntime(): boolean {
 }
 
 /**
- * The installed electron package's installer script.
- *
- * `require.resolve('electron/package.json')` is used rather than `require('electron')`: inside an
- * Electron main process that module name is the built-in API, and requiring the package would
- * download the binary as a side effect of asking about it.
- * @returns the path to the dependency's own install script, or undefined.
+ * @returns the explicitly selected external package installer, or undefined.
  */
 function electronInstallerScript(): string | undefined {
   try {
-    const require = createRequire(import.meta.url)
-    const manifestPath = require.resolve('electron/package.json')
-    const script = join(dirname(manifestPath), 'install.js')
+    const directory = process.env.DSH_BROWSER_ELECTRON_PACKAGE
+    if (!directory || !isAbsolute(directory)) return undefined
+    const metadata = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8')) as { name?: unknown }
+    if (metadata.name !== 'electron') return undefined
+    const script = join(directory, 'install.js')
     return existsSync(script) ? script : undefined
   } catch {
     return undefined
@@ -142,8 +110,9 @@ function electronInstallerScript(): string | undefined {
 /** The Electron version the installed package asks for, for a log line that names the download. */
 function electronVersion(): string {
   try {
-    const require = createRequire(import.meta.url)
-    const manifest = JSON.parse(readFileSync(require.resolve('electron/package.json'), 'utf8')) as { version?: unknown }
+    const directory = process.env.DSH_BROWSER_ELECTRON_PACKAGE
+    if (!directory || !isAbsolute(directory)) return 'unknown'
+    const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8')) as { version?: unknown }
     return typeof manifest.version === 'string' ? manifest.version : 'unknown'
   } catch {
     return 'unknown'
@@ -202,8 +171,6 @@ export async function ensureElectronRuntime(deps: ProvisionDeps = defaultDeps())
   if (script === undefined) {
     return record({ status: 'failed', detail: 'the installed electron package has no install.js; reinstall the plugin in this profile' })
   }
-  // Resolve the installed Electron version once: each call re-runs createRequire,
-  // require.resolve and a synchronous package.json read + parse.
   const version = electronVersion()
   latest = {
     state: 'preparing',

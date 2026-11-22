@@ -1,3 +1,4 @@
+import { testTab, testScope, tabIn } from './canonical-fixtures.mjs'
 // A desktop shell that exits leaves its endpoint file behind.
 //
 // The file is the ONLY thing that says where the bridge is, so a tombstone in it names a port
@@ -10,11 +11,12 @@
 // rewrites `updatedAt` every fifteen seconds.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { BridgeConnection } from '../lib/browser-electron/bridge-connection.js'
+import { carrierHarness, Sidebar } from './carrier-harness.mjs'
 
 /** An endpoint file with a chosen age, on a port nothing listens on. */
 function endpointFile(ageMs) {
@@ -67,20 +69,20 @@ test('an endpoint with no stamp at all keeps working', async () => {
   assert.equal(lost, 0, 'no stamp is not the same answer as an old stamp')
 })
 
-test('a carrier that borrows an outside process can report its loss', () => {
-  // The interface point the fallback hangs on. Removing `onLost` from the bridge host while
-  // leaving `adopt`'s listener would be a silent regression: the listener would simply never run.
-  const host = readFileSync(new URL('../src/browser-electron/desktop-bridge-host.ts', import.meta.url), 'utf8')
-  assert.match(host, /onLost\(listener: \(reason: CarrierLossReason\) => void\): void \{/,
-    'the bridge host accepts a listener carrying the reason')
-  // The transport can only conclude one thing — the shell stopped refreshing its endpoint — so it
-  // reports that, while the panel failure is reported where it is observed.
-  assert.match(host, /new BridgeConnection\(endpoint, bridgeEndpointPath\(\), \(\) => this\.reportLost\('shell-exited'\)\)/,
-    'and wires it into the transport, which reports an exiting shell')
-
-  const entry = readFileSync(new URL('../src/browser-electron/entry.ts', import.meta.url), 'utf8')
-  assert.match(entry, /host\.onLost\?\.\(reason => \{ restoreSelfHosted\(host, reason\) \}\)/,
-    'entry point reacts by restoring the self-hosted browser')
-  assert.match(entry, /const restoreSelfHosted = \(adopted: ElectronBrowserViewHost, reason: CarrierLossReason\): void => \{/,
-    'through a function that exists precisely for it')
+test('a borrowed carrier reports its loss and reconnects only the sidebar', async t => {
+  const first = new Sidebar(), second = new Sidebar()
+  let discoveries = 0
+  const h = carrierHarness(t, { discover: async () => ++discoveries === 1 ? first : second })
+  const host = h.current
+  const view = host.createView(testTab('session-owner'))
+  await view.sendCommand('Runtime.evaluate')
+  first.lose('shell-exited')
+  assert.equal(first.disposed, false)
+  await new Promise(setImmediate)
+  assert.equal(first.disposed, true)
+  assert.match(h.warnings.join('\n'), /shell-exited/)
+  assert.deepEqual(await view.sendCommand('Runtime.evaluate'), { method: 'Runtime.evaluate', owner: 'session-owner' })
+  assert.equal(discoveries, 2)
+  assert.equal(h.current, host)
+  assert.deepEqual(h.registered, [host], 'loss never installs an external carrier')
 })

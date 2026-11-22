@@ -1,9 +1,9 @@
 /** A lazy, reconnectable sidebar carrier that preserves the provider's view handles. */
-import { randomUUID } from 'node:crypto'
-import type { CarrierLossReason, CarrierPage } from '../browser/types.js'
+import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, type BrowserSessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
+import type { CarrierLossReason, CarrierPage } from '../browser/types.ts'
 import type {
   CommandOptions, ElectronBrowserViewHost, ElectronViewHandle, PresentOptions,
-} from './provider.js'
+} from './provider.ts'
 
 interface HostLease {
   readonly host: ElectronBrowserViewHost
@@ -16,9 +16,17 @@ interface BoundView {
 
 interface SidebarView {
   readonly handle: ElectronViewHandle
-  readonly owner: string | undefined
+  readonly scope: BrowserSessionWireId
   bound?: BoundView
   pending?: Promise<BoundView>
+  /**
+   * The shell's own page id this view was adopted from.
+   *
+   * Kept across a bridge reconnect so rebinding adopts the SAME page again. A
+   * plain `createView` would open a fresh blank page and the next capture would
+   * silently read the wrong document.
+   */
+  adoptedId?: BrowserTabWireId
 }
 
 /**
@@ -26,22 +34,28 @@ interface SidebarView {
  * Discovery is deferred until a command needs the bridge; it never selects another carrier.
  */
 export class SidebarOnlyHost implements ElectronBrowserViewHost {
+  readonly referenceOverlayOwner = 'client' as const
   private readonly views = new Map<string, SidebarView>()
+  private readonly retiredSessions = new Set<BrowserSessionWireId>()
   private lease: HostLease | undefined
   private loading: Promise<HostLease> | undefined
   private disposed = false
+  private readonly discovery = new AbortController()
   private lostListener: ((reason: CarrierLossReason) => void) | undefined
 
-  constructor(private readonly loader: () => Promise<ElectronBrowserViewHost>) {}
+  constructor(private readonly loader: (signal: AbortSignal) => Promise<ElectronBrowserViewHost>) {}
 
   /** Keep the explicit selection available so discovery failures reach the caller unchanged. */
   available(): boolean { return !this.disposed }
 
   /** Return a stable handle without opening a sidebar or discovering a bridge. */
-  createView(owner?: string): ElectronViewHandle {
+  createView(identity: BrowserTabWireId): ElectronViewHandle {
     this.assertOpen()
+    const scope = sessionWireId(readTabHandle(identity))
+    if (this.retiredSessions.has(scope)) throw new Error('dsh-builtin-browser: sidebar session was released')
+    if (this.views.has(identity)) throw new Error('dsh-builtin-browser: sidebar view is already bound')
     const handle: ElectronViewHandle = {
-      id: randomUUID(),
+      id: identity,
       sendCommand: (method, params, options) => this.send(view, method, params, options),
       download: async (url, savePath) => {
         const bound = await this.bind(view)
@@ -51,7 +65,7 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
         await bound.handle.download(url, savePath)
       },
     }
-    const view: SidebarView = { handle, owner }
+    const view: SidebarView = { handle, scope }
     this.views.set(handle.id, view)
     return handle
   }
@@ -73,26 +87,92 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
     }
   }
 
-  async listPages(owner?: string): Promise<readonly CarrierPage[]> {
-    const lease = await this.load()
-    this.assertLease(lease)
-    return lease.host.listPages === undefined ? [] : lease.host.listPages(owner)
+  async presentView(handle: ElectronViewHandle, label?: string, options?: PresentOptions): Promise<void> {
+    const view = this.views.get(handle.id)
+    if (view?.handle !== handle) throw new Error('dsh-builtin-browser: sidebar view is destroyed')
+    const bound = await this.bind(view)
+    if (bound.lease.host.presentView === undefined) throw new Error('dsh-builtin-browser: sidebar bridge cannot acknowledge selection')
+    await bound.lease.host.presentView(bound.handle, label, options)
+    this.assertView(view)
+    this.assertLease(bound.lease)
   }
 
-  async closePage(id: string, owner?: string): Promise<void> {
+  async listPages(scope: BrowserSessionWireId, options?: { readonly requireRunning?: boolean }): Promise<readonly CarrierPage[]> {
+    resolveSessionHandle(scope)
+    const lease = await this.load()
+    this.assertLease(lease)
+    if (this.retiredSessions.has(scope)) throw new Error('dsh-builtin-browser: sidebar session was released')
+    const pages = await lease.host.listPages?.(scope, options) ?? []
+    for (const page of pages) resolveTabHandle(resolveSessionHandle(scope), page.id)
+    return pages
+  }
+
+  /**
+   * Bind a page the SHELL opened to a handle the provider can drive.
+   *
+   * The delegation is the point: discovery happens at the first command, so a page
+   * adopted before the bridge is up must still bind later. The adopted handle is
+   * stored as this view's binding, which is exactly what `bind` would have created —
+   * the difference is only which guest it points at.
+   * @param id - the sidebar page id reported by {@link listPages}.
+   * @param owner - the conversation the page belongs to.
+   * @returns a handle whose commands target that page.
+   */
+  async adoptPage(id: BrowserTabWireId, scope = sessionWireId(readTabHandle(id))): Promise<ElectronViewHandle> {
+    resolveTabHandle(resolveSessionHandle(scope), id)
+    if (this.retiredSessions.has(scope)) throw new Error('dsh-builtin-browser: sidebar session was released')
+    const lease = await this.load()
+    this.assertLease(lease)
+    if (lease.host.adoptPage === undefined) throw new Error('dsh-builtin-browser: this sidebar bridge cannot hand over a page it did not open')
+    const adopted = await lease.host.adoptPage(id, scope)
+    this.assertLease(lease)
+    if (adopted.id !== id) {
+      lease.host.destroyView(adopted)
+      throw new Error('dsh-builtin-browser: sidebar returned a different tab handle')
+    }
+    const handle: ElectronViewHandle = {
+      id: adopted.id,
+      sendCommand: (method, params, options) => this.send(view, method, params, options),
+      download: async (url, savePath) => {
+        const bound = await this.bind(view)
+        this.assertView(view)
+        this.assertLease(bound.lease)
+        if (bound.handle.download === undefined) throw new Error('dsh-builtin-browser: update the desktop bridge for sidebar downloads')
+        await bound.handle.download(url, savePath)
+      },
+    }
+    const view: SidebarView = { handle, scope, bound: { lease, handle: adopted }, adoptedId: id }
+    this.views.set(handle.id, view)
+    return handle
+  }
+
+  async closePage(id: BrowserTabWireId, scope = sessionWireId(readTabHandle(id))): Promise<void> {
+    resolveTabHandle(resolveSessionHandle(scope), id)
     const lease = await this.load()
     this.assertLease(lease)
     if (lease.host.closePage === undefined) throw new Error('dsh-builtin-browser: this sidebar bridge cannot close pages')
-    await lease.host.closePage(id, owner)
+    await lease.host.closePage(id, scope)
+  }
+
+  async retireSession(scope: BrowserSessionWireId): Promise<void> {
+    resolveSessionHandle(scope)
+    this.retiredSessions.add(scope)
+    for (const view of [...this.views.values()]) if (view.scope === scope) this.destroyView(view.handle)
+    const lease = this.lease ?? await this.loading
+    if (!this.disposed && lease !== undefined && lease === this.lease) await lease.host.retireSession?.(scope)
   }
 
   /** Retire only this conversation's handles before awaiting an in-flight discovery. */
-  async releasePage(owner?: string): Promise<void> {
-    for (const view of [...this.views.values()]) {
-      if (owner === undefined || view.owner === owner) this.destroyView(view.handle)
+  async releasePage(scope?: BrowserSessionWireId): Promise<void> {
+    if (scope !== undefined) {
+      resolveSessionHandle(scope)
+      this.retiredSessions.add(scope)
     }
-    const lease = this.lease ?? await this.loading?.catch(() => undefined)
-    if (!this.disposed && lease !== undefined && lease === this.lease) await lease.host.releasePage?.(owner)
+    for (const view of [...this.views.values()]) {
+      if (scope === undefined || view.scope === scope) this.destroyView(view.handle)
+    }
+    const lease = this.lease ?? await this.loading
+    if (!this.disposed && lease !== undefined && lease === this.lease) await lease.host.releasePage?.(scope)
   }
 
   async collapse(): Promise<void> {
@@ -106,6 +186,7 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.discovery.abort()
     this.views.clear()
     const lease = this.lease
     this.lease = undefined
@@ -131,7 +212,7 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
     this.assertOpen()
     if (this.lease !== undefined) return Promise.resolve(this.lease)
     if (this.loading !== undefined) return this.loading
-    const pending = Promise.resolve().then(this.loader).then(host => {
+    const pending = Promise.resolve().then(() => this.loader(this.discovery.signal)).then(host => {
       if (this.disposed) {
         host.dispose?.()
         this.assertOpen()
@@ -163,7 +244,9 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
       view.pending = undefined
     }
     // A command already in flight keeps its original outcome; the next call rediscovers.
-    try { lease.host.dispose?.() } catch { /* The next discovery replaces this failed carrier. */ }
+    setImmediate(() => {
+      try { lease.host.dispose?.() } catch { /* The next discovery replaces this failed carrier. */ }
+    })
     try { this.lostListener?.(reason) } catch { /* Transport recovery must survive a listener failure. */ }
   }
 
@@ -174,7 +257,23 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
     const pending = this.load().then(lease => {
       this.assertView(view)
       if (this.lease !== lease) throw new Error('dsh-builtin-browser: sidebar bridge changed before binding the view')
-      const handle = lease.host.createView(view.owner)
+      // An adopted view rebinds to its ORIGINAL page: a bridge reconnect must not
+      // turn the human's page into a fresh blank one the next capture would read.
+      const adoptedId = view.adoptedId
+      if (adoptedId !== undefined) {
+        if (lease.host.adoptPage === undefined) throw new Error('dsh-builtin-browser: this sidebar bridge cannot hand over a page it did not open')
+        return lease.host.adoptPage(adoptedId, view.scope).then(handle => {
+          this.assertView(view)
+          if (this.lease !== lease || handle.id !== view.handle.id) {
+            lease.host.destroyView(handle)
+            throw new Error('dsh-builtin-browser: sidebar bridge changed while binding the view')
+          }
+          const bound = { lease, handle }
+          view.bound = bound
+          return bound
+        })
+      }
+      const handle = lease.host.createView(view.handle.id as BrowserTabWireId)
       if (this.disposed || this.views.get(view.handle.id) !== view || this.lease !== lease) {
         lease.host.destroyView(handle)
         this.assertView(view)

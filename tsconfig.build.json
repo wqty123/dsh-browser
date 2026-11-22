@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "lib",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "declaration": false,
+    "noEmitOnError": false,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "types": ["node"],
+    "paths": {
+      "electron": ["./src/types/electron-shim.d.ts"],
+      "@deepseek-ai/*": [
+        "./.dsh-sdk-types/node_modules/@deepseek-ai/*/lib/types/index.d.ts",
+        "./node_modules/@deepseek-ai/*/lib/types/index.d.ts"
+      ]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": [
+    "src/client/**",
+    "src/reference/**",
+    "src/**/__tests__/**",
+    "src/tool-browser/page-probe.ts"
+  ]
+}

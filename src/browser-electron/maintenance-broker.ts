@@ -1,13 +1,14 @@
 /**
- * Start a local Windows maintenance coordinator through WMI, outside the requesting app's tree.
+ * Start a local maintenance coordinator outside the requesting app's tree: through WMI on Windows,
+ * as a detached session leader on macOS (which survives the app quitting).
  * This primitive only creates the requested process; its caller owns maintenance authorization,
  * the coordinator's plan, readiness handshake and normal application shutdown.
  * @module dsh-browser/browser-electron/maintenance-broker
  */
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { statSync } from 'node:fs'
-import { win32 } from 'node:path'
-import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.js'
+import { isAbsolute, posix, win32 } from 'node:path'
+import { encodePowerShellScript, windowsPowerShellPath } from './windows-system.ts'
 
 export interface MaintenanceBrokerOptions {
   readonly runtimePath: string
@@ -86,6 +87,27 @@ const defaultExecutor: MaintenanceBrokerExecutor = (file, args, options) => new 
   })
 })
 
+/** macOS: a new session (setsid) with no inherited stdio, so the coordinator outlives Desktop. */
+async function launchDetached(options: MaintenanceBrokerOptions, environment: NodeJS.ProcessEnv): Promise<MaintenanceBrokerResult> {
+  for (const [label, value] of [['runtimePath', options.runtimePath], ['cwd', options.cwd]] as const) {
+    if (typeof value !== 'string' || value.includes('\0') || !isAbsolute(value)) throw new Error(`${label} must be an absolute path without NUL`)
+  }
+  const runtimePath = posix.normalize(options.runtimePath)
+  const cwd = posix.normalize(options.cwd)
+  if (!statSync(runtimePath).isFile()) throw new Error('the maintenance runtime is not a file')
+  if (!statSync(cwd).isDirectory()) throw new Error('the maintenance working directory is not a directory')
+  if (!Array.isArray(options.args)) throw new Error('maintenance arguments must be an array')
+  return await new Promise((resolve, reject) => {
+    const child = spawn(runtimePath, [...options.args], { cwd, env: environment, detached: true, stdio: 'ignore', shell: false })
+    child.once('error', error => { reject(new Error(`maintenance broker failed: ${String(error)}`)) })
+    child.once('spawn', () => {
+      child.unref()
+      if (!Number.isSafeInteger(child.pid) || Number(child.pid) <= 0) reject(new Error('the maintenance broker returned no valid process id'))
+      else resolve({ pid: Number(child.pid) })
+    })
+  })
+}
+
 /**
  * Create a hidden, independent local process. No shell evaluates runtime paths or arguments.
  * WMI receives an explicit environment copied from this process, including any plan overrides;
@@ -99,7 +121,9 @@ export async function launchMaintenanceBroker(
   if (deps.execFile === undefined && (underTest(process.env) || underTest(environment))) {
     throw new Error('the real Windows maintenance broker is disabled in tests; inject a fake executor')
   }
-  if ((deps.platform ?? process.platform) !== 'win32') throw new Error('the maintenance broker requires Windows')
+  const platform = deps.platform ?? process.platform
+  if (platform === 'darwin') return await launchDetached(options, environment)
+  if (platform !== 'win32') throw new Error('the maintenance broker requires Windows or macOS')
   const runtimePath = absolutePath(options.runtimePath, 'runtimePath')
   const cwd = absolutePath(options.cwd, 'cwd')
   if (!statSync(runtimePath).isFile()) throw new Error('the maintenance runtime is not a file')

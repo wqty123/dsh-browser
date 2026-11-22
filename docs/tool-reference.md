@@ -1,8 +1,50 @@
 # 工具参考
 
-全部 48 个 `dsh_browser_*` 工具。守卫列:✅ 表示该动作受 `dsh_browser_restrict` 白名单约束;**「– 豁免」表示无论白名单怎么写都不拦截**(豁免集合为 `READ_ONLY_TOOLS`,`src/tool-browser/index.ts` 导出:**只观察的工具** —— `snapshot`/`a11y`/`content`/`scrape`/`screenshot`/`get_value`/`wait`/`challenge`/`list_tabs`/`session`/`history`/`visited` —— 加上 **解除限制 / 从坏状态恢复的工具** `restrict`/`reset_session`/`reset`;`restrict` 在其中,否则限制到空的任务再也解不开);**「–」表示该工具只观察、不做动作**,故没有可拦的东西。两者之外的工具都受白名单约束 —— 例如 `dsh_browser_close_tab`、`dsh_browser_auth` 都不属于豁免集合(`dsh_browser_auth` 的 `restore` 会向任意域写 cookie,是动作,不是观察)。
+`dsh_browser_list_tabs` and `dsh_browser_session` return versioned opaque handles.
+Pass the complete tab `id` unchanged to `dsh_browser_switch_tab` or
+`dsh_browser_close_tab`. Handles include the calling owner and browser session;
+raw provider ids (`tab:…`, `page:…`), foreign-owner handles and handles from a
+closed/replaced session are refused. List again after a session reset. Handles
+identify a target, not authorization. The same handles travel through the runtime,
+provider and protocol-4 desktop bridge. The bridge binds them to live native guests
+at discovery/adoption and refuses released or replaced bindings. Legacy bridges
+must be restarted/upgraded; raw owner/guest/view-id RPC requests are not accepted.
 
-## 批量、观测与断言（待发布）
+以下为浏览器工具目录；默认安装不会一次展示全部工具。守卫列的 ✅ 表示受 `dsh_browser_restrict` 白名单约束；– 表示该工具不受该白名单限制，**不代表跳过宿主权限**。
+
+## 工具如何加载
+
+| 配置 / 模式 | 行为 |
+| --- | --- |
+| `surface: core`（默认） | 常用工具立即可用；`dsh_browser_load_tools` 按需扩展列表。标准 DSH 模式也提供 `dsh_browser_code`。 |
+| `surface: code` | 仅暴露 `dsh_browser_code` 和接管工具；代码工具在 PTC 下也保留。 |
+| `surface: tools` | 一次注册全部单动作工具，不使用插件的代码工具。 |
+| DSH PTC + 默认 `core` | 使用宿主的 `run_code` 批处理，插件不重复提供 `dsh_browser_code`。 |
+
+`dsh_browser_load_tools({ groups: ['debug'] })` 返回本次加载的 `loaded` 和所请求组中已经可用的 `available`。组名：`forms`（表单及输入）、`navigation`（前进、刷新、历史及下载）、`debug`（观测、断言及排查）、`session`（会话、权限及快捷方式）、`more`（其它）。已加载工具不撤销。
+
+## JavaScript 批处理
+
+`dsh_browser_code` 接收 `{ code, timeoutMs? }`（默认 120 秒，最长 600 秒），返回 `{ output, ok, calls, images }`。每个任务有自己的 REPL；顶层变量和函数可供后续单元使用，最后一个表达式可输出。动作按调用顺序执行，独立读取可以用 `Promise.all`。已经 `print()` 的内容在执行中取消或到时仍可返回；取消不会回滚页面动作，重试前先核对结果。
+
+以下代码放进 `code`：
+
+```js
+await tools.dsh_browser_open({ url: 'https://example.com' })
+const [content, match] = await Promise.all([
+  tools.dsh_browser_content({ format: 'markdown', maxChars: 400 }),
+  tools.dsh_browser_find({ text: 'Example Domain' }),
+])
+print({ content, match })
+```
+
+`tools.dsh_browser_<name>(args)` 返回该工具的 JSON 结果，失败抛出带工具名的 `ToolCallError`。也可用 `await help()` 查看 `goto_url`、`js`、`scroll(dy)` / `scroll(x, y, dy)` 等快捷函数。同一权限、接管阻断和会话约束适用；代码工具不会替你取得 Web guest 的 CDP 能力。
+
+## 请求人工接管
+
+`dsh_browser_request_takeover({ reason, instructions? })` 把当前对话的可见侧栏标签交给用户，也可用于手动打开的 Web 隔离页。等待 `outcome`；只有 `done` 表示用户确认完成，仍须核对返回的 `page`。跳过或取消不代表成功。需要登录、验证码、2FA 或付款确认时走此入口。
+
+## 固定步骤、观测与断言
 
 页面探针收集控制台、网络和页面脚本弹窗记录，拖拽与悬停通过浏览器的 CDP 输入通道执行。`fetch` 和 `XHR` 记录包含状态码，资源计时记录的状态码为 0。
 
@@ -53,13 +95,49 @@
 | `dsh_browser_get_value` | `target`(必填) | `{ value?, checked?, selectedText? }` | – 豁免 | 读取元素当前值,用于操作后验证 |
 | `dsh_browser_scrape` | `item`(必填), `fields`(必填,映射), `timeoutMs?` | `{ count, items[] }` | – 豁免 | 结构化提取:容器选择器 + 字段映射(如 `{"title": "h3", "url": "a@href"}`);静态 CSS 查询、不执行任意代码、CSP 安全;等待 item 出现(默认 5s)。**结果是最紧凑的 JSON**(不缩进),条目数在最前面 |
 
+## 网页引用
+
+在网页中选中文字、图片或表格后，由 `dsh_browser_reference_capture` 保存为不可变快照；之后用 `reference_reveal` 回到原页面并高亮。引用 id 可写成 `dsh-browser-ref:<id>`（或 `dsh-browser-ref:<id>/<partId>`）供回复正文引用。设置面板的「网页引用」列出最近 10 条并提供「定位」。
+
+| 工具 | 参数 | 输出 | 守卫 | 说明 |
+| --- | --- | --- | --- | --- |
+| `dsh_browser_reference_capture` | `allowPartial?`, `tableSelector?`, `excerptText?` | `{ ok, referenceId?, pageUrl?, title?, parts[], failures[] }` | – 豁免 | 采集当前选区：文字保存原文与前后文（Text Quote），图片保存实际字节（原图优先，取不到时页面内栅格化），表格保存行列/合并/表头/部分选择等结构。默认整组失败即拒绝（`failures` 说明哪个片段失败）；`allowPartial: true` 才提交成功片段。无选区时可传 `excerptText` 登记助手自己读到的原文（出现两次视为歧义并拒绝）。重复采集同一区域会得到新引用，旧快照不变 |
+| `dsh_browser_reference_reveal` | `referenceId`（必填，可带前缀）, `partId?` | `{ status, pageUrl, currentUrl?, note?, parts[] }` | – 豁免 | 回到引用：核对当前页面 URL，按 Text Quote（原文 + 前后文，空白折叠兜底）定位并高亮文字，或按来源/alt/表头定位图片与表格。`status`：`revealed` / `ambiguous`（同分候选，不猜）/ `missing` / `page-mismatch`（先打开保存的 pageUrl）/ `session-unavailable`（捕获它的浏览器已关闭）。不带 `partId` 时定位整组的第一个片段 |
+| `dsh_browser_reference_list` | `limit?`（默认 20，上限 100） | `{ references[] }` | – 豁免 | 本任务保存的引用，最新在前：id、页面、时间、每个片段一行预览 |
+
+引用数据保存在 `$DSH_HOME/dsh-builtin-browser-host/references.jsonl`，图片字节按内容哈希保存在同目录的 `reference-assets/` 下（`<sha256>.bin` 与 `<sha256>.json`）。交付记录（草稿交接）写在同目录的 `reference-deliveries.jsonl`。
+
+**引用如何进入对话**：`BrowserReferenceDraftAdapter` 已注册，`/reference/insert` 把引用冻结进持久交付队列，不再返回 `draft-adapter-unavailable`；真正的草稿写入由宿主 `ui-browser-reference` 客户端完成（轮询 → 保序追加 → 资产绑定 → ACK）。
+
+| 路由 | 方法 | 说明 |
+| --- | --- | --- |
+| `reference/list` `reference/get` | GET | 列表（摘要，最新在前）与单条详情（完整快照） |
+| `reference/capture` `reference/reveal` `reference/insert` | POST | 采集、定位、送入草稿队列；写操作要求同源 + 直连回环 |
+| `reference/export` `reference/import` | GET / POST | 导出 jsonl／markdown／zip／markdown-zip；导入只接受本插件 `format=zip` 包 |
+| `reference/deliveries?sessionId=&since=` | GET | 客户端按自己的会话轮询；**缺少 `sessionId` 一律 400**，不会返回其它会话的记录 |
+| `reference/delivery/ack` `reference/delivery/remove` | POST | ACK 只在草稿修订与全部图片资产绑定后成立；remove 写 tombstone，迟到重试不会复活 |
+| `reference/asset?key=&encoding=` | GET | 图片真实字节（`base64` 形态返回 JSON），供卡片缩略图与模型图片块使用 |
+| `reference/status` | GET | 诊断：本进程认哪个会话、侧栏扫描到几页、上次失败原因 |
+
+这里的侧栏选区交互与浏览器扩展的连接设置是两回事；显式选择外部浏览器时，实际工具能力取决于载体。
+
+## 起始页快捷方式
+
+起始页的共享快捷方式写在 `browser-startpage` 设置分节里，侧栏 UI 与该接口读写同一份数据。人工可在空标签页的起始页「添加」；没有侧栏的调用方（agent、脚本）用下面这个工具或同名 HTTP 接口。
+
+| 工具 | 参数 | 输出 | 守卫 | 说明 |
+| --- | --- | --- | --- | --- |
+| `dsh_browser_shortcuts` | `action`（必填：`list`/`add`/`remove`）, `title?`, `url?`, `id?` | `{ shortcuts[], changed }` | – 豁免 | `list` 读取；`add` 追加一条（标题必填、地址必须是 http(s)、最多 48 条、同一地址不重复）；`remove` 按 id 删除。与侧栏 UI 共享一份列表：这里加的会出现在下一个空标签页，人工加的这里也能读到 |
+
+对应 HTTP 接口（写操作同样要求同源与直连回环）：`GET /dsh-builtin-browser/shortcuts`、`POST /dsh-builtin-browser/shortcuts/add`、`POST /dsh-builtin-browser/shortcuts/remove`。并发写入按修订号重试，重试时会基于最新列表重新计算这次编辑，不会覆盖掉另一个写入方的改动。
+
 ## 标签与会话
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
 | `dsh_browser_list_tabs` | – | `{ tabs: [{ id, url, active }] }` | – | 当前会话的标签列表(输出 schema 只有 `tabs`,**没有 `session` 字段**;会话标识请用 `dsh_browser_session`) |
-| `dsh_browser_switch_tab` | `tabId`(必填) | `{ switched }` | ✅ | 按 id 切换标签;自托管下同步切换可见视图 |
-| `dsh_browser_close_tab` | `tabId`(必填) | `{ closed }` | ✅ | 关闭标签;关闭活动标签后激活下一个。**不属于只读豁免集合,受白名单约束**;`tabId` 只在本会话内查找(接受 `tab:<uuid>` 或裸 uuid),陈旧 id 不会关掉别的任务的标签页 |
+| `dsh_browser_switch_tab` | `tabId`(必填) | `{ switched }` | ✅ | 按完整会话标签句柄切换标签 |
+| `dsh_browser_close_tab` | `tabId`(必填) | `{ closed }` | ✅ | 关闭标签;关闭活动标签后激活下一个。**不属于只读豁免集合,受白名单约束**;`tabId` 只在本会话内查找（传入 `list_tabs` 返回的完整句柄）,陈旧 id 不会关掉别的任务的标签页 |
 | `dsh_browser_reset` | – | `{ reset }` | – 豁免 | 关闭本任务所有标签,回到一个空白标签(列入 `READ_ONLY_TOOLS`:限制到空的任务也必须能复位,否则白名单成了陷阱) |
 | `dsh_browser_session` | – | `{ session, tabs[] }` | – | 查看本任务的浏览器会话与标签 |
 | `dsh_browser_reset_session` | – | `{ reset }` | – 豁免 | 关闭并重建本任务的浏览器会话(崩溃/卡死后恢复;同上,永远可用) |
@@ -77,14 +155,14 @@
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `dsh_browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出/恢复 cookie —— **三种载体都可用**:自托管走原生会话,桌面侧栏与本机 Chrome/Edge 走 CDP 的 `Network.getCookies` / `Storage.setCookies`;flush 返回 cookie 列表,restore 带列表写回。**flush 只导出当前页所属站点的 cookie**(不是整台机器的共享 cookie 罐),范围按本会话所在页面的 URL 收敛;**范围未知时直接拒绝而不是放宽**(自托管侧栏载体报"cookie 范围未知",CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`)。`restored` 反映真的提交了多少(无法构成有效 URL 的 cookie 会被丢弃并报出条数)。**受白名单约束**:`restore` 会向任意域写 cookie,是动作而非观察,因此该工具**不在只读豁免集合**里。**两个门控是分开的**:`flush`(读)受设置「凭据 / 允许读取 cookies」管,关闭时抛 `BROWSER_AUTH_DISABLED`;`restore`(写)受「允许写入登录状态」管,关闭时抛 `BROWSER_AUTH_WRITE_DISABLED` —— 关掉读不会连带拒绝写,反之亦然 |
+| `dsh_browser_auth` | `action`(flush/restore,必填), `cookies?` | `{ cookies[]? / restored? }` | ✅ | 导出当前页所属站点的 Cookie 或在受支持的载体恢复 Cookie。无法确定当前站点时拒绝导出。读取和恢复分别要求各自的权限。 |
 | `dsh_browser_restrict` | `allowed?` | `{ restrictedTo[] }` | – | 设置动作白名单;空列表解除;**只校验名字是否以 `dsh_browser_` 开头**(写错的前缀会报错,`dsh_browser_typo` 这种拼错但前缀合法的名字会被接受、等同于拦掉该名字,不额外报错);守卫按名字匹配,因此白名单里列什么名字就只放行什么名字。**软护栏**——模型可自行解除,非安全边界 |
 
 ## 截图
 
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
-| `dsh_browser_screenshot` | `fullPage?`, `savePath?`, `format?`(png/jpeg), `quality?`, `maxWidth?`, `maxHeight?` | `{ dataUrl, path?, width?, height? }` | – | 截图;PNG 默认,**JPEG 在自托管与本机 Chrome/Edge 上都可用**(自托管在原生 `capturePage` 路径编码,本机浏览器经 CDP 声明 `supportsCdpJpeg`;**桌面侧栏**的 Electron CDP JPEG 编码器会挂起,该载体下 JPEG 请求返回 PNG);`maxWidth`/`maxHeight` 等比缩放**三种载体都支持**;`fullPage` 会跳过原生 `capturePage`、三种载体统一走 CDP `captureBeyondViewport`;`savePath` 落盘供视觉模型读取(与 `dsh_browser_download` 同一准入门:必须位于 `downloadDir` 内且不覆盖已有文件) |
+| `dsh_browser_screenshot` | `fullPage?`, `savePath?`, `format?`(png/jpeg), `quality?`, `maxWidth?`, `maxHeight?` | `{ dataUrl, path?, width?, height? }` | – | 默认 PNG；载体不支持 JPEG 时可返回 PNG。整页截图受合成环境限制。`savePath` 遵循下载目录限制，不覆盖已有文件。 |
 
 ## 常用组合
 
@@ -95,13 +173,12 @@ dsh_browser_open https://site → dsh_browser_wait(url=...) → dsh_browser_cont
 
 **登录并下载文件**
 ```
-dsh_browser_open https://site/login → dsh_browser_fill(用户名/密码) submit=true →
-等待跳转 → dsh_browser_download(url, savePath)
+打开站点 → dsh_browser_request_takeover(reason=登录) → 核对已登录 → dsh_browser_download(url, savePath)
 ```
 
 **表单填写(React/Vue 页面)**
 ```
-dsh_browser_snapshot → dsh_browser_fill(fields=[{name:'email',value:'a@b.c'},{label:'密码',value:'***'}], submit=true)
+dsh_browser_snapshot → dsh_browser_fill(fields=[{name:'email',value:'a@b.c'},{label:'备注',value:'测试内容'}], submit=true)
 ```
 
 **误操作恢复**
@@ -111,6 +188,5 @@ dsh_browser_reset_session → dsh_browser_open(重新开始)
 
 **遇到验证码**
 ```
-dsh_browser_challenge → 阻塞 → 提示用户:"页面出现人机验证,请在共享浏览器窗口完成,完成后告诉我" →
-dsh_browser_snapshot 复查
+dsh_browser_challenge → dsh_browser_request_takeover → 核对用户完成后的页面状态
 ```

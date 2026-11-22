@@ -36,7 +36,7 @@ async function waitFor(fn, ms = 3000) {
 
 /**
  * Host stub whose CDP surface answers the two probes the provider makes around
- * navigation: the per-document stamp (settle) and the URL/title read (visit).
+ * navigation: the acknowledged document and the URL/title read (visit).
  */
 function makeHost({ url = 'https://example.com/', title = 'Example' } = {}) {
   let counter = 0
@@ -46,10 +46,12 @@ function makeHost({ url = 'https://example.com/', title = 'Example' } = {}) {
       return {
         id: `view${++counter}`,
         async sendCommand(method, params) {
-          if (method === 'Page.navigate') { loads += 1; return {} }
+          if (method === 'Page.navigate') { loads += 1; return { frameId: 'main', loaderId: String(loads) } }
+          if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main', loaderId: String(loads), url } } }
+          if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 }
           if (method === 'Runtime.evaluate') {
             const expr = params.expression ?? ''
-            if (expr.includes('timeOrigin')) return { result: { value: `${loads}|complete` } }
+            if (expr === 'document.readyState') return { result: { value: 'complete' } }
             if (expr.includes('document.title')) return { result: { value: `${url}\u0000${title}` } }
             if (expr.trim() === 'location.href') return { result: { value: url } }
             return { result: { value: { ok: true } } }

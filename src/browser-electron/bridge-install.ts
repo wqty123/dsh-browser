@@ -11,11 +11,19 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { BridgeConnection } from './bridge-connection.js'
-import { bridgeEndpointPath } from './paths.js'
+import { BridgeConnection } from './bridge-connection.ts'
+import { bridgeEndpointPath } from './paths.ts'
+import { extensionHomeId, type InstalledExtension } from './profile-extension.ts'
 
 /** What the panel may ask for. */
 export type BridgeAction = 'install' | 'uninstall'
+
+/** Independent result of the optional, version-gated DSH host patch. */
+export interface HostPatchResult {
+  readonly status: 'absent' | 'applied' | 'unsupported version' | 'anchors mismatch'
+  readonly reason?: string
+  readonly changed?: boolean
+}
 
 /** Everything this module touches from outside, so a test can drive it without spawning. */
 export interface BridgeActionDeps {
@@ -48,6 +56,19 @@ export interface BridgeActionResult {
   readonly logFile?: string
   readonly restarted?: boolean
   readonly pid?: number
+  readonly hostPatch?: HostPatchResult
+}
+
+export async function runBridgeReinstall(deps: {
+  readonly absent: () => boolean
+  readonly run: (action: BridgeAction) => Promise<BridgeActionResult>
+}): Promise<BridgeActionResult> {
+  const removed = deps.absent() ? undefined : await deps.run('uninstall')
+  if (removed && !removed.ok) throw new Error(`REINSTALL_REMOVE_FAILED: ${removed.output}`)
+  if (!deps.absent()) throw new Error('REINSTALL_REMOVE_FAILED: bridge remains installed')
+  const installed = await deps.run('install')
+  if (!installed.ok) throw new Error(`REINSTALL_ADD_FAILED: ${installed.output}`)
+  return { ...installed, output: [removed?.output, installed.output].filter(Boolean).join('\n').slice(-20_000) }
 }
 
 /** Final record written by the installer that actually performed the operation. */
@@ -59,6 +80,7 @@ export interface BridgeActionCompletion {
   readonly pid?: number
   readonly error?: string
   readonly completedAt: string
+  readonly hostPatch?: HostPatchResult
 }
 
 /** Read-only startup verification, with a private endpoint path available to isolated tests. */
@@ -66,6 +88,8 @@ export interface BridgeReadyOptions {
   readonly endpointPath?: string
   readonly timeoutMs?: number
   readonly pollMs?: number
+  readonly extension?: InstalledExtension
+  readonly home?: string
 }
 
 /**
@@ -86,8 +110,15 @@ export async function waitForRestartedBridge(pid: number, options: BridgeReadyOp
         if (remaining <= 0) break
         const connection = new BridgeConnection({ port: Number(endpoint.port), token: endpoint.token, pid })
         try {
+          if (options.extension !== undefined) {
+            const version = await connection.call({ op: 'version' }, Math.min(1_000, remaining))
+            const status = version.mainExtension as { state?: unknown; version?: unknown; loadedAt?: unknown } | undefined
+            if (version.ok !== true || version.bridgeVersion !== options.extension.version || version.bridgeBuild !== options.extension.build
+              || version.homeId !== extensionHomeId(options.home ?? '') || status?.state !== 'loaded'
+              || status.version !== options.extension.version || typeof status.loadedAt !== 'string' || !Number.isFinite(Date.parse(status.loadedAt))) throw new Error('EXTENSION_RESTART_REQUIRED')
+          }
           const answer = await connection.call({ op: 'list' }, Math.min(1_000, remaining))
-          if (answer.ok === true && Array.isArray(answer.guests) && Array.isArray(answer.sidebar)) return
+          if (answer.ok === true && Number(answer.protocol) >= 4) return
         } finally { connection.close() }
       }
     } catch {
@@ -127,6 +158,10 @@ export async function waitForBridgeActionCompletion(
         || typeof record.completedAt !== 'string' || !Number.isFinite(Date.parse(record.completedAt))
         || record.pid !== undefined
         || (record.error !== undefined && typeof record.error !== 'string')
+        || (record.hostPatch !== undefined && (record.hostPatch === null || typeof record.hostPatch !== 'object'
+          || !['absent', 'applied', 'unsupported version', 'anchors mismatch'].includes(record.hostPatch.status)
+          || (record.hostPatch.reason !== undefined && typeof record.hostPatch.reason !== 'string')
+          || (record.hostPatch.changed !== undefined && typeof record.hostPatch.changed !== 'boolean')))
         || (record.ok !== (record.code === 0))) {
         throw new Error('the bridge installer wrote an invalid completion record')
       }
@@ -244,7 +279,8 @@ export async function runBridgeAction(
     const final = await waitForBridgeActionCompletion(resultFile, action, Math.max(0, deadline - Date.now()), deps.resultPollMs)
     const output = [installerOutput, await recordedOutput(), final.error].filter(Boolean).join('\n')
     return { ok: final.ok, code: final.code, output: tail(output), command: printable, resultFile, logFile,
-      restarted: final.restarted, ...final.pid === undefined ? {} : { pid: final.pid } }
+      restarted: final.restarted, ...final.pid === undefined ? {} : { pid: final.pid },
+      ...final.hostPatch === undefined ? {} : { hostPatch: final.hostPatch } }
   } catch (error) {
     return { ok: false, code: null,
       output: tail([installerOutput, await recordedOutput(), String(error)].filter(Boolean).join('\n')),

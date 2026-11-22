@@ -1,3 +1,5 @@
+import { testTab, testScope, tabIn } from './canonical-fixtures.mjs'
+import { readTabHandle, resolveSessionHandle, tabWireId } from '../lib/browser/handles.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { SidebarOnlyHost } from '../lib/browser-electron/sidebar-only-host.js'
@@ -8,21 +10,37 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
+test('disposing the carrier cancels a waiting discovery', async () => {
+  let signal
+  const host = new SidebarOnlyHost(value => new Promise((resolve, reject) => {
+    signal = value
+    value.addEventListener('abort', () => reject(new Error('discovery aborted')), { once: true })
+  }))
+  const pending = host.createView(testTab()).sendCommand('Runtime.evaluate')
+  await Promise.resolve()
+  host.dispose()
+  assert.equal(signal.aborted, true)
+  await assert.rejects(pending, /discovery aborted/)
+})
+
 function sidebar() {
   const calls = []
   let count = 0
   let lost
+  const nativeIds = new Map()
   const host = {
-    createView(owner) {
+    createView(identity) {
+      const owner = readTabHandle(identity).owner
       const id = 'guest-' + ++count
+      nativeIds.set(identity, id)
       calls.push({ action: 'create', id, owner })
-      return { id, async sendCommand(method, params, options) { calls.push({ action: 'send', id, method, params, options }); return { id, method } } }
+      return { id: identity, async sendCommand(method, params, options) { calls.push({ action: 'send', id, method, params, options }); return { id, method } } }
     },
-    destroyView(view) { calls.push({ action: 'destroy', id: view.id }) },
-    showView(view, label, options) { calls.push({ action: 'show', id: view.id, label, options }) },
-    async listPages(owner) { calls.push({ action: 'list', owner }); return [{ id: 'extra', title: owner, url: 'https://example.com' }] },
-    async closePage(id, owner) { calls.push({ action: 'close', id, owner }) },
-    async releasePage(owner) { calls.push({ action: 'release', owner }) },
+    destroyView(view) { calls.push({ action: 'destroy', id: nativeIds.get(view.id) }) },
+    showView(view, label, options) { calls.push({ action: 'show', id: nativeIds.get(view.id), label, options }) },
+    async listPages(scope) { const owner = resolveSessionHandle(scope).owner; calls.push({ action: 'list', owner }); return [{ id: tabWireId({ ...resolveSessionHandle(scope), tab: 'extra' }), title: owner, url: 'https://example.com' }] },
+    async closePage(identity, scope) { calls.push({ action: 'close', id: readTabHandle(identity).tab, owner: resolveSessionHandle(scope).owner }) },
+    async releasePage(scope) { calls.push({ action: 'release', owner: resolveSessionHandle(scope).owner }) },
     async collapse() { calls.push({ action: 'collapse' }) },
     dispose() { calls.push({ action: 'dispose' }) },
     onLost(listener) { lost = listener },
@@ -34,7 +52,7 @@ test('selection stays available and presentation does not discover or open a bla
   const inner = sidebar()
   let loads = 0
   const host = new SidebarOnlyHost(async () => { loads++; return inner.host })
-  const view = host.createView('owner-a')
+  const view = host.createView(testTab('owner-a'))
   assert.equal(host.available(), true)
   assert.deepEqual(Object.keys(view).sort(), ['download', 'id', 'sendCommand'])
   host.showView(view, 'task', { quiet: true })
@@ -52,8 +70,8 @@ test('concurrent first commands share discovery and materialize each owner once'
   const inner = sidebar()
   let loads = 0
   const host = new SidebarOnlyHost(() => { loads++; return ready.promise })
-  const first = host.createView('owner-a')
-  const second = host.createView('owner-b')
+  const first = host.createView(testTab('owner-a'))
+  const second = host.createView(testTab('owner-b'))
   const options = { timeoutMs: 450 }
   const pending = Promise.all([
     first.sendCommand('Page.navigate', { url: 'https://a.example' }, options),
@@ -74,7 +92,7 @@ test('discovery failure preserves the same handle and retries only the requested
   const unavailable = new Error('desktop bridge is not installed')
   let loads = 0
   const host = new SidebarOnlyHost(async () => { if (++loads === 1) throw unavailable; return inner.host })
-  const view = host.createView('owner-a')
+  const view = host.createView(testTab('owner-a'))
   const id = view.id
   await assert.rejects(view.sendCommand('Page.navigate'), error => error === unavailable)
   assert.equal(host.available(), true)
@@ -88,7 +106,7 @@ test('a destroyed handle waiting for discovery never creates an inner view', asy
   const ready = deferred()
   const inner = sidebar()
   const host = new SidebarOnlyHost(() => ready.promise)
-  const view = host.createView('owner-a')
+  const view = host.createView(testTab('owner-a'))
   const pending = view.sendCommand('Page.navigate')
   host.destroyView(view)
   ready.resolve(inner.host)
@@ -101,33 +119,33 @@ test('disposing during discovery disposes its late host and cannot resurrect vie
   const ready = deferred()
   const inner = sidebar()
   const host = new SidebarOnlyHost(() => ready.promise)
-  const view = host.createView('owner-a')
+  const view = host.createView(testTab('owner-a'))
   const pending = view.sendCommand('Page.navigate')
   host.dispose()
   ready.resolve(inner.host)
   await assert.rejects(pending, /host is disposed/)
   assert.deepEqual(inner.calls, [{ action: 'dispose' }])
   host.showView(view)
-  assert.throws(() => host.createView('owner-b'), /host is disposed/)
+  assert.throws(() => host.createView(testTab('owner-b')), /host is disposed/)
 })
 
 test('releasing an owner cancels its pending views without disturbing another owner', async () => {
   const ready = deferred()
   const inner = sidebar()
   const host = new SidebarOnlyHost(() => ready.promise)
-  const first = host.createView('owner-a')
-  const second = host.createView('owner-b')
+  const first = host.createView(testTab('owner-a'))
+  const second = host.createView(testTab('owner-b'))
   const pendingFirst = first.sendCommand('Page.navigate')
   const firstFailure = assert.rejects(pendingFirst, /view is destroyed/)
   const pendingSecond = second.sendCommand('Page.navigate')
-  const release = host.releasePage('owner-a')
+  const release = host.releasePage(testScope('owner-a'))
   ready.resolve(inner.host)
   await Promise.all([firstFailure, pendingSecond, release])
   assert.deepEqual(inner.calls.filter(call => call.action === 'create').map(call => call.owner), ['owner-b'])
   assert.deepEqual(inner.calls.filter(call => call.action === 'release'), [{ action: 'release', owner: 'owner-a' }])
   await second.sendCommand('Runtime.evaluate')
   host.destroyView(second)
-  await host.releasePage('owner-b')
+  await host.releasePage(testScope('owner-b'))
   assert.deepEqual(inner.calls.slice(-2), [{ action: 'destroy', id: 'guest-1' }, { action: 'release', owner: 'owner-b' }])
 })
 
@@ -135,11 +153,11 @@ test('listing and closing forward the requested owner; collapse and release do n
   const inner = sidebar()
   let loads = 0
   const host = new SidebarOnlyHost(async () => { loads++; return inner.host })
-  await host.releasePage('owner-a')
+  await host.releasePage(testScope('owner-a'))
   await host.collapse()
   assert.equal(loads, 0)
-  assert.equal((await host.listPages('owner-b'))[0].title, 'owner-b')
-  await host.closePage('extra', 'owner-b')
+  assert.equal((await host.listPages(testScope('owner-b')))[0].title, 'owner-b')
+  await host.closePage(testTab('owner-b', 'extra'), testScope('owner-b'))
   await host.collapse()
   assert.deepEqual(inner.calls, [{ action: 'list', owner: 'owner-b' }, { action: 'close', id: 'extra', owner: 'owner-b' }, { action: 'collapse' }])
 })
@@ -149,8 +167,8 @@ test('carrier loss reconnects existing wrappers to the sidebar with stable ident
   const second = sidebar()
   let loads = 0
   const host = new SidebarOnlyHost(async () => (++loads === 1 ? first : second).host)
-  const a = host.createView('owner-a')
-  const b = host.createView('owner-b')
+  const a = host.createView(testTab('owner-a'))
+  const b = host.createView(testTab('owner-b'))
   const ids = [a.id, b.id]
   await Promise.all([a.sendCommand('Page.navigate'), b.sendCommand('Page.navigate')])
   const reasons = []
@@ -162,6 +180,7 @@ test('carrier loss reconnects existing wrappers to the sidebar with stable ident
   assert.deepEqual([a.id, b.id], ids)
   assert.deepEqual(second.calls.filter(call => call.action === 'create').map(call => call.owner), ['owner-a', 'owner-b'])
   assert.deepEqual(reasons, ['shell-exited'])
+  await new Promise(setImmediate)
   assert.equal(first.calls.filter(call => call.action === 'dispose').length, 1)
   first.lose()
   await a.sendCommand('Runtime.evaluate')
@@ -172,9 +191,9 @@ test('page command failures keep the current sidebar and are never replayed', as
   const inner = sidebar()
   let loads = 0
   let commands = 0
-  inner.host.createView = owner => ({ id: owner, async sendCommand() { commands++; throw new Error('bad selector') } })
+  inner.host.createView = identity => ({ id: identity, async sendCommand() { commands++; throw new Error('bad selector') } })
   const host = new SidebarOnlyHost(async () => { loads++; return inner.host })
-  const view = host.createView('owner-a')
+  const view = host.createView(testTab('owner-a'))
   await assert.rejects(view.sendCommand('Input.dispatchMouseEvent'), /bad selector/)
   await assert.rejects(view.sendCommand('Input.dispatchMouseEvent'), /bad selector/)
   assert.equal(commands, 2)
@@ -186,8 +205,8 @@ test('concurrent failed discovery is shared and the following commands share one
   const inner = sidebar()
   let loads = 0
   const host = new SidebarOnlyHost(() => ++loads === 1 ? ready.promise : Promise.resolve(inner.host))
-  const a = host.createView('owner-a')
-  const b = host.createView('owner-b')
+  const a = host.createView(testTab('owner-a'))
+  const b = host.createView(testTab('owner-b'))
   const first = Promise.allSettled([a.sendCommand('Page.navigate'), b.sendCommand('Page.navigate')])
   await Promise.resolve()
   ready.reject(new Error('bridge not ready'))
@@ -208,10 +227,12 @@ test('a carrier lost while creating a view cannot install a stale binding', asyn
     return inner
   }
   const host = new SidebarOnlyHost(async () => (++loads === 1 ? first : second).host)
-  const view = host.createView('owner-a')
+  const view = host.createView(testTab('owner-a'))
   await assert.rejects(view.sendCommand('Page.navigate'), /bridge changed while binding/)
   assert.equal(first.calls.some(call => call.action === 'send'), false)
-  assert.deepEqual(first.calls.slice(-2), [{ action: 'dispose' }, { action: 'destroy', id: 'guest-1' }])
+  assert.deepEqual(first.calls.at(-1), { action: 'destroy', id: 'guest-1' })
+  await new Promise(setImmediate)
+  assert.deepEqual(first.calls.at(-1), { action: 'dispose' })
   await view.sendCommand('Page.navigate')
   assert.equal(loads, 2)
   assert.equal(second.calls.filter(call => call.action === 'send').length, 1)
@@ -222,11 +243,11 @@ test('downloads bind lazily to the same owner and propagate transfer failures wi
   const create = inner.host.createView
   const transfers = []
   inner.host.createView = owner => ({ ...create(owner), async download(url, savePath) {
-    transfers.push({ owner, url, savePath })
+    transfers.push({ owner: readTabHandle(owner).owner, url, savePath })
     throw new Error('transfer interrupted')
   } })
   const host = new SidebarOnlyHost(async () => inner.host)
-  const view = host.createView('download-owner')
+  const view = host.createView(testTab('download-owner'))
   await assert.rejects(view.download('https://example.com/file', '/downloads/file'), /transfer interrupted/)
   assert.deepEqual(transfers, [{ owner: 'download-owner', url: 'https://example.com/file', savePath: '/downloads/file' }])
   assert.equal(inner.calls.filter(call => call.action === 'create').length, 1)

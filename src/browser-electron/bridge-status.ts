@@ -14,13 +14,16 @@
  * - `stale` — the archive is back, or the deployed bridge module is missing or outdated.
  * @module dsh-browser/browser-electron/bridge-status
  */
-import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { isAbsolute, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
-import { readDesktopIdentity } from './desktop-identity.js'
+import { desktopPaths, readDesktopIdentity } from './desktop-identity.ts'
+import { MAIN_EXTENSION_UNSUPPORTED, type MainExtensionStatus } from './profile-extension.ts'
+import { BRIDGE_VERSION_MESSAGE } from '../bridge-compatibility.ts'
+import { conventionalInstallRoots, registeredInstallLocations } from '../../desktop-bridge/desktop-discovery.mjs'
 
 // A normal Electron existsSync(app.asar) caches the archive and keeps it locked on Windows.
 // Status inspection must leave maintenance free to rename it after Desktop exits.
@@ -38,10 +41,6 @@ const rawExistsSync: typeof existsSync = (() => {
  * probe now verifies the same identity the installer does (see `desktop-identity.js`), so the
  * answer is about DSH Desktop and nothing else.
  * @param localAppData - the base directory; defaults to the environment's.
- * @param registry - the uninstall-registry lookup; injectable so a test can close a source that is
- *   otherwise answered by the machine it runs on. A test asserting "nothing is installed here" would
- *   otherwise pass or fail depending on whose computer ran it.
- * @param conventions - the platform's conventional install locations; injectable for the same reason.
  * @returns the install directory, or undefined when nothing matches.
  */
 export function findDesktopInstall(
@@ -54,41 +53,23 @@ export function findDesktopInstall(
   // are all probed. A test or a caller that passes a base directory gets exactly that base, so the
   // behaviour stays pinnable.
   const isDesktop = (candidate: string): boolean => readDesktopIdentity(candidate).ok
-  const explicit = process.env.DSH_DESKTOP_PATH
-  if (explicit !== undefined && explicit !== '') {
-    const named = explicit
-    if (isDesktop(named)) return named
-    // A parent directory is a reasonable thing to point at too: look one level down.
-    try {
-      for (const entry of readdirSync(named, { withFileTypes: true })) {
-        if (entry.isDirectory() && isDesktop(join(named, entry.name))) return join(named, entry.name)
+  for (const explicit of [process.env.DSH_DESKTOP_PATH, process.env.DSH_DESKTOP_APP]) {
+    if (explicit !== undefined && explicit !== '') {
+      const named = explicit
+      if (isDesktop(named)) return named
+      // A parent directory is a reasonable thing to point at too: look one level down.
+      try {
+        for (const entry of readdirSync(named, { withFileTypes: true })) {
+          if (entry.isDirectory() && isDesktop(join(named, entry.name))) return join(named, entry.name)
+        }
+      } catch {
+        // Not a directory: fall through to the usual roots.
       }
-    } catch {
-      // Not a directory: fall through to the usual roots.
     }
   }
-  // The name `tools/install-web-plugin.mjs` already documents for the same question. It answers a
-  // slightly different one there (where the host's peers live, so it names the `dsh` directory inside
-  // the install), so its value is tried both as an install root and as a parent of one rather than
-  // assumed to be either.
-  const declared = process.env.DSH_DESKTOP_APP
-  if (declared !== undefined && declared !== '' && declared !== explicit) {
-    if (isDesktop(declared)) return declared
-    try {
-      for (const entry of readdirSync(declared, { withFileTypes: true })) {
-        if (entry.isDirectory() && isDesktop(join(declared, entry.name))) return join(declared, entry.name)
-      }
-    } catch {
-      // Same as above: not a directory is not an error.
-    }
-  }
-  const roots = localAppData === undefined
-    ? [process.env.LOCALAPPDATA ?? '', process.env['ProgramFiles'] ?? '', process.env['ProgramFiles(x86)'] ?? '', process.env.APPDATA ?? '', process.env.ProgramData ?? '']
-      .filter(base => base !== '')
-      .map(base => (base === process.env.LOCALAPPDATA ? join(base, 'Programs') : base))
-    : [join(localAppData, 'Programs')]
+  const roots = localAppData === undefined ? desktopInstallRoots() : [join(localAppData, 'Programs')]
   for (const base of roots) {
-    for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
+    for (const named of DESKTOP_INSTALL_NAMES) {
       const candidate = join(base, named)
       if (isDesktop(candidate)) return candidate
     }
@@ -102,117 +83,30 @@ export function findDesktopInstall(
       // A root that does not exist is a state, not an error.
     }
   }
-  // Windows records where the installer actually put the app, which is the one fact no environment
-  // variable can supply for a custom directory. Read after the usual roots so a normal install keeps
-  // answering exactly as it did.
-  try {
-    for (const location of registry()) {
-      if (isDesktop(location)) return location
-    }
-  } catch {
-    // A lookup that cannot run is not evidence of an install.
-  }
-  // No registry and no `Programs` directory off Windows: on macOS and Linux every root above is empty
-  // (those variables are Windows-only), so without this the probe answers "no desktop here" on a
-  // machine that has one. Empty on Windows, where the sources above already cover it.
-  try {
-    for (const candidate of conventions()) {
-      if (isDesktop(candidate)) return candidate
-    }
-  } catch {
-    // Walking a platform directory can fail for reasons the caller cannot act on.
+  for (const source of [registry, conventions]) {
+    try {
+      for (const candidate of source()) {
+        if (isDesktop(candidate)) return candidate
+      }
+    } catch {}
   }
   return undefined
 }
 
-/**
- * The `InstallLocation` values the Windows uninstall registry lists for this app.
- *
- * Read through `reg.exe` rather than a Node binding: this module also runs under plain `node` (the
- * installer, the tests), where no registry API exists, and spawning the console tool is the one way
- * that works in both. Every failure — not Windows, `reg` absent, no such key, unparsable output —
- * means "no answer", never an error: this is one discovery source among several.
- *
- * @returns candidate directories, unverified; the caller applies the identity rule.
- */
-function registeredInstallLocations(): readonly string[] {
-  if (process.platform !== 'win32') return []
-  // The per-user key holds a per-user install and needs no elevation; the machine-wide one holds an
-  // install for all users. Both spellings of the product name have shipped, so neither key name is
-  // assumed: the whole Uninstall subtree is searched and matched on the value shown to users.
-  const roots = [
-    'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-    'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-    'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-  ]
-  const locations: string[] = []
-  for (const root of roots) {
-    let output = ''
-    try {
-      output = execFileSync('reg', ['query', root, '/s', '/f', 'DeepSeek Harness', '/t', 'REG_SZ'],
-        { encoding: 'utf8', stdio: 'pipe', timeout: 15_000, windowsHide: true })
-    } catch {
-      // A key that does not exist exits non-zero, and so does a missing `reg.exe`; both mean the
-      // same thing here.
-      continue
-    }
-    // Output is a flat list of `    ValueName    REG_SZ    Data` lines under `Key` headers. Only
-    // `InstallLocation` is consulted: `DisplayName` also mentions the product and would otherwise
-    // contribute a directory-shaped string that is not a directory.
-    for (const line of output.split(/\r?\n/)) {
-      const match = /^\s+InstallLocation\s+REG_SZ\s+(.+?)\s*$/.exec(line)
-      if (match !== null && match[1] !== '') locations.push(match[1])
-    }
-  }
-  return locations
-}
+/** Directory names an install is given: a plain directory on Windows, an `.app` bundle on macOS. */
+const DESKTOP_INSTALL_NAMES = ['DSH Desktop', 'DeepSeek Harness', 'DSH Desktop.app', 'DeepSeek Harness.app']
 
 /**
- * The places a packaged app is conventionally installed on this platform.
- *
- * Windows has a registry to consult; the other two do not, so the convention IS the record. Naming
- * these is not a blind guess — every candidate still has to pass the identity rule — but it is what
- * makes discovery work at all on a platform with no install root this plugin can compute from an
- * environment variable.
- *
- * macOS puts a user-visible app in `/Applications` (all users) or `~/Applications` (one user), and
- * the identity rule looks for `resources/app` beneath whatever root it is handed — so the candidate
- * is the bundle's `Contents` directory, the one that holds `Resources` (Electron's `resources`) next
- * to the executable. Linux has no single convention, so the directories listed are where each
- * packaging style actually lands: `/opt` for a tarball or a vendor `.deb`, `/usr/lib` for a distro
- * package, `~/.local/share` for a per-user extract.
- *
- * Directory names only — never a package name. The accepted package names live in
- * `desktop-identity.json` and nowhere else, and a test enforces that.
- * @param platform - injected so a test can ask for another platform's list.
- * @returns candidate install roots, unverified.
+ * Where this OS keeps installed applications, most specific first.
+ * @returns the existing-or-not base directories to probe.
  */
-function conventionalInstallRoots(platform: NodeJS.Platform = process.platform): readonly string[] {
-  const home = process.env.HOME ?? ''
-  if (platform === 'darwin') {
-    const bundles = [
-      '/Applications/DeepSeek Harness.app',
-      '/Applications/DSH Desktop.app',
-      ...home === '' ? [] : [
-        join(home, 'Applications', 'DeepSeek Harness.app'),
-        join(home, 'Applications', 'DSH Desktop.app'),
-      ],
-    ]
-    return bundles.map(bundle => join(bundle, 'Contents'))
-  }
-  if (platform === 'linux') {
-    return [
-      '/opt/DeepSeek Harness',
-      '/opt/DSH Desktop',
-      '/usr/lib/DeepSeek Harness',
-      '/usr/lib/DSH Desktop',
-      ...home === '' ? [] : [
-        join(home, '.local', 'share', 'DeepSeek Harness'),
-        join(home, '.local', 'share', 'DSH Desktop'),
-      ],
-    ]
-  }
-  return []
+function desktopInstallRoots(): string[] {
+  const windows = [process.env.LOCALAPPDATA ?? '', process.env['ProgramFiles'] ?? '', process.env['ProgramFiles(x86)'] ?? '', process.env.APPDATA ?? '', process.env.ProgramData ?? '']
+    .filter(base => base !== '')
+    .map(base => (base === process.env.LOCALAPPDATA ? join(base, 'Programs') : base))
+  // The machine-wide macOS roots cannot be redirected, so a test process never reads them.
+  const testing = process.env.DSH_BROWSER_TEST === '1' || process.env.NODE_TEST_CONTEXT !== undefined
+  return process.platform === 'darwin' && !testing ? [...windows, '/Applications', join(homedir(), 'Applications')] : windows
 }
 
 /** The marker the installer inserts into the shell's main.js. */
@@ -220,6 +114,8 @@ const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sideb
 
 /** One reading of the install tree. */
 export interface BridgeStatus {
+  readonly mainExtension?: MainExtensionStatus
+  readonly code?: string
   /** `installed`, `missing` or `stale`; see the module comment for what each means. */
   readonly state: 'installed' | 'missing' | 'stale'
   /** Whether the loaded application passed DSH Desktop identity verification. */
@@ -292,8 +188,20 @@ function repairCommand(installRoot: string | undefined): string | undefined {
  * @param installRoot - the desktop install directory.
  * @returns the current state.
  */
-export function readBridgeStatus(installRoot: string): BridgeStatus {
-  const resources = join(installRoot, 'resources')
+export function readBridgeStatus(installRoot: string, mainExtension?: MainExtensionStatus): BridgeStatus {
+  const disk = readBridgeInstallStatus(installRoot)
+  if (mainExtension === undefined) return { ...disk, code: disk.code ?? MAIN_EXTENSION_UNSUPPORTED }
+  return { ...disk, mainExtension, command: undefined, detail: `desktop main extension: ${mainExtension.state}`,
+    state: mainExtension.state === 'loaded' ? 'installed' : mainExtension.state === 'not-installed' ? 'missing' : 'stale',
+    code: mainExtension.code }
+}
+
+function readBridgeInstallStatus(installRoot: string): BridgeStatus {
+  let resources: string
+  try { resources = desktopPaths(installRoot).resources }
+  catch (error) {
+    return { state: 'missing', present: false, installRoot, archivePresent: false, detail: `not a DSH Desktop install: ${String(error)}` }
+  }
   const appDir = join(resources, 'app')
   const mainPath = join(appDir, 'lib', 'main.js')
   const archivePath = join(resources, 'app.asar')
@@ -327,6 +235,16 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
       archivePresent,
       version,
       detail: 'not a DSH Desktop install: no resources/app/lib/main.js and no resources/app.asar',
+    }
+  }
+  if (!rawExistsSync(archivePath)
+    && safeIncludes(mainPath, '//#region lib/types/main-extensions.js')
+    && safeExists(fileURLToPath(new URL('../../desktop-bridge/main.mjs', import.meta.url)))) {
+    return {
+      state: 'installed', present: true, installRoot, archivePresent: false,
+      detail: 'DSH Desktop main extension loads the bridge from the installed profile plugin',
+      ...identity.version === undefined ? {} : { version: identity.version },
+      command: repairCommand(installRoot),
     }
   }
   let backupAt
@@ -376,15 +294,34 @@ export function readBridgeStatus(installRoot: string): BridgeStatus {
   }
   const bridgePath = join(appDir, 'lib', 'plugin-browser-bridge.js')
   let bridgeDetail: string | undefined
+  let bridgeCode: string | undefined
   try {
     const deployed = readFileSync(bridgePath)
     const shipped = readFileSync(new URL('../../desktop-bridge/plugin-browser-bridge.js', import.meta.url))
-    if (!deployed.equals(shipped)) bridgeDetail = 'the deployed bridge module differs from this plugin version; reinstall the bridge to refresh it'
+    const loader = readFileSync(new URL('../../desktop-bridge/profile-loader.mjs', import.meta.url))
+    if (deployed.equals(loader)) {
+      try {
+        const profile = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'profiles', 'desktop')
+        const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8'))
+        if (!Object.hasOwn(manifest.dependencies ?? {}, 'dsh-builtin-browser')) throw new Error('not a direct profile dependency')
+        const directory = realpathSync(join(profile, 'node_modules', 'dsh-builtin-browser'))
+        const entry = realpathSync(join(directory, 'desktop-bridge', 'plugin-browser-bridge.js'))
+        const child = relative(directory, entry)
+        if (!child || isAbsolute(child) || child === '..' || child.startsWith('../') || child.startsWith('..\\')) {
+          throw new Error('bridge entry resolves outside its package')
+        }
+        if (!readFileSync(entry).equals(shipped)) bridgeDetail = BRIDGE_VERSION_MESSAGE
+      } catch {
+        bridgeCode = 'DSH_BRIDGE_PACKAGE_UNAVAILABLE'
+        bridgeDetail = `${bridgeCode}: the profile loader's package bridge is missing, unreadable or outside its package`
+      }
+    } else if (!deployed.equals(shipped)) bridgeDetail = BRIDGE_VERSION_MESSAGE
   } catch {
     bridgeDetail = 'the bridge module is missing or cannot be verified; reinstall the bridge to restore it'
   }
   return {
     state: bridgeDetail === undefined ? 'installed' : 'stale',
+    ...bridgeCode === undefined ? {} : { code: bridgeCode },
     present: true,
     installRoot,
     archivePresent,

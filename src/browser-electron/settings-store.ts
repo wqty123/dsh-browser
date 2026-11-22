@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Plugin-owned settings document — the switches the browser settings panel
  * exposes, stored next to the browsing history so both follow the same rules:
@@ -11,8 +12,8 @@
 
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { dshHome } from './paths.js'
-import type { BrowserChannel } from './system-browser.js'
+import { dshHome } from './paths.ts'
+import type { BrowserChannel } from './system-browser.ts'
 
 /** Vision/operation strategy the provider prefers when the model can see. */
 export type VisionStrategy = 'auto' | 'nonVisual'
@@ -27,6 +28,18 @@ export type HeadlessMode = 'auto' | 'headless' | 'windowed'
 
 /** Every value {@link HeadlessMode} accepts, for validation and the settings UI. */
 export const HEADLESS_MODES = ['auto', 'headless', 'windowed'] as const
+
+/**
+ * Which profile the browser runs on.
+ *
+ * `plugin` 是插件自己的目录（默认）：不碰用户的窗口、书签与登录态，也不会因为用户开着浏览器而启动失败。
+ * `user` 复用用户自己的 profile，登录态天然可用，但要求用户的浏览器先关掉——否则 Chromium 以
+ * exit 21（`PROFILE_IN_USE`）退出。
+ */
+export type SystemProfile = 'user' | 'plugin'
+
+/** Every value {@link SystemProfile} accepts, for validation and the settings UI. */
+export const SYSTEM_PROFILES = ['user', 'plugin'] as const
 
 /** The full settings document, with every field resolved. */
 export interface BrowserSettings {
@@ -90,6 +103,11 @@ export interface BrowserSettings {
      * immediately after launch".
      */
     readonly headless: HeadlessMode
+    /**
+     * `plugin` (default) launches a separate DSH-owned persistent profile.
+     * Explicit `user` attaches to the running, paired extension profile; never launches it.
+     */
+    readonly systemProfile: SystemProfile
   }
   /** Whether the agent may read cookies / export login state. */
   readonly credentials: {
@@ -160,10 +178,8 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   cookies: { persist: true },
   ui: { autoExpandOnce: true, closeWithSession: false, virtualCursor: true, quiet: false },
   vision: { strategy: 'auto' },
-  // Bundled by default: it needs nothing installed, and on the desktop the carrier
-  // is the sidebar anyway. Choosing a system browser is an explicit opt-in because
-  // it starts a real Chrome/Edge with its own profile.
-  browser: { channel: 'bundled', headless: 'auto' },
+  // External browsers require an explicit choice; automatic modes never open native windows.
+  browser: { channel: 'sidebar', headless: 'auto', systemProfile: 'plugin' },
   credentials: { allowRead: true },
   // Off unless the host turns it on. A frame can show a CAPTCHA, an account name, or logged-in
   // content, so watching is an explicit decision rather than something a remote client can arrange.
@@ -182,7 +198,7 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
  */
 export function settingsPath(): string {
   const home = dshHome()
-  return join(home, 'dsh-builtin-browser-host', 'settings.json')
+  return join(home, BROWSER_PROFILE_DIR, 'settings.json')
 }
 
 /** Coerce one boolean field, keeping the default when absent or mistyped. */
@@ -367,6 +383,10 @@ export function resolveSettings(raw: unknown, warn?: (message: string) => void):
     browser: {
       channel: resolveChannel(browser?.channel, warn),
       headless: resolveHeadless(browser?.headless, warn),
+      // 不认识的值退回 `plugin`：这一侧不会与用户正在运行的浏览器抢 profile，是"装好即用"的前提。
+      // 之前这一层不产出该字段，`entry.ts` 的 `systemProfile !== 'plugin'` 恒成立，浏览器总是跑在用户
+      // profile 上——用户开着 Edge 时 Chromium 以 exit 21 退出，插件报"引擎起不来"。
+      systemProfile: (browser as { systemProfile?: unknown } | undefined)?.systemProfile === 'user' ? 'user' : 'plugin',
     },
     credentials: {
       // `gate` returns false for anything present-and-not-a-boolean, so an unreadable section

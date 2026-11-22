@@ -18,7 +18,7 @@
  */
 import { lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { pidAlive } from './process.js'
+import { pidAlive } from './process.ts'
 
 /** The marker file, named once because both the claim and the sweep read it. */
 const OWNER_FILE = '.dsh-ephemeral-owner'

@@ -22,7 +22,7 @@ import assert from 'node:assert/strict'
 
 const HOST_SRC = readFileSync('src/browser-electron/desktop-bridge-host.ts', 'utf8')
 const BRIDGE = readFileSync('desktop-bridge/plugin-browser-bridge.js', 'utf8')
-const CLIENT = readFileSync('client.js', 'utf8')
+const CLIENT = readFileSync('src/client/settings/panel.ts', 'utf8')
 
 test('the host makes no decision from what the shell is displaying', () => {
   // Every way this used to be asked is gone. If any of these names comes back, so does the
@@ -38,8 +38,8 @@ test('guestFor still names the conversation it is opening a page for', () => {
   // The owner comes from the VIEW. One host instance serves every conversation, so a process-level
   // owner could only ever be one conversation's id applied to all of them — which is how a page
   // asked for in one conversation could still turn up in another's sidebar.
-  assert.match(guestFor, /const owner = entry\?\.owner \?\? this\.owner/,
-    'the owner is the view\'s conversation')
+  assert.match(guestFor, /op: 'ensureSidebar', handle: id/,
+    'the identity is the view\'s canonical handle')
   assert.ok(!/needsNewTab/.test(guestFor),
     'and no longer distinguishes the first view from later ones: this carrier shows one page per conversation')
 })
@@ -51,7 +51,7 @@ test('the bridge opens a panel by conversation id, through the plugin client hal
   const body = lines.slice(start, start + 80).join('\n')
   assert.match(body, /evaluatePanelService\(/, 'the renderer is asked for this conversation panel')
   assert.match(body, /\/\^session-\/\.test\(owner\)/, 'a caller that cannot name a conversation is refused')
-  assert.ok(!/document\.querySelector/.test(body), 'no DOM query decides where the page goes')
+  assert.ok(!/document\.querySelector/.test(body.slice(0, body.indexOf("if (op === 'collapseSidebar')"))), 'no DOM query decides where the page goes')
 })
 
 test('the panel service is the only thing that knows which sidebar is whose', () => {
@@ -69,4 +69,20 @@ test('the bridge keeps the scoping its remaining DOM ops still need', () => {
   // stay inside this conversation's panel. Removing the panel scoping was never the goal.
   assert.match(BRIDGE, /panelRootExpression/, 'page scripts are scoped to one panel')
   assert.match(BRIDGE, /evaluateInPanel/, 'and every one of them goes through the scoped runner')
+})
+
+// A bound view whose tab is showing the shared start page has a placed tab
+// but no guest: revealing it cannot produce one, and the bridge would poll a
+// page that was never asked to load. The client half now aims that exact tab
+// through the shell's navigation face, so the host body performs the one real
+// load and the existing wait sees its guest.
+test('a bound start-page tab is navigated through the shell instead of awaited', () => {
+  assert.match(CLIENT, /function navigatePlacedTab\(/, 'the navigation helper exists')
+  assert.match(CLIENT, /sidebarRight\.navigateTabIn\(sessionId, tabId, \{ params: \{ url: address \} \}\)/,
+    'the bound tab is re-aimed by session and tab id')
+  assert.match(CLIENT, /!created && state\.guestId === null && address !== ""/,
+    'only an existing guest-less binding with an address is navigated')
+  assert.match(CLIENT, /this DSH shell cannot initialize a bound start-page tab/,
+    'a shell without the navigation face is a named refusal, not a timeout')
+  assert.match(CLIENT, /panelProtocol: 5/, 'the capability is advertised')
 })

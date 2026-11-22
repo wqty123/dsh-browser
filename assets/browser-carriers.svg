@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="152" viewBox="0 0 900 152" role="img" aria-labelledby="title desc">
+  <title id="title">DSH Browser carriers</title>
+  <desc id="desc">Sidebar is the default. Desktop uses a controllable native view when available. Web uses an isolated guest for manual browsing and quotes. Chrome and Edge are opt-in.</desc>
+  <rect width="900" height="152" rx="14" fill="#0f172a"/>
+  <text x="22" y="28" fill="#e2e8f0" font-family="sans-serif" font-size="16" font-weight="700">Browser carriers</text>
+  <g font-family="sans-serif">
+    <rect x="20" y="42" width="280" height="89" rx="8" fill="#1e293b" stroke="#38bdf8"/>
+    <text x="36" y="68" fill="#7dd3fc" font-size="12" font-weight="700">DEFAULT · DSH SIDEBAR</text>
+    <text x="36" y="95" fill="#f8fafc" font-size="19" font-weight="700">Desktop</text>
+    <text x="36" y="116" fill="#cbd5e1" font-size="13">Native control on supported hosts</text>
+    <rect x="310" y="42" width="280" height="89" rx="8" fill="#1e293b" stroke="#38bdf8"/>
+    <text x="326" y="68" fill="#7dd3fc" font-size="12" font-weight="700">DEFAULT · DSH SIDEBAR</text>
+    <text x="326" y="95" fill="#f8fafc" font-size="19" font-weight="700">Web</text>
+    <text x="326" y="116" fill="#cbd5e1" font-size="13">Isolated guest and rich references</text>
+    <rect x="600" y="42" width="280" height="89" rx="8" fill="#1e293b" stroke="#a5b4fc"/>
+    <text x="616" y="68" fill="#c7d2fe" font-size="12" font-weight="700">OPT-IN · EXTERNAL BROWSER</text>
+    <text x="616" y="95" fill="#f8fafc" font-size="19" font-weight="700">Chrome / Edge</text>
+    <text x="616" y="116" fill="#cbd5e1" font-size="13">Managed profile or optional extension</text>
+  </g>
+</svg>

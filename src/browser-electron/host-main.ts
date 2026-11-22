@@ -1,3 +1,5 @@
+import { hostMessages } from '../../assets/browser-messages.mjs'
+import { LOOPBACK_IPV4, BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Self-hosted Electron browser host (child side): the Electron main process
  * spawned by {@link RemoteElectronViewHost}. Owns one `BrowserWindow` PER
@@ -24,16 +26,27 @@
  * @module dsh-browser/browser-electron/host-main
  */
 
-import { app, BrowserWindow, WebContentsView } from 'electron'
+import { app, BrowserWindow, Menu, session, WebContentsView } from 'electron'
+import {
+  overlayScript,
+  overlayDisposeScript,
+  referenceMenuTemplate,
+  standaloneScript,
+  REFERENCE_INTENT_CHANNEL,
+  MAX_REFERENCE_COMMENT,
+  MAX_REFERENCE_TEXT,
+} from '../browser-reference/entry.ts'
+import { validateFrozenCapture } from '../browser-reference/page-script.ts'
 import { createInterface } from 'node:readline'
 import { createConnection } from 'node:net'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { writeFileNoReplace } from './file-write.js'
-import { electronRuntimeDiagnosticLines } from './runtime-diagnostics.js'
-import { createRpcLineReader } from './rpc-input.js'
+import { writeFileNoReplace } from './file-write.ts'
+import { electronRuntimeDiagnosticLines } from './runtime-diagnostics.ts'
+import { createRpcLineReader } from './rpc-input.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { withTimeoutShared } from './timing.js'
+import { withTimeoutShared } from './timing.ts'
+import { dshHome } from './paths.ts'
 
 // Report the binary actually running this child, even when ELECTRON_PATH
 // intentionally selects a different version from the plugin's dependency.
@@ -54,8 +67,8 @@ for (const line of electronRuntimeDiagnosticLines(process.versions)) {
 // (capturePage then fails). A dedicated userData also persists cookies across
 // host restarts (on top of dsh_browser_auth). Must run before app is ready.
 try {
-  const base = process.env.DSH_HOME ?? app.getPath('appData')
-  app.setPath('userData', join(base, 'dsh-builtin-browser-host'))
+  const base = dshHome()
+  app.setPath('userData', join(base, BROWSER_PROFILE_DIR))
 } catch (error) {
   process.stderr.write(`[dsh-browser host] userData setup failed: ${String(error)}\n`)
 }
@@ -411,6 +424,7 @@ function windowFor(windowId: string | undefined): HostWindow {
   // (measured: the setting was on and the window still popped up). The first presentation decides:
   // quiet shows it inactive, a normal call shows it normally.
   const w = new BrowserWindow({ width: 1400, height: 900, show: false, title: 'dsh-browser' })
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   w.on('closed', () => {
     const closing = windows.get(key)
     windows.delete(key)
@@ -710,9 +724,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
             }
             return { action: 'deny' }
           }
-          // Non-HTTP popups (OAuth redirects, mailto:, custom schemes):
-          // allow the native window so OAuth flows and deep links work.
-          return { action: 'allow' }
+          return { action: 'deny' }
         })
         // Attach the debugger BEFORE the view can be seen: an attach failure
         // then leaves nothing in the window (no visible ghost view).
@@ -1146,6 +1158,125 @@ function keepWindowsNonOccluding(): void {
 }
 keepWindowsNonOccluding()
 
+
+// ---------------------------------------------------------------------------
+// Human reference entries (design §3.1 / §11.3): ONE owner per page.
+// A typed preload gives the page a narrow intent channel; the page-side
+// overlay is low-trust and never receives activeTab/screenshot authority.
+// ---------------------------------------------------------------------------
+const REFERENCE_PRELOAD = `const { contextBridge, ipcRenderer } = require('electron')
+try {
+  contextBridge.exposeInMainWorld('__dshRef', {
+    intent: payload => ipcRenderer.send('dsh-reference-intent', payload),
+  })
+} catch (error) { /* another preload already owns this name */ }
+`
+const REFERENCE_PRELOAD_PATH = join(TOOLBAR_DIR, 'reference-preload.js')
+
+function isToolbarContents(contents: import('electron').WebContents): boolean {
+  try { return contents.getURL().endsWith('/toolbar.html') } catch { return false }
+}
+
+/** Find the session/window id whose view owns these webContents. */
+function windowIdForContents(contents: import('electron').WebContents): string | undefined {
+  for (const [key, win] of windows) {
+    for (const entry of win.views.values()) {
+      try {
+        if (entry.webContentsView.webContents === contents) return key
+      } catch { /* view was destroyed mid-iteration */ }
+    }
+  }
+  return undefined
+}
+
+/** Install the single merged context menu and the resident selection entry. */
+function attachReferenceEntry(contents: import('electron').WebContents): void {
+  if (isToolbarContents(contents)) return
+  contents.on('context-menu', (_event, params) => {
+    const windowId = windowIdForContents(contents)
+    if (windowId === undefined) return
+    // The browser's ordinary edit items are kept in the SAME menu, so no second
+    // adapter can pop another one over it (design §3.1:59). The real params
+    // decide which reference actions exist, and the target travels with the
+    // action so a collapsed selection cannot change what was clicked (§3.2/§3.3).
+    const hasSelection = typeof params.selectionText === 'string' && params.selectionText.trim() !== ''
+    const mediaType = typeof params.mediaType === 'string' ? params.mediaType : undefined
+    const template = referenceMenuTemplate({
+      hasSelection,
+      ...mediaType !== undefined ? { mediaType } : {},
+    }).map(item => {
+      if (item.kind === 'separator') return { type: 'separator' as const }
+      if (item.kind === 'role') {
+        if (item.role === undefined) return { type: 'separator' as const }
+        return { role: item.role, label: item.label }
+      }
+      const target = item.target === undefined ? undefined : {
+        kind: item.target,
+        ...item.target === 'image' && typeof params.srcURL === 'string' && params.srcURL !== ''
+          ? { srcUrl: params.srcURL } : {},
+        ...Number.isFinite(params.x) ? { x: params.x } : {},
+        ...Number.isFinite(params.y) ? { y: params.y } : {},
+      }
+      return {
+        id: item.id,
+        label: item.label,
+        click: () => sendUserAction({
+          type: 'capture-reference', windowId, entry: 'native-menu',
+          ...target !== undefined ? { target } : {},
+        }),
+      }
+    })
+    try { Menu.buildFromTemplate(template).popup() } catch (error) {
+      process.stderr.write(`[dsh-browser host] reference menu failed: ${String(error)}\n`)
+    }
+  })
+  contents.on('ipc-message', (_event, channel, ...args) => {
+    if (channel !== 'dsh-reference-intent') return
+    const intent = args[0] as Record<string, unknown> | undefined
+    if (intent === undefined || intent.type !== REFERENCE_INTENT_CHANNEL) return
+    // isTrusted is deliberately NOT read: a page overlay is a low-trust entry.
+    const windowId = windowIdForContents(contents)
+    if (windowId === undefined) return
+    // The page trims its own note; the host re-bounds it because a page is
+    // low-trust, and ignores anything that is not a string.
+    const rawComment = typeof intent.comment === 'string' ? intent.comment.trim() : ''
+    const comment = rawComment.slice(0, MAX_REFERENCE_COMMENT)
+    // The bar freezes the selection text before the comment field takes focus
+    // (focusing it collapses the page selection). Re-bound here: a page is
+    // low-trust, and this string becomes the locator when the live selection is
+    // already gone.
+    const rawSelection = typeof intent.selectionText === 'string' ? intent.selectionText : ''
+    const selectionText = rawSelection.trim().slice(0, MAX_REFERENCE_TEXT)
+    // The bar freezes the complete ordered capture before its comment field
+    // takes focus. Bound and shape-check it here: a page is low-trust.
+    const capture = validateFrozenCapture(intent.capture)
+    sendUserAction({
+      type: 'capture-reference', windowId, entry: 'page-overlay',
+      ...comment !== '' ? { comment } : {},
+      ...selectionText !== '' ? { selectionText } : {},
+      ...capture !== undefined ? { capture } : {},
+    })
+  })
+  contents.on('dom-ready', () => {
+    if (isToolbarContents(contents)) return
+    void contents.executeJavaScript(standaloneScript(overlayScript(), { label: hostMessages.zh.referenceLabel }))
+      .catch(() => { /* an extension-managed page owns its own entry */ })
+  })
+}
+
+app.on('web-contents-created', (_event, contents) => {
+  try { attachReferenceEntry(contents) } catch (error) {
+    process.stderr.write(`[dsh-browser host] reference entry failed: ${String(error)}\n`)
+  }
+})
+
+/** Remove the overlay on plugin shutdown; the disposer clears every listener. */
+export function disposeReferenceEntries(views: Iterable<import('electron').WebContents>): void {
+  for (const contents of views) {
+    try { void contents.executeJavaScript(standaloneScript(overlayDisposeScript())) } catch { /* gone */ }
+  }
+}
+
 /**
  * Electron entry: connect back to the parent's RPC server (port from
  * `--rpc-port`) and serve line-delimited JSON-RPC. `ELECTRON_RUN_AS_NODE` is
@@ -1153,6 +1284,20 @@ keepWindowsNonOccluding()
  * the app entry so `app` is available immediately.
  */
 void app.whenReady().then(() => {
+  // One narrow preload for every webContents in this session. It only exposes
+  // an intent sender; no file, command or CDP capability crosses the boundary.
+  try {
+    mkdirSync(TOOLBAR_DIR, { recursive: true })
+    writeFileSync(REFERENCE_PRELOAD_PATH, REFERENCE_PRELOAD)
+    // APPEND, never replace: another part of the shell may already own a
+    // preload, and `setPreloads` takes the whole list.
+    const existing = session.defaultSession.getPreloads()
+    if (!existing.includes(REFERENCE_PRELOAD_PATH)) {
+      session.defaultSession.setPreloads([...existing, REFERENCE_PRELOAD_PATH])
+    }
+  } catch (error) {
+    process.stderr.write(`[dsh-browser host] reference preload unavailable: ${String(error)}\n`)
+  }
   const portArg = process.argv.indexOf('--rpc-port')
   const port = portArg >= 0 ? Number(process.argv[portArg + 1]) : NaN
   if (!Number.isFinite(port)) {
@@ -1160,7 +1305,7 @@ void app.whenReady().then(() => {
     app.exit(1)
     return
   }
-  const socket = createConnection({ host: '127.0.0.1', port })
+  const socket = createConnection({ host: LOOPBACK_IPV4, port })
   rpcSocket = socket
   socket.setEncoding('utf8')
   // Prove we know the parent's spawn token before anything else; the parent

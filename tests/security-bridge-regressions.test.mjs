@@ -7,6 +7,10 @@ import { pathToFileURL } from 'node:url'
 import { EventEmitter, once } from 'node:events'
 import { connect } from 'node:net'
 import { spawnSync } from 'node:child_process'
+import { browserSessionHandle, sessionWireId, tabWireId } from '../lib/browser/handles.js'
+const scope = browserSessionHandle('session-a', 'browser:security')
+const session = sessionWireId(scope)
+const wire = tab => tabWireId({ ...scope, tab })
 
 const directory = mkdtempSync(join(tmpdir(), 'bridge-regressions-'))
 const source = readFileSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url), 'utf8')
@@ -14,8 +18,10 @@ const stubbed = source.replace(/import \{([^}]+)\} from ['"]electron['"]/, 'cons
 const contents = []
 const closed = []
 globalThis.__electronStub__ = { app: new EventEmitter(), webContents: { getAllWebContents: () => contents, fromId: id => contents.find(c => c.id === id) } }
-writeFileSync(join(directory, 'bridge.mjs'), stubbed + '\nexport { handle, claims };\n')
-const { handle, claims, start, stop } = await import(pathToFileURL(join(directory, 'bridge.mjs')))
+writeFileSync(join(directory, 'bridge.mjs'), stubbed + '\nexport { handle, handles };\n')
+writeFileSync(join(directory, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-bridge/guest-proxy.mjs', import.meta.url)))
+writeFileSync(join(directory, 'native-guests.mjs'), readFileSync(new URL('../desktop-bridge/native-guests.mjs', import.meta.url)))
+const { handle, handles, start, stop } = await import(pathToFileURL(join(directory, 'bridge.mjs')))
 const guest = id => ({ id, getType: () => 'webview', getURL: () => `https://page${id}.example/`, getTitle: () => 'identical title', isDestroyed: () => closed.includes(id), debugger: { isAttached: () => true, sendCommand: async () => ({}) } })
 const shell = { id: 1, getType: () => 'window', getURL: () => 'dsh-app://app/', getTitle: () => 'DSH', isDestroyed: () => false,
   executeJavaScript: async expression => {
@@ -79,22 +85,23 @@ test('authentication and a larger first command may arrive in the same TCP chunk
   }
 })
 
-test('list claims only the requested panel guests, including that panel popups', async () => {
-  claims.clear(); closed.length = 0
+test('list handles only the requested panel guests, including that panel popups', async () => {
+  handles.clear(); closed.length = 0
   contents.splice(0, contents.length, shell, guest(2), guest(3), guest(4))
-  const answer = await handle({ op: 'list', owner: 'session-a' })
-  assert.deepEqual(answer.sidebar.map(g => g.id), [2, 3])
-  assert.equal(claims.get(3), 'session-a')
-  assert.equal(claims.has(4), false)
+  const answer = await handle({ op: 'list', handle: session })
+  assert.deepEqual(answer.sidebar.map(g => g.url), ['https://page2.example/', 'https://page3.example/'])
+  assert.ok(answer.sidebar.every(page => handles.get(page.id).owner === 'session-a'))
+  assert.ok([...handles.values()].every(entry => entry.guest.id !== 4))
 })
 
 test('closePage uses guest identity within its panel even for duplicate titles', async () => {
-  claims.clear(); closed.length = 0
+  handles.clear(); closed.length = 0
   contents.splice(0, contents.length, shell, guest(2), guest(3), guest(4))
-  const answer = await handle({ op: 'closePage', id: 3, owner: 'session-a' })
+  const pages = await handle({ op: 'list', handle: session })
+  const answer = await handle({ op: 'closePage', handle: pages.sidebar.find(page => page.url === 'https://page3.example/').id })
   assert.equal(answer.closed, 1)
   assert.deepEqual(closed, [3])
-  await assert.rejects(handle({ op: 'closePage', id: 4, owner: 'session-a' }), /belong|panel/)
+  await assert.rejects(handle({ op: 'closePage', handle: wire('foreign') }), /stale/)
 })
 
 test('a missing client identity API is refused rather than exposing every unclaimed guest', async () => {
@@ -102,8 +109,8 @@ test('a missing client identity API is refused rather than exposing every unclai
   contents.splice(0, contents.length, shell, guest(2), guest(4))
   shell.executeJavaScript = async () => { throw new Error('identity API unavailable; refresh or upgrade the browser plugin client') }
   try {
-    await assert.rejects(handle({ op: 'list', owner: 'session-a' }), /refresh or upgrade/)
-    await assert.rejects(handle({ op: 'closePage', id: 4, owner: 'session-a' }), /refresh or upgrade/)
+    await assert.rejects(handle({ op: 'list', handle: session }), /refresh or upgrade/)
+    await assert.rejects(handle({ op: 'closePage', handle: wire('foreign') }), error => error.code === 'BROWSER_HANDLE_STALE')
   } finally { shell.executeJavaScript = evaluate }
 })
 

@@ -1,3 +1,4 @@
+import { RUNTIME_STATUS_ROUTE, RUNTIME_PROVISION_ROUTE } from '../../assets/browser-policy.mjs'
 /**
  * The readiness endpoints the settings panel reads.
  *
@@ -10,13 +11,13 @@
  * @module dsh-browser/browser-electron/runtime-route
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { ProvisionSnapshot } from './electron-provision.js'
-import { replyJson } from './json-reply.js'
-import { sameOrigin } from './settings-route.js'
-import type { RuntimeStatusReport } from './runtime-status.js'
+import type { ProvisionSnapshot } from './electron-provision.ts'
+import { replyJson } from './json-reply.ts'
+import { sameOrigin } from './settings-route.ts'
+import type { RuntimeStatusReport } from './runtime-status.ts'
 
 /** Where the panel reads readiness. */
-export const RUNTIME_STATUS_ROUTE = '/dsh-builtin-browser/runtime-status'
+export { RUNTIME_STATUS_ROUTE }
 
 /**
  * Where the panel asks for the bundled runtime.
@@ -26,12 +27,12 @@ export const RUNTIME_STATUS_ROUTE = '/dsh-builtin-browser/runtime-status'
  * would time out in the browser long before a slow network finished, and would hold a connection
  * open for something the panel can poll instead.
  */
-export const RUNTIME_PROVISION_ROUTE = '/dsh-builtin-browser/runtime-provision'
+export { RUNTIME_PROVISION_ROUTE }
 
 /** What both handlers need. */
 export interface RuntimeRouteDeps {
   /** The current report; a cheap read, never a spawn. */
-  readonly report: () => RuntimeStatusReport
+  readonly report: () => RuntimeStatusReport | Promise<RuntimeStatusReport>
   /**
    * Start (or join) a provision and return the state it is in now.
    *
@@ -60,7 +61,7 @@ export async function handleRuntimeStatus(
     replyJson(response, 403, { error: 'not-same-origin' })
     return
   }
-  replyJson(response, 200, { ok: true, runtime: deps.report() })
+  replyJson(response, 200, { ok: true, runtime: await deps.report() })
 }
 
 /**
@@ -95,10 +96,10 @@ export async function handleRuntimeProvision(
     // an answer it can render, rather than a dropped connection it cannot tell from a hang.
     replyJson(response, 200, {
       ok: true,
-      runtime: deps.report(),
+      runtime: await deps.report(),
       provisionError: String(error),
     })
     return
   }
-  replyJson(response, 200, { ok: true, runtime: deps.report(), provision: snapshot })
+  replyJson(response, 200, { ok: true, runtime: await deps.report(), provision: snapshot })
 }

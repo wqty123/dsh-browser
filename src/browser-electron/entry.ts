@@ -1,59 +1,145 @@
+import { referenceCaptureMessages, referenceCaptureErrors } from '../../assets/browser-messages.mjs'
+import { BROWSER_PROFILE_DIR, SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../assets/browser-policy.mjs'
 /**
  * Electron browser provider plugin entry: registers the Electron-backed
  * `BrowserProvider` with `ctx.browser`. The provider needs a view host (real
  * Electron `WebContentsView` objects). When a desktop shell supplies
  * `ctx.electronViewHost`, that host is used (embedded, human-machine shared
- * view). Otherwise the plugin self-hosts: it spawns its own Electron child
- * (`host-main.js`) and drives it over a local TCP JSON-RPC socket, so
- * installing the plugin is enough for `dsh_browser_*` tools to work on any
- * surface.
+ * view). Otherwise it requires a reconnectable sidebar carrier. Only explicitly
+ * selected Chrome or Edge may launch an external browser.
  * @module dsh-browser/browser-electron
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { fileURLToPath } from 'node:url'
+import { statSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
-import type { BrowserRuntime } from '../browser/runtime.js'
-import { ElectronBrowserProvider } from './provider.js'
-import { provisionElectronInBackground, provisionSnapshot, hasElectronRuntime } from './electron-provision.js'
-import type { ElectronBrowserViewHost } from './provider.js'
-import type { CarrierLossReason } from '../browser/types.js'
+import type { BrowserRuntime } from '../browser/runtime.ts'
+import { ElectronBrowserProvider } from './provider.ts'
+import { provisionElectronInBackground, provisionSnapshot, hasElectronRuntime } from './electron-provision.ts'
+import type { ElectronBrowserViewHost } from './provider.ts'
+import type { CarrierLossReason } from '../browser/types.ts'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, renameSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { dshHome } from './paths.js'
+import { dshHome } from './paths.ts'
 import { setTimeout as wait } from 'node:timers/promises'
-import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.js'
-import { DesktopBridgeViewHost } from './desktop-bridge-host.js'
-import { SidebarOnlyHost } from './sidebar-only-host.js'
-import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.js'
-import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralProfiles } from './ephemeral-profile.js'
-import { MissingSystemBrowserHost } from './missing-system-browser.js'
-import { SettingsStore, settingsPath } from './settings-store.js'
-import { sameOrigin } from './settings-route.js'
-import { authenticatedRoute, isDirectLoopback, type BrowserConnection, type BrowserHttpHandler } from './authenticated-route.js'
-import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.js'
-import { findDesktopInstall, readBridgeStatus } from './bridge-status.js'
-import { readBridgeEndpoint } from './bridge-endpoint.js'
-import { runBridgeAction } from './bridge-install.js'
-import { prepareBridgeMaintenance } from './bridge-maintenance.js'
-import { commitAutomaticMaintenance, readAutomaticMaintenance, startAutomaticMaintenance } from './automatic-maintenance.js'
-import { AUTOMATIC_MAINTENANCE_ROUTE, createAutomaticMaintenanceHandler } from './maintenance-route.js'
-import { runWithManualBridgePreference } from './bridge-auto.js'
-import { replyJson, writeJsonText } from './json-reply.js'
-import { readJsonBody, readTextBody } from './http-body.js'
-import { readRuntimeStatus } from './runtime-status.js'
-import { handleRuntimeProvision, handleRuntimeStatus, RUNTIME_PROVISION_ROUTE, RUNTIME_STATUS_ROUTE } from './runtime-route.js'
+import { DesktopBridgeViewHost } from './desktop-bridge-host.ts'
+import { SidebarOnlyHost } from './sidebar-only-host.ts'
+import { ExtensionBrowserViewHost, extensionInstallHelp } from './extension-browser.ts'
+import { PreferredBrowserViewHost } from './preferred-browser.ts'
+import { nativeRegistration, installExtension, registrationStatus, probeExtension } from './extension-setup.ts'
+import { registerCarrierTakeover } from '../browser/takeover-target.ts'
+import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.ts'
+import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralProfiles } from './ephemeral-profile.ts'
+import { MissingSystemBrowserHost } from './missing-system-browser.ts'
+import { SettingsStore, settingsPath } from './settings-store.ts'
+import { sameOrigin } from './settings-route.ts'
+import { authenticatedRoute, pairedRoute, isDirectLoopback, type BrowserConnection, type BrowserPairingConnection, type BrowserHttpHandler } from './authenticated-route.ts'
+import { overlayScript } from '../browser-reference/entry.ts'
+import { getLastOpen } from './open-slot.ts'
+import { GUEST_ROUTE, handleGuest } from './guest-route.ts'
+import { resolveSessionHandle, sessionWireId } from '../browser/handles.ts'
+import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.ts'
+import { findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
+import { readHostExtensionStatus } from './profile-extension.ts'
+import { readBridgeEndpoint } from './bridge-endpoint.ts'
+import { runBridgeAction } from './bridge-install.ts'
+import { enableElectronPackageRemoval } from './package-removal.ts'
+import { prepareBridgeMaintenance } from './bridge-maintenance.ts'
+import { automaticMaintenanceSupported, commitAutomaticMaintenance, readAutomaticMaintenance, startAutomaticMaintenance } from './automatic-maintenance.ts'
+import { AUTOMATIC_MAINTENANCE_ROUTE, createAutomaticMaintenanceHandler } from './maintenance-route.ts'
+import { HOST_PATCH_ROUTE, createHostPatchMaintenance, servedClientModules } from './host-patch-maintenance.ts'
+import { runWithManualBridgePreference } from './bridge-auto.ts'
+import { replyJson, writeJsonText } from './json-reply.ts'
+import { readJsonBody, readTextBody } from './http-body.ts'
+import { readRuntimeStatus } from './runtime-status.ts'
+import { handleRuntimeProvision, handleRuntimeStatus, RUNTIME_PROVISION_ROUTE, RUNTIME_STATUS_ROUTE } from './runtime-route.ts'
+import { createShortcutRouteHandlers, SHORTCUT_ADD_ROUTE, SHORTCUT_REMOVE_ROUTE, SHORTCUTS_ROUTE } from './shortcuts-route.ts'
+import { createShortcutStore, type ShortcutSettings } from './startpage-shortcuts.ts'
+import { createReferenceService, setReferenceCaptureActionHandler } from '../browser-reference/service.ts'
+import { WEB_SOURCE_ROUTE } from '../reference-source.ts'
+import { createDeliveryQueue, resolveReferenceOwner, type DeliveryQueue } from '../browser-reference/delivery.ts'
+import { createSubmissionReceipts, type ReceiptSession } from '../browser-reference/submission-receipts.ts'
+import type { BrowserReference, BrowserReferenceCarrier } from '../browser-reference/types.ts'
+import {
+  createReferenceRouteHandlers,
+  REFERENCE_CAPTURE_ROUTE,
+  REFERENCE_EXPORT_ROUTE,
+  REFERENCE_GET_ROUTE,
+  REFERENCE_IMPORT_ROUTE,
+  REFERENCE_INSERT_ROUTE,
+  REFERENCE_LIST_ROUTE,
+  REFERENCE_REVEAL_ROUTE,
+  REFERENCE_DELIVERIES_ROUTE,
+  REFERENCE_DELIVERY_ACK_ROUTE,
+  REFERENCE_DELIVERY_REMOVE_ROUTE,
+  REFERENCE_ASSET_ROUTE,
+  CLIENT_VERSION_ROUTE,
+  REFERENCE_STATUS_ROUTE,
+} from './reference-route.ts'
+
+function isPreferredCarrier(host: ElectronBrowserViewHost | undefined): host is ExtensionBrowserViewHost | PreferredBrowserViewHost {
+  return host instanceof ExtensionBrowserViewHost || host instanceof PreferredBrowserViewHost
+}
+
+/**
+ * The reference bar as a <script> element, for documents served through the Web guest proxy.
+ *
+ * The desktop shell evaluates the same source with `executeJavaScript`; a proxied document has no such
+ * handle, so it is injected inline. A literal `</script` inside the source would close the element, so
+ * it is escaped on the way in.
+ * @returns the inline script element.
+ */
+function overlayTag(): string {
+  const source = overlayScript().replace(/<\/script/giu, '<\\/script')
+  return `<script data-dsh-ref-overlay-src="guest">(function(){\n${source}\n})()</script>`
+}
+
+
+/** Where the Web sidebar asks "what was just opened?". */
+
+/**
+ * The surface this host would use for an open, echoed to the client.
+ *
+ * The client must not place a tab when the host is in "builtin" mode, or when it is an older build that
+ * always opens its own browser: that combination is the double-open.
+ * @returns "panel" or "builtin".
+ */
+function readSurfaceForRoute(): 'panel' | 'builtin' {
+  try {
+    // `process.getBuiltinModule` avoids adding imports to this file, whose header order is load-bearing
+    // for the plugin's own module graph.
+    const fs = (process as unknown as { getBuiltinModule?: (id: string) => { readFileSync: (p: string, e: string) => string } }).getBuiltinModule?.('fs')
+    if (fs === undefined) return 'panel'
+    const parsed = JSON.parse(fs.readFileSync(settingsPath(), 'utf8')) as { browser?: { surface?: unknown } }
+    return parsed.browser?.surface === 'builtin' ? 'builtin' : 'panel'
+  } catch { return 'panel' }
+}
+
+
+export const OPEN_REQUEST_ROUTE = '/dsh-builtin-browser/browser/open-request'
+/** open 记录的有效期：超过就不再重放。这是一次即时事件，客户端 2 秒轮询一次，10 秒足够送达；
+ *  留得越久，「关掉侧栏后刷新又被拉起来」的窗口越大（实测复现过）。 */
+const OPEN_REQUEST_TTL_MS = 10_000
+/** The client declares which surface it can host, so the host needs no file sniffing. */
+export const SURFACE_DECL_ROUTE = '/dsh-builtin-browser/browser/declare-surface'
 
 export {
   ELECTRON_BROWSER_PROVIDER_ID,
   ElectronBrowserProvider,
-} from './provider.js'
-export type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
-export { RemoteElectronViewHost, defaultHostMainPath } from './remote-host.js'
+} from './provider.ts'
+export type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
+
+function carrierSettingsKey(settings: ReturnType<SettingsStore['get']>): string {
+  return JSON.stringify([settings.browser.channel, settings.browser.systemProfile, settings.browser.headless,
+    settings.browser.systemProfile === 'plugin' ? settings.cookies.persist : undefined])
+}
+
 export const name = 'browser-electron'
 
 /** The browser seam this provider registers into. */
@@ -61,7 +147,7 @@ export const inject = ['browser']
 
 /** Plugin config: an optional externally-supplied view host. */
 export interface Config {
-  /** View host supplied by a desktop shell; absent -> self-host. */
+  /** View host supplied by a desktop shell; absent -> discover the sidebar. */
   readonly viewHost?: ElectronBrowserViewHost
   /** Allow navigation only to HTTP(S) URLs. Default true. */
   readonly httpOnly?: boolean
@@ -115,6 +201,7 @@ function readSessionId(ctx: unknown): string | undefined {
 
 /** Register the Electron browser provider with `ctx.browser`. */
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
+  enableElectronPackageRemoval()
   // Which session is this process serving?
   //
   // The desktop shell keeps ONE sidebar per conversation — measured: two `[class*=_tabStrip]`
@@ -135,7 +222,26 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // replaced by the default — "my setting did nothing" and "I misspelled it" must not look alike.
   const settings = new SettingsStore(undefined, message => ctx.logger?.warn?.(message))
 
+  /**
+   * The provider currently serving `ctx.browser`, kept for diagnostics only.
+   *
+   * `referenceStatus` answers "why is there no selection bar on this page" with the
+   * conversation id this process believes it serves and what its last sidebar scan
+   * saw. A stale entry after a carrier swap is harmless: the status route only reads.
+   */
+  let referenceProvider: ElectronBrowserProvider | undefined
+  const trackProvider = (provider: ElectronBrowserProvider): ElectronBrowserProvider => {
+    // A carrier swap builds a NEW provider; the previous one's pump would keep
+    // ticking against a view host that no longer serves anything, and its user
+    // action listeners would duplicate every capture. Retire it completely.
+    if (referenceProvider !== undefined && referenceProvider !== provider) referenceProvider.dispose()
+    referenceProvider = provider
+    return provider
+  }
   const providerConfig = {
+    // The conversation this process serves: the sidebar reference entry finds its
+    // page through this id (see `adoptSidebarPageForReference`).
+    referenceLabel: () => readSessionId(ctx),
     httpOnly: config.httpOnly,
     downloadDir: config.downloadDir,
     snapshotMaxElements: config.snapshotMaxElements,
@@ -143,105 +249,117 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     settings: () => settings.get(),
   }
 
-  // A host supplied by the composition (the desktop shell's own seam) wins and is
-  // synchronous, so registration stays synchronous on that path.
-  if (config.viewHost !== undefined) {
-    const external = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(config.viewHost as ElectronBrowserViewHost, providerConfig))
-    ctx.effect(() => () => { external() })
-    // The composition supplied the carrier, so `browser.channel` is not ours to honour on this
-    // surface. Saying so is the difference between a setting that cannot apply and a setting that
-    // appears not to have worked — the second is what sends people looking for a bug elsewhere.
-    const asked = settings.get().browser.channel
-    if (asked !== 'sidebar' && asked !== 'bundled') {
-      ctx.logger?.warn?.(
-        `dsh-builtin-browser: browser.channel is "${asked}", but this surface's carrier was `
-        + 'supplied by its composition (the desktop shell), which outranks the setting. Set it to '
-        + '"sidebar" to record the intent, or run on a surface that picks its own carrier.',
-      )
-    }
-    return
+  let panelOpening: Promise<{ host: DesktopBridgeViewHost; provider: ElectronBrowserProvider } | undefined> | undefined
+  let panelsDisposed = false
+  const retirePanel = (panel: { host: DesktopBridgeViewHost; provider: ElectronBrowserProvider }, lost = false): void => {
+    panel.provider.dispose()
+    void Promise.allSettled(panel.provider.watchableSessions().map(id => panel.provider.close(id)))
+      .finally(() => {
+        if (lost) setImmediate(() => { panel.host.dispose() })
+        else panel.host.dispose()
+      })
   }
-
-  // Explicit sidebar selection stays on the desktop's carrier, including while its bridge
-  // reconnects. Other choices can use the independently hosted browser when appropriate.
-  const selfHosted = new RemoteElectronViewHost(defaultHostMainPath())
-  // The self-hosted carrier is the only one that needs Electron, and it is prepared HERE, lazily,
-  // rather than during package installation (issue #41: a `postinstall` download made a default
-  // pnpm 11 profile refuse the install outright, and a failed fetch failed the install too).
-  //
-  // Non-fatal by construction: this never rejects, never blocks a tool call, and its failure leaves
-  // the sidebar / Chrome / Edge carriers untouched. Only the two channels that can use the bundled
-  // runtime are worth the download; an explicit chrome/edge choice is not.
-  const wantedChannel = settings.get().browser.channel
-  if (wantedChannel === 'bundled' || wantedChannel === 'auto') {
-    void provisionElectronInBackground(message => ctx.logger?.info?.(`dsh-builtin-browser: ${message}`))
-  }
-  const requiredSidebar = (): SidebarOnlyHost => new SidebarOnlyHost(async () => {
-    for (const pause of [0, 1_000, 3_000, 8_000]) {
-      if (pause > 0) await wait(pause)
-      const sidebar = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
-      if (sidebar !== undefined) return sidebar
-      if (DesktopBridgeViewHost.refusedIframePanel()) break
+  const unregisterPanel = ctx.browser.registerPanelProvider(async () => {
+    const selected = settings.get().browser
+    if ((selected.channel === 'edge' || selected.channel === 'chrome') && selected.systemProfile === 'user') {
+      if (!isPreferredCarrier(adoptedCarrier) || !referenceProvider) throw new Error('Selected personal-browser carrier is unavailable; no sidebar fallback.')
+      return referenceProvider
     }
-    throw new Error('dsh-builtin-browser: the selected DSH sidebar is not connected. Check or repair the desktop bridge in Browser settings, then retry the same operation.')
+    if (panelOpening === undefined) {
+      const opening = (async () => {
+        const host = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
+        if (host === undefined) return undefined
+        if (panelsDisposed) { host.dispose(); return undefined }
+        const provider = new ElectronBrowserProvider(host, providerConfig)
+        const panel = { host, provider }
+        host.onLost(() => {
+          if (panelOpening === opening) panelOpening = undefined
+          retirePanel(panel, true)
+        })
+        return panel
+      })()
+      panelOpening = opening
+    }
+    try {
+      const panel = await panelOpening
+      if (panel === undefined) panelOpening = undefined
+      return panel?.provider
+    } catch (error) {
+      panelOpening = undefined
+      throw error
+    }
   })
-  const initialHost = wantedChannel === 'sidebar' ? requiredSidebar() : selfHosted
-  let unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(initialHost, providerConfig))
+  ctx.effect(() => () => {
+    panelsDisposed = true
+    unregisterPanel()
+    void panelOpening?.then(panel => {
+      if (panel === undefined) return
+      retirePanel(panel)
+    }).catch(() => {})
+  })
+
+  const reportCarrierLoss = (reason: CarrierLossReason): void => {
+    const detail = reason === 'shell-exited'
+      ? 'the desktop shell backed the sidebar browser and has exited'
+      : 'the desktop shell is running, but its sidebar browser panel cannot be driven'
+    ctx.logger?.warn?.(`dsh-builtin-browser: ${detail} (${reason}); the next operation requires the DSH sidebar. No standalone fallback will be opened.`)
+  }
+  const requiredSidebar = (): SidebarOnlyHost => {
+    const host = new SidebarOnlyHost(async signal => {
+      for (const pause of [0, 1_000, 3_000, 8_000]) {
+        signal.throwIfAborted()
+        if (pause > 0) await wait(pause, undefined, { signal })
+        const sidebar = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
+        if (sidebar !== undefined) return sidebar
+        if (DesktopBridgeViewHost.refusedIframePanel()) break
+      }
+      const detail = DesktopBridgeViewHost.refusedIframePanel()
+        ? 'the DSH sidebar is an iframe and cannot support CDP tools'
+        : 'no controllable DSH sidebar is available'
+      throw Object.assign(new Error(`dsh-builtin-browser: ${detail}. Use a host-provided sidebar/webview carrier or install the DSH native-view host patch, then retry. The Web panel supports manual browsing, not CDP tools. No standalone browser will be opened.`), { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' })
+    })
+    host.onLost(reportCarrierLoss)
+    return host
+  }
+  const initialHost = requiredSidebar()
+  let unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(initialHost, providerConfig)))
   let disposed = false
   let carrierChoice = 0
-  let discovery: AbortController | undefined
   /** The carrier an `adopt` installed, so a later choice can release it. */
-  let adoptedCarrier: ElectronBrowserViewHost | undefined = initialHost === selfHosted ? undefined : initialHost
+  let adoptedCarrier: ElectronBrowserViewHost | undefined = initialHost
+  let unregisterTakeover = (): void => {}
 
   ctx.effect(() => () => {
     disposed = true
+    unregisterTakeover()
     carrierChoice += 1
-    discovery?.abort()
     unregister()
-    adoptedCarrier?.dispose?.()
-    selfHosted.dispose()
+    // The reference pump is a real interval, not a one-shot: `unref` alone lets
+    // the process exit but leaves the tick running inside a live plugin, so it
+    // must stop with the provider it belongs to. Retiring also silences its
+    // user-action listeners, which the view host never unsubscribes.
+    referenceProvider?.dispose()
+    if (adoptedCarrier !== config.viewHost) adoptedCarrier?.dispose?.()
   })
 
   /**
-   * Put the self-hosted browser back after an adopted carrier reports that it is gone.
-   *
-   * This is the half the startup retries never covered: a bridge that was alive at apply time and
-   * exited later left every subsequent call dialling a port nobody owns, because the swap happened
-   * once and only in one direction. Reaching here means the carrier cannot serve anything more, so
-   * the choice made at startup is no longer a choice — the alternative to falling back is a browser
-   * surface that does nothing until DSH is restarted.
-   *
-   * Two failures arrive here and the message must distinguish them. The first draft announced an
-   * exiting shell unconditionally, so a fallback caused by an undrivable sidebar panel told the
-   * user their desktop shell had exited while it was running normally.
+   * Require the sidebar after a borrowed carrier is lost; never launch a fallback window.
    * @param adopted - the carrier that reported the loss, disposed once its replacement is in place.
    * @param reason - which failure this was; see {@link CarrierLossReason}.
    */
-  const restoreSelfHosted = (adopted: ElectronBrowserViewHost, reason: CarrierLossReason): void => {
+  const restoreSidebar = (adopted: ElectronBrowserViewHost, reason: CarrierLossReason): void => {
     // A replaced carrier may finish an outstanding request after the new choice is installed.
     if (disposed || adoptedCarrier !== adopted) return
     try {
-      const sidebarSelected = settings.get().browser.channel === 'sidebar'
-      const restored = sidebarSelected ? requiredSidebar() : new RemoteElectronViewHost(defaultHostMainPath())
+      const restored = requiredSidebar()
       unregister()
-      unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(restored, providerConfig))
+      unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(restored, providerConfig)))
       adoptedCarrier = restored
-      ctx.logger?.warn?.(
-        sidebarSelected
-          ? 'dsh-builtin-browser: the selected DSH sidebar connection was lost; the next operation will reconnect to the sidebar.'
-          : reason === 'shell-exited'
-          ? 'dsh-builtin-browser: the desktop shell backed the sidebar browser and has exited, so the '
-            + 'browser this plugin hosts itself takes over. Pages from the sidebar are gone with it; '
-            + 'open the page again.'
-          : 'dsh-builtin-browser: this desktop shell renders the sidebar browser panel in a way that '
-            + 'cannot be driven (no webContents, so no CDP endpoint), so the browser this plugin hosts '
-            + 'itself takes over. The shell is still running and nothing else is affected; the page '
-            + 'opens in this plugin\'s own window. Set browser.channel to another value to silence this.',
-      )
+      reportCarrierLoss(reason)
     } catch (error) {
       // Nothing better is available: the adopted carrier is gone and a provider that throws is
       // worse than one that explains.
-      ctx.logger?.warn?.(`dsh-builtin-browser: could not fall back to the self-hosted browser: ${String(error)}`)
+      ctx.logger?.warn?.(`dsh-builtin-browser: could not restore the sidebar carrier: ${String(error)}`)
     } finally {
       // Disposed on a LATER turn of the event loop, deliberately.
       //
@@ -277,16 +395,23 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     const previous = adoptedCarrier
     try {
       unregister()
-      unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, providerConfig))
-      selfHosted.dispose()
+      unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(host, providerConfig)))
       adoptedCarrier = host
+      unregisterTakeover()
+      if (isPreferredCarrier(host)) {
+        const provider = referenceProvider!
+        unregisterTakeover = registerCarrierTakeover(ctx.browser, owner => provider.takeoverTargets(owner).map(target => ({
+          ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
+        })))
+        void host.refreshStatus()
+      }
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
       // A borrowed carrier can lose the process behind it, and this is the only notification that
       // will ever arrive. Registering AFTER the swap succeeded means a listener can never fire
       // against a provider that was never installed.
-      if (!(host instanceof SidebarOnlyHost)) host.onLost?.(reason => { restoreSelfHosted(host, reason) })
+      if (!(host instanceof SidebarOnlyHost)) host.onLost?.(reason => { restoreSidebar(host, reason) })
       // Released AFTER the replacement is installed, so the surface is never without a provider.
-      if (previous !== undefined && previous !== host) {
+      if (previous !== undefined && previous !== host && previous !== config.viewHost) {
         try { previous.dispose?.() } catch { /* the replacement is already serving */ }
       }
     } catch (error) {
@@ -295,6 +420,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // process, and dropping it on the floor is how a failed upgrade becomes a leak that only
       // shows up as a stray Electron in the task manager.
       try { host.dispose?.() } catch { /* the fallback below matters more than this */ }
+      if (isPreferredCarrier(host)) {
+        ctx.logger?.warn?.(`dsh-builtin-browser: could not adopt the selected personal-browser extension (${String(error)}); no profile fallback`)
+        return
+      }
       // The fallback registration gets its own guard, because THIS is the path taken when the
       // context is already gone — and then `ctx.browser` throws `cannot get required service
       // "browser" in inactive context`. Unguarded, that second throw escaped the async retry
@@ -302,8 +431,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // exit code 1: a failed upgrade, which should only ever cost a warning, took the whole
       // session down instead. Observed 2026-10-05 (crash-…-host.log, phase: running).
       try {
-        const fallback = settings.get().browser.channel === 'sidebar' ? requiredSidebar() : new RemoteElectronViewHost(defaultHostMainPath())
-        unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(fallback, providerConfig))
+        const fallback = requiredSidebar()
+        unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(fallback, providerConfig)))
         adoptedCarrier = fallback
         if (previous !== undefined && previous !== host) {
           try { previous.dispose?.() } catch { /* fallback is already serving */ }
@@ -327,13 +456,11 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * nothing. Re-entrant by design — changing the channel means replacing the carrier, which is
    * exactly what a second call does.
    */
+  let chosenSettingsKey = ''
   const chooseCarrier = (): void => {
   if (disposed) return
+  chosenSettingsKey = carrierSettingsKey(settings.get())
   const choice = ++carrierChoice
-  discovery?.abort()
-  const controller = new AbortController()
-  discovery = controller
-  const { signal } = controller
   // A browser the user explicitly asked for outranks every automatic choice: the
   // whole point of the setting is that they know which browser they want. It is
   // launched with a plugin-owned profile, so their own windows are untouched.
@@ -348,27 +475,17 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // that choice real — otherwise a user who picked Chrome would silently get the sidebar,
   // and a user who picked a browser that is not installed would never see the explanation
   // written for exactly that case, because the sidebar would quietly replace it.
-  const explicitChoice: boolean = channel !== 'bundled' && channel !== 'auto' && channel !== 'sidebar'
-  if (channel === 'sidebar') {
-    if (!(adoptedCarrier instanceof SidebarOnlyHost)) adopt(requiredSidebar(), 'using only the selected DSH sidebar', choice)
+  if (channel !== 'chrome' && channel !== 'edge') {
+    if (config.viewHost !== undefined) {
+      if (adoptedCarrier !== config.viewHost) adopt(config.viewHost as ElectronBrowserViewHost, 'using the composition-provided sidebar carrier', choice)
+    } else if (!(adoptedCarrier instanceof SidebarOnlyHost)) adopt(requiredSidebar(), 'using only the selected DSH sidebar', choice)
     return
   }
-  if (channel !== 'bundled') {
     const detected = detectBrowser(channel)
     if (detected === undefined) {
-      // `auto` promises to take whatever is available, so falling back is what it
-      // asked for. Naming a browser is a specific request, and quietly satisfying it
-      // with a different one turns the real problem ("no Chrome here") into a
-      // confusing error about Electron later on. Report it instead.
-      if (channel === 'auto') {
-        ctx.logger?.warn?.('dsh-builtin-browser: no installed browser was found; using the bundled browser')
-        if (adoptedCarrier !== undefined) {
-          adopt(new RemoteElectronViewHost(defaultHostMainPath()), 'using the bundled browser', choice)
-        }
-      } else {
-        adopt(new MissingSystemBrowserHost(channel, searchSummary(channel)),
+        const missing = new MissingSystemBrowserHost(channel, searchSummary(channel))
+        adopt(settings.get().browser.systemProfile === 'user' ? new PreferredBrowserViewHost(channel, missing) : missing,
           `the selected ${channel} is not installed — commands will explain how to fix it`)
-      }
     } else {
       // Same profile root as settings-store, history-store and desktop-bridge-host: the
       // `?.dsh` component used to be missing HERE only, so a desktop launched from a
@@ -396,68 +513,17 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       }
       // The headless mode rides along so a display-less host (systemd, container, SSH-only server)
       // still gets a working browser instead of "exited immediately after launch" — issue #32.
-      adopt(new SystemBrowserViewHost(detected, profileDir, [], persist ? undefined : profileDir,
-        undefined, settings.get().browser.headless, () => settings.get().ui.quiet),
+      ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = 'launched-plugin-profile'
+      const managed = new SystemBrowserViewHost(detected, profileDir, [], !persist ? profileDir : undefined,
+        undefined, settings.get().browser.headless, () => settings.get().ui.quiet,
+        undefined, { managed: true })
+      adopt(settings.get().browser.systemProfile === 'user' ? new PreferredBrowserViewHost(channel, managed) : managed,
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
-  } else if (adoptedCarrier !== undefined) {
-    // The original self-hosted carrier was disposed by the first adoption. Switching back
-    // must install a new one, even when no sidebar is found during the discovery below.
-    adopt(new RemoteElectronViewHost(defaultHostMainPath()), 'using the bundled browser', choice)
-  }
-
-  // An explicit choice was already adopted above; discovering the sidebar here would
-  // replace it, which is exactly what this guard prevents.
-  //
-  // Explicit sidebar selection was handled above by its reconnectable sidebar-only host.
-  if (explicitChoice) return
-
-  // The shell may not be up yet. `dsh web` starts before — or entirely without — the desktop app
-  // that hosts the bridge, and a one-shot discovery meant a bridge that appeared a second later
-  // was never adopted for the rest of the process's life. Retry a handful of times over roughly
-  // half a minute, then stop: this is a convenience, not a promise, and the session the user is
-  // already driving in the self-hosted window is not worth replacing minutes into their work.
-  // Each attempt belongs to this choice. A later settings write or teardown cancels its waits,
-  // and an endpoint returned by an already-running discovery is disposed instead of installed.
-  void (async () => {
-    for (const delay of [0, 2_000, 5_000, 15_000]) {
-      if (delay > 0) {
-        try { await wait(delay, undefined, { signal }) } catch { return }
-      }
-      if (signal.aborted || disposed) return
-      let sidebar: Awaited<ReturnType<typeof DesktopBridgeViewHost.discover>>
-      try {
-        sidebar = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
-      } catch {
-        sidebar = undefined // discovery is documented not to throw; never let it stop the retries
-      }
-      if (signal.aborted || disposed) {
-        try { sidebar?.dispose?.() } catch { /* the choice no longer owns this result */ }
-        return
-      }
-      if (sidebar === undefined) continue
-      adopt(sidebar, 'driving the desktop sidebar browser', choice)
-      return
-    }
-    // A bridge exists but its sidebar panel is an iframe. Saying nothing here would leave the user
-    // with a second browser window on a machine where they just followed the instructions to
-    // install the bridge, and no way to know the two facts are related. The carrier is not
-    // unavailable by accident: an iframe has no CDP endpoint, so adopting it would fail every call
-    // instead of falling back — see DesktopBridgeViewHost.discover.
-    if (DesktopBridgeViewHost.refusedIframePanel()) {
-      ctx.logger?.warn?.(
-        'dsh-builtin-browser: a desktop bridge is installed, but this shell renders the sidebar '
-        + 'browser panel as an iframe rather than a webview, which exposes no CDP endpoint and '
-        + 'cannot be driven. Using the browser this plugin hosts itself instead — that is the '
-        + 'independent window, not the sidebar. A shell that exposes `dshDesktop.browser` and '
-        + 'enables `webviewTag` would provide a drivable panel.',
-      )
-      return
-    }
-  })()
   }
 
   chooseCarrier()
+  void nativeRegistration.ensure().catch(() => {})
 
   // Wired AFTER the chooser exists, because the handler re-runs it: a settings write that changes
   // `browser.channel` is a request to switch carriers, and answering `ok` without switching is the
@@ -484,13 +550,51 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: PREVIEW_ROUTE,
-          handler: authenticated(ctx, (request, response) => handlePreviewFrame(request, response, settings, browser)),
+          handler: paired(ctx, (request, response) => handlePreviewFrame(request, response, settings, browser)),
         }, 'dsh-builtin-browser: live view frame'))
-        // The list the panel needs before it can build a frame URL at all: session ids only.
+        // The Web sidebar's iframe has no handle into a cross-origin guest, so the guest is served
+  // through this prefix instead: same origin, readable, injectable. See guest-route.ts.
+  // The client is the authority on which surface exists in THIS shell: it either has a sidebar or not.
+  // Reading settings.json from the host was unreliable (a module instance can hold a stale home), and it
+  // needed a restart to take effect. A declaration rides recomposition instead.
+  host.effect(() => host.webServer.register({
+    kind: 'exact',
+    path: SURFACE_DECL_ROUTE,
+    handler: authenticated(ctx, (request, response) => {
+      readJsonBody(request).then((body) => {
+        const surface = body !== null && typeof body === 'object' && (body as { surface?: unknown }).surface
+        if (surface === 'panel' || surface === 'builtin') {
+          (globalThis as unknown as Record<string, unknown>).__dshBrowserSurface = surface
+        }
+        replyJson(response, 200, { ok: true })
+      }).catch(() => { replyJson(response, 200, { ok: false }) })
+    }),
+  }, 'dsh-builtin-browser: surface declaration'))
+  // One slot the Web sidebar polls: it cannot be told through a bridge, so it asks.
+  host.effect(() => host.webServer.register({
+    kind: 'exact',
+    path: OPEN_REQUEST_ROUTE,
+    handler: authenticated(ctx, (request, response) => {
+      // 这条记录**不能被第一个轮询到的客户端消费掉**：同一进程里可能有多个 DSH 窗口/标签页
+      // （人手一个、自动化又一个），先问的那个把记录清空后，另一个窗口就再也看不到这次 open，
+      // 表现成「工具说打开了、我这边没打开」。所以这里不清空，只按时间过期：
+      // 每个客户端各自用 sessionStorage 记住「这条处理过了」，既不重放，也不互相抢。
+      if ((request.method ?? 'GET').toUpperCase() === 'POST') {
+        request.resume()
+        request.on('end', () => { replyJson(response, 200, { ok: true, cleared: false }) })
+        return
+      }
+      const last = getLastOpen()
+      const fresh = last !== undefined && Date.now() - last.at <= OPEN_REQUEST_TTL_MS ? last : undefined
+      replyJson(response, 200, { ok: true, surface: readSurfaceForRoute(), open: isPreferredCarrier(adoptedCarrier) ? null : fresh ?? null })
+    }),
+  }, 'dsh-builtin-browser: open request slot'))
+  // guest 代理由根行注册（见 src/web-guest.ts）：web 上 Electron 行可能被关闭。
+  // The list the panel needs before it can build a frame URL at all: session ids only.
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: PREVIEW_SESSIONS_ROUTE,
-          handler: authenticated(ctx, (request, response) => handlePreviewSessions(request, response, settings, browser)),
+          handler: paired(ctx, (request, response) => handlePreviewSessions(request, response, settings, browser)),
         }, 'dsh-builtin-browser: live view sessions'))      })
     } catch {
       // No web server on this surface: watching is simply unavailable, and nothing else changes.
@@ -577,15 +681,25 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     if (typeof injectStatus !== 'function') return
     try {
       injectStatus(['webServer'], (host) => {
+        const hostPatchMaintenance = createHostPatchMaintenance({
+          modules: () => servedClientModules(ctx.get('clientModules')),
+          desktop: () => process.versions.electron !== undefined,
+        })
+        host.effect(() => host.webServer.register({
+          kind: 'exact', path: HOST_PATCH_ROUTE,
+          handler: authenticated(ctx, hostPatchMaintenance),
+        }, 'dsh-builtin-browser: Web host patch maintenance'))
         const automaticMaintenance = createAutomaticMaintenanceHandler({
-          supported: () => process.platform === 'win32',
+          supported: () => automaticMaintenanceSupported(),
+          // Windows quits through the Desktop's own menu, opened by the panel; macOS through its Quit Apple event.
+          quit: () => process.platform === 'win32' ? 'menu' : 'self',
           busy: () => bridgeActionRunning,
           read: () => readAutomaticMaintenance(),
           commit: async id => { await commitAutomaticMaintenance(id) },
           start: async (action, options) => {
             const root = findDesktopInstall()
             if (root === undefined) throw new Error('no verified DSH Desktop installation was found')
-            return await runWithManualBridgePreference(action, patch => settings.update(patch),
+            return await runWithManualBridgePreference('install', patch => settings.update(patch),
               async () => await startAutomaticMaintenance(action, root, options))
           },
         })
@@ -596,7 +710,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: BRIDGE_STATUS_ROUTE,
-          handler: authenticated(ctx, (request, response) => handleBridgeStatus(request, response)),
+          handler: authenticated(ctx, async (request, response) => handleBridgeStatus(request, response, undefined,
+            await readHostExtensionStatus(dshHome()))),
         }, 'dsh-builtin-browser: bridge status'))
         // The panel prepares a launcher without changing the running Desktop. Direct local
         // maintenance remains available once Desktop has exited.
@@ -636,20 +751,32 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }).inject
     if (typeof injectRuntime !== 'function') return
     const deps = {
-      report: () => readRuntimeStatus({
-        channel: () => settings.get().browser.channel,
-        selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
-          : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
-        hasBinary: hasElectronRuntime,
-        provision: provisionSnapshot,
-        bridge: () => {
-          const root = findDesktopInstall()
-          return root === undefined ? undefined : readBridgeStatus(root)
-        },
-        // Installed is not running: the install tree survives a reboot, the endpoint does not. Both
-        // readings are cheap and side-effect free — a file read and a signal-0 pid check.
-        endpoint: () => readBridgeEndpoint(),
-      }),
+      report: async () => {
+        const mainExtension = await readHostExtensionStatus(dshHome())
+        return readRuntimeStatus({
+          nativeHostRegistration: () => Object.fromEntries(registrationStatus),
+          channel: () => settings.get().browser.channel,
+          systemProfile: () => settings.get().browser.systemProfile,
+          extensionConnection: () => isPreferredCarrier(adoptedCarrier) ? {
+            ...adoptedCarrier.connectionStatus(), install: extensionInstallHelp(adoptedCarrier.browser), registration: registrationStatus.get(adoptedCarrier.browser),
+          } : undefined,
+          selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
+            : adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.activeCarrier()
+            : adoptedCarrier instanceof ExtensionBrowserViewHost ? 'extension' : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
+          fallbackReason: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallbackReason : undefined,
+          systemConnection: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallback.connectionStatus?.() : adoptedCarrier instanceof SystemBrowserViewHost ? adoptedCarrier.connectionStatus() : undefined,
+          hasBinary: hasElectronRuntime,
+          provision: provisionSnapshot,
+          bridgeError: () => DesktopBridgeViewHost.compatibilityError(),
+          bridge: () => {
+            const root = findDesktopInstall()
+            return root === undefined ? undefined : readBridgeStatus(root, mainExtension)
+          },
+          // Installed is not running: the install tree survives a reboot, the endpoint does not. Both
+          // readings are cheap and side-effect free — a file read and a signal-0 pid check.
+          endpoint: () => readBridgeEndpoint(),
+        })
+      },
       // `force` is what makes the panel's retry button mean anything: without it the answer would be
       // the settled failure the user is trying to replace. An attempt still running is joined.
       provision: () => {
@@ -663,10 +790,24 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }
     try {
       injectRuntime(['webServer'], (host) => {
+        host.effect(() => host.webServer.register({ kind: 'exact', path: EXTENSION_INSTALL_ROUTE, handler: authenticated(ctx, async (request, response) => {
+          if (request.method !== 'POST') { response.writeHead(405); response.end(); return }
+          if (!sameOrigin(request, true)) { response.writeHead(403); response.end(); return }
+          try {
+            const browser = settings.get().browser.channel === 'chrome' ? 'chrome' : 'edge'
+            if (isPreferredCarrier(adoptedCarrier)) await adoptedCarrier.refreshStatus()
+            const connected = isPreferredCarrier(adoptedCarrier) ? adoptedCarrier.connectionStatus().connected : await probeExtension(browser)
+            const result = await installExtension(browser, connected)
+            response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(result))
+          } catch (error) { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ ok: false, detail: String(error) })) }
+        }) }, 'dsh-builtin-browser: install extension'))
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: RUNTIME_STATUS_ROUTE,
-          handler: authenticated(ctx, (request, response) => handleRuntimeStatus(request, response, deps)),
+          handler: authenticated(ctx, async (request, response) => {
+            if (request.method === 'GET' && isPreferredCarrier(adoptedCarrier)) await adoptedCarrier.refreshStatus()
+            await handleRuntimeStatus(request, response, deps)
+          }),
         }, 'dsh-builtin-browser: runtime status'))
         host.effect(() => host.webServer.register({
           kind: 'exact',
@@ -680,6 +821,115 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   }
 
   /**
+   * Expose the shared start-page shortcut list on the host's web server.
+   *
+   * The sidebar edits the section through the settings RPC; this face exists for a
+   * caller that has no sidebar — an agent, a script, or a verification run — and it
+   * writes the SAME section through `ctx.settings`, so both paths see one list.
+   * @param host - the plugin context.
+   */
+  function installShortcutRoutes(host: Context): void {
+    const injectRoutes = (host as unknown as {
+      inject?: (deps: readonly string[], callback: (scope: WebServerHost) => void) => void
+    }).inject
+    if (typeof injectRoutes !== 'function') return
+    const store = createShortcutStore(() => (host as unknown as {
+      get?: (name: string) => ShortcutSettings | undefined
+    }).get?.('settings'))
+    const handlers = createShortcutRouteHandlers(store)
+    try {
+      injectRoutes(['webServer'], (scope) => {
+        const routes: readonly (readonly [string, BrowserHttpHandler, string])[] = [
+          [SHORTCUTS_ROUTE, handlers.list, 'dsh-builtin-browser: start-page shortcuts'],
+          [SHORTCUT_ADD_ROUTE, handlers.add, 'dsh-builtin-browser: start-page shortcut add'],
+          [SHORTCUT_REMOVE_ROUTE, handlers.remove, 'dsh-builtin-browser: start-page shortcut remove'],
+        ]
+        for (const [path, handler, label] of routes) {
+          scope.effect(() => scope.webServer.register({
+            kind: 'exact',
+            path,
+            handler: authenticated(host, handler),
+          }, label))
+        }
+      })
+    } catch {
+      // No web server: the shortcut seam stays available to the agent tool.
+    }
+  }
+
+  /**
+   * Expose browser-reference capture, listing and reveal on the host's web server.
+   *
+   * The panel needs no browser session of its own: list and reveal act on the
+   * session recorded inside each reference, and capture takes the pair of ids
+   * from the caller. Skipped on a surface with no web server, exactly like the
+   * sibling routes.
+   * @param ctx - the plugin context.
+   * @param service - the shared reference service.
+   * @param carrier - the carrier recorded for captures that do not name one.
+   * @param queue - durable capture-to-draft hand-off.
+   */
+  function installReferenceRoutes(
+    ctx: Context,
+    service: ReturnType<typeof createReferenceService>,
+    carrier: () => BrowserReferenceCarrier,
+    queue: DeliveryQueue,
+    receipts: ReturnType<typeof createSubmissionReceipts>,
+  ): void {
+    const injectRoutes = (ctx as unknown as {
+      inject?: (deps: readonly string[], callback: (host: WebServerHost) => void) => void
+    }).inject
+    if (typeof injectRoutes !== 'function') return
+    try {
+      injectRoutes(['webServer'], (host) => {
+        const handlers = createReferenceRouteHandlers({ service, carrier, queue, receipts })
+        const routes: readonly (readonly [string, (request: IncomingMessage, response: ServerResponse) => void | Promise<void>, string])[] = [
+          [CLIENT_VERSION_ROUTE, (_request, response) => {
+            // 客户端产物的版本指纹：内容变了，浏览器就应换到新 bundle。
+            const clientPath = fileURLToPath(new URL('../../dist/client.cjs', import.meta.url))
+            let version = "unknown"
+            try {
+              const stat = statSync(clientPath)
+              version = `${Math.round(stat.mtimeMs)}-${stat.size}`
+            } catch { /* 读不到就返回 unknown：客户端不会重载 */ }
+            response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
+            response.end(JSON.stringify({ ok: true, version }))
+          }, 'dsh-builtin-browser: client version'],
+          [REFERENCE_LIST_ROUTE, handlers.list, 'dsh-builtin-browser: reference list'],
+          [REFERENCE_GET_ROUTE, handlers.get, 'dsh-builtin-browser: reference detail'],
+          [REFERENCE_CAPTURE_ROUTE, handlers.capture, 'dsh-builtin-browser: reference capture'],
+          [REFERENCE_REVEAL_ROUTE, handlers.reveal, 'dsh-builtin-browser: reference reveal'],
+          [WEB_SOURCE_ROUTE, handlers.source, 'dsh-builtin-browser: web reference source'],
+          [REFERENCE_INSERT_ROUTE, handlers.insert, 'dsh-builtin-browser: reference draft insert'],
+          [REFERENCE_EXPORT_ROUTE, handlers.export, 'dsh-builtin-browser: reference export'],
+          [REFERENCE_IMPORT_ROUTE, handlers.importBundle, 'dsh-builtin-browser: reference import'],
+          [REFERENCE_DELIVERIES_ROUTE, handlers.deliveries, 'dsh-builtin-browser: reference deliveries'],
+          [REFERENCE_DELIVERY_ACK_ROUTE, handlers.ack, 'dsh-builtin-browser: reference delivery ack'],
+          [REFERENCE_DELIVERY_REMOVE_ROUTE, handlers.removeDelivery, 'dsh-builtin-browser: reference delivery remove'],
+          [REFERENCE_ASSET_ROUTE, handlers.asset, 'dsh-builtin-browser: reference asset bytes'],
+        ]
+        for (const [path, handler, label] of routes) {
+          host.effect(() => host.webServer.register({
+            kind: 'exact',
+            path,
+            handler: authenticated(ctx, handler),
+          }, label))
+        }
+        host.effect(() => host.webServer.register({
+          kind: 'exact',
+          path: REFERENCE_STATUS_ROUTE,
+          handler: authenticated(ctx, (request, response) => {
+            if (request.method !== 'GET') { replyJson(response, 405, { ok: false, error: 'method-not-allowed' }); return }
+            replyJson(response, 200, { ok: true, entry: referenceProvider?.referenceStatus() ?? null })
+          }),
+        }, 'dsh-builtin-browser: reference entry status'))
+      })
+    } catch {
+      // No web server: capture stays available through the agent tools.
+    }
+  }
+
+  /**
    * Re-run the carrier choice when the settings FILE changes on disk.
    *
    * The route above covers a write through the panel. It does not cover a person editing
@@ -687,13 +937,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * unreachable or the user prefers the file. Measured: the document said `sidebar` and the plugin
    * kept driving the self-hosted window built for the previous choice, because nothing re-read it.
    *
-   * Change detection is on the channel alone, not the mtime: a poll that re-chose the carrier on
+   * Change detection is on carrier settings, not the mtime: a poll that re-chose the carrier on
    * every unrelated save would tear down and rebuild a working browser session for a switch that
    * cannot affect it. mtime is only the cheap trigger to go and look.
    */
   const watchSettingsFile = (): void => {
     const file = settingsPath()
-    let lastChannel = settings.get().browser.channel
     let lastMtime = 0
     try { lastMtime = statSync(file).mtimeMs } catch { /* not written yet */ }
     const timer = setInterval(() => {
@@ -702,10 +951,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       try { mtime = statSync(file).mtimeMs } catch { return }
       if (mtime === lastMtime) return
       lastMtime = mtime
-      const channel = settings.get().browser.channel
-      if (channel === lastChannel) return
-      lastChannel = channel
-      ctx.logger?.info?.(`dsh-builtin-browser: settings changed on disk, re-choosing the carrier for channel "${channel}"`)
+      if (carrierSettingsKey(settings.get()) === chosenSettingsKey) return
+      ctx.logger?.info?.('dsh-builtin-browser: carrier settings changed on disk, re-choosing the carrier')
       chooseCarrier()
     }, 5_000)
     // Unref-ed so a poll never holds the process open.
@@ -716,19 +963,185 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   installPreviewRoute(ctx, settings)
   installBridgeStatusRoute(ctx)
   installRuntimeStatusRoute(ctx, settings)
+  // One service for the panel's routes; the tool layer builds its own over the same store file.
+  const referenceService = createReferenceService(ctx.browser, {
+    sourceReady: async owner => { (await DesktopBridgeViewHost.discover(`session-${owner}`))?.dispose() },
+    sourceSession: (owner, pageId) => ctx.browser.bindPanelPage(`session-${owner}`, pageId),
+    // A visible-region snapshot is a read: the clipped CDP path never presents
+    // the conversation, raises a window or moves the pointer.
+    visibleCapture: async (sessionId, clip, signal) => {
+      const shot = await ctx.browser.screenshot(sessionWireId(resolveSessionHandle(sessionId)), { clip, format: 'png' }, signal)
+      return { dataUrl: shot.dataUrl, mime: 'image/png' }
+    },
+  })
+  const referenceCarrier = (): BrowserReferenceCarrier => {
+    const channel = settings.get().browser.channel
+    return channel === 'chrome' || channel === 'edge' ? channel : 'sidebar'
+  }
+
+  /**
+   * The durable hand-off. A capture is frozen into the queue with the FULL
+   * snapshot, so the client can restore a draft after the page closed or DSH
+   * restarted without asking the browser for anything (§12.2).
+   */
+  const deliveryQueue = createDeliveryQueue()
+  const receipts = createSubmissionReceipts(deliveryQueue, id => {
+    const sessions = ctx.get('sessions') as { get(sessionId: string): ReceiptSession | undefined } | undefined
+    return sessions?.get(id)
+  })
+  ctx.on?.('session/event', (session, event) => {
+    try { receipts.observe(session.id, event as Parameters<typeof receipts.observe>[1]) }
+    catch (error) { ctx.logger?.warn?.(`dsh-builtin-browser: reference receipt pending: ${String(error)}`) }
+  }, { global: true })
+  installReferenceRoutes(ctx, referenceService, referenceCarrier, deliveryQueue, receipts)
+  installShortcutRoutes(ctx)
+
+  /** Short, stable, non-sensitive codes for the page notice when an enqueue fails. */
+  type PrepareFailure = 'browser-session-id-required' | 'delivery-enqueue-failed'
+
+  /** Freeze a captured reference for its owning conversation. */
+  const prepareCaptured = (
+    reference: BrowserReference | undefined,
+    failures: readonly { readonly kind: string; readonly reason: string }[],
+    onFailure?: (code: PrepareFailure) => void,
+  ): boolean => {
+    if (reference === undefined) return false
+    // `resolveReferenceOwner` falls back to `browser:<uuid>` when no real DSH
+    // conversation id can be read. queue.prepare would "succeed" under that
+    // id, but the client polls with the REAL session id and can never match it,
+    // so the card silently never appears. Refuse the enqueue instead of
+    // reporting a success that cannot be delivered, and let the page ask the
+    // human to retry once the session is ready.
+    if ((reference.owner.sessionId ?? '').startsWith('browser:')) {
+      process.stderr.write('[dsh-browser] reference delivery refused: browser-session-id-required\n')
+      onFailure?.('browser-session-id-required')
+      return false
+    }
+    try {
+      deliveryQueue.prepare(reference, {
+        failures: failures.map(failure => ({
+          kind: (failure.kind === 'text' || failure.kind === 'image' || failure.kind === 'table'
+            ? failure.kind : 'reference') as 'text' | 'image' | 'table' | 'reference',
+          reason: failure.reason,
+        })),
+      })
+      return true
+    } catch (error) {
+      process.stderr.write(`[dsh-browser] reference delivery prepare failed: ${String(error)}\n`)
+      onFailure?.('delivery-enqueue-failed')
+      return false
+    }
+  }
+
+  // The production draft adapter. `insertIntoDraft` used to answer
+  // `draft-adapter-unavailable` because nothing ever registered one; now it
+  // freezes the reference into the durable queue. The CLIENT decides when the
+  // draft and assets are actually saved — only its ACK marks the delivery
+  // acknowledged, never this enqueue (§12.1).
+  //
+  // NOTE: installReferenceRoutes always receives the queue, so `/reference/insert`
+  // takes the `queue.prepare` branch and `insertIntoDraft` (hence this adapter)
+  // is not reached in production. It is kept as the fallback for a caller that
+  // constructs the routes WITHOUT a queue; removing it would make that path
+  // silently lose the capture.
+  referenceService.setDraftAdapter({
+    insertReference: async (reference) => {
+      const current = deliveryQueue.get(reference.referenceId)
+      if (current?.state === 'removed') return { applied: false, reason: 'reference-was-removed' }
+      // Only enqueue a capture that has no delivery yet, and HONOUR the result:
+      // an unready session or a failed prepare must not report `applied: true`
+      // for a card the client can never poll.
+      if (current === undefined && !prepareCaptured(reference, [])) {
+        return { applied: false, reason: 'delivery-enqueue-failed' }
+      }
+      return { applied: true }
+    },
+  })
+
+  /**
+   * The one sentence the page shows when a capture produced no reference.
+   *
+   * Ordered from most actionable to least: the reader is told what to DO, not
+   * which internal step failed.
+   */
+  const captureRefusalText = (failures: readonly { readonly reason: string }[]): string => {
+    const copy = referenceCaptureMessages
+    for (const failure of failures) {
+      const reason = failure.reason
+      const exact = copy[reason]
+      if (exact !== undefined) return exact
+      // Machine-coded reasons carry a detail suffix. A reader still deserves an
+      // actionable sentence instead of the generic fallback.
+      if (reason.startsWith('capture-failed:')) return referenceCaptureErrors.captureFailed
+      if (reason.startsWith('store-refused:')) return referenceCaptureErrors.storeRefused
+      if (reason.startsWith('frame-capture-refused:')) return copy['frame-capture-refused']
+      if (reason.startsWith('cell-image:')) return referenceCaptureErrors.imageUnreadable
+      if (reason.startsWith('image-')) return referenceCaptureErrors.imageFailed
+    }
+    return copy['capture-refused']
+  }
+
+  // The self-hosted Electron host reports a right-click or a floating-button
+  // press as a user action. Register the one handler that turns it into a
+  // capture; the disposer keeps a plugin reload from leaving a stale closure.
+  //
+  // R01: `action.windowId` is `browser:<uuid>` — a BROWSER session / view, not a
+  // DSH conversation. The real conversation id comes from `readSessionId(ctx)`
+  // above (the same `ctx.get('agents').list()` the desktop host uses). Both are
+  // recorded separately, and the owner is fixed at capture time, so switching
+  // to another conversation later cannot move this reference.
+  const disposeReferenceAction = setReferenceCaptureActionHandler(async action => {
+    // Re-read: the agent list is empty while the plugin applies, so the id captured
+    // at apply time can be missing exactly when the first capture arrives.
+    const owner = resolveReferenceOwner(readSessionId(ctx) ?? sessionId, action.windowId)
+    const outcome = await referenceService.capture({
+      sessionId: owner.sessionId,
+      browserSessionId: owner.browserSessionId,
+      origin: 'user-selection',
+      entry: action.entry,
+      carrier: referenceCarrier(),
+      ...action.frameSelector !== undefined ? { frameSelector: action.frameSelector } : {},
+      ...action.target !== undefined ? { target: action.target } : {},
+      ...action.comment !== undefined ? { comment: action.comment } : {},
+      // The bar froze the WHOLE capture before its comment field took focus.
+      // Only when that is missing (an older page script, a context-menu entry)
+      // do we fall back to locating the frozen wording.
+      ...action.capture !== undefined
+        ? { frozenCapture: action.capture }
+        : action.selectionText !== undefined && action.selectionText !== ''
+          ? { excerptText: action.selectionText }
+          : {},
+    })
+    if (outcome.reference === undefined) {
+      process.stderr.write(`[dsh-browser] reference capture refused: ${outcome.failures.map(item => item.reason).join(', ')}\n`)
+      // A refusal that is only logged looks like a dead button. Say it in the
+      // page, where the click happened. `notify` MUST NOT be allowed to reject:
+      // the provider's pump treats a thrown notification as an unreachable page
+      // and retires the sidebar the human is still looking at after 5 strikes.
+      try {
+        await referenceService.notify(owner.browserSessionId, captureRefusalText(outcome.failures))
+      } catch {
+        // Best effort: the capture is already decided; a page that cannot be
+        // notified must never escalate into tearing down the live sidebar.
+      }
+      return
+    }
+    let prepareFailure: PrepareFailure = 'delivery-enqueue-failed'
+    if (!prepareCaptured(outcome.reference, outcome.failures, code => { prepareFailure = code })) {
+      // The reference was saved but never entered the delivery queue. Without
+      // this notice the button looks successful and no card EVER appears. The
+      // code is short, stable and non-sensitive (no stack trace, no path).
+      try {
+        await referenceService.notify(owner.browserSessionId,
+          `当前会话还没准备好，请稍后重新添加这条引用。（错误码：${prepareFailure}）`)
+      } catch {
+        // Same as above: a failing notice must not reach the provider's pump.
+      }
+    }
+  })
+  ctx.effect(() => disposeReferenceAction, 'dsh-builtin-browser: reference action handler')
+  ctx.effect(() => () => deliveryQueue.dispose(), 'dsh-builtin-browser: reference delivery queue')
 }
-
-/** Route the settings panel reads and writes. */
-const SETTINGS_ROUTE = '/dsh-builtin-browser/settings'
-
-/**
- * The directory under the DSH home that holds this plugin's browser profile.
- *
- * Named once, because every consumer of it must agree: `settingsPath()` and the history
- * store resolve their own copy from `$DSH_HOME`, and a profile written under a different
- * root than the settings document is a pair that silently never meets.
- */
-const BROWSER_PROFILE_DIR = 'dsh-builtin-browser-host'
 
 /**
  * Move a browser profile left behind by the old layout into the directory the plugin uses now.
@@ -776,6 +1189,13 @@ interface PreviewBrowser {
 function authenticated(ctx: Context, handler: BrowserHttpHandler): BrowserHttpHandler {
   return authenticatedRoute(() => {
     const surface = ctx as unknown as { get(name: string): BrowserConnection | undefined }
+    return surface.get('connection')
+  }, handler)
+}
+
+function paired(ctx: Context, handler: BrowserHttpHandler): BrowserHttpHandler {
+  return pairedRoute(() => {
+    const surface = ctx as unknown as { get(name: string): BrowserPairingConnection | undefined }
     return surface.get('connection')
   }, handler)
 }
@@ -831,7 +1251,7 @@ function installSettingsRoute(
  * @param request - the incoming request.
  * @param response - the response to write.
  * @param settings - the settings document.
- * @param onChannelChange - re-runs the carrier choice when this write changed `browser.channel`.
+ * @param onChannelChange - re-runs the carrier choice when this write changed carrier settings.
  */
 async function handleSettingsRequest(
   request: IncomingMessage,
@@ -862,21 +1282,20 @@ async function handleSettingsRequest(
   try {
     const text = await readTextBody(request)
     const patch: unknown = text.trim() === '' ? {} : JSON.parse(text)
-    const before = settings.get().browser.channel
+    const before = carrierSettingsKey(settings.get())
     const updated = settings.update(patch)
-    // A changed `browser.channel` is a request to switch carriers, not just a value to store. The
+    // Changed carrier settings are a request to switch carriers, not just values to store. The
     // choice is re-run here so the write takes effect now — and the response says so, because a
     // caller that cannot tell "applied" from "stored for later" has no way to know what it got,
     // which is exactly how a write that did nothing read as a success.
-    const channelChanged = updated.browser.channel !== before
-    if (channelChanged) onChannelChange?.()
+    const carrierChanged = carrierSettingsKey(updated) !== before
+    if (carrierChanged) onChannelChange?.()
     json(200, {
       ok: true,
       settings: updated,
-      ...channelChanged ? { carrierRechosen: true } : {},
+      ...carrierChanged ? { carrierRechosen: true } : {},
     })
   } catch (error) {
     json(400, { ok: false, error: `invalid settings patch: ${String(error)}` })
   }
 }
-

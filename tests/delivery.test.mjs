@@ -59,6 +59,8 @@ function makeContext(handoff = async () => ({ isError: false, value: { uploaded:
         return {
           open: async () => 'session-1',
           exists: () => true,
+          openUrl: async () => {},
+          snapshot: async () => ({ url: 'https://example.com/', elements: [], truncated: false }),
           download: async () => ({ path: savedFile }),
         }
       }
@@ -71,9 +73,10 @@ function makeContext(handoff = async () => ({ isError: false, value: { uploaded:
 const run = async (delivery, handoff, batched = true) => {
   settings(delivery)
   const built = makeContext(handoff, batched)
-  apply(built.ctx, {})
+  apply(built.ctx, { surface: 'tools' })
   const tool = built.registered.get('dsh_browser_download')
   const exec = { callId: 'download-1', rootCallId: 'root-1', token: Symbol('outer'), signal: new AbortController().signal, agent: { id: 'task-1' }, toolSet: { view() {} }, deferContext() {}, concludeTurn() {} }
+  await built.registered.get('dsh_browser_open').execute({ url: 'https://example.com/', surface: 'builtin' }, exec)
   const value = await tool.execute({ url: 'https://example.com/report.pdf', savePath: savedFile }, exec)
   return { value, calls: built.calls, tool, exec }
 }
@@ -181,7 +184,11 @@ test('caller cancellation is propagated after a receiver failure', async () => {
     throw controller.signal.reason
   })
   settings({ tool: 'upload', args: {}, onFail: 'keep-local', sites: {} })
-  apply(built.ctx, {})
+  apply(built.ctx, { surface: 'tools' })
+  await built.registered.get('dsh_browser_open').execute(
+    { url: 'https://example.com/', surface: 'builtin' },
+    { signal: controller.signal, agent: { id: 'task-cancel' } },
+  )
   await assert.rejects(
     built.registered.get('dsh_browser_download').execute(
       { url: 'https://example.com/report.pdf', savePath: savedFile },

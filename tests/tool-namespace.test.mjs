@@ -21,12 +21,14 @@ test('every registered tool is in the dsh_browser_ namespace, and nothing else i
   // and left the very name it was written to protect only half-checked.
   const names = [...source().matchAll(/name: '(dsh_browser_[a-z0-9_]+)'/g)].map(m => m[1])
 
-  assert.equal(names.length, 48, 'forty-eight tools (9 observation/batch tools, then upload, hover, find and state)')
+  assert.equal(names.length, 53, 'fifty-three tools including human takeover')
   assert.equal(new Set(names).size, names.length, 'names are unique')
   assert.ok(names.includes('dsh_browser_open'))
   assert.ok(names.includes('dsh_browser_session'), 'including the one that used to collide')
   assert.ok(names.includes('dsh_browser_a11y'), 'and the one with digits in it')
   assert.ok(names.includes('dsh_browser_click_sequence'), 'and the batch-input tool added for canvas pages')
+  assert.ok(names.includes('dsh_browser_reference_capture'), 'and the reference tools')
+  assert.ok(names.includes('dsh_browser_shortcuts'), 'and the start-page shortcut tool')
 
   // No bare name survives: a single `browser_open` left behind would be the old collision waiting
   // to happen all over again, and it would fail silently because the other 33 still load.

@@ -30,6 +30,29 @@ export async function readTextBody(request: IncomingMessage, limit = 64 * 1024):
 }
 
 /**
+ * Read a bounded binary body. The reference-import route takes ZIP bytes directly instead of a
+ * base64 JSON wrapper: a wrapper would inflate the limit by a third and add a decoding step that
+ * can hide an oversize body until after it has been allocated.
+ * @param request - the incoming request.
+ * @param limit - maximum accepted bytes.
+ * @returns the raw body.
+ */
+export async function readBinaryBody(request: IncomingMessage, limit = 32 * 1024 * 1024): Promise<Buffer> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))
+    size += buffer.length
+    if (size > limit) {
+      request.destroy()
+      throw new Error(`request body exceeds ${limit} bytes`)
+    }
+    chunks.push(buffer)
+  }
+  return Buffer.concat(chunks)
+}
+
+/**
  * Read and parse a JSON body. An empty body is an empty object, matching the settings route's
  * long-standing behaviour.
  * @param request - the incoming request.

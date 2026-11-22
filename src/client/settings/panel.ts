@@ -1,0 +1,2657 @@
+import { zh, en } from '../../../assets/browser-panel-locales.mjs'
+import { REFERENCE_REVEAL_ROUTE, REFERENCE_INSERT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE, BRIDGE_STATUS_ROUTE, RUNTIME_STATUS_ROUTE, RUNTIME_PROVISION_ROUTE } from '../../../assets/browser-policy.mjs'
+import { SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../../assets/browser-policy.mjs'
+/**
+ * 设置面板（客户端半）：从旧插件的 ModuleLoader bundle 机械移植而来，内部实现未改一行。
+ *
+ * 它注册进设置页的 `settings.section` 插槽，渲染宿主 `/dsh-builtin-browser/settings` 返回的
+ * 设置文档并回写补丁；宿主那一份文件仍是唯一事实来源（面板不可用时也能手改）。
+ *
+ * 外壳由 `window.__ModuleLoader__.load({factory})` 换成普通导出函数：本仓库的客户端半由
+ * tsdown 打成 CJS 工厂，`require` 由模块加载器在运行期注入，语义与旧加载器一致。
+ */
+
+export interface LegacyClientModule {
+  readonly name?: string
+  readonly inject?: readonly string[]
+  readonly apply: (ctx: never) => void
+}
+
+export async function requestExtensionSetup(fetcher = fetch) {
+  const response = await fetcher(EXTENSION_INSTALL_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
+  const result = await response.json()
+  if (!response.ok || !result.ok) throw new Error(result.detail ?? `HTTP ${response.status}`)
+  return result
+}
+
+/**
+ * 装配旧面板：调用一次返回它的 `{ name, inject, apply }`。
+ * @param require - 模块加载器注入的 require（与旧加载器同签名）。
+ * @returns 旧 bundle 导出的模块对象。
+ */
+export function loadSettingsPanel(require: (id: string) => unknown): LegacyClientModule {
+  var module = { exports: {} }
+  var exports = module.exports
+  Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" })
+
+const react = require("react")
+  const h = react.createElement
+  const { useCallback, useEffect, useRef, useState } = react
+
+  const name = "dsh-builtin-browser"
+  const inject = ["slots", "locale"]
+  const NS = "settings.dsh-builtin-browser"
+  const ROUTE = SETTINGS_ROUTE
+  let translate = (key) => key
+  let currentLocale = "zh"
+  function updateCurrentLocale(locale) {
+    let active
+    try { active = locale.getSnapshot?.().active ?? locale.getLocale?.().active } catch { /* Older hosts may only expose bind. */ }
+    const language = typeof active === "string" ? active : typeof document === "undefined" ? "" : document.documentElement?.lang
+    currentLocale = typeof language === "string" && /^en(?:-|$)/i.test(language) ? "en" : "zh"
+  }
+  /**
+   * Re-evaluate the floating watch entry.
+   *
+   * Set by `installWatchPanel`, called by the settings writer after a `remoteView` change so the
+   * switch takes effect on the spot. A no-op until the panel is installed, and a no-op forever on a
+   * host without one.
+   */
+  let refreshWatchEntry = () => {}
+  /**
+   * Re-apply the locale to the watch panel's static labels.
+   *
+   * Set by `installWatchPanel`, called from the locale subscription in `apply()`. Separate from
+   * {@link refreshWatchEntry} because a language switch must not re-probe or re-mount anything.
+   */
+  let refreshWatchLabels = () => {}
+
+
+  /**
+   * Read or patch the host-owned settings document.
+   *
+   * A patch that touches remote viewing re-evaluates the floating entry right away. Without that,
+   * turning the switch on wrote the file and did nothing anyone could see until the page was
+   * reloaded — unusable from a phone, and reported as such on #46.
+   */
+  async function callSettings(patch) {
+    const response = await fetch(ROUTE, patch === undefined
+      ? { method: "GET", headers: { accept: "application/json" } }
+      : {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      })
+    const data = await response.json().catch(() => undefined)
+    if (data === undefined || data.ok !== true) {
+      throw new Error((data && data.error) || `HTTP ${response.status}`)
+    }
+    if (patch !== undefined && patch !== null && typeof patch === "object" && patch.remoteView !== undefined) {
+      try { refreshWatchEntry() } catch { /* the entry is a convenience, not the setting */ }
+    }
+    return data
+  }
+
+  /**
+   * The panel's own stylesheet.
+   *
+   * Inline styles cannot express `:hover`, and the rows need one — an interactive row with no
+   * feedback reads as decoration. The colours come from DSH's own design tokens
+   * (`--dsw-alias-*`, the same ones the host's settings rows use) so this follows the active
+   * theme instead of guessing at it; each has a literal fallback because a token may be absent
+   * under a third-party theme, and an unstyled row is worse than a slightly-off one.
+   */
+  const CSS = `
+.dsh-bb-settings .dsh-bb-row {
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: .5px solid var(--dsw-alias-border-l2, GrayText);
+  border-radius: 0;
+  background: transparent;
+}
+.dsh-bb-settings { font-size: 14px; line-height: 22px; }
+.dsh-bb-references > summary { display: list-item; }
+.dsh-bb-ref-count { margin-left: 8px; color: var(--dsw-alias-label-tertiary, GrayText); font-size: 12px; font-weight: 400; }
+.dsh-bb-ref-toolbar, .dsh-bb-ref-transfer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dsh-bb-ref-toolbar { justify-content: flex-end; margin: 4px 0; }
+.dsh-bb-ref-list { list-style: none; padding: 0; margin: 0; }
+.dsh-bb-ref-item { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: .5px solid var(--dsw-alias-border-l2, GrayText); }
+.dsh-bb-ref-content { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.dsh-bb-ref-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.dsh-bb-ref-preview { margin: 0; color: var(--dsw-alias-label-secondary, inherit); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.dsh-bb-ref-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--dsw-alias-label-tertiary, GrayText); font-size: 12px; line-height: 1.5; }
+.dsh-bb-ref-source { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-bb-ref-item > button { flex: none; white-space: nowrap; }
+.dsh-bb-ref-transfer { margin-top: 10px; }
+.dsh-bb-ref-transfer-actions { padding: 6px 0; }
+.dsh-bb-ref-outcome { margin: 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+@media (pointer: coarse) { .dsh-bb-ref-item > button, .dsh-bb-ref-toolbar button, .dsh-bb-ref-transfer-actions button { min-height: 40px !important; } }
+.dsh-bb-ref-menu { position: relative; display: inline-flex; align-items: center; }
+.dsh-bb-ref-toggle { font: inherit; padding: 4px 10px; border: .5px solid var(--dsw-alias-border-l2, GrayText); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
+.dsh-bb-ref-toggle:hover { background: var(--dsw-alias-fill-hover, rgba(127,127,127,.12)); }
+.dsh-bb-ref-popover { position: fixed; right: 24px; bottom: 88px; z-index: 2147483000; width: min(460px, calc(100vw - 32px)); max-height: min(70vh, 640px); overflow: auto; padding: 14px 16px; border: .5px solid var(--dsw-alias-border-l2, GrayText); border-radius: 10px; background: var(--dsw-alias-bg-l1, Canvas); color: var(--dsw-alias-label-primary, CanvasText); box-shadow: 0 8px 28px rgba(0,0,0,.18); font-size: 13px; }
+.dsh-bb-ref-actions { display: flex; flex-wrap: wrap; gap: 6px; flex: none; }
+.dsh-bb-ref-actions button { font-size: 12px; }
+@media (pointer: coarse) { .dsh-bb-ref-actions button, .dsh-bb-ref-toggle { min-height: 40px !important; } }
+.dsh-bb-settings .dsh-bb-diagnostics { margin-top: 4px; }
+.dsh-bb-diagnostics code { display: block; max-height: 160px; overflow: auto; }
+.dsh-bb-toggle { justify-content: space-between; cursor: pointer; }
+.dsh-bb-toggle:has(:disabled) { cursor: default; }
+.dsh-bb-switch {
+  appearance: none;
+  position: relative;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--dsw-alias-border-l3, GrayText);
+  color: var(--dsw-alias-switch-thumb, Canvas);
+  cursor: inherit;
+}
+.dsh-bb-switch::after {
+  content: "";
+  position: absolute;
+  inset: 2px auto auto 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  corner-shape: round;
+  background: currentColor;
+}
+.dsh-bb-switch:checked {
+  background: var(--dsw-alias-brand-primary, Highlight);
+  color: var(--dsw-alias-label-primary-foreground, HighlightText);
+}
+.dsh-bb-switch:checked::after { transform: translateX(16px); }
+.dsh-bb-switch:disabled { opacity: .6; }
+.dsh-bb-settings :is(button, input, textarea, select, summary):focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, Highlight);
+  outline-offset: 2px;
+}
+.dsh-bb-settings summary { cursor: pointer; padding: 5px 0; }
+.dsh-bb-settings .dsh-bb-dd { flex: 0 1 auto; margin: 0; }
+.dsh-bb-settings .dsh-bb-dd-btn {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--dsw-radius-md, 8px);
+  background: var(--dsw-alias-bg-module-platform, ButtonFace);
+}
+.dsh-bb-settings .dsh-bb-dd-list { left: auto; right: 0; }
+.dsh-bb-settings .dsh-bb-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid var(--dsw-alias-border, GrayText);
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-layer-1, Canvas);
+  color: var(--dsw-alias-label-primary, CanvasText);
+  font: inherit;
+}
+.dsh-bb-settings fieldset { min-inline-size: 0; }
+.dsh-bb-settings textarea { resize: vertical; }
+.dsh-bb-row {
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: var(--dsw-alias-label-primary, inherit);
+  transition: background-color .12s ease;
+}
+/* Only the switch rows act as a single control; status and selector rows are plain text. */
+.dsh-bb-toggle:hover:not(:has(:disabled)) {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.15));
+}
+.dsh-bb-toggle:active:not(:has(:disabled)) {
+  background: var(--dsw-alias-interactive-bg-active, rgba(128,128,128,.22));
+}
+/* The dropdown is drawn here rather than by the OS.
+   A native <select> paints its popup with system colours on Windows: the highlight overrides
+   whatever the option sets (white text on a white bar), and the list carries a border no CSS
+   can remove. Only the collapsed control is styleable, so a panel that matches its theme
+   everywhere else ends up with one control that does not. Everything below is ours: the
+   surface, the highlight, and the absence of that line. */
+.dsh-bb-dd {
+  position: relative;
+  display: inline-block;
+  max-width: min(100%, calc(100vw - 32px));
+  margin-top: 4px;
+}
+.dsh-bb-dd-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 8px 4px 9px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4));
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,.12));
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dsh-bb-dd-btn:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.18));
+}
+.dsh-bb-dd-btn:disabled { opacity: .55; cursor: default; }
+.dsh-bb-dd-btn > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-bb-dd-caret { flex-shrink: 0; opacity: .6; font-size: 10px; line-height: 1; }
+.dsh-bb-dd-list {
+  position: absolute;
+  box-sizing: border-box;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(340px, calc(100vw - 32px));
+  padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4));
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, #2f2f2f);
+  box-shadow: 0 6px 20px rgba(0,0,0,.28);
+}
+.dsh-bb-dd-opt {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 9px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+/* The same ellipse the rows use, so the panel reads as one surface — and it is ours to draw,
+   which is the whole reason this control exists. */
+.dsh-bb-dd-opt:hover,
+.dsh-bb-dd-opt[data-active="true"] {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.18));
+}
+.dsh-bb-dd-opt[aria-selected="true"] { font-weight: 600; }
+
+/* Live-view panel. Fixed layer rather than a slot: the host has no stable slot for an extra
+   surface over the conversation, and a layer works in every layout including a phone. */
+.dsh-bw-watch {
+  position: fixed; right: 16px; bottom: 16px; font-family: inherit;
+  /* Below a modal or popover rather than above everything: the old 2147483000 sat on top of the page,
+   * its inputs and any dialog the host opened (issue #46). A floating helper is a guest here. */
+  z-index: 1000;
+}
+.dsh-bw-watch-open {
+  display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.45)); border-radius: 999px;
+  padding: 7px 13px; font-size: 12px; color: inherit;
+  background: var(--dsw-alias-interactive-bg, rgba(128,128,128,.12));
+}
+.dsh-bw-watch-open:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.2)); }
+.dsh-bw-watch-dot { width: 7px; height: 7px; border-radius: 50%; background: #d9534f; }
+.dsh-bw-watch-panel {
+  position: absolute; right: 0; bottom: calc(100% + 8px); width: min(560px, calc(100vw - 32px));
+  /* The panel used to sit at 40px from the bottom while the button it hangs off occupied 16-46px
+   * from the bottom edge of its own box: the two overlapped by 6px and, because the panel's
+   * background is opaque, it covered the only way back out (issue #46). 100% is the button's own
+   * height, so the gap survives a font-size or padding change instead of being a second magic
+   * number. */
+  border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.35)); border-radius: 10px;
+  /* --dsw-alias-bg-elevated does not exist in the theme this ships against (measured on rc.5: 0
+   * occurrences, while --dsw-alias-bg-layer-2 has 5). With a token that is never defined, the
+   * fallback is what everyone sees — a dark card in a light theme. bg-layer-2 is the token the
+   * host's own elevated rows use. */
+  background: var(--dsw-alias-bg-layer-2, #1b1b1f); color: inherit; overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35);
+}
+.dsh-bw-watch-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px; }
+.dsh-bw-watch-title { font-weight: 600; }
+.dsh-bw-watch-state { opacity: .7; margin-left: auto; }
+.dsh-bw-watch-session {
+  max-width: 40%; font-size: 11px; color: inherit; background: transparent; cursor: pointer;
+  border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.45)); border-radius: 5px; padding: 2px 4px;
+}
+.dsh-bw-watch-session[hidden] { display: none; }
+.dsh-bw-watch-close {
+  /* A visible control, not a hinted one: the old close was a 16px glyph at 70% opacity with no border
+   * or background, in the same colour as the title — reported as 'no way out but a page refresh'
+   * (issue #46). */
+  border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.45)); border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg, rgba(128,128,128,.12));
+  color: inherit; cursor: pointer; font-size: 14px; line-height: 1; padding: 3px 7px;
+}
+.dsh-bw-watch-close:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.2)); }
+.dsh-bw-watch-stage { background: #000; min-height: 120px; display: flex; align-items: center; justify-content: center; }
+.dsh-bw-watch-img { display: block; max-width: 100%; height: auto; }
+/* The hidden ATTRIBUTE is styled by the UA sheet as [hidden]{display:none}, and an author rule
+ * defeats it whatever its specificity — so img.hidden = true in the script did nothing and the
+ * empty-state image kept taking space (issue #46). */
+.dsh-bw-watch-img[hidden] { display: none; }
+.dsh-bw-watch-note { margin: 0; padding: 24px 14px; font-size: 12px; opacity: .75; text-align: center; }
+.dsh-bw-watch-foot {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  font-size: 11px; border-top: 1px solid var(--dsw-alias-border, rgba(128,128,128,.25));
+}
+.dsh-bw-watch-readonly { opacity: .6; }
+.dsh-bw-watch-bridge { padding: 8px 10px; font-size: 11px; border-bottom: 1px solid var(--dsw-alias-border, rgba(128,128,128,.25)); background: rgba(217,83,79,.12); }
+.dsh-bw-watch-bridge-line { line-height: 1.5; }
+.dsh-bw-watch-bridge-cmd { display: block; margin-top: 5px; padding: 5px 7px; font-size: 11px; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,.28); border-radius: 5px; }
+.dsh-bw-watch-stop {
+  margin-left: auto; cursor: pointer; font-size: 11px; padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.45)); border-radius: 6px;
+  background: transparent; color: inherit;
+}
+`
+
+  /** Install the stylesheet once, however many times the panel is mounted. */
+  function installStyles() {
+    if (typeof document === "undefined") return
+    if (document.getElementById("dsh-builtin-browser-styles") !== null) return
+    const tag = document.createElement("style")
+    tag.id = "dsh-builtin-browser-styles"
+    tag.textContent = CSS
+    document.head.appendChild(tag)
+  }
+
+  const styles = {
+    wrap: { display: "flex", flexDirection: "column", gap: "12px" },
+    lead: { opacity: 0.75, lineHeight: 1.6, margin: 0 },
+    group: { minWidth: 0 },
+    groupTitle: { margin: "0 0 2px", fontSize: "14px", fontWeight: 600, color: "var(--dsw-alias-label-primary, inherit)" },
+    row: { display: "flex", gap: "10px", alignItems: "flex-start" },
+    label: { display: "flex", flexDirection: "column", gap: "2px", cursor: "pointer" },
+    hint: { color: "var(--dsw-alias-label-tertiary, inherit)", fontSize: "12px", lineHeight: 1.5 },
+    status: { opacity: 0.7, minHeight: "18px" },
+    error: { color: "var(--dsw-alias-label-error, #c9342c)" },
+    pathLine: { opacity: 0.6, wordBreak: "break-all", lineHeight: 1.5 },
+    button: { minHeight: "32px", padding: "5px 12px", borderRadius: "8px", border: "1px solid var(--dsw-alias-border, rgba(128,128,128,.4))", background: "transparent", color: "inherit", font: "inherit", cursor: "pointer" },
+    // Readiness: one headline state, three one-line facts, and at most two buttons. The colours are
+    // the only place this panel states an opinion, which is why they carry no text of their own —
+    // the label next to them is always a locale string.
+    badge: { display: "inline-block", padding: "1px 8px", marginRight: "8px", borderRadius: "10px", fontSize: "11px", lineHeight: 1.6, border: "1px solid transparent" },
+    badgeOk: { color: "#2f9e44", borderColor: "rgba(47,158,68,.5)", background: "rgba(47,158,68,.12)" },
+    badgeWarn: { color: "#e5534b", borderColor: "rgba(229,83,75,.5)", background: "rgba(229,83,75,.12)" },
+    badgeUnknown: { color: "#a0a0a8", borderColor: "rgba(160,160,168,.5)", background: "rgba(160,160,168,.12)" },
+    kv: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 12px", margin: "8px 0 0", fontSize: "12px" },
+    kvKey: { opacity: 0.68 },
+    kvVal: { lineHeight: 1.5 },
+    mono: { fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace", fontSize: "11px", whiteSpace: "pre-wrap", wordBreak: "break-all", background: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,.22))", borderRadius: "5px", padding: "4px 6px", marginTop: "4px" },
+    buttons: { display: "flex", gap: "8px", alignItems: "center", marginTop: "10px", flexWrap: "wrap" },
+  }
+
+  /**
+   * A dropdown drawn by this panel rather than by the operating system.
+   *
+   * Replaces a native `<select>`, whose popup Windows paints with system colours: the hover
+   * highlight overrode the option's background (white text on a white bar) and the list carried
+   * a border no CSS could remove. Both are unfixable from outside the control, and this panel's
+   * two dropdowns were the only places it did not match its own theme.
+   *
+   * Keyboard and assistive-technology behaviour is reimplemented rather than inherited, which is
+   * the cost of owning the rendering: Up/Down move, Enter/Space commit, Escape closes and
+   * returns focus, Home/End jump, clicking outside closes.
+   */
+  function Dropdown(props) {
+    const [open, setOpen] = useState(false)
+    // Index the keyboard has moved to; -1 means "the selected value, unless the user moved".
+    const [active, setActive] = useState(-1)
+    const rootRef = useRef(null)
+    const buttonRef = useRef(null)
+
+    const selected = props.options.findIndex(option => option.value === props.value)
+    const current = props.options[selected] ?? props.options[0]
+
+    useEffect(() => {
+      if (!open) return undefined
+      const away = event => {
+        if (rootRef.current !== null && !rootRef.current.contains(event.target)) setOpen(false)
+      }
+      document.addEventListener("mousedown", away)
+      return () => document.removeEventListener("mousedown", away)
+    }, [open])
+
+    const commit = index => {
+      const option = props.options[index]
+      if (option === undefined) return
+      setOpen(false)
+      setActive(-1)
+      buttonRef.current?.focus()
+      if (option.value !== props.value) props.onChange(option.value)
+    }
+
+    const onKeyDown = event => {
+      if (event.key === "Escape") {
+        if (open) { event.preventDefault(); setOpen(false); buttonRef.current?.focus() }
+        return
+      }
+      if (!open && (event.key === "Enter" || event.key === " " || event.key === "ArrowDown")) {
+        event.preventDefault()
+        setOpen(true)
+        setActive(selected >= 0 ? selected : 0)
+        return
+      }
+      if (!open) return
+      const last = props.options.length - 1
+      if (event.key === "ArrowDown") { event.preventDefault(); setActive(a => Math.min(last, (a < 0 ? selected : a) + 1)) }
+      else if (event.key === "ArrowUp") { event.preventDefault(); setActive(a => Math.max(0, (a < 0 ? selected : a) - 1)) }
+      else if (event.key === "Home") { event.preventDefault(); setActive(0) }
+      else if (event.key === "End") { event.preventDefault(); setActive(last) }
+      else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); commit(active < 0 ? selected : active) }
+    }
+
+    return h("div", { key: "s", className: "dsh-bb-dd", ref: rootRef }, [
+      h("button", {
+        key: "b",
+        type: "button",
+        ref: buttonRef,
+        className: "dsh-bb-dd-btn",
+        "aria-label": props.label + ": " + (current?.label ?? ""),
+        disabled: props.disabled,
+        "aria-haspopup": "listbox",
+        "aria-expanded": open ? "true" : "false",
+        onBlur: event => {
+          if (!rootRef.current?.contains(event.relatedTarget)) setOpen(false)
+        },
+        onClick: () => { setOpen(o => !o); setActive(-1) },
+        onKeyDown,
+      }, [
+        h("span", { key: "v" }, current === undefined ? "" : current.label),
+        h("span", { key: "c", className: "dsh-bb-dd-caret", "aria-hidden": "true" }, "\u25be"),
+      ]),
+      open ? h("div", {
+        key: "l",
+        className: "dsh-bb-dd-list",
+        role: "listbox",
+        "aria-label": props.label,
+      }, props.options.map((option, index) => h("button", {
+        key: option.value,
+        type: "button",
+        className: "dsh-bb-dd-opt",
+        role: "option",
+        tabIndex: -1,
+        "aria-selected": option.value === props.value ? "true" : "false",
+        onMouseDown: event => event.preventDefault(),
+        "data-active": index === active ? "true" : "false",
+        onMouseEnter: () => setActive(index),
+        onClick: () => commit(index),
+      }, option.label))) : null,
+    ])
+  }
+
+  /** One boolean switch bound to a settings path. */
+  function Toggle(props) {
+    const t = translate
+    return h("label", { style: styles.row, className: "dsh-bb-row dsh-bb-toggle" }, [
+      h("span", { key: "l", style: styles.label }, [
+        h("span", { key: "t" }, t(props.labelKey)),
+        props.hintKey ? h("span", { key: "h", style: styles.hint }, t(props.hintKey)) : null,
+      ]),
+      h("input", {
+        key: "i",
+        type: "checkbox",
+        className: "dsh-bb-switch",
+        role: "switch",
+        "aria-label": t(props.labelKey),
+        checked: props.checked,
+        disabled: props.busy,
+        onChange: event => props.onChange(event.target.checked),
+      }),
+    ])
+  }
+
+  /**
+   * Re-render this component when the interface language changes at run time.
+   *
+   * `translate` is a module-level binding that `apply()` re-binds on every locale snapshot, but
+   * React has no idea that happened: every label rendered so far keeps the language it was rendered
+   * in, which is exactly the defect the watch panel hit (#40) and the one commit `666cbff` fixed for
+   * that panel's DOM. The settings section is rendered by React, so it needs the notification rather
+   * than a text pass.
+   */
+  let localeVersion = 0
+  const localeWatchers = new Set()
+  function useLocaleVersion() {
+    const [, setVersion] = useState(localeVersion)
+    useEffect(() => {
+      const update = () => setVersion(localeVersion)
+      localeWatchers.add(update)
+      return () => { localeWatchers.delete(update) }
+    }, [])
+  }
+
+  /**
+   * Readiness: can the browser serve a call right now, and what is missing if not.
+   *
+   * This is the "it works once you install it" promise, made visible. The bundled runtime downloads
+   * on first need (issue #41 moved the download out of `postinstall`), so on a fresh install the
+   * honest answer for the first minute is "a download is running" — a state that used to exist only
+   * in a log line. Everything shown here comes from `GET /runtime-status`; the button starts the
+   * same one background attempt the plugin makes on its own, which is why pressing it is never
+   * harmful and never starts a second download.
+   */
+  const hostPatchNoticeEvent = "dsh-builtin-browser:host-patch-notice"
+  function readHostPatchNotice() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(hostPatchNoticeEvent))
+      return saved?.page === performance.timeOrigin ? saved.key : ""
+    } catch { return "" /* Storage may be unavailable. */ }
+  }
+  function publishHostPatchNotice(key) {
+    try { sessionStorage.setItem(hostPatchNoticeEvent, JSON.stringify({ page: performance.timeOrigin, key })) }
+    catch { /* An open panel can still show the result without storage. */ }
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(hostPatchNoticeEvent, { detail: key }))
+  }
+
+  function HostPatchControls() {
+    useLocaleVersion()
+    const t = translate
+    const [state, setState] = useState(null)
+    const [busy, setBusy] = useState(false)
+    const [error, setError] = useState("")
+    const [notice, setNotice] = useState(readHostPatchNotice)
+    const alive = useRef(true)
+    const pending = useRef(false)
+    useEffect(() => {
+      if (typeof window === "undefined") return
+      const target = window
+      const update = event => setNotice(event.detail)
+      target.addEventListener(hostPatchNoticeEvent, update)
+      return () => target.removeEventListener(hostPatchNoticeEvent, update)
+    }, [])
+    useEffect(() => {
+      alive.current = true
+      void fetch("/dsh-builtin-browser/host-patch-maintenance", { headers: { accept: "application/json" } })
+        .then(async response => {
+          if (response.status === 404) return
+          const data = await response.json()
+          if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+          if (alive.current && data.hostPatch?.surface === "web") setState(data.hostPatch)
+        }).catch(failure => { if (alive.current) setError(String(failure)) })
+      return () => { alive.current = false }
+    }, [])
+    const change = async action => {
+      if (pending.current) return
+      pending.current = true
+      setBusy(true); setError(""); setNotice(""); publishHostPatchNotice("")
+      try {
+        const response = await fetch("/dsh-builtin-browser/host-patch-maintenance", {
+          method: "POST", headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({ action }),
+        })
+        const data = await response.json()
+        if (alive.current && data.hostPatch) setState(data.hostPatch)
+        if (!response.ok || data.ok !== true) throw new Error(data.error || data.hostPatch?.reason || `HTTP ${response.status}`)
+        const noticeKey = data.hostPatch.restartRequired ? "hostPatch.restart" : "hostPatch.reload"
+        publishHostPatchNotice(noticeKey)
+        if (alive.current) setNotice(noticeKey)
+      } catch (failure) { if (alive.current) setError(String(failure)) }
+      finally { pending.current = false; if (alive.current) setBusy(false) }
+    }
+    if (state === null && error === "") return null
+    return h("div", { key: "web-host-patch", style: styles.group }, [
+      h("p", { key: "state", role: "status" }, t("readiness.hostPatch") + (state ? ": " + t("readiness.hostPatch." + state.status.replaceAll(" ", "-")) : "")),
+      state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
+      h("div", { key: "buttons", style: styles.row }, [
+        h("button", { key: "install", type: "button", style: styles.button, disabled: busy || !state?.canInstall, onClick: () => change("install") }, t(busy ? "hostPatch.working" : "hostPatch.install")),
+        h("button", { key: "restore", type: "button", style: styles.button, disabled: busy || !state?.canRestore, onClick: () => change("restore") }, t("hostPatch.restore")),
+      ]),
+      notice ? h("p", { key: "notice", role: "status", style: styles.hint }, t(notice)) : null,
+      error ? h("p", { key: "error", role: "alert", style: styles.error }, error) : null,
+    ])
+  }
+
+  function Readiness({ channel } = {}) {
+    useLocaleVersion()
+    const t = translate
+    const [runtime, setRuntime] = useState(null)
+    const [error, setError] = useState("")
+    const [unsupported, setUnsupported] = useState(false)
+    const [busy, setBusy] = useState(false)
+    const [bridgeBusy, setBridgeBusy] = useState(null)
+    const [bridgeJob, setBridgeJob] = useState(null)
+    const [bridgePollVersion, setBridgePollVersion] = useState(0)
+    const [bridgeError, setBridgeError] = useState(null)
+    const [extensionMessage, setExtensionMessage] = useState('')
+    const bridgePending = useRef(false)
+    const bridgeSubmitting = useRef(false)
+    const bridgeJobId = useRef(null)
+    const alive = useRef(true)
+
+    const read = useCallback(async () => {
+      try {
+        const response = await fetch(RUNTIME_STATUS_ROUTE, { headers: { accept: "application/json" } })
+        // A host that predates this route answers 404, and that is a version skew rather than a
+        // fault: after an update the client bundle is read at request time while the host's code is
+        // what started with the process. Rendering "could not read readiness: HTTP 404" at a user who
+        // simply has not restarted yet would be reporting the skew as their problem — so the section
+        // stays out of the way, exactly like a document with no `actions` section.
+        if (response.status === 404) {
+          if (alive.current) { setUnsupported(true); setRuntime(null); setError("") }
+          return null
+        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const data = await response.json()
+        if (data.runtime?.bridge) {
+          const extensions = typeof window === "undefined" ? undefined : window.dshDesktop?.mainExtensions
+          if (typeof extensions?.status === "function") {
+            const status = await extensions.status("dsh-builtin-browser")
+            data.runtime.bridge = { ...data.runtime.bridge, mainExtension: status, code: status.code, command: undefined,
+              state: status.state === "loaded" ? "installed" : status.state === "not-installed" ? "missing" : "stale" }
+          } else if (!data.runtime.bridge.mainExtension) {
+            data.runtime.bridge = { ...data.runtime.bridge, code: "DESKTOP_MAIN_EXTENSION_UNSUPPORTED" }
+          }
+        }
+        if (!alive.current) return null
+        setUnsupported(false)
+        setRuntime(data && data.runtime ? data.runtime : null)
+        setError("")
+        return data && data.runtime ? data.runtime : null
+      } catch (failure) {
+        if (!alive.current) return null
+        setError(String(failure && failure.message ? failure.message : failure))
+        return null
+      }
+    }, [])
+
+    const bridgeActivePhases = ["armed", "closing", "installing", "restarting", "verifying"]
+    const bridgeActive = bridgeJob !== null && bridgeActivePhases.includes(bridgeJob.phase)
+    const readBridgeJob = useCallback(async () => {
+      try {
+        const response = await fetch("/dsh-builtin-browser/bridge-maintenance", { headers: { accept: "application/json" } })
+        if (!response.ok) return
+        const data = await response.json()
+        if (!alive.current || bridgeSubmitting.current || data.ok !== true || data.protocol !== 1 || !data.job || typeof data.job.id !== "string") return
+        if (bridgePending.current && bridgeJobId.current !== null && bridgeJobId.current !== data.job.id) return
+        bridgeJobId.current = data.job.id
+        bridgePending.current = ["armed", "closing", "installing", "restarting", "verifying"].includes(data.job.phase)
+        setBridgeJob(data.job)
+        if (data.job.phase === "completed") void read()
+      } catch { /* The desktop is briefly offline while maintenance restarts it. Keep its job. */ }
+      finally { if (alive.current) setBridgePollVersion(version => version + 1) }
+    }, [read])
+
+    useEffect(() => {
+      alive.current = true
+      void read()
+      void readBridgeJob()
+      return () => { alive.current = false }
+    }, [read, readBridgeJob, channel])
+
+    useEffect(() => {
+      if (!bridgeActive) return undefined
+      const timer = setTimeout(() => { void readBridgeJob() }, 1000)
+      return () => clearTimeout(timer)
+    }, [bridgeActive, bridgeJob, bridgePollVersion, readBridgeJob])
+
+    // Poll only while a download is running: that is the one state that changes on its own, and a
+    // poll in any other state would be a background request per panel per two seconds forever.
+    const preparing = runtime !== null && runtime.electron.state === "preparing"
+    useEffect(() => {
+      if (!preparing) return undefined
+      const timer = setTimeout(() => { void read() }, 2000)
+      return () => clearTimeout(timer)
+    }, [preparing, runtime, read])
+
+    const prepare = async () => {
+      setBusy(true)
+      setError("")
+      try {
+        const response = await fetch(RUNTIME_PROVISION_ROUTE, {
+          method: "POST",
+          headers: { accept: "application/json" },
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error((data && data.error) || `HTTP ${response.status}`)
+        if (alive.current && data && data.runtime) setRuntime(data.runtime)
+      } catch (failure) {
+        if (alive.current) setError(String(failure && failure.message ? failure.message : failure))
+      } finally {
+        if (alive.current) setBusy(false)
+        void read()
+      }
+    }
+
+    const bridgeAction = async () => {
+      const action = "reinstall"
+      if (bridgePending.current || busy || bridgeActive) return
+      const desktopMenu = () => typeof document.querySelector === "function"
+        ? document.querySelector("[data-windows-menu]")?.shadowRoot?.querySelector("button") : null
+      // Windows Desktop draws its own menu; macOS uses the native menu bar, so its Desktop preload is the proof.
+      const inDesktop = typeof desktopMenu()?.click === "function" || (globalThis.dshDesktop !== null && typeof globalThis.dshDesktop === "object")
+      if (!inDesktop) {
+        setBridgeError({ key: "readiness.bridge.localOnly" })
+        return
+      }
+      bridgePending.current = true
+      bridgeSubmitting.current = true
+      setBridgeBusy(action)
+      setBridgeJob(null)
+      setBridgeError(null)
+      let accepted = false
+      try {
+        const response = await fetch("/dsh-builtin-browser/bridge-maintenance", {
+          method: "POST",
+          headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({ action, locale: currentLocale }),
+        })
+        const data = await response.json().catch(() => ({}))
+        if (response.status === 404) {
+          if (alive.current) setBridgeError({ key: "readiness.bridge.unsupported" })
+          return
+        }
+        if (!response.ok || data.ok !== true) throw new Error(data.error || data.output || `HTTP ${response.status}`)
+        if (data.protocol !== 1 || data.accepted !== true || typeof data.job?.id !== "string" || data.job.phase !== "armed" || data.job.action !== action) throw new Error("invalid bridge maintenance acknowledgement")
+        accepted = true
+        bridgeJobId.current = data.job.id
+        if (alive.current) setBridgeJob(data.job)
+        if (data.quit === "self") return
+        const menu = desktopMenu()
+        if (typeof menu?.click !== "function") throw new Error(t("readiness.bridge.localOnly"))
+        // The armed worker selects Exit in this official native menu. This opens that menu only
+        // after the new maintenance endpoint has acknowledged the handoff.
+        menu.click()
+      } catch (failure) {
+        if (alive.current) setBridgeError({ key: "readiness.bridge.actionFailed", detail: String(failure && failure.message ? failure.message : failure) })
+      } finally {
+        bridgeSubmitting.current = false
+        if (!accepted) bridgePending.current = false
+        if (alive.current) setBridgeBusy(null)
+      }
+    }
+
+    if (unsupported) return null
+    if (runtime === null) {
+      return h("div", { style: styles.wrap }, [
+        h("p", { key: "l", style: styles.lead }, error === "" ? t("readiness.loading") : `${t("readiness.failed")} ${error}`),
+      ])
+    }
+
+    const tone = runtime.readiness === "ready" ? styles.badgeOk
+      : runtime.readiness === "blocked" ? styles.badgeWarn : styles.badgeUnknown
+    const row = (key, label, value) => [
+      h("span", { key: `${key}-k`, style: styles.kvKey }, label),
+      h("span", { key: `${key}-v`, style: styles.kvVal }, value),
+    ]
+    // "Installed" and "running" are different facts, and the gap between them is the most common
+    // broken state there is (the desktop app is simply closed). The row says which one it means —
+    // and when the host does not report the running half at all, it says the plain truth rather
+    // than inferring "not running" from an absent field.
+    const bridgeLabel = runtime.bridge.state !== "installed"
+      ? t(`readiness.bridge.${runtime.bridge.state}`)
+      : runtime.bridge.running === true
+        ? t("readiness.bridge.installedRunning")
+        : runtime.bridge.running === false
+          ? t("readiness.bridge.installedNotRunning")
+          : t("readiness.bridge.installed")
+    const resolvedCarrier = runtime.resolvedCarrier ?? (runtime.carrier === "auto"
+      ? runtime.bridge.state === "installed" && runtime.bridge.running === true ? "sidebar"
+        : runtime.systemBrowser?.present === true ? "system" : "bundled"
+      : runtime.carrier)
+    const systemName = ({ chrome: "Chrome", edge: "Edge", brave: "Brave" })[runtime.systemBrowser?.kind ?? runtime.channel] ?? t("readiness.system")
+    const systemLabel = runtime.systemBrowser?.checked === true
+      ? t(runtime.systemBrowser.present ? "readiness.status.systemReady" : "readiness.status.systemMissing").replace("{browser}", systemName)
+      : t("readiness.status.checkPending")
+    const extensionDisconnected = runtime.extension?.state === 'not-connected' || runtime.extension?.state === 'extension-missing'
+    const stateLabel = resolvedCarrier === "extension" ? extensionDisconnected ? t('extension.notConnected') : runtime.extension?.detail ?? t("readiness.state.blocked")
+      : resolvedCarrier === "system" || resolvedCarrier === "cdp" ? systemLabel
+      : resolvedCarrier === "sidebar"
+        ? t(runtime.bridge.state === "installed"
+          ? runtime.bridge.running === true ? "readiness.status.bridgeReady"
+            : runtime.bridge.running === false ? "readiness.status.bridgeStopped" : "readiness.status.bridgeInstalled"
+          : runtime.bridge.state === "stale" ? "readiness.status.bridgeStale"
+            : runtime.bridge.state === "missing" ? "readiness.status.bridgeMissing" : "readiness.status.desktopMissing")
+        : t(runtime.electron.state === "present" || runtime.electron.state === "ready" ? "readiness.status.bundledReady"
+          : runtime.electron.state === "preparing" ? "readiness.status.bundledPreparing"
+            : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
+    const controlsBusy = busy || bridgeBusy !== null || bridgeActive
+    const extensionAction = async () => {
+      setBusy(true)
+      try {
+        const result = await requestExtensionSetup()
+        setExtensionMessage(t(result.connected ? 'extension.connected' : result.store ? 'extension.storeHint' : 'extension.loadHint'))
+      } catch (failure) { setExtensionMessage(String(failure.message ?? failure)) }
+      finally { setBusy(false); void read() }
+    }
+    const extensionButton = h("button", { key: "install-extension", type: "button", style: styles.button, disabled: controlsBusy, onClick: extensionAction }, t('extension.button'))
+    const canManageBridge = runtime.bridge.present === true && runtime.bridge.state !== "absent"
+    const extensionUnsupported = runtime.bridge.code === "DESKTOP_MAIN_EXTENSION_UNSUPPORTED"
+    const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
+    const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
+    const bridgeJobError = typeof bridgeJob?.error === "string" ? bridgeJob.error : ""
+    const bridgeJobOutput = typeof bridgeJob?.output === "string" ? bridgeJob.output : ""
+    const bridgeJobDiagnostic = bridgeJobOutput !== "" && bridgeJobError.includes(bridgeJobOutput)
+      ? bridgeJobError : [bridgeJobError, bridgeJobOutput].filter(Boolean).join("\n")
+
+    return h("div", { style: styles.group }, [
+      h("div", { key: "head", className: "dsh-bb-row", style: styles.row }, [
+        h("span", { key: "title" }, t("readiness.title")),
+        h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, stateLabel),
+      ]),
+      runtime.extension ? h("div", { key: "extension" }, [
+        resolvedCarrier !== 'extension' && extensionDisconnected ? h('p', { key: 'fallback-hint', role: 'status', style: styles.hint }, t('extension.notConnected')) : null,
+        h("p", { key: "profile", role: "status", style: styles.hint }, [runtime.extension.browser, runtime.extension.profile, runtime.extension.connectionId, runtime.extension.state].filter(Boolean).join(" · ")),
+        h("p", { key: "quiet", style: styles.hint }, t("extension.quiet")),
+        h('p', { key: 'hint', style: styles.hint }, t('extension.loadHint')),
+      ]) : null,
+      canManageBridge ? h("div", { key: "bridge-controls" }, [
+        extensionUnsupported ? h("p", { key: "extension-unsupported", role: "status", style: styles.hint }, t("readiness.bridge.extensionUnsupported"))
+          : runtime.bridge.mainExtension ? h("p", { key: "extension-status", role: "status", style: styles.hint },
+            `${t("readiness.bridge.extension." + runtime.bridge.mainExtension.state)}${runtime.bridge.mainExtension.version ? " · " + runtime.bridge.mainExtension.version : ""}${runtime.bridge.mainExtension.code ? " · " + runtime.bridge.mainExtension.code : ""}`) : null,
+        h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
+          h("span", { key: "title" }, t("readiness.bridge")),
+          h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: bridgeAction }, t("readiness.bridge.reinstall")),
+          extensionButton,
+        ]),
+        h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
+      ]) : null,
+      !canManageBridge ? extensionButton : null,
+      extensionMessage ? h('p', { key: 'extension-message', role: 'status', style: styles.hint }, extensionMessage) : null,
+      h('p', { key: 'active-carrier', role: 'status', style: styles.hint }, [runtime.resolvedCarrier, runtime.controlledProfile, runtime.fallbackReason, runtime.extension?.registration?.detail].filter(Boolean).join(' · ')),
+      ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered).map(([browser, status]) => h('p', { key: 'registration-' + browser, role: 'status', style: styles.hint }, browser + ': ' + status.detail)),
+      bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase}`)) : null,
+      bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t("readiness.bridge.installedDone")) : null,
+      bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
+        `${t("readiness.hostPatch")}: ${t("readiness.hostPatch." + bridgeJob.hostPatch.status.replaceAll(" ", "-"))}`) : null,
+      bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
+      bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
+      runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
+      h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
+        h("summary", { key: "title", style: styles.hint }, t("readiness.details")),
+        h("div", { key: "kv", style: styles.kv }, [
+          ...row("carrier", t("readiness.channel"), t(`readiness.carrier.${runtime.carrier}`)),
+          runtime.resolvedCarrier ? row("resolved-carrier", t("readiness.resolvedCarrier"), t(`readiness.carrier.${runtime.resolvedCarrier}`)) : null,
+          runtime.systemBrowser?.checked === true ? row("system", t("readiness.system"), systemLabel) : null,
+          ...row("electron", t("readiness.electron"), t(`readiness.electron.${runtime.electron.state}`)),
+          ...row("bridge", t("readiness.bridge"), bridgeLabel),
+        ]),
+        runtime.systemBrowser?.path ? h("code", { key: "system-path", style: styles.mono }, runtime.systemBrowser.path) : null,
+        bridgeError?.detail ? h("code", { key: "bridge-error-detail", style: styles.mono }, bridgeError.detail) : null,
+        bridgeJobDiagnostic !== "" ? h("code", { key: "bridge-job-detail", style: styles.mono }, bridgeJobDiagnostic) : null,
+        runtime.electron.state === "failed" || runtime.electron.state === "skipped"
+          ? h("p", { key: "edetail", style: styles.hint }, runtime.electron.detail) : null,
+        runtime.bridge.state === "installed" && runtime.bridge.running === false
+          ? h("p", { key: "bdetail", style: styles.hint }, runtime.bridge.runningDetail ?? runtime.bridge.detail) : null,
+        runtime.bridge.command
+          ? h("p", { key: "command", style: styles.hint }, [
+            h("span", { key: "label" }, t("readiness.fix")),
+            h("code", { key: "value", style: styles.mono }, runtime.bridge.command),
+          ]) : null,
+        h("button", {
+          key: "recheck",
+          type: "button",
+          style: styles.button,
+          disabled: controlsBusy || preparing,
+          onClick: () => { void read() },
+        }, t("readiness.recheck")),
+      ]),
+      runtime.canProvision || preparing
+        ? h("div", { key: "buttons", style: styles.buttons }, [
+          preparing ? h("span", { key: "progress", role: "status", style: styles.hint }, t("readiness.preparing")) : null,
+          runtime.canProvision ? h("button", { key: "prepare", type: "button", style: styles.button, disabled: controlsBusy, onClick: () => { void prepare() } }, t("readiness.prepare")) : null,
+        ]) : null,
+      error !== "" ? h("p", { key: "error", role: "alert", style: styles.error }, t("readiness.failed") + " " + error) : null,
+    ])
+  }
+
+  /** Save the delivery fields together so moving focus never writes a partial template. */
+  function DeliverySettings({ delivery, busy, onSave }) {
+    const t = translate
+    const [invalid, setInvalid] = useState(false)
+    const toolPattern = /^[A-Za-z0-9_.-]+$/
+    const submit = event => {
+      event.preventDefault()
+      const fields = event.currentTarget.elements
+      const tool = fields.namedItem("tool").value.trim()
+      const onFail = fields.namedItem("onFail").value
+      const rules = fields.namedItem("sites").value.split("\n").filter(line => line.trim() !== "")
+      const entries = rules.map(line => line.split("=").map(value => value.trim()))
+      let args
+      try {
+        args = JSON.parse(fields.namedItem("args").value)
+      } catch {
+        setInvalid(true)
+        return
+      }
+      if ((tool !== "" && !toolPattern.test(tool))
+        || args === null || typeof args !== "object" || Array.isArray(args)
+        || Object.values(args).some(value => typeof value !== "string")
+        || entries.some(entry => entry.length !== 2 || !/^[A-Za-z0-9.-]+$/.test(entry[0]) || !toolPattern.test(entry[1]))) {
+        setInvalid(true)
+        return
+      }
+      const sites = Object.fromEntries(entries.map(([host, name]) => [host.toLowerCase(), name]))
+      if (Object.keys(sites).length !== entries.length) {
+        setInvalid(true)
+        return
+      }
+      setInvalid(false)
+      onSave({ tool, args, onFail, sites })
+    }
+    const field = (name, control) => h("label", { key: name, style: styles.label }, [
+      h("span", { key: "label" }, t("delivery." + name)),
+      control,
+      name === "args" ? h("span", { key: "hint", style: styles.hint }, t("delivery.args.hint")) : null,
+    ])
+    return h("form", { onSubmit: submit }, [
+      h("fieldset", { key: "fields", disabled: busy, style: { border: 0, margin: 0, padding: 0, display: "grid", gap: "10px" } }, [
+        field("tool", h("input", { key: "control", name: "tool", className: "dsh-bb-input", defaultValue: delivery?.tool ?? "", placeholder: "lark_drive_upload" })),
+        field("args", h("textarea", { key: "control", name: "args", className: "dsh-bb-input", rows: 3, defaultValue: JSON.stringify(delivery?.args ?? { file_path: "{path}" }, null, 2) })),
+        field("onFail", h("select", { key: "control", name: "onFail", className: "dsh-bb-input", defaultValue: delivery?.onFail ?? "keep-local" }, [
+          h("option", { key: "keep", value: "keep-local" }, t("delivery.onFail.keep")),
+          h("option", { key: "stop", value: "stop" }, t("delivery.onFail.stop")),
+        ])),
+        field("sites", h("textarea", { key: "control", name: "sites", className: "dsh-bb-input", rows: 3, defaultValue: Object.entries(delivery?.sites ?? {}).map(([host, tool]) => host + "=" + tool).join("\n") })),
+        h("div", { key: "actions" }, h("button", { type: "submit", style: styles.button }, t("delivery.save"))),
+      ]),
+      invalid ? h("p", { key: "error", role: "alert", style: styles.error }, t("delivery.invalid")) : null,
+    ])
+  }
+
+  /** The settings page section. */
+  /**
+   * The references section: what was selected in a page earlier, and the way back.
+   *
+   * It lists and reveals only. A capture starts from the page — the assistant's
+   * tool, or a browser menu once one exists — because a selection lives in the
+   * page, not in this panel. A host without the reference routes makes the list
+   * request fail, and the section then renders nothing, exactly like a settings
+   * row an older host does not serve.
+   */
+  function References(props) {
+    useLocaleVersion()
+    const t = translate
+    const [rows, setRows] = useState([])
+    const [status, setStatus] = useState("loading")
+    const [pending, setPending] = useState("")
+    const [outcome, setOutcome] = useState(null)
+    const [exporting, setExporting] = useState("")
+    const [importing, setImporting] = useState(false)
+    const [importNote, setImportNote] = useState("")
+    const fileInput = useRef(null)
+    const alive = useRef(true)
+    const loadRevision = useRef(0)
+
+    useEffect(() => {
+      alive.current = true
+      return () => { alive.current = false; loadRevision.current += 1 }
+    }, [])
+
+    const load = useCallback(() => {
+      const revision = ++loadRevision.current
+      setStatus("loading")
+      fetch("/dsh-builtin-browser/reference/list?limit=10", { headers: { accept: "application/json" } })
+        .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+        .then(data => {
+          if (!alive.current || loadRevision.current !== revision) return
+          setRows(Array.isArray(data.references) ? data.references : [])
+          setStatus("ready")
+        })
+        .catch(() => { if (alive.current && loadRevision.current === revision) setStatus("failed") })
+    }, [])
+    useEffect(() => { load() }, [load])
+
+    const label = state => {
+      if (state === "revealed") return t("refs.revealed")
+      if (state === "ambiguous") return t("refs.ambiguous")
+      if (state === "missing") return t("refs.missing")
+      if (state === "page-mismatch") return t("refs.pageMismatch")
+      if (state === "session-unavailable") return t("refs.sessionUnavailable")
+      if (state === "not-found") return t("refs.notFound")
+      if (state === "added") return t("refs.added")
+      if (state === "addFailed") return t("refs.addFailed")
+      if (state === "removed") return t("refs.removed")
+      if (state === "removeFailed") return t("refs.removeFailed")
+      return t("refs.failed")
+    }
+    const reveal = referenceId => {
+      setPending(referenceId)
+      setOutcome(null)
+      fetch(REFERENCE_REVEAL_ROUTE, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ referenceId }),
+      }).then(async response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return response.json()
+      })
+        .then(data => { if (alive.current) setOutcome({ referenceId, status: data.status || "unavailable" }) })
+        .catch(() => { if (alive.current) setOutcome({ referenceId, status: "failed" }) })
+        .finally(() => { if (alive.current) setPending("") })
+    }
+    const exportAs = format => {
+      setExporting(format)
+      setOutcome(null)
+      fetch(`/dsh-builtin-browser/reference/export?format=${encodeURIComponent(format)}`, { headers: { accept: "*/*" } })
+        .then(async response => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          const blob = await response.blob()
+          if (!alive.current) return
+          const disposition = response.headers.get("content-disposition") || ""
+          const named = /filename="([^"]+)"/.exec(disposition)
+          const fallback = { jsonl: "browser-references.jsonl", markdown: "browser-references.md", zip: "browser-references.zip" }[format] || "browser-references.zip"
+          const url = URL.createObjectURL(blob)
+          const link = document.createElement("a")
+          link.href = url
+          link.download = named ? named[1] : fallback
+          link.click()
+          setTimeout(() => URL.revokeObjectURL(url), 0)
+        })
+        .catch(() => { if (alive.current) setOutcome({ referenceId: "", status: "failed" }) })
+        .finally(() => { if (alive.current) setExporting("") })
+    }
+    /**
+     * Restore a `format=zip` export. The route re-verifies every hash and reports per-record
+     * rejections; a partial import is shown as such rather than as a clean success.
+     * @param file - the user-picked archive.
+     */
+    const importFrom = file => {
+      if (!file) return
+      setImporting(true)
+      setImportNote("")
+      setOutcome(null)
+      fetch(REFERENCE_IMPORT_ROUTE, {
+        method: "POST",
+        headers: { "content-type": "application/zip" },
+        body: file,
+      })
+        .then(async response => {
+          const data = await response.json().catch(() => ({}))
+          if (!response.ok || data.ok !== true) throw new Error(String(data.error || `HTTP ${response.status}`))
+          return data
+        })
+        .then(data => {
+          if (!alive.current) return
+          const rejected = Array.isArray(data.rejected) ? data.rejected.length : 0
+          setImportNote(`${t("refs.importDone")} ${String(data.added)}/${String(data.references)}`
+            + (rejected > 0 ? ` · ${String(rejected)} ${t("refs.importPartial")}` : ""))
+          load()
+        })
+        .catch(() => { if (alive.current) setImportNote(t("refs.importFailed")) })
+        .finally(() => {
+          if (!alive.current) return
+          setImporting(false)
+          if (fileInput.current) fileInput.current.value = ""
+        })
+    }
+
+    /**
+     * "Add to conversation" feeds the durable delivery queue; the DSH client
+     * drains that queue into the real draft. The record itself is untouched, so
+     * a failed add can be retried without re-capturing the page.
+     */
+    const postDelivery = (path, body, okStatus, failStatus, referenceId) => {
+      setPending(referenceId)
+      setOutcome(null)
+      fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      })
+        .then(async response => ({ ok: response.ok, data: await response.json().catch(() => ({})) }))
+        .then(({ ok, data }) => {
+          if (alive.current) setOutcome({ referenceId, status: ok && data.ok !== false ? okStatus : failStatus })
+        })
+        .catch(() => { if (alive.current) setOutcome({ referenceId, status: failStatus }) })
+        .finally(() => { if (alive.current) setPending("") })
+    }
+    const addToDraft = referenceId => postDelivery(
+      REFERENCE_INSERT_ROUTE, { referenceId }, "added", "addFailed", referenceId,
+    )
+    const removeFromDraft = referenceId => postDelivery(
+      REFERENCE_DELIVERY_REMOVE_ROUTE, { referenceId }, "removed", "removeFailed", referenceId,
+    )
+    const withActions = props && props.withActions === true
+
+    const transferring = exporting !== "" || importing
+    const sourceLabel = url => {
+      try { return new URL(url).host } catch { return "" }
+    }
+    const preview = item => (Array.isArray(item.parts) ? item.parts : []).map(part =>
+      part.type === "image" ? `${t("refs.image")}${part.preview ? ` · ${part.preview}` : ""}`
+        : part.type === "table" ? `${t("refs.table")}${part.preview ? ` · ${part.preview}` : ""}`
+          : String(part.preview || "")).filter(Boolean).join(" · ")
+
+    return h("details", { style: styles.group, className: "dsh-bb-references" }, [
+      h("summary", { key: "head", style: { ...styles.groupTitle, fontWeight: 500 } }, [
+        t("refs.title"),
+        rows.length > 0 ? h("span", { key: "count", className: "dsh-bb-ref-count" }, `${rows.length} ${t("refs.records")}`) : null,
+      ]),
+      h("div", { key: "toolbar", className: "dsh-bb-ref-toolbar" }, [
+        h("button", { key: "refresh", type: "button", style: styles.button, disabled: status === "loading", onClick: load }, t("refs.refresh")),
+      ]),
+      status === "failed" ? h("p", { key: "error", role: "alert", style: styles.error }, t("refs.loadFailed")) : null,
+      status === "loading" && rows.length === 0 ? h("p", { key: "loading", role: "status", style: styles.hint }, t("refs.reading")) : null,
+      status === "ready" && rows.length === 0 ? h("p", { key: "empty", style: styles.hint }, t("refs.empty")) : null,
+      h("ul", { key: "list", className: "dsh-bb-ref-list", "aria-busy": status === "loading" }, rows.map(item => h("li", {
+        key: item.referenceId, className: "dsh-bb-ref-item",
+      }, [
+        h("div", { key: "text", className: "dsh-bb-ref-content" }, [
+          h("span", { key: "title", className: "dsh-bb-ref-title", title: item.title || item.pageUrl }, item.title || sourceLabel(item.pageUrl) || t("refs.untitled")),
+          preview(item) ? h("p", { key: "preview", className: "dsh-bb-ref-preview" }, preview(item)) : null,
+          h("div", { key: "meta", className: "dsh-bb-ref-meta" }, [
+            h("span", { key: "source", className: "dsh-bb-ref-source", title: item.pageUrl }, sourceLabel(item.pageUrl)),
+            h("time", { key: "date", dateTime: item.capturedAt }, new Date(item.capturedAt).toLocaleDateString(currentLocale === "en" ? "en" : "zh-CN")),
+            h("span", { key: "parts" }, `${item.partCount} ${t("refs.parts")}`),
+          ]),
+          outcome !== null && outcome.referenceId === item.referenceId
+            ? h("p", { key: "outcome", role: "status", className: "dsh-bb-ref-outcome", style: outcome.status === "revealed" || outcome.status === "added" || outcome.status === "removed" ? styles.hint : styles.error }, label(outcome.status))
+            : null,
+        ]),
+        h("div", { key: "actions", className: "dsh-bb-ref-actions" }, [
+          withActions ? h("button", {
+            key: "add", type: "button", style: styles.button,
+            disabled: pending !== "", onClick: () => addToDraft(item.referenceId),
+          }, t("refs.addToDraft")) : null,
+          withActions ? h("button", {
+            key: "remove", type: "button", style: styles.button,
+            disabled: pending !== "", onClick: () => removeFromDraft(item.referenceId),
+          }, t("refs.remove")) : null,
+          h("button", {
+            key: "reveal", type: "button", style: styles.button,
+            disabled: pending !== "", onClick: () => reveal(item.referenceId),
+            "aria-label": `${t("refs.reveal")} · ${item.title || sourceLabel(item.pageUrl)}`,
+          }, pending === item.referenceId ? t("refs.loading") : t("refs.reveal")),
+        ]),
+      ]))),
+      h("details", { key: "transfer", className: "dsh-bb-ref-transfer" }, [
+        h("summary", { key: "label", style: styles.hint }, t("refs.transfer")),
+        h("div", { key: "exports", className: "dsh-bb-ref-transfer-actions" }, [
+          ...["jsonl", "markdown", "zip"].map(format => h("button", {
+            key: format,
+            type: "button",
+            style: styles.button,
+            disabled: transferring,
+            onClick: () => exportAs(format),
+          }, `${t("refs.export")} ${t(format === "jsonl" ? "refs.exportJsonl" : format === "markdown" ? "refs.exportMarkdown" : "refs.exportZip")}`)),
+        ]),
+        h("div", { key: "imports", className: "dsh-bb-ref-transfer-actions" }, [
+          h("input", {
+            key: "file",
+            type: "file",
+            accept: ".zip,application/zip",
+            ref: fileInput,
+            style: { display: "none" },
+            onChange: event => importFrom(event.target.files && event.target.files[0]),
+          }),
+          h("button", {
+            key: "importButton",
+            type: "button",
+            style: styles.button,
+            disabled: transferring,
+            onClick: () => { if (fileInput.current) fileInput.current.click() },
+          }, importing ? t("refs.importBusy") : t("refs.import")),
+        ]),
+      ]),
+      importNote !== "" ? h("p", { key: "importNote", role: "status", style: styles.hint }, importNote) : null,
+      outcome !== null && outcome.referenceId === "" ? h("p", { key: "transfer-error", role: "alert", style: styles.error }, t("refs.failed")) : null,
+    ])
+  }
+
+  /**
+   * The record list is kept for the test seam only. The user-facing entry was
+   * removed: the conversation input now renders one card per reference, so a
+   * separate aggregate history menu duplicated the same content.
+   */
+  function SettingsRoot() {
+    useLocaleVersion()
+    const t = translate
+    const [rawSettings, setSettings] = useState(null)
+    const [meta, setMeta] = useState({ path: "" })
+    const [error, setError] = useState("")
+    const [busy, setBusy] = useState(false)
+    const [saved, setSaved] = useState(false)
+    const saving = useRef(false)
+    const savedTimer = useRef(null)
+    const alive = useRef(true)
+
+    const load = useCallback(() => {
+      setError("")
+      callSettings().then(data => {
+        if (!alive.current) return
+        setSettings(data.settings)
+        setMeta({ path: data.path || "" })
+      }).catch(failure => { if (alive.current) setError(String(failure && failure.message ? failure.message : failure)) })
+    }, [])
+
+    useEffect(() => {
+      alive.current = true
+      load()
+      return () => { alive.current = false }
+    }, [load])
+    useEffect(() => () => clearTimeout(savedTimer.current), [])
+
+    const patch = useCallback(next => {
+      if (saving.current) return
+      saving.current = true
+      clearTimeout(savedTimer.current)
+      setSaved(false)
+      setBusy(true)
+      setError("")
+      callSettings(next).then(data => {
+        if (!alive.current) return
+        setSettings(data.settings)
+        setSaved(true)
+        savedTimer.current = setTimeout(() => setSaved(false), 1800)
+      }).catch(failure => { if (alive.current) setError(String(failure && failure.message ? failure.message : failure)) })
+        .finally(() => {
+          saving.current = false
+          if (alive.current) setBusy(false)
+        })
+    }, [])
+
+    if (rawSettings === null) {
+      return h("div", { style: styles.wrap }, [
+        error === "" ? h("p", { key: "l", role: "status", style: styles.lead }, t("loading")) : null,
+        error !== "" ? h("p", { key: "e", style: styles.error }, `${t("failed")} ${error}`) : null,
+        error !== "" ? h("button", { key: "retry", type: "button", style: styles.button, onClick: load }, t("retry")) : null,
+      ])
+    }
+
+    // A document served by an OLDER host has no `actions` section — which is exactly the state
+    // an update leaves behind when the host has not been restarted yet (the client bundle is
+    // read at request time, the host's code at startup). Rendering `settings.actions.allowExecute`
+    // off that threw, and the throw took the whole panel with it: the section did not merely show
+    // stale values, it refused to open. Fill the gap with the defaults an older host behaves by,
+    // which is also the honest reading — it has no such switch, so "on" is what it does.
+    const settings = rawSettings.actions === undefined
+      ? { ...rawSettings, actions: { allowExecute: true, allowDownload: true, allowCredentialWrite: true } }
+      : rawSettings
+
+    const toggle = (group, key, labelKey = group + "." + key, hintKey) => h(Toggle, {
+      key,
+      labelKey,
+      hintKey,
+      checked: settings[group]?.[key] ?? (group === "cookies" && key === "persist"),
+      busy,
+      onChange: value => patch({ [group]: { [key]: value } }),
+    })
+    const selector = (labelKey, value, options, onChange, hintKey) => h("div", {
+      key: labelKey,
+      className: "dsh-bb-row",
+      style: styles.row,
+    }, [
+      h("span", { key: "text", style: styles.label }, [
+        h("span", { key: "label" }, t(labelKey)),
+        hintKey ? h("span", { key: "hint", style: styles.hint }, t(hintKey)) : null,
+      ]),
+      h(Dropdown, { key: "select", label: t(labelKey), value, options, disabled: busy, onChange }),
+    ])
+    const options = (prefix, values) => values.map(value => ({ value, label: t(prefix + value) }))
+    const section = (titleKey, children) => h("section", { key: titleKey, style: styles.group }, [
+      h("h3", { key: "title", style: styles.groupTitle }, t(titleKey)),
+      ...children,
+    ])
+    const systemBrowser = ["chrome", "edge"].includes(settings.browser.channel)
+
+    return h("div", { style: styles.wrap, className: "dsh-bb-settings" }, [
+      selector("browser.channel", settings.browser.channel,
+        options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"]),
+        channel => patch({ browser: { channel } })),
+      systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
+        options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
+      h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel }),
+      h(HostPatchControls, { key: "host-patch" }),
+      section("ui.title", [
+        toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
+        toggle("ui", "autoExpandOnce"),
+        toggle("ui", "closeWithSession"),
+        toggle("ui", "virtualCursor"),
+        toggle("remoteView", "enabled", "remoteView.enabled", "remoteView.enabled.hint"),
+      ]),
+      section("actions.title", [
+        toggle("actions", "allowExecute"),
+        toggle("actions", "allowDownload"),
+        toggle("credentials", "allowRead"),
+        toggle("actions", "allowCredentialWrite", "actions.allowCredentialWrite", "actions.allowCredentialWrite.hint"),
+      ]),
+      h("details", { key: "advanced", style: styles.group }, [
+        h("summary", { key: "title", style: styles.groupTitle }, t("settings.advanced")),
+        toggle("history", "enabled"),
+        selector("vision.strategy", settings.vision.strategy, [
+          { value: "auto", label: t("vision.auto") },
+          { value: "nonVisual", label: t("vision.nonVisual") },
+        ], strategy => patch({ vision: { strategy } })),
+        systemBrowser && settings.browser.systemProfile !== "user" ? toggle("cookies", "persist", "browser.profile", "browser.profile.hint") : null,
+        systemBrowser && settings.browser.systemProfile !== "user" ? selector("browser.headless", settings.browser.headless ?? "auto",
+          options("browser.headless.", ["auto", "windowed", "headless"]),
+          headless => patch({ browser: { headless } }), "browser.headless.hint") : null,
+        settings.delivery ? section("delivery.title", [
+          h(DeliverySettings, {
+            key: JSON.stringify(settings.delivery),
+            delivery: settings.delivery,
+            busy,
+            onSave: delivery => patch({ delivery }),
+          }),
+        ]) : null,
+        meta.path !== "" ? h("p", { key: "path", style: styles.pathLine }, t("settings.details") + " · " + meta.path) : null,
+      ]),
+      h("div", { key: "status", style: styles.status, role: "status" }, [
+        busy || saved ? h("span", { key: "s" }, t(busy ? "settings.saving" : "saved")) : null,
+        error !== "" ? h("span", { key: "e", style: styles.error }, ` ${t("failed")} ${error} `) : null,
+        error !== "" ? h("button", { key: "r", type: "button", style: styles.button, onClick: load }, t("retry")) : null,
+      ]),
+    ])
+  }
+
+  // ===========================================================================
+  // Conversation panel service: the one place a sidebar panel is opened.
+  //
+  // The shell mounts one right sidebar per conversation, and DSH's own sidebar
+  // browser keeps that conversation's tabs and its webview guest inside it.
+  // `ctx.sidebarRight.openTab` acts on the conversation the shell is SHOWING
+  // (`mounted`), so every path that simulated a shortcut or clicked a card put
+  // the page into whichever conversation the human happened to be reading —
+  // that is the cross-conversation bleed, and it is a property of the path, not
+  // an accident of it.
+  //
+  // `openTabIn(sessionId, …)` is the same navigation aimed at a NAMED
+  // conversation, and it works for one that is not on screen. This service is
+  // the only caller; the plugin's host half reaches it by evaluating
+  // `globalThis.__dshBuiltinBrowser.openPanel(...)` inside the shell window, so
+  // no input event, no key dispatch and no element click is involved.
+  //
+  // Guest identity is read from the panel's own `<webview>` and only inside the
+  // subtree found for THAT conversation — never from the first match in the
+  // document, which belongs to somebody else's panel.
+  // ===========================================================================
+
+  /** The conversation a sidebar element belongs to, read off its React fiber. */
+  function sessionIdOfElement(element) {
+    const key = Object.keys(element).find(
+      name => name.startsWith("__reactFiber$") || name.startsWith("__reactInternalInstance$"),
+    )
+    if (key === undefined) return null
+    let fiber = element[key]
+    let depth = 0
+    while (fiber !== null && fiber !== undefined && depth < 60) {
+      const props = fiber.memoizedProps
+      if (props !== null && typeof props === "object" && typeof props.sessionId === "string") return props.sessionId
+      fiber = fiber.return
+      depth += 1
+    }
+    return null
+  }
+
+  /**
+   * This conversation's own sidebar strip, or null when the shell has not mounted it.
+   *
+   * Its presence is the precondition `openTabIn` needs: it is minted together with the
+   * conversation's surface store, and a call for a conversation whose store was never
+   * minted silently does nothing. Detecting it here turns that silence into a reason
+   * the caller can report, instead of a page that never appears.
+   */
+  function tabStripFor(sessionId) {
+    for (const strip of Array.from(document.querySelectorAll("[class*=_tabStrip]"))) {
+      if (sessionIdOfElement(strip) === sessionId) return strip
+    }
+    return null
+  }
+
+  /** rc.5 marks both SessionView and its nested SidebarPanel, including floating panes. */
+  function panelRootsFor(sessionId) {
+    const roots = Array.from(document.querySelectorAll("[data-sidebar-right-session]"))
+    // Only shells without DOM ownership markers may use the legacy React adapter.
+    return roots.length === 0 ? undefined : roots.filter(root => root.getAttribute("data-sidebar-right-session") === sessionId)
+  }
+
+  /**
+   * Every live `<webview>` guest inside this conversation's panel subtree.
+   *
+   * The walk up stops the moment an ancestor carries ANOTHER conversation's sidebar, and that stop
+   * condition is the whole point of this function. The shell mounts every conversation's panel in
+   * the same document — hidden ones included — so one step too far lands on a subtree that holds
+   * all of them, and the first guest found there belongs to whichever conversation the shell
+   * happens to render first. Measured: a GitHub login page opened in a different conversation was
+   * reported as this one's guest, which is the cross-conversation bleed this service exists to
+   * prevent. A sibling strip is the exact, class-name-independent signature of having stepped
+   * outside; a conversation may legitimately own more than one strip of its own, so the test is
+   * "is there one that is NOT mine", never a count.
+   */
+  function guestsInPanel(sessionId) {
+    const roots = panelRootsFor(sessionId)
+    if (roots !== undefined) {
+      // The nested markers can enumerate a guest twice. Its closest owner must still
+      // name this session, so an embedded foreign session never enters the result.
+      return Array.from(new Set(roots.flatMap(root => Array.from(root.querySelectorAll("webview"))))).filter(view => {
+        try {
+          return roots.includes(view.closest("[data-sidebar-right-session]"))
+            && typeof view.getWebContentsId === "function" && view.getWebContentsId() > 0
+        } catch { return false }
+      })
+    }
+    const strip = tabStripFor(sessionId)
+    if (strip === null) return []
+    // Start at the strip itself: it is by construction this conversation's own, so the foreign test
+    // below cannot trip on it, and a shell that renders the guest as a sibling of the strip is
+    // still reached.
+    let node = strip
+    while (node !== null && node !== undefined && node !== document.body) {
+      const foreign = Array.from(node.querySelectorAll("[class*=_tabStrip]"))
+        .some(el => sessionIdOfElement(el) !== sessionId)
+      if (foreign) break
+      const found = Array.from(node.querySelectorAll("webview")).filter(view => {
+        try { return typeof view.getWebContentsId === "function" && view.getWebContentsId() > 0 }
+        catch (error) { return false }
+      })
+      if (found.length > 0) return found
+      node = node.parentElement
+    }
+    return []
+  }
+
+  /** Read this conversation's current guest, preferring the one actually drawn. */
+  function guestStateFor(sessionId, tabId, initializationReader) {
+    const roots = panelRootsFor(sessionId)
+    if (roots === undefined ? tabStripFor(sessionId) === null : roots.length === 0) return { panel: false, guestId: null, url: "" }
+    if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof tabId === "string") {
+      const page = initializationReader?.current({ sessionId, tabId })
+      return { panel: true, guestId: page?.guestId ?? null, url: page?.url ?? "", ...page?.generation === undefined ? {} : { nativeState: page } }
+    }
+    const guests = guestsInPanel(sessionId).filter(view => tabId === undefined
+      || tabIdOfElement(view, new Set([tabId]), roots) === tabId)
+    if (guests.length === 0) return { panel: true, guestId: null, url: "" }
+    // A sidebar keeps every tab mounted (`keepMounted`), so a background tab's guest is
+    // in the tree too. Prefer the one with a drawn box; fall back to the newest.
+    const drawn = guests.find(view => {
+      const rect = view.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    })
+    const chosen = drawn === undefined ? guests[guests.length - 1] : drawn
+    let url = ""
+    try { url = String(chosen.getURL ? chosen.getURL() : "") } catch (error) { url = "" }
+    try { return { panel: true, guestId: chosen.getWebContentsId(), url } }
+    catch (error) { return { panel: true, guestId: null, url: "" } }
+  }
+
+  /** Resolve a shell tab by its stable id, never by the page's displayed title. */
+  function tabIdOfElement(element, allowed, roots) {
+    if (roots !== undefined) {
+      const owner = element.closest("[data-sidebar-right-session]")
+      if (!roots.includes(owner)) return null
+      let id = null
+      for (let node = element; node && node !== owner; node = node.parentElement) {
+        for (const value of [node.getAttribute("data-sidebar-right-tab"), node.getAttribute("data-dockkit-tab")]) {
+          if (value === null) continue
+          if (id !== null && id !== value) return null
+          id = value
+        }
+      }
+      return allowed.has(id) ? id : null
+    }
+    const key = Object.keys(element).find(name => name.startsWith("__reactFiber$") || name.startsWith("__reactInternalInstance$"))
+    let fiber = key === undefined ? null : element[key]
+    for (let depth = 0; fiber && depth < 60; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps
+      if (!props || typeof props !== "object") continue
+      for (const id of [props.tabId, props.tab && props.tab.id]) {
+        if (typeof id === "string" && allowed.has(id)) return id
+      }
+    }
+    return null
+  }
+
+  /**
+   * Publish the service every host-side panel request goes through.
+   *
+   * The binding is separate from the publication so the API exists from the first
+   * apply — a request arriving before `sidebarRight` is ready gets a named reason
+   * rather than a missing global, which is indistinguishable from a bridge that
+   * never loaded.
+   */
+  function installPanelService(ctx) {
+    let sidebarRight = null
+    let initializationReader = null
+    const pendingTabs = new Map()
+    const renderingHolds = new Map()
+    function releaseRendering(token) {
+      const hold = renderingHolds.get(token)
+      if (hold === undefined) return
+      renderingHolds.delete(token)
+      clearTimeout(hold.timer)
+      hold.release()
+    }
+    function releaseAllRendering() {
+      for (const token of renderingHolds.keys()) releaseRendering(token)
+    }
+    function hasRenderingHold(sessionId) {
+      return Array.from(renderingHolds.values()).some(hold => hold.sessionId === sessionId)
+    }
+    const initializing = new Map()
+    /** The shell's own navigation service: `openSession` is how it is asked to DISPLAY a conversation. */
+    let uiWorkspace = null
+    // `inject` is how a client plugin waits for a service to appear. A host that does not offer it
+    // — an older composition, or a harness that mounted this bundle for its settings panel alone —
+    // must still get the panel, so the wait is skipped and the published API names the missing
+    // service when it is called. Failing the whole apply here would take the settings panel down
+    // with it, which is exactly the shape of regression this file has been bitten by before.
+    if (typeof ctx.inject === "function") {
+      ctx.inject(["sidebarBrowserInitialization"], (scope) => {
+        const reader = scope.sidebarBrowserInitialization
+        if (reader?.protocolVersion !== 1 || typeof reader.read !== "function") return
+        initializationReader = reader
+        scope.effect(() => () => {
+          if (initializationReader === reader) initializationReader = null
+        }, "dsh-builtin-browser: initialization receipt reader")
+      })
+      ctx.inject(["sidebarRight"], (scope) => {
+        if (sidebarRight !== scope.sidebarRight) {
+          releaseAllRendering()
+          pendingTabs.clear()
+        }
+        sidebarRight = scope.sidebarRight
+        scope.effect(() => () => {
+          if (sidebarRight === scope.sidebarRight) {
+            releaseAllRendering()
+            sidebarRight = null
+            pendingTabs.clear()
+            for (const transaction of initializing.values()) transaction.controller.abort(new Error("the sidebar service was released"))
+            initializing.clear()
+          }
+        }, "dsh-builtin-browser: conversation panel binding")
+      })
+      // A separate inject, deliberately: waiting for both services in one call would take the
+      // panel down on a host that has the sidebar but not the workspace service (an older
+      // composition), and the panel is the part that must keep working.
+      ctx.inject(["uiWorkspace"], (scope) => {
+        uiWorkspace = scope.uiWorkspace
+        scope.effect(() => () => {
+          if (uiWorkspace === scope.uiWorkspace) uiWorkspace = null
+        }, "dsh-builtin-browser: workspace binding")
+      })
+    }
+    /**
+     * Place a tool-opened page into the Web sidebar.
+     *
+     * The desktop shell is told to place a tab through the bridge; the Web shell has no such channel, so
+     * a page opened by a tool stayed inside the plugin's own browser while the panel showed nothing.
+     * The host keeps the last open request in one slot; this poll turns it into a sidebar tab, which is
+     * what makes "open it" a single call again.
+     */
+    /**
+     * Which surface this shell should drive.
+     *
+     * Default "panel": the sidebar is the browsing surface. Appending ?browser-surface=builtin to the DSH
+     * URL switches this window to the built-in browser for debugging DSH itself — no restart, no settings
+     * file, and it cannot affect another window.
+     * @returns the surface to declare.
+     */
+    function declaredSurface() {
+      try {
+        const wanted = new URLSearchParams(location.search).get("browser-surface")
+        return wanted === "builtin" ? "builtin" : "panel"
+      } catch { return "panel" }
+    }
+    /**
+     * 已经摆放过的 open 记录时间戳。
+     *
+     * 这份状态以前只在内存里，**刷新页面即归零**：宿主那边仍留着上一次 open 记录，于是页面一刷新就把
+     * 用户已经关掉的侧栏与网页重新打开。写进 sessionStorage 后，同一次浏览会话内的刷新不会再重放；
+     * 换新标签页也不会因为宿主里那条旧记录而凭空冒出侧栏。
+     * @returns 已处理过的最晚 open 时间（毫秒）。
+     */
+    let lastOpenHandled = (() => {
+      try {
+        const raw = sessionStorage.getItem("dsh-builtin-browser:last-open-handled")
+        const value = raw === null ? 0 : Number(raw)
+        return Number.isFinite(value) ? value : 0
+      } catch { return 0 }
+    })()
+
+    /**
+     * 记住已处理的 open，供刷新后继续沿用。
+     * @param at - 该条 open 记录的时间戳（毫秒）。
+     */
+    function rememberOpenHandled(at) {
+      lastOpenHandled = at
+      try { sessionStorage.setItem("dsh-builtin-browser:last-open-handled", String(at)) } catch { /* 隐私模式忽略 */ }
+    }
+
+    function drainOpenRequest() {
+      const sessionId = guestSession()
+      if (typeof sessionId !== "string" || sessionId === "") return
+      fetch("/dsh-builtin-browser/browser/open-request", { headers: { accept: "application/json" } })
+        .then(response => (response.ok ? response.json() : undefined))
+        .then(body => {
+          const open = body && body.open
+          if (!open || typeof open.url !== "string" || typeof open.at !== "number") return
+          if (typeof open.owner === "string" && open.owner.replace(/^session-/, "") !== sessionId) return
+          // Only act when the HOST says it is in panel mode. A host that predates the single-surface
+          // switch still opens its own browser for every call, so placing a tab here as well produced TWO
+          // live views of one page (the reported double-open). No echo, no tab.
+          if (body.surface !== "panel") return
+          if (open.at <= lastOpenHandled) return
+          const frame = document.querySelector('iframe[data-sidebar-browser-frame]')
+          const already = frame !== null && decodeURIComponent(frame.getAttribute("src") || "").includes(encodeURIComponent(open.url).slice(0, 24))
+          if (already) { rememberOpenHandled(open.at); return }
+          rememberOpenHandled(open.at)
+          const api = globalThis.__dshBuiltinBrowser
+          if (api && typeof api.openPanel === "function") api.openPanel("session-" + sessionId, open.url)
+        })
+        .catch(() => {})
+    }
+    // 轮询节奏：页面不可见时完全不发请求，回来时立刻补一次。
+    // Web 端没有宿主→客户端的推送通道（桌面端有 bridge），这条「工具打开了某页」的通知只能由客户端来问；
+    // 但没必要在后台标签页里一直问：DSH 自身常驻，一个隐藏窗口每秒一次的请求纯属浪费。
+    if (typeof setInterval === "function") setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return
+      drainOpenRequest()
+    }, 2000)
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "hidden") drainOpenRequest()
+      })
+    }
+    /**
+     * The conversation a proxied guest should attribute its quote to.
+     *
+     * \`screen()\` is empty for a brand-new conversation, but the shell already stamps the Session on its
+     * own DOM; without this fallback the FIRST reference of a fresh conversation was silently dropped.
+     * @returns the session id, or null when the shell exposes none.
+     */
+    function guestSession() {
+      const normalise = (value) => (value.startsWith("session-") ? value.slice(8) : value)
+      const direct = onScreenSession()
+      if (typeof direct === "string" && direct !== "") return normalise(direct)
+      try {
+        const node = document.querySelector("[data-sidebar-right-session], [data-conversation-session]")
+        const stamped = node === null ? null
+          : node.getAttribute("data-sidebar-right-session") ?? node.getAttribute("data-conversation-session")
+        // The shell stamps its DOM with a "session-<uuid>" prefix; the host's own registry (and the
+        // capture route) key on the bare id, and an un-stripped value is refused as session-unavailable.
+        if (typeof stamped === "string" && stamped !== "") return normalise(stamped)
+      } catch { /* no DOM */ }
+      return null
+    }
+    function onScreenSession() {
+      try {
+        const screen = sidebarRight === null || typeof sidebarRight.screen !== "function" ? undefined : sidebarRight.screen()
+        return screen !== undefined && screen !== null && typeof screen.sessionId === "string" ? screen.sessionId : null
+      } catch (error) {
+        return null
+      }
+    }
+
+    /** Display the owner of an explicit open request, including an already mounted hidden guest. */
+    function claimConversation(sessionId) {
+      if (hasRenderingHold(sessionId)) return false
+      if (uiWorkspace === null || typeof uiWorkspace.openSession !== "function") return false
+      // Already displayed? Then the shell needs no navigation: the panel simply has not been opened
+      // yet, and `revealPlacedPanel` opens it. Re-opening the conversation a human is reading would
+      // be a no-op at best and a view reset at worst.
+      if (onScreenSession() === sessionId) return false
+      try {
+        uiWorkspace.openSession(sessionId)
+        return true
+      } catch (error) {
+        return false
+      }
+    }
+
+    /**
+     * Make a page that has been PLACED actually appear: expand the column, focus its tab.
+     *
+     * A placed tab is not a shown page. The shell renders the body of the ACTIVE tab, and only
+     * while the column is expanded. A collapsed column keeps the strip — so the read side still
+     * reports `panel: true` — while no `<webview>` is ever created, and every guest read comes
+     * back empty. That is the state that used to sit here for 20 s and then get reported as an
+     * unusable panel: measured on the running shell as `panel: true`, `guestId: null` in the
+     * renderer and `sidebar: []` from the bridge, with no carrier-side step that could have
+     * fixed it, because nobody had ever asked the column to open.
+     *
+     * Both calls are layout commands on a conversation's own surface store — no input event, no
+     * key dispatch, no element click. Two guards keep them from touching a conversation the
+     * human is not reading:
+     *   - only when `screen()` names THIS conversation. `screen()` is the shell's own answer to
+     *     "which conversation is displayed", and `toggleExpanded` acts on exactly that one, so
+     *     without this check an expand could fold the column a human is reading. A conversation
+     *     that is displayed but was never opened (a fresh window has no right sidebar at all until
+     *     something asks for it) passes this check — that case is why the DOM alone is not enough;
+     *   - `focus` is scoped by the shell itself (a tab outside the mounted surface is ignored),
+     *     so passing it a tab id from another conversation's list cannot move that view.
+     *
+     * @param sessionId - the conversation whose page was just placed.
+     * A live guest may remain mounted while its column is folded, so it still needs this step.
+     * @returns what was asked for, so a caller can tell "expanded" from "already visible", and
+     *   `displayed` so it can tell "the shell is showing this conversation" from "it is not".
+     */
+    function revealPlacedPanel(sessionId, tabId) {
+      if (sidebarRight === null) return {}
+      const done = {}
+      // Which conversation is the shell DISPLAYING? `screen()` answers it, and it is the question
+      // that decides whether an expand call is safe: `toggleExpanded()` acts on the on-screen
+      // session, so calling it for any other conversation would fold the column a human is reading.
+      //
+      // It also separates two states that the DOM alone cannot:
+      //   - this conversation is displayed but its column has never been opened (a fresh window
+      //     starts with no right sidebar at all) — expand, and the panel mounts;
+      //   - another conversation is displayed — nothing here may touch the column; the claim step
+      //     is what moves the shell, and the caller retries one render later.
+      let onScreen = null
+      try {
+        onScreen = onScreenSession()
+      } catch (error) {
+        onScreen = null
+      }
+      if (onScreen !== sessionId) {
+        done.displayed = false
+        return done
+      }
+      done.displayed = true
+      // Expansion happens before any screen() verdict: a side panel that was never opened has no
+      // column to match, and bailing early there is exactly what left the page in a floating window.
+      try {
+        if (typeof sidebarRight.isExpanded === "function" && typeof sidebarRight.toggleExpanded === "function") {
+          // `isExpanded()` is false both for "folded" and for "never opened". Both want the same
+          // thing here, and `screen()` above has already established that the column being toggled
+          // is THIS conversation's, so expanding cannot touch anybody else's.
+          if (sidebarRight.isExpanded() === false) {
+            sidebarRight.toggleExpanded()
+            done.expanded = true
+          }
+        }
+      } catch (error) {
+        done.expandError = String(error?.message ?? error)
+      }
+      try {
+        const tabs = typeof sidebarRight.tabsIn === "function" ? sidebarRight.tabsIn(sessionId) : []
+        const page = Array.isArray(tabs) ? tabs.find(entry => entry !== null && typeof entry === "object" && entry.kind === "browser" && entry.id === tabId) : undefined
+        if (page !== undefined && typeof sidebarRight.focus === "function") {
+          sidebarRight.focus(page.id)
+          done.focused = String(page.id)
+        }
+      } catch (error) {
+        done.focusError = String(error?.message ?? error)
+      }
+      return done
+    }
+
+    function viewKey(sessionId, viewId) {
+      return JSON.stringify([sessionId, viewId])
+    }
+
+    /**
+     * Aim an already placed tab at one address through the shell's own
+     * navigation face. This is the only way a bound tab showing the start page
+     * can acquire a guest: the tab exists, but its body has never navigated.
+     * @returns true when the shell accepted the target.
+     */
+    function navigatePlacedTab(sessionId, tabId, address) {
+      try {
+        if (typeof sidebarRight.navigateTabIn === "function") {
+          return sidebarRight.navigateTabIn(sessionId, tabId, { params: { url: address } }) === true
+        }
+        const tab = Array.from(sidebarRight.tabsIn(sessionId)).find(tab => tab.id === tabId && tab.kind === "browser")
+        if (typeof tab?.contentId === "string" && typeof sidebarRight.tabDomain?.navigate === "function") {
+          sidebarRight.tabDomain.navigate(sessionId, tabId, { address: tab.contentId, params: { url: address } })
+          return true
+        }
+      } catch (error) {
+        return false
+      }
+      return false
+    }
+
+    /** Bind each logical view to one native tab; URLs can change without changing that identity. */
+    function openViewPanel(sessionId, address, viewId, guestId) {
+      const key = viewKey(sessionId, viewId)
+      const switched = claimConversation(sessionId)
+      let tabs
+      try { tabs = Array.from(sidebarRight.tabsIn(sessionId)) }
+      catch { return { ok: false, reason: "the shell cannot list this conversation's tabs", panel: false, guestId: null, ...switched ? { switched: true } : {} } }
+      const browsers = tabs.filter(tab => tab !== null && typeof tab === "object" && tab.kind === "browser" && typeof tab.id === "string")
+      const allowed = new Set(browsers.map(tab => tab.id))
+      const roots = panelRootsFor(sessionId)
+      const owned = new Set(Array.from(pendingTabs.entries())
+        .filter(([otherKey, binding]) => otherKey !== key && binding.sessionId === sessionId)
+        .map(([, binding]) => binding.id))
+      let binding = pendingTabs.get(key)
+      if (binding !== undefined && !allowed.has(binding.id)) {
+        // A missing store while the conversation mounts is temporary. Keep its identity until the
+        // store is readable again; a nonempty store proves that the original tab actually closed.
+        if (tabs.length === 0 && onScreenSession() !== sessionId) {
+          return { ok: false, reason: "this conversation's sidebar is not mounted", panel: false, guestId: null, ...switched ? { switched: true } : {} }
+        }
+        return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native tab for this browser view was closed; close or reset the view before retrying", panel: true, guestId: null }
+      }
+      const guests = guestsInPanel(sessionId)
+      const hasNativeGuest = globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof guestId === "string"
+      const hasCachedGuest = (Number.isInteger(guestId) && guestId > 0) || hasNativeGuest
+      if (binding === undefined && hasNativeGuest) {
+        const cached = browsers.find(tab => initializationReader?.current({ sessionId, tabId: tab.id })?.guestId === guestId)
+        if (cached === undefined || owned.has(cached.id)) return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native guest is not in this conversation", panel: true, guestId: null }
+        binding = { sessionId, id: cached.id, url: address, scoped: true }
+      }
+      if (binding === undefined && hasCachedGuest) {
+        const cached = guests.find(view => view.getWebContentsId() === guestId)
+        if (cached !== undefined) {
+          const id = tabIdOfElement(cached, allowed, roots)
+          if (id === null || owned.has(id)) {
+            return { ok: false, reason: "the requested guest cannot be assigned to this browser view", panel: true, guestId: null }
+          }
+          binding = { sessionId, id, url: address, scoped: true }
+        }
+        if (binding === undefined) return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native guest for this browser view is gone", panel: true, guestId: null }
+      }
+      if (binding === undefined && !hasCachedGuest) {
+        // Adopt only an unclaimed guest whose native tab can be proved. Multiple visible guests
+        // are ambiguous (split panes); creating a tab is safer than choosing by list order.
+        const candidates = guests.map(view => ({ view, id: tabIdOfElement(view, allowed, roots) }))
+          .filter(candidate => candidate.id !== null && !owned.has(candidate.id))
+        const drawn = candidates.filter(({ view }) => {
+          const rect = view.getBoundingClientRect()
+          return rect.width > 0 && rect.height > 0
+        })
+        const candidate = drawn.length === 1 ? drawn[0] : candidates.length === 1 ? candidates[0] : undefined
+        if (candidate !== undefined) binding = { sessionId, id: candidate.id, url: address, scoped: true }
+      }
+      const placeTab = (url) => {
+        // The Web panel serves pages through the same-origin guest proxy; it needs to know which
+        // conversation the tab belongs to so a quote can be handed back to the right draft.
+        try { globalThis.__dshSidebarSessionId = sessionId } catch { /* non-writable global */ }
+        const before = new Set(tabs.map(tab => tab.id))
+        try {
+          if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1
+            && typeof sidebarRight.openReservedTab === "function") {
+            const id = globalThis.crypto.randomUUID()
+            if (!sidebarRight.openReservedTab(sessionId, "browser", id)) return { ok: false, reason: "the shell refused this browser tab reservation" }
+            if (url && !navigatePlacedTab(sessionId, id, url)) {
+              sidebarRight.closeIn?.(sessionId, id)
+              return { ok: false, reason: "the shell refused this browser tab navigation" }
+            }
+          } else sidebarRight.openTabIn(sessionId, "browser", url ? { params: { url } } : {})
+        }
+        catch (error) { return { ok: false, reason: String(error?.message ?? error) } }
+        let placed
+        try { placed = Array.from(sidebarRight.tabsIn(sessionId)) }
+        catch { placed = [] }
+        const added = placed.filter(tab => tab !== null && typeof tab === "object" && tab.kind === "browser"
+          && typeof tab.id === "string" && !before.has(tab.id) && !owned.has(tab.id))
+        if (added.length !== 1) {
+          return { ok: false, reason: placed.length === 0 ? "this conversation's sidebar is not mounted" : "the shell did not identify a new browser tab for this view" }
+        }
+        return { ok: true, id: added[0].id }
+      }
+      let created = false
+      if (binding === undefined) {
+        const placed = placeTab(address)
+        if (!placed.ok) {
+          return { ok: false, reason: placed.reason, panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0, guestId: null, ...switched ? { switched: true } : {} }
+        }
+        binding = { sessionId, id: placed.id, url: address, scoped: true }
+        created = true
+      }
+      pendingTabs.set(key, binding)
+      const state = guestStateFor(sessionId, binding.id, initializationReader)
+      // A bound tab that still shows the start page has no guest to reveal.
+      // Revealing it can never produce one, so ask the shell to aim that exact
+      // tab at the requested address; the host body turns the new navigation
+      // revision into the one real page load. Tabs created above already carry
+      // the address as their initial URL and need no second navigation.
+      let navigating = false
+      if (!created && state.guestId === null && address !== "") {
+        navigating = navigatePlacedTab(sessionId, binding.id, address)
+        if (!navigating) {
+          return {
+            ok: false,
+            reason: "this DSH shell cannot initialize a bound start-page tab; update DSH and retry",
+            panel: state.panel,
+            guestId: null,
+            tabId: binding.id,
+            ...switched ? { switched: true } : {},
+          }
+        }
+      }
+      return {
+        ok: true,
+        created,
+        navigating,
+        panel: state.panel,
+        guestId: state.guestId,
+        url: state.url,
+        tabId: binding.id,
+        ...switched ? { switched: true } : {},
+        ...revealPlacedPanel(sessionId, binding.id),
+      }
+    }
+
+    const api = {
+      holdRendering(sessionId, token, deadline = Date.now() + 30_000) {
+        if (typeof sessionId !== "string" || !sessionId.startsWith("session-") || typeof token !== "string") return false
+        if (!Number.isFinite(deadline) || deadline <= Date.now()) return false
+        if (renderingHolds.has(token)) return true
+        if (onScreenSession() === sessionId || typeof sidebarRight?.holdRendering !== "function") return false
+        const release = sidebarRight.holdRendering(sessionId)
+        const timer = setTimeout(() => releaseRendering(token), Math.min(30_000, deadline - Date.now()))
+        renderingHolds.set(token, { sessionId, release, timer })
+        return true
+      },
+      releaseRendering,
+      isBackgroundRendering(sessionId) {
+        return hasRenderingHold(sessionId) && Array.from(document.querySelectorAll("[data-sidebar-right-background-rendering]"))
+          .some(element => element.getAttribute("data-sidebar-right-session") === sessionId)
+      },
+      panelProtocol: 5,
+      cancelPanelInitialization(sessionId, viewId, transactionId) {
+        const pending = initializing.get(viewKey(sessionId, viewId))
+        if (!pending || pending.transactionId !== transactionId) return false
+        pending.controller.abort(Object.assign(new Error("sidebar initialization was cancelled"), { code: "BROWSER_NAVIGATION_CANCELLED" }))
+        return true
+      },
+      async initializePanel(sessionId, url, options) {
+        const refuse = (code, reason) => ({ ok: false, code, reason, panel: false, guestId: null })
+        if (typeof options?.viewId !== "string" || options.viewId === "") return refuse("panel-initialization-failed", "a logical view identity is required")
+        if (onScreenSession() !== sessionId && !api.isBackgroundRendering(sessionId)) return refuse("panel-not-displayed", "the requested conversation is not displayed; select it before opening its browser")
+        const reader = initializationReader
+        if (reader === null || typeof reader.wait !== "function") return refuse("panel-initialization-failed", "the browser initialization subscription is unavailable; reload the plugin client")
+        const deadline = options.deadline
+        if (!Number.isFinite(deadline) || deadline <= Date.now()) return refuse("BROWSER_DOCUMENT_TIMEOUT", "sidebar initialization deadline expired")
+        const key = viewKey(sessionId, options.viewId)
+        const previous = initializing.get(key)
+        const controller = new AbortController()
+        const transaction = { controller, transactionId: options.transactionId }
+        let placed
+        const closeNative = () => {
+          if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion !== 1 || typeof placed?.tabId !== "string") return
+          sidebarRight.closeIn?.(sessionId, placed.tabId)
+          if (pendingTabs.get(key)?.id === placed.tabId) pendingTabs.delete(key)
+        }
+        controller.signal.addEventListener("abort", closeNative, { once: true })
+        initializing.set(key, transaction)
+        previous?.controller.abort(Object.assign(new Error("a newer sidebar initialization was requested"), { code: "panel-navigation-superseded" }))
+        const timer = setTimeout(() => controller.abort(Object.assign(new Error("sidebar initialization deadline expired"), { code: "BROWSER_DOCUMENT_TIMEOUT" })), deadline - Date.now())
+        try {
+          const answer = api.openPanel(sessionId, url, options)
+          placed = answer
+          if (controller.signal.aborted) { closeNative(); controller.signal.throwIfAborted() }
+          if (!answer.ok) return answer
+          const rendererNavigation = url !== "" && (answer.created || answer.navigating)
+          if (!rendererNavigation && answer.guestId !== null) return globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1
+            ? { ...answer, nativeState: reader.current({ sessionId, tabId: answer.tabId }) } : answer
+          if (typeof answer.tabId !== "string") return refuse("panel-initialization-failed", "the shell did not acknowledge its native tab identity")
+          const receipt = await reader.wait({ sessionId, tabId: answer.tabId, url }, controller.signal)
+          controller.signal.throwIfAborted()
+          const state = api.panelGuest(sessionId, answer.tabId, options)
+          const observed = reader.current({ sessionId, tabId: answer.tabId })
+          if (state.guestId === null || String(state.guestId) !== receipt.guestId || observed?.guestId !== receipt.guestId) {
+            return refuse("panel-initialization-failed", "the mounted native guest did not acknowledge its initialization identity")
+          }
+          return { ...answer, ...state, url: observed.url, initialization: receipt, rendererNavigation,
+            ...observed.generation === undefined ? {} : { nativeState: observed } }
+        } catch (error) {
+          closeNative()
+          return refuse(error?.code ?? "panel-initialization-failed", String(error?.message ?? error))
+        } finally {
+          clearTimeout(timer)
+          controller.signal.removeEventListener("abort", closeNative)
+          if (initializing.get(key) === transaction) initializing.delete(key)
+        }
+      },
+      get initializationProtocol() { return initializationReader?.protocolVersion ?? 0 },
+      panelInitialization(sessionId, tabId, url, requestId) {
+        if (initializationReader === null || typeof sessionId !== "string" || !sessionId.startsWith("session-")
+          || typeof tabId !== "string" || typeof url !== "string") return undefined
+        const binding = Array.from(pendingTabs.values()).find(value => value.sessionId === sessionId && value.id === tabId)
+        if (binding === undefined) return undefined
+        return initializationReader.read({ sessionId, tabId, url,
+          ...typeof requestId === "string" ? { requestId } : {} })
+      },
+      /** @returns what happened: an existing guest, a newly opened tab, or a named refusal. */
+      openPanel(sessionId, url, options) {
+        const wanted = typeof sessionId === "string" ? sessionId : ""
+        if (!/^session-/.test(wanted)) {
+          return { ok: false, reason: "not a conversation id: " + JSON.stringify(sessionId), panel: false, guestId: null }
+        }
+        if (sidebarRight === null || typeof sidebarRight.openTabIn !== "function") {
+          return { ok: false, reason: "the shell's sidebar service is not available", panel: false, guestId: null }
+        }
+        const address = url ? String(url) : ""
+        if (typeof options?.viewId === "string" && options.viewId !== "") {
+          return openViewPanel(wanted, address, options.viewId, options.guestId)
+        }
+        const pending = pendingTabs.get(wanted)
+        const state = guestStateFor(wanted, pending?.url === address && pending.scoped ? pending.id : undefined, initializationReader)
+        // Explicit opening also reveals a guest kept mounted in a collapsed or hidden sidebar.
+        // Passive panelGuest/panelGuests reads never call either presentation helper.
+        const switched = claimConversation(wanted)
+        if (state.guestId !== null) {
+          const revealed = revealPlacedPanel(wanted, pending?.url === address ? pending.id : undefined)
+          return {
+            ok: true,
+            created: false,
+            panel: true,
+            guestId: state.guestId,
+            url: state.url,
+            ...switched ? { switched: true } : {},
+            ...revealed,
+          }
+        }
+        // No panel DOM for this conversation means the shell is not DISPLAYING it, and no tab placed
+        // here can ever grow a webview: the shell renders one sidebar, for the conversation it shows.
+        // Asking the human to click over was the old answer, and it made a working carrier depend on
+        // their timing. Ask the shell instead — `openSession` is its own navigation, one call on its
+        // own workspace service, no input events — and report `switched` so the caller can retry one
+        // render later instead of reporting a dead carrier.
+        // A mounted panel is NOT required to place a tab.
+        //
+        // `openTabIn` acts on the conversation's own surface store, and the sidebar-right service
+        // keeps one for every conversation the shell has shown — "reaches any session's store by
+        // id … on screen or not". What a DISPLAYED conversation adds is the DOM to read the guest
+        // back out of, which is a separate question. So the tab is placed either way, and `tabsIn`
+        // (a public method) is what says whether it actually landed: `openTabIn` SILENTLY ignores a
+        // conversation whose store was never minted, and a silent no-op must never be reported as
+        // success.
+        let beforeTabs = []
+        try { beforeTabs = Array.from(sidebarRight.tabsIn(wanted)) } catch {}
+        const before = beforeTabs.length
+        const beforeIds = new Set(beforeTabs.map(tab => tab.id))
+        const remembered = pending?.url === address
+          ? beforeTabs.find(tab => tab.kind === "browser" && tab.id === pending.id)
+          : undefined
+        if (remembered === undefined) {
+          try {
+            sidebarRight.openTabIn(wanted, "browser", address ? { params: { url: address } } : {})
+          } catch (error) {
+            return { ok: false, reason: String((error && error.message) || error), panel: state.panel, guestId: null }
+          }
+        }
+        let placedTabs = beforeTabs
+        try { placedTabs = Array.from(sidebarRight.tabsIn(wanted)) } catch {}
+        const placed = placedTabs.length
+        const browserTabs = placedTabs.filter(tab => tab !== null && typeof tab === "object" && tab.kind === "browser")
+        const added = browserTabs.filter(tab => !beforeIds.has(tab.id))
+        const matching = browserTabs.filter(tab => address !== "" && (tab.params?.url === address || tab.url === address))
+        // Multiple browser tabs use separate ids. Correlate this placement before revealing it.
+        // Older shells deduplicate the browser kind, so their sole browser is unambiguous.
+        const page = remembered
+          ?? (added.length === 1 ? added[0] : undefined)
+          ?? (matching.length === 1 ? matching[0] : undefined)
+          ?? (browserTabs.length === 1 ? browserTabs[0] : undefined)
+        const scoped = browserTabs.length > 1 || panelRootsFor(wanted) !== undefined
+        if (page !== undefined) pendingTabs.set(wanted, { id: page.id, url: address, scoped })
+        if (page === undefined && browserTabs.length > 1) {
+          return { ok: false, reason: "the shell did not identify which browser tab was placed", panel: state.panel, guestId: null }
+        }
+        // `openTabIn` DEDUPLICATES, so "the count grew" is the wrong test for "is this
+        // conversation's surface mounted".
+        //
+        // Placing a page kind the conversation already holds leaves the count unchanged — the shell
+        // reveals the tab it has. Testing for growth therefore reported a conversation that already
+        // held the page as UNMOUNTED, and refused to drive a page that was right there: that is the
+        // "it will not reopen what it already opened" behaviour, and it bites hardest on the second
+        // open of an address, which is exactly when a human expects a fast answer.
+        //
+        // A count that started at zero and stayed there is the real signature of a surface the
+        // shell has never minted, because that is the only case where `openTabIn` is a silent no-op.
+        if (placed <= before && before === 0) {
+          // Name what was FOUND, not just what was missing: "no panel" has two very different
+          // causes — the shell has mounted no sidebar for this conversation (nothing this side can
+          // do), or it writes its session id somewhere this lookup does not read (fixable) — and a
+          // refusal that says only "not mounted" cannot tell them apart.
+          const strips = Array.from(document.querySelectorAll("[class*=_tabStrip]"))
+          return {
+            ok: false,
+            reason: "this conversation's sidebar is not mounted, so a panel cannot be opened in it",
+            panel: state.panel,
+            guestId: null,
+            ...switched ? { switched: true } : {},
+            found: {
+              wanted: wanted,
+              strips: strips.length,
+              owners: strips.slice(0, 8).map(strip => sessionIdOfElement(strip)),
+              reactKeys: strips.length === 0 ? [] : Object.keys(strips[0]).filter(key => key.startsWith("__react")).slice(0, 4),
+            },
+          }
+        }
+        // Placing is not showing: ask the shell to expand the column and focus that tab, so the
+        // body (and with it the `<webview>`) actually gets created. Without this the caller polls
+        // a panel that can never answer, which is exactly what "produced no page" used to mean.
+        const revealed = revealPlacedPanel(wanted, page?.id)
+        return {
+          ok: true,
+          created: placed > before,
+          panel: state.panel,
+          guestId: null,
+          tabs: placed,
+          ...page === undefined || !scoped ? {} : { tabId: String(page.id) },
+          ...switched ? { switched: true } : {},
+          ...revealed,
+        }
+      },
+      /** Read-only: this conversation's current guest, if it has one. */
+      panelGuest(sessionId, tabId, options) {
+        if (typeof options?.viewId === "string" && options.viewId !== "") {
+          const bound = pendingTabs.get(viewKey(sessionId, options.viewId))
+          const intended = typeof tabId === "string" && tabId !== "" ? tabId : bound?.id
+          if (intended === undefined || (bound !== undefined && bound.id !== intended)) {
+            const roots = panelRootsFor(sessionId)
+            return { panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0, guestId: null, url: "" }
+          }
+          return guestStateFor(sessionId, intended, initializationReader)
+        }
+        return guestStateFor(
+          typeof sessionId === "string" ? sessionId : "",
+          typeof tabId === "string" && tabId !== "" ? tabId : undefined,
+          initializationReader,
+        )
+      },
+      /** All guest ids verified inside this conversation, including shell-created popup tabs. */
+      panelGuests(sessionId) {
+        if (typeof sessionId !== "string" || !/^session-/.test(sessionId)) return []
+        return guestsInPanel(sessionId).map(view => view.getWebContentsId())
+      },
+      /** Close exactly the tab hosting this guest. An unknown shell shape must fail closed. */
+      closePanelGuest(sessionId, guestId) {
+        const refuse = reason => ({ ok: false, reason, closed: 0 })
+        if (typeof sessionId !== "string" || !/^session-/.test(sessionId)) return refuse("a conversation id is required")
+        if (typeof guestId === "string" && globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1) {
+          const tabs = sidebarRight.tabsIn(sessionId)
+          const tab = tabs.find(tab => tab.kind === "browser" && initializationReader?.current({ sessionId, tabId: tab.id })?.guestId === guestId)
+          if (tab === undefined || typeof sidebarRight.closeIn !== "function") return refuse("the native guest does not belong to this conversation")
+          sidebarRight.closeIn(sessionId, tab.id)
+          return { ok: true, closed: 1 }
+        }
+        const view = guestsInPanel(sessionId).find(candidate => candidate.getWebContentsId() === guestId)
+        if (view === undefined) return refuse("the guest does not belong to this conversation panel")
+        const roots = panelRootsFor(sessionId)
+        const containers = roots === undefined ? [tabStripFor(sessionId)].filter(Boolean) : roots
+        if (containers.length === 0 || sidebarRight === null || typeof sidebarRight.tabsIn !== "function") {
+          return refuse("the shell cannot identify its tabs; refresh or upgrade the browser plugin client")
+        }
+        let tabs
+        try { tabs = sidebarRight.tabsIn(sessionId) } catch { return refuse("the conversation tabs are unavailable") }
+        const allowed = new Set(tabs.map(tab => tab.id))
+        const id = tabIdOfElement(view, allowed, roots)
+        if (id === null) return refuse("the shell does not expose this guest's tab identity; refresh or upgrade the desktop")
+        // rc.5's scoped controller runs registered cleanup and removes the shell tab as one action.
+        if (typeof sidebarRight.closeIn === "function") {
+          try {
+            sidebarRight.closeIn(sessionId, id)
+            if (sidebarRight.tabsIn(sessionId).some(tab => tab.id === id)) return refuse("the shell did not remove the requested conversation tab")
+            return { ok: true, closed: 1 }
+          } catch (error) { return refuse("the shell could not close the conversation tab: " + String(error?.message ?? error)) }
+        }
+        const headers = Array.from(new Set(containers.flatMap(container => Array.from(container.querySelectorAll("[role=tab]")))))
+          .filter(tab => tabIdOfElement(tab, allowed, roots) === id)
+        if (headers.length !== 1) return refuse("the shell does not expose one matching tab control; refresh or upgrade the desktop")
+        const buttons = Array.from(headers[0].querySelectorAll("button"))
+          .filter(button => /关闭|close/i.test((button.getAttribute("aria-label") || "") + " " + (button.getAttribute("title") || "")))
+        if (buttons.length !== 1) return refuse("the shell does not expose one matching close control; refresh or upgrade the desktop")
+        buttons[0].click()
+        return { ok: true, closed: 1 }
+      },
+    }
+    ctx.effect(() => {
+      globalThis.__dshBuiltinBrowser = api
+      return () => {
+        for (const transaction of initializing.values()) transaction.controller.abort(new Error("the panel service was disposed"))
+        initializing.clear()
+        releaseAllRendering()
+        if (globalThis.__dshBuiltinBrowser === api) delete globalThis.__dshBuiltinBrowser
+      }
+    }, "dsh-builtin-browser: conversation panel service")
+  }
+
+  /**
+   * The live-view panel: one frame at a time, for an operator who is not sitting at this machine.
+   *
+   * A plain floating layer rather than a slot registration, deliberately. The host's layout has no
+   * stable slot for "an extra surface over the conversation", and inventing one would tie this
+   * panel to a layout that changes; a fixed layer works in every layout including a phone. It is
+   * also entirely inert until the host turns `remoteView.enabled` on, which the sessions probe
+   * reports.
+   *
+   * Pulls one frame per request and waits for it to paint before asking for the next, so a slow
+   * link shows fewer frames instead of queueing them. Nothing here retries in a tight loop: a
+   * refusal or a 503 moves the panel to a paused state, and it resumes on the next user action.
+   * @param ctx - the plugin context, for the disposal hook.
+   */
+  function installWatchPanel(ctx) {
+    if (typeof document === "undefined") return
+    const SESSIONS = PREVIEW_SESSIONS_ROUTE
+    const FRAME = PREVIEW_ROUTE
+    const MIN_INTERVAL_MS = 500
+
+    // Built element by element and referenced directly, never through innerHTML + querySelector.
+    // Two reasons: the host's test sandbox provides a minimal `createElement`, and re-parsing markup
+    // to find elements this code just made is work without a purpose.
+    const make = (tag, className, text) => {
+      const node = document.createElement(tag)
+      if (className !== undefined) node.className = className
+      if (text !== undefined) node.textContent = text
+      return node
+    }
+
+    const layer = make("div", "dsh-bw-watch")
+    layer.setAttribute("data-dsh-bw-watch", "")
+
+    const openButton = make("button", "dsh-bw-watch-open")
+    openButton.setAttribute("type", "button")
+    const dot = make("span", "dsh-bw-watch-dot")
+    const openLabel = make("span", "dsh-bw-watch-label")
+    openButton.appendChild(dot)
+    openButton.appendChild(openLabel)
+
+    const panel = make("section", "dsh-bw-watch-panel")
+    panel.hidden = true
+
+    const head = make("header", "dsh-bw-watch-head")
+    const title = make("span", "dsh-bw-watch-title")
+    const state = make("span", "dsh-bw-watch-state")
+    /** Only visible when the host reports more than one session to watch. */
+    const sessionSelect = make("select", "dsh-bw-watch-session")
+    sessionSelect.hidden = true
+    const closeButton = make("button", "dsh-bw-watch-close", "×")
+    closeButton.setAttribute("type", "button")
+    head.appendChild(title)
+    head.appendChild(sessionSelect)
+    head.appendChild(state)
+    head.appendChild(closeButton)
+
+    const stage = make("div", "dsh-bw-watch-stage")
+    const img = make("img", "dsh-bw-watch-img")
+    img.hidden = true
+    const note = make("p", "dsh-bw-watch-note")
+    stage.appendChild(img)
+    stage.appendChild(note)
+
+    const foot = make("footer", "dsh-bw-watch-foot")
+    const readonlyLabel = make("span", "dsh-bw-watch-readonly")
+    const stopButton = make("button", "dsh-bw-watch-stop")
+    stopButton.setAttribute("type", "button")
+    foot.appendChild(readonlyLabel)
+    foot.appendChild(stopButton)
+
+    panel.appendChild(head)
+    panel.appendChild(stage)
+    panel.appendChild(foot)
+    layer.appendChild(openButton)
+    layer.appendChild(panel)
+    // Deliberately NOT appended here. The entry is mounted only when the host reports that watching
+    // is on — reported as issue #40: with the feature off, the button still sat on every page and
+    // the bridge-status request fired at startup, so a setting nobody turned on produced a permanent
+    // control and a permanent diagnostic call.
+
+    /** Localized text, falling back to the key so a missing entry is visible rather than blank. */
+    // Localized text.
+    //
+    // The try/catch that used to sit here was dead code, as Mzy123l pointed out on #40: the locale
+    // service does not throw on a missing entry — it returns the key. So a miss shows the key, which
+    // is diagnostic, and an empty answer is the only case worth substituting.
+    const say = key => {
+      const text = translate(key)
+      return typeof text === "string" && text !== "" ? text : key
+    }
+
+    /**
+     * Apply the current locale to every static label.
+     *
+     * Called at mount, after a locale change, and again once the dictionaries are bound. The panel
+     * used to set these exactly once, inside `apply()`, *before* `locale.register` had run — so the
+     * shipped build showed `watch.title` as its title and the key was never replaced (issue #40).
+     */
+    const relabel = () => {
+      openLabel.textContent = say("watch.open")
+      title.textContent = say("watch.title")
+      readonlyLabel.textContent = say("watch.readOnly")
+      stopButton.textContent = say("watch.stop")
+      openButton.title = say("watch.open")
+      sessionSelect.title = say("watch.session")
+      sessionSelect.setAttribute("aria-label", say("watch.session"))
+    }
+    relabel()
+    // A runtime language switch must reach labels that are already on screen. `subscribe` fires on
+    // every locale snapshot change — a switch, and also a late dictionary registration — which is
+    // exactly the set of moments these four strings can go stale.
+    refreshWatchLabels = () => { relabel() }
+
+    let mounted = false
+    /** Put the entry on the page. Idempotent, so a second enable cannot stack copies. */
+    const mount = () => {
+      if (mounted) return
+      mounted = true
+      document.body.appendChild(layer)
+      relabel()
+    }
+    /** Take it off again — the host turned the feature off after it had been on. */
+    const unmount = () => {
+      if (!mounted) return
+      mounted = false
+      layer.remove()
+    }
+
+    /**
+     * One running view. `generation` is the identity of a single watching run: a stop, a session
+     * switch and a reopen all advance it, so a request already in flight can never paint into the
+     * new run or resurrect a second scheduling chain.
+     */
+    const view = {
+      session: undefined, timer: undefined, running: false, lastAt: 0, objectUrl: undefined,
+      generation: 0, controller: undefined,
+    }
+    /** Guards the async probe: two clicks in the same tick must not both reach start(). */
+    let starting = false
+
+    const setState = text => { state.textContent = text }
+    const showNote = text => {
+      note.textContent = text
+      note.hidden = false
+      img.hidden = true
+    }
+    /** Release the previous frame. A viewer that keeps every frame is a memory leak in a phone browser. */
+    const dropFrame = () => {
+      if (view.objectUrl !== undefined) {
+        URL.revokeObjectURL(view.objectUrl)
+        view.objectUrl = undefined
+      }
+    }
+    /** End one generation: cancel its request, timer and frame, without touching the panel chrome. */
+    const cancelLoop = () => {
+      view.running = false
+      view.generation += 1
+      if (view.controller !== undefined) {
+        try { view.controller.abort() } catch { /* an already settled controller is harmless */ }
+        view.controller = undefined
+      }
+      if (view.timer !== undefined) { clearTimeout(view.timer); view.timer = undefined }
+      dropFrame()
+      img.removeAttribute("src")
+      img.hidden = true
+    }
+    const stop = () => {
+      cancelLoop()
+      setState(say("watch.stopped"))
+      showNote(say("watch.stopped"))
+      panel.hidden = true
+    }
+
+    /** Ask which sessions exist; returns whether watching is enabled at all. */
+    const probe = async () => {
+      try {
+        const response = await fetch(SESSIONS, { headers: { accept: "application/json" } })
+        if (!response.ok) return { enabled: false, sessions: [] }
+        const data = await response.json()
+        return { enabled: data?.enabled === true, sessions: Array.isArray(data?.sessions) ? data.sessions : [] }
+      } catch {
+        return { enabled: false, sessions: [] }
+      }
+    }
+
+    /** Show the sessions the host handed out, so a later-created one can actually be chosen. */
+    const fillSessions = sessions => {
+      // Clearing via innerHTML is the one exception to "build element by element": it removes
+      // options, it does not parse markup, and a stale option list would keep a dead session on screen.
+      sessionSelect.innerHTML = ""
+      for (let index = 0; index < sessions.length; index += 1) {
+        const id = String(sessions[index])
+        const option = make("option")
+        option.setAttribute("value", id)
+        const short = id.length > 24 ? `${id.slice(0, 15)}…${id.slice(-6)}` : id
+        option.textContent = `#${index + 1} ${short}`
+        sessionSelect.appendChild(option)
+      }
+      sessionSelect.hidden = sessions.length < 2
+    }
+
+    /**
+     * Pull frames until stopped. One request in flight at a time, and the next one is scheduled only
+     * after the current image has painted — that is what makes a slow link degrade into fewer
+     * frames rather than a growing queue. `gen` is captured once per run and re-checked after every
+     * await: a frame belonging to a superseded run is dropped instead of painted.
+     */
+    const pump = async gen => {
+      if (!view.running || gen !== view.generation) return
+      if (document.visibilityState === "hidden") {
+        // The design's rule: a hidden panel stops pulling immediately. Resuming is the user's
+        // action, not a timer's.
+        setState(say("watch.paused"))
+        showNote(say("watch.paused"))
+        view.timer = setTimeout(() => pump(gen), MIN_INTERVAL_MS * 4)
+        return
+      }
+      const waited = Date.now() - view.lastAt
+      if (waited < MIN_INTERVAL_MS) {
+        view.timer = setTimeout(() => pump(gen), MIN_INTERVAL_MS - waited)
+        return
+      }
+      view.lastAt = Date.now()
+      let nextDelay = MIN_INTERVAL_MS
+      const controller = view.controller
+      try {
+        const url = `${FRAME}?session=${encodeURIComponent(String(view.session))}`
+        const init = { headers: { accept: "image/jpeg" } }
+        if (controller !== undefined) init.signal = controller.signal
+        const response = await fetch(url, init)
+        if (!view.running || gen !== view.generation) return
+        if (!response.ok) {
+          const body = await response.json().catch(() => undefined)
+          if (!view.running || gen !== view.generation) return
+          setState(say("watch.paused"))
+          showNote(body?.error === "remote-view-disabled"
+            ? say("watch.disabled")
+            : body?.error === "no-such-session"
+              ? say("watch.noPage")
+              : say("watch.paused"))
+          // Slower polling while paused: a paused view must not turn into a hot loop.
+          nextDelay = MIN_INTERVAL_MS * 4
+        } else {
+          const blob = await response.blob()
+          if (!view.running || gen !== view.generation) return
+          const painted = new Promise(resolve => {
+            img.onload = () => resolve()
+            img.onerror = () => resolve()
+          })
+          dropFrame()
+          view.objectUrl = URL.createObjectURL(blob)
+          img.src = view.objectUrl
+          img.hidden = false
+          note.hidden = true
+          await painted
+          if (!view.running || gen !== view.generation) return
+          setState(say("watch.live"))
+        }
+      } catch {
+        if (!view.running || gen !== view.generation) return
+        setState(say("watch.disconnected"))
+        showNote(say("watch.disconnected"))
+        nextDelay = MIN_INTERVAL_MS * 4
+      }
+      if (view.running && gen === view.generation) view.timer = setTimeout(() => pump(gen), nextDelay)
+    }
+
+    const start = async session => {
+      cancelLoop()
+      view.session = session
+      view.running = true
+      view.lastAt = 0
+      view.controller = typeof AbortController === "function" ? new AbortController() : undefined
+      const gen = view.generation
+      panel.hidden = false
+      setState(say("watch.connecting"))
+      showNote(say("watch.connecting"))
+      await pump(gen)
+    }
+
+    /**
+     * The session a viewer most likely means when the host cannot name the current conversation:
+     * the newest session it created, rather than always the first entry of the map.
+     */
+    const preferredSession = sessions => sessions[sessions.length - 1]
+
+    openButton.addEventListener("click", () => {
+      void (async () => {
+        if (view.running || starting) return
+        starting = true
+        try {
+          const found = await probe()
+          if (!found.enabled) { showNote(say("watch.disabled")); panel.hidden = false; return }
+          if (found.sessions.length === 0) { showNote(say("watch.noPage")); panel.hidden = false; return }
+          fillSessions(found.sessions)
+          sessionSelect.value = String(preferredSession(found.sessions))
+          const chosen = sessionSelect.value
+          // Release before start(): the first frame may take a long time (or never arrive), and
+          // holding the guard until then would also block a legitimate stop-then-reopen.
+          // There is no await between here and start(), whose synchronous part sets view.running.
+          starting = false
+          await start(chosen)
+        } finally { starting = false }
+      })()
+    })
+    // Switching sessions replaces the run; it never adds a second loop alongside the live one.
+    sessionSelect.addEventListener("change", () => {
+      if (!view.running) return
+      const chosen = sessionSelect.value
+      if (typeof chosen === "string" && chosen !== "") void start(chosen)
+    })
+    closeButton.addEventListener("click", stop)
+    stopButton.addEventListener("click", stop)
+    // A panel hidden by a closed button must not keep pulling frames.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden" && view.running) {
+        if (view.timer !== undefined) { clearTimeout(view.timer); view.timer = undefined }
+        const gen = view.generation
+        view.timer = setTimeout(() => pump(gen), MIN_INTERVAL_MS)
+      }
+    })
+
+    ctx.effect(() => () => {
+      stop()
+      unmount()
+      refreshWatchEntry = () => {}
+      refreshWatchLabels = () => {}
+    }, "dsh-builtin-browser: live view panel")
+
+    /**
+     * Report the sidebar bridge's install state next to the entry button.
+     *
+     * A missing bridge used to be a log line and nothing else, so a user on `channel: sidebar` saw
+     * "another window opened again" with no way to connect that to the actual cause (issue #36).
+     * The reading comes from the install tree, so it is true even before anything has been watched.
+     *
+     * The repair command is shown, never run: a page that could decide to close the desktop shell
+     * would be a worse problem than the one this line solves.
+     */
+    const showBridgeStatus = async () => {
+      let status
+      try {
+        const response = await fetch(BRIDGE_STATUS_ROUTE, { headers: { accept: "application/json" } })
+        if (!response.ok) return
+        const data = await response.json()
+        status = data?.bridge
+      } catch {
+        return
+      }
+      if (status === undefined) return
+      // Only the two states a user can act on: an installed bridge needs no notice, and a host
+      // without a desktop install has nothing to repair here.
+      if (status.state === "installed" || status.present !== true) return
+      const notice = make("div", "dsh-bw-watch-bridge")
+      const line = make("div", "dsh-bw-watch-bridge-line",
+        status.state === "stale" ? say("watch.bridgeStale") : say("watch.bridgeMissing"))
+      notice.appendChild(line)
+      if (typeof status.command === "string" && status.command !== "" && typeof window.dshDesktop?.mainExtensions?.status !== "function") {
+        const code = make("code", "dsh-bw-watch-bridge-cmd", status.command)
+        notice.appendChild(code)
+      }
+      panel.insertBefore(notice, panel.firstChild)
+    }
+
+    /**
+     * Mount the entry only if the host says viewing is enabled, and only then ask about the bridge.
+     *
+     * Both halves are the point of the ordering: the probe answers "is this feature on", and the
+     * bridge-status request is a diagnostic for a feature that is on. Issuing it for a feature that
+     * is off is what the review called a default entry manufacturing a call (issue #40).
+     *
+     * A host that does not serve the sessions endpoint answers `enabled: false`, so the fallback is
+     * "no entry" rather than "an entry that cannot work".
+     */
+    const mountIfEnabled = async () => {
+      const found = await probe()
+      if (!found.enabled) {
+        // Turning the feature off must also stop what it started: a running stream outliving its own
+        // switch is the sort of state that looks like a ghost later.
+        stop()
+        unmount()
+        return
+      }
+      mount()
+      await showBridgeStatus()
+    }
+    // The settings switch calls this after writing `remoteView.enabled` (issue #46): no page reload,
+    // which is the difference between usable and useless on a phone.
+    refreshWatchEntry = () => { void mountIfEnabled() }
+    void mountIfEnabled()
+  }
+
+  function apply(ctx) {
+    // Before anything renders: the rows need a hover state, and inline styles cannot express
+    // one. Idempotent, so a re-apply does not stack copies.
+    installStyles()
+    installPanelService(ctx)
+    // Dictionaries and the bound `t` come BEFORE anything that sets text from them. The watch panel
+    // used to be installed first, so its static labels were written while `translate` still returned
+    // the key and were never rewritten — the panel shipped with `watch.title` as its title
+    // (issue #40).
+    ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-builtin-browser: dictionaries")
+    const t = ctx.locale.bind(NS)
+    translate = t
+    updateCurrentLocale(ctx.locale)
+    // A language switch has to reach text that is already on screen. `subscribe` fires on every
+    // locale snapshot change (switch, and late dictionary registration); guarded, because a host
+    // without it must still get the panel — the labels then simply keep their first language.
+    if (typeof ctx.locale.subscribe === "function") {
+      ctx.effect(() => {
+        const off = ctx.locale.subscribe(() => {
+          translate = ctx.locale.bind(NS)
+          updateCurrentLocale(ctx.locale)
+          // Two audiences, one notification: the vanilla watch panel rewrites its own text, and the
+          // React settings section re-renders (see `useLocaleVersion`). Bumping the counter here is
+          // what makes `t()` inside a mounted component return the new language at all.
+          localeVersion += 1
+          for (const update of localeWatchers) update()
+          refreshWatchLabels()
+        })
+        return () => { if (typeof off === "function") off() }
+      }, "dsh-builtin-browser: locale changes")
+    }
+    installWatchPanel(ctx)
+    // Test seam. The readiness section is composed by the settings component, so a harness that
+    // renders that component can see the element but never run it — and running it is what proves a
+    // user reads a state label rather than `readiness.electron.failed`. Exported on the module rather
+    // than published on `globalThis` (where the product's own `__dshBuiltinBrowser` lives, for the
+    // shell's benefit): nothing in the product reads this name, and a page-level global would be a
+    // side effect of shipping a test.
+    exports.__readinessSection = Readiness
+    // Same seam, same reason: the record list is now composed inside the
+    // on-demand menu, so a harness must be able to render it without driving
+    // the popover's own state.
+    exports.__references = References
+    exports.__hostPatchSection = HostPatchControls
+    ctx.slots.inject("settings.section", () => ctx.slots.register({
+      name: "settings.section",
+      id: "dsh-builtin-browser",
+      // Above the rows the host ships (its furthest sits at 40), so this panel
+      // lands beneath them in the settings page.
+      order: 60,
+      label: () => t("nav"),
+      locale: NS,
+      inject: () => ({ t }),
+    }, SettingsRoot))
+    // No `conversation.input.left` entry: references are rendered one card per
+    // selection inside the composer dock, so an aggregate record menu beside
+    // the input only duplicated it.
+  }
+
+  exports.name = name
+  exports.inject = inject
+  exports.apply = apply
+  return module.exports as unknown as LegacyClientModule
+}

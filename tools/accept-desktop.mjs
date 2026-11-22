@@ -1,251 +1,148 @@
-// Post-restart acceptance run.
-//
-// Everything this session fixed, checked in one pass against the live shell. Written before the
-// restart on purpose: the alternative is what happened for the last four rounds — one check at a
-// time, each one finding the next problem, each one costing the user another restart.
-//
-// Usage: node tools/accept-desktop.mjs
-// It sends real requests to the running bridge, so it DOES open pages. Every step reports what it
-// saw; nothing is inferred.
+#!/usr/bin/env node
+/** Live, destructive sidebar checks. Supply two existing conversation IDs; only test pages are closed. */
 import { readFileSync, statSync } from 'node:fs'
 import { connect } from 'node:net'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { readTabHandle, resolveSessionHandle, sessionWireId, tabWireId } from '../lib/browser/handles.js'
 
-
-// A tool, not a test. `node --test` executes every file it is given, and this one runs on
-// purpose — it talks to the live bridge, or edits the source. Node's test runner sets
-// NODE_TEST_CONTEXT for the child it spawns for each file, so that is the signal. A test that
-// needs to run this tool for real spawns it with the variable cleared.
-if (process.env.NODE_TEST_CONTEXT !== undefined) {
-  process.exit(0)
+const owner = process.env.DSH_ACCEPT_SESSION
+const otherOwner = process.env.DSH_ACCEPT_OTHER_SESSION
+if (!/^session-.+/.test(owner ?? '') || !/^session-.+/.test(otherOwner ?? '') || owner === otherOwner) {
+  console.error('Set DSH_ACCEPT_SESSION and DSH_ACCEPT_OTHER_SESSION to two different existing session-… conversation IDs.')
+  process.exit(1)
 }
-
-const ENDPOINT = process.env.DSH_BRIDGE_ENDPOINT ?? 'D:/dsh-home/dsh-builtin-browser-bridge.json'
-const ep = JSON.parse(readFileSync(ENDPOINT, 'utf8'))
-
+const endpoint = process.env.DSH_BRIDGE_ENDPOINT
+  ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'dsh-builtin-browser-bridge.json')
+const ep = JSON.parse(readFileSync(endpoint, 'utf8'))
 const socket = connect({ host: '127.0.0.1', port: ep.port })
 socket.setEncoding('utf8')
-let seq = 1
-const pending = new Map()
-let buffer = ''
-socket.on('data', (chunk) => {
+const pending = new Map(), results = [], opened = [], protectedIds = new Set()
+const scopes = new Map([owner, otherOwner].map(owner => [owner, sessionWireId({ owner, session: randomUUID() })]))
+let seq = 0, buffer = ''
+socket.on('data', chunk => {
   buffer += chunk
   let cut
   while ((cut = buffer.indexOf('\n')) !== -1) {
     const line = buffer.slice(0, cut)
     buffer = buffer.slice(cut + 1)
-    if (line.trim() === '') continue
-    let message
-    try { message = JSON.parse(line) } catch { continue }
-    const waiter = pending.get(message.bridgeRequestId)
-    if (waiter === undefined) continue
+    let answer
+    try { answer = JSON.parse(line) } catch { continue }
+    const waiter = pending.get(answer.bridgeRequestId)
+    if (!waiter) continue
     clearTimeout(waiter.timer)
-    pending.delete(message.bridgeRequestId)
-    waiter.resolve(message)
+    pending.delete(answer.bridgeRequestId)
+    waiter.resolve(answer)
   }
 })
-
-/** @returns the bridge's answer, or throws on timeout. */
-function call (op, extra = {}, ms = 120_000) {
-  const id = seq++
-  const request = { op, bridgeRequestId: id, ...extra }
-  if (id === 1) request.token = ep.token
+function disconnected(error) {
+  for (const waiter of pending.values()) {
+    clearTimeout(waiter.timer)
+    waiter.reject(error)
+  }
+  pending.clear()
+}
+socket.on('error', disconnected)
+socket.on('close', () => disconnected(new Error('bridge disconnected')))
+function call(op, extra = {}) {
+  const bridgeRequestId = ++seq
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error(op + ' timed out')) }, ms)
-    pending.set(id, { resolve, timer })
-    socket.write(JSON.stringify(request) + '\n')
+    if (socket.destroyed) return reject(new Error('bridge disconnected'))
+    const timer = setTimeout(() => {
+      pending.delete(bridgeRequestId)
+      reject(new Error(`${op} timed out`))
+    }, 30_000)
+    pending.set(bridgeRequestId, { resolve, reject, timer })
+    socket.write(JSON.stringify({ op, ...op === 'list' ? { handle: scopes.get(owner) } : {}, bridgeRequestId, ...extra, ...seq === 1 ? { token: ep.token } : {} }) + '\n')
   })
 }
-
-await new Promise(resolve => socket.on('connect', resolve))
-
-const results = []
-/**
- * Record one check, and on failure print enough state to diagnose without another restart.
- *
- * The restart is the scarce resource here: a run that says only "FAIL" costs another one to
- * interpret. So a failure also reads the strip back — how many tabs this session holds, and what
- * the strip's own labels are, which is where 开始 entries with no page behind them show up.
- */
-async function check (name, ok, detail = '') {
+async function check(name, ok, detail = '') {
   results.push({ name, ok })
-  console.log(`  ${ok ? 'ok  ' : 'FAIL'}  ${name}${detail === '' ? '' : '   ' + detail}`)
+  console.log(`${ok ? 'ok' : 'FAIL'} ${name} ${detail}`)
   if (ok) return
   try {
-    const state = await call('list', { owner: 'acceptance' }, 20_000)
-    const mine = state.sidebar ?? []
-    console.log(`        [diag] this session holds ${mine.length} page(s)`)
-    for (const guest of mine) {
-      console.log(`        [diag]   id=${guest.id} title=${JSON.stringify(String(guest.title ?? '').slice(0, 44))}`)
-    }
-    const shell = (state.guests ?? []).find(g => g.type === 'window')
-    if (shell !== undefined) {
-      const strip = await call('cdp', {
-        id: shell.id,
-        method: 'Runtime.evaluate',
-        params: {
-          expression: `(() => {
-            const strip = document.querySelector('[class*=_tabStrip]');
-            if (strip === null) return JSON.stringify({ strip: 'absent' });
-            const rows = Array.from(strip.querySelectorAll('button,[role=tab],[class*=tab]'))
-              .map(r => ((r.getAttribute('aria-label') || '') + ' ' + (r.textContent || '')).trim().slice(0, 18))
-              .filter(t => t !== '');
-            return JSON.stringify({ strip: 'present', labels: rows.slice(0, 14) });
-          })()`,
-          returnByValue: true,
-        },
-      }, 20_000)
-      console.log('        [diag] strip ' + String(strip?.result?.result?.value ?? 'unreadable').slice(0, 300))
-    }
-  } catch (error) {
-    console.log('        [diag] could not read state: ' + String(error.message).slice(0, 70))
-  }
+    const state = await call('list')
+    console.log('[diag] strip ' + JSON.stringify((state.sidebar ?? []).map(g => ({ id: g.id, title: g.title, url: g.url }))))
+  } catch (error) { console.log('[diag] strip unavailable: ' + error.message) }
 }
-
-console.log('=== post-restart acceptance ===')
-console.log('')
-
-// Which build is answering?
-//
-// Everything below measures the bridge's behaviour, and all of it is meaningless if the host is
-// still running the previous one — the bridge is imported once at boot, so a file edit does
-// nothing until the process restarts. A run that skips this check would blame the new code for the
-// old code's failures, which is the single most expensive way to misread an acceptance run.
+async function open(session, viewId, url) {
+  const handle = tabWireId({ ...resolveSessionHandle(scopes.get(session)), tab: viewId })
+  const answer = await call('ensureSidebar', { handle, attachOnly: true, deadline: Date.now() + 30_000, transactionId: randomUUID() })
+  requireTestPage(answer)
+  opened.push({ handle: answer.id })
+  const navigated = await call('cdp', { handle: answer.id, method: 'Page.navigate', params: { url } })
+  if (navigated.ok !== true) throw new Error('test page navigation failed: ' + (navigated.error ?? answer.id))
+  return answer
+}
+function requireTestPage(answer) {
+  if (answer.ok !== true) throw new Error('ensureSidebar failed: ' + (answer.error ?? 'missing page id'))
+  readTabHandle(answer.id)
+  if (protectedIds.has(answer.id)) throw new Error(`FAIL ensureSidebar reused pre-existing page ${answer.id}; refusing to navigate or close it`)
+}
+async function closeTestPage(page) {
+  if (protectedIds.has(page.handle) || !opened.some(p => p.handle === page.handle)) throw new Error('refusing to close a page not created by this check')
+  return await call('closePage', page)
+}
+async function initialPages(session) {
+  const answer = await call('list', { handle: scopes.get(session) })
+  if (answer.ok !== true || !Array.isArray(answer.sidebar)) {
+    throw new Error('cannot identify pre-existing pages; refusing to open test pages')
+  }
+  for (const page of answer.sidebar) readTabHandle(page.id)
+  return answer.sidebar
+}
 try {
-  const build = await call('version', {}, 10_000)
-  const loadedAt = String(build?.loadedAt ?? '')
-  const fileTime = statSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url)).mtime
-  const loadedMs = Date.parse(loadedAt)
-  const fresh = Number.isFinite(loadedMs) && loadedMs > fileTime.getTime()
-  console.log(`  bridge loaded at ${loadedAt}  (file written ${fileTime.toISOString()})`)
-  console.log(`  protocol ${String(build?.protocol ?? '?')}`)
-  check('the running bridge is the one on disk', fresh,
-    fresh ? '' : 'the host is running the PREVIOUS bridge — restart before trusting anything below')
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error('bridge connect timed out')) }, 5_000)
+    socket.once('connect', () => { clearTimeout(timer); resolve() })
+    socket.once('error', error => { clearTimeout(timer); reject(error) })
+  })
+  const version = await call('version')
+  await check('the current bridge build is loaded', version.ok === true && version.protocol >= 4
+    && Date.parse(version.loadedAt) >= statSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url)).mtimeMs)
+  const before = await initialPages(owner)
+  const otherInitial = await initialPages(otherOwner)
+  for (const page of [...before, ...otherInitial]) protectedIds.add(page.id)
+  const prefix = 'accept-' + randomUUID()
+  const firstView = prefix + '-first', secondView = prefix + '-second'
+  const first = await open(owner, firstView, 'https://example.com/')
+  await check('first open returns a page', first.ok === true && typeof first.id === 'string')
+  const second = await open(owner, secondView, 'https://example.org/')
+  await check('second logical view creates a DIFFERENT page', second.ok === true && typeof second.id === 'string' && second.id !== first.id)
+  const pages = (await call('list')).sidebar ?? []
+  await check('exactly two pages were added — no spray', pages.length - before.length === 2)
+  let operable = 0
+  for (const handle of [first.id, second.id]) {
+    const shown = await call('showTab', { handle })
+    const answer = await call('cdp', { handle, method: 'Runtime.evaluate', params: { expression: 'location.href', returnByValue: true } })
+    if (shown.ok === true && answer.ok === true && typeof answer.result?.result?.value === 'string' && answer.result.result.value !== '') operable += 1
+  }
+  await check('both pages answer after being brought forward', operable === 2)
+  const otherBefore = (await call('list', { handle: scopes.get(otherOwner) })).sidebar ?? []
+  await check('another session cannot see these pages', otherBefore.every(g => g.id !== first.id && g.id !== second.id))
+  const other = await open(otherOwner, prefix + '-other', 'https://example.net/')
+  await check('two sessions get DIFFERENT pages', other.ok === true && typeof other.id === 'string' && other.id !== first.id && other.id !== second.id)
+  const mine = (await call('list')).sidebar ?? []
+  const theirs = (await call('list', { handle: scopes.get(otherOwner) })).sidebar ?? []
+  await check('neither can see the other’s page', mine.some(g => g.id === first.id) && theirs.some(g => g.id === other.id)
+    && !mine.some(g => g.id === other.id) && theirs.every(g => g.id !== first.id && g.id !== second.id))
+  const reopened = await call('ensureSidebar', { handle: first.id, deadline: Date.now() + 30_000, transactionId: randomUUID() })
+  requireTestPage(reopened)
+  await check('reopening a logical view reuses its page', reopened.ok === true && reopened.id === first.id)
+  const closed = await closeTestPage({ handle: second.id })
+  const remaining = (await call('list')).sidebar ?? []
+  await check('closing one page actually closes it', closed.ok === true && closed.closed === 1 && remaining.every(g => g.id !== second.id))
+  await check('the other page survives', remaining.some(g => g.id === first.id))
+  const failed = results.filter(r => !r.ok)
+  console.log(failed.length === 0 ? `ALL ${results.length} CHECKS PASS` : `${failed.length} of ${results.length} FAILED`)
+  process.exitCode = failed.length === 0 ? 0 : 1
 } catch (error) {
-  // An older bridge does not implement `version`; it answers `ok:false` or throws.
-  check('the running bridge is the one on disk', false,
-    'the bridge does not answer `version`, so it predates this build: ' + String(error.message).slice(0, 50))
-}
-console.log('')
-
-// ---------------------------------------------------------------- the sidebar itself
-const shellState = await call('list', { owner: 'acceptance' })
-const startCount = (shellState.sidebar ?? []).length
-console.log(`  (the sidebar currently holds ${startCount} of this session's pages)`)
-console.log('')
-
-// ------------------------------------------------------------------ first open, no url
-// This is the shape the host actually uses: documentStamp opens the view with no address.
-const first = await call('ensureSidebar', { owner: 'acceptance' })
-check('first open with NO url creates a page', first.ok === true && Number.isFinite(first.id),
-  JSON.stringify({ ok: first.ok, id: first.id, created: first.created, via: first.via }).slice(0, 120))
-
-// ------------------------------------------------------------------ second open, new tab
-const second = await call('ensureSidebar', { owner: 'acceptance', newTab: true })
-check('second open (newTab) creates a DIFFERENT page',
-  second.ok === true && Number.isFinite(second.id) && second.id !== first.id,
-  `id=${String(second.id)} vs first ${String(first.id)}`)
-
-// ------------------------------------------------- how many pages did those two make?
-const after = await call('list', { owner: 'acceptance' })
-const made = (after.sidebar ?? []).length - startCount
-check('exactly two pages were added — no spray', made === 2, `added ${made}`)
-
-// --------------------------------------------------------------- both pages are operable
-const ids = [first.id, second.id].filter(Number.isFinite)
-let operable = 0
-for (const id of ids) {
-  try {
-    await call('showTab', { viewId: id, owner: 'acceptance' }, 20_000)
-    await new Promise(resolve => setTimeout(resolve, 600))
-    const answer = await call('cdp', {
-      id,
-      method: 'Runtime.evaluate',
-      params: { expression: 'location.href', returnByValue: true },
-    }, 20_000)
-    const href = answer?.result?.result?.value
-    if (typeof href === 'string' && href !== '') operable += 1
-    console.log(`        page ${id}: ${String(href).slice(0, 60)}`)
-  } catch (error) {
-    console.log(`        page ${id}: ${String(error.message).slice(0, 60)}`)
+  console.error('[diag] ' + error.message)
+  process.exitCode = 1
+} finally {
+  for (const page of opened) {
+    try { await closeTestPage(page) } catch { /* best effort */ }
   }
+  socket.destroy()
 }
-check('both pages answer after being brought forward', operable === 2, `${operable}/2`)
-
-// ------------------------------------------------------------------ session isolation
-const other = await call('list', { owner: 'a-different-session' })
-const leaked = (other.sidebar ?? []).filter(guest => ids.includes(guest.id)).length
-check('another session cannot see these pages', leaked === 0, `${leaked} leaked`)
-
-// --------------------------------------------- two sessions, each opening its own page
-// The reported symptom was "the window another session wanted to open came into THIS one", and the
-// check above does not reach it: it only asks whether a stranger can SEE these pages. This asks
-// whether a second session that opens one of its own gets its own — the cross-session bleed that
-// took four rounds to fix, tested the way the user hit it.
-{
-  const sessionA = 'isolation-A'
-  const sessionB = 'isolation-B'
-  const a = await call('ensureSidebar', { owner: sessionA, url: 'https://example.com/' })
-  const b = await call('ensureSidebar', { owner: sessionB, url: 'https://example.org/' })
-  check('two sessions opening a page each get DIFFERENT pages',
-    Number.isFinite(a.id) && Number.isFinite(b.id) && a.id !== b.id,
-    `A=${String(a.id)} B=${String(b.id)}`)
-
-  const listA = ((await call('list', { owner: sessionA })).sidebar ?? []).map(g => g.id)
-  const listB = ((await call('list', { owner: sessionB })).sidebar ?? []).map(g => g.id)
-  check('and neither can see the other’s page',
-    listA.includes(Number(a.id)) && !listA.includes(Number(b.id))
-    && listB.includes(Number(b.id)) && !listB.includes(Number(a.id)),
-    `A sees ${JSON.stringify(listA)}, B sees ${JSON.stringify(listB)}`)
-
-  // Hand them back so the checks below start from the same place they would on a fresh run.
-  try { await call('closeSidebarBrowser', { owner: 'acceptance', titles: [] }, 20_000) } catch { /* best effort */ }
-}
-
-// ---------------------------------------------------------------------- settings write
-const settings = await call('cdp', {
-  id: ids[0],
-  method: 'Runtime.evaluate',
-  params: {
-    expression: `fetch('/dsh-builtin-browser/settings').then(r => r.status + '')`,
-    returnByValue: true,
-    awaitPromise: true,
-  },
-}, 20_000).catch(() => undefined)
-check('the settings route answers the page', String(settings?.result?.result?.value ?? '') === '200',
-  String(settings?.result?.result?.value ?? 'no answer'))
-
-// --------------------------------------------------------------------- closing a page
-// The release chain: the host resolves titles through `list` WITH an owner, then asks the bridge
-// to close them. Every one of those calls was missing its owner after the ledger landed, and the
-// failure was silent — nothing closed and nothing was reported. So this checks the OUTCOME, and
-// also that the other page survived, which is the isolation half of the same rule.
-const doomed = ids[1]
-const survivor = ids[0]
-if (Number.isFinite(doomed) && Number.isFinite(survivor)) {
-  const beforeClose = (await call('list', { owner: 'acceptance' })).sidebar ?? []
-  const doomedTitle = beforeClose.find(g => g.id === doomed)?.title
-  let closed = false
-  try {
-    const answer = await call('closeSidebarBrowser', {
-      owner: 'acceptance',
-      ...typeof doomedTitle === 'string' && doomedTitle !== '' ? { titles: [doomedTitle] } : {},
-    }, 30_000)
-    closed = Number(answer?.closed ?? 0) > 0
-  } catch (error) {
-    console.log(`        close attempt: ${String(error.message).slice(0, 60)}`)
-  }
-  await new Promise(resolve => setTimeout(resolve, 1_200))
-  const afterClose = (await call('list', { owner: 'acceptance' })).sidebar ?? []
-  check('closing one page actually closes it', closed && afterClose.every(g => g.id !== doomed),
-    closed ? `closed=${String(closed)}` : 'the bridge reported nothing closed')
-  check('and the other page survives', afterClose.some(g => g.id === survivor),
-    `survivor ${String(survivor)} present: ${String(afterClose.some(g => g.id === survivor))}`)
-}
-
-console.log('')
-const failed = results.filter(r => !r.ok)
-console.log(failed.length === 0
-  ? `  ALL ${results.length} CHECKS PASS`
-  : `  ${failed.length} of ${results.length} FAILED: ${failed.map(f => f.name).join('; ')}`)
-socket.end()
-setTimeout(() => process.exit(failed.length === 0 ? 0 : 1), 1_000)

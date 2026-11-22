@@ -1,0 +1,193 @@
+/* Compact reference rail in the composer.
+   The rail is one short row of pills: the input box keeps its height no matter
+   how many references are attached, and a new selection is added to the RIGHT. */
+.dock[class] {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+  /* A flex item of the host's in-card chip row: allowed to shrink and wrap
+     inside the composer instead of forcing the card wider. */
+  min-width: 0;
+  max-width: 100%;
+}
+.dock:empty { display: none; }
+.rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  /* 独立成行：之前胶囊压住了输入框的占位文字（截图里两行字重叠）。 */
+  width: 100%;
+  margin: 0 0 4px;
+}
+.rail[data-pending='yes'] .chip { opacity: 0.72; }
+.sentRail { display: inline-flex; max-width: 100%; vertical-align: middle; margin: 0 2px; }
+.sentRail .chip { max-width: min(320px, 100%); }
+
+/* One collapsed pill per reference. Nothing but the number and the source label
+   is shown here; the captured content is one hover away. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  /* `min-width: 0` plus a half-row cap: two pills + the 6px gap must fit the
+     rail exactly, otherwise the second one wraps to a new line and the composer
+     grows taller. `calc(50% - 4px)` keeps a little slack for sub-pixel rounding
+     (two 190px pills summed to 386.4px inside a 386px rail and wrapped). */
+  min-width: 0;
+  max-width: min(190px, calc(50% - 4px));
+  height: 26px;
+  flex: 0 1 auto;
+  padding: 0 10px 0 4px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-multi-select);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.chip[data-has-note='yes'] { border-color: var(--dsw-alias-border-l3); }
+.chip[aria-expanded='true'] { background: var(--dsw-alias-bg-layer-3); border-color: var(--dsw-alias-border-l3); }
+.badge {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-label-primary-inverted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+.label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The detail card floats ABOVE the pill, outside the composer's flow: opening
+   it must not raise the input box or shift the conversation. */
+.panel[class] {
+  position: fixed;
+  z-index: 100;
+  display: grid;
+  gap: 8px;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 0.5px solid var(--dsw-elevation-stroke-color);
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-panel);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.head { display: flex; align-items: flex-start; gap: 8px; }
+.heading { display: grid; gap: 1px; min-width: 0; }
+.title { font-weight: 500; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.host { color: var(--dsw-alias-label-tertiary); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tools { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.icon {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+.icon[aria-pressed='true'] { background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); }
+.secondary { color: var(--dsw-alias-label-secondary); }
+
+/* Captured content keeps its own shape: paragraph breaks survive, images stay
+   images, tables keep their rows and spans. Long content scrolls, never clips. */
+.parts { display: grid; gap: 8px; max-height: 40vh; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.quote, .comment p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.image { max-width: 100%; max-height: 160px; object-fit: contain; border-radius: var(--dsw-radius-sm); }
+.tableScroll { overflow: auto; max-width: 100%; }
+.table { border-collapse: collapse; font: inherit; }
+.table td, .table th { padding: 3px 7px; border: 0.5px solid var(--dsw-alias-border-l2); text-align: start; white-space: pre-wrap; }
+.table th { font-weight: 500; background: var(--dsw-alias-bg-multi-select); }
+.table tr:nth-child(even) td { background: var(--dsw-alias-bg-layer-2); }
+.quote pre { white-space: pre-wrap; }
+.panel figure { margin: 0; }
+.quote [data-reference-math] { font-family: monospace; background: var(--dsw-alias-bg-layer-2); padding: 1px 3px; border-radius: 3px; }
+
+.comment, .editor { display: grid; gap: 4px; }
+.editor label { color: var(--dsw-alias-label-secondary); font-size: 11px; }
+.editor textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 56px;
+  max-height: 140px;
+  padding: 7px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-multi-select);
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+}
+.editorActions { display: flex; justify-content: flex-end; gap: 8px; }
+.editorActions button {
+  padding: 4px 12px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-multi-select);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.source {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 11px;
+  text-align: start;
+  cursor: pointer;
+}
+.notice { margin: 0; color: var(--dsw-alias-state-warn-label); }
+.status { margin: 4px 0 0; color: var(--dsw-alias-label-secondary); }
+
+.dock button:focus-visible, .panel button:focus-visible, .editor textarea:focus-visible, .tableScroll:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+@media (hover: hover) {
+  .chip:hover { background: var(--dsw-alias-bg-layer-3); border-color: var(--dsw-alias-border-l3); }
+  .icon:hover, .editorActions button:hover { background: var(--dsw-alias-bg-layer-3); }
+  .source:hover { color: var(--dsw-alias-label-primary); }
+}
+@media (pointer: coarse) { .icon { width: 30px; height: 30px; } .chip { height: 30px; } }
+
+/* 胶囊尾部的取消按钮：替换掉原来的装饰性灰点，一点即移除这条引用。 */
+/* 原来灰点的位置就是删除键：交叉线用伪元素画（空元素，不依赖任何字形）。 */
+/* 原来灰点的位置就是删除键；叉由内联 SVG 绘制。 */
+.chipRemove {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary, rgba(215,215,215,.98));
+  cursor: pointer;
+}
+.chipRemove:hover { background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #e5484d) 22%, transparent); }
+/* 胶囊外侧的删除键：独立按钮，不参与胶囊内部布局。 */
+/* 交叉线用伪元素画：不依赖 ✕ 字形（某些字体下会渲染成圆点或方框）。 */

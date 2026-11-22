@@ -18,8 +18,8 @@
  * `available()` reports true on purpose. Reporting false would make the provider pick
  * a different carrier and hide the problem again, which is exactly the bug.
  */
-import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
-import type { BrowserChannel } from './system-browser.js'
+import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
+import type { BrowserChannel } from './system-browser.ts'
 
 /**
  * How each product is named in the message, and what to install.

@@ -1,95 +1,110 @@
 {
   "name": "dsh-builtin-browser",
-  "version": "0.5.8",
-  "description": "Shared real browser plugin for DeepSeek Harness: install-and-use — a visible native browser the human can take over, driven by the agent over CDP. DOM-level interaction (React/Vue safe), per-task session isolation, cookie persistence (dsh_browser_auth), CAPTCHA detection, batch form fill (dsh_browser_fill), authenticated download, history/replay, action restriction",
-  "type": "module",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./lib/index.d.ts",
-      "default": "./lib/index.js"
-    },
-    "./browser": {
-      "types": "./lib/browser/runtime.d.ts",
-      "default": "./lib/browser/runtime.js"
-    },
-    "./browser-electron": {
-      "types": "./lib/browser-electron/entry.d.ts",
-      "default": "./lib/browser-electron/entry.js"
-    },
-    "./tool-browser": {
-      "types": "./lib/tool-browser/index.d.ts",
-      "default": "./lib/tool-browser/index.js"
-    },
-    "./host-main": {
-      "default": "./lib/browser-electron/host-main.js"
-    },
-    "./client": {
-      "default": "./client.js"
-    },
-    "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
-  },
-  "files": [
-    "lib",
-    "src",
-    "docs",
-    "skills",
-    "desktop-bridge",
-    "client.js",
-    "cordis.patch.yml",
-    "README.md",
-    "README.en.md",
-    "CHANGELOG.md",
-    "LICENSE",
-    "scripts"
-  ],
-  "bin": {
-    "dsh-browser-install-electron": "scripts/install-electron.mjs"
-  },
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "node scripts/run-tests.mjs",
-    "prepack": "npm run build"
-  },
+  "version": "1.0.0",
+  "description": "Sidebar browser for DeepSeek Harness with navigation, structured references and dsh_browser_* tools. Browser tools require a controllable host-provided sidebar. External Chrome or Edge requires explicit opt-in; no standalone Electron fallback.",
   "keywords": [
-    "dsh-plugin",
-    "deepseek-harness",
     "browser",
-    "cdp"
+    "cdp",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "sidebar-browser",
+    "startpage"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wqty123/dsh-browser.git"
+    "url": "https://github.com/morlay/dsh-plugin.git"
   },
-  "homepage": "https://github.com/wqty123/dsh-browser",
-  "bugs": {
-    "url": "https://github.com/wqty123/dsh-browser/issues"
+  "files": [
+    "lib",
+    "dist",
+    "src",
+    "scripts",
+    "tools/accept-desktop.mjs",
+    "desktop-bridge",
+    "dsh-host-patch",
+    "!dsh-host-patch/sources",
+    "browser-extension",
+    "native-host",
+    "cordis.patch.yml",
+    "CHANGELOG.md",
+    "README.md",
+    "docs",
+    "skills",
+    "assets",
+    "!src/**/__tests__"
+  ],
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "exports": {
+    ".": "./src/index.ts",
+    "./browser": "./src/browser/runtime.ts",
+    "./browser-electron": "./src/browser-electron/entry.ts",
+    "./tool-browser": "./src/tool-browser/index.ts",
+    "./startpage": "./src/startpage.ts",
+    "./client": "./src/client/index.ts",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
   },
-  "engines": {
-    "node": ">=22.19",
-    "dsh": ">=0.1.1-rc.2 <0.3.0"
+  "publishConfig": {
+    "exports": {
+      ".": "./lib/index.js",
+      "./browser": "./lib/browser/runtime.js",
+      "./browser-electron": "./lib/browser-electron/entry.js",
+      "./tool-browser": "./lib/tool-browser/index.js",
+      "./startpage": "./lib/startpage.js",
+      "./client": "./dist/client.cjs",
+      "./cordis.patch.yml": "./cordis.patch.yml",
+      "./package.json": "./package.json"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs"
+  },
+  "bin": {
+    "dsh-browser-install-electron": "scripts/install-electron.mjs"
   },
   "dependencies": {
-    "electron": "^44.10.0"
+    "katex": "0.16.25"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-llm": ">=0.1.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-tools": ">=0.1.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-system-prompt": ">=0.1.1-rc.2 <0.3.0",
-    "@deepseek-ai/schemastery": "^3.18.1",
-    "@deepseek-ai/dsh-client-locale": ">=0.1.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-client-ui-settings": ">=0.1.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.1-rc.2 <0.3.0"
+    "@deepseek-ai/cordis": "workspace:^",
+    "@deepseek-ai/dsh-llm": "workspace:^",
+    "@deepseek-ai/dsh-system-prompt": "workspace:^",
+    "@deepseek-ai/dsh-tools": "workspace:^",
+    "@deepseek-ai/schemastery": "workspace:^"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-api-workspace-controller": "workspace:^",
+    "@deepseek-ai/dsh-brand": "workspace:^",
+    "@deepseek-ai/dsh-client-locale": "workspace:^",
+    "@deepseek-ai/dsh-client-shortcuts": "workspace:^",
+    "@deepseek-ai/dsh-client-store": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-context-menu": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-conversation": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-dockkit": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-primitives": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-renderer": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-session": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-settings": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-sidebar-right": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-slots": "workspace:^",
+    "@deepseek-ai/dsh-session": "workspace:^",
+    "@deepseek-ai/dsh-settings": "workspace:^",
     "@types/node": "^22.0.0",
+    "react-dom": "^18.2.0",
+    "tldts": "6.1.86",
     "typescript": "^5.5.0"
   },
+  "engines": {
+    "dsh": ">=0.1.1-rc.2 <0.3.0"
+  },
   "dsh": {
+    "desktop": {
+      "main": "./desktop-bridge/main.mjs"
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -97,27 +112,14 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-client-ui-settings"
+        "@deepseek-ai/dsh-client-shortcuts",
+        "@deepseek-ai/dsh-client-ui-context-menu",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-slots"
       ]
-    },
-    "compatibility": {
-      "_comment": "Documentation only. DSH decides plugin compatibility from engines.dsh (falling back to @deepseek-ai/dsh* peerDependencies when it is absent); nothing reads this block. Kept because the release-by-release record is useful to a human and costs nothing.",
-      "profiles": [
-        "web",
-        "desktop"
-      ],
-      "dshReleases": {
-        "0.1.0-rc.8": "unknown",
-        "0.1.1-rc.1": "compatible",
-        "0.1.1-rc.2": "compatible",
-        "0.2.0-rc.1": "compatible",
-        "0.2.0-rc.2": "compatible",
-        "0.2.1-alpha.1": "compatible",
-        "0.2.1-rc.1": "compatible",
-        "0.2.1-rc.5": "compatible",
-        "0.2.2-alpha.3": "compatible"
-      }
     }
   }
 }

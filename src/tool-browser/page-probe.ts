@@ -26,10 +26,10 @@
  * @module dsh-browser/tool-browser/page-probe
  */
 
-import type { BrowserPageOperationRequest, BrowserProbeMethod } from '../browser/types.js'
+import type { BrowserPageOperationRequest, BrowserProbeMethod } from '../browser/types.ts'
 
 /** Bumped when the probe's shape changes; an older probe is replaced rather than trusted. */
-export const PROBE_VERSION = 4
+export const PROBE_VERSION = 5
 
 /** Where the probe keeps itself, and the only global it adds. */
 const PROBE_KEY = '__dshProbe'
@@ -281,7 +281,7 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
         range.setEnd(node, at + needle.length)
         const rect = range.getBoundingClientRect()
         out.push({
-          text: short(value.slice(Math.max(0, at - 20), at + needle.length + 20).replace(/\s+/g, ' ').trim(), 80),
+          text: short(value.slice(Math.max(0, at - 20), at + needle.length + 20).replace(/\\s+/g, ' ').trim(), 80),
           x: Math.round(rect.left + rect.width / 2),
           y: Math.round(rect.top + rect.height / 2),
           host: node.parentElement ? describe(node.parentElement) : 'text',
@@ -331,7 +331,7 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
       scrollX: Math.round(globalThis.scrollX || 0),
       scrollY: Math.round(globalThis.scrollY || 0),
       selection: short(globalThis.getSelection ? String(globalThis.getSelection()) : '', 120),
-      text: short(String(body || '').replace(/\s+/g, ' ').trim(), 400),
+      text: short(String(body || '').replace(/\\s+/g, ' ').trim(), 400),
     }
   }
   globalThis[KEY] = state

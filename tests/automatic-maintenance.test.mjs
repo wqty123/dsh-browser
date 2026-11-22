@@ -3,7 +3,85 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { commitAutomaticMaintenance, maintenanceProgressLaunchOptions, readAutomaticMaintenance, startAutomaticMaintenance, startMaintenanceProgressNotification } from '../lib/browser-electron/automatic-maintenance.js'
+import { commitAutomaticMaintenance, identifyDesktopProcesses, maintenanceProgressLaunchOptions, readAutomaticMaintenance, startAutomaticMaintenance, startMaintenanceProgressNotification, waitForDesktopExit } from '../lib/browser-electron/automatic-maintenance.js'
+import { runMaintenanceLifecycle } from '../lib/browser-electron/maintenance-lifecycle.js'
+
+const processRoot = join(tmpdir(), 'desktop-process-fixture')
+const desktopProcess = { pid: 54600, path: join(processRoot, 'DeepSeek Harness.exe'), command: '"DeepSeek Harness.exe" --remote-debugging-port=9333', started: '2026-11-20T09:36:37.9057920Z' }
+
+function exitWait(snapshots) {
+  let clock = 0
+  let reads = 0
+  const deps = {
+    inspect: async () => identifyDesktopProcesses(processRoot, snapshots[Math.min(reads++, snapshots.length - 1)]),
+    checkCancelled: () => {},
+    now: () => clock,
+    pause: async () => { clock += 1_000 },
+  }
+  return { deps, reads: () => reads }
+}
+
+test('Desktop discovery accepts a debugging argument without requiring Explorer ancestry', () => {
+  assert.deepEqual(identifyDesktopProcesses(processRoot, [desktopProcess]), [desktopProcess])
+  assert.deepEqual(identifyDesktopProcesses(processRoot, [{ ...desktopProcess, command: '"DeepSeek Harness.exe" --expose-internals worker.js' }]), [])
+})
+
+test('a complete empty process snapshot permits maintenance without waiting', async () => {
+  const f = exitWait([[]])
+  await waitForDesktopExit(f.deps)
+  assert.equal(f.reads(), 1)
+})
+
+test('quit tolerates disappearing process identities but does not install until a complete empty snapshot', async () => {
+  for (const field of ['path', 'command', 'started']) {
+    const f = exitWait([[{ ...desktopProcess, [field]: null }], [desktopProcess], []])
+    const calls = []
+    const result = await runMaintenanceLifecycle('install', {
+      requestQuit: async () => { calls.push('quit') },
+      waitUntilClosed: async () => await waitForDesktopExit(f.deps),
+      maintain: async () => {
+        assert.equal(f.reads(), 3)
+        calls.push('install')
+        return { ok: true, code: 0, output: 'installed', command: 'fixture' }
+      },
+      restart: async () => { calls.push('restart'); return 12345 },
+      verify: async () => { calls.push('verify') },
+      publish: async () => {},
+    })
+    assert.equal(result.phase, 'completed')
+    assert.deepEqual(calls, ['quit', 'install', 'restart', 'verify'])
+  }
+})
+
+test('persistent identity loss or a live Desktop times out without authorizing writes', async () => {
+  for (const row of [{ ...desktopProcess, path: null }, desktopProcess]) {
+    const f = exitWait([[row]])
+    let modified = false
+    const result = await runMaintenanceLifecycle('install', {
+      requestQuit: async () => {},
+      waitUntilClosed: async () => await waitForDesktopExit(f.deps),
+      maintain: async () => { modified = true; throw new Error('unexpected install') },
+      restart: async () => { modified = true; return 12345 },
+      verify: async () => {},
+      publish: async () => {},
+    })
+    assert.equal(result.phase, 'cancelled')
+    assert.match(result.error, row.path === null ? /identity remains unavailable/ : /Desktop did not exit/)
+    assert.equal(f.reads(), 60)
+    assert.equal(modified, false)
+  }
+})
+
+test('inspection failures and explicit cancellation are not retried as shutdown races', async () => {
+  const f = exitWait([[]])
+  await assert.rejects(waitForDesktopExit({ ...f.deps, inspect: async () => { throw new Error('CIM access denied') } }), /CIM access denied/)
+  await assert.rejects(waitForDesktopExit({ ...f.deps, checkCancelled: () => { throw new Error('job cancelled') } }), /job cancelled/)
+  assert.equal(f.reads(), 0)
+  await assert.rejects(waitForDesktopExit({ ...f.deps, inspect: async () => {
+    f.deps.checkCancelled = () => { throw new Error('cancelled during inspection') }
+    return []
+  }, checkCancelled: () => f.deps.checkCancelled() }), /cancelled during inspection/)
+})
 
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-automatic-maintenance-'))
@@ -13,7 +91,7 @@ function fixture(t) {
   })
   const home = join(directory, 'home')
   const root = join(directory, 'desktop')
-  const id = 'install-test123'
+  const id = 'reinstall-test123'
   const base = join(home, 'dsh-builtin-browser-host', 'maintenance')
   const jobDirectory = join(base, id)
   mkdirSync(join(root, 'resources', 'app', 'lib'), { recursive: true })
@@ -21,11 +99,11 @@ function fixture(t) {
   writeFileSync(join(root, 'resources', 'app', 'lib', 'main.js'), '// private identity fixture')
   mkdirSync(jobDirectory, { recursive: true })
   const plan = {
-    version: 1, id, action: 'install', root, nodePath: process.execPath, electronNode: false, home,
+    version: 1, id, action: 'reinstall', dependency: 'file:../../plugin.tgz', root, nodePath: process.execPath, electronNode: false, home,
     directory: jobDirectory, target: { pid: 1234, path: join(root, 'DeepSeek Harness.exe'), command: '"DeepSeek Harness.exe"', started: new Date(Date.now() - 1_000).toISOString() },
     createdAt: new Date().toISOString(),
   }
-  const state = { id, action: 'install', phase: 'armed', workerPid: 5678, at: new Date().toISOString() }
+  const state = { id, action: 'reinstall', phase: 'armed', workerPid: 5678, at: new Date().toISOString() }
   const save = () => {
     writeFileSync(join(jobDirectory, 'automatic.json'), JSON.stringify(plan))
     writeFileSync(join(jobDirectory, 'state.json'), JSON.stringify(state))
@@ -36,7 +114,7 @@ function fixture(t) {
 }
 
 test('an automatic launch is prohibited in the test process before discovery or broker creation', async () => {
-  await assert.rejects(startAutomaticMaintenance('install', 'C:/not-a-real-target'), /forbidden in a test process|requires Windows Desktop/)
+  await assert.rejects(startAutomaticMaintenance('reinstall', 'C:/not-a-real-target'), /forbidden in a test process|requires DSH Desktop on Windows or macOS/)
 })
 
 test('committing the current armed job writes a process-bound permission without changing its phase', async t => {
@@ -55,7 +133,7 @@ test('committing the current armed job writes a process-bound permission without
 test('a different, finished, cancelled or malformed job cannot be committed', async t => {
   const f = fixture(t)
   await assert.rejects(commitAutomaticMaintenance('../escape', f.home), /invalid.*id/)
-  await assert.rejects(commitAutomaticMaintenance('install-another123', f.home), /no longer armed/)
+  await assert.rejects(commitAutomaticMaintenance('reinstall-another123', f.home), /no longer armed/)
   f.state.phase = 'completed'
   f.save()
   await assert.rejects(commitAutomaticMaintenance(f.id, f.home), /no longer armed/)

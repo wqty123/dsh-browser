@@ -1,0 +1,260 @@
+{
+  "version": 1,
+  "releases": {
+    "main": {
+      "baseCommit": "2e39e70496aa02986ca6a820c5d497e816b69d7e",
+      "sourceCommit": "967cfb947afa69b59e269825c022ae49a579c731",
+      "patches": [
+        {
+          "file": "main/0001-feat-sidebar-right-add-session-rendering-holds.patch.gz",
+          "commit": "3332e2e69f7d812b0095b8756ae8d7244bdf91a0"
+        },
+        {
+          "file": "main/0002-feat-desktop-load-trusted-profile-main-extensions.patch.gz",
+          "commit": "5e989844fe881eda4fac0080d6f412e660564489"
+        },
+        {
+          "file": "main/0003-feat-desktop-report-resolved-and-running-main-extens.patch.gz",
+          "commit": "1a01e26b8e0c25fcdbc2e6cbcd191fcf216eef08"
+        },
+        {
+          "file": "main/0004-feat-desktop-compose-admitted-native-sidebar-views.patch.gz",
+          "commit": "aa0109aba9cdb2e8e4e419fec4d71adb92a50dff"
+        },
+        {
+          "file": "main/0005-fix-client-admit-coded-browser-errors-in-native-comp.patch.gz",
+          "commit": "f430580383b5ed0ae07f1b51a63a806a0ea2e954"
+        },
+        {
+          "file": "main/0006-fix-desktop-acknowledge-native-same-document-navigat.patch.gz",
+          "commit": "550c755e813f6811795a4a4de0d3830ac3ce6efa"
+        },
+        {
+          "file": "main/0007-fix-desktop-restore-auth-in-the-native-lease-partiti.patch.gz",
+          "commit": "eeea47412d8ecdfb4237b479546e7738773f43c3"
+        },
+        {
+          "file": "main/0008-feat-desktop-adopt-native-children-in-admitted-sideb.patch.gz",
+          "commit": "fe431a79fea365743cd68a3248912e22976542c4"
+        },
+        {
+          "file": "main/0009-fix-desktop-publish-complete-native-child-close-reco.patch.gz",
+          "commit": "8aab7a193b1dbf3305c7382356b09eaea6b19dca"
+        },
+        {
+          "file": "main/0010-fix-desktop-bundle-structured-errors-in-sandboxed-pr.patch.gz",
+          "commit": "c5f50253e75294746827433f742c3ab9208134a0"
+        },
+        {
+          "file": "main/0011-feat-desktop-offer-persistent-Sidebar-sessions-per-D.patch.gz",
+          "commit": "cd7714d2c4bce7481c4d2cee6b455493c5fcef15"
+        },
+        {
+          "file": "main/0012-feat-desktop-retain-sidebar-session-cookies-across-r.patch.gz",
+          "commit": "98bc5f49698b1a55f47ad94c8ab1615813a3b136"
+        },
+        {
+          "file": "main/0013-fix-desktop-honor-sidebar-session-cookie-sidecar-con.patch.gz",
+          "commit": "2ab004816a18aa287bdf5092a16d523e48d54678"
+        },
+        {
+          "file": "main/0014-fix-desktop-retry-cookie-protection-without-failing-.patch.gz",
+          "commit": "99beaa2b85ed725a38f157cd93d1ffaeb3e08760"
+        },
+        {
+          "file": "main/0015-fix-desktop-preserve-host-only-cookie-identity-in-se.patch.gz",
+          "commit": "5b934205bc46e34bd0d2641d7396dac90afd4477"
+        },
+        {
+          "file": "main/0016-fix-desktop-restore-session-cookies-before-checkpoin.patch.gz",
+          "commit": "f1308a92526fa5ec73b1b8036fd090df55af6efc"
+        },
+        {
+          "file": "main/0017-fix-desktop-restore-sidebar-cookies-once-before-gues.patch.gz",
+          "commit": "ecc1469ffe9edeeb19d1a88c0909a915593adba9"
+        },
+        {
+          "file": "main/0018-fix-sidebar-right-follow-animated-native-slot-placem.patch.gz",
+          "commit": "967cfb947afa69b59e269825c022ae49a579c731"
+        }
+      ],
+      "fixture": {
+        "file": "main.base.json.gz",
+        "bytes": 5567352,
+        "sha256": "214c7503cd3ed3a6ec760c0dab93308e1035f52c48004f8d19a08489b19f5ca9"
+      },
+      "baseTree": "4fbe028266d089667f10986bffed8780826f19c6",
+      "sourceTree": "ceaee400f94d61e3c1a86af4f585c7847d37185b"
+    },
+    "rc3": {
+      "baseCommit": "38a6a5c965aa99ab525161efb7cc5cf1fe62fced",
+      "sourceCommit": "65791d4dcf3f25c544b3fb433c47e133583a34b6",
+      "patches": [
+        {
+          "file": "rc3/0001-feat-sidebar-right-add-session-rendering-holds.patch.gz",
+          "commit": "7f1b26e2d1a696115d7cd6146257599d2bdd3c1e"
+        },
+        {
+          "file": "rc3/0002-feat-desktop-load-trusted-profile-main-extensions.patch.gz",
+          "commit": "ff1f9d16d53707cc67adf0d85bc01a9235ab2c94"
+        },
+        {
+          "file": "rc3/0003-feat-desktop-report-resolved-and-running-main-extens.patch.gz",
+          "commit": "d38ed963510b8f9688374f1112075b6124cda09b"
+        },
+        {
+          "file": "rc3/0004-feat-desktop-compose-admitted-native-sidebar-views.patch.gz",
+          "commit": "062adf7365a5c20bf47c7145d26b363756ddf122"
+        },
+        {
+          "file": "rc3/0005-fix-client-admit-coded-browser-errors-in-native-comp.patch.gz",
+          "commit": "13705d30f00632fcbac33d1a6ec5b7b561df05de"
+        },
+        {
+          "file": "rc3/0006-fix-desktop-acknowledge-native-same-document-navigat.patch.gz",
+          "commit": "cbc141dd42a09f85a53b37de1e4965b1c7d6b8f4"
+        },
+        {
+          "file": "rc3/0007-fix-desktop-restore-auth-in-the-native-lease-partiti.patch.gz",
+          "commit": "7fa9ced01b92c9bd3b366a0d6b87f7e8f0dd7866"
+        },
+        {
+          "file": "rc3/0008-feat-desktop-adopt-native-children-in-admitted-sideb.patch.gz",
+          "commit": "78cdafd52d3600eb7dc9592715fb5c2c59998db5"
+        },
+        {
+          "file": "rc3/0009-fix-desktop-publish-complete-native-child-close-reco.patch.gz",
+          "commit": "e12a219b11b2909392f3eda4377e4ba524c257bf"
+        },
+        {
+          "file": "rc3/0010-fix-desktop-bundle-structured-errors-in-sandboxed-pr.patch.gz",
+          "commit": "7f9dce79fbfd2678a58577aa38a75b109dac4d8a"
+        },
+        {
+          "file": "rc3/0011-feat-desktop-offer-persistent-Sidebar-sessions-per-D.patch.gz",
+          "commit": "2a9d9360234fde1731cfec31fe6e5a35d4529588"
+        },
+        {
+          "file": "rc3/0012-feat-desktop-retain-sidebar-session-cookies-across-r.patch.gz",
+          "commit": "baa55ca931afc386853ed405e73a4a4232a6f358"
+        },
+        {
+          "file": "rc3/0013-fix-desktop-honor-sidebar-session-cookie-sidecar-con.patch.gz",
+          "commit": "77aa64c0f160320f0a0557af549fc7b962ed2d0b"
+        },
+        {
+          "file": "rc3/0014-fix-desktop-retry-cookie-protection-without-failing-.patch.gz",
+          "commit": "214615cbfcc68b45470b03e4ed6cff6bb33c32b7"
+        },
+        {
+          "file": "rc3/0015-fix-desktop-preserve-host-only-cookie-identity-in-se.patch.gz",
+          "commit": "3f4a95335d9eb55c85df3962f7924190f85c2400"
+        },
+        {
+          "file": "rc3/0016-fix-desktop-restore-session-cookies-before-checkpoin.patch.gz",
+          "commit": "87a4d53eed435fe92e971dd9eef132e9a68a0991"
+        },
+        {
+          "file": "rc3/0017-fix-desktop-restore-sidebar-cookies-once-before-gues.patch.gz",
+          "commit": "948d49ac3f9e48e511b71ecbef446745e59e1d05"
+        },
+        {
+          "file": "rc3/0018-fix-sidebar-right-follow-animated-native-slot-placem.patch.gz",
+          "commit": "65791d4dcf3f25c544b3fb433c47e133583a34b6"
+        }
+      ],
+      "fixture": {
+        "file": "rc3.base.json.gz",
+        "bytes": 5398535,
+        "sha256": "bc597312bb8097636604398e866af0869c9feeff2cc808a14b853ffdd4d4a5f1"
+      },
+      "baseTree": "77ab54bbce37988207baa603b1d39aa9db9aeaaa",
+      "sourceTree": "5d7cbf5effb52a37c57bbeb90a3b39703979df30"
+    },
+    "rc5": {
+      "baseCommit": "9c2670d3bce5275e0d1610272958121af87787bb",
+      "sourceCommit": "0525cbba653769b53a966bbbdc684dab281e4e9e",
+      "patches": [
+        {
+          "file": "rc5/0001-feat-sidebar-right-add-session-rendering-holds.patch.gz",
+          "commit": "5e822f77d72f980427545a3e6029b7fe74267396"
+        },
+        {
+          "file": "rc5/0002-feat-desktop-load-trusted-profile-main-extensions.patch.gz",
+          "commit": "0bdacc467bc930b79502c5bca5a5653da3eda83c"
+        },
+        {
+          "file": "rc5/0003-feat-desktop-report-resolved-and-running-main-extens.patch.gz",
+          "commit": "8b0e829bfd22d6e131cdc66a5a0f6592c7a6f074"
+        },
+        {
+          "file": "rc5/0004-feat-desktop-compose-admitted-native-sidebar-views.patch.gz",
+          "commit": "da20bebd9d39dd5282e53fe443b049482e66d65d"
+        },
+        {
+          "file": "rc5/0005-fix-client-admit-coded-browser-errors-in-native-comp.patch.gz",
+          "commit": "52511a6004afea23d313a52fb7c84380e9e20b79"
+        },
+        {
+          "file": "rc5/0006-fix-desktop-acknowledge-native-same-document-navigat.patch.gz",
+          "commit": "6f3d4987f97d57d916e8fba30830412d51d6a6dc"
+        },
+        {
+          "file": "rc5/0007-fix-desktop-restore-auth-in-the-native-lease-partiti.patch.gz",
+          "commit": "1b89543db998bb2661b18035c9713ab68f815767"
+        },
+        {
+          "file": "rc5/0008-feat-desktop-adopt-native-children-in-admitted-sideb.patch.gz",
+          "commit": "9f452b00f04707cc6c1374a3afc6741697e18e76"
+        },
+        {
+          "file": "rc5/0009-fix-desktop-publish-complete-native-child-close-reco.patch.gz",
+          "commit": "3a3a2eba96710b40e66cdd82a6ceb9faa0a0bd6c"
+        },
+        {
+          "file": "rc5/0010-fix-desktop-bundle-structured-errors-in-sandboxed-pr.patch.gz",
+          "commit": "c14606c2a1e2ad276cfbdc120f6100adfb0f7e16"
+        },
+        {
+          "file": "rc5/0011-feat-desktop-offer-persistent-Sidebar-sessions-per-D.patch.gz",
+          "commit": "5c7e32abffae6305c283729b3c8062f3f50fec08"
+        },
+        {
+          "file": "rc5/0012-feat-desktop-retain-sidebar-session-cookies-across-r.patch.gz",
+          "commit": "b5c74346825e99bedd915a9c2089db72bb33f08b"
+        },
+        {
+          "file": "rc5/0013-fix-desktop-honor-sidebar-session-cookie-sidecar-con.patch.gz",
+          "commit": "f04adf7b2469afe506a2218d6a00099163ba8d6a"
+        },
+        {
+          "file": "rc5/0014-fix-desktop-retry-cookie-protection-without-failing-.patch.gz",
+          "commit": "8e5d18a0ab8153ea655476b18daba23361bc3478"
+        },
+        {
+          "file": "rc5/0015-fix-desktop-preserve-host-only-cookie-identity-in-se.patch.gz",
+          "commit": "f23d888e6d1add80455408efdbb1043cc2380b0d"
+        },
+        {
+          "file": "rc5/0016-fix-desktop-restore-session-cookies-before-checkpoin.patch.gz",
+          "commit": "fe0a38ca9e9fb987f5d1a72f092564beffa38125"
+        },
+        {
+          "file": "rc5/0017-fix-desktop-restore-sidebar-cookies-once-before-gues.patch.gz",
+          "commit": "c8f8d79aacc07d2f54dda634ff2cc041d165bcf5"
+        },
+        {
+          "file": "rc5/0018-fix-sidebar-right-follow-animated-native-slot-placem.patch.gz",
+          "commit": "0525cbba653769b53a966bbbdc684dab281e4e9e"
+        }
+      ],
+      "fixture": {
+        "file": "rc5.base.json.gz",
+        "bytes": 5399612,
+        "sha256": "4d56b235a252f3e877b50ad63d4b3a4f3b6ecb122d6493d531f7747bac7f2da1"
+      },
+      "baseTree": "6ec0fcdcaf38bdf8ffa6675e30b036dc104a1ece",
+      "sourceTree": "273fc6c7d5c0b5e5f041b172f3744eb83c9ea078"
+    }
+  }
+}

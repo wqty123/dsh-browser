@@ -42,6 +42,7 @@ function fakeBrowser(overrides = {}) {
     open: async () => 'session-1',
     session: () => 'session-1',
     exists: () => true,
+    openUrl: async () => {},
     a11y: async () => ({
       url: 'https://example.com/',
       title: 'Example Domain',
@@ -76,9 +77,54 @@ async function run(tools, name) {
   return await tool.execute({}, { task: 'test' })
 }
 
+async function open(tools) {
+  await tools.get('dsh_browser_open').execute(
+    { url: 'https://example.com/', surface: 'builtin' }, { task: 'test' },
+  )
+}
+
+test('the prompt section coexists with another browser plugin in either registration order', () => {
+  for (const siblingFirst of [true, false]) {
+    const { ctx, tools } = makeContext()
+    const sections = new Set(siblingFirst ? ['tool:browser'] : [])
+    ctx.systemPrompt.section = ({ name }) => {
+      assert.equal(sections.has(name), false, 'prompt section identity is unique')
+      sections.add(name)
+    }
+    apply(ctx, { surface: 'tools' })
+    if (!siblingFirst) ctx.systemPrompt.section({ name: 'tool:browser' })
+    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:browser-human-takeover', 'tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
+    assert.ok(tools.has('dsh_browser_open'), 'tool registration completes')
+  }
+})
+
+test('reference guidance distinguishes tool-only capture storage from chat capsules', () => {
+  const { ctx, tools } = makeContext()
+  const sections = []
+  ctx.systemPrompt.section = section => { sections.push(section) }
+  apply(ctx, { surface: 'tools' })
+  const guidance = sections.find(section => section.name === 'tool:dsh-browser-reference-presentation')
+  assert.match(guidance.text, /Do not repeat.*source\/citation links/u)
+  const capture = tools.get('dsh_browser_reference_capture')
+  const list = tools.get('dsh_browser_reference_list')
+  assert.match(capture.description, /Tool-only captures are stored for later dsh_browser_reference_reveal or export and do not create a chat capsule/u)
+  assert.match(capture.description, /do not emit dsh-browser-ref: URIs, reference markers, or synthetic source links/u)
+  assert.match(list.description, /do not repeat reference URIs/u)
+  const reference = { referenceId: 'ref-1', title: 'Test', pageUrl: 'https://example.com/', capturedAt: 'now', parts: [], failures: [] }
+  const captured = capture.output.render({}, { ...reference, ok: true })[0].text
+  const listed = list.output.render({}, { references: [reference] })[0].text
+  assert.match(captured, /Stored in the reference library for dsh_browser_reference_reveal or export \(tool-only captures do not create a chat capsule\)/u)
+  assert.match(captured, /Do not emit dsh-browser-ref: URIs or reference markers/u)
+  assert.match(listed, /not a reply link/u)
+  for (const text of [captured, listed]) assert.doesNotMatch(text, /Cite it|dsh-browser-ref:ref-1|\]\(/u)
+  assert.match(capture.output.render({}, { ok: false, failures: [{ kind: 'text', reason: 'empty-text' }] })[0].text, /Nothing was captured/u)
+  assert.match(list.output.render({}, { references: [] })[0].text, /No browser references/u)
+})
+
 test('dsh_browser_a11y hands the selector on', async () => {
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
+  await open(tools)
 
   const value = await run(tools, 'dsh_browser_a11y')
 
@@ -92,7 +138,8 @@ test('dsh_browser_a11y hands the selector on', async () => {
 
 test('dsh_browser_snapshot hands the selector on', async () => {
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
+  await open(tools)
 
   const value = await run(tools, 'dsh_browser_snapshot')
   assert.equal(value.elements[0].selector, '#probe-btn', 'the snapshot mapping carries selector')
@@ -102,7 +149,8 @@ test('both element mappings carry the same field set', async () => {
   // The two mappings reimplement the same idea, and they disagreed: one listed selector, the
   // other did not. Comparing them catches the next field that only lands in one of them.
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
+  await open(tools)
 
   const a11y = await run(tools, 'dsh_browser_a11y')
   const snapshot = await run(tools, 'dsh_browser_snapshot')
@@ -123,7 +171,8 @@ test('a required field in the output schema is one the tool can actually produce
   // Invisible to the type checker (the mapping is an object literal) and to the suite (nothing
   // ran a tool). Optional fields are exempt, since those may legitimately be absent.
   const { ctx, tools } = makeContext({ browser: fakeBrowser() })
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
+  await open(tools)
 
   const problems = []
   for (const name of ['dsh_browser_a11y', 'dsh_browser_snapshot']) {

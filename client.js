@@ -17,7 +17,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   var exports = module.exports
   Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" })
 
-  const react = require("react")
+const react = require("react")
   const h = react.createElement
   const { useCallback, useEffect, useRef, useState } = react
 
@@ -84,7 +84,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     saved: "已保存",
     "history.enabled": "保留浏览历史",
     "ui.title": "展示",
-    "ui.autoExpandOnce": "侧栏自动展开(每轮一次)",
+    "ui.autoExpandOnce": "侧栏自动展开",
     "ui.closeWithSession": "会话结束时关闭浏览器",
     "ui.virtualCursor": "显示 Agent 光标",
     "ui.quiet": "安静模式",
@@ -94,7 +94,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "vision.nonVisual": "禁止",
     "credentials.allowRead": "允许 Agent 读取 cookies / 导出登录状态",
     "browser.channel": "默认浏览器",
-    "browser.sidebar": "DSH 侧栏",
+    "browser.sidebar": "DSH 侧栏面板",
     "browser.bundled": "内置浏览器",
     "browser.chrome": "本机 Chrome",
     "browser.edge": "本机 Edge",
@@ -104,6 +104,43 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "actions.allowDownload": "允许下载文件到磁盘",
     "actions.allowCredentialWrite": "允许写入登录状态",
     "actions.allowCredentialWrite.hint": "可向任意域写入 cookies。",
+    "refs.title": "网页引用",
+    "refs.empty": "暂无网页引用",
+    "refs.records": "条",
+    "refs.transfer": "导入与导出",
+    "refs.loadFailed": "读取失败，请重试",
+    "refs.reading": "正在读取…",
+    "refs.image": "图片",
+    "refs.table": "表格",
+    "refs.untitled": "未命名网页",
+    "refs.reveal": "定位",
+    "refs.refresh": "刷新",
+    "refs.loading": "定位中…",
+    "refs.parts": "个片段",
+    "refs.revealed": "已在原文中定位",
+    "refs.ambiguous": "有多处相同匹配，无法唯一定位",
+    "refs.missing": "原文中已找不到这段内容",
+    "refs.pageMismatch": "当前页面与引用来源不同，请先打开来源地址",
+    "refs.sessionUnavailable": "捕获该引用的浏览器已关闭",
+    "refs.notFound": "引用不存在",
+    "refs.failed": "定位失败",
+    "refs.export": "导出",
+    "refs.exportJsonl": "JSONL",
+    "refs.exportMarkdown": "Markdown",
+    "refs.exportZip": "ZIP（含图片）",
+    "refs.import": "导入 ZIP",
+    "refs.importBusy": "导入中…",
+    "refs.importDone": "已导入",
+    "refs.importPartial": "条拒绝",
+    "refs.importFailed": "导入失败",
+    "refs.settingsHint": "网页引用属于会话内容：引用卡片出现在会话输入框，历史记录与按需导入导出在输入框旁的「引用记录」入口；设置页只保存引用偏好。",
+    "refs.recordsMenu": "引用记录",
+    "refs.addToDraft": "引用到会话",
+    "refs.remove": "移除",
+    "refs.added": "已加入当前会话草稿，请补充问题后自行发送",
+    "refs.addFailed": "加入失败，引用仍保留在记录里",
+    "refs.removed": "已从会话草稿移除",
+    "refs.removeFailed": "移除失败（可能尚未加入会话）",
     "remoteView.enabled": "允许远程观看",
     "remoteView.enabled.hint": "共享只读画面，可能包含敏感信息。",
     "readiness.title": "环境检查",
@@ -114,12 +151,12 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.system": "本机浏览器",
     "readiness.details": "诊断",
     "readiness.electron": "内置浏览器运行时",
-    "readiness.bridge": "桌面侧栏 bridge",
+    "readiness.bridge": "侧栏浏览器桥接",
     "readiness.recheck": "重新检测",
     "readiness.prepare": "准备内置浏览器",
     "readiness.preparing": "正在准备…",
     "readiness.fix": "外部终端命令",
-    "readiness.carrier.sidebar": "桌面侧栏",
+    "readiness.carrier.sidebar": "侧栏浏览器",
     "readiness.carrier.bundled": "内置 Electron",
     "readiness.carrier.system": "本机 Chrome / Edge",
     "readiness.carrier.auto": "自动",
@@ -135,9 +172,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.status.bridgeReady": "侧栏桥可用",
     "readiness.status.bridgeMissing": "侧栏桥待安装",
     "readiness.status.bridgeStale": "侧栏桥待修复",
-    "readiness.status.bridgeStopped": "等待桌面端启动",
+    "readiness.status.bridgeStopped": "侧栏桥未连接",
     "readiness.status.bridgeInstalled": "侧栏桥已安装",
-    "readiness.status.desktopMissing": "未检测到桌面端",
+    "readiness.status.desktopMissing": "未检测到宿主进程",
     "readiness.electron.present": "已就绪",
     "readiness.electron.ready": "已就绪",
     "readiness.electron.preparing": "正在下载",
@@ -145,11 +182,11 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.electron.skipped": "已跳过(设置了 ELECTRON_SKIP_BINARY_DOWNLOAD)",
     "readiness.electron.failed": "准备失败",
     "readiness.bridge.installed": "已安装",
-    "readiness.bridge.installedRunning": "已安装(桌面端正在运行)",
-    "readiness.bridge.installedNotRunning": "已安装,但桌面端没在运行",
+    "readiness.bridge.installedRunning": "已安装(宿主正在运行)",
+    "readiness.bridge.installedNotRunning": "已安装,但宿主没在运行",
     "readiness.bridge.missing": "未安装",
-    "readiness.bridge.stale": "已失效(桌面端升级后需重装)",
-    "readiness.bridge.absent": "本机没有桌面端",
+    "readiness.bridge.stale": "已失效(宿主升级后需重装)",
+    "readiness.bridge.absent": "本机没有可用的宿主进程",
     "readiness.bridge.install": "安装并重启",
     "readiness.bridge.repair": "修复并重启",
     "readiness.bridge.reinstall": "重装并重启",
@@ -196,7 +233,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "watch.disabled": "Remote viewing is off on the host",
     "watch.noPage": "This task has not opened a browser",
     "watch.bridgeStale": "A desktop update invalidated the bridge; re-run:",
-    "watch.bridgeMissing": "The desktop bridge is not installed, so the sidebar carrier cannot work:",
+    "watch.bridgeMissing": "The sidebar bridge is not installed, so the sidebar carrier cannot work:",
     title: "Browser",
     "settings.advanced": "Advanced settings",
     "settings.saving": "Saving…",
@@ -216,7 +253,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     saved: "Saved",
     "history.enabled": "Keep browsing history",
     "ui.title": "Presentation",
-    "ui.autoExpandOnce": "Auto-expand the side panel (once per task)",
+    "ui.autoExpandOnce": "Auto-expand the side panel",
     "ui.closeWithSession": "Close the browser when the session ends",
     "ui.virtualCursor": "Show agent cursor",
     "ui.quiet": "Quiet mode",
@@ -236,6 +273,43 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "actions.allowDownload": "Download files to disk",
     "actions.allowCredentialWrite": "Write login state",
     "actions.allowCredentialWrite.hint": "Write cookies to any domain.",
+    "refs.title": "Page references",
+    "refs.empty": "No page references",
+    "refs.records": "saved",
+    "refs.transfer": "Import and export",
+    "refs.loadFailed": "Could not load references. Try again.",
+    "refs.reading": "Loading…",
+    "refs.image": "Image",
+    "refs.table": "Table",
+    "refs.untitled": "Untitled page",
+    "refs.reveal": "Locate",
+    "refs.refresh": "Refresh",
+    "refs.loading": "Locating…",
+    "refs.parts": "part(s)",
+    "refs.revealed": "Located in the page",
+    "refs.ambiguous": "Several equal matches; cannot choose one",
+    "refs.missing": "This content is no longer on the page",
+    "refs.pageMismatch": "The page has changed; open the reference's page first",
+    "refs.sessionUnavailable": "The browser that captured this reference is gone",
+    "refs.notFound": "Reference not found",
+    "refs.failed": "Could not locate",
+    "refs.export": "Export",
+    "refs.exportJsonl": "JSONL",
+    "refs.exportMarkdown": "Markdown",
+    "refs.exportZip": "ZIP (with images)",
+    "refs.import": "Import ZIP",
+    "refs.importBusy": "Importing…",
+    "refs.importDone": "Imported",
+    "refs.importPartial": "rejected",
+    "refs.importFailed": "Import failed",
+    "refs.settingsHint": "Page references belong to a conversation: cards appear in the conversation input, while history and on-demand import/export live in the Reference records entry beside it. Settings only hold preferences.",
+    "refs.recordsMenu": "Reference records",
+    "refs.addToDraft": "Add to conversation",
+    "refs.remove": "Remove",
+    "refs.added": "Added to this conversation's draft; write your question and send it yourself",
+    "refs.addFailed": "Could not add; the record is kept",
+    "refs.removed": "Removed from the conversation draft",
+    "refs.removeFailed": "Could not remove (it may not be in a draft yet)",
     "remoteView.enabled": "Allow remote viewing",
     "remoteView.enabled.hint": "Shares a read-only view that may contain sensitive information.",
     "readiness.title": "Environment check",
@@ -246,12 +320,12 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "readiness.system": "Installed browser",
     "readiness.details": "Diagnostics",
     "readiness.electron": "Bundled browser runtime",
-    "readiness.bridge": "Desktop sidebar bridge",
+    "readiness.bridge": "Sidebar browser bridge",
     "readiness.recheck": "Check again",
     "readiness.prepare": "Prepare the bundled browser",
     "readiness.preparing": "Preparing…",
     "readiness.fix": "External-terminal command",
-    "readiness.carrier.sidebar": "Desktop sidebar",
+    "readiness.carrier.sidebar": "Sidebar browser",
     "readiness.carrier.bundled": "Bundled Electron",
     "readiness.carrier.system": "Installed Chrome / Edge",
     "readiness.carrier.auto": "Automatic",
@@ -358,6 +432,29 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   background: transparent;
 }
 .dsh-bb-settings { font-size: 14px; line-height: 22px; }
+.dsh-bb-references > summary { display: list-item; }
+.dsh-bb-ref-count { margin-left: 8px; color: var(--dsw-alias-label-tertiary, GrayText); font-size: 12px; font-weight: 400; }
+.dsh-bb-ref-toolbar, .dsh-bb-ref-transfer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dsh-bb-ref-toolbar { justify-content: flex-end; margin: 4px 0; }
+.dsh-bb-ref-list { list-style: none; padding: 0; margin: 0; }
+.dsh-bb-ref-item { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: .5px solid var(--dsw-alias-border-l2, GrayText); }
+.dsh-bb-ref-content { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.dsh-bb-ref-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.dsh-bb-ref-preview { margin: 0; color: var(--dsw-alias-label-secondary, inherit); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.dsh-bb-ref-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--dsw-alias-label-tertiary, GrayText); font-size: 12px; line-height: 1.5; }
+.dsh-bb-ref-source { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-bb-ref-item > button { flex: none; white-space: nowrap; }
+.dsh-bb-ref-transfer { margin-top: 10px; }
+.dsh-bb-ref-transfer-actions { padding: 6px 0; }
+.dsh-bb-ref-outcome { margin: 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+@media (pointer: coarse) { .dsh-bb-ref-item > button, .dsh-bb-ref-toolbar button, .dsh-bb-ref-transfer-actions button { min-height: 40px !important; } }
+.dsh-bb-ref-menu { position: relative; display: inline-flex; align-items: center; }
+.dsh-bb-ref-toggle { font: inherit; padding: 4px 10px; border: .5px solid var(--dsw-alias-border-l2, GrayText); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
+.dsh-bb-ref-toggle:hover { background: var(--dsw-alias-fill-hover, rgba(127,127,127,.12)); }
+.dsh-bb-ref-popover { position: fixed; right: 24px; bottom: 88px; z-index: 2147483000; width: min(460px, calc(100vw - 32px)); max-height: min(70vh, 640px); overflow: auto; padding: 14px 16px; border: .5px solid var(--dsw-alias-border-l2, GrayText); border-radius: 10px; background: var(--dsw-alias-bg-l1, Canvas); color: var(--dsw-alias-label-primary, CanvasText); box-shadow: 0 8px 28px rgba(0,0,0,.18); font-size: 13px; }
+.dsh-bb-ref-actions { display: flex; flex-wrap: wrap; gap: 6px; flex: none; }
+.dsh-bb-ref-actions button { font-size: 12px; }
+@media (pointer: coarse) { .dsh-bb-ref-actions button, .dsh-bb-ref-toggle { min-height: 40px !important; } }
 .dsh-bb-settings .dsh-bb-diagnostics { margin-top: 4px; }
 .dsh-bb-diagnostics code { display: block; max-height: 160px; overflow: auto; }
 .dsh-bb-toggle { justify-content: space-between; cursor: pointer; }
@@ -1070,6 +1167,250 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
   }
 
   /** The settings page section. */
+  /**
+   * The references section: what was selected in a page earlier, and the way back.
+   *
+   * It lists and reveals only. A capture starts from the page — the assistant's
+   * tool, or a browser menu once one exists — because a selection lives in the
+   * page, not in this panel. A host without the reference routes makes the list
+   * request fail, and the section then renders nothing, exactly like a settings
+   * row an older host does not serve.
+   */
+  function References(props) {
+    useLocaleVersion()
+    const t = translate
+    const [rows, setRows] = useState([])
+    const [status, setStatus] = useState("loading")
+    const [pending, setPending] = useState("")
+    const [outcome, setOutcome] = useState(null)
+    const [exporting, setExporting] = useState("")
+    const [importing, setImporting] = useState(false)
+    const [importNote, setImportNote] = useState("")
+    const fileInput = useRef(null)
+    const alive = useRef(true)
+    const loadRevision = useRef(0)
+
+    useEffect(() => {
+      alive.current = true
+      return () => { alive.current = false; loadRevision.current += 1 }
+    }, [])
+
+    const load = useCallback(() => {
+      const revision = ++loadRevision.current
+      setStatus("loading")
+      fetch("/dsh-builtin-browser/reference/list?limit=10", { headers: { accept: "application/json" } })
+        .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+        .then(data => {
+          if (!alive.current || loadRevision.current !== revision) return
+          setRows(Array.isArray(data.references) ? data.references : [])
+          setStatus("ready")
+        })
+        .catch(() => { if (alive.current && loadRevision.current === revision) setStatus("failed") })
+    }, [])
+    useEffect(() => { load() }, [load])
+
+    const label = state => {
+      if (state === "revealed") return t("refs.revealed")
+      if (state === "ambiguous") return t("refs.ambiguous")
+      if (state === "missing") return t("refs.missing")
+      if (state === "page-mismatch") return t("refs.pageMismatch")
+      if (state === "session-unavailable") return t("refs.sessionUnavailable")
+      if (state === "not-found") return t("refs.notFound")
+      if (state === "added") return t("refs.added")
+      if (state === "addFailed") return t("refs.addFailed")
+      if (state === "removed") return t("refs.removed")
+      if (state === "removeFailed") return t("refs.removeFailed")
+      return t("refs.failed")
+    }
+    const reveal = referenceId => {
+      setPending(referenceId)
+      setOutcome(null)
+      fetch("/dsh-builtin-browser/reference/reveal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ referenceId }),
+      }).then(async response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return response.json()
+      })
+        .then(data => { if (alive.current) setOutcome({ referenceId, status: data.status || "unavailable" }) })
+        .catch(() => { if (alive.current) setOutcome({ referenceId, status: "failed" }) })
+        .finally(() => { if (alive.current) setPending("") })
+    }
+    const exportAs = format => {
+      setExporting(format)
+      setOutcome(null)
+      fetch(`/dsh-builtin-browser/reference/export?format=${encodeURIComponent(format)}`, { headers: { accept: "*/*" } })
+        .then(async response => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          const blob = await response.blob()
+          if (!alive.current) return
+          const disposition = response.headers.get("content-disposition") || ""
+          const named = /filename="([^"]+)"/.exec(disposition)
+          const fallback = { jsonl: "browser-references.jsonl", markdown: "browser-references.md", zip: "browser-references.zip" }[format] || "browser-references.zip"
+          const url = URL.createObjectURL(blob)
+          const link = document.createElement("a")
+          link.href = url
+          link.download = named ? named[1] : fallback
+          link.click()
+          setTimeout(() => URL.revokeObjectURL(url), 0)
+        })
+        .catch(() => { if (alive.current) setOutcome({ referenceId: "", status: "failed" }) })
+        .finally(() => { if (alive.current) setExporting("") })
+    }
+    /**
+     * Restore a `format=zip` export. The route re-verifies every hash and reports per-record
+     * rejections; a partial import is shown as such rather than as a clean success.
+     * @param file - the user-picked archive.
+     */
+    const importFrom = file => {
+      if (!file) return
+      setImporting(true)
+      setImportNote("")
+      setOutcome(null)
+      fetch("/dsh-builtin-browser/reference/import", {
+        method: "POST",
+        headers: { "content-type": "application/zip" },
+        body: file,
+      })
+        .then(async response => {
+          const data = await response.json().catch(() => ({}))
+          if (!response.ok || data.ok !== true) throw new Error(String(data.error || `HTTP ${response.status}`))
+          return data
+        })
+        .then(data => {
+          if (!alive.current) return
+          const rejected = Array.isArray(data.rejected) ? data.rejected.length : 0
+          setImportNote(`${t("refs.importDone")} ${String(data.added)}/${String(data.references)}`
+            + (rejected > 0 ? ` · ${String(rejected)} ${t("refs.importPartial")}` : ""))
+          load()
+        })
+        .catch(() => { if (alive.current) setImportNote(t("refs.importFailed")) })
+        .finally(() => {
+          if (!alive.current) return
+          setImporting(false)
+          if (fileInput.current) fileInput.current.value = ""
+        })
+    }
+
+    /**
+     * "Add to conversation" feeds the durable delivery queue; the DSH client
+     * drains that queue into the real draft. The record itself is untouched, so
+     * a failed add can be retried without re-capturing the page.
+     */
+    const postDelivery = (path, body, okStatus, failStatus, referenceId) => {
+      setPending(referenceId)
+      setOutcome(null)
+      fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      })
+        .then(async response => ({ ok: response.ok, data: await response.json().catch(() => ({})) }))
+        .then(({ ok, data }) => {
+          if (alive.current) setOutcome({ referenceId, status: ok && data.ok !== false ? okStatus : failStatus })
+        })
+        .catch(() => { if (alive.current) setOutcome({ referenceId, status: failStatus }) })
+        .finally(() => { if (alive.current) setPending("") })
+    }
+    const addToDraft = referenceId => postDelivery(
+      "/dsh-builtin-browser/reference/insert", { referenceId }, "added", "addFailed", referenceId,
+    )
+    const removeFromDraft = referenceId => postDelivery(
+      "/dsh-builtin-browser/reference/delivery/remove", { referenceId }, "removed", "removeFailed", referenceId,
+    )
+    const withActions = props && props.withActions === true
+
+    const transferring = exporting !== "" || importing
+    const sourceLabel = url => {
+      try { return new URL(url).host } catch { return "" }
+    }
+    const preview = item => (Array.isArray(item.parts) ? item.parts : []).map(part =>
+      part.type === "image" ? `${t("refs.image")}${part.preview ? ` · ${part.preview}` : ""}`
+        : part.type === "table" ? `${t("refs.table")}${part.preview ? ` · ${part.preview}` : ""}`
+          : String(part.preview || "")).filter(Boolean).join(" · ")
+
+    return h("details", { style: styles.group, className: "dsh-bb-references" }, [
+      h("summary", { key: "head", style: { ...styles.groupTitle, fontWeight: 500 } }, [
+        t("refs.title"),
+        rows.length > 0 ? h("span", { key: "count", className: "dsh-bb-ref-count" }, `${rows.length} ${t("refs.records")}`) : null,
+      ]),
+      h("div", { key: "toolbar", className: "dsh-bb-ref-toolbar" }, [
+        h("button", { key: "refresh", type: "button", style: styles.button, disabled: status === "loading", onClick: load }, t("refs.refresh")),
+      ]),
+      status === "failed" ? h("p", { key: "error", role: "alert", style: styles.error }, t("refs.loadFailed")) : null,
+      status === "loading" && rows.length === 0 ? h("p", { key: "loading", role: "status", style: styles.hint }, t("refs.reading")) : null,
+      status === "ready" && rows.length === 0 ? h("p", { key: "empty", style: styles.hint }, t("refs.empty")) : null,
+      h("ul", { key: "list", className: "dsh-bb-ref-list", "aria-busy": status === "loading" }, rows.map(item => h("li", {
+        key: item.referenceId, className: "dsh-bb-ref-item",
+      }, [
+        h("div", { key: "text", className: "dsh-bb-ref-content" }, [
+          h("span", { key: "title", className: "dsh-bb-ref-title", title: item.title || item.pageUrl }, item.title || sourceLabel(item.pageUrl) || t("refs.untitled")),
+          preview(item) ? h("p", { key: "preview", className: "dsh-bb-ref-preview" }, preview(item)) : null,
+          h("div", { key: "meta", className: "dsh-bb-ref-meta" }, [
+            h("span", { key: "source", className: "dsh-bb-ref-source", title: item.pageUrl }, sourceLabel(item.pageUrl)),
+            h("time", { key: "date", dateTime: item.capturedAt }, new Date(item.capturedAt).toLocaleDateString(currentLocale === "en" ? "en" : "zh-CN")),
+            h("span", { key: "parts" }, `${item.partCount} ${t("refs.parts")}`),
+          ]),
+          outcome !== null && outcome.referenceId === item.referenceId
+            ? h("p", { key: "outcome", role: "status", className: "dsh-bb-ref-outcome", style: outcome.status === "revealed" || outcome.status === "added" || outcome.status === "removed" ? styles.hint : styles.error }, label(outcome.status))
+            : null,
+        ]),
+        h("div", { key: "actions", className: "dsh-bb-ref-actions" }, [
+          withActions ? h("button", {
+            key: "add", type: "button", style: styles.button,
+            disabled: pending !== "", onClick: () => addToDraft(item.referenceId),
+          }, t("refs.addToDraft")) : null,
+          withActions ? h("button", {
+            key: "remove", type: "button", style: styles.button,
+            disabled: pending !== "", onClick: () => removeFromDraft(item.referenceId),
+          }, t("refs.remove")) : null,
+          h("button", {
+            key: "reveal", type: "button", style: styles.button,
+            disabled: pending !== "", onClick: () => reveal(item.referenceId),
+            "aria-label": `${t("refs.reveal")} · ${item.title || sourceLabel(item.pageUrl)}`,
+          }, pending === item.referenceId ? t("refs.loading") : t("refs.reveal")),
+        ]),
+      ]))),
+      h("details", { key: "transfer", className: "dsh-bb-ref-transfer" }, [
+        h("summary", { key: "label", style: styles.hint }, t("refs.transfer")),
+        h("div", { key: "exports", className: "dsh-bb-ref-transfer-actions" }, [
+          ...["jsonl", "markdown", "zip"].map(format => h("button", {
+            key: format,
+            type: "button",
+            style: styles.button,
+            disabled: transferring,
+            onClick: () => exportAs(format),
+          }, `${t("refs.export")} ${t(format === "jsonl" ? "refs.exportJsonl" : format === "markdown" ? "refs.exportMarkdown" : "refs.exportZip")}`)),
+        ]),
+        h("div", { key: "imports", className: "dsh-bb-ref-transfer-actions" }, [
+          h("input", {
+            key: "file",
+            type: "file",
+            accept: ".zip,application/zip",
+            ref: fileInput,
+            style: { display: "none" },
+            onChange: event => importFrom(event.target.files && event.target.files[0]),
+          }),
+          h("button", {
+            key: "importButton",
+            type: "button",
+            style: styles.button,
+            disabled: transferring,
+            onClick: () => { if (fileInput.current) fileInput.current.click() },
+          }, importing ? t("refs.importBusy") : t("refs.import")),
+        ]),
+      ]),
+      importNote !== "" ? h("p", { key: "importNote", role: "status", style: styles.hint }, importNote) : null,
+      outcome !== null && outcome.referenceId === "" ? h("p", { key: "transfer-error", role: "alert", style: styles.error }, t("refs.failed")) : null,
+    ])
+  }
+
+  /**
+   * The record list is kept for the test seam only. The user-facing entry was
+   * removed: the conversation input now renders one card per reference, so a
+   * separate aggregate history menu duplicated the same content.
+   */
   function SettingsRoot() {
     useLocaleVersion()
     const t = translate
@@ -1371,6 +1712,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
    */
   function installPanelService(ctx) {
     let sidebarRight = null
+    let initializationReader = null
     const pendingTabs = new Map()
     /** The shell's own navigation service: `openSession` is how it is asked to DISPLAY a conversation. */
     let uiWorkspace = null
@@ -1380,6 +1722,14 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     // service when it is called. Failing the whole apply here would take the settings panel down
     // with it, which is exactly the shape of regression this file has been bitten by before.
     if (typeof ctx.inject === "function") {
+      ctx.inject(["sidebarBrowserInitialization"], (scope) => {
+        const reader = scope.sidebarBrowserInitialization
+        if (reader?.protocolVersion !== 1 || typeof reader.read !== "function") return
+        initializationReader = reader
+        scope.effect(() => () => {
+          if (initializationReader === reader) initializationReader = null
+        }, "dsh-builtin-browser: initialization receipt reader")
+      })
       ctx.inject(["sidebarRight"], (scope) => {
         if (sidebarRight !== scope.sidebarRight) pendingTabs.clear()
         sidebarRight = scope.sidebarRight
@@ -1407,6 +1757,182 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
      * never minted. Expansion requires a known owner, because it acts on the displayed surface.
      * @returns the on-screen session id, or null.
      */
+    // The Web panel's proxied guest asks which conversation it belongs to; this answers with the one
+    // on screen, so a quote lands in the right draft even for a tab the reader typed themselves.
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function" && !window.__dshSidebarSessionBridge) {
+      window.__dshSidebarSessionBridge = true
+      window.addEventListener("message", (event) => {
+        if (!event || event.origin !== location.origin) return
+        const data = event.data
+        if (!data || data.type !== "dsh.sidebar.session.request") return
+        const current = guestSession()
+        console.log('[app] session request ->', current)
+        if (typeof current !== "string" || current === "") return
+        try { event.source?.postMessage({ type: "dsh.sidebar.session", sessionId: current }, location.origin) } catch { /* detached frame */ }
+      })
+    }
+    /**
+     * Drain reference intents from the Web panel's proxied guest.
+     *
+     * The desktop guest hands its intent to the preload bridge; a proxied document has no bridge, so
+     * the bar leaves it in the page and exposes \`__dshRefTake\`. Same-origin means this page can simply
+     * ask for it — the same mechanism the bundled carrier polls, without needing the guest to know
+     * which conversation it is quoting into.
+     */
+    function drainPanelIntents() {
+      if (typeof document === "undefined") return
+      // A brand-new conversation has no screen() entry yet, but the shell already stamps the Session on
+      // its own DOM. Without this fallback the first reference of a fresh conversation was dropped.
+      const sessionId = guestSession()
+      if (typeof sessionId !== "string" || sessionId === "") return
+      for (const frame of Array.from(document.querySelectorAll("iframe"))) {
+        let guest
+        try { guest = frame.contentWindow } catch { continue }
+        // Push the conversation id on every tick instead of waiting to be asked: the guest's request can
+        // be lost while the shell is still mounting, and a lost handshake meant a silently dropped quote.
+        try { guest.postMessage({ type: "dsh.sidebar.session", sessionId }, location.origin) } catch { /* detached */ }
+        if (!guest || typeof guest.__dshRefTake !== "function") continue
+        let intent
+        try { intent = guest.__dshRefTake() } catch { continue }
+        while (intent && typeof intent === "object") {
+          try {
+            fetch("/dsh-builtin-browser/reference/capture", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ ...intent, sessionId }),
+            })
+          } catch { /* the reader can retry from the bar */ }
+          try { intent = guest.__dshRefTake() } catch { break }
+        }
+      }
+    }
+    /**
+     * Place a tool-opened page into the Web sidebar.
+     *
+     * The desktop shell is told to place a tab through the bridge; the Web shell has no such channel, so
+     * a page opened by a tool stayed inside the plugin's own browser while the panel showed nothing.
+     * The host keeps the last open request in one slot; this poll turns it into a sidebar tab, which is
+     * what makes "open it" a single call again.
+     */
+    /**
+     * Which surface this shell should drive.
+     *
+     * Default "panel": the sidebar is the browsing surface. Appending ?browser-surface=builtin to the DSH
+     * URL switches this window to the built-in browser for debugging DSH itself — no restart, no settings
+     * file, and it cannot affect another window.
+     * @returns the surface to declare.
+     */
+    function declaredSurface() {
+      try {
+        const wanted = new URLSearchParams(location.search).get("browser-surface")
+        return wanted === "builtin" ? "builtin" : "panel"
+      } catch { return "panel" }
+    }
+    let lastOpenHandled = 0
+    function drainOpenRequest() {
+      const sessionId = guestSession()
+      if (typeof sessionId !== "string" || sessionId === "") return
+      fetch("/dsh-builtin-browser/browser/open-request", { headers: { accept: "application/json" } })
+        .then(response => (response.ok ? response.json() : undefined))
+        .then(body => {
+          const open = body && body.open
+          if (!open || typeof open.url !== "string" || typeof open.at !== "number") return
+          // Only act when the HOST says it is in panel mode. A host that predates the single-surface
+          // switch still opens its own browser for every call, so placing a tab here as well produced TWO
+          // live views of one page (the reported double-open). No echo, no tab.
+          if (body.surface !== "panel") return
+          if (open.at <= lastOpenHandled) return
+          const frame = document.querySelector('iframe[data-sidebar-browser-frame], iframe[src*="/browser-view/guest"]')
+          const already = frame !== null && decodeURIComponent(frame.getAttribute("src") || "").includes(encodeURIComponent(open.url).slice(0, 24))
+          if (already) { lastOpenHandled = open.at; return }
+          lastOpenHandled = open.at
+          const api = globalThis.__dshBuiltinBrowser
+          if (api && typeof api.openPanel === "function") api.openPanel("session-" + sessionId, open.url)
+        })
+        .catch(() => {})
+    }
+    if (typeof setInterval === "function") setInterval(drainOpenRequest, 1200)
+    if (typeof setInterval === "function" && !globalThis.__dshPanelIntentPoller) {
+      globalThis.__dshPanelIntentPoller = setInterval(drainPanelIntents, 700)
+    }
+    /**
+     * The conversation a proxied guest should attribute its quote to.
+     *
+     * \`screen()\` is empty for a brand-new conversation, but the shell already stamps the Session on its
+     * own DOM; without this fallback the FIRST reference of a fresh conversation was silently dropped.
+     * @returns the session id, or null when the shell exposes none.
+     */
+    function guestSession() {
+      const normalise = (value) => (value.startsWith("session-") ? value.slice(8) : value)
+      const direct = onScreenSession()
+      if (typeof direct === "string" && direct !== "") return normalise(direct)
+      try {
+        const node = document.querySelector("[data-sidebar-right-session], [data-conversation-session]")
+        const stamped = node === null ? null
+          : node.getAttribute("data-sidebar-right-session") ?? node.getAttribute("data-conversation-session")
+        // The shell stamps its DOM with a "session-<uuid>" prefix; the host's own registry (and the
+        // capture route) key on the bare id, and an un-stripped value is refused as session-unavailable.
+        if (typeof stamped === "string" && stamped !== "") return normalise(stamped)
+      } catch { /* no DOM */ }
+      return null
+    }
+    /**
+     * Reveal a reference inside the Web sidebar.
+     *
+     * A web-panel capture has no browser session, so the host's revealer cannot point a tab at it. The
+     * panel is just a tab in this shell, so navigation is ours to do: read the reference's page and aim
+     * the bound tab at it. Registered as a global hook because the reply-side renderer lives in another
+     * package and must stay free of shell imports.
+     *
+     * @param uri - canonical `dsh-browser-ref:` URI.
+     * @returns whether a tab was aimed.
+     */
+    function revealInPanel(uri) {
+      try {
+        const match = /^dsh-browser-ref:([^/\s]+)/u.exec(String(uri))
+        if (match === null) return false
+        const referenceId = decodeURIComponent(match[1])
+        const sessionId = guestSession()
+        if (typeof sessionId !== "string" || sessionId === "") return false
+        const tabs = sidebarRight && typeof sidebarRight.tabsIn === "function" ? Array.from(sidebarRight.tabsIn(sessionId)) : []
+        const page = tabs.find(tab => tab && typeof tab === "object" && tab.kind === "browser")
+        fetch("/dsh-builtin-browser/reference/get?id=" + encodeURIComponent(referenceId), { headers: { accept: "application/json" } })
+          .then(response => (response.ok ? response.json() : undefined))
+          .then(body => {
+            // The record keeps the page under `source` (the route ships {ok, reference, summary}); reading
+            // `reference.url` yielded "" and the panel never moved.
+            // The page lives at `source.pageUrl`. A capture taken through the proxy stores the PROXY address
+            // there, so unwrap it to the real page and re-wrap it consistently.
+            const source = body && body.reference ? body.reference.source : undefined
+            const raw = source && typeof source.pageUrl === "string" ? source.pageUrl
+              : (body && body.summary && typeof body.summary.pageUrl === "string" ? body.summary.pageUrl : "")
+            const url = (() => {
+              if (typeof raw !== "string" || raw === "") return ""
+              const marker = "browser-view/guest?u="
+              const at = raw.indexOf(marker)
+              if (at === -1) return raw
+              try { return decodeURIComponent(raw.slice(at + marker.length).split("&")[0]) } catch { return "" }
+            })()
+            if (url === "") return
+            try { if (typeof sidebarRight.isExpanded === "function" && sidebarRight.isExpanded() === false) sidebarRight.toggleExpanded() } catch { /* folded is fine */ }
+            // The Web panel is an iframe in THIS document, so aiming it needs no tab id at all: rewrite
+            // the frame's src through the same-origin proxy. The shell does not publish the visible
+            // browser tab through `tabsIn`, which is why the tab-based path silently did nothing.
+            const frame = document.querySelector('iframe[data-sidebar-browser-frame], iframe[src*="/browser-view/guest"]')
+            if (frame !== null) {
+              frame.src = location.origin + "/dsh-builtin-browser/browser-view/guest?u=" + encodeURIComponent(url)
+            } else {
+              try {
+                if (page !== undefined) sidebarRight.navigateTabIn(sessionId, page.id, { params: { url } })
+                else sidebarRight.openTabIn(sessionId, "browser", { params: { url } })
+              } catch { /* tab gone */ }
+            }
+          })
+          .catch(() => {})
+        return true
+      } catch { return false }
+    }
+    try { globalThis.__DSH_BROWSER_REF_REVEAL__ = revealInPanel } catch { /* non-writable */ }
     function onScreenSession() {
       try {
         const screen = sidebarRight === null || typeof sidebarRight.screen !== "function" ? undefined : sidebarRight.screen()
@@ -1481,6 +2007,8 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         return done
       }
       done.displayed = true
+      // Expansion happens before any screen() verdict: a side panel that was never opened has no
+      // column to match, and bailing early there is exactly what left the page in a floating window.
       try {
         if (typeof sidebarRight.isExpanded === "function" && typeof sidebarRight.toggleExpanded === "function") {
           // `isExpanded()` is false both for "folded" and for "never opened". Both want the same
@@ -1509,6 +2037,23 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
 
     function viewKey(sessionId, viewId) {
       return JSON.stringify([sessionId, viewId])
+    }
+
+    /**
+     * Aim an already placed tab at one address through the shell's own
+     * navigation face. This is the only way a bound tab showing the start page
+     * can acquire a guest: the tab exists, but its body has never navigated.
+     * @returns true when the shell accepted the target.
+     */
+    function navigatePlacedTab(sessionId, tabId, address) {
+      try {
+        if (typeof sidebarRight.navigateTabIn === "function") {
+          return sidebarRight.navigateTabIn(sessionId, tabId, { params: { url: address } }) === true
+        }
+      } catch (error) {
+        return false
+      }
+      return false
     }
 
     /** Bind each logical view to one native tab; URLs can change without changing that identity. */
@@ -1558,33 +2103,80 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
         const candidate = drawn.length === 1 ? drawn[0] : candidates.length === 1 ? candidates[0] : undefined
         if (candidate !== undefined) binding = { sessionId, id: candidate.id, url: address, scoped: true }
       }
-      let created = false
-      if (binding === undefined) {
+      // One place that asks the shell for a browser tab and identifies the one it added. Shared by
+      // the first placement and by the repair below, so both go through the same proof.
+
+      const placeTab = (url) => {
+        // The Web panel serves pages through the same-origin guest proxy; it needs to know which
+        // conversation the tab belongs to so a quote can be handed back to the right draft.
+        try { globalThis.__dshSidebarSessionId = sessionId } catch { /* non-writable global */ }
         const before = new Set(tabs.map(tab => tab.id))
-        try { sidebarRight.openTabIn(sessionId, "browser", address ? { params: { url: address } } : {}) }
-        catch (error) { return { ok: false, reason: String(error?.message ?? error), panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0, guestId: null } }
+        try { sidebarRight.openTabIn(sessionId, "browser", url ? { params: { url } } : {}) }
+        catch (error) { return { ok: false, reason: String(error?.message ?? error) } }
         let placed
         try { placed = Array.from(sidebarRight.tabsIn(sessionId)) }
         catch { placed = [] }
         const added = placed.filter(tab => tab !== null && typeof tab === "object" && tab.kind === "browser"
           && typeof tab.id === "string" && !before.has(tab.id) && !owned.has(tab.id))
         if (added.length !== 1) {
-          return {
-            ok: false,
-            reason: placed.length === 0 ? "this conversation's sidebar is not mounted" : "the shell did not identify a new browser tab for this view",
-            panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0,
-            guestId: null,
-            ...switched ? { switched: true } : {},
-          }
+          return { ok: false, reason: placed.length === 0 ? "this conversation's sidebar is not mounted" : "the shell did not identify a new browser tab for this view" }
         }
-        binding = { sessionId, id: added[0].id, url: address, scoped: true }
+        return { ok: true, id: added[0].id }
+      }
+      let created = false
+      if (binding === undefined) {
+        const placed = placeTab(address)
+        if (!placed.ok) {
+          return { ok: false, reason: placed.reason, panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0, guestId: null, ...switched ? { switched: true } : {} }
+        }
+        binding = { sessionId, id: placed.id, url: address, scoped: true }
         created = true
       }
       pendingTabs.set(key, binding)
       const state = guestStateFor(sessionId, binding.id)
+      // A bound tab that still shows the start page has no guest to reveal.
+      // Revealing it can never produce one, so ask the shell to aim that exact
+      // tab at the requested address; the host body turns the new navigation
+      // revision into the one real page load. Tabs created above already carry
+      // the address as their initial URL and need no second navigation.
+      let navigating = false
+      if (!created && state.guestId === null && address !== "") {
+        navigating = navigatePlacedTab(sessionId, binding.id, address)
+        if (!navigating) {
+          // `navigateTabIn` also answers false when the shell merely declines this navigation (a body
+          // that has not attached yet), so the identity is checked before anything is replaced: only a
+          // tab id that is GONE from this session's layout is a stale binding. That case is what made
+          // the start page — and with it the reference capture — look broken after the DSH
+          // 0.2.2-rc.3 upgrade, where a restart replaced every tab.
+          let stillListed = false
+          try { stillListed = Array.from(sidebarRight.tabsIn(sessionId)).some(tab => tab !== null && typeof tab === "object" && tab.id === binding.id) }
+          catch { stillListed = true }
+          if (!stillListed) {
+            pendingTabs.delete(key)
+            const replaced = placeTab(address)
+            if (replaced.ok) {
+              binding = { sessionId, id: replaced.id, url: address, scoped: true }
+              created = true
+              pendingTabs.set(key, binding)
+            }
+          }
+          const repaired = created
+          if (!repaired) {
+            return {
+              ok: false,
+              reason: "this DSH shell cannot initialize a bound start-page tab; update DSH and retry",
+              panel: state.panel,
+              guestId: null,
+              tabId: binding.id,
+              ...switched ? { switched: true } : {},
+            }
+          }
+        }
+      }
       return {
         ok: true,
         created,
+        navigating,
         panel: state.panel,
         guestId: state.guestId,
         url: state.url,
@@ -1595,7 +2187,16 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     }
 
     const api = {
-      panelProtocol: 3,
+      panelProtocol: 4,
+      get initializationProtocol() { return initializationReader?.protocolVersion ?? 0 },
+      panelInitialization(sessionId, tabId, url, requestId) {
+        if (initializationReader === null || typeof sessionId !== "string" || !sessionId.startsWith("session-")
+          || typeof tabId !== "string" || typeof url !== "string") return undefined
+        const binding = Array.from(pendingTabs.values()).find(value => value.sessionId === sessionId && value.id === tabId)
+        if (binding === undefined) return undefined
+        return initializationReader.read({ sessionId, tabId, url,
+          ...typeof requestId === "string" ? { requestId } : {} })
+      },
       /** @returns what happened: an existing guest, a newly opened tab, or a named refusal. */
       openPanel(sessionId, url, options) {
         const wanted = typeof sessionId === "string" ? sessionId : ""
@@ -2111,7 +2712,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     }, "dsh-builtin-browser: live view panel")
 
     /**
-     * Report the desktop bridge's install state next to the entry button.
+     * Report the sidebar bridge's install state next to the entry button.
      *
      * A missing bridge used to be a log line and nothing else, so a user on `channel: sidebar` saw
      * "another window opened again" with no way to connect that to the actual cause (issue #36).
@@ -2212,6 +2813,10 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     // shell's benefit): nothing in the product reads this name, and a page-level global would be a
     // side effect of shipping a test.
     exports.__readinessSection = Readiness
+    // Same seam, same reason: the record list is now composed inside the
+    // on-demand menu, so a harness must be able to render it without driving
+    // the popover's own state.
+    exports.__references = References
     ctx.slots.inject("settings.section", () => ctx.slots.register({
       name: "settings.section",
       id: "dsh-builtin-browser",
@@ -2222,6 +2827,9 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       locale: NS,
       inject: () => ({ t }),
     }, SettingsRoot))
+    // No `conversation.input.left` entry: references are rendered one card per
+    // selection inside the composer dock, so an aggregate record menu beside
+    // the input only duplicated it.
   }
 
   exports.name = name

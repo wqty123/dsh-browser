@@ -3,87 +3,50 @@
   <img src="https://img.shields.io/npm/v/dsh-builtin-browser?style=flat&amp;label=npm&amp;color=CB3837" alt="npm version">
   <img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License">
   <img src="https://img.shields.io/badge/DSH-Plugin-47848F?style=flat" alt="DeepSeek Harness plugin">
-  <img src="https://img.shields.io/badge/Platform-Windows-4493F8?style=flat-square" alt="Platform: Windows (verified)">
 </p>
 
 <p align="center"><sub><a href="README.md">中文</a> · English</sub></p>
 
 # Browser plugin for DeepSeek Harness
 
-Use DSH to open pages, read content, fill forms, and download files in the bundled browser, the desktop sidebar, or a local installation of Chrome or Edge. Each task has its own tabs and action history. In a visible window or the desktop sidebar, you can take over the page the agent is using.
+Browse in the DSH sidebar, send rich page selections into a conversation, and let the agent operate the same page on supported Desktop hosts. Tabs and action history belong to the task. [1.0.0 release changes](CHANGELOG.md#未发布)
 
-This feature list matches **0.5.8** (compatible with DSH 0.2.2-alpha.3: plugin routes go through the host session auth). [Changelog](CHANGELOG.md)
+![Browser carrier choices: Desktop sidebar, isolated Web sidebar, and opt-in Chrome or Edge](assets/browser-carriers.svg)
 
 ## Quick start
 
-**First, which side are you on** — these are two separate installs; updating one does not update the other, and they host the browser differently.
-
-> **Updating an installed plugin takes two steps** (since DSH 0.2.1-alpha.2, installing over an installed package fails outright with `already-installed`): run `dsh plugin --profile <profile> remove dsh-builtin-browser` first, then `add` the target version. See the [user guide](docs/user-guide.md) (Chinese).
-
-### DSH Desktop
+Desktop and Web use separate DSH profiles. These commands install the version currently published on npm:
 
 ```sh
 dsh plugin --profile desktop add dsh-builtin-browser
-```
-
-When the desktop shell provides a controllable `<webview>` and the bridge is installed, the plugin drives the **official side panel**: the agent operates the very page you see. Otherwise it falls back to the plugin's own Electron window.
-
-The sidebar bridge is installed into **the desktop app's own install directory**. On Windows Desktop, open **Settings → Browser** and select **Install and restart**. The action exits Desktop normally, installs the bridge, reopens Desktop, and verifies the new bridge connection. DSH retains its own confirmation for running tasks.
-
-For terminal installation, save your task and exit DSH Desktop completely, including its tray process, then run this from the plugin directory:
-
-```sh
-node desktop-bridge/install.mjs "<DSH Desktop install directory>"
-```
-
-Start DSH Desktop after installation. On Windows, `desktop-bridge/install-and-start.cmd` installs and starts the app after Desktop has exited. The settings action uses an independent maintenance process; the installer verifies the closed target, its identity, and backups before writing files.
-
-> **The bridge is optional**: without it, the plugin uses a standalone window. **Reinstall the bridge with the new script after plugin or desktop shell upgrades** — a desktop update restores `app.asar`, the bridge goes stale, and `bridge-status` reports `stale`. The state is visible at the top of the panel. See [carrier limitations](docs/limitations.md) (Chinese).
-
-### Web (`dsh web`)
-
-```sh
 dsh plugin --profile web add dsh-builtin-browser
 ```
 
-There is **no side panel and no bridge** on the web side: the shared browser is **self-hosted** in a standalone window (titled `dsh-browser`) with a full toolbar (address bar, back/forward/reload, tab strip) you can use like any browser.
+If already installed, run `dsh plugin --profile desktop remove dsh-builtin-browser` before adding the target version; replace `desktop` with `web` for Web. See the [update steps](docs/user-guide.md#先移除再安装).
 
-> Since 0.5.3 nothing is downloaded at install time and there is no `postinstall`: the runtime is prepared in the background on first need. Progress and retry live in **Settings → Browser** (use **Prepare the bundled browser** after a failure). To prepare it ahead of time (offline images, CI), run `npx --no dsh-browser-install-electron` from that profile directory (network required). See the [setup guide](docs/user-guide.md#准备-electron-二进制) (Chinese).
+**Desktop (Windows and macOS).** Keep **DSH Sidebar** selected. If the bridge needs repair, save active work and use **Settings → Browser → Uninstall and reinstall** when available. On supported builds this can apply the bundled host patch; it changes local DSH files and is not required to use Chrome or Edge. DSH asks before quitting an active task. After a host update, check bridge status again.
 
-### Both sides
-
-Once installation is complete, ask the agent:
-
-```
-Open https://example.com and summarise the main content for me.
-```
-
-The browser window appears with the first call, and you can operate in it yourself at any point. **Either side can be pointed at your own installed Chrome / Edge** in settings — that option behaves identically on both.
+**Web (`dsh web`).** Open the browser from the DSH sidebar. You can navigate and send selections from the isolated guest. Desktop-native tooling and opener-dependent child tabs are not available in this guest. Use a supported Desktop sidebar or explicitly select a local browser when a task requires CDP.
 
 ## Choose a browser
 
 | Option | How it works |
 | --- | --- |
-| Bundled browser | Opens pages in a separate window with an address bar, navigation controls, and tabs. |
-| DSH sidebar | With the bridge installed on a Desktop build that exposes Electron `webview`, opening a URL expands the target conversation's sidebar browser. Lost connections reconnect to the selected sidebar. |
-| Local Chrome / Edge | Launches the installed browser with a dedicated plugin profile. |
-| Automatic | Chooses based on the available local browsers and desktop sidebar. |
+| DSH Sidebar (default) | Uses the selected host's sidebar. If the needed capability is missing, it reports why instead of opening another window. |
+| Chrome / Edge | Uses a DSH-managed profile by default. If you prefer your own browser, the optional extension can use its sign-in state; when the extension is unavailable, a new session uses the managed profile. |
+| Bundled / Auto (legacy values) | Both now mean sidebar only. Neither downloads Electron or picks an external browser. |
 
-Windows Desktop **Settings → Browser** provides installation, repair, and reinstallation with automatic restart. **Diagnostics** includes uninstall and restart, plus an external-terminal command. Progress and results survive the restart, and successful installation requires a verified connection to the new process. For terminal maintenance, exit Desktop normally and run this from the plugin directory:
+## Quote a page in chat
 
-~~~sh
-node desktop-bridge/install.mjs "<DSH Desktop install directory>"
-~~~
-
-Preparation feedback appears immediately. While Desktop is closed, a separate progress window shows installation, startup, connection checks, and elapsed time, then closes after completion. The window stays in the background; closing it leaves maintenance running.
+Select text in the sidebar, then use the floating bar to add it to the conversation. Supported selections retain paragraph, link, table and formula formatting. Sent references stay as capsules, without duplicated quote text. Hover for a preview or choose **Return to source** to reopen the page and locate the selection. If the source has changed, the saved preview is still available.
 
 ## Browser settings
 
-- **Environment check** reports detected Chrome / Edge, the bundled runtime, and sidebar bridge availability. Automatic mode identifies the selected carrier; **Diagnostics** includes the executable path.
-- **Quiet mode** preserves the operating system's foreground window and pointer position. New browser windows appear in the background, and minimized bundled browser windows stay minimized. With DSH sidebar selected, opening a URL reveals the target conversation's sidebar page; explicit tab switching selects the corresponding native tab.
+- **Environment check** shows the selected carrier, the bridge status, and the detected Chrome and Edge executables.
+- **Quiet mode** avoids raising the host window. With DSH sidebar selected, opening a URL reveals the target conversation's sidebar page; explicit tab switching selects the corresponding sidebar tab. Window behavior applies only to explicitly selected external browsers.
 - **Presentation** controls sidebar expansion, closing the browser with the session, the agent cursor, and remote viewing.
 - **Agent permissions** controls page scripts, downloads, and reading or writing sign-in state.
-- **Advanced settings** covers browsing history, permission for coordinate clicks and drags, and sign-in persistence and window mode for Chrome, Edge, and Automatic mode. The delivery form validates and saves the tool name, argument template, failure policy, and per-site rules together.
+- **Advanced settings** covers browsing history, permission for coordinate clicks and drags, and sign-in persistence and window mode for explicitly selected Chrome or Edge. The delivery form validates and saves the tool name, argument template, failure policy, and per-site rules together.
 
 On the local machine or in an isolated test environment, turn on **Allow remote viewing** and open the DSH viewer for a read-only view of the browser session. The viewer refreshes JPEG frames up to twice per second.
 
@@ -108,20 +71,9 @@ For Feishu, configure an MCP tool that provides file uploads and use the argumen
 
 ## Browser tools
 
-The current source registers 48 tools. The table lists their names after the `dsh_browser_` prefix.
+Common `dsh_browser_*` tools are loaded by default. Use `dsh_browser_load_tools` for less common groups and `dsh_browser_do` for a fixed action list. For loops, branches, or independent reads in parallel, use `dsh_browser_code` in standard DSH mode or DSH's `run_code` in PTC mode.
 
-| Purpose | Tools |
-| --- | --- |
-| Open and navigate | `open` `back` `forward` `refresh` `list_tabs` `switch_tab` `close_tab` |
-| Read pages | `snapshot` `a11y` `content` `scrape` `screenshot` `challenge` |
-| Click and type | `click` `click_sequence` `type` `key` `scroll` `drag` `hover` `execute` |
-| Fill forms | `fill` `set_value` `clear` `check` `select` `get_value` |
-| Select and save files | `upload` `download` |
-| Run and verify steps | `do` `assert` `wait` `wait_for_response` |
-| Inspect page activity | `state` `find` `console` `network` `dialog` |
-| Manage sessions | `session` `reset` `reset_session` `restrict` `auth` |
-| Review records | `history` `visited` `replay` |
-| Diagnose issues and find help | `doctor` `help` |
+When a site needs a login, CAPTCHA or other human verification, ask the agent to request takeover. The plugin does not solve challenges automatically.
 
 ## Documentation
 
