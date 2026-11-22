@@ -154,9 +154,10 @@ export interface Config {
   /** Optional initial allow-list of browser tool names; other tools are refused. */
   readonly allowedActions?: readonly string[]
   /**
-   * What the model sees. "code" (default): one dsh_browser_code tool whose script calls every
-   * browser action as a helper, plus dsh_browser_request_takeover. "tools": every action as its
-   * own tool.
+   * What the model sees. "core" (default): core browser tools, dsh_browser_load_tools and
+   * dsh_browser_code (which steps aside under PTC). "code": one dsh_browser_code tool whose
+   * script calls every browser action as a helper, plus dsh_browser_request_takeover. "tools":
+   * every action as its own tool.
    */
   readonly surface?: 'core' | 'code' | 'tools'
 }
