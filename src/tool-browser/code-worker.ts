@@ -94,6 +94,120 @@ interface ScanResult {
 }
 
 /**
+ * Dedent top-level lines while leaving multiline template literal bodies untouched, so unindented
+ * lines inside a template literal do not prevent dedenting the surrounding cell (and trailing
+ * parenthesized expressions still get turned into `return (...)` instead of triggering ASI calls).
+ */
+function dedentTopLevel(code: string): { readonly dedented: string; readonly inTemplateStart: readonly boolean[] } {
+  const trimmed = code.replace(/\s+$/, '')
+  const lines = trimmed.split('\n')
+  const inTemplateStart = new Array<boolean>(lines.length).fill(false)
+  let lineIdx = 0
+  let i = 0
+  let prevChar = ''
+  let prevWord = ''
+  const n = trimmed.length
+
+  const isIdentStart = (ch: string): boolean => /[A-Za-z_$]/.test(ch)
+  const isIdentPart = (ch: string): boolean => /[\w$]/.test(ch)
+  const advance = (ch: string): void => { if (ch === '\n') lineIdx++ }
+
+  const skipRegex = (): void => {
+    i++
+    let inClass = false
+    while (i < n) {
+      const ch = trimmed[i]!
+      if (ch === '\\') { advance(trimmed[i + 1] ?? ''); i += 2; continue }
+      if (ch === '[') inClass = true
+      else if (ch === ']') inClass = false
+      else if (ch === '/' && !inClass) {
+        i++
+        while (i < n && /[a-z]/i.test(trimmed[i]!)) i++
+        return
+      } else if (ch === '\n') return
+      i++
+    }
+  }
+
+  const skipQuoted = (quote: string): void => {
+    i++
+    while (i < n) {
+      const ch = trimmed[i]!
+      if (ch === '\\') { advance(trimmed[i + 1] ?? ''); i += 2; continue }
+      if (quote === '`' && ch === '$' && trimmed[i + 1] === '{') {
+        i += 2
+        let exprDepth = 1
+        let exprPrev = '{'
+        let exprWord = ''
+        while (i < n && exprDepth > 0) {
+          const c = trimmed[i]!
+          if (c === "'" || c === '"' || c === '`') { skipQuoted(c); exprPrev = '"'; exprWord = ''; continue }
+          if (c === '/' && trimmed[i + 1] === '/') { while (i < n && trimmed[i] !== '\n') i++; continue }
+          if (c === '/' && trimmed[i + 1] === '*') {
+            i += 2
+            while (i < n && !(trimmed[i] === '*' && trimmed[i + 1] === '/')) { advance(trimmed[i]!); i++ }
+            if (i < n) i += 2
+            continue
+          }
+          if (c === '/' && (REGEX_BEFORE.has(exprPrev) || REGEX_KEYWORDS.has(exprWord))) { skipRegex(); exprPrev = '/'; exprWord = ''; continue }
+          if (isIdentStart(c)) {
+            const start = i
+            i++
+            while (i < n && isIdentPart(trimmed[i]!)) i++
+            exprPrev = 'a'; exprWord = trimmed.slice(start, i)
+            continue
+          }
+          if (c === '{') exprDepth++
+          else if (c === '}') exprDepth--
+          if (c === '\n') { lineIdx++; exprPrev = '\n'; exprWord = '' }
+          else if (!/\s/.test(c)) { exprPrev = c; exprWord = '' }
+          i++
+        }
+        continue
+      }
+      if (ch === quote) { i++; return }
+      if (ch === '\n') {
+        lineIdx++
+        if (quote === '`' && lineIdx < lines.length) inTemplateStart[lineIdx] = true
+      }
+      i++
+    }
+  }
+
+  while (i < n) {
+    const ch = trimmed[i]!
+    if (ch === "'" || ch === '"' || ch === '`') { skipQuoted(ch); prevChar = '"'; prevWord = ''; continue }
+    if (ch === '/' && trimmed[i + 1] === '/') { while (i < n && trimmed[i] !== '\n') i++; continue }
+    if (ch === '/' && trimmed[i + 1] === '*') {
+      i += 2
+      while (i < n && !(trimmed[i] === '*' && trimmed[i + 1] === '/')) { advance(trimmed[i]!); i++ }
+      if (i < n) i += 2
+      continue
+    }
+    if (ch === '/' && (REGEX_BEFORE.has(prevChar) || REGEX_KEYWORDS.has(prevWord))) { skipRegex(); prevChar = '/'; prevWord = ''; continue }
+    if (isIdentStart(ch)) {
+      const start = i
+      i++
+      while (i < n && isIdentPart(trimmed[i]!)) i++
+      prevChar = 'a'; prevWord = trimmed.slice(start, i)
+      continue
+    }
+    if (ch === '\n') { lineIdx++; prevChar = '\n'; prevWord = '' }
+    else if (!/\s/.test(ch)) { prevChar = ch; prevWord = '' }
+    i++
+  }
+
+  const indents = lines
+    .filter((line, idx) => !inTemplateStart[idx] && line.trim() !== '')
+    .map(line => /^[ \t]*/.exec(line)?.[0].length ?? 0)
+  const indent = indents.length > 0 ? Math.min(...indents) : 0
+  const dedented = indent === 0
+    ? trimmed
+    : lines.map((line, idx) => inTemplateStart[idx] ? line : line.slice(indent)).join('\n')
+  return { dedented, inTemplateStart }
+}
+
+/**
  * Lexically scan top-level declarations (skipping comments, strings, nested template literals,
  * regex literals and nested blocks) so destructuring, multiline template strings and hoisted
  * functions all persist cleanly across REPL cells.
@@ -353,10 +467,7 @@ function scanTopLevel(code: string): ScanResult {
  * @returns an async function body.
  */
 export function prepare(code: string): string {
-  const raw = code.replace(/\s+$/, '').split('\n')
-  const indents = raw.filter(line => line.trim() !== '').map(line => /^[ \t]*/.exec(line)?.[0].length ?? 0)
-  const indent = indents.length > 0 ? Math.min(...indents) : 0
-  const dedented = raw.map(line => line.slice(indent)).join('\n')
+  const { dedented, inTemplateStart } = dedentTopLevel(code)
   const { rewritten, varNames, fnNames, hasTopReturn } = scanTopLevel(dedented)
   const prelude = fnNames.length === 0 ? '' : fnNames.map(name => `globalThis.${name} = ${name};`).join(' ') + '\n'
   const persist = varNames.length === 0
@@ -372,7 +483,7 @@ export function prepare(code: string): string {
   const last = lines.length - 1
   const line = lines[last] ?? ''
   const previous = lines.slice(0, last).reverse().find(l => l.trim() !== '')?.trimEnd() ?? ''
-  if (line === '' || /^\s/.test(line) || NOT_EXPRESSION.test(line) || CONTINUES.test(previous) || /[{,]$/.test(line)) {
+  if (inTemplateStart[last] || line === '' || /^\s/.test(line) || NOT_EXPRESSION.test(line) || CONTINUES.test(previous) || /[{,]$/.test(line)) {
     return wrap(rewritten)
   }
   // A one-line cell of several statements returns its last one.
