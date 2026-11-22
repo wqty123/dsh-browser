@@ -19,7 +19,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ImageBlock } from '@deepseek-ai/dsh-llm'
 import { SCREENSHOT_MAX_WIDTH, SCREENSHOT_MAX_HEIGHT, screenshotDimension, screenshotBytes, screenshotVisionEnabled, saveScreenshotImage } from './screenshot-image.ts'
 import { BrowserTakeovers, installTakeovers } from './takeover.ts'
-import { TAKEOVER_TOOL, type TakeoverDecision, type TakeoverSummary } from '../takeover-protocol.ts'
+import { TAKEOVER_TOOL, type TakeoverDecision, type TakeoverOutcome, type TakeoverSummary } from '../takeover-protocol.ts'
 import { clearLastOpen, getLastOpen, setLastOpen } from '../browser-electron/open-slot.ts'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -630,7 +630,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const navigationUrl = open?.owner === owner && Date.now() - open.at < 10000 ? open.url : undefined
       const page = await takeovers.adopt(owner, exec.signal, navigationUrl)
       if (navigationUrl !== undefined && getLastOpen()?.owner === owner) clearLastOpen(open!.at)
-      return takeovers.run(page, args.reason.trim(), args.instructions, exec.signal, async pending => {
+      return takeovers.run(page, args.reason.trim(), args.instructions, exec.signal, async (pending): Promise<{ outcome: TakeoverOutcome; page: TakeoverSummary }> => {
         const approval = ctx.get('approval' as never) as unknown as { request(request: {
           agent: ToolRunContext['agent']; toolName: string; reason: string; displayReason: { en: string; zh: string };
           callId: ToolRunContext['callId']; signal: AbortSignal;
