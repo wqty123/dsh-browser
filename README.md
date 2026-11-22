@@ -22,7 +22,7 @@ dsh plugin --profile desktop add dsh-builtin-browser
 dsh plugin --profile web add dsh-builtin-browser
 ```
 
-若插件已安装，请在目标 profile [先移除，再添加目标版本](docs/user-guide.md#先移除再安装)。
+若插件已安装，先运行 `dsh plugin --profile desktop remove dsh-builtin-browser`，再添加目标版本；Web 请把 `desktop` 换成 `web`。详见[更新步骤](docs/user-guide.md#先移除再安装)。
 
 **桌面端（Windows / macOS）。** 默认使用 **DSH 侧栏**。桥接需要修复时，保存进行中的工作，在 **设置 → 浏览器** 使用可用的 **卸载并重装**。受支持的构建可借此应用随插件附带的宿主补丁；这会修改本机 DSH 文件，使用 Chrome 或 Edge 不需要该补丁。有任务运行时，是否退出由 DSH 提示、用户确认。宿主更新后请重新检查桥接状态。
 

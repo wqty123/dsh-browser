@@ -22,7 +22,7 @@ dsh plugin --profile desktop add dsh-builtin-browser
 dsh plugin --profile web add dsh-builtin-browser
 ```
 
-If it is already installed, [remove it from that profile before adding the target version](docs/user-guide.md#先移除再安装).
+If already installed, run `dsh plugin --profile desktop remove dsh-builtin-browser` before adding the target version; replace `desktop` with `web` for Web. See the [update steps](docs/user-guide.md#先移除再安装).
 
 **Desktop (Windows and macOS).** Keep **DSH Sidebar** selected. If the bridge needs repair, save active work and use **Settings → Browser → Uninstall and reinstall** when available. On supported builds this can apply the bundled host patch; it changes local DSH files and is not required to use Chrome or Edge. DSH asks before quitting an active task. After a host update, check bridge status again.
 

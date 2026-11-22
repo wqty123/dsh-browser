@@ -11,7 +11,7 @@ dsh plugin --profile web add dsh-builtin-browser
 
 ### 先移除再安装
 
-已有版本时，保存进行中的工作，在需要更新的 profile 先运行 `remove`，再添加目标版本。下面以桌面端为例；把 `VERSION` 改成已发布的目标版本，更新 Web 时把 `desktop` 改成 `web`。
+DSH 会拒绝重复安装（`already-installed`），不会自动更新。已有版本时，保存进行中的工作，在需要更新的 profile 先运行 `remove`，再添加目标版本。下面以桌面端为例；把 `VERSION` 改成已发布的目标版本，更新 Web 时把 `desktop` 改成 `web`。
 
 ```sh
 dsh plugin --profile desktop remove dsh-builtin-browser
