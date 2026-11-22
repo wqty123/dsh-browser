@@ -68,6 +68,7 @@ test('registered tools retain canonical identity through runtime, provider, host
     .replace(/import \{([^}]+)\} from ['"]electron['"]/, 'const {$1} = globalThis.__canonicalElectron')
   writeFileSync(join(directory, 'bridge.mjs'), source)
   writeFileSync(join(directory, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-bridge/guest-proxy.mjs', import.meta.url)))
+  writeFileSync(join(directory, 'native-guests.mjs'), readFileSync(new URL('../desktop-bridge/native-guests.mjs', import.meta.url)))
   const bridge = await import(pathToFileURL(join(directory, 'bridge.mjs')))
   const server = bridge.start()
   t.after(() => bridge.stop())

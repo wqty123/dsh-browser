@@ -62,8 +62,8 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       const answer = await probe.call({ op: 'list' }, 5_000)
       if (isBridgeVersionMismatch(answer)) throw new BridgeVersionError()
       if (answer.ok !== true) return undefined
-      if (answer.frame === 'iframe') { this.refuseIframe = true; return undefined }
       if (typeof answer.protocol !== 'number' || !Number.isInteger(answer.protocol)) throw new BridgeVersionError()
+      if (answer.frame === 'iframe') { this.refuseIframe = true; return undefined }
       return new DesktopBridgeViewHost(endpoint, isQuiet)
     } catch (error) {
       const versionError = bridgePackageError(error) ?? (error instanceof BridgeVersionError ? error : undefined)

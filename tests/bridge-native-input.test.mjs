@@ -17,6 +17,7 @@ source = source.replace(/^start\(\)$/m, '').replace(/^main\(\)$/m, '')
 source += '\nexport { sendCdp, nativeKeyEvent };\n'
 writeFileSync(join(folder, 'bridge.mjs'), source)
 writeFileSync(join(folder, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-bridge/guest-proxy.mjs', import.meta.url)))
+writeFileSync(join(folder, 'native-guests.mjs'), readFileSync(new URL('../desktop-bridge/native-guests.mjs', import.meta.url)))
 const { sendCdp, nativeKeyEvent } = await import(pathToFileURL(join(folder, 'bridge.mjs')))
 after(() => { delete globalThis.__nativeInputElectron; assert.ok(resolve(folder).startsWith(resolve(tmpdir()) + sep)); rmSync(folder, { recursive: true, force: true }) })
 

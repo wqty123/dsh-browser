@@ -28,6 +28,21 @@ function mount(facade: ReturnType<typeof controllers>, aborted = false) {
 }
 
 describe('controller journal ownership', () => {
+  it('acknowledges a native adoption without replaying its URL through loadUrl', async () => {
+    const frame = createSnapshotStore(emptyBrowserFrame())
+    const navigated: string[] = [], acknowledged: string[] = []
+    const facade = createBrowserControllers({ replace() {} } as BrowserControllerOptions['actions'], () => ({
+      frame: { ...frame, loadUrl(target) { navigated.push(target.url) }, goBack() {}, goForward() {}, reload() {}, async dispose() {} },
+      presentation: { mount: () => () => {} },
+      adoption: { url: 'https://example.test/native-child', acknowledge: id => { acknowledged.push(id) } },
+    }), () => true, undefined, { sessionId })
+    try {
+      mount(facade)
+      expect(navigated).toEqual([])
+      expect(acknowledged).toHaveLength(1)
+      expect(facade.initializationLog().some(entry => entry.url === 'https://example.test/native-child')).toBe(true)
+    } finally { await facade.dispose() }
+  })
   it('releases its owned history and diagnostic registration on every plugin lifetime', async () => {
     const count = registered().length
     for (let reload = 0; reload < 3; reload++) {

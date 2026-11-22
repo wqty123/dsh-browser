@@ -34,9 +34,20 @@ const archiveFs: Pick<typeof import('node:fs'), 'openSync' | 'readSync' | 'close
 })()
 
 /** The identity rule, as data. */
+/** Where one kind of install keeps its resources, executable and CLI launcher (all relative). */
+export interface DesktopLayout {
+  readonly name: string
+  /** The layout applies when this path exists under the install root; the default has none. */
+  readonly marker?: string
+  readonly resources: string
+  readonly executable: string
+  readonly cliLauncher: string
+}
+
 interface IdentityRule {
   readonly packageNames: readonly string[]
   readonly mainEntry: string
+  readonly layouts: readonly DesktopLayout[]
 }
 
 /**
@@ -48,6 +59,10 @@ interface IdentityRule {
 export const FALLBACK_RULE: IdentityRule = {
   packageNames: ['@deepseek-ai/dsh-desktop', 'dsh-desktop'],
   mainEntry: 'lib/main.js',
+  layouts: [
+    { name: 'macos-bundle', marker: 'Contents/Info.plist', resources: 'Contents/Resources', executable: 'Contents/MacOS/DeepSeek Harness', cliLauncher: 'runtime/cli/bin/dsh' },
+    { name: 'directory', resources: 'resources', executable: 'DeepSeek Harness.exe', cliLauncher: 'runtime/cli/bin/dsh.cmd' },
+  ],
 }
 
 /** A verified install. */
@@ -90,13 +105,49 @@ export function readIdentityRule(): IdentityRule | { readonly error: string } {
     if (typeof main !== 'string' || main === '') {
       return { error: 'desktop-identity.json: mainEntry must be a non-empty string' }
     }
-    return { packageNames: names, mainEntry: main }
+    const layouts = raw.layouts
+    const field = (value: unknown): boolean => typeof value === 'string' && value !== ''
+    if (!Array.isArray(layouts) || layouts.length === 0
+      || layouts.some(l => l === null || typeof l !== 'object' || !field(l.name) || !field(l.resources) || !field(l.executable) || !field(l.cliLauncher)
+        || (l.marker !== undefined && !field(l.marker)))
+      || layouts[layouts.length - 1]?.marker !== undefined) {
+      return { error: 'desktop-identity.json: layouts must be a non-empty array whose last entry has no marker' }
+    }
+    return { packageNames: names, mainEntry: main, layouts }
   } catch (error) {
     if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
       return FALLBACK_RULE
     }
     return { error: `desktop-identity.json could not be read: ${String(error)}` }
   }
+}
+
+function layoutOf(rule: IdentityRule, installRoot: string): DesktopLayout {
+  return rule.layouts.find(layout => layout.marker === undefined || existsSync(join(installRoot, ...layout.marker.split('/'))))
+    ?? rule.layouts[rule.layouts.length - 1] as DesktopLayout
+}
+
+/**
+ * The layout of an install root: a macOS `.app` bundle or a plain directory (Windows).
+ * Decided by the install's own shape rather than the host OS, so every platform reads it the same.
+ * @param installRoot - the install directory.
+ * @returns the layout, or an error when the identity rule cannot be read.
+ */
+export function desktopLayout(installRoot: string): DesktopLayout | { readonly error: string } {
+  const rule = readIdentityRule()
+  return 'error' in rule ? rule : layoutOf(rule, installRoot)
+}
+
+/**
+ * Absolute paths an install keeps, from its layout.
+ * @param installRoot - the install directory.
+ * @returns resources directory, GUI executable and CLI launcher.
+ */
+export function desktopPaths(installRoot: string): { readonly resources: string; readonly executable: string; readonly cliLauncher: string } {
+  const layout = desktopLayout(installRoot)
+  if ('error' in layout) throw new Error(layout.error)
+  const resources = join(installRoot, ...layout.resources.split('/'))
+  return { resources, executable: join(installRoot, ...layout.executable.split('/')), cliLauncher: join(resources, ...layout.cliLauncher.split('/')) }
 }
 
 /**
@@ -199,7 +250,7 @@ export function readAsarFile(archive: string, path: string): Buffer | undefined 
 export function readDesktopIdentity(installRoot: string): DesktopIdentity | IdentityRefusal {
   const rule = readIdentityRule()
   if ('error' in rule) return { ok: false, reason: rule.error }
-  const resources = join(installRoot, 'resources')
+  const resources = join(installRoot, ...layoutOf(rule, installRoot).resources.split('/'))
   const appDir = join(resources, 'app')
   const archive = join(resources, 'app.asar')
 

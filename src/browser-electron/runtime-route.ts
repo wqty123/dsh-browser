@@ -32,7 +32,7 @@ export { RUNTIME_PROVISION_ROUTE }
 /** What both handlers need. */
 export interface RuntimeRouteDeps {
   /** The current report; a cheap read, never a spawn. */
-  readonly report: () => RuntimeStatusReport
+  readonly report: () => RuntimeStatusReport | Promise<RuntimeStatusReport>
   /**
    * Start (or join) a provision and return the state it is in now.
    *
@@ -61,7 +61,7 @@ export async function handleRuntimeStatus(
     replyJson(response, 403, { error: 'not-same-origin' })
     return
   }
-  replyJson(response, 200, { ok: true, runtime: deps.report() })
+  replyJson(response, 200, { ok: true, runtime: await deps.report() })
 }
 
 /**
@@ -96,10 +96,10 @@ export async function handleRuntimeProvision(
     // an answer it can render, rather than a dropped connection it cannot tell from a hang.
     replyJson(response, 200, {
       ok: true,
-      runtime: deps.report(),
+      runtime: await deps.report(),
       provisionError: String(error),
     })
     return
   }
-  replyJson(response, 200, { ok: true, runtime: deps.report(), provision: snapshot })
+  replyJson(response, 200, { ok: true, runtime: await deps.report(), provision: snapshot })
 }

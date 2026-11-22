@@ -23,6 +23,8 @@
     "scripts",
     "tools/accept-desktop.mjs",
     "desktop-bridge",
+    "dsh-host-patch",
+    "!dsh-host-patch/sources",
     "browser-extension",
     "native-host",
     "cordis.patch.yml",

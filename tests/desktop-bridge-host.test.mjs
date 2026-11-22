@@ -11,6 +11,8 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { BrowserRuntime } from '../lib/browser/runtime.js'
+import { apply as applyTools } from '../lib/tool-browser/index.js'
 
 import { typescriptSourceLoader } from './typescript-source.mjs'
 
@@ -56,7 +58,8 @@ async function startFakeBridge(state = { tabs: 1, dead: [] }) {
                 ?? (request.handle ? tabWireId({ ...resolveSessionHandle(request.handle), tab: `page:${i}` }) : undefined)
               if (id) sidebar.push({ id, type: 'webview', url: `https://page${i}.example/`, title: `Page ${i}`, destroyed: false })
             }
-            return { ok: true, sidebar, protocol: state.protocol ?? 4 }
+            return { ok: true, sidebar, protocol: Object.hasOwn(state, 'protocol') ? state.protocol : 4,
+              ...state.frame === undefined ? {} : { frame: state.frame } }
           }
           if (request.op === 'ensureSidebar') {
             // The real op answers with the page THIS conversation's panel holds, and that page
@@ -263,10 +266,9 @@ test('protocol 4 gives each logical view an independent guest and keeps it when 
 })
 
 test('legacy or invalid protocols are refused before any view can drive a native page', async () => {
-  for (const protocol of [3, 'invalid']) {
+  for (const protocol of [1, 2, 3, 'invalid', undefined]) {
     const bridge = await startFakeBridge({ tabs: 1, dead: [], protocol })
     withEndpoint(bridge.port)
-    let host
     try {
       await assert.rejects(DesktopBridgeViewHost.discover('session-a'), {
         name: 'BridgeVersionError', code: 'BROWSER_BRIDGE_VERSION_MISMATCH',
@@ -275,9 +277,52 @@ test('legacy or invalid protocols are refused before any view can drive a native
       assert.equal(DesktopBridgeViewHost.compatibilityError(), '桥接版本过旧，请点击 卸载并重装')
       assert.ok(bridge.requests.every(request => request.op === 'list'))
     } finally {
-      host?.dispose()
       await bridge.close()
     }
+  }
+})
+
+test('tool open against a live legacy bridge reports repair instead of a queued iframe success', async () => {
+  const bridge = await startFakeBridge({ tabs: 1, dead: [], protocol: 3, frame: 'iframe' })
+  withEndpoint(bridge.port)
+  const runtime = Object.create(BrowserRuntime.prototype)
+  runtime.providers = new Map()
+  runtime.panelSessions = new Map()
+  runtime.panelPages = new Map()
+  Object.defineProperty(runtime, 'ctx', { value: { effect: effect => {
+    const cleanup = effect()
+    return () => cleanup()
+  } } })
+  const unregister = runtime.registerPanelProvider(() => DesktopBridgeViewHost.discover('session-a'))
+  const tools = new Map()
+  applyTools({ tools: { register: tool => tools.set(tool.name, tool) },
+    systemPrompt: { section() {} }, effect() {}, get: name => name === 'browser' ? runtime : undefined })
+  try {
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-a' } }
+    await assert.rejects(tools.get('dsh_browser_open').execute({ url: 'https://example.com/' }, exec), error => {
+      assert.equal(error.code, 'BROWSER_BRIDGE_VERSION_MISMATCH')
+      assert.match(error.message, /卸载并重装/)
+      return true
+    })
+    assert.equal(runtime.panelSessions.size, 0)
+    assert.ok(bridge.requests.length > 0)
+    assert.ok(bridge.requests.every(request => request.op === 'list'))
+    await assert.rejects(tools.get('dsh_browser_screenshot').execute({}, exec), /nothing is open/)
+  } finally {
+    unregister()
+    await bridge.close()
+  }
+})
+
+test('a current-protocol manual iframe is unavailable, not misreported as an old bridge', async () => {
+  const bridge = await startFakeBridge({ tabs: 0, dead: [], protocol: 4, frame: 'iframe' })
+  withEndpoint(bridge.port)
+  try {
+    assert.equal(await DesktopBridgeViewHost.discover('session-a'), undefined)
+    assert.equal(DesktopBridgeViewHost.refusedIframePanel(), true)
+    assert.ok(bridge.requests.every(request => request.op === 'list'))
+  } finally {
+    await bridge.close()
   }
 })
 
@@ -333,7 +378,6 @@ for (const [code, name, message, errorCode] of [
     assert.equal((await view.sendCommand('Runtime.evaluate', { expression: '1' })).echo, 'Runtime.evaluate')
   } finally { host?.dispose(); await bridge.close() }
 })
-
 test('a passive preview never assigns another live page to an unopened logical view', async () => {
   const bridge = await startFakeBridge({ tabs: 1, dead: [], protocol: 4 })
   withEndpoint(bridge.port)

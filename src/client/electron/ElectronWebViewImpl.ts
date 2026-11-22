@@ -188,7 +188,8 @@ export class ElectronWebViewImpl implements BrowserFrame {
     if (attachmentSignal.aborted) return
     let reservation: Awaited<ReturnType<DesktopBrowserBridge['acquire']>>
     try {
-      reservation = await this.bridge.acquire(this.workspaceKey)
+      reservation = await (this.bridge.persistentSession === true
+        ? this.bridge.acquire(this.workspaceKey, true) : this.bridge.acquire(this.workspaceKey))
     } catch (error) {
       if (!this.superseded(attachment, attachmentSignal)) {
         this.carrier.set({ stage: 'failed', reason: 'acquire-failed',

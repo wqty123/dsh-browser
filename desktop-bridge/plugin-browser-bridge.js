@@ -22,13 +22,14 @@
  * any user configuration.
  */
 import { createServer, connect as netConnect } from 'node:net'
-import { randomBytes, randomUUID } from 'node:crypto'
-import { writeFileSync, mkdirSync, constants } from 'node:fs'
+import { randomBytes, randomUUID, createHash } from 'node:crypto'
+import { writeFileSync, mkdirSync, readFileSync, unlinkSync, constants } from 'node:fs'
 import { open, mkdir, unlink, link, copyFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, dirname, isAbsolute } from 'node:path'
+import { join, dirname, isAbsolute, resolve } from 'node:path'
 import { app, webContents } from 'electron'
 import { sidebarProxyConfig, parseSystemProxy, normalizeGuestUserAgent, shouldFallbackToSystemProxy, DEFAULT_SIDEBAR_PROXY_BYPASS } from './guest-proxy.mjs'
+import { nativeGuestRegistry } from './native-guests.mjs'
 
 /**
  * The conversation's sidebar panel exists but the shell is not displaying that conversation, so no
@@ -41,6 +42,8 @@ import { sidebarProxyConfig, parseSystemProxy, normalizeGuestUserAgent, shouldFa
  */
 const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
 const PANEL_INITIALIZING = 'panel-initializing'
+const RENDERING_RELEASE_TIMEOUT_MS = 250
+const RENDERING_HOLD_MS = 30_000
 
 /**
  * An Error carrying a stable code, so the code survives the socket as a field rather than as text a
@@ -93,6 +96,7 @@ const retiredHandles = new Set()
 const retiredSessions = new Set()
 // Only pending URL opens participate. A passive guest lookup never cancels a navigation.
 const pendingSidebarOpens = new Map()
+const activeRequests = new Set()
 
 /**
  * When this module was loaded, and the protocol generation it speaks.
@@ -209,11 +213,15 @@ async function evaluateInPanel(shellId, sessionId, method, params) {
 
 
 function guestById(id) {
+  if (typeof id === 'string') return nativeGuests.get(id)
   for (const contents of webContents.getAllWebContents()) {
     if (contents.id === id) return contents
   }
   return undefined
 }
+
+const nativeCapability = () => globalThis[ACTIVE]?.api?.browserGuests?.protocolVersion === 1 ? globalThis[ACTIVE].api.browserGuests : undefined
+const nativeGuests = nativeGuestRegistry(nativeCapability)
 
 /** Describe one candidate guest. */
 function describe(contents) {
@@ -238,11 +246,12 @@ function describe(contents) {
 const CDP_COMMAND_TIMEOUT_MS = 15_000
 const timedOutGuests = new WeakSet()
 
-async function sendCdp(id, method, params) {
+async function sendCdp(id, method, params, checkCurrent) {
   const guest = guestById(id)
   if (guest === undefined || guest.isDestroyed()) throw new Error(`guest ${id} is not available`)
   const previous = queues.get(id) ?? Promise.resolve()
   const guarded = previous.then(async () => {
+    checkCurrent?.()
     const current = guestById(id)
     if (current !== guest || current.isDestroyed()) throw new Error(`guest ${id} is not available`)
     if (timedOutGuests.has(current)) throw new Error(`guest ${id} has a timed-out command; close and reopen its page before sending more commands`)
@@ -381,7 +390,7 @@ async function downloadGuest(guest, url, savePath) {
 async function evaluatePanelService(shellId, sessionId, url, viewId, guestId, deadline = Date.now() + 30_000, transactionId) {
   const target = JSON.stringify({
     viewId, deadline, transactionId,
-    ...Number.isSafeInteger(guestId) && guestId > 0 ? { guestId } : {},
+    ...(Number.isSafeInteger(guestId) && guestId > 0) || typeof guestId === 'string' ? { guestId } : {},
   })
   const expression = `(async () => {
     const api = globalThis.__dshBuiltinBrowser;
@@ -389,7 +398,10 @@ async function evaluatePanelService(shellId, sessionId, url, viewId, guestId, de
       return JSON.stringify({ ok: false, code: 'panel-initialization-failed', reason: 'reload the browser plugin client for transactional sidebar initialization' });
     }
     try {
-      return JSON.stringify(await api.initializePanel(${JSON.stringify(String(sessionId))}, ${JSON.stringify(String(url ?? ''))}, ${target}));
+      const answer = await api.initializePanel(${JSON.stringify(String(sessionId))}, ${JSON.stringify(String(url ?? ''))}, ${target});
+      answer.backgroundRendering = typeof api.isBackgroundRendering === 'function'
+        && api.isBackgroundRendering(${JSON.stringify(String(sessionId))}) === true;
+      return JSON.stringify(answer);
     } catch (error) {
       return JSON.stringify({ ok: false, code: error?.code, reason: String(error?.message ?? error) });
     }
@@ -431,14 +443,16 @@ async function evaluatePanelService(shellId, sessionId, url, viewId, guestId, de
       panel: parsed?.panel === true,
       created: parsed?.created === true,
       navigating: parsed?.navigating === true,
+      backgroundRendering: parsed?.backgroundRendering === true,
       ...typeof parsed?.displayed === 'boolean' ? { displayed: parsed.displayed } : {},
-      guestId: typeof parsed?.guestId === 'number' && Number.isFinite(parsed.guestId) ? parsed.guestId : null,
+      guestId: (typeof parsed?.guestId === 'number' && Number.isFinite(parsed.guestId)) || typeof parsed?.guestId === 'string' ? parsed.guestId : null,
       ...typeof parsed?.tabId === 'string' ? { tabId: parsed.tabId } : {},
       url: typeof parsed?.url === 'string' ? parsed.url : '',
       // A refusal carries what the renderer found, so the reason is actionable rather than a guess.
       found: parsed?.found === undefined ? undefined : parsed.found,
       ...parsed?.initialization !== null && typeof parsed?.initialization === 'object'
         ? { initialization: parsed.initialization } : {},
+      ...parsed?.nativeState !== null && typeof parsed?.nativeState === 'object' ? { nativeState: parsed.nativeState } : {},
     }
   } catch (error) {
     return { ok: false, reason: 'the shell answered a shape this bridge does not understand', panel: false, guestId: null, url: '' }
@@ -498,6 +512,7 @@ async function committedSidebarNavigation(id, url) {
  * @returns 'webview' | 'iframe' | 'none' (no panel yet) | 'unknown' (could not be read).
  */
 async function sidebarFrameKind(shellId) {
+  if (nativeCapability() !== undefined) return 'native'
   if (typeof shellId !== 'number') return 'unknown'
   try {
     // `executeJavaScript`, not the debugger: the same measured reason as every other shell-side
@@ -520,6 +535,7 @@ async function sidebarFrameKind(shellId) {
 /** Read the exact guest set from the named conversation's renderer, never from free globals. */
 async function panelGuestIds(shell, owner) {
   if (!/^session-/.test(owner)) return []
+  if (nativeCapability() !== undefined) return nativeGuests.ids(owner)
   const value = await shell.executeJavaScript(`(() => {
     const api = globalThis.__dshBuiltinBrowser;
     if (!api || typeof api.panelGuests !== 'function') {
@@ -533,6 +549,111 @@ async function panelGuestIds(shell, owner) {
     throw new Error('invalid sidebar page identity reply; refresh or upgrade the browser plugin client')
   }
   return ids
+}
+
+/** Handle one JSON request line; every answer is a JSON line too. */
+async function handle(request, signal) {
+  signal?.throwIfAborted()
+  if (['owner', 'id', 'viewId', 'logicalViewId'].some(key => Object.hasOwn(request, key))) {
+    throw codedError('BROWSER_HANDLE_REQUIRED', 'the bridge requires canonical handles, not local ids')
+  }
+  const owner = ['ensureSidebar', 'cdp', 'download'].includes(request?.op) ? wireHandle(request.handle, 'tab').owner : undefined
+  const controller = new AbortController()
+  const checkCurrent = () => controller.signal.throwIfAborted()
+  if (request?.op === 'ensureSidebar') request = { ...request,
+    transactionId: request.transactionId ?? randomBytes(16).toString('hex'),
+    deadline: Number.isFinite(request.deadline) ? request.deadline : Date.now() + 30_000,
+  }
+  checkCurrent()
+  const shell = /^session-/.test(owner)
+    ? webContents.getAllWebContents().find(contents => contents.getType() === 'window') : undefined
+  const token = randomBytes(16).toString('hex')
+  const holdDeadline = Number.isFinite(request.deadline) ? request.deadline : Date.now() + RENDERING_HOLD_MS
+  let held
+  let releasePromise
+  const release = () => {
+    if (held === false) return Promise.resolve()
+    const run = async () => {
+      let timer
+      try {
+        await Promise.race([
+          shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.releaseRendering?.(${JSON.stringify(token)})`, true),
+          new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, Math.min(RENDERING_RELEASE_TIMEOUT_MS, holdDeadline - Date.now()))) }),
+        ])
+      } catch (error) { console.error('[dsh-browser-bridge] rendering hold release failed:', error) }
+      finally { clearTimeout(timer) }
+    }
+    return held === undefined ? run() : releasePromise ??= run()
+  }
+  let rejectAborted
+  const aborted = new Promise((_resolve, reject) => { rejectAborted = reject })
+  const onAbort = () => {
+    rejectAborted(controller.signal.reason)
+    if (shell !== undefined) {
+      void release()
+      if (request.op === 'ensureSidebar') {
+        void shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.cancelPanelInitialization?.(${JSON.stringify(owner)}, ${JSON.stringify(request.handle)}, ${JSON.stringify(request.transactionId)})`)
+          .catch(error => console.error('[dsh-browser-bridge] initialization cancellation failed:', error))
+      }
+    }
+  }
+  const forwardAbort = () => controller.abort(signal.reason)
+  controller.signal.addEventListener('abort', onAbort, { once: true })
+  signal?.addEventListener('abort', forwardAbort, { once: true })
+  activeRequests.add(controller)
+  const timer = request?.op === 'ensureSidebar' ? setTimeout(() => controller.abort(
+    codedError('BROWSER_DOCUMENT_TIMEOUT', 'sidebar initialization deadline expired')), Math.max(0, request.deadline - Date.now())) : undefined
+  const run = async () => {
+    try {
+      checkCurrent()
+      if (shell !== undefined) {
+        held = await shell.executeJavaScript(`(async () => {
+          const api = globalThis.__dshBuiltinBrowser;
+          if (typeof api?.holdRendering !== 'function') return false;
+          return api.holdRendering(${JSON.stringify(owner)}, ${JSON.stringify(token)}, ${holdDeadline});
+        })()`, true) === true
+      }
+      checkCurrent()
+      return await handleRequest(request, checkCurrent, controller)
+    } finally {
+      if (shell !== undefined) await release()
+    }
+  }
+  try {
+    return await Promise.race([run(), aborted])
+  } finally {
+    clearTimeout(timer)
+    activeRequests.delete(controller)
+    signal?.removeEventListener('abort', forwardAbort)
+    controller.signal.removeEventListener('abort', onAbort)
+    if (shell !== undefined) await release()
+  }
+}
+
+async function handleRequest(request, checkCancelled, controller) {
+  const op = String(request?.op ?? '')
+  if (op !== 'ensureSidebar' && op !== 'cancelSidebar') return dispatch(request, checkCancelled)
+  const scope = wireHandle(request.handle, 'tab')
+  const key = request.handle
+  if (op === 'cancelSidebar') {
+    const pending = pendingSidebarOpens.get(key)
+    if (typeof request.transactionId !== 'string' || pending?.transactionId !== request.transactionId) return { ok: true, cancelled: false }
+    pending.cancelled = true
+    pending.abort()
+    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+    if (shell) await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.cancelPanelInitialization?.(${JSON.stringify(scope.owner)}, ${JSON.stringify(key)}, ${JSON.stringify(request.transactionId)})`)
+    return { ok: true, cancelled: true }
+  }
+  const token = { transactionId: request.transactionId, cancelled: false,
+    abort: () => controller.abort(codedError('BROWSER_NAVIGATION_CANCELLED', 'sidebar initialization was cancelled')) }
+  pendingSidebarOpens.set(key, token)
+  const checkCurrent = () => {
+    checkCancelled?.()
+    if (token.cancelled) throw codedError('BROWSER_NAVIGATION_CANCELLED', 'sidebar initialization was cancelled')
+    if (pendingSidebarOpens.get(key) !== token) throw codedError('panel-navigation-superseded', 'a newer navigation was requested for this sidebar view')
+  }
+  try { return await dispatch(request, checkCurrent) }
+  finally { if (pendingSidebarOpens.get(key) === token) pendingSidebarOpens.delete(key) }
 }
 
 function wireHandle(wire, kind) {
@@ -577,35 +698,20 @@ function bindGuest(handle, guest) {
   handles.set(handle, { ...scope, guest })
 }
 
-async function handle(request) {
-  const op = String(request?.op ?? '')
-  if (['owner', 'id', 'viewId', 'logicalViewId'].some(key => Object.hasOwn(request, key))) {
-    throw codedError('BROWSER_HANDLE_REQUIRED', 'the bridge requires canonical handles, not local ids')
-  }
-  if (op !== 'ensureSidebar' && op !== 'cancelSidebar') return dispatch(request)
-  const scope = wireHandle(request.handle, 'tab')
-  const key = request.handle
-  if (op === 'cancelSidebar') {
-    const pending = pendingSidebarOpens.get(key)
-    if (typeof request.transactionId !== 'string' || pending?.transactionId !== request.transactionId) return { ok: true, cancelled: false }
-    pending.cancelled = true
-    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-    if (shell) await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.cancelPanelInitialization?.(${JSON.stringify(scope.owner)}, ${JSON.stringify(key)}, ${JSON.stringify(request.transactionId)})`)
-    return { ok: true, cancelled: true }
-  }
-  const token = { transactionId: request.transactionId, cancelled: false }
-  pendingSidebarOpens.set(key, token)
-  const checkCurrent = () => {
-    if (token.cancelled) throw codedError('BROWSER_NAVIGATION_CANCELLED', 'sidebar initialization was cancelled')
-    if (pendingSidebarOpens.get(key) !== token) throw codedError('panel-navigation-superseded', 'a newer navigation was requested for this sidebar view')
-  }
-  try { return await dispatch(request, checkCurrent) }
-  finally { if (pendingSidebarOpens.get(key) === token) pendingSidebarOpens.delete(key) }
-}
-
 async function dispatch(request, checkCurrent) {
+  checkCurrent?.()
   const op = String(request?.op ?? '')
-  if (op === 'version') return { ok: true, loadedAt: LOADED_AT, protocol: PROTOCOL }
+  // Which build is answering. The acceptance script asks this first, because everything else it
+  // measures is meaningless if the host is still running the previous bridge.
+  if (op === 'version') {
+    const api = globalThis[ACTIVE]?.api
+    const home = resolve(api?.dshHome ?? process.env.DSH_HOME ?? join(homedir(), '.dsh'))
+    return { ok: true, loadedAt: LOADED_AT, protocol: PROTOCOL,
+      bridgeVersion: api?.bridgeVersion, bridgeBuild: api?.bridgeBuild,
+      homeId: createHash('sha256').update(process.platform === 'win32' ? home.toLowerCase() : home).digest('hex'),
+      mainExtension: typeof api?.mainExtensions?.status === 'function'
+        ? await api.mainExtensions.status('dsh-builtin-browser') : { code: 'DESKTOP_MAIN_EXTENSION_UNSUPPORTED' } }
+  }
   const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
   if (op === 'list') {
     const frame = await sidebarFrameKind(shell?.id)
@@ -615,7 +721,7 @@ async function dispatch(request, checkCurrent) {
     const sidebar = []
     for (const id of ids) {
       const guest = guestById(id)
-      if (!guest || guest.isDestroyed() || guest.getType() !== 'webview') continue
+      if (!guest || guest.isDestroyed() || !['webview', 'native'].includes(guest.getType())) continue
       let handle
       for (const [key, entry] of handles) {
         if (entry.owner === scope.owner && entry.session === scope.session && entry.guest === guest) { handle = key; break }
@@ -660,7 +766,14 @@ async function dispatch(request, checkCurrent) {
     }
     if (first.guestId === null) throw codedError('BROWSER_DOCUMENT_UNACKNOWLEDGED', 'sidebar initialization did not acknowledge a guest')
     const guest = guestById(first.guestId)
-    if (!guest || guest.isDestroyed() || guest.getType() !== 'webview') throw codedError('BROWSER_GUEST_CLOSED', 'the acknowledged sidebar guest is gone')
+    if (!guest || guest.isDestroyed() || !['webview', 'native'].includes(guest.getType())) throw codedError('BROWSER_GUEST_CLOSED', 'the acknowledged sidebar guest is gone')
+    if (guest.getType() === 'native') {
+      const admission = wireHandle(guest.scope, 'tab')
+      const state = nativeGuests.state(guest.id)
+      if (admission.owner !== owner || state?.stage !== 'document' || first.nativeState?.guestId !== guest.id
+        || first.nativeState?.generation !== state.generation || first.nativeState?.frameId !== state.frameId
+        || first.nativeState?.loaderId !== state.loaderId) throw codedError('BROWSER_DOCUMENT_UNACKNOWLEDGED', 'native document generation was not acknowledged')
+    }
     const existing = handles.get(request.handle)
     if (existing && existing.guest !== guest) throw codedError('BROWSER_HANDLE_STALE', 'the sidebar returned a replacement guest')
     let navigation
@@ -675,7 +788,7 @@ async function dispatch(request, checkCurrent) {
     if (Date.now() >= deadline) throw codedError('BROWSER_DOCUMENT_TIMEOUT', 'sidebar initialization deadline expired')
     bindGuest(request.handle, guest)
     if (!request.attachOnly && !guestShows(guest.id, url)) {
-      navigation = await sendCdp(guest.id, 'Page.navigate', { url })
+      navigation = await sendCdp(guest.id, 'Page.navigate', { url }, checkCurrent)
       checkCurrent?.()
       if (navigation?.errorText) throw codedError('panel-navigation-failed', String(navigation.errorText))
     }
@@ -707,7 +820,7 @@ async function dispatch(request, checkCurrent) {
     return { ok: true, id: request.handle }
   }
   const guest = boundGuest(request.handle)
-  if (op === 'cdp') return { ok: true, result: await sendCdp(guest.id, String(request.method ?? ''), request.params) }
+  if (op === 'cdp') return { ok: true, result: await sendCdp(guest.id, String(request.method ?? ''), request.params, checkCurrent) }
   if (op === 'download') {
     await downloadGuest(guest, request.url, request.savePath)
     return { ok: true, path: request.savePath }
@@ -723,7 +836,7 @@ async function dispatch(request, checkCurrent) {
     const value = await shell.executeJavaScript(`(() => {
       const api = globalThis.__dshBuiltinBrowser;
       if (!api || typeof api.closePanelGuest !== 'function') throw new Error('sidebar close API is unavailable; refresh or upgrade the browser plugin client');
-      return JSON.stringify(api.closePanelGuest(${JSON.stringify(owner)}, ${guest.id}));
+      return JSON.stringify(api.closePanelGuest(${JSON.stringify(owner)}, ${JSON.stringify(guest.id)}));
     })()`, true)
     let answer
     try { answer = JSON.parse(value) } catch { throw new Error('invalid sidebar close reply') }
@@ -949,7 +1062,9 @@ async function applySidebarGuestProxy(contents) {
 }
 
 export function stop() {
+  for (const controller of activeRequests) controller.abort(codedError('bridge-request-abandoned', 'the bridge was disposed'))
   const current = globalThis[ACTIVE]
+  if (nativeCapability() !== undefined) void nativeGuests.releaseAll().catch(error => console.error('[dsh-browser-bridge] native release failed:', error))
   globalThis[ACTIVE] = undefined
   // Detach BEFORE the early return: a reload replaces this module's `start()`,
   // and a listener left on a live webContents keeps a stale closure alive that
@@ -960,14 +1075,28 @@ export function stop() {
   fallbackHandlers.clear()
   if (!current) return
   try { clearInterval(current.keepalive) } catch { /* ignore */ }
+  for (const socket of current.sockets ?? []) socket.destroy()
   try { current.server.close() } catch { /* already closed */ }
-  try { app.off('will-quit', current.onQuit) } catch { /* ignore */ }
-  try { app.off('web-contents-created', current.onGuestCreated) } catch { /* ignore */ }
+  try { current.application.off('will-quit', current.onQuit) } catch { /* ignore */ }
+  try { current.application.off('web-contents-created', current.onGuestCreated) } catch { /* ignore */ }
+  try {
+    const file = endpointFile(current.api?.dshHome)
+    const endpoint = JSON.parse(readFileSync(file, 'utf8'))
+    if (endpoint.token === current.token && endpoint.pid === process.pid) unlinkSync(file)
+  } catch { /* absent, unreadable, or owned by a replacement instance */ }
 }
 
 /** Start the bridge: loopback listener + published endpoint file + token. */
 export function start(api) {
-  stop()
+  const current = globalThis[ACTIVE]
+  if (current) {
+    const mainOwned = current.api?.owner === 'desktop-main'
+    if (mainOwned && api?.owner !== 'desktop-main') return current.server
+    if (api?.reload !== true && (mainOwned || api?.owner !== 'desktop-main')) return current.server
+    if (typeof current.stop === 'function') current.stop()
+    else stop()
+  }
+  const application = api?.app ?? app
   // Sidebar guests are created by the shell at any time (including after a
   // bridge reload), so configure both the existing guests and every future one.
   // Default policy is direct, which is fast but useless on a machine whose
@@ -1018,7 +1147,7 @@ export function start(api) {
     void applySidebarGuestProxy(contents)
     attachProxyFallback(contents)
   }
-  app.on('web-contents-created', onGuestCreated)
+  application.on('web-contents-created', onGuestCreated)
   for (const contents of webContents.getAllWebContents()) {
     onGuestCreated(undefined, contents)
   }
@@ -1037,13 +1166,20 @@ export function start(api) {
     }
   } catch { /* no webContents at all; nothing to detach */ }
   const token = randomBytes(24).toString('hex')
+  const sockets = new Set()
   const server = createServer(socket => {
+    sockets.add(socket)
+    const controller = new AbortController()
     let buffer = ''
     let authed = false
     socket.setEncoding('utf8')
     const authenticationDeadline = setTimeout(() => socket.destroy(), 5_000)
     authenticationDeadline.unref?.()
-    socket.on('close', () => clearTimeout(authenticationDeadline))
+    socket.on('close', () => {
+      sockets.delete(socket)
+      clearTimeout(authenticationDeadline)
+      controller.abort(codedError('bridge-request-abandoned', 'the bridge client disconnected'))
+    })
     socket.on('data', chunk => {
       if (Buffer.byteLength(buffer, 'utf8') + Buffer.byteLength(chunk, 'utf8') > 32 * 1024 * 1024) {
         socket.destroy()
@@ -1080,7 +1216,7 @@ export function start(api) {
           // (A client may also put the token on its first real request; both work.)
           if (typeof request.op !== 'string' || request.op === '') continue
         }
-        void handle(request)
+        void handle(request, controller.signal)
           // The request id is stamped HERE, at the single point where every answer is written,
           // rather than on the handful of returns that happened to remember it.
           //
@@ -1111,6 +1247,7 @@ export function start(api) {
   // Loopback only, port chosen by the OS: the endpoint file is the discovery
   // mechanism, so a fixed port would only add collisions.
   server.listen(0, '127.0.0.1', () => {
+    if (globalThis[ACTIVE]?.server !== server) { server.close(); return }
     const address = server.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
     if (publishEndpoint(port, token, api?.dshHome)) {
@@ -1125,7 +1262,7 @@ export function start(api) {
   }, 15_000)
   keepalive.unref?.()
   const onQuit = () => stop()
-  app.on('will-quit', onQuit)
-  globalThis[ACTIVE] = { server, keepalive, onQuit, onGuestCreated }
+  application.on('will-quit', onQuit)
+  globalThis[ACTIVE] = { server, keepalive, onQuit, onGuestCreated, stop, api, application, token, sockets }
   return server
 }
