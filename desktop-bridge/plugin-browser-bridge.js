@@ -42,7 +42,7 @@ import { nativeGuestRegistry } from './native-guests.mjs'
  */
 const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
 const PANEL_INITIALIZING = 'panel-initializing'
-const RENDERING_RELEASE_TIMEOUT_MS = 250
+const RENDERING_RELEASE_TIMEOUT_MS = 2000
 const RENDERING_HOLD_MS = 30_000
 
 /**

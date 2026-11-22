@@ -725,7 +725,7 @@ const react = require("react")
       const desktopMenu = () => typeof document.querySelector === "function"
         ? document.querySelector("[data-windows-menu]")?.shadowRoot?.querySelector("button") : null
       // Windows Desktop draws its own menu; macOS uses the native menu bar, so its Desktop preload is the proof.
-      const inDesktop = typeof desktopMenu()?.click === "function" || typeof globalThis.dshDesktop === "object"
+      const inDesktop = typeof desktopMenu()?.click === "function" || (globalThis.dshDesktop !== null && typeof globalThis.dshDesktop === "object")
       if (!inDesktop) {
         setBridgeError({ key: "readiness.bridge.localOnly" })
         return

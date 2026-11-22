@@ -98,7 +98,7 @@ test('the prompt section coexists with another browser plugin in either registra
   }
 })
 
-test('reference guidance leaves source navigation in capsules, not model-generated citations', () => {
+test('reference guidance distinguishes tool-only capture storage from chat capsules', () => {
   const { ctx, tools } = makeContext()
   const sections = []
   ctx.systemPrompt.section = section => { sections.push(section) }
@@ -107,12 +107,14 @@ test('reference guidance leaves source navigation in capsules, not model-generat
   assert.match(guidance.text, /Do not repeat.*source\/citation links/u)
   const capture = tools.get('dsh_browser_reference_capture')
   const list = tools.get('dsh_browser_reference_list')
-  assert.match(capture.description, /Do not repeat reference URIs/u)
+  assert.match(capture.description, /Tool-only captures are stored for later dsh_browser_reference_reveal or export and do not create a chat capsule/u)
+  assert.match(capture.description, /do not emit dsh-browser-ref: URIs, reference markers, or synthetic source links/u)
   assert.match(list.description, /do not repeat reference URIs/u)
   const reference = { referenceId: 'ref-1', title: 'Test', pageUrl: 'https://example.com/', capturedAt: 'now', parts: [], failures: [] }
   const captured = capture.output.render({}, { ...reference, ok: true })[0].text
   const listed = list.output.render({}, { references: [reference] })[0].text
-  assert.match(captured, /Do not repeat.*source\/citation link/u)
+  assert.match(captured, /Stored in the reference library for dsh_browser_reference_reveal or export \(tool-only captures do not create a chat capsule\)/u)
+  assert.match(captured, /Do not emit dsh-browser-ref: URIs or reference markers/u)
   assert.match(listed, /not a reply link/u)
   for (const text of [captured, listed]) assert.doesNotMatch(text, /Cite it|dsh-browser-ref:ref-1|\]\(/u)
   assert.match(capture.output.render({}, { ok: false, failures: [{ kind: 'text', reason: 'empty-text' }] })[0].text, /Nothing was captured/u)

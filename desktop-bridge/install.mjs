@@ -611,7 +611,7 @@ function patchPosixCliShim(text) {
     'dsh_app=$resources/app',
     '[ -f "$dsh_app/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js" ] || dsh_app=$resources/app.asar',
   ].join('\n')
-  writeFileSync(cliShimPath, text.replace(resourcesLine[0], `${resourcesLine[0]}\n${injection}`)
+  writeFileSync(cliShimPath, text.replace(resourcesLine[0], () => `${resourcesLine[0]}\n${injection}`)
     .replace('"$resources/app.asar/dsh/', '"$dsh_app/dsh/'))
   return 'patched'
 }

@@ -3411,7 +3411,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   registerSafely(defineTool({
     name: 'dsh_browser_reference_capture',
-    description: 'Capture what the human has selected in the shared-browser page as a durable reference, so it can be quoted and found again later. The reference keeps the selected text with enough surrounding context to relocate it, any images selected with their real bytes, and any table as a structural snapshot. References are already displayed as interactive capsules for source navigation. Do not repeat reference URIs, source URLs, markers, or source/citation links in the reply. Re-capturing the same region creates a NEW reference, because a stored reference is an immutable snapshot.',
+    description: 'Capture what the human has selected in the shared-browser page as a durable reference, so it can be quoted and found again later. The reference keeps the selected text with enough surrounding context to relocate it, any images selected with their real bytes, and any table as a structural snapshot. Tool-only captures are stored for later dsh_browser_reference_reveal or export and do not create a chat capsule; do not emit dsh-browser-ref: URIs, reference markers, or synthetic source links in the reply. Re-capturing the same region creates a NEW reference, because a stored reference is an immutable snapshot.',
     parameters: {
       allowPartial: { type: 'boolean', description: 'Commit the fragments that succeeded when another fragment failed (default false: a group with a broken image or oversized table is refused as a whole).' },
       tableSelector: { type: 'string', description: 'Capture this table whole (CSS selector) even when the selection does not touch it.' },
@@ -3460,7 +3460,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         const lines = [
           `Reference ${value.referenceId} captured from ${value.title !== undefined && value.title !== '' ? value.title : value.pageUrl}.`,
-          'The reference capsule provides source navigation. Do not repeat its URI, source URL, marker, or a source/citation link in the reply.',
+          'Stored in the reference library for dsh_browser_reference_reveal or export (tool-only captures do not create a chat capsule). Do not emit dsh-browser-ref: URIs or reference markers in the reply.',
           ...value.parts.map(part => `  ${part.partId} (${part.type}): ${part.preview}`),
         ]
         if (value.failures.length > 0) lines.push(`(${value.failures.length} fragment(s) failed and were left out: ${value.failures.map(failure => failure.reason).join('; ')})`)

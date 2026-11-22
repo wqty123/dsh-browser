@@ -2500,9 +2500,20 @@ for (const { name, snapshot, documentLanguage, switchLanguage, expected } of [
     assert.deepEqual(JSON.parse(post.init.body), { action: 'reinstall', locale: expected })
   })
 }
-test('remote or unsupported surfaces cannot arm bridge maintenance', async () => {
+test('a Desktop preload object can arm maintenance without a custom menu', async () => {
   const fixture = maintenanceFixture(), timers = maintenanceTimers()
   const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: makeDocument(), timers })
+  activeSandbox.dshDesktop = {}
+  const Component = readinessComponent(mounted.exports)
+  const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
+  await bridgeButton(tree, 'readiness.bridge.reinstall').props.onClick()
+  assert.equal(fixture.calls.filter(call => call.init.method === 'POST').length, 1)
+})
+
+for (const desktop of [undefined, null]) test(`remote or unsupported surfaces cannot arm bridge maintenance (dshDesktop=${desktop})`, async () => {
+  const fixture = maintenanceFixture(), timers = maintenanceTimers()
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: makeDocument(), timers })
+  activeSandbox.dshDesktop = desktop
   const Component = readinessComponent(mounted.exports)
   const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
   await bridgeButton(tree, 'readiness.bridge.reinstall').props.onClick()

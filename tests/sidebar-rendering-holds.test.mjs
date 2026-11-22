@@ -155,6 +155,35 @@ test('a CDP operation holds the background page until success or rejection, but 
   assert.equal(state.api.holdRendering('session-reader', 'selected'), false)
 })
 
+test('a hung rendering release waits up to two seconds without switching sessions', async t => {
+  const state = mount(t)
+  const shell = contents[0]
+  const execute = shell.executeJavaScript
+  let began
+  shell.executeJavaScript = async expression => {
+    const result = await execute(expression)
+    if (expression.includes('releaseRendering?.')) {
+      began = Date.now()
+      return new Promise(() => {})
+    }
+    return result
+  }
+  const guest = { id: 2, getType: () => 'webview', isDestroyed: () => false, debugger: {
+    isAttached: () => true,
+    sendCommand: async () => ({ data: 'frame' }),
+  } }
+  contents.push(guest)
+  bridge.bindGuest(wire, guest)
+  state.api.panelGuests = () => [2]
+  const result = await bridge.handle({ op: 'cdp', handle: wire, method: 'Page.captureScreenshot', deadline: Date.now() + 10_000 })
+  assert.deepEqual(result.result, { data: 'frame' })
+  assert.ok(Date.now() - began >= 1900)
+  assert.ok(Date.now() - began < 5000)
+  assert.equal(state.held.size, 0)
+  assert.equal(state.released(), 1)
+  assert.deepEqual(state.switched, [])
+})
+
 test('held DOM backgrounds are accepted, while the unheld panel-not-displayed fallback remains', async t => {
   const state = mount(t)
   contents.push({ id: 2, getType: () => 'webview', isDestroyed: () => false })

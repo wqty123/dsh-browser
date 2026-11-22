@@ -264,6 +264,28 @@ function makeBundleInstall() {
   return { root, app, body, shim, launcher }
 }
 
+for (const marker of ['$&', '$`', "$'", '$$']) {
+  test(`POSIX launcher replacement preserves literal ${marker} in the resources path`, () => {
+    const { root, shim, launcher } = makeBundleInstall()
+    const path = `/Applications/DSH ${marker}/Contents/Resources`
+    const resourcesLine = "resources='" + path.replaceAll("'", "'\\''") + "'"
+    const original = launcher.replace(/^resources=.*$/m, () => resourcesLine)
+    writeFileSync(shim, original)
+    try {
+      const installed = run([root])
+      assert.equal(installed.code, 0, installed.out)
+      const patched = readFileSync(shim, 'utf8')
+      assert.equal(patched.split('\n')[1], resourcesLine)
+      assert.match(patched, /dsh_app=\$resources\/app\n/)
+      const reverted = run([root, '--revert'])
+      assert.equal(reverted.code, 0, reverted.out)
+      assert.equal(readFileSync(shim, 'utf8'), original)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
 test('a macOS bundle is patched under Contents/Resources and restored by --revert', () => {
   const { root, app, body, shim, launcher } = makeBundleInstall()
   const mainPath = join(app, 'lib', 'main.js')
