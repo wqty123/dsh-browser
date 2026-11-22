@@ -8,7 +8,7 @@ Preflight records undeclared nested dependencies in `automatic.json`. After Desk
 
 Package operations and optional rollback reconciliation inherit DSH's network settings: they do not force offline mode or override fetch timeouts/retries. Both legacy `npm_config_*` and pnpm 11 `PNPM_CONFIG_*` prefixes disable scripts and automatic peer installation. Each CLI call has a five-minute bound and attempts to terminate its process tree on timeout. Unrelated top-level entry removals or retargeting fail the transaction rather than silently accepting pruning. Recovery restart is attempted even when process termination cannot be fully verified, with that uncertainty retained in the failure report.
 
-Electron-node package-manager children inherit `ELECTRON_NO_ASAR=1`, including DSH's own plugin removal after this plugin's Cordis contribution is disposed. This does not change the running host's `process.noAsar`. A packed cold CLI must first import from `app.asar` with archive support enabled, then passes no-ASAR mode to its pnpm child. Maintenance itself discovers the packed CLI through raw archive reads.
+Only the package-manager children this plugin starts get `ELECTRON_NO_ASAR=1`, in their own environment. The plugin never writes it into the host's `process.env`: every later child of an ASAR-packaged host (DSH Tauri's subprocess Job runner, for one) would inherit it and fail to load its own entry from the archive (issue #71). A packed cold CLI must first import from `app.asar` with archive support enabled, then passes no-ASAR mode to its pnpm child. Maintenance itself discovers the packed CLI through raw archive reads.
 
 ## Sidebar tool readiness
 

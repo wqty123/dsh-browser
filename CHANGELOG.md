@@ -2,6 +2,12 @@
 
 本文件记录各轮功能开发与问题修复(由仓库外独立文档迁移,随仓库管理)。
 
+## 未发布
+
+### 修复：Windows / Tauri 上插件启用后代码执行失败（[#71](https://github.com/wqty123/dsh-browser/issues/71)）
+
+1.0.0 加载时把 `ELECTRON_NO_ASAR=1` 写进了宿主进程的 `process.env`。此后宿主启动的每个子进程都继承它：DSH Tauri 以 Electron-as-node 运行、内核打包在 asar 里，`dsh-subprocess-local` 的 Windows Job runner 读不到自己在 asar 里的入口，直接以退出码 1 结束，表现为 `Windows Job runner exited with exit code 1 before proving its managed range empty` 或 `write EPIPE`。现在插件不再改动宿主环境；只有插件自己启动的包管理子进程在各自的环境里带 `ELECTRON_NO_ASAR=1`。
+
 ## 1.0.0（2026-11-22）— 自 0.5.8 以来的更新
 
 这是自上一次公开发布 [v0.5.8](https://github.com/wqty123/dsh-browser/releases/tag/v0.5.8) 以来的累计更新。0.6.x 和此前的 0.7.x 是开发版本，不需要逐个安装。
