@@ -18,7 +18,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const read = p => readFileSync(new URL(p, import.meta.url), 'utf8')
-const provider = read('../src/browser-electron/provider.ts')
+// The provider is split across provider*.ts modules; these checks read all of them.
+const provider = ['provider.ts', 'provider-core.ts', 'provider-tabs.ts', 'provider-navigation.ts', 'provider-observation.ts', 'provider-interaction.ts', 'provider-media.ts'].map(file => read(`../src/browser-electron/${file}`)).join('\n')
 const bridgeHost = read('../src/browser-electron/desktop-bridge-host.ts')
 const systemHost = read('../src/browser-electron/system-browser.ts')
 const selfHosted = read('../src/browser-electron/host-main.ts')

@@ -966,7 +966,7 @@ test('a blank page reports itself as blank instead of as a page with no elements
 // The snapshot returned zero elements for a page full of links, because every label came out empty.
 // The collector's own source is the readable evidence here: running it needs a real DOM.
 test('an image-only link takes its name from the image alt', () => {
-  const source = readFileSync(new URL('../src/browser-electron/provider.ts', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/browser-electron/provider-observation.ts', import.meta.url), 'utf8')
   const labelLine = source.slice(source.indexOf('const label = ('), source.indexOf('const label = (') + 700)
   assert.match(labelLine, /imageAlt/,
     'the label expression must consult the image alt')
@@ -995,7 +995,7 @@ test('a page drawn on a canvas reports itself as a canvas, not as empty', async 
 })
 
 test('the canvas detector fires on area alone, not on an empty element list', () => {
-  const source = readFileSync(new URL('../src/browser-electron/provider.ts', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/browser-electron/provider-observation.ts', import.meta.url), 'utf8')
   const at = source.indexOf('let canvas')
   assert.ok(at !== -1, 'the detector exists')
   const block = source.slice(at, at + 900)

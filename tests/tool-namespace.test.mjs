@@ -16,6 +16,7 @@ const readSrc = name => readFileSync(new URL(`../src/${name}`, import.meta.url),
 // The entry registers what the tool modules define, so the toolset is the entry plus every module.
 const TOOL_SOURCES = ['index', 'tools-navigation', 'tools-observation', 'tools-interaction', 'tools-debug', 'tools-reference']
   .map(file => `tool-browser/${file}.ts`)
+const PROVIDER_MODULES = ['browser-electron/provider.ts', 'browser-electron/provider-core.ts', 'browser-electron/provider-tabs.ts', 'browser-electron/provider-navigation.ts', 'browser-electron/provider-observation.ts', 'browser-electron/provider-interaction.ts', 'browser-electron/provider-media.ts']
 const source = () => TOOL_SOURCES.map(readSrc).join('\n')
 const entry = () => readSrc('tool-browser/index.ts')
 
@@ -67,11 +68,11 @@ test('the rename did not touch uppercase constants', () => {
   // every error code, which broke `code === 'BROWSER_...'` comparisons and left an undefined
   // identifier. Tool names are entirely lowercase, so a capital after the prefix can only be
   // collateral damage — checked on the real sources, not on the rename script.
-  for (const file of [...TOOL_SOURCES, 'tool-browser/state.ts', 'tool-browser/probe-client.ts', 'browser-electron/provider.ts', 'browser-electron/entry.ts']) {
+  for (const file of [...TOOL_SOURCES, 'tool-browser/state.ts', 'tool-browser/probe-client.ts', ...PROVIDER_MODULES, 'browser-electron/entry.ts']) {
     const text = readSrc(file)
     const smashed = [...text.matchAll(/dsh_browser_[A-Z][A-Z_0-9]*/g)].map(m => m[0])
     assert.deepEqual(smashed, [], `${file} has a constant that the rename damaged`)
   }
   assert.match(readSrc('browser-electron/entry.ts'), /BROWSER_PROFILE_DIR/, 'the constant is intact')
-  assert.match(readSrc('browser-electron/provider.ts'), /BROWSER_SNAPSHOT_TIMEOUT/, 'and so is this one')
+  assert.match(readSrc('browser-electron/provider-observation.ts'), /BROWSER_SNAPSHOT_TIMEOUT/, 'and so is this one')
 })
