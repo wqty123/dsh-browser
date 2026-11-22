@@ -9,10 +9,12 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
 
-const source = readFileSync(new URL('../src/browser-electron/provider.ts', import.meta.url), 'utf8')
+// The provider is split across provider*.ts modules; these checks read all of them.
+const source = ['provider.ts', 'provider-core.ts', 'provider-tabs.ts', 'provider-navigation.ts', 'provider-observation.ts', 'provider-interaction.ts', 'provider-media.ts']
+  .map(file => readFileSync(new URL(`../src/browser-electron/${file}`, import.meta.url), 'utf8')).join('\n')
 
 test('opening a URL that is already open binds that page instead of creating another', () => {
-  const at = source.indexOf('private async adoptMatchingPage')
+  const at = source.indexOf('async adoptMatchingPage(')
   assert.ok(at !== -1, 'the reuse path exists')
   const block = source.slice(at, at + 2200)
 

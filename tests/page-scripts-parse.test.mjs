@@ -108,6 +108,12 @@ function wrap(body) {
 
 const SOURCES = [
   ['src/browser-electron/provider.ts', 'the provider’s page scripts'],
+  ['src/browser-electron/provider-core.ts', 'the provider’s page scripts'],
+  ['src/browser-electron/provider-tabs.ts', 'the provider’s page scripts'],
+  ['src/browser-electron/provider-navigation.ts', 'the provider’s page scripts'],
+  ['src/browser-electron/provider-observation.ts', 'the provider’s page scripts'],
+  ['src/browser-electron/provider-interaction.ts', 'the provider’s page scripts'],
+  ['src/browser-electron/provider-media.ts', 'the provider’s page scripts'],
   ['src/browser-electron/host-main.ts', 'the toolbar and download scripts'],
   ['src/browser-electron/virtual-cursor.ts', 'the cursor script'],
   ['desktop-bridge/plugin-browser-bridge.js', 'the sidebar bridge’s scripts'],
@@ -144,10 +150,10 @@ test('the scan actually finds the scripts it claims to cover', () => {
   // A guard against the guard: if a refactor renames the files or changes how scripts are
   // written, this test failing is the signal that the scan above became a no-op rather than a
   // pass.
-  const provider = readFileSync('src/browser-electron/provider.ts', 'utf8')
+  const provider = ['provider.ts', 'provider-core.ts', 'provider-tabs.ts', 'provider-navigation.ts', 'provider-observation.ts', 'provider-interaction.ts', 'provider-media.ts'].map(file => readFileSync(`src/browser-electron/${file}`, 'utf8')).join('\n')
   const found = extractScripts(provider).filter(entry => looksLikeScript(entry.body))
   assert.ok(
     found.length >= 5,
-    `expected several page scripts in provider.ts, found ${found.length} — the extraction is probably broken`,
+    `expected several page scripts in the provider modules, found ${found.length} — the extraction is probably broken`,
   )
 })
