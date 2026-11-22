@@ -32,7 +32,8 @@ export async function documentReady(handle: ElectronViewHandle, expected: Docume
     expression: 'document.readyState', contextId: world.executionContextId, returnByValue: true,
   }, { present: false, initialize: false }) as { result?: { value?: unknown }; exceptionDetails?: unknown }
   checkCurrent()
-  const after = mainDocument(await handle.sendCommand('Page.getFrameTree', undefined, { present: false, initialize: false }))
+  const after = mainDocument(await handle.sendCommand('Page.getFrameTree', undefined, { present: false, initialize: false }),
+    { allowErrorDocument: !!expected.unreachableUrl })
   checkCurrent()
   if (after.id !== expected.id || after.loaderId !== expected.loaderId) {
     throw new BrowserError('browser: the acknowledged document was superseded', 'BROWSER_NAVIGATION_SUPERSEDED')

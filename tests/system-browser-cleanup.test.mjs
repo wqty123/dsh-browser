@@ -162,9 +162,9 @@ async function until(predicate) {
   while (!predicate()) { if (Date.now() > end) throw Error('condition timed out'); await new Promise(resolve => setTimeout(resolve, 10)) }
 }
 
-async function carrier(t, { adopted = false, managed = true, endpointPid } = {}) {
+async function carrier(t, { adopted = false, managed = true, endpointPid, blanks } = {}) {
   const s = setup(t)
-  const browser = createFakeBrowser({ browserName: adopted ? 'Chrome/157' : 'Fake/1', browserPid: endpointPid ?? s.child.pid })
+  const browser = createFakeBrowser({ browserName: adopted ? 'Chrome/157' : 'Fake/1', browserPid: endpointPid ?? s.child.pid, blanks })
   await browser.listen()
   t.after(() => browser.kill())
   const portFile = join(s.directory, 'DevToolsActivePort')
@@ -233,6 +233,30 @@ test('automatic teardown detaches; only explicit close can close an agent-create
   host.dispose()
   assert.deepEqual(browser.closed, [agentTarget])
   assert.equal(s.killed, 0)
+})
+
+for (const detach of [false, true]) test(`automatically adopted blank targets are owned across detach (${detach})`, async t => {
+  const { browser, host, view, scope, id } = await carrier(t, { adopted: true, blanks: ['startup-blank'] })
+  assert.deepEqual(browser.created, [])
+  assert.deepEqual(browser.attached, ['startup-blank'])
+  if (detach) {
+    host.destroyView(view)
+    await until(() => browser.commands.some(command => command.method === 'Target.detachFromTarget'))
+    assert.deepEqual(browser.closed, [])
+  }
+  await host.closePage(detach ? tabWireId({ owner: 'task-a', session: 'main', tab: 'page:startup-blank' }) : id, scope)
+  assert.deepEqual(browser.closed, ['startup-blank'])
+  assert.equal(browser.commands.some(command => ['Page.bringToFront', 'Input.dispatchMouseEvent', 'Browser.setWindowBounds'].includes(command.method)), false)
+})
+
+test('explicitly adopted personal blank targets remain detach-only', async t => {
+  const { browser, host, scope } = await carrier(t, { adopted: true })
+  const id = tabWireId({ owner: 'task-a', session: 'main', tab: 'page:personal-blank' })
+  const view = await host.adoptPage(id, scope)
+  await assert.rejects(host.closePage(id, scope), /detach-only/)
+  host.destroyView(view)
+  await until(() => browser.commands.some(command => command.method === 'Target.detachFromTarget'))
+  assert.deepEqual(browser.closed, [])
 })
 
 test('provider explicit close reaches the owned target and preserves the logical tab on refusal', async t => {

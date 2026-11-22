@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
 
@@ -8,15 +8,15 @@ export interface ProfileLease {
   release(cleanup?: () => void): Promise<void>
 }
 
-function isStaleGuard(guardPath: string): boolean {
+function isStaleGuard(guardPath: string, leasePath: string): boolean {
   try {
-    const raw = JSON.parse(readFileSync(guardPath, 'utf8')) as { pid?: unknown; at?: unknown } | null
+    const ownerPath = statSync(guardPath).isDirectory() ? leasePath : guardPath
+    const raw = JSON.parse(readFileSync(ownerPath, 'utf8')) as { pid?: unknown } | null
     if (raw && Number.isSafeInteger(raw.pid) && Number(raw.pid) > 0) {
       try { process.kill(Number(raw.pid), 0) }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true
       }
-      if (typeof raw.at === 'number' && Number.isFinite(raw.at) && Date.now() - raw.at > STALE_GUARD_MS) return true
       return false
     }
   } catch { /* fall through to mtime check */ }
@@ -46,8 +46,11 @@ export function acquireProfileLease(directory: string): ProfileLease {
         break
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw busy()
-        if (attempt === 0 && isStaleGuard(guard)) {
-          try { unlinkSync(guard) } catch { /* raced with another cleaner */ }
+        if (attempt === 0 && isStaleGuard(guard, file)) {
+          try {
+            if (statSync(guard).isDirectory()) rmdirSync(guard)
+            else unlinkSync(guard)
+          } catch { /* raced with another cleaner */ }
           continue
         }
         throw busy()

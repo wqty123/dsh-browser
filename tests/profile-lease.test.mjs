@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -35,6 +35,49 @@ test('a dead process lease can be reclaimed and cleanup remains exclusive', asyn
     })
     assert.equal(existsSync(dir), false)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+for (const directoryGuard of [false, true]) {
+  for (const alive of [false, true]) test(`guard recovery preserves live owners (directory=${directoryGuard}, alive=${alive})`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-profile-guard-'))
+    const guard = join(dirname(dir), `.${basename(dir)}.dsh-browser-lease.guard`)
+    const exited = spawnSync(process.execPath, ['-e', ''])
+    assert.equal(exited.status, 0)
+    const pid = alive ? process.pid : exited.pid
+    const owner = JSON.stringify({ pid, at: 0, token: 'guard-owner' })
+    try {
+      if (directoryGuard) {
+        mkdirSync(guard)
+        writeFileSync(join(dir, '.dsh-browser-lease.json'), owner)
+      } else writeFileSync(guard, owner)
+      utimesSync(guard, new Date(0), new Date(0))
+      if (alive) {
+        assert.throws(() => acquireProfileLease(dir), /profile is leased/)
+        assert.equal(existsSync(guard), true)
+      } else {
+        const lease = acquireProfileLease(dir)
+        await lease.release()
+        assert.equal(existsSync(guard), false)
+      }
+    } finally {
+      rmSync(guard, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}
+
+for (const old of [false, true]) test(`legacy empty directory guard recovery requires staleness (${old})`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-profile-legacy-'))
+  const guard = join(dirname(dir), `.${basename(dir)}.dsh-browser-lease.guard`)
+  try {
+    mkdirSync(guard)
+    if (old) utimesSync(guard, new Date(0), new Date(0))
+    if (old) await acquireProfileLease(dir).release()
+    else assert.throws(() => acquireProfileLease(dir), /profile is leased/)
+  } finally {
+    rmSync(guard, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 for (const invalid of ['', 'null', '{}', '{broken', '{"pid":0,"token":"x"}']) {

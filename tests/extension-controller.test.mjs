@@ -128,11 +128,13 @@ test('CDP escape hatches, cookie export, oversized screenshot and foreign leases
   await assert.rejects(controller.request({ kind: 'cdp', scope: 'foreign', view: 'task/session/tab', lease, method: 'Runtime.evaluate' }), /foreign/)
 })
 
-test('dialogs are dismissed and reported to the next operation; child-session events are routed', async () => {
+test('dialogs are dismissed without failing the next operation; child-session events are routed', async () => {
   const { controller, calls, events } = fake(), { lease } = await create(controller)
   await controller.event({ tabId: 2, sessionId: 'child' }, 'Page.javascriptDialogOpening', { type: 'confirm', message: 'Confirm?' })
   assert.deepEqual(calls.find(([method]) => method === 'Page.handleJavaScriptDialog').slice(1), [{ tabId: 2, sessionId: 'child' }, { accept: false }])
-  await assert.rejects(cdp(controller, lease, 'Runtime.evaluate'), /dismissed JavaScript confirm/)
+  await cdp(controller, lease, 'Runtime.evaluate')
+  const notices = await controller.request({ kind: 'events', scope: 'task/session', view: 'task/session/tab', lease })
+  assert.ok(notices.some(notice => /dismissed JavaScript confirm/.test(notice)))
   assert.equal(events[0].sessionId, 'child')
   await controller.event({ tabId: 2 }, 'Network.requestWillBeSent', { request: { headers: { Cookie: 'private', Authorization: 'private', Accept: '*/*' } } })
   assert.equal(events.at(-1).params.request.headers.Cookie, '[redacted]')

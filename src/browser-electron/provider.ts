@@ -1589,7 +1589,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   private async documentIdentity(handle: ElectronViewHandle, signal?: AbortSignal, checkCurrent?: () => void,
-    deadline = Date.now() + PROVIDER_TIMEOUTS.evaluation): Promise<DocumentIdentity> {
+    deadline = Date.now() + PROVIDER_TIMEOUTS.evaluation, allowErrorDocument = false): Promise<DocumentIdentity> {
     signal?.throwIfAborted()
     checkCurrent?.()
     return mainDocument(await withTimeout(
@@ -1598,7 +1598,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
         try { checkCurrent?.() } catch { return }
         this.interrupt(handle, timedOut)
       },
-    ))
+    ), { allowErrorDocument })
   }
 
   /**
@@ -1614,7 +1614,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
    */
   private async settleDocument(handle: ElectronViewHandle, before: DocumentIdentity | undefined, signal?: AbortSignal,
     acknowledgement?: { readonly frameId?: string; readonly loaderId?: string }, checkCurrent?: () => void,
-    historyEntry?: number, deadline = Date.now() + DEFAULT_OPERATION_TIMEOUT_MS): Promise<void> {
+    historyEntry?: number, deadline = Date.now() + DEFAULT_OPERATION_TIMEOUT_MS, allowErrorDocument = false): Promise<void> {
     // The document is being replaced, so the synthetic pointer drawn into the old one
     // is gone. Dropping the remembered position is what lets it be painted again:
     // without this, a paint at coincidentally identical coordinates would be skipped
@@ -1633,7 +1633,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
           const history = await handle.sendCommand('Page.getNavigationHistory') as { entries?: Array<{ id?: number }>; currentIndex?: number }
           if (history.entries?.[history.currentIndex ?? -1]?.id !== historyEntry) return false
         }
-        const current = await this.documentIdentity(handle, signal, checkCurrent, deadline)
+        const current = await this.documentIdentity(handle, signal, checkCurrent, deadline, allowErrorDocument)
         if (acknowledgement?.frameId !== undefined && current.id !== acknowledgement.frameId) {
           throw new BrowserError('browser: navigation frame was superseded', 'BROWSER_NAVIGATION_SUPERSEDED')
         }
@@ -2781,7 +2781,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (entry?.id === undefined) throw new BrowserError('browser: history entry missing id', 'BROWSER_HISTORY_INVALID')
     // A history step is a navigation too: the classic A→B→A redirect would
     // otherwise read the outgoing document's identity (see settleDocument).
-    const before = await this.documentIdentity(handle, signal, () => { this.checkNavigation(tab, navigation) }, deadline)
+    const before = await this.documentIdentity(handle, signal, () => { this.checkNavigation(tab, navigation) }, deadline, true)
     const inPage = await withTimeout(handleSendEvaluate(handle, `(() => {
       if (typeof navigation === 'undefined') return false;
       const entry = navigation.entries().find(entry => entry.index === navigation.currentEntry.index + ${direction});
@@ -2798,7 +2798,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     )
     await this.settleDocument(handle, before, signal,
       inPage.ok && inPage.value === true ? { frameId: before.id, loaderId: before.loaderId } : undefined,
-      () => { this.checkNavigation(tab, navigation) }, entry.id, deadline)
+      () => { this.checkNavigation(tab, navigation) }, entry.id, deadline, true)
     this.record(s, direction === -1 ? 'back' : 'forward', {}, true)
     this.recordVisit(s, handle)
     this.showActive(s)
@@ -2827,7 +2827,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const deadline = Date.now() + timeoutMs
     // Same-URL reload: only the per-load document identity can tell the new
     // document from the old one, so capture it before reloading.
-    const before = await this.documentIdentity(handle, signal, () => { this.checkNavigation(tab, navigation) }, deadline)
+    const before = await this.documentIdentity(handle, signal, () => { this.checkNavigation(tab, navigation) }, deadline, true)
     this.checkNavigation(tab, navigation)
     signal?.throwIfAborted()
     await withTimeout(
@@ -2838,7 +2838,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // Best-effort: cancel the reload if it wedges the debugger queue.
       () => { if (tab.navigation === navigation) void handle.sendCommand('Page.stopLoading').catch(() => {}) },
     )
-    await this.settleDocument(handle, before, signal, undefined, () => { this.checkNavigation(tab, navigation) }, undefined, deadline)
+    await this.settleDocument(handle, before, signal, undefined, () => { this.checkNavigation(tab, navigation) }, undefined, deadline, true)
     this.record(s, 'reload', {}, true)
     this.recordVisit(s, handle)
     this.showActive(s)

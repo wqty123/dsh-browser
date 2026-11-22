@@ -1376,6 +1376,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
       const sessionId = attached?.sessionId
       if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
+      if (adopted !== undefined) this.rememberTarget(client, targetId, viewId)
       // The session id is what page commands ride; the target id is what closes it.
       this.sessions.set(sessionId, targetId)
       this.views.set(viewId, { session: sessionId, client })
@@ -1450,10 +1451,14 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }) as { targetId?: string }
     const targetId = created?.targetId
     if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')
+    this.rememberTarget(client, targetId, viewId)
+    return targetId
+  }
+
+  private rememberTarget(client: CdpClient, targetId: string, viewId: string): void {
     let targets = this.createdTargets.get(client)
     if (!targets) { targets = new Map(); this.createdTargets.set(client, targets) }
     targets.set(targetId, viewId as BrowserTabWireId)
-    return targetId
   }
 
   /** Views whose session is being created right now, so a second caller waits for the first. */
