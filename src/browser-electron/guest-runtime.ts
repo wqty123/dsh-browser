@@ -207,6 +207,10 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       : name.toLowerCase() === 'srcset' ? proxySrcset(String(value)) : proxyResource(String(value));
     const set = Element.prototype.setAttribute;
     Element.prototype.setAttribute = function(name, value) {
+      if (this.tagName === 'LINK' && /^integrity$/i.test(name)) {
+        this.removeAttribute('integrity');
+        return;
+      }
       return set.call(this, name, /^(src|href|action|poster|srcset|style)$/i.test(name) ? resourceAttribute(name, value) : value);
     };
     for (const [name, prop] of [['HTMLImageElement', 'src'], ['HTMLScriptElement', 'src'],
@@ -221,6 +225,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
     });
     const rewriteResource = node => {
       if (!node || node.nodeType !== 1) return;
+      if (node.tagName === 'LINK' && node.hasAttribute('integrity')) node.removeAttribute('integrity');
       rewriteStyleText(node);
       const attributes = /^(A|FORM)$/.test(node.tagName) ? ['style'] : ['src', 'href', 'srcset', 'poster', 'style'];
       for (const attribute of attributes) attempt(() => {
@@ -233,7 +238,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
     const rewriteTree = node => {
       rewriteResource(node);
       if (node && node.querySelectorAll) {
-        for (const descendant of node.querySelectorAll('[src],[href],[srcset],[poster],[style],style')) rewriteResource(descendant);
+        for (const descendant of node.querySelectorAll('[src],[href],[srcset],[poster],[style],[integrity],style')) rewriteResource(descendant);
       }
     };
     for (const name of ['Node', 'Element', 'Document', 'DocumentFragment']) {
@@ -290,7 +295,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       });
     });
     observer.observe(document, { childList: true, subtree: true, attributes: true, characterData: true,
-      attributeFilter: ['src', 'href', 'srcset', 'poster', 'action', 'style'] });
+      attributeFilter: ['src', 'href', 'srcset', 'poster', 'action', 'style', 'integrity'] });
     rewriteTree(document.documentElement);
   });
   attempt(() => document.addEventListener('click', event => {

@@ -49,6 +49,8 @@ export class ExtensionController {
     const stored = (await this.api.storage.session.get(DEBUGGER_SESSION_KEY))[DEBUGGER_SESSION_KEY]
     for (const lease of stored?.leases ?? []) {
       if (validScope(lease.id) && validScope(lease.scope) && validScope(lease.view) && Number.isInteger(lease.tabId)) {
+        lease.notices = Array.isArray(lease.notices) ? lease.notices : []
+        lease.blockingNotices = Array.isArray(lease.blockingNotices) ? lease.blockingNotices : []
         this.leases.set(lease.id, lease); this.tabLeases.set(lease.tabId, lease)
       }
     }
@@ -144,12 +146,20 @@ export class ExtensionController {
       try {
         await this.api.debugger.sendCommand(source, 'Page.handleJavaScriptDialog', { accept: false })
         lease.notices.push(`Quiet mode dismissed JavaScript ${params.type ?? 'dialog'}: ${String(params.message ?? '').slice(0, EXTENSION_LIMITS.dialogPreview)}`)
-      } catch { lease.notices.push('Quiet mode could not dismiss a JavaScript dialog; human action may be required.') }
+      } catch {
+        const msg = 'Quiet mode could not dismiss a JavaScript dialog; human action may be required.'
+        lease.notices.push(msg)
+        lease.blockingNotices.push(msg)
+        lease.blockingNotices = lease.blockingNotices.slice(-EXTENSION_LIMITS.notices)
+      }
       lease.notices = lease.notices.slice(-EXTENSION_LIMITS.notices)
     }
     if (method === 'Page.fileChooserOpened') {
-      lease.notices.push('Quiet mode blocked a file chooser; file uploads are unavailable.')
+      const msg = 'Quiet mode blocked a file chooser; file uploads are unavailable.'
+      lease.notices.push(msg)
+      lease.blockingNotices.push(msg)
       lease.notices = lease.notices.slice(-EXTENSION_LIMITS.notices)
+      lease.blockingNotices = lease.blockingNotices.slice(-EXTENSION_LIMITS.notices)
     }
     if (method.startsWith('Network.')) {
       params = JSON.parse(JSON.stringify(params))
@@ -170,7 +180,7 @@ export class ExtensionController {
       const tab = await this.api.tabs.get(tabId)
       const url = tab.url || tab.pendingUrl || (this.created.get(tabId) === scope ? 'about:blank' : undefined)
       if (tab.incognito || !allowedUrl(url) || !allowedUrl(tab.pendingUrl || url)) throw Error('restricted/internal, extension and incognito pages are unavailable')
-      const lease = { id: crypto.randomUUID(), tabId, scope, view, notices: [] }
+      const lease = { id: crypto.randomUUID(), tabId, scope, view, notices: [], blockingNotices: [] }
       this.leases.set(lease.id, lease); this.tabLeases.set(tabId, lease)
       try {
         await this.activate(lease)
@@ -238,7 +248,7 @@ export class ExtensionController {
     }
     if (kind === 'events') return lease.notices.splice(0)
     if (kind !== 'cdp') throw Error('unsupported extension operation')
-    if (lease.notices.length) throw Error(lease.notices.shift())
+    if (lease.blockingNotices?.length) throw Error(lease.blockingNotices.shift())
     let { method, params = {}, sessionId } = operation
     if (typeof method !== 'string' || !DOMAINS.has(method.split('.')[0]) || DENIED.has(method)
       || /Cookies|Cookie/.test(method) || method.startsWith('Input.') && !method.startsWith('Input.dispatch') && method !== 'Input.insertText'

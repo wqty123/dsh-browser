@@ -24,8 +24,22 @@ export function registration(browser, manifest, { platform = process.platform, h
 const LAUNCHER_BUFFER_BYTES = 8192
 
 export function launcherSource(nodePath, hostScript, configPath) {
-  return `using System; using System.Diagnostics; using System.Threading.Tasks;
+  return `using System; using System.Diagnostics; using System.Text; using System.Threading.Tasks;
       class NativeHost {
+        static string QuoteArg(string arg) {
+          var sb=new StringBuilder();
+          sb.Append('"');
+          int backslashes=0;
+          for(int i=0;i<arg.Length;i++) {
+            char c=arg[i];
+            if(c=='\\\\') { backslashes++; }
+            else if(c=='"') { sb.Append('\\\\',backslashes*2+1); sb.Append('"'); backslashes=0; }
+            else { if(backslashes>0) { sb.Append('\\\\',backslashes); backslashes=0; } sb.Append(c); }
+          }
+          if(backslashes>0) sb.Append('\\\\',backslashes*2);
+          sb.Append('"');
+          return sb.ToString();
+        }
         static void Relay(System.IO.Stream input, System.IO.Stream output) {
           var buffer=new byte[${LAUNCHER_BUFFER_BYTES}];
           int count;
@@ -37,7 +51,7 @@ export function launcherSource(nodePath, hostScript, configPath) {
         static int Main(string[] args) {
         if(args.Length<1) return 1;
         var info=new ProcessStartInfo(${literal(nodePath)});
-        info.Arguments="\\\""+${literal(hostScript)}+"\\\" --config \\\""+${literal(configPath)}+"\\\" \\\""+args[0].Replace("\\\"", "")+"\\\"";
+        info.Arguments=QuoteArg(${literal(hostScript)})+" --config "+QuoteArg(${literal(configPath)})+" "+QuoteArg(args[0]);
         info.UseShellExecute=false; info.CreateNoWindow=true;
         info.RedirectStandardInput=true; info.RedirectStandardOutput=true; info.RedirectStandardError=true;
         using(var process=Process.Start(info)) {

@@ -33,6 +33,7 @@ function isSelfTarget(url: URL): boolean {
     || /^\[(?:f[cd]|fe[89ab])/u.test(host) || /^169\.254\./u.test(host)) return true
   if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1' || host === '0.0.0.0') return true
   if (/^(?:0|127)\./u.test(host)) return true
+  if (/^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./u.test(host)) return true
   if (/^10\./u.test(host) || /^192\.168\./u.test(host)) return true
   if (/^172\.(1[6-9]|2\d|3[01])\./u.test(host)) return true
   return false
@@ -61,6 +62,24 @@ function upstreamErrorCode(error: unknown): string | undefined {
       && typeof value.code === 'string' && UPSTREAM_ERROR_CODES.has(value.code)) return value.code
   }
   return undefined
+}
+
+/** Decode CSS bytes honoring BOM, Content-Type charset, and @charset; unknown encodings pass through untouched. */
+function decodeCssBytes(bytes: Buffer, contentType: string): string | undefined {
+  let label: string | undefined
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) label = 'utf-8'
+  else if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) label = 'utf-16le'
+  else if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) label = 'utf-16be'
+  else {
+    const headerMatch = /;\s*charset\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s;]+))/iu.exec(contentType)
+    label = headerMatch?.[1] ?? headerMatch?.[2] ?? headerMatch?.[3]
+    if (label === undefined) {
+      const head = bytes.subarray(0, 1024).toString('latin1')
+      label = /^@charset\s+"([^"]+)";/u.exec(head)?.[1] ?? 'utf-8'
+    }
+  }
+  try { return new TextDecoder(label).decode(bytes).replace(/^@charset\s+"[^"]+";\s*/iu, '') }
+  catch { return undefined }
 }
 
 /** Document content types eligible for rewriting. */
@@ -180,27 +199,30 @@ function stripDocumentPolicies(html: string): string {
  */
 export function rewriteDocument(html: string, base: URL): string {
   const proxied = (raw: string): string | undefined => proxyReference(raw, base)
-  const attributes = (tag: string): string => tag.replace(
-    /(\s+)([^\s"'<>/=]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/gu,
-    (match, space: string, name: string, equals: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
-      const value = decodeAttribute(doubleQuoted ?? singleQuoted ?? bare ?? '')
-      const attribute = name.toLowerCase()
-      let next: string | undefined
-      if (['href', 'src', 'poster', 'data-src', 'action'].includes(attribute)) next = proxied(value)
-      else if (attribute === 'target' && /^_(?:blank|new|top|parent)$/iu.test(value)) next = '_self'
-      else if (attribute === 'srcset') {
-        next = value.split(',').map(part => {
-          const [url, descriptor] = part.trim().split(/\s+/u)
-          const rewritten = url === undefined ? undefined : proxied(url)
-          if (rewritten === undefined) return part.trim()
-          return descriptor === undefined ? rewritten : `${rewritten} ${descriptor}`
-        }).join(', ')
-      } else if (attribute === 'style') next = rewriteCss(value, proxied)
-      if (next === undefined) return match
-      const quote = singleQuoted === undefined ? '"' : "'"
-      return space + name + equals + quote + escapeAttribute(next, quote) + quote
-    },
-  )
+  const attributes = (tag: string): string => {
+    const isLink = /^<link\b/iu.test(tag)
+    return tag.replace(
+      /(\s+)([^\s"'<>/=]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/gu,
+      (match, space: string, name: string, equals: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
+        const value = decodeAttribute(doubleQuoted ?? singleQuoted ?? bare ?? '')
+        const attribute = name.toLowerCase()
+        if (isLink && attribute === 'integrity') return ''
+        let next: string | undefined
+        if (['href', 'src', 'poster', 'data-src', 'action'].includes(attribute)) next = proxied(value)
+        else if (attribute === 'srcset') {
+          next = value.split(',').map(part => {
+            const [url, descriptor] = part.trim().split(/\s+/u)
+            const rewritten = url === undefined ? undefined : proxied(url)
+            if (rewritten === undefined) return part.trim()
+            return descriptor === undefined ? rewritten : `${rewritten} ${descriptor}`
+          }).join(', ')
+        } else if (attribute === 'style') next = rewriteCss(value, proxied)
+        if (next === undefined) return match
+        const quote = singleQuoted === undefined ? '"' : "'"
+        return space + name + equals + quote + escapeAttribute(next, quote) + quote
+      },
+    )
+  }
   return stripDocumentPolicies(html).replace(
     /<!--[\s\S]*?-->|(<(script|style|textarea|title|xmp|iframe|noembed|noframes)\b(?:[^>"']|"[^"]*"|'[^']*')*>)([\s\S]*?)(<\/\2\s*>|$)|<[a-z][a-z\d:-]*\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu,
     (markup, open: string | undefined, kind: string | undefined, content: string, close: string) => {
@@ -497,7 +519,14 @@ export async function handleGuest(
       return
     }
     if (/^text\/css(?:;|$)/iu.test(type) && !(upstream.status >= 300 && upstream.status < 400)) {
-      const css = rewriteCss(await upstream.text(), value => proxyReference(value, target))
+      const bytes = Buffer.from(await upstream.arrayBuffer())
+      const decoded = decodeCssBytes(bytes, type)
+      if (decoded === undefined) {
+        writeHead(upstream.status, Object.fromEntries(out))
+        response.end(bytes)
+        return
+      }
+      const css = rewriteCss(decoded, value => proxyReference(value, target))
       out.delete('etag')
       out.delete('content-md5')
       out.set('content-type', 'text/css; charset=utf-8')

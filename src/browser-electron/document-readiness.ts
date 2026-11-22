@@ -8,13 +8,13 @@ export interface DocumentIdentity {
   readonly unreachableUrl?: string
 }
 
-export function mainDocument(value: unknown): DocumentIdentity {
+export function mainDocument(value: unknown, options?: { readonly allowErrorDocument?: boolean }): DocumentIdentity {
   const frame = (value as { frameTree?: { frame?: DocumentIdentity } } | undefined)?.frameTree?.frame
   if (typeof frame?.id !== 'string' || frame.id === ''
     || typeof frame.loaderId !== 'string' || frame.loaderId === '' || typeof frame.url !== 'string') {
     throw new BrowserError('browser: the guest did not acknowledge its main document identity', 'BROWSER_DOCUMENT_UNACKNOWLEDGED')
   }
-  if (frame.unreachableUrl) {
+  if (frame.unreachableUrl && options?.allowErrorDocument !== true) {
     throw new BrowserError(`browser: failed to load ${frame.unreachableUrl}`, 'BROWSER_NAVIGATION_FAILED')
   }
   return frame

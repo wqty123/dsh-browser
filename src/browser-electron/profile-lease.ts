@@ -1,9 +1,30 @@
-import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
 
+const STALE_GUARD_MS = 10_000
+
 export interface ProfileLease {
   release(cleanup?: () => void): Promise<void>
+}
+
+function isStaleGuard(guardPath: string): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(guardPath, 'utf8')) as { pid?: unknown; at?: unknown } | null
+    if (raw && Number.isSafeInteger(raw.pid) && Number(raw.pid) > 0) {
+      try { process.kill(Number(raw.pid), 0) }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true
+      }
+      if (typeof raw.at === 'number' && Number.isFinite(raw.at) && Date.now() - raw.at > STALE_GUARD_MS) return true
+      return false
+    }
+  } catch { /* fall through to mtime check */ }
+  try {
+    return Date.now() - statSync(guardPath).mtimeMs > STALE_GUARD_MS
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+  }
 }
 
 /** Exclusive ownership of the plugin profile, including launch and shutdown. */
@@ -15,8 +36,31 @@ export function acquireProfileLease(directory: string): ProfileLease {
   const token = randomUUID()
   const busy = (): Error => new Error(`dsh-builtin-browser: browser profile is leased or its ownership cannot be verified: ${root}`)
   const guarded = <T>(operation: () => T): T => {
-    try { mkdirSync(guard) } catch { throw busy() }
-    try { return operation() } finally { rmdirSync(guard) }
+    let acquired = false
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let fd: number | undefined
+      try {
+        fd = openSync(guard, 'wx', 0o600)
+        writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }))
+        acquired = true
+        break
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw busy()
+        if (attempt === 0 && isStaleGuard(guard)) {
+          try { unlinkSync(guard) } catch { /* raced with another cleaner */ }
+          continue
+        }
+        throw busy()
+      } finally {
+        if (fd !== undefined) { try { closeSync(fd) } catch {} }
+      }
+    }
+    if (!acquired) throw busy()
+    try { return operation() } finally {
+      try { unlinkSync(guard) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
   }
   guarded(() => {
     let previous: unknown
