@@ -83,226 +83,297 @@ export function targetArgs(target: Target): Record<string, unknown> {
 
 const NOT_EXPRESSION = /^(return|if|for|while|do|switch|try|catch|finally|throw|const|let|var|function|async\s+function|class|import|export|break|continue|else|\}|\)|\]|\/\/|\/\*|\*)/
 const CONTINUES = /[([{,+\-*/%=&|?:.<>!^~]$|=>$/
-const IDENT_START = /[A-Za-z_$]/
-const IDENT_PART = /[A-Za-z0-9_$]/
+const REGEX_BEFORE = new Set(['', '(', '[', '{', ',', ';', ':', '=', '!', '&', '|', '?', '+', '-', '*', '%', '^', '~', '<', '>', '\n'])
+const REGEX_KEYWORDS = new Set(['return', 'throw', 'case', 'in', 'instanceof', 'typeof', 'void', 'delete', 'new', 'await', 'yield', 'else', 'do', 'of'])
 
-function skipString(code: string, start: number): number {
-  const quote = code[start]!
-  let i = start + 1
-  while (i < code.length) {
-    const ch = code[i]!
-    if (ch === '\\') { i += 2; continue }
-    if (quote === '`' && ch === '$' && code[i + 1] === '{') {
-      i += 2
-      let depth = 1
-      while (i < code.length && depth > 0) {
-        const inner = code[i]!
-        if (inner === "'" || inner === '"' || inner === '`') { i = skipString(code, i); continue }
-        if (inner === '/' && code[i + 1] === '/') { i = code.indexOf('\n', i + 2); i = i === -1 ? code.length : i + 1; continue }
-        if (inner === '/' && code[i + 1] === '*') { i = code.indexOf('*/', i + 2); i = i === -1 ? code.length : i + 2; continue }
-        if (inner === '{') depth++
-        else if (inner === '}') depth--
-        i++
-      }
-      continue
-    }
-    if (ch === quote) return i + 1
-    i++
-  }
-  return i
-}
-
-function skipWsAndComments(code: string, start: number): number {
-  let i = start
-  while (i < code.length) {
-    const ch = code[i]!
-    if (/\s/.test(ch)) { i++; continue }
-    if (ch === '/' && code[i + 1] === '/') { i = code.indexOf('\n', i + 2); i = i === -1 ? code.length : i + 1; continue }
-    if (ch === '/' && code[i + 1] === '*') { i = code.indexOf('*/', i + 2); i = i === -1 ? code.length : i + 2; continue }
-    break
-  }
-  return i
-}
-
-function readIdent(code: string, start: number): { readonly name: string; readonly end: number } | undefined {
-  if (start >= code.length || !IDENT_START.test(code[start]!)) return undefined
-  let i = start + 1
-  while (i < code.length && IDENT_PART.test(code[i]!)) i++
-  return { name: code.slice(start, i), end: i }
-}
-
-/** Skip an initializer/default expression until an unnested stop character (`,` `;` `]` `}` or newline). */
-function skipInitExpr(code: string, start: number, stopOnNewline: boolean): number {
-  let i = start
-  let depth = 0
-  while (i < code.length) {
-    const ch = code[i]!
-    if (ch === "'" || ch === '"' || ch === '`') { i = skipString(code, i); continue }
-    if (ch === '/' && code[i + 1] === '/') {
-      const nl = code.indexOf('\n', i + 2)
-      i = nl === -1 ? code.length : nl
-      if (stopOnNewline && depth === 0) return i
-      continue
-    }
-    if (ch === '/' && code[i + 1] === '*') { i = code.indexOf('*/', i + 2); i = i === -1 ? code.length : i + 2; continue }
-    if (ch === '(' || ch === '[' || ch === '{') { depth++; i++; continue }
-    if (ch === ')' || ch === ']' || ch === '}') {
-      if (depth === 0) return i
-      depth--
-      i++
-      continue
-    }
-    if (depth === 0) {
-      if (ch === ',' || ch === ';') return i
-      if (stopOnNewline && ch === '\n') return i
-    }
-    i++
-  }
-  return i
-}
-
-/** Parse a JS binding identifier or destructuring pattern (`[a, { b: c = 1 }]`), collecting bound names. */
-function parseBindingPattern(code: string, start: number, names: Set<string>): number {
-  let i = skipWsAndComments(code, start)
-  if (i >= code.length) return i
-  const ch = code[i]!
-  if (ch === '[') {
-    i++
-    while (i < code.length) {
-      i = skipWsAndComments(code, i)
-      if (code[i] === ']') return i + 1
-      if (code[i] === ',') { i++; continue }
-      if (code.startsWith('...', i)) i = skipWsAndComments(code, i + 3)
-      const next = parseBindingPattern(code, i, names)
-      if (next === i) break
-      i = skipWsAndComments(code, next)
-      if (code[i] === '=') i = skipInitExpr(code, i + 1, false)
-      i = skipWsAndComments(code, i)
-      if (code[i] === ',') i++
-      else if (code[i] === ']') return i + 1
-    }
-    return i
-  }
-  if (ch === '{') {
-    i++
-    while (i < code.length) {
-      i = skipWsAndComments(code, i)
-      if (code[i] === '}') return i + 1
-      if (code[i] === ',') { i++; continue }
-      if (code.startsWith('...', i)) {
-        const rest = readIdent(code, skipWsAndComments(code, i + 3))
-        if (rest) { names.add(rest.name); i = skipWsAndComments(code, rest.end) }
-        else break
-      } else {
-        // Property key: computed `[expr]`, string/number literal, or identifier.
-        let keyIdent: string | undefined
-        if (code[i] === '[') {
-          i = skipInitExpr(code, i + 1, false)
-          if (code[i] === ']') i++
-        } else if (code[i] === "'" || code[i] === '"') {
-          i = skipString(code, i)
-        } else {
-          const ident = readIdent(code, i)
-          if (ident) { keyIdent = ident.name; i = ident.end }
-          else {
-            const num = /^\d+(?:\.\d+)?/.exec(code.slice(i))
-            if (num) i += num[0].length
-            else break
-          }
-        }
-        i = skipWsAndComments(code, i)
-        if (code[i] === ':') {
-          i = parseBindingPattern(code, i + 1, names)
-        } else if (keyIdent !== undefined) {
-          names.add(keyIdent)
-        }
-        i = skipWsAndComments(code, i)
-        if (code[i] === '=') i = skipInitExpr(code, i + 1, false)
-      }
-      i = skipWsAndComments(code, i)
-      if (code[i] === ',') i++
-      else if (code[i] === '}') return i + 1
-    }
-    return i
-  }
-  const ident = readIdent(code, i)
-  if (ident) { names.add(ident.name); return ident.end }
-  return i
+interface ScanResult {
+  readonly rewritten: string
+  readonly varNames: readonly string[]
+  readonly fnNames: readonly string[]
+  readonly hasTopReturn: boolean
 }
 
 /**
- * Lexically scan top-level declarations (const/let/var including destructuring, function, class)
- * and top-level `return` statements while ignoring comments, strings, templates and nested blocks.
+ * Lexically scan top-level declarations (skipping comments, strings, nested template literals,
+ * regex literals and nested blocks) so destructuring, multiline template strings and hoisted
+ * functions all persist cleanly across REPL cells.
  */
-function collectTopLevelBindings(code: string): { readonly names: string[]; readonly hasTopReturn: boolean } {
-  const names = new Set<string>()
+function scanTopLevel(code: string): ScanResult {
+  const varNames = new Set<string>()
+  const fnNames = new Set<string>()
+  const replacements: { readonly start: number; readonly end: number; readonly text: string }[] = []
   let hasTopReturn = false
   let depth = 0
   let i = 0
-  while (i < code.length) {
-    const ch = code[i]!
-    if (ch === "'" || ch === '"' || ch === '`') { i = skipString(code, i); continue }
-    if (ch === '/' && code[i + 1] === '/') { i = code.indexOf('\n', i + 2); i = i === -1 ? code.length : i + 1; continue }
-    if (ch === '/' && code[i + 1] === '*') { i = code.indexOf('*/', i + 2); i = i === -1 ? code.length : i + 2; continue }
-    if (ch === '{' || ch === '(' || ch === '[') { depth++; i++; continue }
-    if (ch === '}' || ch === ')' || ch === ']') { depth = Math.max(0, depth - 1); i++; continue }
+  let prevChar = ''
+  let prevWord = ''
+  const n = code.length
 
-    if (depth === 0 && (i === 0 || /[\s;{}]/.test(code[i - 1]!))) {
-      const rest = code.slice(i)
-      const fnMatch = /^(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\b/.exec(rest)
-      if (fnMatch) { names.add(fnMatch[1]!); i += fnMatch[0].length; continue }
-      const clsMatch = /^class\s+([A-Za-z_$][\w$]*)\b/.exec(rest)
-      if (clsMatch) { names.add(clsMatch[1]!); i += clsMatch[0].length; continue }
-      const varMatch = /^(?:const|let|var)(?=\s)/.exec(rest)
-      if (varMatch) {
-        i += varMatch[0].length
-        while (i < code.length) {
-          const next = parseBindingPattern(code, i, names)
-          if (next === i) break
-          i = skipWsAndComments(code, next)
-          if (code[i] === '=') i = skipInitExpr(code, i + 1, true)
-          const after = skipWsAndComments(code, i)
-          if (code[after] === ',') { i = after + 1; continue }
-          i = after
-          if (code[i] === ';') i++
-          break
+  const isIdentStart = (ch: string): boolean => /[A-Za-z_$]/.test(ch)
+  const isIdentPart = (ch: string): boolean => /[\w$]/.test(ch)
+
+  const skipSpacesAndComments = (allowNewline = true): void => {
+    while (i < n) {
+      const ch = code[i]!
+      if (ch === ' ' || ch === '\t' || ch === '\r' || (allowNewline && ch === '\n')) { i++; continue }
+      if (ch === '/' && code[i + 1] === '/') { while (i < n && code[i] !== '\n') i++; continue }
+      if (ch === '/' && code[i + 1] === '*') {
+        const end = code.indexOf('*/', i + 2)
+        i = end === -1 ? n : end + 2
+        continue
+      }
+      break
+    }
+  }
+
+  const skipQuoted = (quote: string): void => {
+    i++
+    while (i < n) {
+      const ch = code[i]!
+      if (ch === '\\') { i += 2; continue }
+      if (quote === '`' && ch === '$' && code[i + 1] === '{') {
+        i += 2
+        let exprDepth = 1
+        while (i < n && exprDepth > 0) {
+          const c = code[i]!
+          if (c === "'" || c === '"' || c === '`') skipQuoted(c)
+          else if (c === '/' && code[i + 1] === '/') { while (i < n && code[i] !== '\n') i++ }
+          else if (c === '/' && code[i + 1] === '*') { const end = code.indexOf('*/', i + 2); i = end === -1 ? n : end + 2 }
+          else { if (c === '{') exprDepth++; else if (c === '}') exprDepth--; i++ }
         }
         continue
       }
-      if (/^return(?=$|[\s;(])/.test(rest)) { hasTopReturn = true; i += 6; continue }
+      if (ch === quote) { i++; return }
+      i++
     }
+  }
+
+  const skipRegex = (): void => {
+    i++
+    let inClass = false
+    while (i < n) {
+      const ch = code[i]!
+      if (ch === '\\') { i += 2; continue }
+      if (ch === '[') inClass = true
+      else if (ch === ']') inClass = false
+      else if (ch === '/' && !inClass) {
+        i++
+        while (i < n && /[a-z]/i.test(code[i]!)) i++
+        return
+      } else if (ch === '\n') return
+      i++
+    }
+  }
+
+  const readIdent = (): string | undefined => {
+    if (i >= n || !isIdentStart(code[i]!)) return undefined
+    const start = i
+    i++
+    while (i < n && isIdentPart(code[i]!)) i++
+    return code.slice(start, i)
+  }
+
+  const skipBalancedExpr = (stopChars: string): void => {
+    let exprDepth = 0
+    let localPrev = '='
+    let localWord = ''
+    while (i < n) {
+      const ch = code[i]!
+      if (ch === "'" || ch === '"' || ch === '`') { skipQuoted(ch); localPrev = '"'; localWord = ''; continue }
+      if (ch === '/' && code[i + 1] === '/') { while (i < n && code[i] !== '\n') i++; continue }
+      if (ch === '/' && code[i + 1] === '*') { const end = code.indexOf('*/', i + 2); i = end === -1 ? n : end + 2; continue }
+      if (ch === '/' && (REGEX_BEFORE.has(localPrev) || REGEX_KEYWORDS.has(localWord))) { skipRegex(); localPrev = '/'; localWord = ''; continue }
+      if (ch === '(' || ch === '[' || ch === '{') { exprDepth++; i++; localPrev = ch; localWord = ''; continue }
+      if (ch === ')' || ch === ']' || ch === '}') {
+        if (exprDepth === 0 && stopChars.includes(ch)) return
+        exprDepth = Math.max(0, exprDepth - 1); i++; localPrev = ch; localWord = ''; continue
+      }
+      if (exprDepth === 0 && stopChars.includes(ch)) return
+      if (isIdentStart(ch)) {
+        const w = readIdent() ?? ''
+        localPrev = 'a'; localWord = w; continue
+      }
+      if (!/\s/.test(ch)) { localPrev = ch; localWord = '' }
+      else if (ch === '\n' && exprDepth === 0 && stopChars.includes('\n')) return
+      i++
+    }
+  }
+
+  const parseBindingPattern = (): void => {
+    skipSpacesAndComments()
+    if (i >= n) return
+    if (code.startsWith('...', i)) {
+      i += 3
+      skipSpacesAndComments()
+      const name = readIdent()
+      if (name !== undefined) varNames.add(name)
+      return
+    }
+    if (code[i] === '[') {
+      i++
+      while (i < n) {
+        skipSpacesAndComments()
+        if (code[i] === ']') { i++; return }
+        if (code[i] === ',') { i++; continue }
+        parseBindingPattern()
+        skipSpacesAndComments()
+        if (code[i] === '=') { i++; skipBalancedExpr(',]') }
+        skipSpacesAndComments()
+        if (code[i] === ',') i++
+        else if (code[i] === ']') { i++; return }
+        else break
+      }
+      return
+    }
+    if (code[i] === '{') {
+      i++
+      while (i < n) {
+        skipSpacesAndComments()
+        if (code[i] === '}') { i++; return }
+        if (code.startsWith('...', i)) {
+          i += 3
+          skipSpacesAndComments()
+          const rest = readIdent()
+          if (rest !== undefined) varNames.add(rest)
+        } else {
+          let keyIdent: string | undefined
+          if (code[i] === '[') {
+            i++; skipBalancedExpr(']'); if (code[i] === ']') i++
+          } else if (code[i] === "'" || code[i] === '"') {
+            skipQuoted(code[i]!)
+          } else if (isIdentStart(code[i]!)) {
+            keyIdent = readIdent()
+          } else {
+            while (i < n && !/[\s:,=}]/.test(code[i]!)) i++
+          }
+          skipSpacesAndComments()
+          if (code[i] === ':') {
+            i++
+            parseBindingPattern()
+          } else if (keyIdent !== undefined) {
+            varNames.add(keyIdent)
+          }
+        }
+        skipSpacesAndComments()
+        if (code[i] === '=') { i++; skipBalancedExpr(',}') }
+        skipSpacesAndComments()
+        if (code[i] === ',') i++
+        else if (code[i] === '}') { i++; return }
+        else break
+      }
+      return
+    }
+    const name = readIdent()
+    if (name !== undefined) varNames.add(name)
+  }
+
+  while (i < n) {
+    const ch = code[i]!
+    if (ch === "'" || ch === '"' || ch === '`') { skipQuoted(ch); prevChar = '"'; prevWord = ''; continue }
+    if (ch === '/' && code[i + 1] === '/') { while (i < n && code[i] !== '\n') i++; continue }
+    if (ch === '/' && code[i + 1] === '*') { const end = code.indexOf('*/', i + 2); i = end === -1 ? n : end + 2; continue }
+    if (ch === '/' && (REGEX_BEFORE.has(prevChar) || REGEX_KEYWORDS.has(prevWord))) { skipRegex(); prevChar = '/'; prevWord = ''; continue }
+    if (ch === '{' || ch === '(' || ch === '[') { depth++; i++; prevChar = ch; prevWord = ''; continue }
+    if (ch === '}' || ch === ')' || ch === ']') { depth = Math.max(0, depth - 1); i++; prevChar = ch; prevWord = ''; continue }
+
+    if (depth === 0 && isIdentStart(ch) && prevChar !== '.') {
+      const wordStart = i
+      const word = readIdent()!
+      if (word === 'const' || word === 'let' || word === 'var') {
+        if (word !== 'var') replacements.push({ start: wordStart, end: i, text: 'var' })
+        while (i < n) {
+          parseBindingPattern()
+          skipSpacesAndComments(false)
+          if (code[i] === '=') {
+            i++
+            skipSpacesAndComments(true)
+            skipBalancedExpr(',;\n')
+          }
+          skipSpacesAndComments(false)
+          if (code[i] === ',') { i++; continue }
+          break
+        }
+        prevChar = 'a'; prevWord = ''
+        continue
+      }
+      if (word === 'async') {
+        const saved = i
+        skipSpacesAndComments(false)
+        if (code.startsWith('function', i) && !isIdentPart(code[i + 8] ?? '')) {
+          i += 8
+          skipSpacesAndComments()
+          if (code[i] === '*') { i++; skipSpacesAndComments() }
+          const fn = readIdent()
+          if (fn !== undefined) fnNames.add(fn)
+          prevChar = 'a'; prevWord = 'function'
+          continue
+        }
+        i = saved
+      }
+      if (word === 'function') {
+        skipSpacesAndComments()
+        if (code[i] === '*') { i++; skipSpacesAndComments() }
+        const fn = readIdent()
+        if (fn !== undefined) fnNames.add(fn)
+        prevChar = 'a'; prevWord = 'function'
+        continue
+      }
+      if (word === 'class') {
+        skipSpacesAndComments()
+        const cls = readIdent()
+        if (cls !== undefined) {
+          varNames.add(cls)
+          replacements.push({ start: wordStart, end: wordStart + 5, text: `var ${cls} = class` })
+        }
+        prevChar = 'a'; prevWord = 'class'
+        continue
+      }
+      if (word === 'return') hasTopReturn = true
+      prevChar = 'a'; prevWord = word
+      continue
+    }
+
+    if (ch === '\n') { prevChar = '\n'; prevWord = '' }
+    else if (!/\s/.test(ch)) { prevChar = ch; prevWord = '' }
     i++
   }
-  return { names: [...names], hasTopReturn }
+
+  let rewritten = code
+  for (let idx = replacements.length - 1; idx >= 0; idx--) {
+    const rep = replacements[idx]!
+    rewritten = rewritten.slice(0, rep.start) + rep.text + rewritten.slice(rep.end)
+  }
+  return { rewritten, varNames: [...varNames], fnNames: [...fnNames], hasTopReturn }
 }
 
 /**
- * Make a cell behave like a REPL cell: top-level declarations (including destructuring, hoisted
- * functions and classes) persist onto `globalThis` via a same-scope `finally` saver, and a
- * trailing expression becomes the cell's return value.
+ * Make a cell behave like a REPL cell: top-level declarations land on the context (so they
+ * survive the call) and a trailing expression is the cell's value.
  * @param code - the model's cell.
  * @returns an async function body.
  */
 export function prepare(code: string): string {
   const raw = code.replace(/\s+$/, '').split('\n')
-  const indent = Math.min(...raw.filter(line => line.trim() !== '').map(line => /^[ \t]*/.exec(line)?.[0].length ?? 0))
-  const lines = raw.map(line => line.slice(Number.isFinite(indent) ? indent : 0))
-  const body = lines.join('\n')
-  const { names, hasTopReturn } = collectTopLevelBindings(body)
-  // Saving through a closure defined inside the `try` block keeps `const`/`let`/`class` in the
-  // same block scope (preserving hoisting and destructuring) while still persisting initialized
-  // bindings on both normal return and mid-cell errors.
-  const wrap = (inner: string): string => {
-    if (names.length === 0) return inner
-    const save = names.map(name => `try { globalThis.${name} = ${name}; } catch {}`).join(' ')
-    return `let __dshSave;\ntry {\n__dshSave = () => { ${save} };\n${inner}\n} finally {\n__dshSave?.();\n}`
+  const indents = raw.filter(line => line.trim() !== '').map(line => /^[ \t]*/.exec(line)?.[0].length ?? 0)
+  const indent = indents.length > 0 ? Math.min(...indents) : 0
+  const dedented = raw.map(line => line.slice(indent)).join('\n')
+  const { rewritten, varNames, fnNames, hasTopReturn } = scanTopLevel(dedented)
+  const prelude = fnNames.length === 0 ? '' : fnNames.map(name => `globalThis.${name} = ${name};`).join(' ') + '\n'
+  const persist = varNames.length === 0
+    ? ''
+    : varNames.map(name => `try { if (typeof ${name} !== 'undefined' || !(${JSON.stringify(name)} in globalThis)) globalThis.${name} = ${name}; } catch {}`).join(' ')
+  const wrap = (body: string): string => {
+    if (persist !== '') return `try {\n${prelude}${body}\n} finally {\n${persist}\n}`
+    return `${prelude}${body}`
   }
-  if (hasTopReturn) return wrap(body)
+
+  if (hasTopReturn) return wrap(rewritten)
+  const lines = rewritten.split('\n')
   const last = lines.length - 1
   const line = lines[last] ?? ''
   const previous = lines.slice(0, last).reverse().find(l => l.trim() !== '')?.trimEnd() ?? ''
   if (line === '' || /^\s/.test(line) || NOT_EXPRESSION.test(line) || CONTINUES.test(previous) || /[{,]$/.test(line)) {
-    return wrap(body)
+    return wrap(rewritten)
   }
   // A one-line cell of several statements returns its last one.
   const split = line.lastIndexOf(';', line.replace(/;\s*$/, '').length - 1)
@@ -312,7 +383,7 @@ export function prepare(code: string): string {
     const transformed = [...lines.slice(0, last), candidate].join('\n')
     if (tail !== '' && compiles(wrap(transformed))) return wrap(transformed)
   }
-  return wrap(body)
+  return wrap(rewritten)
 }
 
 function compiles(body: string): boolean {
@@ -352,7 +423,10 @@ const helpers = {
     if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null) return text('scroll', args[0] as Record<string, unknown>)
     if (args.length >= 3) {
       const [x, y, dy] = [Number(args[0]), Number(args[1]), Number(args[2])]
-      return String(await js(`(() => {
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(dy)) {
+        throw new Error('scroll(x, y, dy): coordinates and deltaY must be finite numbers')
+      }
+      return await js(`(() => {
         let el = document.elementFromPoint(${JSON.stringify(x)}, ${JSON.stringify(y)});
         while (el && el !== document.documentElement && el !== document.body) {
           const st = getComputedStyle(el);
@@ -364,7 +438,7 @@ const helpers = {
         }
         window.scrollBy({ top: ${JSON.stringify(dy)} });
         return 'Scrolled window.';
-      })()`))
+      })()`)
     }
     const deltaY = args.length === 1 ? Number(args[0]) : 600
     return text('scroll', { deltaY })

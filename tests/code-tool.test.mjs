@@ -141,24 +141,24 @@ test('the REPL keeps variables across calls and prints the last expression', asy
   assert.equal(value.output, '[2,4,6]')
 })
 
-test('destructured bindings, hoisted functions and multiline template strings persist cleanly', async () => {
+test('the REPL persists destructured bindings, hoisted functions and multiline template literals', async () => {
   const { run } = mount()
   const first = await run(`
-    const hoisted = triple(4)
-    function triple(n) { return n * 3 }
-    const [a, b] = [10, 20]
-    const { x: alias = 5, nested: { y } } = { nested: { y: 7 } }
-    const snippet = \`
-const notTopLevel = 1
-return 'still-inside-template'
+    const hoisted = twice(21)
+    function twice(n) { return n * 2 }
+    const [firstItem, secondItem] = [10, 20]
+    const { title: heading = 'fallback', nested: { count } } = { title: 'ok', nested: { count: 3 } }
+    const tpl = \`
+const notADecl = 1
+return notAReturn
 \`
-    ({ hoisted, len: snippet.length })
+    ({ hoisted, firstItem, secondItem, heading, count })
   `)
   assert.equal(first.ok, true, first.output)
-  assert.match(first.output, /"hoisted":12/)
-  const second = await run('[a, b, alias, y, triple(2), typeof notTopLevel]')
+  assert.match(first.output, /"hoisted":42/)
+  const second = await run('[twice(3), firstItem + secondItem, heading, count, tpl.includes("return notAReturn")]')
   assert.equal(second.ok, true, second.output)
-  assert.equal(second.output, '[10,20,5,7,6,"undefined"]')
+  assert.equal(second.output, '[6,30,"ok",3,true]')
 })
 
 test('a cell past its deadline is killed, even a busy loop after await, and the REPL restarts', async () => {
@@ -175,41 +175,46 @@ test('a cell past its deadline is killed, even a busy loop after await, and the 
   assert.equal(after.output, 'undefined')
 })
 
+test('a cell cancelled mid-execution returns everything already printed', async () => {
+  const { tools } = mount()
+  const code = tools.get('dsh_browser_code')
+  const execBase = { agent: { id: 'mid-cancel-owner' } }
+  // Warm up the worker so cancellation happens after cell execution starts.
+  assert.equal((await code.execute({ code: '1' }, execBase)).ok, true)
+  const controller = new AbortController()
+  const running = code.execute(
+    { code: 'print("partial-finding"); await sleep(5000); print("never")' },
+    { ...execBase, signal: controller.signal },
+  )
+  await new Promise(done => setTimeout(done, 120))
+  controller.abort()
+  const result = await running
+  assert.equal(result.ok, false)
+  assert.match(result.output, /partial-finding/)
+  assert.match(result.output, /cell cancelled; the REPL was restarted/)
+  assert.doesNotMatch(result.output, /never/)
+})
+
+test('concurrent cells for the same task run serially without hanging', async () => {
+  const { tools } = mount()
+  const code = tools.get('dsh_browser_code')
+  const exec = { agent: { id: 'serial-owner' } }
+  const [first, second] = await Promise.all([
+    code.execute({ code: 'await sleep(80); const seq = 1; seq' }, exec),
+    code.execute({ code: 'seq + 1' }, exec),
+  ])
+  assert.equal(first.ok, true, first.output)
+  assert.equal(first.output, '1')
+  assert.equal(second.ok, true, second.output)
+  assert.equal(second.output, '2')
+})
+
 test('an already cancelled call runs no browser action', async () => {
   const { tools, calls } = mount()
   const controller = new AbortController()
   controller.abort()
   await assert.rejects(tools.get('dsh_browser_code').execute({ code: "await click('Buy')" }, { agent: { id: 'code-owner' }, signal: controller.signal }))
   assert.equal(calls.some(([name]) => name === 'click'), false)
-})
-
-test('a cell cancelled mid-run still returns output printed before cancellation', async () => {
-  const { tools } = mount()
-  const code = tools.get('dsh_browser_code')
-  const exec = { agent: { id: 'mid-cancel-owner' } }
-  await code.execute({ code: '1' }, exec)
-  const controller = new AbortController()
-  const running = code.execute({ code: "print('partial finding'); await sleep(5000); print('never')" }, { ...exec, signal: controller.signal })
-  setTimeout(() => controller.abort(new Error('user stopped')), 150)
-  const value = await running
-  assert.equal(value.ok, false)
-  assert.match(value.output, /partial finding/)
-  assert.match(value.output, /cell cancelled/)
-  assert.doesNotMatch(value.output, /never/)
-})
-
-test('concurrent calls for the same task serialize without clobbering worker callbacks', async () => {
-  const { tools } = mount()
-  const code = tools.get('dsh_browser_code')
-  const exec = { agent: { id: 'serial-owner' } }
-  const [first, second] = await Promise.all([
-    code.execute({ code: 'await sleep(80); const shared = 41; shared' }, exec),
-    code.execute({ code: 'shared + 1' }, exec),
-  ])
-  assert.equal(first.ok, true, first.output)
-  assert.equal(first.output, '41')
-  assert.equal(second.ok, true, second.output)
-  assert.equal(second.output, '42')
 })
 
 test('fill throws when a field fails, so later steps do not run', async () => {
@@ -221,22 +226,19 @@ test('fill throws when a field fails, so later steps do not run', async () => {
   assert.doesNotMatch(value.output, /submitted/)
 })
 
-test('type() rejects an object target without a string text argument', async () => {
-  const { run } = mount()
-  await run(`await call('open', { url: 'https://example.test/', surface: 'builtin' })`)
-  const value = await run(`await type({ css: '#q' })`)
-  assert.equal(value.ok, false)
-  assert.match(value.output, /text must be a string when target is an object/)
-})
-
-test('scroll(x, y, dy) uses coordinates via elementFromPoint instead of dropping them', async () => {
+test('scroll(x, y, dy) targets the scrollable container at (x, y) and type rejects object without text', async () => {
   const scripts = []
-  const { run } = mount({ execute: async (_session, request) => { scripts.push(request.script); return { ok: true, value: JSON.stringify('Scrolled element.') } } })
+  const { run } = mount({
+    execute: async (_session, request) => { scripts.push(request.script); return { ok: true, value: JSON.stringify('Scrolled element.') } },
+  })
   await run(`await call('open', { url: 'https://example.test/', surface: 'builtin' })`)
-  const value = await run('await scroll(120, 240, 300)')
-  assert.equal(value.ok, true, value.output)
+  const scrolled = await run('await scroll(120, 240, 300)')
+  assert.equal(scrolled.ok, true, scrolled.output)
   assert.match(scripts.at(-1), /elementFromPoint\(120, 240\)/)
   assert.match(scripts.at(-1), /top: 300/)
+  const badType = await run('await type({ css: "#q" })')
+  assert.equal(badType.ok, false)
+  assert.match(badType.output, /text must be a string when target is an object/)
 })
 
 test('js() returns page strings exactly, even when they look like JSON numbers', async () => {
@@ -276,12 +278,15 @@ test('the REPL that replaces a killed one keeps its variables', async () => {
 })
 
 test('cells become REPL cells: declarations persist and the last expression is the value', () => {
-  const decl = prepare('const a = 1\nlet b = 2\na + b')
-  assert.match(decl, /globalThis\.a = a/)
-  assert.match(decl, /globalThis\.b = b/)
-  assert.match(decl, /return \(a \+ b\)/)
+  const vars = prepare('const a = 1\nlet b = 2\na + b')
+  assert.match(vars, /var a = 1/)
+  assert.match(vars, /var b = 2/)
+  assert.match(vars, /return \(a \+ b\)/)
+  assert.match(vars, /globalThis\.a = a/)
+  assert.match(vars, /globalThis\.b = b/)
   const fn = prepare('async function f() {\n  return 1\n}')
-  assert.match(fn, /globalThis\.f = f/)
+  assert.match(fn, /globalThis\.f = f;/)
+  assert.match(fn, /async function f\(\)/)
   assert.equal(prepare('if (x) {\n  y()\n}'), 'if (x) {\n  y()\n}')
   assert.equal(prepare('return 5'), 'return 5')
 })

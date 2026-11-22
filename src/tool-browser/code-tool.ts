@@ -84,8 +84,8 @@ function format(value: unknown): string {
 }
 
 /**
- * Resolve the worker script path for both built (`lib/*.js`) and dev (`src/*.ts`) installs,
- * and include both symlink and real paths for Node's `--allow-fs-read` permission flag (pnpm).
+ * Resolve the REPL worker script for both built (`lib/*.js`) and source (`src/*.ts`) runs,
+ * returning its canonical realpath so Node's `--allow-fs-read` works under pnpm symlinks.
  */
 function resolveWorkerScript(): { readonly script: string; readonly allowRead: readonly string[] } {
   const jsPath = fileURLToPath(new URL('./code-worker.js', import.meta.url))
@@ -118,8 +118,6 @@ class CellWorker {
       this.onMessage = message => { if (message.type === 'ready') resolve() }
       this.child.once('exit', () => reject(new Error(`the REPL worker did not start: ${stderr.trim() || 'exited'}`)))
     })
-    // Prevent unhandled rejections if the caller aborts while the worker is starting and kills it.
-    this.ready.catch(() => {})
     this.child.on('message', message => this.onMessage?.(message as WorkerMessage))
     this.child.once('exit', (code, signal) => {
       this.exited = true
@@ -130,11 +128,7 @@ class CellWorker {
 
   send(message: unknown): boolean {
     if (this.exited || !this.child.connected) return false
-    try {
-      return this.child.send(message)
-    } catch {
-      return false
-    }
+    try { return this.child.send(message) } catch { return false }
   }
 
   busy(): void {
@@ -163,32 +157,12 @@ class CellWorker {
  * Node's permission model for the worker: it may read its own script and nothing else, and it
  * cannot spawn processes, start workers or load addons. Model code that escapes the vm context
  * reaches only this process.
- * @param paths - the worker script paths (symlink and resolved realpath).
+ * @param paths - the worker script path (and resolved realpath if symlinked).
  */
 function permissionArgs(paths: readonly string[]): string[] {
   const flags = process.allowedNodeEnvironmentFlags
   const flag = flags.has('--permission') ? '--permission' : flags.has('--experimental-permission') ? '--experimental-permission' : undefined
   return flag === undefined ? [] : [flag, ...paths.map(path => `--allow-fs-read=${path}`)]
-}
-
-/** Wait for a worker to finish booting, aborting promptly if the caller cancels before execution starts. */
-async function awaitWorkerReady(worker: CellWorker, signal: AbortSignal | undefined, onCancel: () => void): Promise<void> {
-  signal?.throwIfAborted()
-  if (signal === undefined) {
-    await worker.ready
-    return
-  }
-  await new Promise<void>((resolve, reject) => {
-    const onAbort = () => {
-      onCancel()
-      reject(signal.reason ?? new Error('cell cancelled'))
-    }
-    signal.addEventListener('abort', onAbort, { once: true })
-    worker.ready.then(
-      () => { signal.removeEventListener('abort', onAbort); resolve() },
-      error => { signal.removeEventListener('abort', onAbort); reject(error) },
-    )
-  })
 }
 
 /**
@@ -199,14 +173,27 @@ async function awaitWorkerReady(worker: CellWorker, signal: AbortSignal | undefi
 export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
   const workers = new Map<string, CellWorker>()
   const locks = new Map<string, Promise<unknown>>()
-  const serialize = async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
+  const serialize = async <T>(key: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> => {
     const prev = locks.get(key) ?? Promise.resolve()
     let release!: () => void
     const next = new Promise<void>(resolve => { release = resolve })
     const chain = prev.then(() => next)
     locks.set(key, chain)
-    await prev
     try {
+      if (signal !== undefined) {
+        signal.throwIfAborted()
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => reject(signal.reason)
+          signal.addEventListener('abort', onAbort, { once: true })
+          void prev.then(() => {
+            signal.removeEventListener('abort', onAbort)
+            resolve()
+          })
+        })
+        signal.throwIfAborted()
+      } else {
+        await prev
+      }
       return await fn()
     } finally {
       release()
@@ -270,13 +257,14 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
       if (typeof args.code !== 'string' || args.code.trim() === '') throw new Error('code must be a non-empty JavaScript cell')
       const budget = Math.min(Math.max(Number(args.timeoutMs ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS, 1000), MAX_TIMEOUT_MS)
       const key = (exec as { agent?: { id?: string } }).agent?.id ?? 'default'
-      return serialize(key, async () => {
+      return serialize(key, exec.signal, async () => {
         exec.signal?.throwIfAborted()
         const controller = new AbortController()
         const lines: string[] = []
         const images: ImageAttachment[] = []
         let calls = 0
         let ok = true
+        let started = false
         // Same scheduling as DSH run_code: concurrency-safe calls overlap (bounded), an action waits
         // for everything before it and holds back everything after it.
         let barrier: Promise<unknown> = Promise.resolve()
@@ -308,10 +296,27 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
         const worker = workerFor(key)
         const forget = () => { if (workers.get(key) === worker) workers.delete(key) }
         worker.busy()
-        let cellStarted = false
         try {
-          await awaitWorkerReady(worker, exec.signal, () => { worker.kill(); forget() })
-          exec.signal?.throwIfAborted()
+          if (exec.signal !== undefined) {
+            exec.signal.throwIfAborted()
+            await new Promise<void>((resolveReady, rejectReady) => {
+              const onAbortBeforeStart = () => {
+                worker.onExit = undefined
+                worker.kill()
+                forget()
+                rejectReady(exec.signal?.reason)
+              }
+              exec.signal?.addEventListener('abort', onAbortBeforeStart, { once: true })
+              void worker.ready.then(
+                () => { exec.signal?.removeEventListener('abort', onAbortBeforeStart); resolveReady() },
+                error => { exec.signal?.removeEventListener('abort', onAbortBeforeStart); rejectReady(error) },
+              )
+            })
+            exec.signal.throwIfAborted()
+          } else {
+            await worker.ready
+          }
+          started = true
           const outcome = await new Promise<{ ok: boolean; error?: string }>(finish => {
             let timer: ReturnType<typeof setTimeout> | undefined
             const settle = (result: { ok: boolean; error?: string }) => {
@@ -368,10 +373,9 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
                 worker.send({ type: 'reply', id, error: error instanceof Error ? error.message : String(error) })
               }
             }
-            cellStarted = true
             if (!worker.send({ type: 'run', code: args.code })) {
               forget()
-              settle({ ok: false, error: 'the REPL worker IPC channel disconnected' })
+              settle({ ok: false, error: 'the REPL worker disconnected before running the cell' })
             }
           })
           if (!outcome.ok) {
@@ -379,15 +383,13 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
             lines.push(`Error: ${outcome.error ?? 'cell failed'}`)
           }
         } catch (error) {
-          if (!cellStarted && exec.signal?.aborted === true) throw error
+          if (!started && exec.signal?.aborted === true) throw error
           ok = false
           forget()
           lines.push(`Error: ${error instanceof Error ? error.message : String(error)}`)
         } finally {
           if (!worker.exited) worker.idle()
         }
-        // Only reject when cancelled before the cell started; once running, return partial printed output.
-        if (!cellStarted) exec.signal?.throwIfAborted()
         let output = lines.join('\n')
         if (output === '') output = ok ? '(no output; end the cell with an expression or print() what you need)' : 'Error'
         if (output.length > MAX_OUTPUT_CHARS) output = `${output.slice(0, MAX_OUTPUT_CHARS)}\n[output truncated at ${MAX_OUTPUT_CHARS} chars; print less or slice it]`
