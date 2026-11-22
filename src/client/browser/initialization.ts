@@ -38,6 +38,9 @@ export type BrowserInitFailure =
 
 /** One immutable observation of an initialization attempt. */
 export interface BrowserInitReceipt {
+  readonly generation?: string
+  readonly frameId?: string
+  readonly loaderId?: string
   readonly requestId: string
   readonly sessionId: string
   readonly tabId: TabId
@@ -69,6 +72,9 @@ export interface BrowserInitRequest {
 
 /** A stage transition may carry the guest id observed by the carrier. */
 export interface BrowserInitPatch {
+  readonly generation?: string
+  readonly frameId?: string
+  readonly loaderId?: string
   readonly detail?: string
   readonly guestId?: string
   readonly navigationRevision?: number
@@ -91,6 +97,9 @@ export interface BrowserInitializationJournal {
 
 /** Ready document observed in the live frame, independent of its last requested URL. */
 export interface BrowserObservedPage {
+  readonly generation?: string
+  readonly frameId?: string
+  readonly loaderId?: string
   readonly url: string
   readonly guestId?: string
 }
@@ -217,6 +226,7 @@ export function createBrowserInitializationJournal(
         ...patch.navigationRevision === undefined ? {} : { navigationRevision: patch.navigationRevision },
         ...patch.url === undefined ? {} : { url: patch.url },
         ...patch.guestId === undefined ? {} : { guestId: patch.guestId },
+        ...patch.generation === undefined ? {} : { generation: patch.generation, frameId: patch.frameId, loaderId: patch.loaderId },
         stage,
         at: now(),
       })
@@ -231,6 +241,7 @@ export function createBrowserInitializationJournal(
         ...patch.navigationRevision === undefined ? {} : { navigationRevision: patch.navigationRevision },
         ...patch.url === undefined ? {} : { url: patch.url },
         ...patch.guestId === undefined ? {} : { guestId: patch.guestId },
+        ...patch.generation === undefined ? {} : { generation: patch.generation, frameId: patch.frameId, loaderId: patch.loaderId },
         stage: 'failed',
         reason,
         ...patch.detail === undefined ? {} : { detail: patch.detail },

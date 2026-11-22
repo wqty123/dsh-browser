@@ -77,6 +77,6 @@ test('bridge blocks native windows for existing and future webview guests', () =
     assert.equal(configured.at(-1), contents)
     assert.equal(fallbacks.at(-1), contents)
   }
-  assert.match(bridge, /app\.on\('web-contents-created', onGuestCreated\)/)
+  assert.match(bridge, /application\.on\('web-contents-created', onGuestCreated\)/)
   assert.match(bridge, /for \(const contents of webContents\.getAllWebContents\(\)\) \{\s*onGuestCreated\(undefined, contents\)/)
 })

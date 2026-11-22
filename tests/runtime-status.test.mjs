@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { readRuntimeStatus } from '../lib/browser-electron/runtime-status.js'
+import { zh, en } from '../assets/browser-panel-locales.mjs'
 
 const at = '2026-11-03T15:00:00.000Z'
 
@@ -314,7 +315,7 @@ test('the state vocabulary the panel localizes matches what the host can emit', 
   assert.ok(snapshot, 'the provisioning state union is the one this test enumerates')
   const readiness = /export type Readiness = 'ready' \| 'blocked'/.test(source)
   assert.ok(readiness, 'and so is the readiness union')
-  const carrier = /export type CarrierKind = 'sidebar' \| 'bundled' \| 'system' \| 'auto'/.test(source)
+  const carrier = /export type CarrierKind = 'sidebar' \| 'bundled' \| 'system' \| 'extension' \| 'cdp' \| 'auto'/.test(source)
   assert.ok(carrier, 'and the carrier union')
 })
 
@@ -326,17 +327,14 @@ test('a previously prepared runtime removed from disk can be prepared again', ()
 })
 
 test('every state and carrier the report can name has a label in both languages', () => {
-  const client = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
-  const zhBlock = client.slice(client.indexOf('const zh = {'), client.indexOf('const en = {'))
-  const enBlock = client.slice(client.indexOf('const en = {'), client.indexOf('async function callSettings'))
-  const has = (block, key) => new RegExp(`"${key.replace(/\./g, '\\.')}":`).test(block)
+  const has = (locale, key) => typeof locale[key] === 'string' && locale[key].length > 0
   const keys = []
   for (const state of ['idle', 'preparing', 'present', 'ready', 'skipped', 'failed']) keys.push(`readiness.electron.${state}`)
   // Two rows beyond the install-tree states: the panel distinguishes an installed bridge that is
   // running from one whose desktop app is closed, in both directions.
   for (const state of ['installed', 'installedRunning', 'installedNotRunning', 'missing', 'stale', 'absent']) keys.push(`readiness.bridge.${state}`)
-  for (const carrier of ['sidebar', 'bundled', 'system', 'auto']) keys.push(`readiness.carrier.${carrier}`)
+  for (const carrier of ['sidebar', 'bundled', 'system', 'extension', 'auto']) keys.push(`readiness.carrier.${carrier}`)
   for (const readiness of ['ready', 'blocked']) keys.push(`readiness.state.${readiness}`)
-  const missing = keys.filter(key => !has(zhBlock, key) || !has(enBlock, key))
+  const missing = keys.filter(key => !has(zh, key) || !has(en, key))
   assert.deepEqual(missing, [], 'these would render as raw keys in the panel')
 })

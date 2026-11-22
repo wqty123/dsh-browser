@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Persistent reference store: append-only JSONL beside the browser profile, so
  * a reference survives the browser process, the page, and a DSH restart.
@@ -29,7 +30,7 @@ const PRUNE_SLACK = 200
 
 /** Absolute path of the reference file, beside the browser profile. */
 export function referenceStorePath(): string {
-  return join(dshHome(), 'dsh-builtin-browser-host', 'references.jsonl')
+  return join(dshHome(), BROWSER_PROFILE_DIR, 'references.jsonl')
 }
 
 /** Canonical JSON: sorted keys, so hashing never depends on construction order. */

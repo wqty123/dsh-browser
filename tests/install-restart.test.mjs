@@ -1,8 +1,9 @@
 // Maintenance refuses a running target and never terminates its host.
+import { isDesktopExecutable } from '../desktop-bridge/desktop-processes.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs'
-import { resolve, join, dirname, basename } from 'node:path'
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, realpathSync } from 'node:fs'
+import { resolve, join, dirname, basename, isAbsolute } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -34,7 +35,7 @@ test('test mode never launches a Desktop executable', () => {
   const end = source.indexOf('\nconst args =', start)
   let spawns = 0
   const launch = runInNewContext(source.slice(start, end) + '; startShell', {
-    join: (...parts) => parts.join('/'), existsSync: () => true,
+    join: (...parts) => parts.join('/'), existsSync: () => true, layoutPaths: root => ({ executable: root + '/DeepSeek Harness.exe' }),
     process: { env: { DSH_BROWSER_TEST: '1' } }, console: { error() {}, log() {} },
     spawn() { spawns++; throw Error('must not spawn') },
   })
@@ -107,7 +108,7 @@ function processSelection() {
 test('the selected GUI processes exclude native CLI, installer and other installations', () => {
   const root = resolve('test-desktop')
   const exe = resolve(root, 'DeepSeek Harness.exe')
-  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve })
+  const select = runInNewContext(processSelection() + '; selectShellProcesses', { isDesktopExecutable, resolve, layoutPaths: root => ({ executable: resolve(root, 'DeepSeek Harness.exe') }), basename, process: { platform: 'win32' } })
   const row = (pid, parent, commandLine, executablePath = exe) => ({
     ProcessId: pid, ParentProcessId: parent, Name: 'DeepSeek Harness.exe', ExecutablePath: executablePath, CommandLine: commandLine,
   })
@@ -125,7 +126,7 @@ test('the selected GUI processes exclude native CLI, installer and other install
 test('an installer beneath the GUI refuses before any GUI process can be closed', () => {
   const root = resolve('test-desktop')
   const exe = resolve(root, 'DeepSeek Harness.exe')
-  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve })
+  const select = runInNewContext(processSelection() + '; selectShellProcesses', { isDesktopExecutable, resolve, layoutPaths: root => ({ executable: resolve(root, 'DeepSeek Harness.exe') }), basename, process: { platform: 'win32' } })
   const rows = [
     { ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness.exe', ExecutablePath: exe, CommandLine: '"' + exe + '"' },
     { ProcessId: 20, ParentProcessId: 10, Name: 'DeepSeek Harness.exe', ExecutablePath: exe, CommandLine: '"' + exe + '" --expose-internals cli.js' },
@@ -137,12 +138,12 @@ test('an installer beneath the GUI refuses before any GUI process can be closed'
 test('failed or malformed process enumeration never means the GUI is stopped', () => {
   const root = resolve('test-desktop')
   for (const output of [undefined, '', 'not json', 'null', '[]', '{}', '[null]']) {
-    const enumerate = runInNewContext(processSelection() + '; shellProcesses', {
-      resolve, process: { pid: 21 }, runCapture: () => output,
+    const enumerate = runInNewContext(processSelection() + '; shellProcesses', { isDesktopExecutable,
+      resolve, layoutPaths: root => ({ executable: resolve(root, 'DeepSeek Harness.exe') }), basename, process: { pid: 21, platform: 'win32' }, runCapture: () => output,
     })
     assert.throws(() => enumerate(root), /process|enumerate|parse|invalid/i)
   }
-  const select = runInNewContext(processSelection() + '; selectShellProcesses', { resolve })
+  const select = runInNewContext(processSelection() + '; selectShellProcesses', { isDesktopExecutable, resolve, layoutPaths: root => ({ executable: resolve(root, 'DeepSeek Harness.exe') }), basename, process: { platform: 'win32' } })
   assert.throws(() => select([
     { ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness.exe', ExecutablePath: null, CommandLine: null },
   ], root, 21), /could not identify/)
@@ -152,8 +153,8 @@ test('the process query declares UTF-8 before matching Unicode installation path
   const root = resolve('桌面安装目录')
   const exe = resolve(root, 'DeepSeek Harness.exe')
   let query
-  const enumerate = runInNewContext(processSelection() + '; shellProcesses', {
-    resolve, process: { pid: 999 },
+  const enumerate = runInNewContext(processSelection() + '; shellProcesses', { isDesktopExecutable,
+    resolve, layoutPaths: root => ({ executable: resolve(root, 'DeepSeek Harness.exe') }), basename, process: { pid: 999, platform: 'win32' },
     runCapture: (command, args) => {
       assert.equal(command, 'powershell.exe')
       query = args.at(-1)
@@ -174,7 +175,7 @@ test('GUI restart clears Electron Node mode while retaining the remaining enviro
     DSH_BRIDGE_DETACHED: '1', DSH_BRIDGE_HANDOFF_PARENT: '21',
     DSH_BRIDGE_ACTION_RESULT_FILE: 'private-result.json', DSH_BRIDGE_ACTION_LOG_FILE: 'private-log.txt' }
   const startGui = runInNewContext(source.slice(start, end) + '; startShell', {
-    join: (...parts) => parts.join('/'),
+    join: (...parts) => parts.join('/'), layoutPaths: root => ({ executable: root + '/DeepSeek Harness.exe' }),
     existsSync: () => true,
     process: { env: environment },
     console: { log() {}, error() {} },
@@ -191,4 +192,73 @@ test('GUI restart clears Electron Node mode while retaining the remaining enviro
   assert.equal(environment.ELECTRON_RUN_AS_NODE, '1', 'the parent host remains in its original mode')
   assert.equal(options.detached, true)
   assert.equal(detached, true)
+})
+
+test('a macOS installation path matches the running Desktop by its on-disk spelling', { skip: process.platform === 'win32' }, () => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-case-'))
+  try {
+    const root = join(base, 'DeepSeek Harness.app')
+    const exe = join(root, 'Contents', 'MacOS', 'DeepSeek Harness')
+    mkdirSync(dirname(exe), { recursive: true })
+    writeFileSync(exe, 'x')
+    const select = runInNewContext(processSelection() + '; selectShellProcesses', { isDesktopExecutable,
+      resolve, basename, realpathSync, process: { platform: 'darwin' },
+      layoutPaths: r => ({ executable: join(r, 'Contents', 'MacOS', 'DeepSeek Harness') }),
+    })
+    const rows = [{ ProcessId: 10, ParentProcessId: 1, Name: 'DeepSeek Harness', ExecutablePath: exe, CommandLine: exe }]
+    assert.deepEqual(Array.from(select(rows, root, 21)), [10])
+    const caseInsensitive = existsSync(root.toLowerCase())
+    assert.deepEqual(Array.from(select(rows, join(base, 'deepseek harness.app'), 21)), caseInsensitive ? [10] : [],
+      'another spelling is the same app only when the volume says so')
+  } finally { rmSync(base, { recursive: true, force: true }) }
+})
+
+test('macOS bundle helpers alone block installation while other bundles and Node-mode CLI do not', () => {
+  const root = resolve('DeepSeek Harness.app')
+  const exe = join(root, 'Contents/MacOS/DeepSeek Harness')
+  const helper = join(root, 'Contents/Frameworks/DeepSeek Harness Helper (GPU).app/Contents/MacOS/DeepSeek Harness Helper (GPU)')
+  const select = runInNewContext(processSelection() + '; selectShellProcesses', {
+    isDesktopExecutable, resolve, basename, realpathSync, process: { platform: 'darwin' },
+    layoutPaths: () => ({ name: 'macos-bundle', executable: exe }),
+  })
+  const row = (pid, path = helper, command = path) => ({ ProcessId: pid, ParentProcessId: 1,
+    Name: basename(path), ExecutablePath: path, CommandLine: command })
+  assert.deepEqual(Array.from(select([], root, 99)), [])
+  assert.deepEqual(Array.from(select([
+    row(10), row(11, exe, `${exe} --expose-internals cli.mjs`),
+    row(12, helper.replace('Harness.app/', 'Harness.app-other/')),
+  ], root, 99)), [10])
+  assert.throws(() => select([{ ...row(10), ExecutablePath: '' }], root, 99), /could not identify/)
+  assert.throws(() => select([{ ...row(10), CommandLine: undefined }], root, 99), /incomplete/)
+  assert.throws(() => select([row(10), { ...row(99, exe), ParentProcessId: 10 }], root, 99), /child of DSH Desktop/)
+})
+
+test('standalone ps enumeration uses C locale and fails closed on enumeration errors', () => {
+  const calls = []
+  let mode = 'rows'
+  const start = source.indexOf('function runCapture(')
+  const end = source.indexOf('\n/**', start)
+  const capture = runInNewContext(source.slice(start, end) + '; runCapture', {
+    execFileSync(command, args, options) {
+      calls.push({ command, args, options })
+      if (mode === 'error') throw new Error('ps failed')
+      if (mode === 'empty') return ''
+      return args.at(-1).includes('comm') ? '10 1 /usr/bin/node\n' : '10 /usr/bin/node\n'
+    },
+  })
+  const enumerate = runInNewContext(processSelection() + '; posixProcessTable', {
+    basename, isAbsolute, runCapture: capture, process: { env: { LC_ALL: 'fr_FR.UTF-8', LANG: 'fr_FR.UTF-8', RETAIN: 'yes' } },
+  })
+  assert.deepEqual(Array.from(enumerate(), row => row.ProcessId), [10])
+  assert.equal(calls.length, 2)
+  for (const call of calls) {
+    assert.equal(call.command, 'ps')
+    assert.equal(call.options.env.LC_ALL, 'C')
+    assert.equal(call.options.env.LANG, 'C')
+    assert.equal(call.options.env.RETAIN, 'yes')
+  }
+  mode = 'empty'
+  assert.throws(() => enumerate(), /process table is invalid/)
+  mode = 'error'
+  assert.throws(() => enumerate(), /could not enumerate/)
 })

@@ -1,3 +1,5 @@
+import { hostMessages } from '../../assets/browser-messages.mjs'
+import { LOOPBACK_IPV4, BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Self-hosted Electron browser host (child side): the Electron main process
  * spawned by {@link RemoteElectronViewHost}. Owns one `BrowserWindow` PER
@@ -66,7 +68,7 @@ for (const line of electronRuntimeDiagnosticLines(process.versions)) {
 // host restarts (on top of dsh_browser_auth). Must run before app is ready.
 try {
   const base = dshHome()
-  app.setPath('userData', join(base, 'dsh-builtin-browser-host'))
+  app.setPath('userData', join(base, BROWSER_PROFILE_DIR))
 } catch (error) {
   process.stderr.write(`[dsh-browser host] userData setup failed: ${String(error)}\n`)
 }
@@ -1257,7 +1259,7 @@ function attachReferenceEntry(contents: import('electron').WebContents): void {
   })
   contents.on('dom-ready', () => {
     if (isToolbarContents(contents)) return
-    void contents.executeJavaScript(standaloneScript(overlayScript(), { label: '引用到 DSH' }))
+    void contents.executeJavaScript(standaloneScript(overlayScript(), { label: hostMessages.zh.referenceLabel }))
       .catch(() => { /* an extension-managed page owns its own entry */ })
   })
 }
@@ -1303,7 +1305,7 @@ void app.whenReady().then(() => {
     app.exit(1)
     return
   }
-  const socket = createConnection({ host: '127.0.0.1', port })
+  const socket = createConnection({ host: LOOPBACK_IPV4, port })
   rpcSocket = socket
   socket.setEncoding('utf8')
   // Prove we know the parent's spawn token before anything else; the parent

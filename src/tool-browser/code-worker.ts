@@ -83,6 +83,382 @@ export function targetArgs(target: Target): Record<string, unknown> {
 
 const NOT_EXPRESSION = /^(return|if|for|while|do|switch|try|catch|finally|throw|const|let|var|function|async\s+function|class|import|export|break|continue|else|\}|\)|\]|\/\/|\/\*|\*)/
 const CONTINUES = /[([{,+\-*/%=&|?:.<>!^~]$|=>$/
+const REGEX_BEFORE = new Set(['', '(', '[', '{', ',', ';', ':', '=', '!', '&', '|', '?', '+', '-', '*', '%', '^', '~', '<', '>', '\n'])
+const REGEX_KEYWORDS = new Set(['return', 'throw', 'case', 'in', 'instanceof', 'typeof', 'void', 'delete', 'new', 'await', 'yield', 'else', 'do', 'of'])
+
+interface ScanResult {
+  readonly rewritten: string
+  readonly varNames: readonly string[]
+  readonly fnNames: readonly string[]
+  readonly hasTopReturn: boolean
+}
+
+/**
+ * Dedent top-level lines while leaving multiline template literal bodies untouched, so unindented
+ * lines inside a template literal do not prevent dedenting the surrounding cell (and trailing
+ * parenthesized expressions still get turned into `return (...)` instead of triggering ASI calls).
+ */
+function dedentTopLevel(code: string): { readonly dedented: string; readonly inTemplateStart: readonly boolean[] } {
+  const trimmed = code.replace(/\s+$/, '')
+  const lines = trimmed.split('\n')
+  const inTemplateStart = new Array<boolean>(lines.length).fill(false)
+  let lineIdx = 0
+  let i = 0
+  let prevChar = ''
+  let prevWord = ''
+  const n = trimmed.length
+
+  const isIdentStart = (ch: string): boolean => /[A-Za-z_$]/.test(ch)
+  const isIdentPart = (ch: string): boolean => /[\w$]/.test(ch)
+  const advance = (ch: string): void => { if (ch === '\n') lineIdx++ }
+
+  const skipRegex = (): void => {
+    i++
+    let inClass = false
+    while (i < n) {
+      const ch = trimmed[i]!
+      if (ch === '\\') { advance(trimmed[i + 1] ?? ''); i += 2; continue }
+      if (ch === '[') inClass = true
+      else if (ch === ']') inClass = false
+      else if (ch === '/' && !inClass) {
+        i++
+        while (i < n && /[a-z]/i.test(trimmed[i]!)) i++
+        return
+      } else if (ch === '\n') return
+      i++
+    }
+  }
+
+  const skipQuoted = (quote: string): void => {
+    i++
+    while (i < n) {
+      const ch = trimmed[i]!
+      if (ch === '\\') { advance(trimmed[i + 1] ?? ''); i += 2; continue }
+      if (quote === '`' && ch === '$' && trimmed[i + 1] === '{') {
+        i += 2
+        let exprDepth = 1
+        let exprPrev = '{'
+        let exprWord = ''
+        while (i < n && exprDepth > 0) {
+          const c = trimmed[i]!
+          if (c === "'" || c === '"' || c === '`') { skipQuoted(c); exprPrev = '"'; exprWord = ''; continue }
+          if (c === '/' && trimmed[i + 1] === '/') { while (i < n && trimmed[i] !== '\n') i++; continue }
+          if (c === '/' && trimmed[i + 1] === '*') {
+            i += 2
+            while (i < n && !(trimmed[i] === '*' && trimmed[i + 1] === '/')) { advance(trimmed[i]!); i++ }
+            if (i < n) i += 2
+            continue
+          }
+          if (c === '/' && (REGEX_BEFORE.has(exprPrev) || REGEX_KEYWORDS.has(exprWord))) { skipRegex(); exprPrev = '/'; exprWord = ''; continue }
+          if (isIdentStart(c)) {
+            const start = i
+            i++
+            while (i < n && isIdentPart(trimmed[i]!)) i++
+            exprPrev = 'a'; exprWord = trimmed.slice(start, i)
+            continue
+          }
+          if (c === '{') exprDepth++
+          else if (c === '}') exprDepth--
+          if (c === '\n') { lineIdx++; exprPrev = '\n'; exprWord = '' }
+          else if (!/\s/.test(c)) { exprPrev = c; exprWord = '' }
+          i++
+        }
+        continue
+      }
+      if (ch === quote) { i++; return }
+      if (ch === '\n') {
+        lineIdx++
+        if (quote === '`' && lineIdx < lines.length) inTemplateStart[lineIdx] = true
+      }
+      i++
+    }
+  }
+
+  while (i < n) {
+    const ch = trimmed[i]!
+    if (ch === "'" || ch === '"' || ch === '`') { skipQuoted(ch); prevChar = '"'; prevWord = ''; continue }
+    if (ch === '/' && trimmed[i + 1] === '/') { while (i < n && trimmed[i] !== '\n') i++; continue }
+    if (ch === '/' && trimmed[i + 1] === '*') {
+      i += 2
+      while (i < n && !(trimmed[i] === '*' && trimmed[i + 1] === '/')) { advance(trimmed[i]!); i++ }
+      if (i < n) i += 2
+      continue
+    }
+    if (ch === '/' && (REGEX_BEFORE.has(prevChar) || REGEX_KEYWORDS.has(prevWord))) { skipRegex(); prevChar = '/'; prevWord = ''; continue }
+    if (isIdentStart(ch)) {
+      const start = i
+      i++
+      while (i < n && isIdentPart(trimmed[i]!)) i++
+      prevChar = 'a'; prevWord = trimmed.slice(start, i)
+      continue
+    }
+    if (ch === '\n') { lineIdx++; prevChar = '\n'; prevWord = '' }
+    else if (!/\s/.test(ch)) { prevChar = ch; prevWord = '' }
+    i++
+  }
+
+  const indents = lines
+    .filter((line, idx) => !inTemplateStart[idx] && line.trim() !== '')
+    .map(line => /^[ \t]*/.exec(line)?.[0].length ?? 0)
+  const indent = indents.length > 0 ? Math.min(...indents) : 0
+  const dedented = indent === 0
+    ? trimmed
+    : lines.map((line, idx) => inTemplateStart[idx] ? line : line.slice(indent)).join('\n')
+  return { dedented, inTemplateStart }
+}
+
+/**
+ * Lexically scan top-level declarations (skipping comments, strings, nested template literals,
+ * regex literals and nested blocks) so destructuring, multiline template strings and hoisted
+ * functions all persist cleanly across REPL cells.
+ */
+function scanTopLevel(code: string): ScanResult {
+  const varNames = new Set<string>()
+  const fnNames = new Set<string>()
+  const replacements: { readonly start: number; readonly end: number; readonly text: string }[] = []
+  let hasTopReturn = false
+  let depth = 0
+  let i = 0
+  let prevChar = ''
+  let prevWord = ''
+  const n = code.length
+
+  const isIdentStart = (ch: string): boolean => /[A-Za-z_$]/.test(ch)
+  const isIdentPart = (ch: string): boolean => /[\w$]/.test(ch)
+
+  const skipSpacesAndComments = (allowNewline = true): void => {
+    while (i < n) {
+      const ch = code[i]!
+      if (ch === ' ' || ch === '\t' || ch === '\r' || (allowNewline && ch === '\n')) { i++; continue }
+      if (ch === '/' && code[i + 1] === '/') { while (i < n && code[i] !== '\n') i++; continue }
+      if (ch === '/' && code[i + 1] === '*') {
+        const end = code.indexOf('*/', i + 2)
+        i = end === -1 ? n : end + 2
+        continue
+      }
+      break
+    }
+  }
+
+  const skipQuoted = (quote: string): void => {
+    i++
+    while (i < n) {
+      const ch = code[i]!
+      if (ch === '\\') { i += 2; continue }
+      if (quote === '`' && ch === '$' && code[i + 1] === '{') {
+        i += 2
+        let exprDepth = 1
+        while (i < n && exprDepth > 0) {
+          const c = code[i]!
+          if (c === "'" || c === '"' || c === '`') skipQuoted(c)
+          else if (c === '/' && code[i + 1] === '/') { while (i < n && code[i] !== '\n') i++ }
+          else if (c === '/' && code[i + 1] === '*') { const end = code.indexOf('*/', i + 2); i = end === -1 ? n : end + 2 }
+          else { if (c === '{') exprDepth++; else if (c === '}') exprDepth--; i++ }
+        }
+        continue
+      }
+      if (ch === quote) { i++; return }
+      i++
+    }
+  }
+
+  const skipRegex = (): void => {
+    i++
+    let inClass = false
+    while (i < n) {
+      const ch = code[i]!
+      if (ch === '\\') { i += 2; continue }
+      if (ch === '[') inClass = true
+      else if (ch === ']') inClass = false
+      else if (ch === '/' && !inClass) {
+        i++
+        while (i < n && /[a-z]/i.test(code[i]!)) i++
+        return
+      } else if (ch === '\n') return
+      i++
+    }
+  }
+
+  const readIdent = (): string | undefined => {
+    if (i >= n || !isIdentStart(code[i]!)) return undefined
+    const start = i
+    i++
+    while (i < n && isIdentPart(code[i]!)) i++
+    return code.slice(start, i)
+  }
+
+  const skipBalancedExpr = (stopChars: string): void => {
+    let exprDepth = 0
+    let localPrev = '='
+    let localWord = ''
+    while (i < n) {
+      const ch = code[i]!
+      if (ch === "'" || ch === '"' || ch === '`') { skipQuoted(ch); localPrev = '"'; localWord = ''; continue }
+      if (ch === '/' && code[i + 1] === '/') { while (i < n && code[i] !== '\n') i++; continue }
+      if (ch === '/' && code[i + 1] === '*') { const end = code.indexOf('*/', i + 2); i = end === -1 ? n : end + 2; continue }
+      if (ch === '/' && (REGEX_BEFORE.has(localPrev) || REGEX_KEYWORDS.has(localWord))) { skipRegex(); localPrev = '/'; localWord = ''; continue }
+      if (ch === '(' || ch === '[' || ch === '{') { exprDepth++; i++; localPrev = ch; localWord = ''; continue }
+      if (ch === ')' || ch === ']' || ch === '}') {
+        if (exprDepth === 0 && stopChars.includes(ch)) return
+        exprDepth = Math.max(0, exprDepth - 1); i++; localPrev = ch; localWord = ''; continue
+      }
+      if (exprDepth === 0 && stopChars.includes(ch)) return
+      if (isIdentStart(ch)) {
+        const w = readIdent() ?? ''
+        localPrev = 'a'; localWord = w; continue
+      }
+      if (!/\s/.test(ch)) { localPrev = ch; localWord = '' }
+      else if (ch === '\n' && exprDepth === 0 && stopChars.includes('\n')) return
+      i++
+    }
+  }
+
+  const parseBindingPattern = (): void => {
+    skipSpacesAndComments()
+    if (i >= n) return
+    if (code.startsWith('...', i)) {
+      i += 3
+      skipSpacesAndComments()
+      const name = readIdent()
+      if (name !== undefined) varNames.add(name)
+      return
+    }
+    if (code[i] === '[') {
+      i++
+      while (i < n) {
+        skipSpacesAndComments()
+        if (code[i] === ']') { i++; return }
+        if (code[i] === ',') { i++; continue }
+        parseBindingPattern()
+        skipSpacesAndComments()
+        if (code[i] === '=') { i++; skipBalancedExpr(',]') }
+        skipSpacesAndComments()
+        if (code[i] === ',') i++
+        else if (code[i] === ']') { i++; return }
+        else break
+      }
+      return
+    }
+    if (code[i] === '{') {
+      i++
+      while (i < n) {
+        skipSpacesAndComments()
+        if (code[i] === '}') { i++; return }
+        if (code.startsWith('...', i)) {
+          i += 3
+          skipSpacesAndComments()
+          const rest = readIdent()
+          if (rest !== undefined) varNames.add(rest)
+        } else {
+          let keyIdent: string | undefined
+          if (code[i] === '[') {
+            i++; skipBalancedExpr(']'); if (code[i] === ']') i++
+          } else if (code[i] === "'" || code[i] === '"') {
+            skipQuoted(code[i]!)
+          } else if (isIdentStart(code[i]!)) {
+            keyIdent = readIdent()
+          } else {
+            while (i < n && !/[\s:,=}]/.test(code[i]!)) i++
+          }
+          skipSpacesAndComments()
+          if (code[i] === ':') {
+            i++
+            parseBindingPattern()
+          } else if (keyIdent !== undefined) {
+            varNames.add(keyIdent)
+          }
+        }
+        skipSpacesAndComments()
+        if (code[i] === '=') { i++; skipBalancedExpr(',}') }
+        skipSpacesAndComments()
+        if (code[i] === ',') i++
+        else if (code[i] === '}') { i++; return }
+        else break
+      }
+      return
+    }
+    const name = readIdent()
+    if (name !== undefined) varNames.add(name)
+  }
+
+  while (i < n) {
+    const ch = code[i]!
+    if (ch === "'" || ch === '"' || ch === '`') { skipQuoted(ch); prevChar = '"'; prevWord = ''; continue }
+    if (ch === '/' && code[i + 1] === '/') { while (i < n && code[i] !== '\n') i++; continue }
+    if (ch === '/' && code[i + 1] === '*') { const end = code.indexOf('*/', i + 2); i = end === -1 ? n : end + 2; continue }
+    if (ch === '/' && (REGEX_BEFORE.has(prevChar) || REGEX_KEYWORDS.has(prevWord))) { skipRegex(); prevChar = '/'; prevWord = ''; continue }
+    if (ch === '{' || ch === '(' || ch === '[') { depth++; i++; prevChar = ch; prevWord = ''; continue }
+    if (ch === '}' || ch === ')' || ch === ']') { depth = Math.max(0, depth - 1); i++; prevChar = ch; prevWord = ''; continue }
+
+    if (depth === 0 && isIdentStart(ch) && prevChar !== '.') {
+      const wordStart = i
+      const word = readIdent()!
+      if (word === 'const' || word === 'let' || word === 'var') {
+        if (word !== 'var') replacements.push({ start: wordStart, end: i, text: 'var' })
+        while (i < n) {
+          parseBindingPattern()
+          skipSpacesAndComments(false)
+          if (code[i] === '=') {
+            i++
+            skipSpacesAndComments(true)
+            skipBalancedExpr(',;\n')
+          }
+          skipSpacesAndComments(false)
+          if (code[i] === ',') { i++; continue }
+          break
+        }
+        prevChar = 'a'; prevWord = ''
+        continue
+      }
+      if (word === 'async') {
+        const saved = i
+        skipSpacesAndComments(false)
+        if (code.startsWith('function', i) && !isIdentPart(code[i + 8] ?? '')) {
+          i += 8
+          skipSpacesAndComments()
+          if (code[i] === '*') { i++; skipSpacesAndComments() }
+          const fn = readIdent()
+          if (fn !== undefined) fnNames.add(fn)
+          prevChar = 'a'; prevWord = 'function'
+          continue
+        }
+        i = saved
+      }
+      if (word === 'function') {
+        skipSpacesAndComments()
+        if (code[i] === '*') { i++; skipSpacesAndComments() }
+        const fn = readIdent()
+        if (fn !== undefined) fnNames.add(fn)
+        prevChar = 'a'; prevWord = 'function'
+        continue
+      }
+      if (word === 'class') {
+        skipSpacesAndComments()
+        const cls = readIdent()
+        if (cls !== undefined) {
+          varNames.add(cls)
+          replacements.push({ start: wordStart, end: wordStart + 5, text: `var ${cls} = class` })
+        }
+        prevChar = 'a'; prevWord = 'class'
+        continue
+      }
+      if (word === 'return') hasTopReturn = true
+      prevChar = 'a'; prevWord = word
+      continue
+    }
+
+    if (ch === '\n') { prevChar = '\n'; prevWord = '' }
+    else if (!/\s/.test(ch)) { prevChar = ch; prevWord = '' }
+    i++
+  }
+
+  let rewritten = code
+  for (let idx = replacements.length - 1; idx >= 0; idx--) {
+    const rep = replacements[idx]!
+    rewritten = rewritten.slice(0, rep.start) + rep.text + rewritten.slice(rep.end)
+  }
+  return { rewritten, varNames: [...varNames], fnNames: [...fnNames], hasTopReturn }
+}
 
 /**
  * Make a cell behave like a REPL cell: top-level declarations land on the context (so they
@@ -91,27 +467,34 @@ const CONTINUES = /[([{,+\-*/%=&|?:.<>!^~]$|=>$/
  * @returns an async function body.
  */
 export function prepare(code: string): string {
-  const raw = code.replace(/\s+$/, '').split('\n')
-  const indent = Math.min(...raw.filter(line => line.trim() !== '').map(line => /^[ \t]*/.exec(line)?.[0].length ?? 0))
-  const lines = raw.map(line => line.slice(Number.isFinite(indent) ? indent : 0)
-    .replace(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/, 'globalThis.$1 =')
-    .replace(/^(async\s+)?function(\s*\*?\s*)([A-Za-z_$][\w$]*)/, 'globalThis.$3 = $1function$2$3')
-    .replace(/^class\s+([A-Za-z_$][\w$]*)/, 'globalThis.$1 = class $1'))
-  const body = lines.join('\n')
-  if (lines.some(line => /^return\b/.test(line))) return body
+  const { dedented, inTemplateStart } = dedentTopLevel(code)
+  const { rewritten, varNames, fnNames, hasTopReturn } = scanTopLevel(dedented)
+  const prelude = fnNames.length === 0 ? '' : fnNames.map(name => `globalThis.${name} = ${name};`).join(' ') + '\n'
+  const persist = varNames.length === 0
+    ? ''
+    : varNames.map(name => `try { if (typeof ${name} !== 'undefined' || !(${JSON.stringify(name)} in globalThis)) globalThis.${name} = ${name}; } catch {}`).join(' ')
+  const wrap = (body: string): string => {
+    if (persist !== '') return `try {\n${prelude}${body}\n} finally {\n${persist}\n}`
+    return `${prelude}${body}`
+  }
+
+  if (hasTopReturn) return wrap(rewritten)
+  const lines = rewritten.split('\n')
   const last = lines.length - 1
   const line = lines[last] ?? ''
   const previous = lines.slice(0, last).reverse().find(l => l.trim() !== '')?.trimEnd() ?? ''
-  if (line === '' || /^\s/.test(line) || NOT_EXPRESSION.test(line) || line.startsWith('globalThis.') || CONTINUES.test(previous) || /[{,]$/.test(line)) return body
+  if (inTemplateStart[last] || line === '' || /^\s/.test(line) || NOT_EXPRESSION.test(line) || CONTINUES.test(previous) || /[{,]$/.test(line)) {
+    return wrap(rewritten)
+  }
   // A one-line cell of several statements returns its last one.
   const split = line.lastIndexOf(';', line.replace(/;\s*$/, '').length - 1)
   const head = split > 0 ? line.slice(0, split + 1) + '\n' : ''
   const tail = (split > 0 ? line.slice(split + 1) : line).trim().replace(/^;\s*/, '').replace(/;\s*$/, '')
   for (const candidate of [`${head}return (${tail})`, `return (${line.replace(/^;\s*/, '').replace(/;\s*$/, '')})`]) {
     const transformed = [...lines.slice(0, last), candidate].join('\n')
-    if (tail !== '' && compiles(transformed)) return transformed
+    if (tail !== '' && compiles(wrap(transformed))) return wrap(transformed)
   }
-  return body
+  return wrap(rewritten)
 }
 
 function compiles(body: string): boolean {
@@ -147,9 +530,28 @@ const helpers = {
   type_text: (input: string) => text('type', { text: input }),
   fill_input: (target: Target, input: string) => text('set_value', { ...targetArgs(target), value: input }),
   press_key: (key: string) => text('key', { key }),
-  scroll: (...args: unknown[]) => {
+  scroll: async (...args: unknown[]) => {
     if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null) return text('scroll', args[0] as Record<string, unknown>)
-    const deltaY = args.length >= 3 ? Number(args[2]) : args.length === 1 ? Number(args[0]) : 600
+    if (args.length >= 3) {
+      const [x, y, dy] = [Number(args[0]), Number(args[1]), Number(args[2])]
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(dy)) {
+        throw new Error('scroll(x, y, dy): coordinates and deltaY must be finite numbers')
+      }
+      return await js(`(() => {
+        let el = document.elementFromPoint(${JSON.stringify(x)}, ${JSON.stringify(y)});
+        while (el && el !== document.documentElement && el !== document.body) {
+          const st = getComputedStyle(el);
+          if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight) {
+            el.scrollBy({ top: ${JSON.stringify(dy)} });
+            return 'Scrolled element.';
+          }
+          el = el.parentElement;
+        }
+        window.scrollBy({ top: ${JSON.stringify(dy)} });
+        return 'Scrolled window.';
+      })()`)
+    }
+    const deltaY = args.length === 1 ? Number(args[0]) : 600
     return text('scroll', { deltaY })
   },
   screenshot: (opts: Record<string, unknown> = {}) => text('screenshot', opts),
@@ -167,7 +569,10 @@ const helpers = {
   // Semantic helpers over the dsh tools.
   click: (target: Target) => text('click', targetArgs(target)),
   type: async (target: Target, input?: string | { submit?: boolean }, opts: { submit?: boolean } = {}) => {
-    const toolArgs = typeof input === 'string' ? { ...targetArgs(target), text: input } : { text: String(target) }
+    if (typeof input !== 'string' && typeof target !== 'string') {
+      throw new Error('type(target, text): text must be a string when target is an object')
+    }
+    const toolArgs = typeof input === 'string' ? { ...targetArgs(target), text: input } : { text: target as string }
     if (typeof input === 'object' && input !== null) opts = input
     let out = await text('type', toolArgs)
     if (opts.submit === true) out += '\n' + await text('key', { key: 'Enter' })

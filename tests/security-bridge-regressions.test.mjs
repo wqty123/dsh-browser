@@ -20,6 +20,7 @@ const closed = []
 globalThis.__electronStub__ = { app: new EventEmitter(), webContents: { getAllWebContents: () => contents, fromId: id => contents.find(c => c.id === id) } }
 writeFileSync(join(directory, 'bridge.mjs'), stubbed + '\nexport { handle, handles };\n')
 writeFileSync(join(directory, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-bridge/guest-proxy.mjs', import.meta.url)))
+writeFileSync(join(directory, 'native-guests.mjs'), readFileSync(new URL('../desktop-bridge/native-guests.mjs', import.meta.url)))
 const { handle, handles, start, stop } = await import(pathToFileURL(join(directory, 'bridge.mjs')))
 const guest = id => ({ id, getType: () => 'webview', getURL: () => `https://page${id}.example/`, getTitle: () => 'identical title', isDestroyed: () => closed.includes(id), debugger: { isAttached: () => true, sendCommand: async () => ({}) } })
 const shell = { id: 1, getType: () => 'window', getURL: () => 'dsh-app://app/', getTitle: () => 'DSH', isDestroyed: () => false,

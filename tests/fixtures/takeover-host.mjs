@@ -66,7 +66,7 @@ export function takeoverHost(browser = {}, ApprovalService = ApprovalContract) {
   const exec = { signal: controller.signal, callId: 'takeover-call', agent: {
     id: 'session-owner', session: { append: (kind, data) => audit.push({ kind, ...data }) },
   } }
-  return { tools, routes, native, audit, sections, controller, exec, setTurnOpen(value) { turnOpen = value },
+  return { ctx, tools, routes, native, audit, sections, controller, exec, setTurnOpen(value) { turnOpen = value },
     dispose() { controller.abort(); for (const dispose of disposers.reverse()) dispose() } }
 }
 

@@ -10,6 +10,9 @@ import { apply } from '../lib/browser-electron/entry.js'
 import { SettingsStore, DEFAULT_SETTINGS } from '../lib/browser-electron/settings-store.js'
 import { DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
 import { SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
+import { ExtensionBrowserViewHost } from '../lib/browser-electron/extension-browser.js'
+import { PreferredBrowserViewHost } from '../lib/browser-electron/preferred-browser.js'
+import { nativeRegistration } from '../lib/browser-electron/extension-setup.js'
 
 class Sidebar {
   disposed = false
@@ -21,6 +24,7 @@ class Sidebar {
 }
 
 function harness(t, channel, discover = () => new Promise(() => {})) {
+  t.mock.method(nativeRegistration, 'ensure', async () => {})
   const folder = mkdtempSync(join(tmpdir(), 'dsh-carrier-choice-'))
   const oldHome = process.env.DSH_HOME
   const oldChrome = process.env.DSH_BROWSER_CHROME_PATH
@@ -164,7 +168,30 @@ test('the installed runtime route reads the selected system carrier connection a
   assert.equal((await h.status()).systemBrowser.detail, state.detail)
   await h.patch({ browser: { systemProfile: 'user' } })
   assert.equal((await h.status()).readiness, 'blocked')
-  assert.equal((await h.status()).resolvedCarrier, 'system')
+  assert.equal((await h.status()).resolvedCarrier, 'cdp')
+  assert.equal((await h.status()).controlledProfile, 'plugin')
+  assert.ok(h.current instanceof PreferredBrowserViewHost)
+  assert.equal((await h.panelFactory()).host, h.current, 'Web panel operations use the selected extension, not iframe/desktop discovery')
+})
+
+test('extension status reports a connected personal profile or the managed CDP fallback', async t => {
+  let state = { connected: false, state: 'not-paired', browser: 'chrome', detail: 'Pair this profile' }
+  t.mock.method(ExtensionBrowserViewHost.prototype, 'connectionStatus', () => state)
+  t.mock.method(ExtensionBrowserViewHost.prototype, 'refreshStatus', async () => {})
+  const h = harness(t, 'chrome')
+  await h.patch({ browser: { systemProfile: 'user' } })
+  assert.equal((await h.status()).readiness, 'blocked')
+  assert.equal((await h.status()).extension.state, 'not-paired')
+  state = { connected: true, state: 'connected', browser: 'chrome', profile: 'My real Chrome', connectionId: 'paired-profile-id', detail: 'Connected' }
+  const ready = await h.status()
+  assert.equal(ready.readiness, 'ready')
+  assert.equal(ready.extension.profile, state.profile)
+  assert.equal(ready.systemBrowser.checked, false)
+  assert.equal(ready.executable, undefined)
+  assert.match(ready.extension.install.installer, /native-host.*install.mjs$/)
+  state = { ...state, connected: false, state: 'extension-missing' }
+  assert.equal((await h.status()).readiness, 'blocked')
+  assert.ok(h.current instanceof PreferredBrowserViewHost)
 })
 
 test('persistence changes in user-profile mode leave the selected profile carrier intact', async t => {

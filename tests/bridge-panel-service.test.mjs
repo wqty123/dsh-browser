@@ -64,11 +64,11 @@ src = src.replace(/^main\(\)$/m, '')
 // The signature must match the source EXACTLY, or the patch silently does nothing and every
 // scenario reads as "the code was correct". The previous harness lost the id here too; this one
 // keeps it, because the panel path is judged by WHICH webContents it evaluates in.
-const SIGNATURE = 'async function sendCdp(id, method, params) {'
+const SIGNATURE = 'async function sendCdp(id, method, params, checkCurrent) {'
 assert.ok(src.includes(SIGNATURE), 'sendCdp signature changed; this harness would silently no-op')
 src = src.replace(
   SIGNATURE,
-  'async function sendCdp(id, method, params) { return globalThis.__answerCdp__(id, method, params) }\n'
+  'async function sendCdp(id, method, params, checkCurrent) { checkCurrent?.(); return globalThis.__answerCdp__(id, method, params) }\n'
   + 'async function __unusedRealSendCdp(id, method, params) {',
 )
 src += '\nglobalThis.__bridge_handle__ = handle;\nglobalThis.__bridge_handles__ = handles;\n'
@@ -95,6 +95,7 @@ let cancelInitialization = () => false
  * attaches one asynchronously after the tab is placed.
  */
 globalThis.__evalInShell__ = async (id, code) => {
+  if (code.includes('api?.holdRendering')) return false
   seen.evaluates.push({ id, expression: code })
   if (code.includes('cancelPanelInitialization')) return cancelInitialization(code)
   if (code.includes('.click(')) seen.clicks.push(code)
@@ -143,6 +144,7 @@ const folder = mkdtempSync(join(tmpdir(), 'panel-'))
 const file = join(folder, 'bridge.mjs')
 writeFileSync(file, src)
 writeFileSync(join(folder, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-bridge/guest-proxy.mjs', import.meta.url)))
+writeFileSync(join(folder, 'native-guests.mjs'), readFileSync(new URL('../desktop-bridge/native-guests.mjs', import.meta.url)))
 await import('file:///' + file.replace(/\\/g, '/'))
 
 const handle = globalThis.__bridge_handle__

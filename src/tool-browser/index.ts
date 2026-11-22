@@ -19,7 +19,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ImageBlock } from '@deepseek-ai/dsh-llm'
 import { SCREENSHOT_MAX_WIDTH, SCREENSHOT_MAX_HEIGHT, screenshotDimension, screenshotBytes, screenshotVisionEnabled, saveScreenshotImage } from './screenshot-image.ts'
 import { BrowserTakeovers, installTakeovers } from './takeover.ts'
-import { TAKEOVER_TOOL, type TakeoverDecision, type TakeoverSummary } from '../takeover-protocol.ts'
+import { TAKEOVER_TOOL, type TakeoverDecision, type TakeoverOutcome, type TakeoverSummary } from '../takeover-protocol.ts'
 import { clearLastOpen, getLastOpen, setLastOpen } from '../browser-electron/open-slot.ts'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -154,9 +154,10 @@ export interface Config {
   /** Optional initial allow-list of browser tool names; other tools are refused. */
   readonly allowedActions?: readonly string[]
   /**
-   * What the model sees. "code" (default): one dsh_browser_code tool whose script calls every
-   * browser action as a helper, plus dsh_browser_request_takeover. "tools": every action as its
-   * own tool.
+   * What the model sees. "core" (default): core browser tools, dsh_browser_load_tools and
+   * dsh_browser_code (which steps aside under PTC). "code": one dsh_browser_code tool whose
+   * script calls every browser action as a helper, plus dsh_browser_request_takeover. "tools":
+   * every action as its own tool.
    */
   readonly surface?: 'core' | 'code' | 'tools'
 }
@@ -678,7 +679,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const navigationUrl = open?.owner === owner && Date.now() - open.at < 10000 ? open.url : undefined
       const page = await takeovers.adopt(owner, exec.signal, navigationUrl)
       if (navigationUrl !== undefined && getLastOpen()?.owner === owner) clearLastOpen(open!.at)
-      return takeovers.run(page, args.reason.trim(), args.instructions, exec.signal, async pending => {
+      return takeovers.run(page, args.reason.trim(), args.instructions, exec.signal, async (pending): Promise<{ outcome: TakeoverOutcome; page: TakeoverSummary }> => {
         const approval = ctx.get('approval' as never) as unknown as { request(request: {
           agent: ToolRunContext['agent']; toolName: string; reason: string; displayReason: { en: string; zh: string };
           callId: ToolRunContext['callId']; signal: AbortSignal;
@@ -793,7 +794,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   registerSafely(defineTool({
     name: 'dsh_browser_open',
-    description: 'Open a URL on the selected surface (default: panel). The CDP-backed desktop sidebar returns a live snapshot and supports subsequent browser tools on that same page. The Web iframe panel only queues sidebar navigation: carrier=panel-iframe-navigation-requested, with no snapshot or live-control capability. Reading tools never start another browser. newTab is optional on CDP surfaces. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
+    description: 'Open a URL on the selected controllable surface (default: panel). Success returns a live snapshot and supports subsequent browser tools on that same page. A Web iframe or unavailable desktop bridge is refused; no manual-only navigation is queued. Reading tools never start another browser. newTab is optional on CDP surfaces. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
     parameters: {
       url: { type: 'string', required: true, description: 'The URL to open (HTTP/HTTPS).' },
       newTab: { type: 'boolean', description: 'Open in a new tab instead of the active one.' },

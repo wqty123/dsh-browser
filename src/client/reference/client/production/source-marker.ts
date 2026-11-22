@@ -24,9 +24,11 @@ export function readSubmissionQuote(text: string, from: number) {
 }
 
 export function sourceMarker(referenceId: string, index: number, title?: string): string {
-  const displayTitle = (title ?? '').replace(/[\r\n\t]+/gu, ' ')
-    .replace(/[\[\]()\\`<>*_]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 80).trim()
-  const label = `${SOURCE_LINK_LABEL} ${index + 1}${displayTitle === '' ? '' : `：${displayTitle}`}`
+  const cleaned = (title ?? '').replace(/[\r\n\t]+/gu, ' ')
+    .replace(/[\[\]()\\`<>*_]/gu, '').replace(/\s+/gu, ' ').trim()
+  const displayTitle = Array.from(cleaned).slice(0, 80).join('').trim()
+  const rawLabel = `${SOURCE_LINK_LABEL} ${index + 1}${displayTitle === '' ? '' : `：${displayTitle}`}`
+  const label = typeof rawLabel.toWellFormed === 'function' ? rawLabel.toWellFormed() : rawLabel
   return `<dsh-browser-reference uri="${encodeBrowserRefUri({ referenceId })}" label="${encodeURIComponent(label)}"/>`
 }
 

@@ -75,6 +75,23 @@ DSH 侧栏下载使用目标页面所属浏览器会话的登录状态，分段�
 
 遇到登录、验证码等需要人工完成的操作，请让 Agent 请求接管；插件不会自动解决验证。
 
+## DSH 宿主补丁
+
+Windows / macOS 桌面端设置 → 浏览器提供一个固定的 **卸载并重装** 按钮：
+
+- 预检确认 Desktop 身份、宿主文件及恢复备份，从当前 Desktop profile 捕获准确的插件依赖来源。缺少依赖时明确拒绝，不写入维护文件，也不选择替代来源；打包安装以 `resources/app.asar` 为准，不信任残留的解包目录。
+- 独立维护进程、安装器和宿主补丁暂存于插件目录之外。正常退出一次后，依次移除 profile 插件、恢复宿主原文件、应用随包分发的 **DSH 0.2.2-rc.3 / 0.2.2-rc.5** 兼容补丁，再从捕获的依赖来源添加插件；保留最初的精确恢复基线，备份冲突时拒绝维护。
+- 设置继续显示 `not-installed` / `pending-restart` / `loaded` / `failed` 主扩展状态。Web 宿主补丁控件和手动终端安装/恢复入口不变。
+- 维护沿用正常退出与任务确认：取消退出或仍有进程运行时不安装。重启后校验当前 DSH home 的 endpoint、新进程 PID、宿主 `loaded` 状态、包版本与实时桥接代码摘要。
+
+补丁按宿主包精确版本与原文件校验选择；锚点不匹配时安全拒绝。rc.5 Desktop 的原文件哈希来自源码构建，尚未与已发布桌面安装包核对。详见 [宿主补丁说明](dsh-host-patch/README.md) 和 [#36 集成与验收记录](docs/pr64-extension-status.md)。
+
+revision 9 包含 `childTabs` v2 与按 `DSH_HOME` 持久化的侧栏会话：子页面保留 opener、消息、命名目标、POST 和关闭语义，不重放 URL、不创建额外窗口；同一 home 的工作区共享登录，无过期时间的会话 cookie 也会在重启前后保存与恢复。每个分区仅恢复一次，完成前阻止页面加载；后续检查点只保存实时 cookie，不会重放已注销的登录。无效条目单独跳过，读取失败经有限重试后保留 `.bak` 并继续运行。插件检测持久化能力，不支持时保留原有内存会话。支持 revision 2 / 3 / 4 / 5 / 6 / 7 / 8 的安全升级与精确恢复。未支持的原生 opener 请求明确返回 `BROWSER_NATIVE_CHILD_UNAVAILABLE`；显式 URL-only 行为不变。详见 [集成与验收](docs/pr64-native-children.md)。
+
+后台浏览器操作会按能力检测使用 `ctx.sidebarRight.holdRendering(sessionId)`，不会切换用户当前会话；未打补丁的宿主保留既有行为。
+
+Web/npm 安装可通过包目录运行独立 CLI；补丁说明、校验／恢复命令及上游源码补丁见 [dsh-host-patch/README.md](dsh-host-patch/README.md)。
+
 ## 文档
 
 - [用户指南](docs/user-guide.md)

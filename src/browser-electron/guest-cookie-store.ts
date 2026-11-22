@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 import { randomUUID } from 'node:crypto'
 import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -48,7 +49,7 @@ export function loadGuestCookies(directory: string): GuestCookieJar {
 const stores = new Map<string, GuestCookieJar>()
 
 export function localGuestCookies(): GuestCookieJar {
-  const directory = join(dshHome(), 'dsh-builtin-browser-host', 'web-cookies')
+  const directory = join(dshHome(), BROWSER_PROFILE_DIR, 'web-cookies')
   let store = stores.get(directory)
   if (store === undefined) {
     store = loadGuestCookies(directory)

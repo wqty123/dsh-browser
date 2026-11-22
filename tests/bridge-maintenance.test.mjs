@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { prepareBridgeMaintenance } from '../lib/browser-electron/bridge-maintenance.js'
 import { createInstallerSandbox } from './helpers/installer-sandbox.mjs'
@@ -132,4 +132,24 @@ test('a redirected output directory is refused before creating anything in Deskt
     if (existsSync(link)) unlinkSync(link)
     check.sandbox.close()
   }
+})
+
+test('a macOS bundle gets an executable .command launcher with single-quoted literal paths', async () => {
+  const check = fixture()
+  try {
+    const bundle = join(check.sandbox.temp('bundle-'), "DeepSeek Harness's.app")
+    mkdirSync(join(bundle, 'Contents', 'Resources', 'app', 'lib'), { recursive: true })
+    writeFileSync(join(bundle, 'Contents', 'Info.plist'), '<plist/>')
+    writeFileSync(join(bundle, 'Contents', 'Resources', 'app', 'lib', 'main.js'), 'const app = {};\nexport {};\n')
+    writeFileSync(join(bundle, 'Contents', 'Resources', 'app', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.2-test', main: 'lib/main.js' }))
+    const prepared = await prepareBridgeMaintenance('install', bundle, check.options)
+    assert.ok(prepared.path.endsWith('install-bridge.command'))
+    assert.equal(prepared.commandShell, 'sh')
+    assert.ok(prepared.command.startsWith("'") && prepared.command.endsWith("'"))
+    const text = readFileSync(prepared.path, 'utf8')
+    assert.match(text, /^#!\/bin\/sh\n/)
+    assert.ok(text.includes(`'${process.execPath.replace(/'/g, `'\\''`)}' ./run-maintenance.mjs`))
+    if (process.platform !== 'win32') assert.equal(statSync(prepared.path).mode & 0o700, 0o700)
+    assert.equal(JSON.parse(readFileSync(prepared.planPath, 'utf8')).installRoot, bundle)
+  } finally { check.sandbox.close() }
 })

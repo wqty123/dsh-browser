@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { carrierTakeoverTarget, hasCarrierTakeover } from '../browser/takeover-target.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { pairedRoute, type BrowserHttpHandler, type BrowserPairingConnection } from '../browser-electron/authenticated-route.ts'
@@ -9,6 +10,7 @@ import { referenceOwnerKey } from '../reference-owner.ts'
 import { TAKEOVER_ROUTE, TAKEOVER_TOOL, type TakeoverDecision, type TakeoverNotice, type TakeoverSummary } from '../takeover-protocol.ts'
 
 interface Page {
+  readonly connected?: () => boolean
   readonly owner: string
   readonly tabId: string
   readonly pageId: string
@@ -48,6 +50,8 @@ function summary(value: unknown): TakeoverSummary {
 }
 
 export class BrowserTakeovers {
+  private browser?: object
+  attachBrowser(browser: object | undefined): void { this.browser = browser }
   private readonly pages = new Map<string, Page>()
   private readonly pending = new Map<string, Pending>()
   private readonly results = new Map<string, Promise<unknown>>()
@@ -64,6 +68,9 @@ export class BrowserTakeovers {
 
   async adopt(owner: string, signal: AbortSignal, navigationUrl?: string, timeoutMs = 15000): Promise<Page> {
     signal.throwIfAborted()
+    const carrier = carrierTakeoverTarget(this.browser, owner)
+    if (carrier) return { ...carrier, owner: referenceOwnerKey(owner), lease: randomUUID(), active: true, seen: Date.now() }
+    if (hasCarrierTakeover(this.browser)) throw new Error('The selected personal browser has no connected tab in this conversation. Reconnect the extension or open a tab; no sidebar fallback.')
     return new Promise<Page>((resolve, reject) => {
       const finish = (page?: Page, error?: unknown): void => {
         clearTimeout(timer)
@@ -104,7 +111,7 @@ export class BrowserTakeovers {
       button: new Promise(resolve => { answer = resolve }), answer: decision => { answer(decision) },
       summary: new Promise(resolve => { report = resolve }), report: value => { report(value) }, phase: 'waiting' }
     this.pending.set(key, pending)
-    const expiry = setInterval(() => { if (Date.now() - page.seen > 15000) controller.abort() }, 1000)
+    const expiry = setInterval(() => { if (page.connected ? !page.connected() : Date.now() - page.seen > 15000) controller.abort() }, 1000)
     expiry.unref()
     const result = Promise.resolve().then(() => operation(pending)).finally(() => {
       clearInterval(expiry)
@@ -180,6 +187,7 @@ export class BrowserTakeovers {
 }
 
 export function installTakeovers(ctx: Context, takeovers: BrowserTakeovers): void {
+  takeovers.attachBrowser(ctx.get('browser'))
   ctx.on?.('approval/request' as never, ((request: { toolName: string; signal?: AbortSignal }, next: () => Promise<TakeoverDecision>) => takeovers.listen(request, next)) as never, { prepend: true })
   ctx.effect(() => () => { takeovers.dispose() })
   ctx.inject?.(['webServer'] as never, (host: Context) => {

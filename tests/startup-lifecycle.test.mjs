@@ -80,7 +80,7 @@ test('startup discovers targets without closing surplus pages', () => {
 test('a view adopts a blank page instead of discarding the one the browser opened', () => {
   const build = body('buildSession')
   assert.match(build, /await this\.adoptBlankTarget\(client\)/, 'adoption is attempted')
-  assert.match(build, /adopted \?\? await this\.createTarget\(client\)/, 'and creation is the fallback')
+  assert.match(build, /adopted \?\? await this\.createTarget\(client, viewId\)/, 'and creation records the owning view')
 
   const adopt = body('adoptBlankTarget')
   // Two views sharing one page would be worse than an extra tab, so an already-claimed target is

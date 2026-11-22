@@ -39,7 +39,7 @@ import type { TextPosition } from '../ordered-submission.ts'
 import { ensureDockStyles } from './styles.ts'
 import { buildBrowserRefLinkProps } from '../BrowserRefLink.tsx'
 import { installReplyLinkBridge } from './reply-link-bridge.ts'
-import { browserSourceRule } from './user-text-rule.ts'
+import { createBrowserSourceRule } from './user-text-rule.ts'
 import { decodeBrowserRefUri } from '../scheme.ts'
 import { createElement as element, useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -456,12 +456,13 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
   runtime.start()
   ctx.effect(() => () => { runtime.dispose() }, 'ui-browser-reference: production runtime')
 
+  const sourceRule = createBrowserSourceRule(referenceId => runtime.referenceDetail(referenceId) !== undefined)
   const textOwner = ctx.get('uiConversation') as {
-    readonly userText?: { register(rule: typeof browserSourceRule): () => void }
+    readonly userText?: { register(rule: typeof sourceRule): () => void }
   } | undefined
   if (textOwner?.userText !== undefined) {
     try {
-      ctx.effect(() => textOwner.userText?.register(browserSourceRule), 'ui-browser-reference: source text rule')
+      ctx.effect(() => textOwner.userText?.register(sourceRule), 'ui-browser-reference: source text rule')
     } catch {
       // 文本来源高亮是可选的展示增强：注册失败不能拖垮引用投递。
     }

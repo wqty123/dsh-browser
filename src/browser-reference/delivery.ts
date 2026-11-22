@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Durable hand-off between a browser capture and the DSH conversation draft.
  *
@@ -24,7 +25,7 @@ import type { BrowserReference, BrowserReferencePart } from './types.ts'
 
 /** Where the delivery log lives, beside the reference store. */
 export function deliveryStorePath(): string {
-  return join(dshHome(), 'dsh-builtin-browser-host', 'reference-deliveries.jsonl')
+  return join(dshHome(), BROWSER_PROFILE_DIR, 'reference-deliveries.jsonl')
 }
 
 export type DeliveryState = 'prepared' | 'draft-applied' | 'acknowledged' | 'consumed' | 'removed'

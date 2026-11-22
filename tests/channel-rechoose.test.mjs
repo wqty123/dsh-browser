@@ -45,9 +45,16 @@ test('a settings response distinguishes a changed channel from an unchanged one'
   assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
 })
 
-test('a composition-owned carrier reports that an external channel setting cannot apply', t => {
+test('explicit browser modes outrank a composition sidebar and can switch back without disposing it', async t => {
   const supplied = new Sidebar()
-  const h = carrierHarness(t, { channel: 'chrome', viewHost: supplied })
+  const h = carrierHarness(t, { viewHost: supplied })
   assert.equal(h.current, supplied)
-  assert.match(h.warnings.join('\n'), /browser.channel is "chrome".*supplied by its composition/)
+  await h.choose('edge', 'user')
+  assert.equal(h.current.constructor.name, 'PreferredBrowserViewHost')
+  assert.equal(supplied.disposed, false)
+  await h.choose('sidebar')
+  assert.equal(h.current, supplied)
+  await h.choose('chrome', 'plugin')
+  assert.equal(h.current.constructor.name, 'SystemBrowserViewHost')
+  assert.equal(supplied.disposed, false)
 })

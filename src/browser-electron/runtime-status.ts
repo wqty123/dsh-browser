@@ -23,10 +23,12 @@
 import type { BridgeStatus } from './bridge-status.ts'
 import type { BridgeEndpointState } from './bridge-endpoint.ts'
 import type { ProvisionSnapshot } from './electron-provision.ts'
+import type { ExtensionConnectionStatus } from '../../native-host/client.mjs'
+import type { extensionInstallHelp } from './extension-browser.ts'
 import { detectBrowser, type BrowserChannel, type DetectedBrowser, type SystemBrowserLaunchDiagnostic } from './system-browser.ts'
 
 /** The part of the carrier the channel names, in the terms the panel has to explain. */
-export type CarrierKind = 'sidebar' | 'bundled' | 'system' | 'auto'
+export type CarrierKind = 'sidebar' | 'bundled' | 'system' | 'extension' | 'cdp' | 'auto'
 
 /** Whether the chosen carrier's required files or running bridge are available. */
 export type Readiness = 'ready' | 'blocked'
@@ -55,6 +57,8 @@ export interface ElectronReadiness {
 
 /** The desktop sidebar bridge, or the honest "there is no desktop here" shape. */
 export interface BridgeReadiness {
+  readonly mainExtension?: BridgeStatus['mainExtension']
+  readonly code?: string
   /** Whether a DSH Desktop install was found at all. */
   readonly present: boolean
   /** `absent` is reported separately from `missing`: nothing to repair versus something to repair. */
@@ -78,6 +82,10 @@ export interface BridgeReadiness {
 
 /** The whole report. */
 export interface RuntimeStatusReport {
+  readonly nativeHostRegistration?: Record<string, { registered: boolean; detail: string }>
+  readonly controlledProfile: 'plugin' | 'user' | 'sidebar'
+  readonly extension?: ExtensionConnectionStatus & { readonly install?: ReturnType<typeof extensionInstallHelp>; readonly registration?: { registered: boolean; detail: string } }
+  readonly fallbackReason?: string
   /** What the settings document says, verbatim: the panel shows the switch it is honouring. */
   readonly channel: BrowserChannel
   /** What that channel resolves to, in panel terms. */
@@ -97,6 +105,10 @@ export interface RuntimeStatusReport {
 
 /** Everything the report reads, so a test can answer without any of the real machinery. */
 export interface RuntimeStatusDeps {
+  readonly nativeHostRegistration?: () => NonNullable<RuntimeStatusReport['nativeHostRegistration']>
+  readonly fallbackReason?: () => string | undefined
+  readonly systemProfile?: () => 'user' | 'plugin'
+  readonly extensionConnection?: () => RuntimeStatusReport['extension']
   /** The stored `browser.channel`. */
   readonly channel: () => BrowserChannel
   /** Whether a launch would find an Electron binary — the launch path's own probe. */
@@ -131,7 +143,11 @@ function carrierOf(channel: BrowserChannel): CarrierKind {
  */
 export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport {
   const channel = deps.channel()
-  const carrier = carrierOf(channel)
+  const preferExtension = (channel === 'edge' || channel === 'chrome') && deps.systemProfile?.() === 'user'
+  const carrier = preferExtension ? 'extension' : carrierOf(channel)
+  const extension = carrier === 'extension' ? deps.extensionConnection?.() ?? {
+    state: 'extension-missing' as const, connected: false, browser: channel as 'edge' | 'chrome', detail: 'Optional extension is not connected; managed CDP is available as fallback.',
+  } : undefined
 
   // The binary check comes first and wins: a runtime that is on disk is ready whatever the
   // provisioning state machine last said, which is also how a runtime installed by hand (or by an
@@ -166,6 +182,8 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
       running: endpoint?.alive === true,
       runningDetail: endpoint?.detail ?? 'no desktop shell has published a bridge endpoint',
       ...bridgeStatus.command === undefined ? {} : { command: bridgeStatus.command },
+      ...bridgeStatus.mainExtension === undefined ? {} : { mainExtension: bridgeStatus.mainExtension },
+      ...bridgeStatus.code === undefined ? {} : { code: bridgeStatus.code },
     }
 
   const bridgeError = deps.bridgeError?.()
@@ -176,7 +194,8 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
   // shell actually running. Either one alone is the false green this report exists to prevent.
   const sidebarReady = bridge.state === 'installed' && bridge.running
 
-  const checkSystemBrowser = carrier === 'system'
+  const selected = preferExtension ? deps.selectedCarrier?.() ?? (extension?.connected ? 'extension' : 'cdp') : undefined
+  const checkSystemBrowser = carrier === 'system' || selected === 'cdp'
   const detected = checkSystemBrowser ? (deps.detectBrowser ?? detectBrowser)(channel) : undefined
   const connection = checkSystemBrowser ? deps.systemConnection?.() : undefined
   const systemBrowser: SystemBrowserReadiness = {
@@ -194,12 +213,22 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
   if (carrier === 'sidebar') {
     resolvedCarrier = 'sidebar'
     readiness = sidebarReady ? 'ready' : 'blocked'
+  } else if (selected === 'cdp') {
+    resolvedCarrier = 'cdp'
+    readiness = detected !== undefined && connection?.connected === true ? 'ready' : 'blocked'
+  } else if (carrier === 'extension') {
+    resolvedCarrier = 'extension'
+    readiness = extension?.state === 'connected' && extension.connected ? 'ready' : 'blocked'
   } else {
     resolvedCarrier = 'system'
     readiness = detected !== undefined && connection?.connected === true ? 'ready' : 'blocked'
   }
 
   return {
+    ...deps.nativeHostRegistration ? { nativeHostRegistration: deps.nativeHostRegistration() } : {},
+    controlledProfile: resolvedCarrier === 'extension' ? 'user' : resolvedCarrier === 'system' || resolvedCarrier === 'cdp' ? 'plugin' : 'sidebar',
+    ...(preferExtension && resolvedCarrier === 'cdp' ? { fallbackReason: deps.fallbackReason?.() ?? (extension?.state === 'disabled' ? 'disabled' : 'not-connected') } : {}),
+    ...extension === undefined ? {} : { extension },
     channel,
     carrier,
     resolvedCarrier,

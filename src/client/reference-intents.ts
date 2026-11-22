@@ -1,3 +1,5 @@
+import { hostMessages } from '../../assets/browser-messages.mjs'
+import { REFERENCE_CAPTURE_ROUTE } from '../../assets/browser-policy.mjs'
 /** Submit low-trust page intents in the authenticated app context. */
 import { referenceOwnerKey } from '../reference-owner.ts'
 
@@ -10,10 +12,10 @@ export function reportReferenceCaptureFailure(error: unknown): void {
   notice.setAttribute('role', 'alert')
   notice.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:2147483646;max-width:420px;padding:12px;border-radius:8px;background:Canvas;color:CanvasText;border:1px solid GrayText;font:14px system-ui'
   const message = document.createElement('span')
-  message.textContent = `引用未能加入当前会话，请重试。${error instanceof Error ? ` ${error.message.slice(0, 200)}` : ''}`
+  message.textContent = `${hostMessages.zh.referenceFailed}${error instanceof Error ? ` ${error.message.slice(0, 200)}` : ''}`
   const dismiss = document.createElement('button')
   dismiss.type = 'button'
-  dismiss.textContent = '关闭'
+  dismiss.textContent = hostMessages.zh.dismiss
   dismiss.addEventListener('click', () => { notice.remove() }, { once: true })
   notice.append(message, dismiss)
   document.body.append(notice)
@@ -21,7 +23,7 @@ export function reportReferenceCaptureFailure(error: unknown): void {
 
 export async function captureReferenceIntent(intent: object, sessionId: string, signal?: AbortSignal): Promise<void> {
   if (typeof sessionId !== 'string' || sessionId.trim() === '') throw new Error('reference owner is unavailable')
-  const response = await fetch('/dsh-builtin-browser/reference/capture', {
+  const response = await fetch(REFERENCE_CAPTURE_ROUTE, {
     signal,
     method: 'POST',
     credentials: 'include',
