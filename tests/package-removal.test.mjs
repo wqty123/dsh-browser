@@ -4,20 +4,24 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { enableElectronPackageRemoval } from '../src/browser-electron/package-removal.ts'
+import { carrierHarness } from './carrier-harness.mjs'
 
-test('the Electron-node host keeps noAsar for package-manager children after bundle disposal without changing parent fs', () => {
-  const environment = { ELECTRON_RUN_AS_NODE: '1' }, before = process.noAsar
-  enableElectronPackageRemoval(environment, '44.10.0')
-  assert.equal(environment.ELECTRON_NO_ASAR, '1')
-  assert.equal(process.noAsar, before)
-  const child = { ...environment }
-  assert.equal(child.ELECTRON_NO_ASAR, '1')
-  for (const [env, electron] of [[{}, '44.10.0'], [{ ELECTRON_RUN_AS_NODE: '1' }, undefined]]) {
-    const original = { ...env }
-    enableElectronPackageRemoval(env, electron)
-    assert.deepEqual(env, original)
-  }
+test('loading the plugin in an Electron-node host leaves ELECTRON_NO_ASAR out of the host environment', t => {
+  const saved = { run: process.env.ELECTRON_RUN_AS_NODE, noAsar: process.env.ELECTRON_NO_ASAR }
+  const version = Object.getOwnPropertyDescriptor(process.versions, 'electron')
+  t.after(() => {
+    for (const [name, value] of [['ELECTRON_RUN_AS_NODE', saved.run], ['ELECTRON_NO_ASAR', saved.noAsar]]) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value
+    }
+    if (version === undefined) delete process.versions.electron; else Object.defineProperty(process.versions, 'electron', version)
+  })
+  process.env.ELECTRON_RUN_AS_NODE = '1'
+  delete process.env.ELECTRON_NO_ASAR
+  Object.defineProperty(process.versions, 'electron', { value: '44.10.0', configurable: true, enumerable: true })
+  carrierHarness(t)
+  // Every child the host starts afterwards inherits process.env; with ELECTRON_NO_ASAR an ASAR-packed
+  // host's own helpers (DSH Tauri's Windows Job runner) cannot load their entry and exit 1 (issue #71).
+  assert.equal(process.env.ELECTRON_NO_ASAR, undefined)
 })
 
 const electron = process.env.DSH_ELECTRON_BINARY
