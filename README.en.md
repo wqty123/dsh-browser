@@ -9,7 +9,7 @@
 
 # Browser plugin for DeepSeek Harness
 
-Browse in the DSH sidebar, send rich page selections into a conversation, and let the agent operate the same page on supported Desktop hosts. Tabs and action history belong to the task. [0.7.42 release changes](CHANGELOG.md#未发布)
+Browse in the DSH sidebar, send rich page selections into a conversation, and let the agent operate the same page on supported Desktop hosts. Tabs and action history belong to the task. [1.0.0 release changes](CHANGELOG.md#未发布)
 
 ![Browser carrier choices: Desktop sidebar, isolated Web sidebar, and opt-in Chrome or Edge](assets/browser-carriers.svg)
 

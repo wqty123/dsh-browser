@@ -4,7 +4,7 @@
 
 ## 未发布
 
-### 0.7.42 — 自 0.5.8 以来的更新
+### 1.0.0 — 自 0.5.8 以来的更新
 
 这是自上一次公开发布 [v0.5.8](https://github.com/wqty123/dsh-browser/releases/tag/v0.5.8) 以来的累计更新。0.6.x 和此前的 0.7.x 是开发版本，不需要逐个安装。
 
@@ -37,7 +37,7 @@ Desktop 原生侧栏和 Web 代理各自在同一 `DSH_HOME` 内保留侧栏站�
 
 #### 升级提示
 
-Desktop 和 Web 各有独立 profile。从 0.5.8 升级时，在要升级的 profile 中先移除旧包、再添加 0.7.42；无需清空 `DSH_HOME`。更新 Desktop 后重新检查桥接状态；若部署禁止修改宿主文件，请不要使用宿主补丁。不支持的操作不会触发外部浏览器回退，登录、验证码和敏感确认仍由用户接管。
+Desktop 和 Web 各有独立 profile。从 0.5.8 升级时，在要升级的 profile 中先移除旧包、再添加 1.0.0；无需清空 `DSH_HOME`。更新 Desktop 后重新检查桥接状态；若部署禁止修改宿主文件，请不要使用宿主补丁。不支持的操作不会触发外部浏览器回退，登录、验证码和敏感确认仍由用户接管。
 
 **近期功能 PR：** [侧栏、引用与外部浏览器 #63](https://github.com/wqty123/dsh-browser/pull/63) · [Desktop 宿主能力 #64](https://github.com/wqty123/dsh-browser/pull/64) · [macOS 桥接 #65](https://github.com/wqty123/dsh-browser/pull/65) · [工具与批处理 #66](https://github.com/wqty123/dsh-browser/pull/66) · [REPL 稳定性 #67](https://github.com/wqty123/dsh-browser/pull/67)
 

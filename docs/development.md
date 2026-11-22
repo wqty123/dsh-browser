@@ -87,7 +87,7 @@ node tests/run.mjs tests/code-tool.test.mjs
 
 行为测试需要 `tsx`（或 `ts-node/esm`）来加载宿主依赖；在 monorepo 外不能直接解析 `workspace:^`。先看本文开头的已发布 SDK 类型检查方法。插件不随包安装 Electron；浏览器内核由宿主提供，不要放开全局依赖脚本来绕过审批。
 
-### 0.7.42 回归范围
+### 1.0.0 回归范围
 
 | 场景 | 需要复验 |
 | --- | --- |

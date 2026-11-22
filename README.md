@@ -9,7 +9,7 @@
 
 # DeepSeek Harness 浏览器插件
 
-在 DSH 侧栏浏览网页，把保留格式的选区加入对话。桌面宿主支持时，Agent 操作的就是你正在看的页面；标签和操作历史归各自任务。[0.7.42 更新记录](CHANGELOG.md#未发布)
+在 DSH 侧栏浏览网页，把保留格式的选区加入对话。桌面宿主支持时，Agent 操作的就是你正在看的页面；标签和操作历史归各自任务。[1.0.0 更新记录](CHANGELOG.md#未发布)
 
 ![浏览器载体：桌面侧栏、隔离的 Web 侧栏、显式选择的 Chrome 或 Edge](assets/browser-carriers.svg)
 
