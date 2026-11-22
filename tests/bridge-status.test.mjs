@@ -254,7 +254,7 @@ test('the install is found by identity, under either product name', () => {
       // Remove it again so the next candidate is the one that matches.
       rmSync(root, { recursive: true, force: true })
     }
-    assert.equal(findDesktopInstall(base), undefined, 'and nothing matches when nothing is there')
+    assert.equal(findDesktopInstall(base, () => [], () => []), undefined, 'and nothing matches when nothing is there')
 
     // The half that used to be wrong: the right shape with the wrong name is NOT an install.
     const impostor = join(base, 'Programs', 'DSH Desktop')
@@ -262,7 +262,7 @@ test('the install is found by identity, under either product name', () => {
     writeFileSync(join(impostor, 'resources', 'app', 'lib', 'main.js'), 'const app = {};\n\nexport {};\n')
     writeFileSync(join(impostor, 'resources', 'app', 'package.json'),
       JSON.stringify({ name: 'unrelated-meeting-app', main: 'lib/main.js' }))
-    assert.equal(findDesktopInstall(base), undefined, 'an Electron app is not DSH Desktop')
+    assert.equal(findDesktopInstall(base, () => [], () => []), undefined, 'an Electron app is not DSH Desktop')
   } finally {
     rmSync(base, { recursive: true, force: true })
   }

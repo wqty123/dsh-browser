@@ -125,7 +125,7 @@ test('an unreadable archive and a product-named executable are not identity evid
   try {
     const root = fakeInstall(join(base, 'Elsewhere'))
     writeFileSync(join(root, 'resources', 'app.asar'), 'not an archive')
-    assert.equal(withEnv(base, { DSH_DESKTOP_PATH: root }, () => findDesktopInstall()), undefined)
+    assert.equal(withEnv(base, { DSH_DESKTOP_PATH: root }, () => findDesktopInstall(undefined, () => [], () => [])), undefined)
   } finally {
     rmSync(base, { recursive: true, force: true })
   }

@@ -199,7 +199,7 @@ test('discovery skips a foreign app even when its product directory is named lik
     writeFileSync(join(impostor, 'resources', 'app', 'lib', 'main.js'), MAIN_BODY)
     writeFileSync(join(impostor, 'resources', 'app', 'package.json'), JSON.stringify({ name: 'unrelated-meeting-app' }))
 
-    assert.equal(findDesktopInstall(base), undefined, 'a name-bearing product directory is not proof')
+    assert.equal(findDesktopInstall(base, () => [], () => []), undefined, 'a name-bearing product directory is not proof')
 
     const real = join(base, 'Programs', 'DSH Desktop')
     mkdirSync(join(real, 'resources', 'app', 'lib'), { recursive: true })
