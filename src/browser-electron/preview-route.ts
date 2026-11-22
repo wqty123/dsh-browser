@@ -193,6 +193,8 @@ export async function handleBridgeStatus(
   response: ServerResponse,
   localAppData?: string,
   mainExtension?: MainExtensionStatus,
+  registry?: () => readonly string[],
+  conventions?: () => readonly string[],
 ): Promise<void> {
   if (request.method !== 'GET') {
     replyJson(response, 405, { error: 'method-not-allowed' })
@@ -202,13 +204,14 @@ export async function handleBridgeStatus(
     replyJson(response, 403, { error: 'not-same-origin' })
     return
   }
-  const installRoot = findDesktopInstall(localAppData)
+  const installRoot = findDesktopInstall(localAppData, registry, conventions)
   const status = installRoot === undefined
     ? {
       state: 'missing' as const,
       present: false,
       archivePresent: false,
-      detail: 'no DSH Desktop install found under LOCALAPPDATA\\Programs',
+      detail: 'no DSH Desktop install found in the usual roots, at DSH_DESKTOP_PATH or DSH_DESKTOP_APP, '
+        + 'in the uninstall registry, or at this platform\'s conventional locations',
     }
     : readBridgeStatus(installRoot, mainExtension)
   replyJson(response, 200, { ok: true, bridge: status })

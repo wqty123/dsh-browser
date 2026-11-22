@@ -68,6 +68,7 @@ import * as nodeFs from 'node:fs'
 import { applyHostPatch, hostPatchStatus, restoreHostPatch } from '../dsh-host-patch/apply.mjs'
 import { renameMaintenanceFileSync } from './maintenance-files.mjs'
 import { isDesktopExecutable } from './desktop-processes.mjs'
+import { conventionalInstallRoots, registeredInstallLocations } from './desktop-discovery.mjs'
 import { legacyBridgeMarker as MARKER, legacyBridgeSnippet as SNIPPET } from '../dsh-host-patch/legacy-bridge.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -175,11 +176,12 @@ function findDefaultInstall(testRoot) {
   }
   // Same roots the panel probes: an explicit DSH_DESKTOP_PATH, then the places people actually install
   // to. An install on another drive used to be invisible to both the panel and this default.
-  const explicit = process.env.DSH_DESKTOP_PATH
-  if (explicit !== undefined && explicit !== '') {
-    if (looksInstalled(explicit)) return explicit
-    const below = probe(explicit)
-    if (below !== undefined) return below
+  for (const explicit of [process.env.DSH_DESKTOP_PATH, process.env.DSH_DESKTOP_APP]) {
+    if (explicit !== undefined && explicit !== '') {
+      if (looksInstalled(explicit)) return explicit
+      const below = probe(explicit)
+      if (below !== undefined) return below
+    }
   }
   const localAppData = process.env.LOCALAPPDATA ?? ''
   const roots = [
@@ -190,6 +192,11 @@ function findDefaultInstall(testRoot) {
   for (const base of roots) {
     const found = probe(base)
     if (found !== undefined) return found
+  }
+  for (const source of [registeredInstallLocations, conventionalInstallRoots]) {
+    for (const candidate of source()) {
+      if (looksInstalled(candidate)) return candidate
+    }
   }
   return testRoot === undefined
     ? process.platform === 'darwin' ? '/Applications/DeepSeek Harness.app'

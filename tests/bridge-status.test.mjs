@@ -327,12 +327,14 @@ test('no install at all is a state, not an error', async () => {
   const base = mkdtempSync(join(tmpdir(), 'dsh-lad-empty-'))
   try {
     const res = response()
-    await handleBridgeStatus(request(), res, base)
+    await handleBridgeStatus(request(), res, base, undefined, () => [], () => [])
     assert.equal(res.recorded.status, 200, 'the panel still gets an answer')
     const payload = JSON.parse(String(res.recorded.body))
     assert.equal(payload.bridge.state, 'missing')
     assert.equal(payload.bridge.present, false)
     assert.match(payload.bridge.detail, /no DSH Desktop install/)
+    assert.match(payload.bridge.detail, /DSH_DESKTOP_APP/)
+    assert.match(payload.bridge.detail, /uninstall registry/)
   } finally {
     rmSync(base, { recursive: true, force: true })
   }

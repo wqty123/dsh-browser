@@ -12,6 +12,7 @@ import { join } from 'node:path'
 
 import { findDesktopInstall } from '../lib/browser-electron/bridge-status.js'
 import { MAIN_BODY, writeAsar } from './fake-asar.mjs'
+import { conventionalInstallRoots, registeredInstallLocations } from '../desktop-bridge/desktop-discovery.mjs'
 
 /** A packed installation whose archive supplies the actual product identity. */
 function fakeInstall(parent, name = 'DSH Desktop', packageName = '@deepseek-ai/dsh-desktop') {
@@ -30,7 +31,7 @@ function fakeInstall(parent, name = 'DSH Desktop', packageName = '@deepseek-ai/d
  * install on this machine cannot answer instead.
  */
 function withEnv(base, extra, body) {
-  const names = ['DSH_DESKTOP_PATH', 'LOCALAPPDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'APPDATA', 'ProgramData']
+  const names = ['DSH_DESKTOP_PATH', 'DSH_DESKTOP_APP', 'LOCALAPPDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'APPDATA', 'ProgramData']
   const saved = Object.fromEntries(names.map(name => [name, process.env[name]]))
   try {
     for (const name of names) delete process.env[name]
@@ -156,3 +157,63 @@ test('a macOS .app bundle is found by identity under Contents/Resources', () => 
   }
 })
 
+for (const parent of [false, true]) test(`DSH_DESKTOP_APP discovers an install (parent=${parent})`, t => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-discover-alias-'))
+  t.after(() => rmSync(base, { recursive: true, force: true }))
+  const directory = join(base, 'Apps'), root = fakeInstall(directory)
+  assert.equal(withEnv(base, { DSH_DESKTOP_APP: parent ? directory : root }, () => findDesktopInstall()), root)
+})
+
+for (const source of ['registry', 'conventions']) test(`${source} discovery verifies candidates and preserves usual-root precedence`, t => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-discover-source-'))
+  t.after(() => rmSync(base, { recursive: true, force: true }))
+  const root = fakeInstall(join(base, 'Elsewhere'))
+  const impostor = fakeInstall(join(base, 'Foreign'), 'DSH Desktop', 'unrelated-app')
+  const sources = source === 'registry' ? [() => [join(base, 'missing'), impostor, root], () => []]
+    : [() => [], () => [join(base, 'missing'), impostor, root]]
+  assert.equal(withEnv(base, {}, () => findDesktopInstall(undefined, ...sources)), root)
+  const usual = fakeInstall(join(base, 'Usual'))
+  assert.equal(withEnv(base, { ProgramFiles: join(base, 'Usual') }, () => findDesktopInstall(undefined, ...sources)), usual)
+  assert.equal(withEnv(base, {}, () => findDesktopInstall(undefined, () => [impostor], () => [impostor])), undefined)
+})
+
+test('empty and throwing discovery sources do not escape or prevent the next source', t => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-discover-errors-'))
+  t.after(() => rmSync(base, { recursive: true, force: true }))
+  const root = fakeInstall(join(base, 'Elsewhere'))
+  const denied = () => { throw Error('unavailable') }
+  assert.equal(withEnv(base, {}, () => findDesktopInstall(undefined, () => [], () => [])), undefined)
+  assert.equal(withEnv(base, {}, () => findDesktopInstall(undefined, denied, denied)), undefined)
+  assert.equal(withEnv(base, {}, () => findDesktopInstall(undefined, denied, () => [root])), root)
+})
+
+test('registry parsing accepts only InstallLocation and tolerates inaccessible keys', () => {
+  const calls = []
+  const query = (command, args, options) => {
+    calls.push({ command, args, options })
+    if (calls.length === 1) throw Error('denied')
+    return '    DisplayName    REG_SZ    DeepSeek Harness\r\n    InstallLocation    REG_SZ    E:\\Apps\\DeepSeek Harness  \r\n'
+  }
+  assert.deepEqual(registeredInstallLocations('win32', query), ['E:\\Apps\\DeepSeek Harness', 'E:\\Apps\\DeepSeek Harness'])
+  assert.equal(calls.length, 3)
+  assert.ok(calls.every(call => call.command === 'reg' && call.options.windowsHide && call.options.timeout === 15000))
+  assert.deepEqual(registeredInstallLocations('linux', () => { throw Error('must not query') }), [])
+  assert.deepEqual(registeredInstallLocations('win32', () => ''), [])
+})
+
+test('platform conventions retain bundle roots and Linux system and per-user locations', () => {
+  assert.deepEqual(conventionalInstallRoots('win32', '/home/test'), [])
+  assert.ok(conventionalInstallRoots('darwin', '/home/test').includes(join('/home/test', 'Applications', 'DSH Desktop.app')))
+  const linux = conventionalInstallRoots('linux', '/home/test')
+  for (const base of ['/opt', '/usr/lib', '/home/test/.local/share']) {
+    assert.ok(linux.includes(join(base, 'DeepSeek Harness')))
+  }
+  assert.equal(conventionalInstallRoots('linux', '').length, 4)
+})
+
+test('injected conventions discover macOS bundles without changing their root', t => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-discover-macos-source-'))
+  t.after(() => rmSync(base, { recursive: true, force: true }))
+  const root = fakeBundle(join(base, 'Applications'))
+  assert.equal(withEnv(base, {}, () => findDesktopInstall(undefined, () => [], () => [root])), root)
+})

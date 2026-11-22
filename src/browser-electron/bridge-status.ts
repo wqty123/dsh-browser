@@ -23,6 +23,7 @@ import { createRequire } from 'node:module'
 import { desktopPaths, readDesktopIdentity } from './desktop-identity.ts'
 import { MAIN_EXTENSION_UNSUPPORTED, type MainExtensionStatus } from './profile-extension.ts'
 import { BRIDGE_VERSION_MESSAGE } from '../bridge-compatibility.ts'
+import { conventionalInstallRoots, registeredInstallLocations } from '../../desktop-bridge/desktop-discovery.mjs'
 
 // A normal Electron existsSync(app.asar) caches the archive and keeps it locked on Windows.
 // Status inspection must leave maintenance free to rename it after Desktop exits.
@@ -42,23 +43,28 @@ const rawExistsSync: typeof existsSync = (() => {
  * @param localAppData - the base directory; defaults to the environment's.
  * @returns the install directory, or undefined when nothing matches.
  */
-export function findDesktopInstall(localAppData?: string): string | undefined {
+export function findDesktopInstall(
+  localAppData?: string,
+  registry: () => readonly string[] = registeredInstallLocations,
+  conventions: () => readonly string[] = conventionalInstallRoots,
+): string | undefined {
   // Not every install lives in %LOCALAPPDATA%\\Programs: people put the app on another drive, under
   // Program Files, or in their own folder. DSH_DESKTOP_PATH names one explicitly, and the usual roots
   // are all probed. A test or a caller that passes a base directory gets exactly that base, so the
   // behaviour stays pinnable.
   const isDesktop = (candidate: string): boolean => readDesktopIdentity(candidate).ok
-  const explicit = process.env.DSH_DESKTOP_PATH
-  if (explicit !== undefined && explicit !== '') {
-    const named = explicit
-    if (isDesktop(named)) return named
-    // A parent directory is a reasonable thing to point at too: look one level down.
-    try {
-      for (const entry of readdirSync(named, { withFileTypes: true })) {
-        if (entry.isDirectory() && isDesktop(join(named, entry.name))) return join(named, entry.name)
+  for (const explicit of [process.env.DSH_DESKTOP_PATH, process.env.DSH_DESKTOP_APP]) {
+    if (explicit !== undefined && explicit !== '') {
+      const named = explicit
+      if (isDesktop(named)) return named
+      // A parent directory is a reasonable thing to point at too: look one level down.
+      try {
+        for (const entry of readdirSync(named, { withFileTypes: true })) {
+          if (entry.isDirectory() && isDesktop(join(named, entry.name))) return join(named, entry.name)
+        }
+      } catch {
+        // Not a directory: fall through to the usual roots.
       }
-    } catch {
-      // Not a directory: fall through to the usual roots.
     }
   }
   const roots = localAppData === undefined ? desktopInstallRoots() : [join(localAppData, 'Programs')]
@@ -76,6 +82,13 @@ export function findDesktopInstall(localAppData?: string): string | undefined {
     } catch {
       // A root that does not exist is a state, not an error.
     }
+  }
+  for (const source of [registry, conventions]) {
+    try {
+      for (const candidate of source()) {
+        if (isDesktop(candidate)) return candidate
+      }
+    } catch {}
   }
   return undefined
 }

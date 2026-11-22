@@ -25,8 +25,7 @@ const repo = fileURLToPath(new URL('..', import.meta.url))
 const script = join(repo, 'desktop-bridge', 'install.mjs')
 
 /** A minimal but structurally valid desktop install. */
-function makeInstall() {
-  const root = sandbox.temp('dsh-install-')
+function makeInstall(root = sandbox.temp('dsh-install-')) {
   mkdirSync(join(root, 'resources', 'app', 'lib'), { recursive: true })
   const body = [
     '// a stand-in for the shell entry point',
@@ -54,6 +53,19 @@ const run = args => {
     return { code: error.status ?? 1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` }
   }
 }
+
+for (const parent of [false, true]) test(`installer default accepts DSH_DESKTOP_APP (parent=${parent})`, t => {
+  const directory = sandbox.temp('declared-')
+  const { root } = makeInstall(join(directory, 'DSH Desktop'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const output = execFileSync(process.execPath, [script, '--preflight'], {
+    encoding: 'utf8', windowsHide: true,
+    env: sandbox.env({ DSH_DESKTOP_APP: parent ? dirname(root) : root }),
+  })
+  const verdict = JSON.parse(output)
+  assert.equal(verdict.ok, true)
+  assert.equal(verdict.target, root)
+})
 
 test('a normal install followed by --revert restores the file and keeps the backup', () => {
   const { root, body } = makeInstall()
