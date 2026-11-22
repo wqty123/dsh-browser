@@ -158,7 +158,7 @@ test('a released host refuses to start a browser', async () => {
 // platform can actually verify — the Windows separator, the lookup order, the
 // per-platform isolation — plus the Linux table's contents, read from the source.
 test('the Linux launcher names are the packaged ones', () => {
-  const source = readFileSync(new URL('../src/browser-electron/system-browser.ts', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../assets/browser-products.mjs', import.meta.url), 'utf8')
   assert.match(source, /linux: \['microsoft-edge-stable'/, 'the versioned Edge launcher is listed')
   assert.match(source, /linux: \['google-chrome-stable'/, 'the versioned Chrome launcher is listed')
   assert.match(source, /'\/usr\/bin\/microsoft-edge-stable'/, 'and a fixed Linux location too')

@@ -8,6 +8,7 @@ import vm from 'node:vm'
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
 import { tabIn, testTab } from './canonical-fixtures.mjs'
 import { readTabHandle, resolveSessionHandle } from '../lib/browser/handles.js'
+import { DEFAULT_SETTINGS } from '../lib/browser-electron/settings-store.js'
 
 /**
  * A fake ElectronBrowserViewHost. `sendCommand` simulates the CDP surface the
@@ -598,6 +599,54 @@ test('click presents the view before dispatching input, and reports failure', as
   const sid2 = await p2.open()
   await assert.rejects(() => p2.click(sid2, { x: 1, y: 1 }), /not presented|BROWSER_VIEW_NOT_PRESENTED|no surface/)
   await p2.close(sid2)
+})
+
+for (const explicitError of [false, true]) test(`history and reload recover from error documents (navigate errorText=${explicitError})`, async () => {
+  const host = makeHost()
+  const create = host.createView.bind(host)
+  let unreachable = false
+  let reloadRecovers = false
+  const shown = []
+  host.showView = (_handle, _label, options) => { shown.push(options) }
+  host.createView = identity => {
+    const handle = create(identity)
+    const send = handle.sendCommand
+    handle.sendCommand = async (method, params) => {
+      const result = await send(method, params)
+      if (method === 'Page.navigate') {
+        unreachable = params.url.includes('unreachable')
+        if (unreachable && explicitError) return { ...result, errorText: 'net::ERR_NAME_NOT_RESOLVED' }
+      }
+      if (method === 'Page.reload' && reloadRecovers) unreachable = false
+      if (method === 'Page.navigateToHistoryEntry') unreachable = params.entryId === 2
+      if (method === 'Page.getFrameTree' && unreachable) {
+        Object.assign(result.frameTree.frame, { url: 'chrome-error://chromewebdata/', unreachableUrl: 'https://unreachable.test/' })
+      }
+      return result
+    }
+    return handle
+  }
+  const p = new ElectronBrowserProvider(host, {
+    history: { enabled: false }, settings: () => ({ ...DEFAULT_SETTINGS, ui: { ...DEFAULT_SETTINGS.ui, quiet: true } }),
+  })
+  try {
+    const sid = await p.open()
+    await assert.rejects(p.navigate(sid, { url: 'https://unreachable.test/' }), { code: 'BROWSER_NAVIGATION_FAILED' })
+    await p.reload(sid)
+    assert.equal(unreachable, true, 'reload may legitimately land on another error document')
+    host.events.history = { entries: [{ id: 1, url: 'https://reachable.test/' }, { id: 2, url: 'https://unreachable.test/' }], currentIndex: 1 }
+    await p.back(sid)
+    assert.equal(unreachable, false)
+    await p.forward(sid)
+    assert.equal(unreachable, true, 'history may return to an error document')
+    reloadRecovers = true
+    await p.reload(sid)
+    assert.equal(unreachable, false)
+    await p.navigate(sid, { url: 'https://reachable.test/' })
+    assert.equal(host.events.focus, 0)
+    assert.equal(host.events.move, 0)
+    assert.ok(shown.length > 0 && shown.every(options => options.quiet === true))
+  } finally { await p.dispose() }
 })
 
 test('reload issues Page.reload and records history', async () => {

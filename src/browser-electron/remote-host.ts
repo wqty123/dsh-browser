@@ -1,3 +1,4 @@
+import { LOOPBACK_IPV4 } from '../../assets/browser-policy.mjs'
 /**
  * Legacy standalone Electron browser host (not a supported package export): an
  * {@link ElectronBrowserViewHost} implementation that spawns the plugin's own
@@ -1089,7 +1090,7 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     })
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => resolve())
+      server.listen(0, LOOPBACK_IPV4, () => resolve())
     })
     // A later server error (rare on a loopback ephemeral port) must not crash
     // the process; the client's fail path handles the actual recovery.

@@ -8,13 +8,13 @@ export interface DocumentIdentity {
   readonly unreachableUrl?: string
 }
 
-export function mainDocument(value: unknown): DocumentIdentity {
+export function mainDocument(value: unknown, options?: { readonly allowErrorDocument?: boolean }): DocumentIdentity {
   const frame = (value as { frameTree?: { frame?: DocumentIdentity } } | undefined)?.frameTree?.frame
   if (typeof frame?.id !== 'string' || frame.id === ''
     || typeof frame.loaderId !== 'string' || frame.loaderId === '' || typeof frame.url !== 'string') {
     throw new BrowserError('browser: the guest did not acknowledge its main document identity', 'BROWSER_DOCUMENT_UNACKNOWLEDGED')
   }
-  if (frame.unreachableUrl) {
+  if (frame.unreachableUrl && options?.allowErrorDocument !== true) {
     throw new BrowserError(`browser: failed to load ${frame.unreachableUrl}`, 'BROWSER_NAVIGATION_FAILED')
   }
   return frame
@@ -32,7 +32,8 @@ export async function documentReady(handle: ElectronViewHandle, expected: Docume
     expression: 'document.readyState', contextId: world.executionContextId, returnByValue: true,
   }, { present: false, initialize: false }) as { result?: { value?: unknown }; exceptionDetails?: unknown }
   checkCurrent()
-  const after = mainDocument(await handle.sendCommand('Page.getFrameTree', undefined, { present: false, initialize: false }))
+  const after = mainDocument(await handle.sendCommand('Page.getFrameTree', undefined, { present: false, initialize: false }),
+    { allowErrorDocument: !!expected.unreachableUrl })
   checkCurrent()
   if (after.id !== expected.id || after.loaderId !== expected.loaderId) {
     throw new BrowserError('browser: the acknowledged document was superseded', 'BROWSER_NAVIGATION_SUPERSEDED')

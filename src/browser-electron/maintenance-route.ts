@@ -4,7 +4,7 @@ import { sameOrigin } from './settings-route.ts'
 import { isDirectLoopback } from './authenticated-route.ts'
 import { replyJson } from './json-reply.ts'
 import { readJsonBody } from './http-body.ts'
-import type { AutomaticMaintenanceJob } from './automatic-maintenance.ts'
+import type { AutomaticMaintenanceJob, AutomaticMaintenanceOptions } from './automatic-maintenance.ts'
 
 export const AUTOMATIC_MAINTENANCE_ROUTE = '/dsh-builtin-browser/bridge-maintenance'
 export interface AutomaticMaintenanceRouteDeps {
@@ -12,7 +12,7 @@ export interface AutomaticMaintenanceRouteDeps {
   /** How Desktop is asked to quit: `menu` waits for the panel to open the native menu, `self` needs nothing from it. */
   readonly quit?: () => 'menu' | 'self'
   readonly read: () => AutomaticMaintenanceJob | undefined
-  readonly start: (action: 'reinstall', options?: { readonly locale?: 'zh' | 'en' }) => Promise<AutomaticMaintenanceJob>
+  readonly start: (action: 'reinstall', options?: AutomaticMaintenanceOptions) => Promise<AutomaticMaintenanceJob>
   /** Commit only after the accepted response has been flushed to the client. */
   readonly commit?: (id: string) => Promise<void>
   /** True while the legacy bridge-action route is running an installer. */
@@ -45,7 +45,8 @@ export function createAutomaticMaintenanceHandler(deps: AutomaticMaintenanceRout
     if (starting || deps.busy?.() === true) { replyJson(response, 409, { ok: false, error: 'bridge maintenance is already starting' }); return }
     starting = true
     try {
-      const job = await deps.start(action, locale === undefined ? undefined : { locale })
+      const options = { ...locale === undefined ? {} : { locale } }
+      const job = await deps.start(action, Object.keys(options).length === 0 ? undefined : options)
       if (deps.commit !== undefined) {
         let fired = false
         const commitOnce = (): void => {
@@ -60,7 +61,7 @@ export function createAutomaticMaintenanceHandler(deps: AutomaticMaintenanceRout
       }
       replyJson(response, 202, { ok: true, accepted: true, protocol: 1, quit: deps.quit?.() ?? 'menu', job })
     } catch (error) {
-      replyJson(response, 409, { ok: false, error: String(error) })
+      replyJson(response, 409, { ok: false, error: String(error), ...(error instanceof Error && 'code' in error ? { code: error.code } : {}) })
     } finally { starting = false }
   }
 }

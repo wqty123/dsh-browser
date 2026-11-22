@@ -1,3 +1,6 @@
+import { zh, en } from '../../../assets/browser-panel-locales.mjs'
+import { REFERENCE_REVEAL_ROUTE, REFERENCE_INSERT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE, BRIDGE_STATUS_ROUTE, RUNTIME_STATUS_ROUTE, RUNTIME_PROVISION_ROUTE } from '../../../assets/browser-policy.mjs'
+import { SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../../assets/browser-policy.mjs'
 /**
  * 设置面板（客户端半）：从旧插件的 ModuleLoader bundle 机械移植而来，内部实现未改一行。
  *
@@ -12,6 +15,13 @@ export interface LegacyClientModule {
   readonly name?: string
   readonly inject?: readonly string[]
   readonly apply: (ctx: never) => void
+}
+
+export async function requestExtensionSetup(fetcher = fetch) {
+  const response = await fetcher(EXTENSION_INSTALL_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
+  const result = await response.json()
+  if (!response.ok || !result.ok) throw new Error(result.detail ?? `HTTP ${response.status}`)
+  return result
 }
 
 /**
@@ -31,7 +41,7 @@ const react = require("react")
   const name = "dsh-builtin-browser"
   const inject = ["slots", "locale"]
   const NS = "settings.dsh-builtin-browser"
-  const ROUTE = "/dsh-builtin-browser/settings"
+  const ROUTE = SETTINGS_ROUTE
   let translate = (key) => key
   let currentLocale = "zh"
   function updateCurrentLocale(locale) {
@@ -56,333 +66,6 @@ const react = require("react")
    */
   let refreshWatchLabels = () => {}
 
-  const zh = {
-    nav: "浏览器",
-    "watch.open": "观看浏览器",
-    "watch.title": "实时画面",
-    "watch.session": "选择会话",
-    "watch.readOnly": "只读,不转发点击与输入",
-    "watch.stop": "停止",
-    "watch.live": "直播",
-    "watch.paused": "已暂停",
-    "watch.stopped": "已停止",
-    "watch.connecting": "连接中",
-    "watch.disconnected": "连接中断",
-    "watch.disabled": "主机未开启远程观看",
-    "watch.noPage": "该任务尚未打开浏览器",
-    "watch.bridgeStale": "桌面端升级后 bridge 已失效,请重跑安装:",
-    "watch.bridgeMissing": "桌面 bridge 未安装,侧栏载体不可用。安装命令:",
-    title: "浏览器",
-    "settings.advanced": "高级设置",
-    "settings.saving": "正在保存…",
-    "settings.details": "配置文件",
-    "browser.profile": "保留登录状态",
-    "browser.profile.hint": "重启 DSH 后生效",
-    "browser.headless": "窗口模式",
-    "browser.headless.hint": "重启 DSH 后生效",
-    "browser.headless.auto": "自动检测显示环境",
-    "browser.headless.windowed": "显示窗口",
-    "browser.headless.headless": "无头运行",
-    "delivery.save": "保存交付设置",
-    "delivery.invalid": "检查工具名、参数模板和站点规则。参数必须是字符串值的 JSON 对象，站点规则每行填写一个 host=工具名。",
-    loading: "读取设置…",
-    failed: "读取设置失败:",
-    retry: "重试",
-    saved: "已保存",
-    "history.enabled": "保留浏览历史",
-    "ui.title": "展示",
-    "ui.autoExpandOnce": "侧栏自动展开",
-    "ui.closeWithSession": "会话结束时关闭浏览器",
-    "ui.virtualCursor": "显示 Agent 光标",
-    "ui.quiet": "安静模式",
-    "ui.quiet.hint": "保留当前窗口和标签。新启动的 Chrome / Edge 在后台运行。",
-    "vision.strategy": "坐标点击与拖拽",
-    "vision.auto": "允许",
-    "vision.nonVisual": "禁止",
-    "credentials.allowRead": "允许 Agent 读取 cookies / 导出登录状态",
-    "browser.channel": "默认浏览器",
-    "browser.sidebar": "DSH 侧栏面板",
-    "browser.bundled": "DSH 侧栏（旧版内置选项）",
-    "browser.chrome": "本机 Chrome",
-    "browser.edge": "本机 Edge",
-    "browser.auto": "DSH 侧栏（旧版自动选项）",
-    "actions.title": "Agent 权限",
-    "actions.allowExecute": "允许在页面里执行脚本",
-    "actions.allowDownload": "允许下载文件到磁盘",
-    "actions.allowCredentialWrite": "允许写入登录状态",
-    "actions.allowCredentialWrite.hint": "可向任意域写入 cookies。",
-    "refs.title": "网页引用",
-    "refs.empty": "暂无网页引用",
-    "refs.records": "条",
-    "refs.transfer": "导入与导出",
-    "refs.loadFailed": "读取失败，请重试",
-    "refs.reading": "正在读取…",
-    "refs.image": "图片",
-    "refs.table": "表格",
-    "refs.untitled": "未命名网页",
-    "refs.reveal": "定位",
-    "refs.refresh": "刷新",
-    "refs.loading": "定位中…",
-    "refs.parts": "个片段",
-    "refs.revealed": "已在原文中定位",
-    "refs.ambiguous": "有多处相同匹配，无法唯一定位",
-    "refs.missing": "原文中已找不到这段内容",
-    "refs.pageMismatch": "当前页面与引用来源不同，请先打开来源地址",
-    "refs.sessionUnavailable": "捕获该引用的浏览器已关闭",
-    "refs.notFound": "引用不存在",
-    "refs.failed": "定位失败",
-    "refs.export": "导出",
-    "refs.exportJsonl": "JSONL",
-    "refs.exportMarkdown": "Markdown",
-    "refs.exportZip": "ZIP（含图片）",
-    "refs.import": "导入 ZIP",
-    "refs.importBusy": "导入中…",
-    "refs.importDone": "已导入",
-    "refs.importPartial": "条拒绝",
-    "refs.importFailed": "导入失败",
-    "refs.settingsHint": "网页引用属于会话内容：引用卡片出现在会话输入框，历史记录与按需导入导出在输入框旁的「引用记录」入口；设置页只保存引用偏好。",
-    "refs.recordsMenu": "引用记录",
-    "refs.addToDraft": "引用到会话",
-    "refs.remove": "移除",
-    "refs.added": "已加入当前会话草稿，请补充问题后自行发送",
-    "refs.addFailed": "加入失败，引用仍保留在记录里",
-    "refs.removed": "已从会话草稿移除",
-    "refs.removeFailed": "移除失败（可能尚未加入会话）",
-    "remoteView.enabled": "允许远程观看",
-    "remoteView.enabled.hint": "共享只读画面，可能包含敏感信息。",
-    "readiness.title": "环境检查",
-    "readiness.loading": "检测中…",
-    "readiness.failed": "读取就绪状态失败:",
-    "readiness.channel": "配置的载体",
-    "readiness.resolvedCarrier": "当前载体",
-    "readiness.system": "本机浏览器",
-    "readiness.details": "诊断",
-    "readiness.electron": "内置浏览器运行时",
-    "readiness.bridge": "侧栏浏览器桥接",
-    "readiness.recheck": "重新检测",
-    "readiness.prepare": "准备内置浏览器",
-    "readiness.preparing": "正在准备…",
-    "readiness.fix": "外部终端命令",
-    "readiness.carrier.sidebar": "侧栏浏览器",
-    "readiness.carrier.bundled": "内置 Electron",
-    "readiness.carrier.system": "本机 Chrome / Edge",
-    "readiness.carrier.auto": "自动",
-    "readiness.state.ready": "可用",
-    "readiness.state.blocked": "尚不可用",
-    "readiness.status.checkPending": "等待环境检测",
-    "readiness.status.systemReady": "已找到 {browser}",
-    "readiness.status.systemMissing": "未找到 {browser}",
-    "readiness.status.bundledReady": "内置运行环境可用",
-    "readiness.status.bundledMissing": "内置运行环境待安装",
-    "readiness.status.bundledPreparing": "正在下载内置运行环境",
-    "readiness.status.bundledFailed": "内置运行环境准备失败",
-    "readiness.status.bridgeReady": "侧栏桥可用",
-    "readiness.status.bridgeMissing": "侧栏桥待安装",
-    "readiness.status.bridgeStale": "侧栏桥待修复",
-    "readiness.status.bridgeStopped": "侧栏桥未连接",
-    "readiness.status.bridgeInstalled": "侧栏桥已安装",
-    "readiness.status.desktopMissing": "未检测到宿主进程",
-    "readiness.electron.present": "已就绪",
-    "readiness.electron.ready": "已就绪",
-    "readiness.electron.preparing": "正在下载",
-    "readiness.electron.idle": "尚未开始准备",
-    "readiness.electron.skipped": "已跳过(设置了 ELECTRON_SKIP_BINARY_DOWNLOAD)",
-    "readiness.electron.failed": "准备失败",
-    "readiness.bridge.installed": "已安装",
-    "readiness.bridge.installedRunning": "已安装(宿主正在运行)",
-    "readiness.bridge.installedNotRunning": "已安装,但宿主没在运行",
-    "readiness.bridge.missing": "未安装",
-    "readiness.bridge.stale": "已失效(宿主升级后需重装)",
-    "readiness.bridge.absent": "本机没有可用的宿主进程",
-    "readiness.bridge.reinstall": "卸载并重装",
-    "readiness.bridge.working": "正在准备维护…",
-    "readiness.bridge.inProgress": "维护进行中…",
-    "readiness.bridge.maintenanceHint": "点击后将正常退出并重启 DSH。",
-    "readiness.bridge.progressHint": "DSH 将退出并完成维护，结束后自动重新启动。",
-    "readiness.bridge.localOnly": "请在本机 DSH 桌面的设置中操作。",
-    "readiness.bridge.unsupported": "请更新并重启 DSH 后重试。",
-    "readiness.bridge.phase.armed": "正在准备退出 DSH…",
-    "readiness.bridge.phase.closing": "正在正常退出 DSH…",
-    "readiness.bridge.phase.installing": "正在安装桥接…",
-    "readiness.bridge.phase.restarting": "正在重启 DSH…",
-    "readiness.bridge.phase.verifying": "正在确认桥接状态…",
-    "readiness.bridge.failed": "桥接维护失败，请查看诊断后重试。",
-    "readiness.bridge.cancelled": "桥接维护已取消，可重试。",
-    "readiness.bridge.installedDone": "桥接安装完成",
-    "readiness.bridge.actionFailed": "桥接维护未能开始，请查看诊断后重试。",
-    "delivery.title": "交付",
-    "delivery.tool": "接手下载的工具(MCP 工具名,留空=只存本地)",
-    "delivery.args": "参数模板(JSON)",
-    "delivery.args.hint": "占位 {path} {name} {size}。",
-    "delivery.onFail": "远程失败时",
-    "delivery.onFail.keep": "保留本地文件并报告两边结果",
-    "delivery.onFail.stop": "按失败处理",
-    "delivery.sites": "按站点覆盖(每行 host=工具名)",
-  }
-
-  const en = {
-    nav: "Browser",
-    "watch.open": "Watch browser",
-    "watch.title": "Live view",
-    "watch.session": "Session",
-    "watch.readOnly": "Read-only; clicks and typing are not forwarded",
-    "watch.stop": "Stop",
-    "watch.live": "Live",
-    "watch.paused": "Paused",
-    "watch.stopped": "Stopped",
-    "watch.connecting": "Connecting",
-    "watch.disconnected": "Disconnected",
-    "watch.disabled": "Remote viewing is off on the host",
-    "watch.noPage": "This task has not opened a browser",
-    "watch.bridgeStale": "A desktop update invalidated the bridge; re-run:",
-    "watch.bridgeMissing": "The sidebar bridge is not installed, so the sidebar carrier cannot work:",
-    title: "Browser",
-    "settings.advanced": "Advanced settings",
-    "settings.saving": "Saving…",
-    "settings.details": "Configuration file",
-    "browser.profile": "Keep sign-ins",
-    "browser.profile.hint": "Requires restarting DSH",
-    "browser.headless": "Window mode",
-    "browser.headless.hint": "Requires restarting DSH",
-    "browser.headless.auto": "Detect display automatically",
-    "browser.headless.windowed": "Show a window",
-    "browser.headless.headless": "Run headless",
-    "delivery.save": "Save delivery settings",
-    "delivery.invalid": "Check tool names, the argument template, and site rules. Use a JSON object with string values and one host=tool rule per line.",
-    loading: "Loading settings…",
-    failed: "Could not load settings:",
-    retry: "Retry",
-    saved: "Saved",
-    "history.enabled": "Keep browsing history",
-    "ui.title": "Presentation",
-    "ui.autoExpandOnce": "Auto-expand the side panel",
-    "ui.closeWithSession": "Close the browser when the session ends",
-    "ui.virtualCursor": "Show agent cursor",
-    "ui.quiet": "Quiet mode",
-    "ui.quiet.hint": "Keeps your current window and tab. New Chrome / Edge instances run in the background.",
-    "vision.strategy": "Coordinate clicks and drags",
-    "vision.auto": "Allowed",
-    "vision.nonVisual": "Blocked",
-    "credentials.allowRead": "Allow the agent to read cookies / export login state",
-    "browser.channel": "Default browser",
-    "browser.sidebar": "DSH sidebar",
-    "browser.bundled": "DSH sidebar (legacy bundled setting)",
-    "browser.chrome": "Installed Chrome",
-    "browser.edge": "Installed Edge",
-    "browser.auto": "DSH sidebar (legacy automatic setting)",
-    "actions.title": "Agent permissions",
-    "actions.allowExecute": "Run scripts in the page",
-    "actions.allowDownload": "Download files to disk",
-    "actions.allowCredentialWrite": "Write login state",
-    "actions.allowCredentialWrite.hint": "Write cookies to any domain.",
-    "refs.title": "Page references",
-    "refs.empty": "No page references",
-    "refs.records": "saved",
-    "refs.transfer": "Import and export",
-    "refs.loadFailed": "Could not load references. Try again.",
-    "refs.reading": "Loading…",
-    "refs.image": "Image",
-    "refs.table": "Table",
-    "refs.untitled": "Untitled page",
-    "refs.reveal": "Locate",
-    "refs.refresh": "Refresh",
-    "refs.loading": "Locating…",
-    "refs.parts": "part(s)",
-    "refs.revealed": "Located in the page",
-    "refs.ambiguous": "Several equal matches; cannot choose one",
-    "refs.missing": "This content is no longer on the page",
-    "refs.pageMismatch": "The page has changed; open the reference's page first",
-    "refs.sessionUnavailable": "The browser that captured this reference is gone",
-    "refs.notFound": "Reference not found",
-    "refs.failed": "Could not locate",
-    "refs.export": "Export",
-    "refs.exportJsonl": "JSONL",
-    "refs.exportMarkdown": "Markdown",
-    "refs.exportZip": "ZIP (with images)",
-    "refs.import": "Import ZIP",
-    "refs.importBusy": "Importing…",
-    "refs.importDone": "Imported",
-    "refs.importPartial": "rejected",
-    "refs.importFailed": "Import failed",
-    "refs.settingsHint": "Page references belong to a conversation: cards appear in the conversation input, while history and on-demand import/export live in the Reference records entry beside it. Settings only hold preferences.",
-    "refs.recordsMenu": "Reference records",
-    "refs.addToDraft": "Add to conversation",
-    "refs.remove": "Remove",
-    "refs.added": "Added to this conversation's draft; write your question and send it yourself",
-    "refs.addFailed": "Could not add; the record is kept",
-    "refs.removed": "Removed from the conversation draft",
-    "refs.removeFailed": "Could not remove (it may not be in a draft yet)",
-    "remoteView.enabled": "Allow remote viewing",
-    "remoteView.enabled.hint": "Shares a read-only view that may contain sensitive information.",
-    "readiness.title": "Environment check",
-    "readiness.loading": "Checking…",
-    "readiness.failed": "Could not read readiness:",
-    "readiness.channel": "Configured carrier",
-    "readiness.resolvedCarrier": "Current carrier",
-    "readiness.system": "Installed browser",
-    "readiness.details": "Diagnostics",
-    "readiness.electron": "Bundled browser runtime",
-    "readiness.bridge": "Sidebar browser bridge",
-    "readiness.recheck": "Check again",
-    "readiness.prepare": "Prepare the bundled browser",
-    "readiness.preparing": "Preparing…",
-    "readiness.fix": "External-terminal command",
-    "readiness.carrier.sidebar": "Sidebar browser",
-    "readiness.carrier.bundled": "Bundled Electron",
-    "readiness.carrier.system": "Installed Chrome / Edge",
-    "readiness.carrier.auto": "Automatic",
-    "readiness.state.ready": "Ready",
-    "readiness.state.blocked": "Not ready yet",
-    "readiness.status.checkPending": "Waiting for environment check",
-    "readiness.status.systemReady": "{browser} found",
-    "readiness.status.systemMissing": "{browser} not found",
-    "readiness.status.bundledReady": "Bundled runtime available",
-    "readiness.status.bundledMissing": "Bundled runtime needs installation",
-    "readiness.status.bundledPreparing": "Downloading bundled runtime",
-    "readiness.status.bundledFailed": "Bundled runtime preparation failed",
-    "readiness.status.bridgeReady": "Sidebar bridge available",
-    "readiness.status.bridgeMissing": "Sidebar bridge needs installation",
-    "readiness.status.bridgeStale": "Sidebar bridge needs repair",
-    "readiness.status.bridgeStopped": "Waiting for DSH Desktop to start",
-    "readiness.status.bridgeInstalled": "Sidebar bridge installed",
-    "readiness.status.desktopMissing": "DSH Desktop not found",
-    "readiness.electron.present": "Ready",
-    "readiness.electron.ready": "Ready",
-    "readiness.electron.preparing": "Downloading",
-    "readiness.electron.idle": "Not prepared yet",
-    "readiness.electron.skipped": "Skipped (ELECTRON_SKIP_BINARY_DOWNLOAD is set)",
-    "readiness.electron.failed": "Preparation failed",
-    "readiness.bridge.installed": "Installed",
-    "readiness.bridge.installedRunning": "Installed (the desktop app is running)",
-    "readiness.bridge.installedNotRunning": "Installed, but the desktop app is not running",
-    "readiness.bridge.missing": "Not installed",
-    "readiness.bridge.stale": "Stale (a desktop update needs a reinstall)",
-    "readiness.bridge.absent": "No desktop install on this machine",
-    "readiness.bridge.reinstall": "Uninstall and reinstall",
-    "readiness.bridge.working": "Preparing maintenance…",
-    "readiness.bridge.inProgress": "Maintenance in progress…",
-    "readiness.bridge.maintenanceHint": "DSH will exit normally and restart after you click.",
-    "readiness.bridge.progressHint": "DSH quits for maintenance and starts again automatically when it finishes.",
-    "readiness.bridge.localOnly": "Use settings in DSH Desktop on this computer.",
-    "readiness.bridge.unsupported": "Update and restart DSH, then try again.",
-    "readiness.bridge.phase.armed": "Preparing to exit DSH…",
-    "readiness.bridge.phase.closing": "Exiting DSH normally…",
-    "readiness.bridge.phase.installing": "Installing the bridge…",
-    "readiness.bridge.phase.restarting": "Restarting DSH…",
-    "readiness.bridge.phase.verifying": "Checking the bridge…",
-    "readiness.bridge.failed": "Bridge maintenance failed. Check diagnostics and try again.",
-    "readiness.bridge.cancelled": "Bridge maintenance was cancelled. You can try again.",
-    "readiness.bridge.installedDone": "Bridge installed",
-    "readiness.bridge.actionFailed": "Bridge maintenance could not start. Check diagnostics and try again.",
-    "delivery.title": "Delivery",
-    "delivery.tool": "Tool that takes the download (MCP tool name; empty = local only)",
-    "delivery.args": "Argument template (JSON)",
-    "delivery.args.hint": "Placeholders: {path} {name} {size}.",
-    "delivery.onFail": "When the remote side fails",
-    "delivery.onFail.keep": "Keep the local file and report both outcomes",
-    "delivery.onFail.stop": "Treat it as a failure",
-    "delivery.sites": "Per-site override (one host=tool per line)",
-  }
 
   /**
    * Read or patch the host-owned settings document.
@@ -854,6 +537,77 @@ const react = require("react")
    * same one background attempt the plugin makes on its own, which is why pressing it is never
    * harmful and never starts a second download.
    */
+  const hostPatchNoticeEvent = "dsh-builtin-browser:host-patch-notice"
+  function readHostPatchNotice() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(hostPatchNoticeEvent))
+      return saved?.page === performance.timeOrigin ? saved.key : ""
+    } catch { return "" /* Storage may be unavailable. */ }
+  }
+  function publishHostPatchNotice(key) {
+    try { sessionStorage.setItem(hostPatchNoticeEvent, JSON.stringify({ page: performance.timeOrigin, key })) }
+    catch { /* An open panel can still show the result without storage. */ }
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(hostPatchNoticeEvent, { detail: key }))
+  }
+
+  function HostPatchControls() {
+    useLocaleVersion()
+    const t = translate
+    const [state, setState] = useState(null)
+    const [busy, setBusy] = useState(false)
+    const [error, setError] = useState("")
+    const [notice, setNotice] = useState(readHostPatchNotice)
+    const alive = useRef(true)
+    const pending = useRef(false)
+    useEffect(() => {
+      if (typeof window === "undefined") return
+      const target = window
+      const update = event => setNotice(event.detail)
+      target.addEventListener(hostPatchNoticeEvent, update)
+      return () => target.removeEventListener(hostPatchNoticeEvent, update)
+    }, [])
+    useEffect(() => {
+      alive.current = true
+      void fetch("/dsh-builtin-browser/host-patch-maintenance", { headers: { accept: "application/json" } })
+        .then(async response => {
+          if (response.status === 404) return
+          const data = await response.json()
+          if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+          if (alive.current && data.hostPatch?.surface === "web") setState(data.hostPatch)
+        }).catch(failure => { if (alive.current) setError(String(failure)) })
+      return () => { alive.current = false }
+    }, [])
+    const change = async action => {
+      if (pending.current) return
+      pending.current = true
+      setBusy(true); setError(""); setNotice(""); publishHostPatchNotice("")
+      try {
+        const response = await fetch("/dsh-builtin-browser/host-patch-maintenance", {
+          method: "POST", headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({ action }),
+        })
+        const data = await response.json()
+        if (alive.current && data.hostPatch) setState(data.hostPatch)
+        if (!response.ok || data.ok !== true) throw new Error(data.error || data.hostPatch?.reason || `HTTP ${response.status}`)
+        const noticeKey = data.hostPatch.restartRequired ? "hostPatch.restart" : "hostPatch.reload"
+        publishHostPatchNotice(noticeKey)
+        if (alive.current) setNotice(noticeKey)
+      } catch (failure) { if (alive.current) setError(String(failure)) }
+      finally { pending.current = false; if (alive.current) setBusy(false) }
+    }
+    if (state === null && error === "") return null
+    return h("div", { key: "web-host-patch", style: styles.group }, [
+      h("p", { key: "state", role: "status" }, t("readiness.hostPatch") + (state ? ": " + t("readiness.hostPatch." + state.status.replaceAll(" ", "-")) : "")),
+      state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
+      h("div", { key: "buttons", style: styles.row }, [
+        h("button", { key: "install", type: "button", style: styles.button, disabled: busy || !state?.canInstall, onClick: () => change("install") }, t(busy ? "hostPatch.working" : "hostPatch.install")),
+        h("button", { key: "restore", type: "button", style: styles.button, disabled: busy || !state?.canRestore, onClick: () => change("restore") }, t("hostPatch.restore")),
+      ]),
+      notice ? h("p", { key: "notice", role: "status", style: styles.hint }, t(notice)) : null,
+      error ? h("p", { key: "error", role: "alert", style: styles.error }, error) : null,
+    ])
+  }
+
   function Readiness({ channel } = {}) {
     useLocaleVersion()
     const t = translate
@@ -865,6 +619,7 @@ const react = require("react")
     const [bridgeJob, setBridgeJob] = useState(null)
     const [bridgePollVersion, setBridgePollVersion] = useState(0)
     const [bridgeError, setBridgeError] = useState(null)
+    const [extensionMessage, setExtensionMessage] = useState('')
     const bridgePending = useRef(false)
     const bridgeSubmitting = useRef(false)
     const bridgeJobId = useRef(null)
@@ -872,7 +627,7 @@ const react = require("react")
 
     const read = useCallback(async () => {
       try {
-        const response = await fetch("/dsh-builtin-browser/runtime-status", { headers: { accept: "application/json" } })
+        const response = await fetch(RUNTIME_STATUS_ROUTE, { headers: { accept: "application/json" } })
         // A host that predates this route answers 404, and that is a version skew rather than a
         // fault: after an update the client bundle is read at request time while the host's code is
         // what started with the process. Rendering "could not read readiness: HTTP 404" at a user who
@@ -884,6 +639,16 @@ const react = require("react")
         }
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const data = await response.json()
+        if (data.runtime?.bridge) {
+          const extensions = typeof window === "undefined" ? undefined : window.dshDesktop?.mainExtensions
+          if (typeof extensions?.status === "function") {
+            const status = await extensions.status("dsh-builtin-browser")
+            data.runtime.bridge = { ...data.runtime.bridge, mainExtension: status, code: status.code, command: undefined,
+              state: status.state === "loaded" ? "installed" : status.state === "not-installed" ? "missing" : "stale" }
+          } else if (!data.runtime.bridge.mainExtension) {
+            data.runtime.bridge = { ...data.runtime.bridge, code: "DESKTOP_MAIN_EXTENSION_UNSUPPORTED" }
+          }
+        }
         if (!alive.current) return null
         setUnsupported(false)
         setRuntime(data && data.runtime ? data.runtime : null)
@@ -939,7 +704,7 @@ const react = require("react")
       setBusy(true)
       setError("")
       try {
-        const response = await fetch("/dsh-builtin-browser/runtime-provision", {
+        const response = await fetch(RUNTIME_PROVISION_ROUTE, {
           method: "POST",
           headers: { accept: "application/json" },
         })
@@ -1034,7 +799,9 @@ const react = require("react")
     const systemLabel = runtime.systemBrowser?.checked === true
       ? t(runtime.systemBrowser.present ? "readiness.status.systemReady" : "readiness.status.systemMissing").replace("{browser}", systemName)
       : t("readiness.status.checkPending")
-    const stateLabel = resolvedCarrier === "system" ? systemLabel
+    const extensionDisconnected = runtime.extension?.state === 'not-connected' || runtime.extension?.state === 'extension-missing'
+    const stateLabel = resolvedCarrier === "extension" ? extensionDisconnected ? t('extension.notConnected') : runtime.extension?.detail ?? t("readiness.state.blocked")
+      : resolvedCarrier === "system" || resolvedCarrier === "cdp" ? systemLabel
       : resolvedCarrier === "sidebar"
         ? t(runtime.bridge.state === "installed"
           ? runtime.bridge.running === true ? "readiness.status.bridgeReady"
@@ -1045,7 +812,17 @@ const react = require("react")
           : runtime.electron.state === "preparing" ? "readiness.status.bundledPreparing"
             : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
     const controlsBusy = busy || bridgeBusy !== null || bridgeActive
+    const extensionAction = async () => {
+      setBusy(true)
+      try {
+        const result = await requestExtensionSetup()
+        setExtensionMessage(t(result.connected ? 'extension.connected' : result.store ? 'extension.storeHint' : 'extension.loadHint'))
+      } catch (failure) { setExtensionMessage(String(failure.message ?? failure)) }
+      finally { setBusy(false); void read() }
+    }
+    const extensionButton = h("button", { key: "install-extension", type: "button", style: styles.button, disabled: controlsBusy, onClick: extensionAction }, t('extension.button'))
     const canManageBridge = runtime.bridge.present === true && runtime.bridge.state !== "absent"
+    const extensionUnsupported = runtime.bridge.code === "DESKTOP_MAIN_EXTENSION_UNSUPPORTED"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
     const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
     const bridgeJobError = typeof bridgeJob?.error === "string" ? bridgeJob.error : ""
@@ -1058,17 +835,34 @@ const react = require("react")
         h("span", { key: "title" }, t("readiness.title")),
         h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, stateLabel),
       ]),
+      runtime.extension ? h("div", { key: "extension" }, [
+        resolvedCarrier !== 'extension' && extensionDisconnected ? h('p', { key: 'fallback-hint', role: 'status', style: styles.hint }, t('extension.notConnected')) : null,
+        h("p", { key: "profile", role: "status", style: styles.hint }, [runtime.extension.browser, runtime.extension.profile, runtime.extension.connectionId, runtime.extension.state].filter(Boolean).join(" · ")),
+        h("p", { key: "quiet", style: styles.hint }, t("extension.quiet")),
+        h('p', { key: 'hint', style: styles.hint }, t('extension.loadHint')),
+      ]) : null,
       canManageBridge ? h("div", { key: "bridge-controls" }, [
+        extensionUnsupported ? h("p", { key: "extension-unsupported", role: "status", style: styles.hint }, t("readiness.bridge.extensionUnsupported"))
+          : runtime.bridge.mainExtension ? h("p", { key: "extension-status", role: "status", style: styles.hint },
+            `${t("readiness.bridge.extension." + runtime.bridge.mainExtension.state)}${runtime.bridge.mainExtension.version ? " · " + runtime.bridge.mainExtension.version : ""}${runtime.bridge.mainExtension.code ? " · " + runtime.bridge.mainExtension.code : ""}`) : null,
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
           h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: bridgeAction }, t("readiness.bridge.reinstall")),
+          extensionButton,
         ]),
         h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
       ]) : null,
+      !canManageBridge ? extensionButton : null,
+      extensionMessage ? h('p', { key: 'extension-message', role: 'status', style: styles.hint }, extensionMessage) : null,
+      h('p', { key: 'active-carrier', role: 'status', style: styles.hint }, [runtime.resolvedCarrier, runtime.controlledProfile, runtime.fallbackReason, runtime.extension?.registration?.detail].filter(Boolean).join(' · ')),
+      ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered).map(([browser, status]) => h('p', { key: 'registration-' + browser, role: 'status', style: styles.hint }, browser + ': ' + status.detail)),
       bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase}`)) : null,
       bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t("readiness.bridge.installedDone")) : null,
+      bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
+        `${t("readiness.hostPatch")}: ${t("readiness.hostPatch." + bridgeJob.hostPatch.status.replaceAll(" ", "-"))}`) : null,
       bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
       bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
+      runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
         h("summary", { key: "title", style: styles.hint }, t("readiness.details")),
         h("div", { key: "kv", style: styles.kv }, [
@@ -1220,7 +1014,7 @@ const react = require("react")
     const reveal = referenceId => {
       setPending(referenceId)
       setOutcome(null)
-      fetch("/dsh-builtin-browser/reference/reveal", {
+      fetch(REFERENCE_REVEAL_ROUTE, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ referenceId }),
@@ -1263,7 +1057,7 @@ const react = require("react")
       setImporting(true)
       setImportNote("")
       setOutcome(null)
-      fetch("/dsh-builtin-browser/reference/import", {
+      fetch(REFERENCE_IMPORT_ROUTE, {
         method: "POST",
         headers: { "content-type": "application/zip" },
         body: file,
@@ -1309,10 +1103,10 @@ const react = require("react")
         .finally(() => { if (alive.current) setPending("") })
     }
     const addToDraft = referenceId => postDelivery(
-      "/dsh-builtin-browser/reference/insert", { referenceId }, "added", "addFailed", referenceId,
+      REFERENCE_INSERT_ROUTE, { referenceId }, "added", "addFailed", referenceId,
     )
     const removeFromDraft = referenceId => postDelivery(
-      "/dsh-builtin-browser/reference/delivery/remove", { referenceId }, "removed", "removeFailed", referenceId,
+      REFERENCE_DELIVERY_REMOVE_ROUTE, { referenceId }, "removed", "removeFailed", referenceId,
     )
     const withActions = props && props.withActions === true
 
@@ -1501,7 +1295,10 @@ const react = require("react")
       selector("browser.channel", settings.browser.channel,
         options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
-      h(Readiness, { key: "readiness", channel: settings.browser.channel }),
+      systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
+        options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
+      h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel }),
+      h(HostPatchControls, { key: "host-patch" }),
       section("ui.title", [
         toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
         toggle("ui", "autoExpandOnce"),
@@ -1522,8 +1319,8 @@ const react = require("react")
           { value: "auto", label: t("vision.auto") },
           { value: "nonVisual", label: t("vision.nonVisual") },
         ], strategy => patch({ vision: { strategy } })),
-        systemBrowser ? toggle("cookies", "persist", "browser.profile", "browser.profile.hint") : null,
-        systemBrowser ? selector("browser.headless", settings.browser.headless ?? "auto",
+        systemBrowser && settings.browser.systemProfile !== "user" ? toggle("cookies", "persist", "browser.profile", "browser.profile.hint") : null,
+        systemBrowser && settings.browser.systemProfile !== "user" ? selector("browser.headless", settings.browser.headless ?? "auto",
           options("browser.headless.", ["auto", "windowed", "headless"]),
           headless => patch({ browser: { headless } }), "browser.headless.hint") : null,
         settings.delivery ? section("delivery.title", [
@@ -1651,9 +1448,13 @@ const react = require("react")
   }
 
   /** Read this conversation's current guest, preferring the one actually drawn. */
-  function guestStateFor(sessionId, tabId) {
+  function guestStateFor(sessionId, tabId, initializationReader) {
     const roots = panelRootsFor(sessionId)
     if (roots === undefined ? tabStripFor(sessionId) === null : roots.length === 0) return { panel: false, guestId: null, url: "" }
+    if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof tabId === "string") {
+      const page = initializationReader?.current({ sessionId, tabId })
+      return { panel: true, guestId: page?.guestId ?? null, url: page?.url ?? "", ...page?.generation === undefined ? {} : { nativeState: page } }
+    }
     const guests = guestsInPanel(sessionId).filter(view => tabId === undefined
       || tabIdOfElement(view, new Set([tabId]), roots) === tabId)
     if (guests.length === 0) return { panel: true, guestId: null, url: "" }
@@ -1709,6 +1510,20 @@ const react = require("react")
     let sidebarRight = null
     let initializationReader = null
     const pendingTabs = new Map()
+    const renderingHolds = new Map()
+    function releaseRendering(token) {
+      const hold = renderingHolds.get(token)
+      if (hold === undefined) return
+      renderingHolds.delete(token)
+      clearTimeout(hold.timer)
+      hold.release()
+    }
+    function releaseAllRendering() {
+      for (const token of renderingHolds.keys()) releaseRendering(token)
+    }
+    function hasRenderingHold(sessionId) {
+      return Array.from(renderingHolds.values()).some(hold => hold.sessionId === sessionId)
+    }
     const initializing = new Map()
     /** The shell's own navigation service: `openSession` is how it is asked to DISPLAY a conversation. */
     let uiWorkspace = null
@@ -1727,10 +1542,14 @@ const react = require("react")
         }, "dsh-builtin-browser: initialization receipt reader")
       })
       ctx.inject(["sidebarRight"], (scope) => {
-        if (sidebarRight !== scope.sidebarRight) pendingTabs.clear()
+        if (sidebarRight !== scope.sidebarRight) {
+          releaseAllRendering()
+          pendingTabs.clear()
+        }
         sidebarRight = scope.sidebarRight
         scope.effect(() => () => {
           if (sidebarRight === scope.sidebarRight) {
+            releaseAllRendering()
             sidebarRight = null
             pendingTabs.clear()
             for (const transaction of initializing.values()) transaction.controller.abort(new Error("the sidebar service was released"))
@@ -1803,6 +1622,7 @@ const react = require("react")
         .then(body => {
           const open = body && body.open
           if (!open || typeof open.url !== "string" || typeof open.at !== "number") return
+          if (typeof open.owner === "string" && open.owner.replace(/^session-/, "") !== sessionId) return
           // Only act when the HOST says it is in panel mode. A host that predates the single-surface
           // switch still opens its own browser for every call, so placing a tab here as well produced TWO
           // live views of one page (the reported double-open). No echo, no tab.
@@ -1861,6 +1681,7 @@ const react = require("react")
 
     /** Display the owner of an explicit open request, including an already mounted hidden guest. */
     function claimConversation(sessionId) {
+      if (hasRenderingHold(sessionId)) return false
       if (uiWorkspace === null || typeof uiWorkspace.openSession !== "function") return false
       // Already displayed? Then the shell needs no navigation: the panel simply has not been opened
       // yet, and `revealPlacedPanel` opens it. Re-opening the conversation a human is reading would
@@ -1967,6 +1788,11 @@ const react = require("react")
         if (typeof sidebarRight.navigateTabIn === "function") {
           return sidebarRight.navigateTabIn(sessionId, tabId, { params: { url: address } }) === true
         }
+        const tab = Array.from(sidebarRight.tabsIn(sessionId)).find(tab => tab.id === tabId && tab.kind === "browser")
+        if (typeof tab?.contentId === "string" && typeof sidebarRight.tabDomain?.navigate === "function") {
+          sidebarRight.tabDomain.navigate(sessionId, tabId, { address: tab.contentId, params: { url: address } })
+          return true
+        }
       } catch (error) {
         return false
       }
@@ -1996,7 +1822,13 @@ const react = require("react")
         return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native tab for this browser view was closed; close or reset the view before retrying", panel: true, guestId: null }
       }
       const guests = guestsInPanel(sessionId)
-      const hasCachedGuest = Number.isInteger(guestId) && guestId > 0
+      const hasNativeGuest = globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof guestId === "string"
+      const hasCachedGuest = (Number.isInteger(guestId) && guestId > 0) || hasNativeGuest
+      if (binding === undefined && hasNativeGuest) {
+        const cached = browsers.find(tab => initializationReader?.current({ sessionId, tabId: tab.id })?.guestId === guestId)
+        if (cached === undefined || owned.has(cached.id)) return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native guest is not in this conversation", panel: true, guestId: null }
+        binding = { sessionId, id: cached.id, url: address, scoped: true }
+      }
       if (binding === undefined && hasCachedGuest) {
         const cached = guests.find(view => view.getWebContentsId() === guestId)
         if (cached !== undefined) {
@@ -2025,7 +1857,17 @@ const react = require("react")
         // conversation the tab belongs to so a quote can be handed back to the right draft.
         try { globalThis.__dshSidebarSessionId = sessionId } catch { /* non-writable global */ }
         const before = new Set(tabs.map(tab => tab.id))
-        try { sidebarRight.openTabIn(sessionId, "browser", url ? { params: { url } } : {}) }
+        try {
+          if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1
+            && typeof sidebarRight.openReservedTab === "function") {
+            const id = globalThis.crypto.randomUUID()
+            if (!sidebarRight.openReservedTab(sessionId, "browser", id)) return { ok: false, reason: "the shell refused this browser tab reservation" }
+            if (url && !navigatePlacedTab(sessionId, id, url)) {
+              sidebarRight.closeIn?.(sessionId, id)
+              return { ok: false, reason: "the shell refused this browser tab navigation" }
+            }
+          } else sidebarRight.openTabIn(sessionId, "browser", url ? { params: { url } } : {})
+        }
         catch (error) { return { ok: false, reason: String(error?.message ?? error) } }
         let placed
         try { placed = Array.from(sidebarRight.tabsIn(sessionId)) }
@@ -2047,7 +1889,7 @@ const react = require("react")
         created = true
       }
       pendingTabs.set(key, binding)
-      const state = guestStateFor(sessionId, binding.id)
+      const state = guestStateFor(sessionId, binding.id, initializationReader)
       // A bound tab that still shows the start page has no guest to reveal.
       // Revealing it can never produce one, so ask the shell to aim that exact
       // tab at the requested address; the host body turns the new navigation
@@ -2081,6 +1923,21 @@ const react = require("react")
     }
 
     const api = {
+      holdRendering(sessionId, token, deadline = Date.now() + 30_000) {
+        if (typeof sessionId !== "string" || !sessionId.startsWith("session-") || typeof token !== "string") return false
+        if (!Number.isFinite(deadline) || deadline <= Date.now()) return false
+        if (renderingHolds.has(token)) return true
+        if (onScreenSession() === sessionId || typeof sidebarRight?.holdRendering !== "function") return false
+        const release = sidebarRight.holdRendering(sessionId)
+        const timer = setTimeout(() => releaseRendering(token), Math.min(30_000, deadline - Date.now()))
+        renderingHolds.set(token, { sessionId, release, timer })
+        return true
+      },
+      releaseRendering,
+      isBackgroundRendering(sessionId) {
+        return hasRenderingHold(sessionId) && Array.from(document.querySelectorAll("[data-sidebar-right-background-rendering]"))
+          .some(element => element.getAttribute("data-sidebar-right-session") === sessionId)
+      },
       panelProtocol: 5,
       cancelPanelInitialization(sessionId, viewId, transactionId) {
         const pending = initializing.get(viewKey(sessionId, viewId))
@@ -2091,7 +1948,7 @@ const react = require("react")
       async initializePanel(sessionId, url, options) {
         const refuse = (code, reason) => ({ ok: false, code, reason, panel: false, guestId: null })
         if (typeof options?.viewId !== "string" || options.viewId === "") return refuse("panel-initialization-failed", "a logical view identity is required")
-        if (onScreenSession() !== sessionId) return refuse("panel-not-displayed", "the requested conversation is not displayed; select it before opening its browser")
+        if (onScreenSession() !== sessionId && !api.isBackgroundRendering(sessionId)) return refuse("panel-not-displayed", "the requested conversation is not displayed; select it before opening its browser")
         const reader = initializationReader
         if (reader === null || typeof reader.wait !== "function") return refuse("panel-initialization-failed", "the browser initialization subscription is unavailable; reload the plugin client")
         const deadline = options.deadline
@@ -2100,14 +1957,24 @@ const react = require("react")
         const previous = initializing.get(key)
         const controller = new AbortController()
         const transaction = { controller, transactionId: options.transactionId }
+        let placed
+        const closeNative = () => {
+          if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion !== 1 || typeof placed?.tabId !== "string") return
+          sidebarRight.closeIn?.(sessionId, placed.tabId)
+          if (pendingTabs.get(key)?.id === placed.tabId) pendingTabs.delete(key)
+        }
+        controller.signal.addEventListener("abort", closeNative, { once: true })
         initializing.set(key, transaction)
         previous?.controller.abort(Object.assign(new Error("a newer sidebar initialization was requested"), { code: "panel-navigation-superseded" }))
         const timer = setTimeout(() => controller.abort(Object.assign(new Error("sidebar initialization deadline expired"), { code: "BROWSER_DOCUMENT_TIMEOUT" })), deadline - Date.now())
         try {
           const answer = api.openPanel(sessionId, url, options)
+          placed = answer
+          if (controller.signal.aborted) { closeNative(); controller.signal.throwIfAborted() }
           if (!answer.ok) return answer
           const rendererNavigation = url !== "" && (answer.created || answer.navigating)
-          if (!rendererNavigation && answer.guestId !== null) return answer
+          if (!rendererNavigation && answer.guestId !== null) return globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1
+            ? { ...answer, nativeState: reader.current({ sessionId, tabId: answer.tabId }) } : answer
           if (typeof answer.tabId !== "string") return refuse("panel-initialization-failed", "the shell did not acknowledge its native tab identity")
           const receipt = await reader.wait({ sessionId, tabId: answer.tabId, url }, controller.signal)
           controller.signal.throwIfAborted()
@@ -2116,11 +1983,14 @@ const react = require("react")
           if (state.guestId === null || String(state.guestId) !== receipt.guestId || observed?.guestId !== receipt.guestId) {
             return refuse("panel-initialization-failed", "the mounted native guest did not acknowledge its initialization identity")
           }
-          return { ...answer, ...state, url: observed.url, initialization: receipt, rendererNavigation }
+          return { ...answer, ...state, url: observed.url, initialization: receipt, rendererNavigation,
+            ...observed.generation === undefined ? {} : { nativeState: observed } }
         } catch (error) {
+          closeNative()
           return refuse(error?.code ?? "panel-initialization-failed", String(error?.message ?? error))
         } finally {
           clearTimeout(timer)
+          controller.signal.removeEventListener("abort", closeNative)
           if (initializing.get(key) === transaction) initializing.delete(key)
         }
       },
@@ -2147,7 +2017,7 @@ const react = require("react")
           return openViewPanel(wanted, address, options.viewId, options.guestId)
         }
         const pending = pendingTabs.get(wanted)
-        const state = guestStateFor(wanted, pending?.url === address && pending.scoped ? pending.id : undefined)
+        const state = guestStateFor(wanted, pending?.url === address && pending.scoped ? pending.id : undefined, initializationReader)
         // Explicit opening also reveals a guest kept mounted in a collapsed or hidden sidebar.
         // Passive panelGuest/panelGuests reads never call either presentation helper.
         const switched = claimConversation(wanted)
@@ -2264,11 +2134,12 @@ const react = require("react")
             const roots = panelRootsFor(sessionId)
             return { panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0, guestId: null, url: "" }
           }
-          return guestStateFor(sessionId, intended)
+          return guestStateFor(sessionId, intended, initializationReader)
         }
         return guestStateFor(
           typeof sessionId === "string" ? sessionId : "",
           typeof tabId === "string" && tabId !== "" ? tabId : undefined,
+          initializationReader,
         )
       },
       /** All guest ids verified inside this conversation, including shell-created popup tabs. */
@@ -2280,6 +2151,13 @@ const react = require("react")
       closePanelGuest(sessionId, guestId) {
         const refuse = reason => ({ ok: false, reason, closed: 0 })
         if (typeof sessionId !== "string" || !/^session-/.test(sessionId)) return refuse("a conversation id is required")
+        if (typeof guestId === "string" && globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1) {
+          const tabs = sidebarRight.tabsIn(sessionId)
+          const tab = tabs.find(tab => tab.kind === "browser" && initializationReader?.current({ sessionId, tabId: tab.id })?.guestId === guestId)
+          if (tab === undefined || typeof sidebarRight.closeIn !== "function") return refuse("the native guest does not belong to this conversation")
+          sidebarRight.closeIn(sessionId, tab.id)
+          return { ok: true, closed: 1 }
+        }
         const view = guestsInPanel(sessionId).find(candidate => candidate.getWebContentsId() === guestId)
         if (view === undefined) return refuse("the guest does not belong to this conversation panel")
         const roots = panelRootsFor(sessionId)
@@ -2313,6 +2191,9 @@ const react = require("react")
     ctx.effect(() => {
       globalThis.__dshBuiltinBrowser = api
       return () => {
+        for (const transaction of initializing.values()) transaction.controller.abort(new Error("the panel service was disposed"))
+        initializing.clear()
+        releaseAllRendering()
         if (globalThis.__dshBuiltinBrowser === api) delete globalThis.__dshBuiltinBrowser
       }
     }, "dsh-builtin-browser: conversation panel service")
@@ -2334,8 +2215,8 @@ const react = require("react")
    */
   function installWatchPanel(ctx) {
     if (typeof document === "undefined") return
-    const SESSIONS = "/dsh-builtin-browser/browser-view/sessions"
-    const FRAME = "/dsh-builtin-browser/browser-view/frame"
+    const SESSIONS = PREVIEW_SESSIONS_ROUTE
+    const FRAME = PREVIEW_ROUTE
     const MIN_INTERVAL_MS = 500
 
     // Built element by element and referenced directly, never through innerHTML + querySelector.
@@ -2660,7 +2541,7 @@ const react = require("react")
     const showBridgeStatus = async () => {
       let status
       try {
-        const response = await fetch("/dsh-builtin-browser/bridge-status", { headers: { accept: "application/json" } })
+        const response = await fetch(BRIDGE_STATUS_ROUTE, { headers: { accept: "application/json" } })
         if (!response.ok) return
         const data = await response.json()
         status = data?.bridge
@@ -2675,7 +2556,7 @@ const react = require("react")
       const line = make("div", "dsh-bw-watch-bridge-line",
         status.state === "stale" ? say("watch.bridgeStale") : say("watch.bridgeMissing"))
       notice.appendChild(line)
-      if (typeof status.command === "string" && status.command !== "") {
+      if (typeof status.command === "string" && status.command !== "" && typeof window.dshDesktop?.mainExtensions?.status !== "function") {
         const code = make("code", "dsh-bw-watch-bridge-cmd", status.command)
         notice.appendChild(code)
       }
@@ -2753,6 +2634,7 @@ const react = require("react")
     // on-demand menu, so a harness must be able to render it without driving
     // the popover's own state.
     exports.__references = References
+    exports.__hostPatchSection = HostPatchControls
     ctx.slots.inject("settings.section", () => ctx.slots.register({
       name: "settings.section",
       id: "dsh-builtin-browser",

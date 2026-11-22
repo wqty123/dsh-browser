@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { readRuntimeStatus } from '../lib/browser-electron/runtime-status.js'
+import { zh, en } from '../assets/browser-panel-locales.mjs'
 
 const at = '2026-11-03T15:00:00.000Z'
 
@@ -52,6 +53,8 @@ function report(channel, {
   endpointReader = noShell,
   browserReader = () => undefined,
   selectedCarrier,
+  bridgeError,
+  systemConnection,
 } = {}) {
   return readRuntimeStatus({
     channel: () => channel,
@@ -61,8 +64,21 @@ function report(channel, {
     endpoint: endpointReader,
     detectBrowser: browserReader,
     selectedCarrier,
+    bridgeError,
+    systemConnection,
   })
 }
+
+test('a discovery version mismatch overrides installed and running readiness until a compatible discovery', () => {
+  let mismatch = '桥接版本过旧，请点击 卸载并重装'
+  const options = { bridgeReader: bridge('installed'), endpointReader: shellRunning, bridgeError: () => mismatch }
+  const incompatible = report('sidebar', options)
+  assert.equal(incompatible.bridge.state, 'stale')
+  assert.equal(incompatible.bridge.detail, mismatch)
+  assert.notEqual(incompatible.readiness, 'ready')
+  mismatch = undefined
+  assert.equal(report('sidebar', options).bridge.state, 'installed')
+})
 
 test('legacy automatic ignores obsolete standalone fallback reports', () => {
   const status = report('auto', { binary: true, bridgeReader: bridge('installed'), endpointReader: shellRunning,
@@ -179,13 +195,14 @@ for (const kind of ['chrome', 'edge']) {
         assert.equal(channel, kind, 'the configured choice reaches the launch path detector')
         return { kind, path }
       },
+      systemConnection: () => ({ connected: true, detail: 'Live CDP connection.' }),
     })
     assert.equal(status.carrier, 'system')
     assert.equal(status.resolvedCarrier, 'system')
     assert.equal(status.readiness, 'ready')
     assert.equal(status.executable, path)
     assert.deepEqual(status.systemBrowser, {
-      checked: true, present: true, kind, path, detail: `${kind} is available at ${path}`,
+      checked: true, present: true, kind, path, detail: 'Live CDP connection.',
     })
   })
 
@@ -251,7 +268,7 @@ test('the default reader detects a real file through the launch path detector wi
       bridge: noDesktop,
       endpoint: noShell,
     })
-    assert.equal(status.readiness, 'ready')
+    assert.equal(status.readiness, 'blocked')
     assert.equal(status.executable, path)
     assert.equal(readFileSync(path, 'utf8'), 'this fixture is not an executable')
   } finally {
@@ -259,6 +276,24 @@ test('the default reader detects a real file through the launch path detector wi
     else process.env.DSH_BROWSER_CHROME_PATH = previous
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('system readiness follows the selected live CDP connection and preserves launch failures', () => {
+  let state
+  const options = { browserReader: () => ({ kind: 'edge', path: 'edge.exe' }), systemConnection: () => state }
+  assert.equal(report('edge', options).readiness, 'blocked')
+  assert.match(report('edge', options).systemBrowser.detail, /has not launched/)
+  for (const detail of ['Browser launch is in progress', 'Default-profile debugging refused', 'Singleton handoff without DevToolsActivePort', 'CDP connection lost']) {
+    state = { connected: false, detail }
+    const status = report('edge', options)
+    assert.equal(status.readiness, 'blocked')
+    assert.equal(status.systemBrowser.detail, detail)
+    assert.equal(status.resolvedCarrier, 'system')
+  }
+  state = { connected: true, detail: 'Live CDP' }
+  assert.equal(report('edge', options).readiness, 'ready')
+  state = { connected: false, detail: 'CDP closed' }
+  assert.equal(report('edge', options).readiness, 'blocked')
 })
 
 test('a runtime installed by hand is diagnostic, not a working sidebar', () => {
@@ -280,7 +315,7 @@ test('the state vocabulary the panel localizes matches what the host can emit', 
   assert.ok(snapshot, 'the provisioning state union is the one this test enumerates')
   const readiness = /export type Readiness = 'ready' \| 'blocked'/.test(source)
   assert.ok(readiness, 'and so is the readiness union')
-  const carrier = /export type CarrierKind = 'sidebar' \| 'bundled' \| 'system' \| 'auto'/.test(source)
+  const carrier = /export type CarrierKind = 'sidebar' \| 'bundled' \| 'system' \| 'extension' \| 'cdp' \| 'auto'/.test(source)
   assert.ok(carrier, 'and the carrier union')
 })
 
@@ -292,17 +327,14 @@ test('a previously prepared runtime removed from disk can be prepared again', ()
 })
 
 test('every state and carrier the report can name has a label in both languages', () => {
-  const client = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
-  const zhBlock = client.slice(client.indexOf('const zh = {'), client.indexOf('const en = {'))
-  const enBlock = client.slice(client.indexOf('const en = {'), client.indexOf('async function callSettings'))
-  const has = (block, key) => new RegExp(`"${key.replace(/\./g, '\\.')}":`).test(block)
+  const has = (locale, key) => typeof locale[key] === 'string' && locale[key].length > 0
   const keys = []
   for (const state of ['idle', 'preparing', 'present', 'ready', 'skipped', 'failed']) keys.push(`readiness.electron.${state}`)
   // Two rows beyond the install-tree states: the panel distinguishes an installed bridge that is
   // running from one whose desktop app is closed, in both directions.
   for (const state of ['installed', 'installedRunning', 'installedNotRunning', 'missing', 'stale', 'absent']) keys.push(`readiness.bridge.${state}`)
-  for (const carrier of ['sidebar', 'bundled', 'system', 'auto']) keys.push(`readiness.carrier.${carrier}`)
+  for (const carrier of ['sidebar', 'bundled', 'system', 'extension', 'auto']) keys.push(`readiness.carrier.${carrier}`)
   for (const readiness of ['ready', 'blocked']) keys.push(`readiness.state.${readiness}`)
-  const missing = keys.filter(key => !has(zhBlock, key) || !has(enBlock, key))
+  const missing = keys.filter(key => !has(zh, key) || !has(en, key))
   assert.deepEqual(missing, [], 'these would render as raw keys in the panel')
 })

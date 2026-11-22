@@ -1,3 +1,4 @@
+import { WINDOWS_TOOLS } from '../../assets/browser-products.mjs'
 /** Locate Windows system tools from the running system rather than an assumed system drive. */
 import { existsSync } from 'node:fs'
 import { win32 } from 'node:path'
@@ -17,7 +18,7 @@ export function windowsPowerShellPath(
   if (root === undefined || !/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/.test(root)) {
     throw new Error('Windows system directory is unavailable; SystemRoot or WINDIR must identify the current system')
   }
-  const path = win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const path = win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', WINDOWS_TOOLS.powershell)
   if (!exists(path)) throw new Error('Windows PowerShell is unavailable in the detected system directory')
   return path
 }

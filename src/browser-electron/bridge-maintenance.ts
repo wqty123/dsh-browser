@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Prepare bridge maintenance (Windows `.cmd`, macOS `.command`) for the user to run after exiting DSH Desktop.
  * Preparation writes a private launcher and plan; it never starts a process or changes Desktop.
@@ -149,7 +150,7 @@ export async function prepareBridgeMaintenance(
   if (testContext && options.directory === undefined && process.env.DSH_BRIDGE_TEST_ROOT === undefined) {
     throw new Error('test preparation requires an explicit private maintenance directory')
   }
-  const directory = checkedPath(options.directory ?? join(dshHome, 'dsh-builtin-browser-host', 'maintenance'), 'Maintenance directory')
+  const directory = checkedPath(options.directory ?? join(dshHome, BROWSER_PROFILE_DIR, 'maintenance'), 'Maintenance directory')
   if (withinOrEqual(target, directory) || withinOrEqual(target, prospectiveRealPath(directory))) {
     throw new Error('maintenance launchers must be stored outside the Desktop installation')
   }

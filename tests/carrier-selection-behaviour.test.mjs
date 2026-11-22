@@ -9,6 +9,10 @@ import { Readable } from 'node:stream'
 import { apply } from '../lib/browser-electron/entry.js'
 import { SettingsStore, DEFAULT_SETTINGS } from '../lib/browser-electron/settings-store.js'
 import { DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
+import { SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
+import { ExtensionBrowserViewHost } from '../lib/browser-electron/extension-browser.js'
+import { PreferredBrowserViewHost } from '../lib/browser-electron/preferred-browser.js'
+import { nativeRegistration } from '../lib/browser-electron/extension-setup.js'
 
 class Sidebar {
   disposed = false
@@ -20,6 +24,7 @@ class Sidebar {
 }
 
 function harness(t, channel, discover = () => new Promise(() => {})) {
+  t.mock.method(nativeRegistration, 'ensure', async () => {})
   const folder = mkdtempSync(join(tmpdir(), 'dsh-carrier-choice-'))
   const oldHome = process.env.DSH_HOME
   const oldChrome = process.env.DSH_BROWSER_CHROME_PATH
@@ -29,7 +34,8 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
   let settings = { ...DEFAULT_SETTINGS, browser: { ...DEFAULT_SETTINGS.browser, channel } }
   t.mock.method(SettingsStore.prototype, 'get', () => settings)
   t.mock.method(SettingsStore.prototype, 'update', patch => {
-    settings = { ...settings, browser: { ...settings.browser, ...patch.browser } }
+    settings = { ...settings, browser: { ...settings.browser, ...patch.browser },
+      cookies: { ...settings.cookies, ...patch.cookies }, ui: { ...settings.ui, ...patch.ui } }
     return settings
   })
   t.mock.method(DesktopBridgeViewHost, 'discover', discover)
@@ -83,6 +89,30 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
   return {
     get current() { return current }, get panelFactory() { return panelFactory }, registered, dispose,
     failNextRegistration() { failRegistration = true },
+    async status() {
+      let body
+      await routes.get('/dsh-builtin-browser/runtime-status')({ method: 'GET', headers: {
+        host: 'localhost:3000', origin: 'http://localhost:3000', cookie: 'dsh_test_session=authenticated',
+      } }, { writeHead() {}, end(text) { body = JSON.parse(text) } })
+      assert.equal(body.ok, true)
+      return body.runtime
+    },
+    diskPatch(patch) {
+      SettingsStore.prototype.update(patch)
+      const file = join(folder, 'dsh-builtin-browser-host', 'settings.json')
+      fs.writeFileSync(file, JSON.stringify(settings))
+      const time = Date.now() / 1000 + registered.length + 1
+      fs.utimesSync(file, time, time)
+    },
+    async patch(patch) {
+      const request = Readable.from([JSON.stringify(patch)])
+      request.method = 'PUT'
+      request.headers = { host: 'localhost:3000', origin: 'http://localhost:3000', cookie: 'dsh_test_session=authenticated' }
+      let response
+      await handler(request, { writeHead() {}, end(text) { response = JSON.parse(text) } })
+      assert.equal(response.ok, true)
+      return response
+    },
     async choose(nextChannel) {
       const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel } })])
       request.method = 'PUT'
@@ -94,6 +124,93 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
     },
   }
 }
+
+for (const source of ['PUT', 'disk']) test(`${source} replaces the carrier for profile, headless, persistence and channel changes only`, async t => {
+  let poll
+  const interval = globalThis.setInterval
+  t.mock.method(globalThis, 'setInterval', (fn, ms, ...args) => {
+    if (ms === 5000) { poll = fn; return { unref() {} } }
+    return interval(fn, ms, ...args)
+  })
+  const h = harness(t, 'chrome')
+  for (const patch of [
+    { browser: { systemProfile: 'user' } }, { browser: { systemProfile: 'plugin' } },
+    { browser: { headless: 'windowed' } }, { cookies: { persist: false } },
+    { browser: { channel: 'sidebar' } },
+  ]) {
+    const previous = h.current
+    if (source === 'PUT') assert.equal((await h.patch(patch)).carrierRechosen, true)
+    else h.diskPatch(patch)
+    poll()
+    assert.notEqual(h.current, previous)
+    assert.equal(previous.available?.() ?? !previous.disposed, false)
+    const count = h.registered.length
+    poll()
+    assert.equal(h.registered.length, count, 'polling does not replace a carrier twice')
+  }
+  const previous = h.current
+  const unrelated = { ui: { quiet: true } }
+  if (source === 'PUT') assert.equal((await h.patch(unrelated)).carrierRechosen, undefined)
+  else h.diskPatch(unrelated)
+  poll()
+  assert.equal(h.current, previous, 'unrelated changes leave the carrier intact')
+})
+
+test('the installed runtime route reads the selected system carrier connection and launch error', async t => {
+  let state = { connected: false, detail: 'Not launched yet' }
+  t.mock.method(SystemBrowserViewHost.prototype, 'connectionStatus', () => state)
+  const h = harness(t, 'chrome')
+  assert.equal((await h.status()).readiness, 'blocked')
+  state = { connected: true, detail: 'Live CDP' }
+  assert.equal((await h.status()).readiness, 'ready')
+  state = { connected: false, detail: 'Default-profile debugging refused' }
+  assert.equal((await h.status()).readiness, 'blocked')
+  assert.equal((await h.status()).systemBrowser.detail, state.detail)
+  await h.patch({ browser: { systemProfile: 'user' } })
+  assert.equal((await h.status()).readiness, 'blocked')
+  assert.equal((await h.status()).resolvedCarrier, 'cdp')
+  assert.equal((await h.status()).controlledProfile, 'plugin')
+  assert.ok(h.current instanceof PreferredBrowserViewHost)
+  assert.equal((await h.panelFactory()).host, h.current, 'Web panel operations use the selected extension, not iframe/desktop discovery')
+})
+
+test('extension status reports a connected personal profile or the managed CDP fallback', async t => {
+  let state = { connected: false, state: 'not-paired', browser: 'chrome', detail: 'Pair this profile' }
+  t.mock.method(ExtensionBrowserViewHost.prototype, 'connectionStatus', () => state)
+  t.mock.method(ExtensionBrowserViewHost.prototype, 'refreshStatus', async () => {})
+  const h = harness(t, 'chrome')
+  await h.patch({ browser: { systemProfile: 'user' } })
+  assert.equal((await h.status()).readiness, 'blocked')
+  assert.equal((await h.status()).extension.state, 'not-paired')
+  state = { connected: true, state: 'connected', browser: 'chrome', profile: 'My real Chrome', connectionId: 'paired-profile-id', detail: 'Connected' }
+  const ready = await h.status()
+  assert.equal(ready.readiness, 'ready')
+  assert.equal(ready.extension.profile, state.profile)
+  assert.equal(ready.systemBrowser.checked, false)
+  assert.equal(ready.executable, undefined)
+  assert.match(ready.extension.install.installer, /native-host.*install.mjs$/)
+  state = { ...state, connected: false, state: 'extension-missing' }
+  assert.equal((await h.status()).readiness, 'blocked')
+  assert.ok(h.current instanceof PreferredBrowserViewHost)
+})
+
+test('persistence changes in user-profile mode leave the selected profile carrier intact', async t => {
+  let poll
+  const interval = globalThis.setInterval
+  t.mock.method(globalThis, 'setInterval', (fn, ms, ...args) => {
+    if (ms === 5000) { poll = fn; return { unref() {} } }
+    return interval(fn, ms, ...args)
+  })
+  const h = harness(t, 'chrome')
+  await h.patch({ browser: { systemProfile: 'user' } })
+  const previous = h.current
+  assert.equal((await h.patch({ cookies: { persist: false } })).carrierRechosen, undefined)
+  poll()
+  assert.equal(h.current, previous)
+  h.diskPatch({ cookies: { persist: true } })
+  poll()
+  assert.equal(h.current, previous)
+})
 
 test('switching from Chrome to legacy bundled installs only a reconnectable sidebar', async t => {
   const h = harness(t, 'chrome')

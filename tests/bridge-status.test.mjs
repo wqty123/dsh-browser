@@ -72,13 +72,13 @@ test('a main patch without its deployed bridge module needs repair', () => {
   }
 })
 
-test('a deployed bridge from another plugin version needs repair', () => {
-  const root = makeInstall({ patched: true, bridge: 'export function start() {}\n' })
+test('a deployed protocol-3 bridge explicitly asks for uninstall and reinstall', () => {
+  const root = makeInstall({ patched: true, bridge: 'const PROTOCOL = 3; export function start() {}\n' })
   try {
     const status = readBridgeStatus(root)
     assert.equal(status.state, 'stale')
     assert.equal(status.present, true)
-    assert.match(status.detail, /bridge module.*differs|outdated/i)
+    assert.equal(status.detail, '桥接版本过旧，请点击 卸载并重装')
     assert.equal(status.version, '0.2.1-rc.5')
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -155,6 +155,18 @@ test('the repair command is offered, quoted, and never executed', () => {
   }
 })
 
+test('supported extension status replaces marker diagnostics and never offers the legacy installer', t => {
+  const root = makeInstall({ patched: false })
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  assert.match(readBridgeStatus(root).command, /install\.mjs/)
+  for (const state of ['loaded', 'pending-restart', 'not-installed', 'failed']) {
+    const result = readBridgeStatus(root, { state, version: '1.0.0' })
+    assert.equal(result.mainExtension.state, state)
+    assert.equal(result.command, undefined)
+    assert.equal(result.detail, `desktop main extension: ${state}`)
+  }
+})
+
 test('the install is found by identity, under either product name', () => {
   // Issue #40 changed what discovery may accept: the shape alone used to be enough, and every
   // Electron app has the shape. What the user names the directory still must not matter — the app's
@@ -224,6 +236,13 @@ test('the endpoint answers with the reading, same-origin only', async () => {
     const payload = JSON.parse(String(ok.recorded.body))
     assert.equal(payload.ok, true)
     assert.equal(payload.bridge.state, 'installed')
+
+    const failed = response(), extension = { state: 'failed', code: 'EXTENSION_START_FAILED' }
+    await handleBridgeStatus(request(), failed, base, extension)
+    const failedPayload = JSON.parse(String(failed.recorded.body))
+    assert.equal(failedPayload.bridge.state, 'stale')
+    assert.deepEqual(failedPayload.bridge.mainExtension, extension)
+    assert.equal(failedPayload.bridge.command, undefined)
 
     const foreign = response()
     await handleBridgeStatus(request('GET', 'https://evil.example'), foreign, base)

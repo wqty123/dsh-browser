@@ -6,6 +6,7 @@ import { Readable } from 'node:stream'
 import { apply } from '../lib/browser-electron/entry.js'
 import { DEFAULT_SETTINGS, SettingsStore } from '../lib/browser-electron/settings-store.js'
 import { DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-host.js'
+import { nativeRegistration } from '../lib/browser-electron/extension-setup.js'
 
 export class Sidebar {
   disposed = false
@@ -17,6 +18,7 @@ export class Sidebar {
 }
 
 export function carrierHarness(t, { channel = 'sidebar', discover = async () => new Sidebar(), viewHost } = {}) {
+  t.mock.method(nativeRegistration, 'ensure', async () => {})
   const folder = mkdtempSync(join(tmpdir(), 'dsh-carrier-contract-'))
   const oldHome = process.env.DSH_HOME
   const oldChrome = process.env.DSH_BROWSER_CHROME_PATH
@@ -55,8 +57,8 @@ export function carrierHarness(t, { channel = 'sidebar', discover = async () => 
   return {
     get current() { return current }, registered, warnings,
     openPanel: () => panelFactory?.(),
-    async choose(nextChannel) {
-      const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel } })])
+    async choose(nextChannel, systemProfile) {
+      const request = Readable.from([JSON.stringify({ browser: { channel: nextChannel, ...systemProfile ? { systemProfile } : {} } })])
       request.method = 'PUT'
       request.headers = { host: 'localhost:3000', origin: 'http://localhost:3000' }
       let response

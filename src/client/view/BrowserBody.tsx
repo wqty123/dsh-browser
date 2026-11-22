@@ -1,5 +1,5 @@
 /** Common browser chrome; a presentation adapter attaches the page inside its content container. */
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import {
   Button,
@@ -21,6 +21,10 @@ import { searchEnginePreferences } from '../startpage/model.ts'
 import type { StartPageFailure } from '../startpage/model.ts'
 import type { BrowserStore } from '../browser/store.ts'
 import { EngineSettingsDialog, SearchEngineMenu, ShortcutDialog, StartPage } from './StartPage.tsx'
+import { TakeoverBanner } from './TakeoverBanner.tsx'
+import { connectBrowserTakeover } from '../browser/takeover-channel.ts'
+import { iframePage, subscribeIframePages } from '../browser/iframe-reference.ts'
+import type { TakeoverNotice } from '../../takeover-protocol.ts'
 import css from './Browser.module.css'
 
 const EMPTY_FRAME = emptyBrowserFrame()
@@ -85,6 +89,29 @@ export function BrowserBody(props: BrowserBodyProps): ReactNode {
   const [enginesOpen, setEnginesOpen] = useState(false)
   const [engineFailure, setEngineFailure] = useState<StartPageFailure>()
   const state = useBrowserState(tab.id)
+  const takeoverCurrent = useRef<{ url: string; active: boolean; navigationUrl?: string }>({ url: '', active: false })
+  const [takeover, setTakeover] = useState<{ notice?: TakeoverNotice; error?: boolean }>({})
+  const takeoverChannel = useRef<ReturnType<typeof connectBrowserTakeover>>()
+  const webPage = useSyncExternalStore(subscribeIframePages, () => iframePage(sessionId, viewportId))
+  const lastVerifiedWebPage = useRef<{ sessionId: string; epoch: number; page: NonNullable<typeof webPage> }>()
+  if (webPage) lastVerifiedWebPage.current = { sessionId, epoch: mountEpoch, page: webPage }
+  const takeoverWebPage = webPage ?? (lastVerifiedWebPage.current?.sessionId === sessionId
+    && lastVerifiedWebPage.current.epoch === mountEpoch && state?.initialization?.stage !== 'failed' ? lastVerifiedWebPage.current.page : undefined)
+  const observedPage = props.currentPage?.(tab.id)
+  const carrierPageId = observedPage?.guestId ?? state?.initialization?.guestId
+  const pageId = takeoverWebPage?.pageId ?? (carrierPageId?.startsWith('iframe:') ? undefined : carrierPageId)
+  takeoverCurrent.current = { url: takeoverWebPage?.url ?? observedPage?.url ?? state?.frame.target?.url ?? '',
+    active: tab.visible === true && (takeoverWebPage === undefined || webPage !== undefined),
+    ...takeoverWebPage?.navigationUrl === undefined ? {} : { navigationUrl: takeoverWebPage.navigationUrl } }
+  useEffect(() => {
+    if (!pageId) return
+    const lifetime = new AbortController()
+    takeoverChannel.current = connectBrowserTakeover({ owner: sessionId, tabId: tab.id, pageId,
+      current: () => takeoverCurrent.current,
+      changed: (notice, error) => { setTakeover({ notice, error }) },
+    }, lifetime.signal)
+    return () => { lifetime.abort(); takeoverChannel.current = undefined }
+  }, [sessionId, tab.id, pageId])
   const startPage = useStartPage(value => value)
   const frame = state?.frame ?? EMPTY_FRAME
   const restoreTarget = state === undefined ? currentBrowserTarget(initial.current) : state.restoreTarget
@@ -172,6 +199,10 @@ export function BrowserBody(props: BrowserBodyProps): ReactNode {
           setFocused(false)
         }}
       >
+      <TakeoverBanner notice={takeover.notice} error={takeover.error}
+        label={t('takeover.waiting', { reason: takeover.notice?.reason ?? '' })}
+        done={t('takeover.done')} skip={t('takeover.skip')} failure={t('takeover.failed')}
+        answer={outcome => { void takeoverChannel.current?.answer(outcome) }} />
       <form className={css.toolbar} onSubmit={submit}>
         <button type="button" className={css.tool} aria-label={t('back')} title={t('back')} disabled={!frame.canGoBack} onClick={() => { goBack(tab.id) }}><IconChevronLeftOutlineRegular /></button>
         <button type="button" className={css.tool} aria-label={t('forward')} title={t('forward')} disabled={!frame.canGoForward} onClick={() => { goForward(tab.id) }}><IconChevronRightOutlineRegular /></button>

@@ -1,3 +1,5 @@
+import { PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE, BRIDGE_STATUS_ROUTE } from '../../assets/browser-policy.mjs'
+import { URL_PARSE_BASE } from '../../assets/browser-policy.mjs'
 /**
  * The live-view frame endpoint (issue #34): one JPEG per request, for a remote operator watching the
  * page the agent is driving.
@@ -17,9 +19,10 @@ import type { BrowserError } from '../browser/types.ts'
 import { replyJson } from './json-reply.ts'
 import { sameOrigin } from './settings-route.ts'
 import { findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
+import type { MainExtensionStatus } from './profile-extension.ts'
 
 /** Where the frame endpoint lives. The viewer must use exactly this path, same origin. */
-export const PREVIEW_ROUTE = '/dsh-builtin-browser/browser-view/frame'
+export { PREVIEW_ROUTE }
 
 /**
  * Where the viewer asks which sessions it may watch.
@@ -29,7 +32,7 @@ export const PREVIEW_ROUTE = '/dsh-builtin-browser/browser-view/frame'
  * is exactly what the design forbids. So the list is served, and it contains nothing but ids of
  * sessions that currently have a page — no URLs, no titles, no target handles.
  */
-export const PREVIEW_SESSIONS_ROUTE = '/dsh-builtin-browser/browser-view/sessions'
+export { PREVIEW_SESSIONS_ROUTE }
 
 /**
  * Where the settings panel asks whether the desktop bridge is installed.
@@ -39,7 +42,7 @@ export const PREVIEW_SESSIONS_ROUTE = '/dsh-builtin-browser/browser-view/session
  * The reading is taken from the install tree on disk, so it is true even when the plugin has just
  * started and remembers nothing.
  */
-export const BRIDGE_STATUS_ROUTE = '/dsh-builtin-browser/bridge-status'
+export { BRIDGE_STATUS_ROUTE }
 
 
 /** What the route needs from the settings document. */
@@ -125,7 +128,7 @@ export async function handlePreviewFrame(
     replyJson(response, 403, { error: 'remote-view-disabled' })
     return
   }
-  const url = new URL(request.url ?? '/', 'http://localhost')
+  const url = new URL(request.url ?? '/', URL_PARSE_BASE)
   const session = url.searchParams.get('session') ?? ''
   if (session === '') {
     replyJson(response, 400, { error: 'session-required' })
@@ -189,6 +192,7 @@ export async function handleBridgeStatus(
   request: IncomingMessage,
   response: ServerResponse,
   localAppData?: string,
+  mainExtension?: MainExtensionStatus,
 ): Promise<void> {
   if (request.method !== 'GET') {
     replyJson(response, 405, { error: 'method-not-allowed' })
@@ -206,6 +210,6 @@ export async function handleBridgeStatus(
       archivePresent: false,
       detail: 'no DSH Desktop install found under LOCALAPPDATA\\Programs',
     }
-    : readBridgeStatus(installRoot)
+    : readBridgeStatus(installRoot, mainExtension)
   replyJson(response, 200, { ok: true, bridge: status })
 }

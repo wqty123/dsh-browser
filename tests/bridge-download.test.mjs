@@ -13,6 +13,7 @@ source = source.replace(/^start\(\)$/m, '').replace(/^main\(\)$/m, '')
 source += '\nexport { downloadGuest };\n'
 writeFileSync(join(directory, 'bridge.mjs'), source)
 writeFileSync(join(directory, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-bridge/guest-proxy.mjs', import.meta.url)))
+writeFileSync(join(directory, 'native-guests.mjs'), readFileSync(new URL('../desktop-bridge/native-guests.mjs', import.meta.url)))
 const { downloadGuest } = await import(pathToFileURL(join(directory, 'bridge.mjs')))
 after(() => {
   delete globalThis.__downloadElectron

@@ -22,6 +22,7 @@ function page(storage, storageAvailable = true) {
     headers = new Map()
     open(...args) { this.args = args }
     setRequestHeader(name, value) { this.headers.set(name, value) }
+    send(body) { this.body = body }
   }
   const location = { origin: 'https://dsh.example', href: 'https://dsh.example' + guestPath('https://ordinary.example/dir/page'),
     assign(url) { navigations.push(url) } }
@@ -119,6 +120,7 @@ test('fetch handles string, URL and Request inputs, preserving POST body and add
   assert.equal(requests[0].input, guestPath('https://ordinary.example/api'))
   assert.equal(requests[0].init.body, 'a=1')
   assert.equal(requests[0].init.headers.get('content-type'), 'text/plain')
+  assert.equal(requests[0].init.headers.get('x-dsh-guest-headers'), 'content-type')
   assert.equal(requests[1].input, guestPath('https://other.example/api'))
   assert.equal(requests[2].input.url, 'https://dsh.example' + guestPath('https://ordinary.example/post'))
   assert.equal(await requests[2].input.text(), 'body')
@@ -145,11 +147,17 @@ test('XHR and beacon stay in the proxy; window.open never impersonates a child b
   assert.equal(xhr.args[1], guestPath('https://ordinary.example/api'))
   assert.equal(xhr.args[2], false)
   assert.equal(xhr.headers.get('x-dsh-guest-sub'), '1')
+  xhr.setRequestHeader('X-Site-Config', 'page-value')
+  xhr.withCredentials = true
+  xhr.send('payload')
+  assert.equal(xhr.headers.get('x-dsh-guest-headers'), 'x-site-config')
+  assert.equal(xhr.withCredentials, false)
+  assert.equal(xhr.body, 'payload')
   assert.equal(context.navigator.sendBeacon('/metrics', 'payload'), true)
   assert.equal(requests[0].input, guestPath('https://ordinary.example/metrics'))
   assert.equal(requests[0].init.headers['x-dsh-guest-sub'], '1')
   assert.equal(requests[0].init.body, 'payload')
-  assert.throws(() => context.open('next', '_blank'), error => error.name === 'NotSupportedError' && error.code === 'native-child-opener-unavailable')
+  assert.throws(() => context.open('next', '_blank'), error => error.name === 'NotSupportedError' && error.code === 'BROWSER_NATIVE_CHILD_UNAVAILABLE')
   assert.deepEqual(navigations, [])
 })
 
@@ -224,7 +232,7 @@ test('native opener, named targets, blank children, POST targets and unready tab
   context.parent.postMessage = data => { if (data.type === 'dsh.browser.guest.child.request') requests.push(data) }
   listeners.get('message')({ source: context.parent, data: { type: 'dsh.browser.guest.navigation.request', loadId: 1 } })
   for (const args of [[], [''], ['about:blank'], ['next', 'login'], ['next', '_blank', 'noopener=0']]) {
-    assert.throws(() => context.open(...args), error => error.code === 'native-child-opener-unavailable')
+    assert.throws(() => context.open(...args), error => error.code === 'BROWSER_NATIVE_CHILD_UNAVAILABLE')
   }
   const form = new Form(); form.setAttribute('target', '_blank'); form.setAttribute('method', 'POST')
   listeners.get('submit')({ target: form, preventDefault() {} })
@@ -277,7 +285,8 @@ test('observer proxies parsed resource subtrees and attribute mutations without 
   assert.equal(observer.options.childList, true)
   assert.equal(observer.options.subtree, true)
   assert.equal(observer.options.attributes, true)
-  assert.deepEqual(Array.from(observer.options.attributeFilter), ['src', 'href', 'srcset', 'poster', 'action'])
+  assert.equal(observer.options.characterData, true)
+  assert.deepEqual(Array.from(observer.options.attributeFilter), ['src', 'href', 'srcset', 'poster', 'action', 'style', 'integrity'])
   const link = new Element()
   link.tagName = 'LINK'
   link.attributes.set('href', '/rp/style.css')

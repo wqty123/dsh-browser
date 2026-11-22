@@ -43,6 +43,7 @@ function entryOf(relative, packageName) {
 
 // 1) 宿主侧：tsc → lib/（`rewriteRelativeImportExtensions` 把 `./x.ts` 改写成 `./x.js`）
 runNode([entryOf('typescript/bin/tsc', 'typescript'), '-p', 'tsconfig.build.json'], true)
+runNode(['scripts/bundle-host.mjs'])
 
 // 2) 客户端半：tsdown → dist/client.cjs（另有一份无用的 ESM 薄壳，第 3 步删掉）
 runNode([entryOf('tsdown/dist/run.mjs', 'tsdown')])

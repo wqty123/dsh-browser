@@ -65,6 +65,10 @@
  * start the already-closed app after maintenance; it never closes a running application.
  */
 import * as nodeFs from 'node:fs'
+import { applyHostPatch, hostPatchStatus, restoreHostPatch } from '../dsh-host-patch/apply.mjs'
+import { renameMaintenanceFileSync } from './maintenance-files.mjs'
+import { isDesktopExecutable } from './desktop-processes.mjs'
+import { legacyBridgeMarker as MARKER, legacyBridgeSnippet as SNIPPET } from '../dsh-host-patch/legacy-bridge.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
@@ -230,15 +234,19 @@ function selectShellProcesses(rows, root, selfPid) {
   // APFS volume while `Apps` and `apps` stay distinct on a case-sensitive one.
   const fold = process.platform === 'win32' ? value => value.toLowerCase()
     : value => { try { return realpathSync.native(value) } catch { return value } }
-  const expectedExe = fold(resolve(layoutPaths(root).executable))
+  const layout = layoutPaths(root)
+  const expectedExe = fold(resolve(layout.executable))
   const expectedName = fold(basename(expectedExe))
+  const bundleRoot = process.platform === 'darwin' && layout.name === 'macos-bundle' ? root : undefined
   const selected = []
   for (const row of rows) {
-    if (fold(String(row.Name ?? '')) !== expectedName) continue
+    const namedMain = fold(String(row.Name ?? '')) === expectedName
+    if (bundleRoot === undefined && !namedMain) continue
     if (typeof row.ExecutablePath !== 'string' || row.ExecutablePath === '') {
+      if (!namedMain && !/ Helper(?: \([^)]*\))?$/.test(String(row.Name ?? ''))) continue
       throw new Error('could not identify a running DeepSeek Harness process; refusing to close or patch the application')
     }
-    if (fold(resolve(row.ExecutablePath)) !== expectedExe) continue
+    if (!isDesktopExecutable(row.ExecutablePath, expectedExe, bundleRoot, process.platform)) continue
     if (!Number.isSafeInteger(row.ProcessId) || row.ProcessId <= 0 || typeof row.CommandLine !== 'string') {
       throw new Error('the Desktop process table is incomplete; refusing to close or patch the application')
     }
@@ -286,8 +294,9 @@ function shellProcesses(root) {
  * @returns every process row.
  */
 function posixProcessTable() {
-  const executables = runCapture('ps', ['-axww', '-o', 'pid=,ppid=,comm='])
-  const commands = runCapture('ps', ['-axww', '-o', 'pid=,args='])
+  const environment = { ...process.env, LC_ALL: 'C', LANG: 'C' }
+  const executables = runCapture('ps', ['-axww', '-o', 'pid=,ppid=,comm='], environment)
+  const commands = runCapture('ps', ['-axww', '-o', 'pid=,args='], environment)
   if (executables === undefined || commands === undefined) throw new Error('could not enumerate Desktop processes')
   const byPid = new Map()
   for (const line of commands.split('\n')) {
@@ -312,9 +321,10 @@ function posixProcessTable() {
  * @param argv - its arguments.
  * @returns stdout text, or undefined.
  */
-function runCapture(command, argv) {
+function runCapture(command, argv, environment) {
   try {
-    return execFileSync(command, argv, { encoding: 'utf8', stdio: 'pipe', windowsHide: true, timeout: 30_000 })
+    return execFileSync(command, argv, { encoding: 'utf8', stdio: 'pipe', windowsHide: true, timeout: 30_000,
+      ...(environment === undefined ? {} : { env: environment }) })
   } catch {
     return undefined
   }
@@ -386,15 +396,34 @@ const asarPath = join(resourcesDir, 'app.asar')
 const asarMoved = `${asarPath}.before-bridge`
 const mainPath = join(appDir, 'lib', 'main.js')
 const bridgeTarget = join(appDir, 'lib', 'plugin-browser-bridge.js')
-const bridgeSource = join(import.meta.dirname, 'plugin-browser-bridge.js')
-const proxyTarget = join(appDir, 'lib', 'guest-proxy.mjs')
-const proxySource = join(import.meta.dirname, 'guest-proxy.mjs')
+const bridgeSource = join(import.meta.dirname, 'profile-loader.mjs')
+const bridgeBackup = bridgeTarget + '.before-profile-loader'
+const bridgeAbsent = bridgeBackup + '.absent'
 const backupPath = `${mainPath}.before-bridge`
 
-/** The bridge imports its pure proxy-policy helper from the same directory. */
-function copyBridgeModules() {
+function validateBridgeLoaderBaseline() {
+  if (existsSync(bridgeBackup) && existsSync(bridgeAbsent)) throw new Error('Conflicting bridge loader restore baselines')
+  if (!existsSync(bridgeTarget)) return
+  const current = readFileSync(bridgeTarget)
+  if (current.equals(readFileSync(bridgeSource))) return
+  if (existsSync(bridgeAbsent) || (existsSync(bridgeBackup) && !current.equals(readFileSync(bridgeBackup)))) {
+    throw new Error('Bridge module differs from its preserved restore baseline')
+  }
+}
+
+function installBridgeLoader() {
+  validateBridgeLoaderBaseline()
+  if (!existsSync(bridgeBackup) && !existsSync(bridgeAbsent)) {
+    if (existsSync(bridgeTarget)) copyFileSync(bridgeTarget, bridgeBackup)
+    else writeFileSync(bridgeAbsent, '')
+  }
   copyFileSync(bridgeSource, bridgeTarget)
-  copyFileSync(proxySource, proxyTarget)
+}
+
+function restoreBridgeLoader() {
+  validateBridgeLoaderBaseline()
+  if (existsSync(bridgeBackup)) copyFileSync(bridgeBackup, bridgeTarget)
+  else if (existsSync(bridgeAbsent)) rmSync(bridgeTarget, { force: true })
 }
 
 // Moving the archive aside breaks two more places that spell `app.asar` out
@@ -414,6 +443,7 @@ const CLI_SHIM_MARKER = 'dsh-builtin-browser: resolve the app directory'
 const HOST_CLI_MARKER = 'dsh-builtin-browser: recognize an unpacked `app` directory'
 
 let targetWasClosed = false
+let hostPatch
 const resultFile = process.env.DSH_BRIDGE_ACTION_RESULT_FILE
 const installErrors = []
 if (resultFile !== undefined) {
@@ -441,11 +471,12 @@ process.once('exit', code => {
       ...lastStartedPid === undefined ? {} : { pid: lastStartedPid },
       ...installErrors.length === 0 ? {} : { error: installErrors.join('\n').slice(-2400) },
       completedAt: new Date().toISOString(),
+      ...hostPatch === undefined ? {} : { hostPatch },
     }
     try {
       const temporary = `${resultFile}.${process.pid}.tmp`
       writeFileSync(temporary, JSON.stringify(result))
-      renameSync(temporary, resultFile)
+      renameMaintenanceFileSync(temporary, resultFile, { rename: renameSync })
     } catch (error) {
       originalResultError(error)
     }
@@ -454,49 +485,8 @@ process.once('exit', code => {
 
 function originalResultError(error) {
   console.error('could not record the bridge installer result: ' + String(error))
-  process.exitCode = 1
+  process.exitCode = process.exitCode || 1
 }
-
-/** The exact block appended to main.js. Keep it recognisable: idempotence and
- *  reverting both key off this marker. */
-const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sidebar'
-const SNIPPET = `
-${MARKER} pages.
-// The plugin runs inside the Node-mode host, where there is no Electron API, so the
-// shell is the only process that can own a view. Exposing the existing webview
-// guests (and their CDP) is what lets the agent work on the page the human is
-// looking at, instead of spawning a second, parallel browser window.
-// Installed by apps/desktop/bridge/install.mjs — re-run it after a desktop upgrade.
-// A bridge failure is never fatal to the shell.
-app.whenReady().then(async () => {
-	const bridgeUrl = new URL("./plugin-browser-bridge.js", import.meta.url);
-	const loadBridge = async (why) => {
-		try {
-			// A plain import is cached for the process lifetime, so an edited bridge
-			// would need a shell restart. The stamp makes every load read the current
-			// bytes; start() itself stops the previous instance, so this reloads in place.
-			const bridge = await import(bridgeUrl.href + "?v=" + Date.now());
-			bridge.start();
-			console.log("[dsh-browser-bridge] started" + (why ? " (" + why + ")" : ""));
-		} catch (error) {
-			console.error("[dsh-browser-bridge] start failed:", error);
-		}
-	};
-	await loadBridge();
-	// Watch the module so an edit reloads it in place instead of forcing a shell
-	// restart. Debounced; a failure here is never fatal to the shell.
-	try {
-		const { watch } = await import("node:fs");
-		let timer = null;
-		watch(bridgeUrl, { persistent: false }, () => {
-			if (timer) clearTimeout(timer);
-			timer = setTimeout(() => void loadBridge("file changed"), 300);
-		});
-	} catch (error) {
-		console.error("[dsh-browser-bridge] watch failed:", error);
-	}
-});
-`
 
 /**
  * Parse an asar header — a Chromium pickle holding
@@ -939,10 +929,25 @@ if (!existsSync(mainPath) && !existsSync(asarPath)) {
 }
 
 if (revert) {
+  validateBridgeLoaderBaseline()
+  const targets = [appDir, join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
+  const hasHostBackup = [mainPath, join(targets[1], 'lib', 'client.js')]
+    .some(path => existsSync(path + '.before-dsh-host-patch'))
+  hostPatch = hasHostBackup ? restoreHostPatch(targets, { fs: archiveFs }) : hostPatchStatus(targets, { fs: archiveFs })
+  console.log('DSH host patch: ' + JSON.stringify(hostPatch))
+  if (hasHostBackup && hostPatch.status !== 'absent') {
+    console.error('refusing to uninstall over a host patch that cannot be safely restored: ' + hostPatch.reason)
+    process.exit(1)
+  }
+  if (hasHostBackup && readFileSync(mainPath, 'utf8').includes(MARKER)) {
+    restoreBridgeLoader()
+    console.log('restored the pre-install legacy bridge and sidebar; preserving its module copies, CLI and archive layout')
+    process.exit(0)
+  }
   // Tracked separately: restoring a CLI launcher or the runtime resolution is NOT an
   // uninstall. `reverted` only means some component was restored; whether the bridge is
   // actually gone is decided from the entry Electron loads, at the end of this branch.
-  let reverted = false
+  let reverted = hasHostBackup && hostPatch.status === 'absent'
   let mainEntrySkipped = false
   if (existsSync(asarMoved)) {
     if (existsSync(asarPath)) {
@@ -1058,6 +1063,7 @@ if (revert) {
   if (packedLayout) {
     console.log(`note: ${appDir} is inert while app.asar exists; delete it to reclaim ~350 MB`)
   }
+  restoreBridgeLoader()
   process.exit(0)
 }
 
@@ -1106,9 +1112,22 @@ if (packedLayout) {
 }
 
 const current = readFileSync(mainPath, 'utf8')
+validateBridgeLoaderBaseline()
+const hostTargets = [appDir, join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
+hostPatch = applyHostPatch(hostTargets, {
+  fs: archiveFs,
+})
+console.log('DSH host patch: ' + JSON.stringify(hostPatch))
+if (hostPatch.status === 'applied' || current.includes('//#region lib/types/main-extensions.js')) {
+  installBridgeLoader()
+  console.log('bridge activation: DSH Desktop main extension (profile plugin); no main.js injection')
+  installCliCompatibility()
+  if (!restart) console.log('restart DSH Desktop to activate it.')
+  process.exit(0)
+}
 if (current.includes(MARKER)) {
-  console.log('bridge already installed (main.js carries the marker); refreshing the module copy')
-  copyBridgeModules()
+  console.log('bridge already installed (main.js carries the marker); refreshing the profile loader')
+  installBridgeLoader()
   installCliCompatibility()
   process.exit(0)
 }
@@ -1128,10 +1147,9 @@ if (insertAt === -1) {
 const patched = `${current.slice(0, insertAt)}${SNIPPET}${current.slice(insertAt)}`
 writeFileSync(mainPath, patched)
 
-copyBridgeModules()
+installBridgeLoader()
 console.log(`installed bridge into ${appDir}`)
 console.log(`  module: ${bridgeTarget}`)
-console.log(`  proxy policy: ${proxyTarget}`)
 console.log(`  patch:  ${mainPath} (+${SNIPPET.split('\n').length} lines)`)
 installCliCompatibility()
 if (!restart) {

@@ -1,3 +1,4 @@
+import { CLIENT_VERSION_ROUTE } from '../../assets/browser-policy.mjs'
 /** Register the HTTP(S) Browser tab type in the right Sidebar. */
 import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client'
 import type { Context } from '@deepseek-ai/cordis'
@@ -20,7 +21,9 @@ import type { BrowserInitializationReader } from './browser/initialization.ts'
 import { createIframePage } from './pages.ts'
 import { createReferenceCapture, type ReferenceCaptureContext } from './reference-capture-owner.ts'
 import { createElectronPage } from './electron/pages.ts'
-import type { DesktopBrowserBridge } from '../types.ts'
+import { createNativePage } from './electron/NativeViewPage.ts'
+import { NativeChildPresentation } from './electron/NativeChildPresentation.ts'
+import type { DesktopBrowserBridge, SidebarNativeSlot } from '../types.ts'
 import { browserWorkspace } from './electron/workspace.ts'
 import type { BrowserPageFactory } from './browser/BrowserPage.ts'
 import { BROWSER_ID, BROWSER_KIND, browserDefinition } from './definition.tsx'
@@ -77,6 +80,11 @@ export const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs', 'u
 /** sessionStorage 键：本页加载时看到的客户端产物版本。 */
 const CLIENT_VERSION_WATCH = 'dsh-builtin-browser:client-version'
 
+type SidebarHostExtensions = {
+  navigateTabIn?: (session: BrowserBodyProps['sessionId'], tab: TabId, options: { params: { url: string } }) => boolean
+  openReservedTab?: (session: BrowserBodyProps['sessionId'], kind: string, tab: TabId) => boolean
+}
+
 /**
  * 客户端产物是宿主启动时合成的整包脚本，URL 里的 rev 在启动那一刻固定：产物更新后浏览器仍按旧
  * URL 命中缓存，于是「改了代码界面不变」。这里轮询宿主暴露的产物指纹，一旦变化就带新参数重载本页
@@ -86,7 +94,7 @@ const CLIENT_VERSION_WATCH = 'dsh-builtin-browser:client-version'
 function watchClientVersion(ctx: Context): void {
   const check = async (): Promise<void> => {
     try {
-      const response = await fetch('/dsh-builtin-browser/client-version', { credentials: 'same-origin', cache: 'no-store' })
+      const response = await fetch(CLIENT_VERSION_ROUTE, { credentials: 'same-origin', cache: 'no-store' })
       if (!response.ok) return
       const body = await response.json() as { readonly version?: string }
       const version = body.version
@@ -180,7 +188,7 @@ export function apply(ctx: Context): void {
           id: 'open', label: t('startpage.open'),
           run: () => {
             openShortcutTarget(
-              u => scope.sidebarRight.navigateTabIn<'browser'>(sessionId, tabId, { params: { url: u } }),
+              u => (scope.sidebarRight as typeof scope.sidebarRight & SidebarHostExtensions).navigateTabIn?.(sessionId, tabId, { params: { url: u } }) === true,
               u => { scope.sidebarRight.openTabIn<'browser'>(sessionId, BROWSER_KIND, { params: { url: u }, revealIfOpened: false }) },
               url,
             )
@@ -257,8 +265,27 @@ export function apply(ctx: Context): void {
     installFrames(ctx, sessionId => options => createIframePage(options, sessionId, capture))
   }
   else ctx.inject(['workspaces'], (scope) => {
-    installFrames(scope, sessionId => options => createElectronPage(options, desktop,
-      signal => browserWorkspace(scope.workspaces.list, sessionId, signal), sessionId, capture))
+    installFrames(scope, sessionId => {
+      const childApi = desktop.childTabs
+      const sidebar = scope.sidebarRight as typeof scope.sidebarRight & SidebarHostExtensions
+      const children = childApi?.protocolVersion === 2 && sidebar.openReservedTab !== undefined ? new NativeChildPresentation(childApi, sessionId,
+        tab => sidebar.openReservedTab?.(sessionId, BROWSER_KIND, tab) === true,
+        tab => { sidebar.closeIn(sessionId, tab) }) : undefined
+      return options => {
+        const native = desktop.nativeViews
+        const workspace = (signal: AbortSignal): Promise<string> => browserWorkspace(scope.workspaces.list, sessionId, signal)
+        if (native?.protocolVersion === 1) {
+          const sidebar = scope.sidebarRight as typeof scope.sidebarRight & {
+            nativeSlot?: (session: typeof sessionId, tab: TabId, address: string, viewport: string, signal: AbortSignal) => Promise<SidebarNativeSlot>
+          }
+          return createNativePage(options, native, async (tab, address, viewport, signal) => {
+            if (sidebar.nativeSlot === undefined) throw Object.assign(new Error('BROWSER_NATIVE_SURFACE_UNAVAILABLE'), { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' })
+            return sidebar.nativeSlot(sessionId, tab, address, viewport, signal)
+          }, workspace, sessionId, capture, children)
+        }
+        return createElectronPage(options, desktop, workspace, sessionId, capture)
+      }
+    })
   })
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab.title', key: BROWSER_ID, store,

@@ -162,6 +162,27 @@ test('rejects every unsafe DNS answer, DSH address aliases and unresolved target
   resolved.delete('alias.example')
 })
 
+test('site-selected custom headers pass preflight and forwarding without forwarding DSH credentials or metadata', async () => {
+  const path = guestPath('https://ordinary.example/echo')
+  const preflight = await call(path, { method: 'OPTIONS', headers: {
+    'access-control-request-headers': 'x-site-config, is_referer, cookie, authorization, x-dsh-secret, x-dsh-guest-headers',
+  } })
+  assert.equal(preflight.status, 204)
+  const allowed = preflight.headers['access-control-allow-headers'].split(', ')
+  assert.ok(allowed.includes('x-site-config')); assert.ok(allowed.includes('is_referer'))
+  for (const name of ['cookie', 'authorization', 'x-dsh-secret']) assert.ok(!allowed.includes(name))
+  assert.equal(preflight.headers['access-control-allow-credentials'], undefined)
+  const result = await call(path, { headers: { 'x-dsh-guest-sub':'1',
+    'x-dsh-guest-headers':'x-site-config,cookie,authorization,x-dsh-secret,host,origin',
+    'x-site-config':'site-value', 'x-host-private':'host-value', cookie:'DSH=private', authorization:'Bearer host', 'x-dsh-secret':'host-secret',
+  } })
+  const headers = JSON.parse(result.body).headers
+  assert.equal(headers['x-site-config'], 'site-value')
+  for (const name of ['x-host-private', 'cookie', 'authorization', 'x-dsh-secret', 'x-dsh-guest-headers']) assert.equal(headers[name], undefined)
+  const unmarked = await call(path, { headers: { 'sec-fetch-dest':'empty', 'x-dsh-guest-headers':'x-site-config', 'x-site-config':'not-from-guest' } })
+  assert.equal(JSON.parse(unmarked.body).headers['x-site-config'], undefined)
+})
+
 test('validates DNS on redirect targets and again when the next hop is requested', async () => {
   const path = guestPath('https://ordinary.example/dns-redirect')
   resolved.set('redirect.example', ['::1'])
@@ -399,7 +420,11 @@ test('http port 443 cookies survive restart without breaking any sidebar page', 
   const account = await call(login.headers.location)
   assert.equal(account.status, 200)
   assert.equal(JSON.parse(account.body).headers.cookie, 'SAVED=yes; SESSION=temporary')
-  for (const url of ['http://ordinary.example/account', 'https://ordinary.example:443/account', 'http://scoped.example:443/account']) {
+  for (const url of ['http://ordinary.example/account', 'https://ordinary.example:443/account']) {
+    const other = await call(guestPath(url))
+    assert.equal(JSON.parse(other.body).headers.cookie, 'SAVED=yes; SESSION=temporary')
+  }
+  for (const url of ['http://scoped.example:443/account']) {
     const other = await call(guestPath(url))
     assert.equal(other.status, 200)
     assert.doesNotMatch(JSON.parse(other.body).headers.cookie ?? '', /SAVED=|SESSION=/u)
@@ -464,20 +489,22 @@ test('proxy cookie round-trip honors directory paths, duplicate names and Secure
   const outside = await call(guestPath('https://scoped.example/cookie-scopes-other'), options)
   assert.equal(JSON.parse(outside.body).headers.cookie, 'SID=root; secure=https-only')
   const insecure = await call(guestPath('http://scoped.example/echo'), options)
-  assert.equal(JSON.parse(insecure.body).headers.cookie, undefined)
+  assert.equal(JSON.parse(insecure.body).headers.cookie, 'SID=root')
 })
 
-test('cookie jar validates Domain but conservatively retains exact host and port isolation', () => {
+test('cookie jar shares Domain cookies with matching hosts and ignores ports and non-Secure schemes', () => {
   const jar = new GuestCookieJar()
   const target = new URL('https://login.example.com/account/login')
   assert.equal(jar.getCookieHeader(target), undefined)
   jar.setCookies(target, ['host=only; Path=/', 'parent=valid; Domain=.example.com; Path=/',
     'suffix=isolated; Domain=com; Path=/', 'foreign=no; Domain=elsewhere.com', 'trailing=no; Domain=example.com.'])
-  assert.equal(jar.getCookieHeader(target), 'host=only; parent=valid; suffix=isolated')
-  for (const url of ['https://example.com/', 'https://other.example.com/', 'https://child.login.example.com/',
-    'https://login.example.com:8443/', 'https://login.example.com.evil/']) {
-    assert.equal(jar.getCookieHeader(new URL(url)), undefined, url)
+  assert.equal(jar.getCookieHeader(target), 'host=only; parent=valid')
+  for (const url of ['https://example.com/', 'https://other.example.com/', 'https://child.login.example.com/']) {
+    assert.equal(jar.getCookieHeader(new URL(url)), 'parent=valid', url)
   }
+  assert.equal(jar.getCookieHeader(new URL('https://login.example.com:8443/')), 'host=only; parent=valid')
+  assert.equal(jar.getCookieHeader(new URL('http://login.example.com/')), 'host=only; parent=valid')
+  assert.equal(jar.getCookieHeader(new URL('https://login.example.com.evil/')), undefined)
 })
 
 test('challenge warm-up only sends root-matching jar cookies and restores target-path cookies for retry', async () => {
@@ -520,7 +547,7 @@ test('cookie jar ignores malformed cookies and protects Secure and host-prefixed
     '__Secure-valid=yes; Secure; Path=/', '__Host-valid=yes; Secure; Path=/'])
   jar.setCookies(http, ['SID=overwrite; Path=/', 'SID=delete; Max-Age=0; Path=/', 'new=no; Secure'])
   assert.equal(jar.getCookieHeader(https), 'empty=; SID=safe; __Secure-valid=yes; __Host-valid=yes')
-  assert.equal(jar.getCookieHeader(http), undefined)
+  assert.equal(jar.getCookieHeader(http), 'empty=')
   jar.setCookies(https, [])
   assert.equal(jar.getCookieHeader(https), 'empty=; SID=safe; __Secure-valid=yes; __Host-valid=yes')
 })
@@ -721,7 +748,9 @@ test('rejects loopback, private, DSH-host, non-http targets and unsafe redirects
 test('reports transport errors as 502', async () => {
   const result = await call(guestPath('https://offline.example/'))
   assert.equal(result.status, 502)
-  assert.match(result.body, /cannot reach offline.example/)
+  assert.match(result.headers['content-type'], /^text\/html/u)
+  assert.ok(result.body.includes('guest proxy: upstream request failed'))
+  assert.ok(result.body.includes('data-dsh-guest-runtime'))
 })
 
 test('static rewriting keeps supported asset forms and special URLs intact', () => {

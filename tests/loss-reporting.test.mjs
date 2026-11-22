@@ -64,6 +64,7 @@ test('startedAt records when the bridge started, not when it last said hello', (
   assert.match(body, /startedAt: instanceStartedAt\(\)/)
   assert.doesNotMatch(body, /startedAt: new Date\(\)\.toISOString\(\)/)
   assert.match(body, /updatedAt: new Date\(\)\.toISOString\(\)/)
+  assert.match(body, /endpointFile\(dshHome\)/)
   assert.match(bridge, /const instanceStartedAt = \(\(\) => \{/)
   assert.match(bridge, /const at = new Date\(\)\.toISOString\(\)\n\s*return \(\) => at/)
 })

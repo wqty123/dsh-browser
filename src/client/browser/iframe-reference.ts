@@ -8,9 +8,31 @@ export interface ReferenceSourcePage {
   readonly reveal?: (snapshot: FrozenSnapshot, partId: string | undefined, signal: AbortSignal) => Promise<RevealStatus>
 }
 
-export type GuestReferenceCommand = (operation: 'text' | 'highlight' | 'element', spec: object, signal: AbortSignal) => Promise<Record<string, unknown>>
+export type GuestReferenceCommand = (operation: 'text' | 'highlight' | 'element' | 'summary', spec: object, signal: AbortSignal) => Promise<Record<string, unknown>>
 
 const sources = new Map<string, { readonly owner: string; readonly reveal: NonNullable<ReferenceSourcePage['reveal']> }>()
+const pages = new Map<string, { readonly pageId: string; readonly url: string; readonly navigationUrl?: string }>()
+const pageListeners = new Set<() => void>()
+
+export function subscribeIframePages(listener: () => void): () => void {
+  pageListeners.add(listener)
+  return () => { pageListeners.delete(listener) }
+}
+
+export function iframePage(owner: string, viewportId: string): { readonly pageId: string; readonly url: string; readonly navigationUrl?: string } | undefined {
+  return pages.get(JSON.stringify([referenceOwnerKey(owner), viewportId]))
+}
+
+export function registerIframePage(owner: string, viewportId: string, pageId: string, url: string, navigationUrl?: string): () => void {
+  const key = JSON.stringify([referenceOwnerKey(owner), viewportId]), page = { pageId, url, ...navigationUrl === undefined ? {} : { navigationUrl } }
+  pages.set(key, page)
+  for (const listener of pageListeners) listener()
+  return () => {
+    if (pages.get(key) !== page) return
+    pages.delete(key)
+    for (const listener of pageListeners) listener()
+  }
+}
 
 export function registerIframeReference(pageId: string, owner: string, commands: (url: string) => GuestReferenceCommand): () => void {
   const key = referenceOwnerKey(owner)

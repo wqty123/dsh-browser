@@ -6,6 +6,7 @@ import {
 } from '../production/reveal.ts'
 import { encodeBrowserRefUri } from '../scheme.ts'
 import { FakeReferenceHttp, makeSnapshot } from './production.fixtures.ts'
+import { BridgeVersionError } from '../../../../bridge-compatibility.ts'
 
 function owner(overrides: Partial<RevealOwner> = {}): RevealOwner {
   const snapshot = makeSnapshot('sess-A')
@@ -43,6 +44,15 @@ function setup(overrides: { current?: string; owner?: RevealOwner; revealOutcome
 const URI = encodeBrowserRefUri({ referenceId: 'ref-mixed-1', partId: 'tb-1' })
 
 describe('createProductionRevealer — /reference/reveal + understandable states', () => {
+  it('maps the loader package code to the same named error in the reveal adapter', async () => {
+    const { http, owners, current } = setup({ revealOutcome: { ok: true, status: 'unavailable', code: 'DSH_BRIDGE_PACKAGE_UNAVAILABLE' } })
+    const adapter = createRevealAdapter({ http, resolveOwner: id => owners.get(id), currentSessionId: () => current.id })
+    await expect(adapter.locate({ referenceId: 'ref-mixed-1', sessionId: 'sess-A' }, new AbortController().signal)).rejects.toBeInstanceOf(BridgeVersionError)
+    await expect(adapter.locate({ referenceId: 'ref-mixed-1', sessionId: 'sess-A' }, new AbortController().signal)).rejects.toMatchObject({
+      name: 'BridgeVersionError', code: 'BROWSER_BRIDGE_VERSION_MISMATCH', message: '浏览器桥接不可用，请点击 卸载并重装',
+    })
+  })
+
   it('reveals a known reference in the owning session with referenceId + partId', async () => {
     const { http, revealer } = setup()
     const status = await revealer.activate(URI)
