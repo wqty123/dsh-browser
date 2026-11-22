@@ -4,6 +4,16 @@
 
 ## 未发布
 
+### 0.7.42：侧栏浏览、结构化引用与代码批处理
+
+- **侧栏优先**（[#63](https://github.com/wqty123/dsh-browser/pull/63)）：Desktop 与 Web 留在所属对话的侧栏，不再回退到独立 Electron 窗口。`auto` 与 `bundled` 都表示仅侧栏。隔离的 Web 页面支持手动浏览、URL-only 子标签与人工接管；站点不能读取 DSH 应用的存储或会话凭据。
+- **引用回到原文**（[#63](https://github.com/wqty123/dsh-browser/pull/63)）：浮条把含段落、列表、表格、公式的选区送入对话。发送后只留下可预览的胶囊；回到原页面时按实际来源导航和定位，不要求原标签仍在。桌面侧栏对齐页面与面板缩放比例。
+- **可选的个人浏览器**（[#63](https://github.com/wqty123/dsh-browser/pull/63)）：显式选择 Chrome 或 Edge 后可用扩展复用个人登录态。扩展不可用时，新会话固定使用 DSH 管理的 CDP 配置；个人窗口与原有标签不会被任务清理关闭。
+- **Desktop 原生侧栏与维护**（[#64](https://github.com/wqty123/dsh-browser/pull/64)、[#65](https://github.com/wqty123/dsh-browser/pull/65)）：可选宿主补丁带来原生侧栏视图、保留 opener 的子标签、后台渲染和主扩展。支持的 Windows / macOS 安装可从设置正常退出、重装并重启验证；不匹配的补丁或备份会被拒绝。Desktop 和 Web 的侧栏各自保留同一 `DSH_HOME` 下的站点登录。
+- **默认工具更少，能力不减少**（[#66](https://github.com/wqty123/dsh-browser/pull/66)、[#67](https://github.com/wqty123/dsh-browser/pull/67)）：常用工具直接可用，其余按组加载。标准模式新增按任务隔离的 JavaScript REPL；PTC 默认用宿主 `run_code`。独立读取可并行，动作按序；同任务单元不会互相抢占，超时或执行中取消仍保留已经打印的内容。
+
+升级与限制见[用户指南](docs/user-guide.md)和[兼容性与边界](docs/limitations.md)。
+
 ### 桌面端探测补上注册表与平台约定位置
 
 `findDesktopInstall` 与安装器的默认探测已改为多根扫描，但仍有两个真实安装看不见：

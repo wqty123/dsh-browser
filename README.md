@@ -3,65 +3,46 @@
   <img src="https://img.shields.io/npm/v/dsh-builtin-browser?style=flat&amp;label=npm&amp;color=CB3837" alt="npm version">
   <img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License">
   <img src="https://img.shields.io/badge/DSH-Plugin-47848F?style=flat" alt="DeepSeek Harness plugin">
-  <img src="https://img.shields.io/badge/Platform-Windows-4493F8?style=flat-square" alt="Platform: Windows (verified)">
 </p>
 
 <p align="center"><sub>中文 · <a href="README.en.md">English</a></sub></p>
 
 # DeepSeek Harness 浏览器插件
 
-在 DSH 侧栏中浏览网页、捕获保留格式的引用；宿主提供可驱动的侧栏载体时，Agent 工具操作同一个可见页面。每个任务有自己的标签页和操作记录。本机 Chrome、Edge 仅供显式选择，不会自动作为回退载体。
+在 DSH 侧栏浏览网页，把保留格式的选区加入对话。桌面宿主支持时，Agent 操作的就是你正在看的页面；标签和操作历史归各自任务。[0.7.42 更新记录](CHANGELOG.md#未发布)
 
-本页功能清单对应 **0.5.8**（适配 DSH 0.2.2-alpha.3：插件路由走宿主会话鉴权）。[更新记录](CHANGELOG.md)
+![浏览器载体：桌面侧栏、隔离的 Web 侧栏、显式选择的 Chrome 或 Edge](assets/browser-carriers.svg)
 
 ## 快速开始
 
-**先确认你在哪一端** —— 两端是两份独立安装,**更新其中一端不会带上另一端**,浏览器的承载方式也不同。
-
-> **更新已安装的插件是两步**(DSH 0.2.1-alpha.2 起,对已装包再装会直接报 `already-installed`):先 `dsh plugin --profile <profile> remove dsh-builtin-browser`,再 `add` 目标版本。详见[用户指南](docs/user-guide.md#先移除再安装)。
-
-### DSH Desktop(桌面端)
+Desktop 和 Web 使用独立的 DSH profile。下列命令安装 npm 当前发布的版本：
 
 ```sh
 dsh plugin --profile desktop add dsh-builtin-browser
-```
-
-宿主提供可驱动的侧栏/webview 载体时，Agent 操作**官方侧栏**中同一个可见页面。缺少该能力时，工具返回明确的能力错误，不会打开独立 Electron 窗口。
-
-现有旧版 bridge 安装器会修改桌面应用。**禁止修改 DSH 上游的部署不要使用安装/修复入口。** 合规集成需要宿主正式提供 `viewHost` 或侧栏 API；仅安装插件无法补齐宿主缺失的能力。已存在的可驱动侧栏连接可以重连，但不会切换到独立窗口。
-
-### Web 端(`dsh web`)
-
-```sh
 dsh plugin --profile web add dsh-builtin-browser
 ```
 
-Web 侧栏使用不透明源沙箱 iframe。导航和选区引用提交留在 DSH 内；网页无法使用 DSH 的存储或 API 凭据。引用经校验来源窗口的消息通道交给所属会话。依赖源存储、worker 等沙箱受限功能的站点可能无法使用。CDP 工具需要可驱动的桌面侧栏，Web 不支持的操作会报告能力限制，而不是另开浏览器。
+若插件已安装，请在目标 profile [先移除，再添加目标版本](docs/user-guide.md#先移除再安装)。
 
-### 两端通用
+**桌面端（Windows / macOS）。** 默认使用 **DSH 侧栏**。桥接需要修复时，保存进行中的工作，在 **设置 → 浏览器** 使用可用的 **卸载并重装**。受支持的构建可借此应用随插件附带的宿主补丁；这会修改本机 DSH 文件，使用 Chrome 或 Edge 不需要该补丁。有任务运行时，是否退出由 DSH 提示、用户确认。宿主更新后请重新检查桥接状态。
 
-完成安装后,直接让 agent 用它:
-
-```
-帮我打开 https://example.com，把页面上的主要内容用中文总结一下。
-```
-
-默认设置为 `browser.channel: "sidebar"`，没有独立窗口回退，也不会自动下载 Electron。**只有显式选择 `"chrome"` 或 `"edge"` 才允许外部浏览器**；要求仅限侧栏时保持 `"sidebar"`。
+**Web 端（`dsh web`）。** 从 DSH 侧栏打开浏览器，可在隔离页面内导航、选择内容并发送引用。该页面不提供原生 CDP 能力，也不支持依赖 opener 的子标签。任务确实需要 CDP 时，请使用受支持的桌面侧栏，或显式选择本机浏览器。
 
 ## 选择浏览器
 
 | 选项 | 使用方式 |
 | --- | --- |
-| 内置浏览器（旧设置） | 仅侧栏的兼容别名，不启动 Electron。 |
-| DSH 侧栏 | 在支持 Electron `webview` 的桌面端安装桥接组件后，打开网址会自动展开目标会话的侧栏浏览器。连接中断后继续重连所选侧栏。 |
-| 本机 Chrome / Edge | 使用插件专用的浏览器配置启动本机 Chrome 或 Edge。 |
-| 自动（旧设置） | 仅侧栏的兼容别名，不自动选择本机浏览器。 |
+| DSH 侧栏（默认） | 使用所在宿主的侧栏。缺少所需能力时说明原因，不另开浏览器窗口。 |
+| 本机 Chrome / Edge | 默认使用 DSH 管理的独立浏览器配置。偏好自己的浏览器时，可用可选扩展复用登录态；扩展不可用时，新会话使用独立配置。 |
+| 内置浏览器 / 自动（旧设置） | 都是仅侧栏的兼容别名，不下载 Electron，也不自动选择外部浏览器。 |
 
-旧版维护入口仍存在，但不是获得宿主 API 的合规方式；载体选择不会自动运行这些操作。
+## 把网页内容引用到对话
+
+在侧栏划选网页内容，再用浮条将选区加入对话。支持的选区保留段落、链接、表格和公式等格式。发送后只显示引用胶囊，不再重复引用正文；悬停可预览，点击 **回到原页面** 可打开来源并定位选区。原文改变时仍可查看已保存的预览。
 
 ## 浏览器设置
 
-- **环境检查** 显示已找到的 Chrome / Edge、内置运行环境和侧栏桥接状态。自动模式显示实际选择的载体，**诊断** 提供可执行文件路径。
+- **环境检查** 显示所选载体、侧栏桥接状态以及找到的 Chrome / Edge。
 - **安静模式** 避免抬起宿主窗口。选择 DSH 侧栏后，打开网址会展示目标会话的侧栏页面，显式切换标签会选择对应的侧栏标签。外部浏览器窗口行为仅适用于显式选择的 Chrome / Edge。
 - **展示** 提供侧栏自动展开、随会话关闭浏览器、Agent 光标和远程观看开关。
 - **Agent 权限** 控制页面脚本、文件下载和登录状态的读写。
@@ -90,39 +71,9 @@ DSH 侧栏下载使用目标页面所属浏览器会话的登录状态，分段�
 
 ## 浏览器工具
 
-当前源码注册 51 个工具。表中列出 `dsh_browser_` 后面的名称。
+常用 `dsh_browser_*` 工具默认可用。用 `dsh_browser_load_tools` 按组加载其余工具，或用 `dsh_browser_do` 执行固定步骤。需要循环、条件分支或并发读取时，标准模式用 `dsh_browser_code`，DSH PTC 模式用宿主的 `run_code`。
 
-| 用途 | 工具 |
-| --- | --- |
-| 打开与导航 | `open` `back` `forward` `refresh` `list_tabs` `switch_tab` `close_tab` |
-| 读取页面 | `snapshot` `a11y` `content` `scrape` `screenshot` `challenge` |
-| 点击与输入 | `click` `click_sequence` `type` `key` `scroll` `drag` `hover` `execute` |
-| 填写表单 | `fill` `set_value` `clear` `check` `select` `get_value` |
-| 选择与保存文件 | `upload` `download` |
-| 执行步骤与核对结果 | `do` `assert` `wait` `wait_for_response` |
-| 查看页面状态 | `state` `find` `console` `network` `dialog` |
-| 管理会话 | `session` `reset` `reset_session` `restrict` `auth` |
-| 查看记录 | `history` `visited` `replay` |
-| 网页引用 | `reference_capture` `reference_reveal` `reference_list` |
-| 起始页快捷方式 | `shortcuts` |
-| 排查问题与查用法 | `doctor` `help` |
-
-## 网页引用的当前支持范围（2026-11-09）
-
-| 能力 | 状态 |
-| --- | --- |
-| 文字／图片／表格／混合选区的采集、冻结快照与图片资产落盘 | 已实现；真实 Chrome 渲染页面验证跨段选区顺序、真实 PNG 与含合并单元格的表格 |
-| 右键文字／图片／表格目标、划选浮动入口（自带 Electron 载体） | 已接入采集与会话交付；单一菜单保留复制／剪切／粘贴／全选 |
-| 会话归属、草稿交付、保存成功才提示加入引用 | 已实现：`browser:<uuid>` 与真实 DSH 会话分离，捕获时锁定归属，ACK 要求草稿修订与全部图片资产绑定 |
-| 引用卡片、预览、移除、撤销、回到原文 | 引用卡片由宿主 `ui-browser-reference` 插件注册到会话输入框；卡片自带样式表、评论框、6 秒撤销与失败原因提示；不响应的「导入/导出」占位控件已删除。插件自身「引用记录」菜单负责历史记录与定位，设置页不录入对话内容 |
-| 模型收到实际文字／图片／表格块 | 宿主 `sendSession` 使用有序提交 seam：`buildContent()` 纯投影，Host 接受后 `commit()` 只消费本次冻结的引用，拒绝/抛错 `rollback()` 保留草稿；成功发送仍保留来源身份。修复已构建并同步到已安装桌面的四个客户端 bundle；未在用户既有会话中发送测试消息 |
-| 来源回跳、草稿／排队／重启恢复 | 定位／高亮接口与恢复逻辑有单测；卡片「回到原文」调用 revealer，失败在 dock 内说明原因且提示会自动消失；回复正文里 `dsh-browser-ref:` 链接由宿主 `ui-browser-reference` 的 DOM 桥接激活（安装包自带前端没有该分流），真机验证装饰与点击拦截均生效；重启恢复仍为单测覆盖 |
-| 失败可见性、交付一致性 | 捕获拒绝有逐因中文提示（含图片失败、页面跳转、片段过多）；入队失败不再假报成功；非法游标 400、资产竞态 404；交付日志按文件行序折叠，多进程同序号不丢记录；快捷方式按规范化 URL 判重、撤销写回干净记录且失败可重试 |
-| 桌面侧栏 guest 的划选／右键入口 | 已接通：bridge 不转发 user action，改由进程内 1.2 秒一次的 CDP 巡检注入浮条并收取 `__dshRefIntents`；真机验证「划选 → 评论 → 添加到对话 → 卡片 → 发送后进入消息上下文」 |
-| Chrome／Edge 生产引用入口 | 后续独立批次。独立 MV3 验证工程已通过 Chrome／Edge 各 19 项端到端，但**未接入本插件的生产配对、目标会话选择与原标签定位** |
-| 起始页与共享快捷方式 | 已实现并真机验证：空标签页点「添加」可新增；`dsh_browser_shortcuts` / `POST /shortcuts/add` 与侧栏共享同一列表；点快捷方式打开目标网址。宿主 `ui-sidebar-browser`／`ui-sidebar-right` 的重建 bundle 已同步到已安装桌面，修复了部署中 `navigateTabIn` 缺失导致的点击报错；验收期写入的 6 条测试快捷方式已从 live profile 清除（保留 Bing／百度／DeepSeek 三项，原文件有备份） |
-
-> 原生 DSH UI 改动**不会**随本 npm 插件包自动分发：已安装桌面需要把重建的客户端 bundle 复制到 `resources/app/dsh/node_modules/@deepseek-ai/`（必要时还有 profile 的 `node_modules`），bridge 另有独立安装步骤。本机重放脚本、字节级验证、冷启动与端到端真机证据见 `E:/ds 维护以及插件制作/_audit/deployment-review-20261109/`（含第三轮《整体到细节》第 9 节）；客户端 bundle 不在 HMR 监听范围，替换后需重启桌面（验证实例已关闭，下次启动即生效）。
+遇到登录、验证码等需要人工完成的操作，请让 Agent 请求接管；插件不会自动解决验证。
 
 ## 文档
 

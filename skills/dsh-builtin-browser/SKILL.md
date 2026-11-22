@@ -5,18 +5,23 @@ description: Use when a task needs a real web page — opening a URL, reading or
 
 # Driving the browser
 
-The browser is a real Chromium the human can watch and take over. The core `dsh_browser_*`
-tools (open, snapshot, click, type, key, scroll, fill, wait, content, find, scrape, screenshot,
-execute, tabs, references, takeover) are always available; load the rest by group with
-`dsh_browser_load_tools` (forms, navigation, debug, session, more) when a task needs them.
+On a supported Desktop sidebar, the user can watch and take over the same browser tab.
+Manual Web sidebar browsing supports references and human takeover, not native CDP.
+If an operation reports a missing or stale carrier, explain the limitation and ask the user
+to repair the bridge or select another supported carrier. Do not open another browser
+as a fallback on your own.
 
-To batch, use `dsh_browser_do` for a fixed list of steps, or `dsh_browser_code` for a program:
-each call is a JavaScript cell in a persistent REPL, after Browser Use 1.0's `python` tool.
-Top-level `const`/`let`/`function` survive calls, the last expression is printed, and every
-browser tool is bound as `await tools.dsh_browser_<name>(args)` (same arguments as the tool,
-resolving to its JSON value). Independent reads may overlap under `Promise.all`; actions run in
-order. Print findings as you go: a cell that hits its deadline still returns what it printed.
-When DSH runs in PTC mode (`run_code`), call the same tools from `run_code` instead.
+The default surface exposes core `dsh_browser_*` tools. For a missing native tool, use
+`dsh_browser_load_tools` with an array of group names, such as `{groups: ['debug']}`.
+Groups: `forms`, `navigation`, `debug`, `session`, `more`.
+
+Use `dsh_browser_do` for a fixed list of steps. In standard mode, use `dsh_browser_code`
+for loops and branching; in PTC mode with the default surface, use DSH's `run_code`.
+The code tool runs JavaScript cells in a persistent per-task REPL. Top-level bindings
+survive between cells. Call any browser tool with
+`await tools.dsh_browser_<name>(args)` and the same arguments as its native tool.
+Independent reads may overlap under `Promise.all`; actions run in order. Print findings
+as you go; output printed before a deadline or mid-run cancellation is returned.
 
 ```js
 await goto_url('https://example.com/search')
@@ -36,7 +41,7 @@ The next cell can keep using `rows`.
 - Page data: `js(expr)` (objects, arrays and exact strings come back as data; `return` works),
   `read({selector, maxChars})`, `snapshot()`, `find(text)`, `state()`, `screenshot()`.
 - Input: `click(target)`, `type(target, text, {submit})`, `fill_input(target, text)`, `select(target, optionText)`,
-  `fill(fields, {submit})`, `click_at_xy(x, y)`, `type_text(text)`, `press_key(key)`, `scroll(dy)`,
+  `fill(fields, {submit})`, `click_at_xy(x, y)`, `type_text(text)`, `press_key(key)`, `scroll(dy)` or `scroll(x, y, dy)`,
   `upload_file(selector, path)`. A `target` is visible text, a CSS selector, `{text|css|xpath, index}` or `{x, y}`.
 - Waiting: `wait_for_element(selector)`, `wait_for_network_idle()`, `sleep(ms)` only as a last resort.
 - References: `refs.capture({excerptText})`, `refs.list()`, `refs.reveal({referenceId})`.
@@ -52,13 +57,17 @@ in the same cell. Return only what you need: a few fields from `js()` beat a who
 
 ## Verify, then retry
 
-"Clicked" and "the form accepted it" are different claims: check the URL, a confirmation text or
-`call('wait_for_response', ...)` before moving on. A cell that timed out may have partly run:
-inspect before repeating anything that changes server state.
+"Clicked" and "the form accepted it" are different claims: check the URL, a confirmation message,
+or a server response before moving on. Arm `wait_for_response` before the triggering action
+inside a code cell; see [batch examples](references/batch.md). If a cell timed out or was
+cancelled, inspect the current page before repeating anything that changes server state.
+If access is denied, report what you verified. For a research task, you can use a different,
+publicly available source without bypassing the original site's access restrictions.
 
 ## Never
 
-- Never solve a CAPTCHA, slider, login, 2FA or payment yourself: call `dsh_browser_request_takeover`.
+- For a CAPTCHA, slider, login, 2FA or payment, call `dsh_browser_request_takeover` with a short
+  reason. Inspect the page after `done`; never report `skipped` or `cancelled` as success.
 - Do not paste cookies, tokens or exported login state into the conversation.
 - Do not assume another task's tabs or navigation are visible to you: each task has its own
   session and its own REPL.

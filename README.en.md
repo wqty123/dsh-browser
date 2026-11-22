@@ -3,65 +3,46 @@
   <img src="https://img.shields.io/npm/v/dsh-builtin-browser?style=flat&amp;label=npm&amp;color=CB3837" alt="npm version">
   <img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat" alt="MIT License">
   <img src="https://img.shields.io/badge/DSH-Plugin-47848F?style=flat" alt="DeepSeek Harness plugin">
-  <img src="https://img.shields.io/badge/Platform-Windows-4493F8?style=flat-square" alt="Platform: Windows (verified)">
 </p>
 
 <p align="center"><sub><a href="README.md">中文</a> · English</sub></p>
 
 # Browser plugin for DeepSeek Harness
 
-Browse inside the DSH sidebar, capture structured references, and use browser tools on the same visible page when the host supplies a controllable sidebar carrier. Each task has its own tabs and action history. External Chrome or Edge is an explicit opt-in, not a fallback.
+Browse in the DSH sidebar, send rich page selections into a conversation, and let the agent operate the same page on supported Desktop hosts. Tabs and action history belong to the task. [0.7.42 release changes](CHANGELOG.md#未发布)
 
-This feature list matches **0.5.8** (compatible with DSH 0.2.2-alpha.3: plugin routes go through the host session auth). [Changelog](CHANGELOG.md)
+![Browser carrier choices: Desktop sidebar, isolated Web sidebar, and opt-in Chrome or Edge](assets/browser-carriers.svg)
 
 ## Quick start
 
-**First, which side are you on** — these are two separate installs; updating one does not update the other, and they host the browser differently.
-
-> **Updating an installed plugin takes two steps** (since DSH 0.2.1-alpha.2, installing over an installed package fails outright with `already-installed`): run `dsh plugin --profile <profile> remove dsh-builtin-browser` first, then `add` the target version. See the [user guide](docs/user-guide.md) (Chinese).
-
-### DSH Desktop
+Desktop and Web use separate DSH profiles. These commands install the version currently published on npm:
 
 ```sh
 dsh plugin --profile desktop add dsh-builtin-browser
-```
-
-When the desktop shell provides a controllable sidebar/webview carrier, the plugin drives the **official side panel**: the agent operates the very page you see. Without that capability, browser tools return an actionable error. They never start a standalone Electron window.
-
-The existing legacy bridge installer modifies the desktop application. **Do not use its install/repair actions where upstream modifications are prohibited.** A compliant integration needs a supported host-provided carrier (`viewHost`) or sidebar API; installing this plugin alone cannot supply that missing host capability. Existing controllable sidebar connections can reconnect without switching carriers.
-
-### Web (`dsh web`)
-
-```sh
 dsh plugin --profile web add dsh-builtin-browser
 ```
 
-The Web sidebar uses an opaque-origin sandboxed iframe. Navigation and selection-reference submission stay inside DSH; guest pages cannot use DSH storage or authenticated API privileges. References travel to the owning app frame through a source-validated message channel. Sites requiring origin storage, workers or other sandbox-restricted features may not work in this carrier. CDP tools require a controllable desktop sidebar; unsupported Web operations report that capability limit rather than opening another browser.
+If it is already installed, [remove it from that profile before adding the target version](docs/user-guide.md#先移除再安装).
 
-### Both sides
+**Desktop (Windows and macOS).** Keep **DSH Sidebar** selected. If the bridge needs repair, save active work and use **Settings → Browser → Uninstall and reinstall** when available. On supported builds this can apply the bundled host patch; it changes local DSH files and is not required to use Chrome or Edge. DSH asks before quitting an active task. After a host update, check bridge status again.
 
-Once installation is complete, ask the agent:
-
-```
-Open https://example.com and summarise the main content for me.
-```
-
-The default is `browser.channel: "sidebar"`. There is no standalone fallback and no automatic Electron download. **Only explicitly selecting `"chrome"` or `"edge"` permits an external browser**; keep `"sidebar"` for sidebar-only operation.
+**Web (`dsh web`).** Open the browser from the DSH sidebar. You can navigate and send selections from the isolated guest. Desktop-native tooling and opener-dependent child tabs are not available in this guest. Use a supported Desktop sidebar or explicitly select a local browser when a task requires CDP.
 
 ## Choose a browser
 
 | Option | How it works |
 | --- | --- |
-| Bundled browser (legacy setting) | Alias for sidebar-only operation; never starts Electron. |
-| DSH sidebar | With the bridge installed on a Desktop build that exposes Electron `webview`, opening a URL expands the target conversation's sidebar browser. Lost connections reconnect to the selected sidebar. |
-| Local Chrome / Edge | Launches the installed browser with a dedicated plugin profile. |
-| Automatic (legacy setting) | Alias for sidebar-only operation; never selects a local browser. |
+| DSH Sidebar (default) | Uses the selected host's sidebar. If the needed capability is missing, it reports why instead of opening another window. |
+| Chrome / Edge | Uses a DSH-managed profile by default. If you prefer your own browser, the optional extension can use its sign-in state; when the extension is unavailable, a new session uses the managed profile. |
+| Bundled / Auto (legacy values) | Both now mean sidebar only. Neither downloads Electron or picks an external browser. |
 
-Legacy maintenance controls are still present but are not a compliant way to obtain the missing host API. They are not run automatically by carrier selection.
+## Quote a page in chat
+
+Select text in the sidebar, then use the floating bar to add it to the conversation. Supported selections retain paragraph, link, table and formula formatting. Sent references stay as capsules, without duplicated quote text. Hover for a preview or choose **Return to source** to reopen the page and locate the selection. If the source has changed, the saved preview is still available.
 
 ## Browser settings
 
-- **Environment check** reports detected Chrome / Edge, the bundled runtime, and sidebar bridge availability. Automatic mode identifies the selected carrier; **Diagnostics** includes the executable path.
+- **Environment check** shows the selected carrier, the bridge status, and the detected Chrome and Edge executables.
 - **Quiet mode** avoids raising the host window. With DSH sidebar selected, opening a URL reveals the target conversation's sidebar page; explicit tab switching selects the corresponding sidebar tab. Window behavior applies only to explicitly selected external browsers.
 - **Presentation** controls sidebar expansion, closing the browser with the session, the agent cursor, and remote viewing.
 - **Agent permissions** controls page scripts, downloads, and reading or writing sign-in state.
@@ -90,22 +71,9 @@ For Feishu, configure an MCP tool that provides file uploads and use the argumen
 
 ## Browser tools
 
-The current source registers 51 tools. The table lists their names after the `dsh_browser_` prefix.
+Common `dsh_browser_*` tools are loaded by default. Use `dsh_browser_load_tools` for less common groups and `dsh_browser_do` for a fixed action list. For loops, branches, or independent reads in parallel, use `dsh_browser_code` in standard DSH mode or DSH's `run_code` in PTC mode.
 
-| Purpose | Tools |
-| --- | --- |
-| Open and navigate | `open` `back` `forward` `refresh` `list_tabs` `switch_tab` `close_tab` |
-| Read pages | `snapshot` `a11y` `content` `scrape` `screenshot` `challenge` |
-| Click and type | `click` `click_sequence` `type` `key` `scroll` `drag` `hover` `execute` |
-| Fill forms | `fill` `set_value` `clear` `check` `select` `get_value` |
-| Select and save files | `upload` `download` |
-| Run and verify steps | `do` `assert` `wait` `wait_for_response` |
-| Inspect page activity | `state` `find` `console` `network` `dialog` |
-| Manage sessions | `session` `reset` `reset_session` `restrict` `auth` |
-| Review records | `history` `visited` `replay` |
-| Page references | `reference_capture` `reference_reveal` `reference_list` |
-| Start-page shortcuts | `shortcuts` |
-| Diagnose issues and find help | `doctor` `help` |
+When a site needs a login, CAPTCHA or other human verification, ask the agent to request takeover. The plugin does not solve challenges automatically.
 
 ## Documentation
 
