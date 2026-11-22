@@ -2,7 +2,7 @@
 
 ## 安装
 
-Desktop 和 Web 是独立 profile，两端都用时分别安装。下面的命令安装 npm 当前发布的版本；本文描述的是 1.0.0 的功能。
+Desktop 和 Web 是独立 profile，两端都用时分别安装。下面的命令安装 npm 当前发布的版本；本文描述的是 1.0.x 的功能。
 
 ```sh
 dsh plugin --profile desktop add dsh-builtin-browser
