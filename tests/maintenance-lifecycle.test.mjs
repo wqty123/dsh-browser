@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { runMaintenanceLifecycle } from '../lib/browser-electron/maintenance-lifecycle.js'
+import { MaintenanceRecoveryError, runMaintenanceLifecycle } from '../lib/browser-electron/maintenance-lifecycle.js'
 
 function fixture(overrides = {}) {
   const calls = []
@@ -24,6 +24,14 @@ test('explicit reinstall closes normally, maintains once, restarts once and veri
   assert.deepEqual(f.states.map(s => s.phase), ['armed', 'closing', 'installing', 'restarting', 'verifying', 'completed'])
   assert.equal(result.ok, true)
   assert.equal(result.restarted, true)
+})
+
+test('optional host patch results remain separate from successful bridge maintenance', async () => {
+  const hostPatch = { status: 'unsupported version', reason: 'supported: 0.2.2-rc.3' }
+  const f = fixture({ maintain: async () => ({ ok: true, code: 0, output: 'legacy bridge installed', command: 'fixture', hostPatch }) })
+  const result = await runMaintenanceLifecycle('install', f.deps)
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.hostPatch, hostPatch)
 })
 
 test('missing quit capability never installs or restarts', async () => {
@@ -60,6 +68,19 @@ test('a spawned Desktop without a working new bridge cannot be reported installe
   assert.match(result.error, /handshake failed/)
 })
 
+test('unverified rollback still restarts Desktop and loudly preserves recovery and verification failures', async () => {
+  const f = fixture({
+    maintain: async () => { throw new MaintenanceRecoveryError('REINSTALL_ROLLBACK_FAILED: profile resolution unverified') },
+    verify: async () => { throw new Error('recovery process verification failed') },
+  })
+  const result = await runMaintenanceLifecycle('reinstall', f.deps)
+  assert.equal(result.phase, 'failed')
+  assert.equal(result.ok, false)
+  assert.equal(result.restarted, true)
+  assert.deepEqual(f.calls, ['quit', 'closed', 'restart'])
+  assert.match(result.error, /REINSTALL_ROLLBACK_FAILED.*profile resolution unverified.*recovery process verification failed/)
+})
+
 test('uninstall is verified as an uninstall after the same safe lifecycle', async () => {
   const f = fixture()
   const result = await runMaintenanceLifecycle('uninstall', f.deps)
@@ -67,14 +88,16 @@ test('uninstall is verified as an uninstall after the same safe lifecycle', asyn
   assert.equal(f.calls.at(-1), 'verify:12345:uninstall')
 })
 test('failure to save a post-quit progress update cannot prevent recovery or restart', async () => {
-  for (const phase of ['closing', 'installing', 'restarting', 'verifying']) {
+  for (const phase of ['closing', 'installing', 'restarting', 'verifying', 'completed']) {
     const f = fixture({ publish: async state => { if (state.phase === phase) throw new Error('disk unavailable') } })
     const result = await runMaintenanceLifecycle('install', f.deps)
-    assert.equal(result.phase, 'failed')
+    assert.equal(result.phase, 'completed')
     assert.equal(result.restarted, true)
     assert.ok(f.calls.includes('maintain'))
     assert.ok(f.calls.includes('restart'))
-    assert.match(result.error, /progress could not be saved/)
+    assert.equal(result.ok, true)
+    assert.equal(result.error, undefined)
+    assert.match(result.progressError, /disk unavailable/)
   }
 })
 test('failure to persist armed state prevents all Desktop actions', async () => {

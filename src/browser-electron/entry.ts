@@ -44,11 +44,14 @@ import { GUEST_ROUTE, handleGuest } from './guest-route.ts'
 import { resolveSessionHandle, sessionWireId } from '../browser/handles.ts'
 import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.ts'
 import { findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
+import { readHostExtensionStatus } from './profile-extension.ts'
 import { readBridgeEndpoint } from './bridge-endpoint.ts'
 import { runBridgeAction } from './bridge-install.ts'
+import { enableElectronPackageRemoval } from './package-removal.ts'
 import { prepareBridgeMaintenance } from './bridge-maintenance.ts'
-import { commitAutomaticMaintenance, readAutomaticMaintenance, startAutomaticMaintenance } from './automatic-maintenance.ts'
+import { automaticMaintenanceSupported, commitAutomaticMaintenance, readAutomaticMaintenance, startAutomaticMaintenance } from './automatic-maintenance.ts'
 import { AUTOMATIC_MAINTENANCE_ROUTE, createAutomaticMaintenanceHandler } from './maintenance-route.ts'
+import { HOST_PATCH_ROUTE, createHostPatchMaintenance, servedClientModules } from './host-patch-maintenance.ts'
 import { runWithManualBridgePreference } from './bridge-auto.ts'
 import { replyJson, writeJsonText } from './json-reply.ts'
 import { readJsonBody, readTextBody } from './http-body.ts'
@@ -198,6 +201,7 @@ function readSessionId(ctx: unknown): string | undefined {
 
 /** Register the Electron browser provider with `ctx.browser`. */
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
+  enableElectronPackageRemoval()
   // Which session is this process serving?
   //
   // The desktop shell keeps ONE sidebar per conversation — measured: two `[class*=_tabStrip]`
@@ -312,7 +316,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       const detail = DesktopBridgeViewHost.refusedIframePanel()
         ? 'the DSH sidebar is an iframe and cannot support CDP tools'
         : 'no controllable DSH sidebar is available'
-      throw new Error(`dsh-builtin-browser: ${detail}. Use a host-provided sidebar/webview carrier or reconnect the existing sidebar, then retry. The Web panel supports manual browsing, not CDP tools. No standalone browser will be opened.`)
+      throw Object.assign(new Error(`dsh-builtin-browser: ${detail}. Use a host-provided sidebar/webview carrier or install the DSH native-view host patch, then retry. The Web panel supports manual browsing, not CDP tools. No standalone browser will be opened.`), { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' })
     })
     host.onLost(reportCarrierLoss)
     return host
@@ -677,8 +681,18 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     if (typeof injectStatus !== 'function') return
     try {
       injectStatus(['webServer'], (host) => {
+        const hostPatchMaintenance = createHostPatchMaintenance({
+          modules: () => servedClientModules(ctx.get('clientModules')),
+          desktop: () => process.versions.electron !== undefined,
+        })
+        host.effect(() => host.webServer.register({
+          kind: 'exact', path: HOST_PATCH_ROUTE,
+          handler: authenticated(ctx, hostPatchMaintenance),
+        }, 'dsh-builtin-browser: Web host patch maintenance'))
         const automaticMaintenance = createAutomaticMaintenanceHandler({
-          supported: () => process.platform === 'win32',
+          supported: () => automaticMaintenanceSupported(),
+          // Windows quits through the Desktop's own menu, opened by the panel; macOS through its Quit Apple event.
+          quit: () => process.platform === 'win32' ? 'menu' : 'self',
           busy: () => bridgeActionRunning,
           read: () => readAutomaticMaintenance(),
           commit: async id => { await commitAutomaticMaintenance(id) },
@@ -696,7 +710,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: BRIDGE_STATUS_ROUTE,
-          handler: authenticated(ctx, (request, response) => handleBridgeStatus(request, response)),
+          handler: authenticated(ctx, async (request, response) => handleBridgeStatus(request, response, undefined,
+            await readHostExtensionStatus(dshHome()))),
         }, 'dsh-builtin-browser: bridge status'))
         // The panel prepares a launcher without changing the running Desktop. Direct local
         // maintenance remains available once Desktop has exited.
@@ -736,29 +751,32 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }).inject
     if (typeof injectRuntime !== 'function') return
     const deps = {
-      report: () => readRuntimeStatus({
-        nativeHostRegistration: () => Object.fromEntries(registrationStatus),
-        channel: () => settings.get().browser.channel,
-        systemProfile: () => settings.get().browser.systemProfile,
-        extensionConnection: () => isPreferredCarrier(adoptedCarrier) ? {
-          ...adoptedCarrier.connectionStatus(), install: extensionInstallHelp(adoptedCarrier.browser), registration: registrationStatus.get(adoptedCarrier.browser),
-        } : undefined,
-        selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
-          : adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.activeCarrier()
-          : adoptedCarrier instanceof ExtensionBrowserViewHost ? 'extension' : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
-        fallbackReason: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallbackReason : undefined,
-        systemConnection: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallback.connectionStatus?.() : adoptedCarrier instanceof SystemBrowserViewHost ? adoptedCarrier.connectionStatus() : undefined,
-        hasBinary: hasElectronRuntime,
-        provision: provisionSnapshot,
-        bridgeError: () => DesktopBridgeViewHost.compatibilityError(),
-        bridge: () => {
-          const root = findDesktopInstall()
-          return root === undefined ? undefined : readBridgeStatus(root)
-        },
-        // Installed is not running: the install tree survives a reboot, the endpoint does not. Both
-        // readings are cheap and side-effect free — a file read and a signal-0 pid check.
-        endpoint: () => readBridgeEndpoint(),
-      }),
+      report: async () => {
+        const mainExtension = await readHostExtensionStatus(dshHome())
+        return readRuntimeStatus({
+          nativeHostRegistration: () => Object.fromEntries(registrationStatus),
+          channel: () => settings.get().browser.channel,
+          systemProfile: () => settings.get().browser.systemProfile,
+          extensionConnection: () => isPreferredCarrier(adoptedCarrier) ? {
+            ...adoptedCarrier.connectionStatus(), install: extensionInstallHelp(adoptedCarrier.browser), registration: registrationStatus.get(adoptedCarrier.browser),
+          } : undefined,
+          selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
+            : adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.activeCarrier()
+            : adoptedCarrier instanceof ExtensionBrowserViewHost ? 'extension' : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
+          fallbackReason: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallbackReason : undefined,
+          systemConnection: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallback.connectionStatus?.() : adoptedCarrier instanceof SystemBrowserViewHost ? adoptedCarrier.connectionStatus() : undefined,
+          hasBinary: hasElectronRuntime,
+          provision: provisionSnapshot,
+          bridgeError: () => DesktopBridgeViewHost.compatibilityError(),
+          bridge: () => {
+            const root = findDesktopInstall()
+            return root === undefined ? undefined : readBridgeStatus(root, mainExtension)
+          },
+          // Installed is not running: the install tree survives a reboot, the endpoint does not. Both
+          // readings are cheap and side-effect free — a file read and a signal-0 pid check.
+          endpoint: () => readBridgeEndpoint(),
+        })
+      },
       // `force` is what makes the panel's retry button mean anything: without it the answer would be
       // the settled failure the user is trying to replace. An attempt still running is joined.
       provision: () => {

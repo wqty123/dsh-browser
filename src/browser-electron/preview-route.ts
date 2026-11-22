@@ -19,6 +19,7 @@ import type { BrowserError } from '../browser/types.ts'
 import { replyJson } from './json-reply.ts'
 import { sameOrigin } from './settings-route.ts'
 import { findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
+import type { MainExtensionStatus } from './profile-extension.ts'
 
 /** Where the frame endpoint lives. The viewer must use exactly this path, same origin. */
 export { PREVIEW_ROUTE }
@@ -191,6 +192,7 @@ export async function handleBridgeStatus(
   request: IncomingMessage,
   response: ServerResponse,
   localAppData?: string,
+  mainExtension?: MainExtensionStatus,
 ): Promise<void> {
   if (request.method !== 'GET') {
     replyJson(response, 405, { error: 'method-not-allowed' })
@@ -208,6 +210,6 @@ export async function handleBridgeStatus(
       archivePresent: false,
       detail: 'no DSH Desktop install found under LOCALAPPDATA\\Programs',
     }
-    : readBridgeStatus(installRoot)
+    : readBridgeStatus(installRoot, mainExtension)
   replyJson(response, 200, { ok: true, bridge: status })
 }

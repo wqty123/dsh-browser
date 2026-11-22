@@ -129,3 +129,30 @@ test('an unreadable archive and a product-named executable are not identity evid
     rmSync(base, { recursive: true, force: true })
   }
 })
+
+/** A macOS `.app` bundle: the same archive, under Contents/Resources. */
+function fakeBundle(parent, name = 'DeepSeek Harness.app') {
+  const root = join(parent, name)
+  mkdirSync(join(root, 'Contents', 'Resources'), { recursive: true })
+  mkdirSync(join(root, 'Contents', 'MacOS'), { recursive: true })
+  writeFileSync(join(root, 'Contents', 'Info.plist'), '<plist/>')
+  writeFileSync(join(root, 'Contents', 'MacOS', 'DeepSeek Harness'), 'x')
+  writeAsar(join(root, 'Contents', 'Resources', 'app.asar'), {
+    'package.json': JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.2-test', main: 'lib/main.js' }),
+    'lib/main.js': MAIN_BODY,
+  })
+  return root
+}
+
+test('a macOS .app bundle is found by identity under Contents/Resources', () => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-discover-bundle-'))
+  try {
+    const parent = join(base, 'Applications')
+    const root = fakeBundle(parent)
+    assert.equal(withEnv(base, { DSH_DESKTOP_PATH: parent }, () => findDesktopInstall()), root)
+    assert.equal(withEnv(base, { DSH_DESKTOP_PATH: root }, () => findDesktopInstall()), root)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+

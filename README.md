@@ -28,7 +28,7 @@ dsh plugin --profile desktop add dsh-builtin-browser
 
 宿主提供可驱动的侧栏/webview 载体时，Agent 操作**官方侧栏**中同一个可见页面。缺少该能力时，工具返回明确的能力错误，不会打开独立 Electron 窗口。
 
-现有旧版 bridge 安装器会修改桌面应用。**禁止修改 DSH 上游的部署不要使用安装/修复入口。** 合规集成需要宿主正式提供 `viewHost` 或侧栏 API；仅安装插件无法补齐宿主缺失的能力。已存在的可驱动侧栏连接可以重连，但不会切换到独立窗口。
+普通主扩展修复通过 DSH 的 Desktop profile 包管理命令进行，不修改桌面应用。**显式“安装或升级宿主补丁并重启”仍会修改宿主文件；禁止修改 DSH 上游的部署不要使用该引导入口。** 仅安装插件无法补齐宿主缺失的能力。已存在的旧版桥接继续工作；支持的修复流程不会静默注入旧桥接。
 
 ### Web 端(`dsh web`)
 
@@ -123,6 +123,23 @@ DSH 侧栏下载使用目标页面所属浏览器会话的登录状态，分段�
 | 起始页与共享快捷方式 | 已实现并真机验证：空标签页点「添加」可新增；`dsh_browser_shortcuts` / `POST /shortcuts/add` 与侧栏共享同一列表；点快捷方式打开目标网址。宿主 `ui-sidebar-browser`／`ui-sidebar-right` 的重建 bundle 已同步到已安装桌面，修复了部署中 `navigateTabIn` 缺失导致的点击报错；验收期写入的 6 条测试快捷方式已从 live profile 清除（保留 Bing／百度／DeepSeek 三项，原文件有备份） |
 
 > 原生 DSH UI 改动**不会**随本 npm 插件包自动分发：已安装桌面需要把重建的客户端 bundle 复制到 `resources/app/dsh/node_modules/@deepseek-ai/`（必要时还有 profile 的 `node_modules`），bridge 另有独立安装步骤。本机重放脚本、字节级验证、冷启动与端到端真机证据见 `E:/ds 维护以及插件制作/_audit/deployment-review-20261109/`（含第三轮《整体到细节》第 9 节）；客户端 bundle 不在 HMR 监听范围，替换后需重启桌面（验证实例已关闭，下次启动即生效）。
+
+## DSH 宿主补丁
+
+Windows 桌面端设置 → 浏览器提供一个固定的 **卸载并重装** 按钮：
+
+- 预检确认 Desktop 身份、宿主文件及恢复备份，从当前 Desktop profile 捕获准确的插件依赖来源。缺少依赖时明确拒绝，不写入维护文件，也不选择替代来源；打包安装以 `resources/app.asar` 为准，不信任残留的解包目录。
+- 独立维护进程、安装器和宿主补丁暂存于插件目录之外。正常退出一次后，依次移除 profile 插件、恢复宿主原文件、应用随包分发的 **DSH 0.2.2-rc.3 / 0.2.2-rc.5** 兼容补丁，再从捕获的依赖来源添加插件；保留最初的精确恢复基线，备份冲突时拒绝维护。
+- 设置继续显示 `not-installed` / `pending-restart` / `loaded` / `failed` 主扩展状态。Web 宿主补丁控件和手动终端安装/恢复入口不变。
+- 维护沿用正常退出与任务确认：取消退出或仍有进程运行时不安装。重启后校验当前 DSH home 的 endpoint、新进程 PID、宿主 `loaded` 状态、包版本与实时桥接代码摘要。
+
+补丁按宿主包精确版本与原文件校验选择；锚点不匹配时安全拒绝。rc.5 Desktop 的原文件哈希来自源码构建，尚未与已发布桌面安装包核对。详见 [宿主补丁说明](dsh-host-patch/README.md) 和 [#36 集成与验收记录](docs/pr64-extension-status.md)。
+
+revision 9 包含 `childTabs` v2 与按 `DSH_HOME` 持久化的侧栏会话：子页面保留 opener、消息、命名目标、POST 和关闭语义，不重放 URL、不创建额外窗口；同一 home 的工作区共享登录，无过期时间的会话 cookie 也会在重启前后保存与恢复。每个分区仅恢复一次，完成前阻止页面加载；后续检查点只保存实时 cookie，不会重放已注销的登录。无效条目单独跳过，读取失败经有限重试后保留 `.bak` 并继续运行。插件检测持久化能力，不支持时保留原有内存会话。支持 revision 2 / 3 / 4 / 5 / 6 / 7 / 8 的安全升级与精确恢复。未支持的原生 opener 请求明确返回 `BROWSER_NATIVE_CHILD_UNAVAILABLE`；显式 URL-only 行为不变。详见 [集成与验收](docs/pr64-native-children.md)。
+
+后台浏览器操作会按能力检测使用 `ctx.sidebarRight.holdRendering(sessionId)`，不会切换用户当前会话；未打补丁的宿主保留既有行为。
+
+Web/npm 安装可通过包目录运行独立 CLI；补丁说明、校验／恢复命令及上游源码补丁见 [dsh-host-patch/README.md](dsh-host-patch/README.md)。
 
 ## 文档
 

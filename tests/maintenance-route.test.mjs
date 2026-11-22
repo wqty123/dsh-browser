@@ -89,13 +89,24 @@ test('unsupported progress language is rejected without starting a worker', asyn
   assert.equal(r.statusCode, 400)
   assert.deepEqual(f.calls, [])
 })
+test('the acknowledgement says whether the panel must open the Desktop menu', async () => {
+  assert.equal((await fixture().request()).body.quit, 'menu', 'Windows hosts keep the menu handoff by default')
+  assert.equal((await fixture({ quit: () => 'self' }).request()).body.quit, 'self', 'macOS quits through its own Apple event')
+})
 
-test('obsolete actions and mode or hostStatus options are rejected', async () => {
-  for (const body of [{ action: 'install' }, { action: 'uninstall' }, { action: 'reinstall', mode: 'bootstrap' },
-    { action: 'reinstall', hostStatus: {} }]) {
+test('legacy actions and mode selection are rejected before worker startup', async () => {
+  for (const body of [{ action: 'install' }, { action: 'uninstall' }, { action: 'reinstall', mode: 'profile' }, { action: 'reinstall', hostStatus: { state: 'loaded' } }]) {
     const f = fixture()
-    const r = await f.request({ body: JSON.stringify(body) })
-    assert.equal(r.statusCode, 400)
+    assert.equal((await f.request({ body: JSON.stringify(body) })).statusCode, 400)
     assert.deepEqual(f.calls, [])
   }
+})
+
+test('missing dependency preflight returns its structured error and never commits', async () => {
+  let commits = 0
+  const f = fixture({ start: async () => { throw Object.assign(new Error('Dependency missing'), { code: 'REINSTALL_DEPENDENCY_MISSING' }) }, commit: async () => { commits++ } })
+  const r = await f.request()
+  assert.equal(r.statusCode, 409)
+  assert.equal(r.body.code, 'REINSTALL_DEPENDENCY_MISSING')
+  assert.equal(commits, 0)
 })

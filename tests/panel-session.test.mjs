@@ -81,7 +81,7 @@ test('default panel open drives every operation on its live sidebar session, wit
   assert.equal(references.references[0].carrier, 'sidebar')
 })
 
-test('Web panel open records a navigation request; unsupported tools name the surface and desktop alternative', async () => {
+test('a Web panel queues explicit iframe navigation without claiming a live task session or fallback browser', async () => {
   const { run, calls } = mount({ openPanel: async () => undefined })
   const opened = await run('open', { url: 'https://example.com/' })
   assert.equal(opened.carrier, 'panel-iframe-navigation-requested')
@@ -106,6 +106,17 @@ test('reading an unopened task never opens any surface', async () => {
   assert.deepEqual(calls, [])
 })
 
+test('a queued iframe open can be retried after a CDP provider connects', async () => {
+  const { run, browser, calls } = mount({ openPanel: undefined })
+  assert.equal((await run('open', { url: 'https://example.com/' })).carrier, 'panel-iframe-navigation-requested')
+  assert.deepEqual(calls, [])
+  browser.openPanel = async () => 'browser:panel'
+  assert.equal((await run('open', { url: 'https://example.com/' })).title, 'Visible page')
+  await run('screenshot')
+  assert.equal(calls.at(-1).session, 'browser:panel')
+  assert.equal(calls.some(call => call.name === 'open'), false)
+})
+
 test('builtin -> CDP panel -> builtin switches sessions instead of driving a stale page', async () => {
   const { run, calls } = mount()
   await run('open', { url: 'https://old.example/', surface: 'builtin' })
@@ -119,12 +130,13 @@ test('builtin -> CDP panel -> builtin switches sessions instead of driving a sta
   assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:panel'))
 })
 
-test('builtin -> Web panel forgets and closes the old controllable session', async () => {
+test('a queued Web panel switch closes the old session instead of driving its stale page', async () => {
   const { run, calls } = mount({ openPanel: async () => undefined })
   await run('open', { url: 'https://old.example/', surface: 'builtin' })
-  await run('open', { url: 'https://new.example/' })
+  assert.equal((await run('open', { url: 'https://new.example/' })).carrier, 'panel-iframe-navigation-requested')
+  assert.equal(getLastOpen().url, 'https://new.example/')
   const before = calls.length
-  await assert.rejects(run('content', { format: 'txt' }), /panel surface/)
+  await assert.rejects(run('content', { format: 'txt' }), /panel surface has no live CDP session/)
   assert.equal(calls.length, before)
   assert.ok(calls.some(call => call.name === 'close' && call.session === 'browser:builtin'))
 })

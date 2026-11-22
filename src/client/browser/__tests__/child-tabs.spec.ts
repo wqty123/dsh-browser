@@ -15,7 +15,7 @@ it('dispatches only explicit URL-only HTTP(S) requests, never native children or
   for (const url of ['', 'example.test', 'about:blank', 'javascript:alert(1)', 'file:///private', location.origin, 'https://user:secret@example.test/']) {
     expect(dispatchChildTab({ mode: 'url-only', url }, location.origin, open)).toEqual({ status: 'unsupported', code: 'invalid-child-url' })
   }
-  expect(dispatchChildTab({ mode: 'native-opener', url: 'https://example.test' }, location.origin, open)).toEqual({ status: 'unsupported', code: 'native-child-opener-unavailable' })
+  expect(dispatchChildTab({ mode: 'native-opener', url: 'https://example.test' }, location.origin, open)).toEqual({ status: 'unsupported', code: 'BROWSER_NATIVE_CHILD_UNAVAILABLE' })
   expect(dispatchChildTab({ mode: 'url-only', url: 'https://example.test' }, location.origin, open, false)).toEqual({ status: 'unsupported', code: 'guest-disposed' })
   expect(open).toHaveBeenCalledTimes(1)
   expect(dispatchChildTab({ mode: 'url-only', url: 'https://example.test' }, location.origin, () => { throw new Error('disposed sidebar') })).toEqual({ status: 'unsupported', code: 'sidebar-tab-dispatch-failed' })
@@ -27,10 +27,11 @@ it.each([true, false])('binds Desktop child requests to the guest lifetime (stru
   let legacy!: (url: string) => void
   const onRequested = vi.fn((_lease, listener) => { requested = listener; return stop })
   const onOpenRequested = vi.fn((_lease, listener) => { legacy = listener; return stop })
+  const acquire = vi.fn(async () => ({ lease: 'child-lease' as DesktopBrowserLeaseId, partition: 'persist:test' }))
   const bridge: DesktopBrowserBridge = {
-    acquire: async () => ({ lease: 'child-lease' as DesktopBrowserLeaseId, partition: 'persist:test' }),
+    acquire,
     release: vi.fn(async () => {}), onOpenRequested,
-    ...(structured ? { childTabs: { protocolVersion: 1 as const, onRequested } } : {}),
+    ...(structured ? { persistentSession: true as const, childTabs: { protocolVersion: 1 as const, onRequested } } : {}),
   }
   const element = Object.assign(document.createElement('div'), { loadURL: load }) as unknown as WebviewElement
   const presentation = { createElement: () => element, present() {}, clear() {}, dispose() {} } as unknown as ElectronWebviewPresentation
@@ -38,10 +39,11 @@ it.each([true, false])('binds Desktop child requests to the guest lifetime (stru
   frame.loadUrl({ kind: 'https', url: 'https://example.test/source', title: 'Source' })
   frame.attach()
   await vi.waitFor(() => expect(structured ? onRequested : onOpenRequested).toHaveBeenCalledOnce())
+  expect(acquire).toHaveBeenCalledExactlyOnceWith('workspace', ...structured ? [true] : [])
   if (structured) {
     expect(onOpenRequested).not.toHaveBeenCalled()
-    expect(requested({ mode: 'native-opener', url: 'https://example.test/child' })).toEqual({ status: 'unsupported', code: 'native-child-opener-unavailable' })
-    expect(frame.getSnapshot().error?.description).toBe('native-child-opener-unavailable')
+    expect(requested({ mode: 'native-opener', url: 'https://example.test/child' })).toEqual({ status: 'unsupported', code: 'BROWSER_NATIVE_CHILD_UNAVAILABLE' })
+    expect(frame.getSnapshot().error?.description).toBe('BROWSER_NATIVE_CHILD_UNAVAILABLE')
     expect(open).not.toHaveBeenCalled()
     expect(requested({ mode: 'url-only', url: 'https://example.test/child' })).toEqual({ status: 'url-only-dispatched' })
   } else legacy('https://example.test/child')
@@ -75,7 +77,7 @@ it('authenticates Web URL-only tab requests and exposes unsupported opener error
   emit({})
   expect(open).toHaveBeenCalledExactlyOnceWith('https://example.test/child')
   emit({ requestId: 2, mode: 'native-opener' })
-  expect(page.frame.getSnapshot().error?.description).toBe('native-child-opener-unavailable')
+  expect(page.frame.getSnapshot().error?.description).toBe('BROWSER_NATIVE_CHILD_UNAVAILABLE')
   expect(page.frame.getSnapshot().target?.url).toBe('https://example.test/source')
   expect(host.querySelector('iframe')).toBe(frame)
   await page.frame.dispose()
