@@ -58,7 +58,7 @@ test('different tasks concurrently claim different browser targets', async () =>
   }
 })
 
-test('an ephemeral profile is removed after its launched browser exits, not while it is still alive', async () => {
+test('an ephemeral profile with unverified process ownership is retained even after its launcher exits', async () => {
   const folder = mkdtempSync(join(tmpdir(), 'dsh-ephemeral-exit-'))
   writeFileSync(join(folder, 'Cookies'), 'sample')
   const child = Object.assign(new EventEmitter(), {
@@ -73,7 +73,7 @@ test('an ephemeral profile is removed after its launched browser exits, not whil
     child.exitCode = 0
     child.emit('exit', 0, null)
     await new Promise(setImmediate)
-    assert.equal(existsSync(folder), false, 'profile cleanup runs after the exit notification')
+    assert.equal(existsSync(folder), true, 'launcher exit alone does not prove its profile is unused')
   } finally {
     child.exitCode = 0
     child.emit('exit', 0, null)

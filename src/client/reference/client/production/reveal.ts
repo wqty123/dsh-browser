@@ -21,6 +21,7 @@ import { createRevealer, RevealFailed, type RevealAdapter, type RevealLocation }
 import { parseBrowserRefUri } from '../scheme.ts'
 import type { BrowserRefLinkSpec } from '../BrowserRefLink.tsx'
 import type { ReferenceHttpClient } from './http-transport.ts'
+import { bridgePackageError } from '../../../../bridge-compatibility.ts'
 
 /** Frozen identity of a captured reference, resolved from the stored snapshot. */
 export interface RevealOwner {
@@ -60,6 +61,7 @@ export interface ProductionRevealer {
   linkSpec(uri: string, label?: string): BrowserRefLinkSpec
   /** Last activation status, for the UI to render a hint. */
   lastStatus(): RevealStatus | undefined
+  lastReason(): string | undefined
   dispose(): void
 }
 
@@ -109,11 +111,14 @@ export function createRevealAdapter(options: ProductionRevealerOptions): RevealA
       const owner = resolveOwner(request.referenceId)
       if (owner === undefined) throw new RevealUnavailableError('unknown reference')
       const wire = await http.reveal(request.referenceId, request.partId, request.navigate === true, request.sourcePageId)
+        .catch((error: unknown) => { throw bridgePackageError(error) ?? error })
+      const packageError = bridgePackageError(wire)
+      if (packageError !== undefined) throw packageError
       // A transport-level refusal (ok !== true) has no cause to report; a
       // decoded answer always does, so it travels with the status.
       if (wire.ok !== true) throw new RevealUnavailableError(wire.reason ?? 'reveal was refused')
       const status = wireStatus(wire.status)
-      if (status !== 'revealed') throw new RevealFailed(status, wire.reason ?? wire.status)
+      if (status !== 'revealed') throw new RevealFailed(status, wire.reason ?? wire.note ?? wire.status)
       // Identity facts (owner.sessionId + browserSessionId + label/frame) are
       // carried for audit; the plugin resolves the actual tab from the frozen
       // reference server-side.
@@ -140,8 +145,10 @@ export function createRevealAdapter(options: ProductionRevealerOptions): RevealA
 export function createProductionRevealer(options: ProductionRevealerOptions): ProductionRevealer {
   const revealer = createRevealer({ adapter: createRevealAdapter(options) })
   let last: RevealStatus | undefined
+  let reason: string | undefined
 
   const run = async (parsed: ReturnType<typeof parseBrowserRefUri>, navigate = false, sourcePageId?: string): Promise<RevealStatus> => {
+    reason = undefined
     let status: RevealStatus
     if (parsed === undefined) {
       status = 'unknown-reference'
@@ -156,6 +163,7 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
       try {
         const result: RevealResult = await revealer.reveal(request)
         status = result.status
+        reason = result.reason
       } catch {
         status = 'unavailable'
       }
@@ -169,6 +177,7 @@ export function createProductionRevealer(options: ProductionRevealerOptions): Pr
 
   return {
     revealer,
+    lastReason: () => reason,
     async activate(uri, activateOptions) {
       return run(parseBrowserRefUri(uri), activateOptions?.navigate === true, activateOptions?.sourcePageId)
     },

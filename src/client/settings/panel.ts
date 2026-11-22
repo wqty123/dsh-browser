@@ -1,3 +1,6 @@
+import { zh, en } from '../../../assets/browser-panel-locales.mjs'
+import { REFERENCE_REVEAL_ROUTE, REFERENCE_INSERT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE, BRIDGE_STATUS_ROUTE, RUNTIME_STATUS_ROUTE, RUNTIME_PROVISION_ROUTE } from '../../../assets/browser-policy.mjs'
+import { SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../../assets/browser-policy.mjs'
 /**
  * 设置面板（客户端半）：从旧插件的 ModuleLoader bundle 机械移植而来，内部实现未改一行。
  *
@@ -12,6 +15,13 @@ export interface LegacyClientModule {
   readonly name?: string
   readonly inject?: readonly string[]
   readonly apply: (ctx: never) => void
+}
+
+export async function requestExtensionSetup(fetcher = fetch) {
+  const response = await fetcher(EXTENSION_INSTALL_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
+  const result = await response.json()
+  if (!response.ok || !result.ok) throw new Error(result.detail ?? `HTTP ${response.status}`)
+  return result
 }
 
 /**
@@ -31,7 +41,7 @@ const react = require("react")
   const name = "dsh-builtin-browser"
   const inject = ["slots", "locale"]
   const NS = "settings.dsh-builtin-browser"
-  const ROUTE = "/dsh-builtin-browser/settings"
+  const ROUTE = SETTINGS_ROUTE
   let translate = (key) => key
   let currentLocale = "zh"
   function updateCurrentLocale(locale) {
@@ -56,363 +66,6 @@ const react = require("react")
    */
   let refreshWatchLabels = () => {}
 
-  const zh = {
-    "readiness.hostPatch": "DSH 宿主补丁",
-    "hostPatch.install": "安装宿主补丁",
-    "hostPatch.restore": "恢复原文件",
-    "hostPatch.working": "正在更新…",
-    "hostPatch.reload": "已更新，请重新加载此页面。无需重启服务器。",
-    "hostPatch.restart": "已更新；请重启 DSH Web 服务器，然后重新加载此页面。",
-    "readiness.hostPatch.applied": "已应用（支持后台页面渲染）",
-    "readiness.hostPatch.absent": "未应用",
-    "readiness.hostPatch.unsupported-version": "不支持此版本；继续使用兼容桥接",
-    "readiness.hostPatch.anchors-mismatch": "文件不匹配；继续使用兼容桥接",
-    nav: "浏览器",
-    "watch.open": "观看浏览器",
-    "watch.title": "实时画面",
-    "watch.session": "选择会话",
-    "watch.readOnly": "只读,不转发点击与输入",
-    "watch.stop": "停止",
-    "watch.live": "直播",
-    "watch.paused": "已暂停",
-    "watch.stopped": "已停止",
-    "watch.connecting": "连接中",
-    "watch.disconnected": "连接中断",
-    "watch.disabled": "主机未开启远程观看",
-    "watch.noPage": "该任务尚未打开浏览器",
-    "watch.bridgeStale": "桌面端升级后 bridge 已失效,请重跑安装:",
-    "watch.bridgeMissing": "桌面 bridge 未安装,侧栏载体不可用。安装命令:",
-    title: "浏览器",
-    "settings.advanced": "高级设置",
-    "settings.saving": "正在保存…",
-    "settings.details": "配置文件",
-    "browser.profile": "保留登录状态",
-    "browser.profile.hint": "重启 DSH 后生效",
-    "browser.headless": "窗口模式",
-    "browser.headless.hint": "重启 DSH 后生效",
-    "browser.headless.auto": "自动检测显示环境",
-    "browser.headless.windowed": "显示窗口",
-    "browser.headless.headless": "无头运行",
-    "delivery.save": "保存交付设置",
-    "delivery.invalid": "检查工具名、参数模板和站点规则。参数必须是字符串值的 JSON 对象，站点规则每行填写一个 host=工具名。",
-    loading: "读取设置…",
-    failed: "读取设置失败:",
-    retry: "重试",
-    saved: "已保存",
-    "history.enabled": "保留浏览历史",
-    "ui.title": "展示",
-    "ui.autoExpandOnce": "侧栏自动展开",
-    "ui.closeWithSession": "会话结束时关闭浏览器",
-    "ui.virtualCursor": "显示 Agent 光标",
-    "ui.quiet": "安静模式",
-    "ui.quiet.hint": "保留当前窗口和标签。新启动的 Chrome / Edge 在后台运行。",
-    "vision.strategy": "坐标点击与拖拽",
-    "vision.auto": "允许",
-    "vision.nonVisual": "禁止",
-    "credentials.allowRead": "允许 Agent 读取 cookies / 导出登录状态",
-    "browser.channel": "默认浏览器",
-    "browser.sidebar": "DSH 侧栏面板",
-    "browser.bundled": "DSH 侧栏（旧版内置选项）",
-    "browser.chrome": "本机 Chrome",
-    "browser.edge": "本机 Edge",
-    "browser.auto": "DSH 侧栏（旧版自动选项）",
-    "actions.title": "Agent 权限",
-    "actions.allowExecute": "允许在页面里执行脚本",
-    "actions.allowDownload": "允许下载文件到磁盘",
-    "actions.allowCredentialWrite": "允许写入登录状态",
-    "actions.allowCredentialWrite.hint": "可向任意域写入 cookies。",
-    "refs.title": "网页引用",
-    "refs.empty": "暂无网页引用",
-    "refs.records": "条",
-    "refs.transfer": "导入与导出",
-    "refs.loadFailed": "读取失败，请重试",
-    "refs.reading": "正在读取…",
-    "refs.image": "图片",
-    "refs.table": "表格",
-    "refs.untitled": "未命名网页",
-    "refs.reveal": "定位",
-    "refs.refresh": "刷新",
-    "refs.loading": "定位中…",
-    "refs.parts": "个片段",
-    "refs.revealed": "已在原文中定位",
-    "refs.ambiguous": "有多处相同匹配，无法唯一定位",
-    "refs.missing": "原文中已找不到这段内容",
-    "refs.pageMismatch": "当前页面与引用来源不同，请先打开来源地址",
-    "refs.sessionUnavailable": "捕获该引用的浏览器已关闭",
-    "refs.notFound": "引用不存在",
-    "refs.failed": "定位失败",
-    "refs.export": "导出",
-    "refs.exportJsonl": "JSONL",
-    "refs.exportMarkdown": "Markdown",
-    "refs.exportZip": "ZIP（含图片）",
-    "refs.import": "导入 ZIP",
-    "refs.importBusy": "导入中…",
-    "refs.importDone": "已导入",
-    "refs.importPartial": "条拒绝",
-    "refs.importFailed": "导入失败",
-    "refs.settingsHint": "网页引用属于会话内容：引用卡片出现在会话输入框，历史记录与按需导入导出在输入框旁的「引用记录」入口；设置页只保存引用偏好。",
-    "refs.recordsMenu": "引用记录",
-    "refs.addToDraft": "引用到会话",
-    "refs.remove": "移除",
-    "refs.added": "已加入当前会话草稿，请补充问题后自行发送",
-    "refs.addFailed": "加入失败，引用仍保留在记录里",
-    "refs.removed": "已从会话草稿移除",
-    "refs.removeFailed": "移除失败（可能尚未加入会话）",
-    "remoteView.enabled": "允许远程观看",
-    "remoteView.enabled.hint": "共享只读画面，可能包含敏感信息。",
-    "readiness.title": "环境检查",
-    "readiness.loading": "检测中…",
-    "readiness.failed": "读取就绪状态失败:",
-    "readiness.channel": "配置的载体",
-    "readiness.resolvedCarrier": "当前载体",
-    "readiness.system": "本机浏览器",
-    "readiness.details": "诊断",
-    "readiness.electron": "内置浏览器运行时",
-    "readiness.bridge": "侧栏浏览器桥接",
-    "readiness.recheck": "重新检测",
-    "readiness.prepare": "准备内置浏览器",
-    "readiness.preparing": "正在准备…",
-    "readiness.fix": "外部终端命令",
-    "readiness.carrier.sidebar": "侧栏浏览器",
-    "readiness.carrier.bundled": "内置 Electron",
-    "readiness.carrier.system": "本机 Chrome / Edge",
-    "readiness.carrier.auto": "自动",
-    "readiness.state.ready": "可用",
-    "readiness.state.blocked": "尚不可用",
-    "readiness.status.checkPending": "等待环境检测",
-    "readiness.status.systemReady": "已找到 {browser}",
-    "readiness.status.systemMissing": "未找到 {browser}",
-    "readiness.status.bundledReady": "内置运行环境可用",
-    "readiness.status.bundledMissing": "内置运行环境待安装",
-    "readiness.status.bundledPreparing": "正在下载内置运行环境",
-    "readiness.status.bundledFailed": "内置运行环境准备失败",
-    "readiness.status.bridgeReady": "侧栏桥可用",
-    "readiness.status.bridgeMissing": "侧栏桥待安装",
-    "readiness.status.bridgeStale": "侧栏桥待修复",
-    "readiness.status.bridgeStopped": "侧栏桥未连接",
-    "readiness.status.bridgeInstalled": "侧栏桥已安装",
-    "readiness.status.desktopMissing": "未检测到宿主进程",
-    "readiness.electron.present": "已就绪",
-    "readiness.electron.ready": "已就绪",
-    "readiness.electron.preparing": "正在下载",
-    "readiness.electron.idle": "尚未开始准备",
-    "readiness.electron.skipped": "已跳过(设置了 ELECTRON_SKIP_BINARY_DOWNLOAD)",
-    "readiness.electron.failed": "准备失败",
-    "readiness.bridge.installed": "已安装",
-    "readiness.bridge.installedRunning": "已安装(宿主正在运行)",
-    "readiness.bridge.installedNotRunning": "已安装,但宿主没在运行",
-    "readiness.bridge.missing": "未安装",
-    "readiness.bridge.stale": "已失效(宿主升级后需重装)",
-    "readiness.bridge.absent": "本机没有可用的宿主进程",
-    "readiness.bridge.reinstall": "卸载并重装",
-    "readiness.bridge.extensionUnsupported": "DESKTOP_MAIN_EXTENSION_UNSUPPORTED：请先显式安装宿主补丁。现有兼容桥接不受影响。",
-    "readiness.bridge.extension.not-installed": "主扩展未安装",
-    "readiness.bridge.extension.pending-restart": "主扩展待重启",
-    "readiness.bridge.extension.loaded": "主扩展已加载",
-    "readiness.bridge.extension.failed": "主扩展加载失败",
-    "readiness.bridge.working": "正在准备维护…",
-    "readiness.bridge.inProgress": "维护进行中…",
-    "readiness.bridge.maintenanceHint": "点击后将正常退出并重启 DSH。",
-    "readiness.bridge.progressHint": "维护期间将显示独立进度，完成后自动启动 DSH。",
-    "readiness.bridge.localOnly": "请在本机 DSH 桌面的设置中操作。",
-    "readiness.bridge.unsupported": "请更新并重启 DSH 后重试。",
-    "readiness.bridge.phase.armed": "正在准备退出 DSH…",
-    "readiness.bridge.phase.closing": "正在正常退出 DSH…",
-    "readiness.bridge.phase.installing": "正在安装桥接…",
-    "readiness.bridge.phase.restarting": "正在重启 DSH…",
-    "readiness.bridge.phase.verifying": "正在确认桥接状态…",
-    "readiness.bridge.failed": "桥接维护失败，请查看诊断后重试。",
-    "readiness.bridge.cancelled": "桥接维护已取消，可重试。",
-    "readiness.bridge.installedDone": "桥接安装完成",
-    "readiness.bridge.actionFailed": "桥接维护未能开始，请查看诊断后重试。",
-    "delivery.title": "交付",
-    "delivery.tool": "接手下载的工具(MCP 工具名,留空=只存本地)",
-    "delivery.args": "参数模板(JSON)",
-    "delivery.args.hint": "占位 {path} {name} {size}。",
-    "delivery.onFail": "远程失败时",
-    "delivery.onFail.keep": "保留本地文件并报告两边结果",
-    "delivery.onFail.stop": "按失败处理",
-    "delivery.sites": "按站点覆盖(每行 host=工具名)",
-  }
-
-  const en = {
-    "readiness.hostPatch": "DSH host patch",
-    "hostPatch.install": "Install host patch",
-    "hostPatch.restore": "Restore original files",
-    "hostPatch.working": "Updating…",
-    "hostPatch.reload": "Updated. Reload this page; no server restart is needed.",
-    "hostPatch.restart": "Updated. Restart the DSH Web server, then reload this page.",
-    "readiness.hostPatch.applied": "Applied (background page rendering available)",
-    "readiness.hostPatch.absent": "Not applied",
-    "readiness.hostPatch.unsupported-version": "Unsupported version; using the legacy bridge",
-    "readiness.hostPatch.anchors-mismatch": "Files did not match; using the legacy bridge",
-    nav: "Browser",
-    "watch.open": "Watch browser",
-    "watch.title": "Live view",
-    "watch.session": "Session",
-    "watch.readOnly": "Read-only; clicks and typing are not forwarded",
-    "watch.stop": "Stop",
-    "watch.live": "Live",
-    "watch.paused": "Paused",
-    "watch.stopped": "Stopped",
-    "watch.connecting": "Connecting",
-    "watch.disconnected": "Disconnected",
-    "watch.disabled": "Remote viewing is off on the host",
-    "watch.noPage": "This task has not opened a browser",
-    "watch.bridgeStale": "A desktop update invalidated the bridge; re-run:",
-    "watch.bridgeMissing": "The sidebar bridge is not installed, so the sidebar carrier cannot work:",
-    title: "Browser",
-    "settings.advanced": "Advanced settings",
-    "settings.saving": "Saving…",
-    "settings.details": "Configuration file",
-    "browser.profile": "Keep sign-ins",
-    "browser.profile.hint": "Requires restarting DSH",
-    "browser.headless": "Window mode",
-    "browser.headless.hint": "Requires restarting DSH",
-    "browser.headless.auto": "Detect display automatically",
-    "browser.headless.windowed": "Show a window",
-    "browser.headless.headless": "Run headless",
-    "delivery.save": "Save delivery settings",
-    "delivery.invalid": "Check tool names, the argument template, and site rules. Use a JSON object with string values and one host=tool rule per line.",
-    loading: "Loading settings…",
-    failed: "Could not load settings:",
-    retry: "Retry",
-    saved: "Saved",
-    "history.enabled": "Keep browsing history",
-    "ui.title": "Presentation",
-    "ui.autoExpandOnce": "Auto-expand the side panel",
-    "ui.closeWithSession": "Close the browser when the session ends",
-    "ui.virtualCursor": "Show agent cursor",
-    "ui.quiet": "Quiet mode",
-    "ui.quiet.hint": "Keeps your current window and tab. New Chrome / Edge instances run in the background.",
-    "vision.strategy": "Coordinate clicks and drags",
-    "vision.auto": "Allowed",
-    "vision.nonVisual": "Blocked",
-    "credentials.allowRead": "Allow the agent to read cookies / export login state",
-    "browser.channel": "Default browser",
-    "browser.sidebar": "DSH sidebar",
-    "browser.bundled": "DSH sidebar (legacy bundled setting)",
-    "browser.chrome": "Installed Chrome",
-    "browser.edge": "Installed Edge",
-    "browser.auto": "DSH sidebar (legacy automatic setting)",
-    "actions.title": "Agent permissions",
-    "actions.allowExecute": "Run scripts in the page",
-    "actions.allowDownload": "Download files to disk",
-    "actions.allowCredentialWrite": "Write login state",
-    "actions.allowCredentialWrite.hint": "Write cookies to any domain.",
-    "refs.title": "Page references",
-    "refs.empty": "No page references",
-    "refs.records": "saved",
-    "refs.transfer": "Import and export",
-    "refs.loadFailed": "Could not load references. Try again.",
-    "refs.reading": "Loading…",
-    "refs.image": "Image",
-    "refs.table": "Table",
-    "refs.untitled": "Untitled page",
-    "refs.reveal": "Locate",
-    "refs.refresh": "Refresh",
-    "refs.loading": "Locating…",
-    "refs.parts": "part(s)",
-    "refs.revealed": "Located in the page",
-    "refs.ambiguous": "Several equal matches; cannot choose one",
-    "refs.missing": "This content is no longer on the page",
-    "refs.pageMismatch": "The page has changed; open the reference's page first",
-    "refs.sessionUnavailable": "The browser that captured this reference is gone",
-    "refs.notFound": "Reference not found",
-    "refs.failed": "Could not locate",
-    "refs.export": "Export",
-    "refs.exportJsonl": "JSONL",
-    "refs.exportMarkdown": "Markdown",
-    "refs.exportZip": "ZIP (with images)",
-    "refs.import": "Import ZIP",
-    "refs.importBusy": "Importing…",
-    "refs.importDone": "Imported",
-    "refs.importPartial": "rejected",
-    "refs.importFailed": "Import failed",
-    "refs.settingsHint": "Page references belong to a conversation: cards appear in the conversation input, while history and on-demand import/export live in the Reference records entry beside it. Settings only hold preferences.",
-    "refs.recordsMenu": "Reference records",
-    "refs.addToDraft": "Add to conversation",
-    "refs.remove": "Remove",
-    "refs.added": "Added to this conversation's draft; write your question and send it yourself",
-    "refs.addFailed": "Could not add; the record is kept",
-    "refs.removed": "Removed from the conversation draft",
-    "refs.removeFailed": "Could not remove (it may not be in a draft yet)",
-    "remoteView.enabled": "Allow remote viewing",
-    "remoteView.enabled.hint": "Shares a read-only view that may contain sensitive information.",
-    "readiness.title": "Environment check",
-    "readiness.loading": "Checking…",
-    "readiness.failed": "Could not read readiness:",
-    "readiness.channel": "Configured carrier",
-    "readiness.resolvedCarrier": "Current carrier",
-    "readiness.system": "Installed browser",
-    "readiness.details": "Diagnostics",
-    "readiness.electron": "Bundled browser runtime",
-    "readiness.bridge": "Sidebar browser bridge",
-    "readiness.recheck": "Check again",
-    "readiness.prepare": "Prepare the bundled browser",
-    "readiness.preparing": "Preparing…",
-    "readiness.fix": "External-terminal command",
-    "readiness.carrier.sidebar": "Sidebar browser",
-    "readiness.carrier.bundled": "Bundled Electron",
-    "readiness.carrier.system": "Installed Chrome / Edge",
-    "readiness.carrier.auto": "Automatic",
-    "readiness.state.ready": "Ready",
-    "readiness.state.blocked": "Not ready yet",
-    "readiness.status.checkPending": "Waiting for environment check",
-    "readiness.status.systemReady": "{browser} found",
-    "readiness.status.systemMissing": "{browser} not found",
-    "readiness.status.bundledReady": "Bundled runtime available",
-    "readiness.status.bundledMissing": "Bundled runtime needs installation",
-    "readiness.status.bundledPreparing": "Downloading bundled runtime",
-    "readiness.status.bundledFailed": "Bundled runtime preparation failed",
-    "readiness.status.bridgeReady": "Sidebar bridge available",
-    "readiness.status.bridgeMissing": "Sidebar bridge needs installation",
-    "readiness.status.bridgeStale": "Sidebar bridge needs repair",
-    "readiness.status.bridgeStopped": "Waiting for DSH Desktop to start",
-    "readiness.status.bridgeInstalled": "Sidebar bridge installed",
-    "readiness.status.desktopMissing": "DSH Desktop not found",
-    "readiness.electron.present": "Ready",
-    "readiness.electron.ready": "Ready",
-    "readiness.electron.preparing": "Downloading",
-    "readiness.electron.idle": "Not prepared yet",
-    "readiness.electron.skipped": "Skipped (ELECTRON_SKIP_BINARY_DOWNLOAD is set)",
-    "readiness.electron.failed": "Preparation failed",
-    "readiness.bridge.installed": "Installed",
-    "readiness.bridge.installedRunning": "Installed (the desktop app is running)",
-    "readiness.bridge.installedNotRunning": "Installed, but the desktop app is not running",
-    "readiness.bridge.missing": "Not installed",
-    "readiness.bridge.stale": "Stale (a desktop update needs a reinstall)",
-    "readiness.bridge.absent": "No desktop install on this machine",
-    "readiness.bridge.reinstall": "Uninstall and reinstall",
-    "readiness.bridge.extensionUnsupported": "DESKTOP_MAIN_EXTENSION_UNSUPPORTED: explicitly install the host patch first. An existing legacy bridge continues to work.",
-    "readiness.bridge.extension.not-installed": "Main extension not installed",
-    "readiness.bridge.extension.pending-restart": "Main extension pending restart",
-    "readiness.bridge.extension.loaded": "Main extension loaded",
-    "readiness.bridge.extension.failed": "Main extension failed",
-    "readiness.bridge.working": "Preparing maintenance…",
-    "readiness.bridge.inProgress": "Maintenance in progress…",
-    "readiness.bridge.maintenanceHint": "DSH will exit normally and restart after you click.",
-    "readiness.bridge.progressHint": "A separate progress window will appear. DSH starts automatically when maintenance finishes.",
-    "readiness.bridge.localOnly": "Use settings in DSH Desktop on this computer.",
-    "readiness.bridge.unsupported": "Update and restart DSH, then try again.",
-    "readiness.bridge.phase.armed": "Preparing to exit DSH…",
-    "readiness.bridge.phase.closing": "Exiting DSH normally…",
-    "readiness.bridge.phase.installing": "Installing the bridge…",
-    "readiness.bridge.phase.restarting": "Restarting DSH…",
-    "readiness.bridge.phase.verifying": "Checking the bridge…",
-    "readiness.bridge.failed": "Bridge maintenance failed. Check diagnostics and try again.",
-    "readiness.bridge.cancelled": "Bridge maintenance was cancelled. You can try again.",
-    "readiness.bridge.installedDone": "Bridge installed",
-    "readiness.bridge.actionFailed": "Bridge maintenance could not start. Check diagnostics and try again.",
-    "delivery.title": "Delivery",
-    "delivery.tool": "Tool that takes the download (MCP tool name; empty = local only)",
-    "delivery.args": "Argument template (JSON)",
-    "delivery.args.hint": "Placeholders: {path} {name} {size}.",
-    "delivery.onFail": "When the remote side fails",
-    "delivery.onFail.keep": "Keep the local file and report both outcomes",
-    "delivery.onFail.stop": "Treat it as a failure",
-    "delivery.sites": "Per-site override (one host=tool per line)",
-  }
 
   /**
    * Read or patch the host-owned settings document.
@@ -966,6 +619,7 @@ const react = require("react")
     const [bridgeJob, setBridgeJob] = useState(null)
     const [bridgePollVersion, setBridgePollVersion] = useState(0)
     const [bridgeError, setBridgeError] = useState(null)
+    const [extensionMessage, setExtensionMessage] = useState('')
     const bridgePending = useRef(false)
     const bridgeSubmitting = useRef(false)
     const bridgeJobId = useRef(null)
@@ -973,7 +627,7 @@ const react = require("react")
 
     const read = useCallback(async () => {
       try {
-        const response = await fetch("/dsh-builtin-browser/runtime-status", { headers: { accept: "application/json" } })
+        const response = await fetch(RUNTIME_STATUS_ROUTE, { headers: { accept: "application/json" } })
         // A host that predates this route answers 404, and that is a version skew rather than a
         // fault: after an update the client bundle is read at request time while the host's code is
         // what started with the process. Rendering "could not read readiness: HTTP 404" at a user who
@@ -1050,7 +704,7 @@ const react = require("react")
       setBusy(true)
       setError("")
       try {
-        const response = await fetch("/dsh-builtin-browser/runtime-provision", {
+        const response = await fetch(RUNTIME_PROVISION_ROUTE, {
           method: "POST",
           headers: { accept: "application/json" },
         })
@@ -1142,7 +796,9 @@ const react = require("react")
     const systemLabel = runtime.systemBrowser?.checked === true
       ? t(runtime.systemBrowser.present ? "readiness.status.systemReady" : "readiness.status.systemMissing").replace("{browser}", systemName)
       : t("readiness.status.checkPending")
-    const stateLabel = resolvedCarrier === "system" ? systemLabel
+    const extensionDisconnected = runtime.extension?.state === 'not-connected' || runtime.extension?.state === 'extension-missing'
+    const stateLabel = resolvedCarrier === "extension" ? extensionDisconnected ? t('extension.notConnected') : runtime.extension?.detail ?? t("readiness.state.blocked")
+      : resolvedCarrier === "system" || resolvedCarrier === "cdp" ? systemLabel
       : resolvedCarrier === "sidebar"
         ? t(runtime.bridge.state === "installed"
           ? runtime.bridge.running === true ? "readiness.status.bridgeReady"
@@ -1153,6 +809,15 @@ const react = require("react")
           : runtime.electron.state === "preparing" ? "readiness.status.bundledPreparing"
             : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
     const controlsBusy = busy || bridgeBusy !== null || bridgeActive
+    const extensionAction = async () => {
+      setBusy(true)
+      try {
+        const result = await requestExtensionSetup()
+        setExtensionMessage(t(result.connected ? 'extension.connected' : result.store ? 'extension.storeHint' : 'extension.loadHint'))
+      } catch (failure) { setExtensionMessage(String(failure.message ?? failure)) }
+      finally { setBusy(false); void read() }
+    }
+    const extensionButton = h("button", { key: "install-extension", type: "button", style: styles.button, disabled: controlsBusy, onClick: extensionAction }, t('extension.button'))
     const canManageBridge = runtime.bridge.present === true && runtime.bridge.state !== "absent"
     const extensionUnsupported = runtime.bridge.code === "DESKTOP_MAIN_EXTENSION_UNSUPPORTED"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
@@ -1167,6 +832,12 @@ const react = require("react")
         h("span", { key: "title" }, t("readiness.title")),
         h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, stateLabel),
       ]),
+      runtime.extension ? h("div", { key: "extension" }, [
+        resolvedCarrier !== 'extension' && extensionDisconnected ? h('p', { key: 'fallback-hint', role: 'status', style: styles.hint }, t('extension.notConnected')) : null,
+        h("p", { key: "profile", role: "status", style: styles.hint }, [runtime.extension.browser, runtime.extension.profile, runtime.extension.connectionId, runtime.extension.state].filter(Boolean).join(" · ")),
+        h("p", { key: "quiet", style: styles.hint }, t("extension.quiet")),
+        h('p', { key: 'hint', style: styles.hint }, t('extension.loadHint')),
+      ]) : null,
       canManageBridge ? h("div", { key: "bridge-controls" }, [
         extensionUnsupported ? h("p", { key: "extension-unsupported", role: "status", style: styles.hint }, t("readiness.bridge.extensionUnsupported"))
           : runtime.bridge.mainExtension ? h("p", { key: "extension-status", role: "status", style: styles.hint },
@@ -1174,15 +845,21 @@ const react = require("react")
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
           h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: bridgeAction }, t("readiness.bridge.reinstall")),
+          extensionButton,
         ]),
         h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
       ]) : null,
+      !canManageBridge ? extensionButton : null,
+      extensionMessage ? h('p', { key: 'extension-message', role: 'status', style: styles.hint }, extensionMessage) : null,
+      h('p', { key: 'active-carrier', role: 'status', style: styles.hint }, [runtime.resolvedCarrier, runtime.controlledProfile, runtime.fallbackReason, runtime.extension?.registration?.detail].filter(Boolean).join(' · ')),
+      ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered).map(([browser, status]) => h('p', { key: 'registration-' + browser, role: 'status', style: styles.hint }, browser + ': ' + status.detail)),
       bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase}`)) : null,
       bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t("readiness.bridge.installedDone")) : null,
       bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
         `${t("readiness.hostPatch")}: ${t("readiness.hostPatch." + bridgeJob.hostPatch.status.replaceAll(" ", "-"))}`) : null,
       bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
       bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
+      runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
         h("summary", { key: "title", style: styles.hint }, t("readiness.details")),
         h("div", { key: "kv", style: styles.kv }, [
@@ -1334,7 +1011,7 @@ const react = require("react")
     const reveal = referenceId => {
       setPending(referenceId)
       setOutcome(null)
-      fetch("/dsh-builtin-browser/reference/reveal", {
+      fetch(REFERENCE_REVEAL_ROUTE, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ referenceId }),
@@ -1377,7 +1054,7 @@ const react = require("react")
       setImporting(true)
       setImportNote("")
       setOutcome(null)
-      fetch("/dsh-builtin-browser/reference/import", {
+      fetch(REFERENCE_IMPORT_ROUTE, {
         method: "POST",
         headers: { "content-type": "application/zip" },
         body: file,
@@ -1423,10 +1100,10 @@ const react = require("react")
         .finally(() => { if (alive.current) setPending("") })
     }
     const addToDraft = referenceId => postDelivery(
-      "/dsh-builtin-browser/reference/insert", { referenceId }, "added", "addFailed", referenceId,
+      REFERENCE_INSERT_ROUTE, { referenceId }, "added", "addFailed", referenceId,
     )
     const removeFromDraft = referenceId => postDelivery(
-      "/dsh-builtin-browser/reference/delivery/remove", { referenceId }, "removed", "removeFailed", referenceId,
+      REFERENCE_DELIVERY_REMOVE_ROUTE, { referenceId }, "removed", "removeFailed", referenceId,
     )
     const withActions = props && props.withActions === true
 
@@ -1615,7 +1292,9 @@ const react = require("react")
       selector("browser.channel", settings.browser.channel,
         options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
-      h(Readiness, { key: "readiness", channel: settings.browser.channel }),
+      systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
+        options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
+      h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel }),
       h(HostPatchControls, { key: "host-patch" }),
       section("ui.title", [
         toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
@@ -1637,8 +1316,8 @@ const react = require("react")
           { value: "auto", label: t("vision.auto") },
           { value: "nonVisual", label: t("vision.nonVisual") },
         ], strategy => patch({ vision: { strategy } })),
-        systemBrowser ? toggle("cookies", "persist", "browser.profile", "browser.profile.hint") : null,
-        systemBrowser ? selector("browser.headless", settings.browser.headless ?? "auto",
+        systemBrowser && settings.browser.systemProfile !== "user" ? toggle("cookies", "persist", "browser.profile", "browser.profile.hint") : null,
+        systemBrowser && settings.browser.systemProfile !== "user" ? selector("browser.headless", settings.browser.headless ?? "auto",
           options("browser.headless.", ["auto", "windowed", "headless"]),
           headless => patch({ browser: { headless } }), "browser.headless.hint") : null,
         settings.delivery ? section("delivery.title", [
@@ -1833,6 +1512,7 @@ const react = require("react")
       const hold = renderingHolds.get(token)
       if (hold === undefined) return
       renderingHolds.delete(token)
+      clearTimeout(hold.timer)
       hold.release()
     }
     function releaseAllRendering() {
@@ -1939,6 +1619,7 @@ const react = require("react")
         .then(body => {
           const open = body && body.open
           if (!open || typeof open.url !== "string" || typeof open.at !== "number") return
+          if (typeof open.owner === "string" && open.owner.replace(/^session-/, "") !== sessionId) return
           // Only act when the HOST says it is in panel mode. A host that predates the single-surface
           // switch still opens its own browser for every call, so placing a tab here as well produced TWO
           // live views of one page (the reported double-open). No echo, no tab.
@@ -2239,12 +1920,14 @@ const react = require("react")
     }
 
     const api = {
-      holdRendering(sessionId, token) {
+      holdRendering(sessionId, token, deadline = Date.now() + 30_000) {
         if (typeof sessionId !== "string" || !sessionId.startsWith("session-") || typeof token !== "string") return false
+        if (!Number.isFinite(deadline) || deadline <= Date.now()) return false
         if (renderingHolds.has(token)) return true
         if (onScreenSession() === sessionId || typeof sidebarRight?.holdRendering !== "function") return false
         const release = sidebarRight.holdRendering(sessionId)
-        renderingHolds.set(token, { sessionId, release })
+        const timer = setTimeout(() => releaseRendering(token), Math.min(30_000, deadline - Date.now()))
+        renderingHolds.set(token, { sessionId, release, timer })
         return true
       },
       releaseRendering,
@@ -2529,8 +2212,8 @@ const react = require("react")
    */
   function installWatchPanel(ctx) {
     if (typeof document === "undefined") return
-    const SESSIONS = "/dsh-builtin-browser/browser-view/sessions"
-    const FRAME = "/dsh-builtin-browser/browser-view/frame"
+    const SESSIONS = PREVIEW_SESSIONS_ROUTE
+    const FRAME = PREVIEW_ROUTE
     const MIN_INTERVAL_MS = 500
 
     // Built element by element and referenced directly, never through innerHTML + querySelector.
@@ -2855,7 +2538,7 @@ const react = require("react")
     const showBridgeStatus = async () => {
       let status
       try {
-        const response = await fetch("/dsh-builtin-browser/bridge-status", { headers: { accept: "application/json" } })
+        const response = await fetch(BRIDGE_STATUS_ROUTE, { headers: { accept: "application/json" } })
         if (!response.ok) return
         const data = await response.json()
         status = data?.bridge

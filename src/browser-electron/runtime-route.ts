@@ -1,3 +1,4 @@
+import { RUNTIME_STATUS_ROUTE, RUNTIME_PROVISION_ROUTE } from '../../assets/browser-policy.mjs'
 /**
  * The readiness endpoints the settings panel reads.
  *
@@ -16,7 +17,7 @@ import { sameOrigin } from './settings-route.ts'
 import type { RuntimeStatusReport } from './runtime-status.ts'
 
 /** Where the panel reads readiness. */
-export const RUNTIME_STATUS_ROUTE = '/dsh-builtin-browser/runtime-status'
+export { RUNTIME_STATUS_ROUTE }
 
 /**
  * Where the panel asks for the bundled runtime.
@@ -26,7 +27,7 @@ export const RUNTIME_STATUS_ROUTE = '/dsh-builtin-browser/runtime-status'
  * would time out in the browser long before a slow network finished, and would hold a connection
  * open for something the panel can poll instead.
  */
-export const RUNTIME_PROVISION_ROUTE = '/dsh-builtin-browser/runtime-provision'
+export { RUNTIME_PROVISION_ROUTE }
 
 /** What both handlers need. */
 export interface RuntimeRouteDeps {

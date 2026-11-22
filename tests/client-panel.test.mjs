@@ -1,3 +1,6 @@
+import { zh, en } from '../assets/browser-panel-locales.mjs'
+import * as browserPolicy from '../assets/browser-policy.mjs'
+import { extensionMessages } from '../assets/browser-messages.mjs'
 // The settings panel, actually executed.
 //
 // The bundle is a ModuleLoader entry that reaches for `react`, `ctx.slots` and `ctx.locale`
@@ -24,9 +27,9 @@ const { createBrowserInitializationJournal, createBrowserInitializationReader } 
 
 const { DEFAULT_SETTINGS } = await import('../lib/browser-electron/settings-store.js')
 
-const panelSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8')).replace(/^export /gm, '')
+const panelSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8')).replace(/^export /gm, '').replace(/^import[^\n]+\n/gm, '')
 const SOURCE = `window.__ModuleLoader__.load({ factory(require) {
-  ${panelSource}
+  const { ${Object.keys(browserPolicy).join(', ')} } = ${JSON.stringify(browserPolicy)};\n  const extensionMessages = ${JSON.stringify(extensionMessages)};\n  const zh = ${JSON.stringify(zh)}; const en = ${JSON.stringify(en)};\n  ${panelSource}
   return loadSettingsPanel(require);
 } })`
 const ROUTE = '/dsh-builtin-browser/settings'
@@ -2236,6 +2239,20 @@ function bridgeButton(tree, label) {
   return elements(tree).find(node => node.type === 'button' && textOf(node).join('') === label)
 }
 
+for (const message of ['桥接版本过旧，请点击 卸载并重装', '浏览器桥接不可用，请点击 卸载并重装']) {
+test(`an incompatible bridge displays its reinstall error outside collapsed diagnostics: ${message}`, async () => {
+  const runtime = bridgeRuntime('stale')
+  runtime.bridge.detail = message
+  const fetchMock = readinessFetch({ runtime })
+  const mounted = await mount({ production: true, fetch: fetchMock, render: false })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+  const alert = elements(tree).find(node => node.props.key === 'bridge-compatibility-error')
+  assert.equal(alert.props.role, 'alert')
+  assert.ok(textOf(alert).includes(runtime.bridge.detail))
+  assert.ok(bridgeButton(tree, 'readiness.bridge.reinstall'))
+})
+}
+
 test('bridge maintenance names its automatic restart and retains the diagnostic command', async () => {
   const locale = lazyLocale()
   const runtime = bridgeRuntime('installed')
@@ -2267,10 +2284,11 @@ for (const [state, label] of [
     const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
     const diagnostics = elements(tree).find(node => node.type === 'details' && node.props.key === 'diagnostics')
     assert.ok(controls, 'bridge management remains visible without opening diagnostics')
-    assert.equal(elements(controls).filter(node => node.type === 'button').length, 1)
+    assert.equal(elements(controls).filter(node => node.type === 'button').length, 2)
+    assert.ok(elements(controls).find(node => node.type === 'button' && node.props.key === 'install-extension'), 'optional extension setup sits beside bridge reinstall')
     assert.ok(bridgeButton(controls, label), 'the action matches the actual bridge state')
     assert.equal(bridgeButton(diagnostics, label), undefined, 'the primary action is not buried in diagnostics')
-    assert.equal(elements(controls).filter(node => node.type === 'button').length, 1)
+    assert.equal(elements(controls).filter(node => node.type === 'button' && node.props.key === 'reinstall').length, 1)
     assert.equal(bridgeButton(diagnostics, 'readiness.bridge.uninstall'), undefined, 'restore is not buried in diagnostics')
     assert.ok(textOf(controls).includes('readiness.bridge.maintenanceHint'), 'the restart is stated beside the explicit action')
     assert.equal(calls.filter(call => call.method === 'POST').length, 0, 'viewing settings starts no installation')
@@ -2392,7 +2410,7 @@ test('production settings exposes exactly one fixed reinstall control in every b
     const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(), timers: maintenanceTimers() })
     const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
     const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
-    assert.equal(elements(controls).filter(node => node.type === 'button').length, 1)
+    assert.equal(elements(controls).filter(node => node.type === 'button' && node.props.key === 'reinstall').length, 1)
     const button = elements(tree).find(node => node.props.key === 'reinstall')
     assert.ok(button)
     await button.props.onClick()
@@ -2551,7 +2569,7 @@ test('a fresh panel recovers a completed job without rearming maintenance', asyn
   assert.ok(textOf(tree).includes('readiness.bridge.installedDone'))
   assert.equal(bridgeButton(tree, 'readiness.bridge.reinstall').props.disabled, false)
   const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
-  assert.equal(elements(controls).filter(node => node.type === 'button').length, 1)
+  assert.equal(elements(controls).filter(node => node.type === 'button' && node.props.key === 'reinstall').length, 1)
   assert.equal(fixture.calls.some(call => call.init.method === 'POST'), false)
   assert.deepEqual(clicks, [])
   assert.equal(timers.pending.size, 0)

@@ -1,5 +1,6 @@
 import { guestReferenceHandlerScript } from '../browser-reference/page-script.ts'
 import { guestStorageScript, type GuestStorageConfig } from './guest-storage-runtime.ts'
+import { guestCssRuntimeScript } from './guest-css-runtime.ts'
 
 /** Early, self-contained interception for documents served from the guest proxy. */
 export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig): string {
@@ -9,6 +10,13 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
   let real = ${JSON.stringify(pageUrl).replace(/</gu, '\\u003c')};
   const route = '/dsh-builtin-browser/browser-view/isolated-guest';
   const attempt = fn => { try { return fn(); } catch {} };
+  attempt(() => {
+    const cache = { match: async () => undefined, matchAll: async () => [], keys: async () => [],
+      add: async () => {}, addAll: async () => {}, put: async () => {}, delete: async () => false };
+    const caches = { open: async () => cache, match: async () => undefined, has: async () => false,
+      delete: async () => false, keys: async () => [] };
+    Object.defineProperty(window, 'caches', { configurable: true, enumerable: true, get: () => caches });
+  });
   ${storage === undefined ? '' : 'attempt(() => { ' + guestStorageScript(storage) + ' });'}
   const storageContext = ${JSON.stringify(storage?.context ?? '')};
   const contextual = value => {
@@ -49,6 +57,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         const url = toProxy(isRequest ? input.url : input);
         if (!/^https?:$/.test(new URL(url, location.href).protocol)) return nativeFetch(input, init);
         const headers = new Headers(init && init.headers || (isRequest ? input.headers : undefined));
+        headers.set('x-dsh-guest-headers', [...headers.keys()].filter(name => !name.startsWith('x-dsh-')).join(','));
         headers.set('x-dsh-guest-sub', '1');
         const options = Object.assign({}, init, { headers, mode: 'cors', credentials: 'omit' });
         return nativeFetch(isRequest ? new Request(new URL(url, location.href), input) : url, options);
@@ -57,10 +66,25 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
   });
   attempt(() => {
     const open = XMLHttpRequest.prototype.open;
+    const send = XMLHttpRequest.prototype.send;
+    const header = XMLHttpRequest.prototype.setRequestHeader;
+    const names = new WeakMap();
     XMLHttpRequest.prototype.open = function(method, url, ...args) {
       const result = open.call(this, method, toProxy(url), ...args);
+      names.set(this, new Set());
       attempt(() => this.setRequestHeader('x-dsh-guest-sub', '1'));
       return result;
+    };
+    XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+      const result = header.call(this, name, value);
+      const key = String(name).toLowerCase();
+      if (!key.startsWith('x-dsh-')) names.get(this)?.add(key);
+      return result;
+    };
+    XMLHttpRequest.prototype.send = function(...args) {
+      this.withCredentials = false;
+      header.call(this, 'x-dsh-guest-headers', [...(names.get(this) || [])].join(','));
+      return send.apply(this, args);
     };
   });
   attempt(() => {
@@ -131,14 +155,16 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         const current = new URL(real), source = new URL(data.url);
         current.hash = ''; source.hash = '';
         if (current.href !== source.href || document.readyState === 'loading') throw new Error('source document is not ready');
-        if (!data.spec || typeof data.spec !== 'object' || Array.isArray(data.spec) || !['text', 'highlight', 'element'].includes(data.operation)) throw new Error('invalid reference command');
+        if (!data.spec || typeof data.spec !== 'object' || Array.isArray(data.spec) || !['text', 'highlight', 'element', 'summary'].includes(data.operation)) throw new Error('invalid reference command');
         if (data.operation !== 'element' && (!Number.isSafeInteger(data.spec.maxChars) || data.spec.maxChars <= 0
           || data.spec.maxChars > 2000000 || typeof data.spec.legacy !== 'boolean')) throw new Error('invalid text specification');
         if (data.operation === 'element' && (!['image', 'table'].includes(data.spec.kind)
           || !data.spec.anchor || typeof data.spec.anchor !== 'object' || Array.isArray(data.spec.anchor))) throw new Error('invalid element specification');
         if (data.operation === 'highlight' && (!Number.isSafeInteger(data.spec.start) || !Number.isSafeInteger(data.spec.end)
           || data.spec.start < 0 || data.spec.end <= data.spec.start)) throw new Error('invalid text positions');
-        const value = reference(data.operation, data.spec);
+        const value = data.operation === 'summary'
+          ? { url: real, title: String(document.title || '').slice(0, 1000), snapshotHint: reference('text', { maxChars: 1500, legacy: false }).text, fresh: true }
+          : reference(data.operation, data.spec);
         parent.postMessage({ ...ack, ok: true, value }, event.origin);
       } catch (error) { parent.postMessage({ ...ack, ok: false, reason: String(error).slice(0, 200) }, event.origin); }
     } else if (event.data.type === 'dsh.browser.guest.history') {
@@ -157,6 +183,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       if (/^(#|data:|blob:|about:|javascript:)/i.test(value.trim())) return value;
       return toProxy(value);
     };
+    ${guestCssRuntimeScript()}
     const proxySrcset = value => {
       let result = '', position = 0;
       while (position < value.length) {
@@ -176,10 +203,15 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       }
       return result;
     };
-    const resourceAttribute = (name, value) => name.toLowerCase() === 'srcset' ? proxySrcset(String(value)) : proxyResource(String(value));
+    const resourceAttribute = (name, value) => name.toLowerCase() === 'style' ? proxyCss(value)
+      : name.toLowerCase() === 'srcset' ? proxySrcset(String(value)) : proxyResource(String(value));
     const set = Element.prototype.setAttribute;
     Element.prototype.setAttribute = function(name, value) {
-      return set.call(this, name, /^(src|href|action|poster|srcset)$/i.test(name) ? resourceAttribute(name, value) : value);
+      if (this.tagName === 'LINK' && /^integrity$/i.test(name)) {
+        this.removeAttribute('integrity');
+        return;
+      }
+      return set.call(this, name, /^(src|href|action|poster|srcset|style)$/i.test(name) ? resourceAttribute(name, value) : value);
     };
     for (const [name, prop] of [['HTMLImageElement', 'src'], ['HTMLScriptElement', 'src'],
       ['HTMLIFrameElement', 'src'], ['HTMLLinkElement', 'href'], ['HTMLSourceElement', 'src'],
@@ -192,18 +224,21 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       }));
     });
     const rewriteResource = node => {
-      if (!node || node.nodeType !== 1 || /^(A|FORM)$/.test(node.tagName)) return;
-      for (const attribute of ['src', 'href', 'srcset', 'poster']) attempt(() => {
+      if (!node || node.nodeType !== 1) return;
+      if (node.tagName === 'LINK' && node.hasAttribute('integrity')) node.removeAttribute('integrity');
+      rewriteStyleText(node);
+      const attributes = /^(A|FORM)$/.test(node.tagName) ? ['style'] : ['src', 'href', 'srcset', 'poster', 'style'];
+      for (const attribute of attributes) attempt(() => {
         const value = node.getAttribute(attribute);
         if (!value || !value.trim()) return;
-        const next = attribute === 'srcset' ? proxySrcset(value) : proxyResource(value);
+        const next = resourceAttribute(attribute, value);
         if (next !== value) node.setAttribute(attribute, next);
       });
     };
     const rewriteTree = node => {
       rewriteResource(node);
       if (node && node.querySelectorAll) {
-        for (const descendant of node.querySelectorAll('[src],[href],[srcset],[poster]')) rewriteResource(descendant);
+        for (const descendant of node.querySelectorAll('[src],[href],[srcset],[poster],[style],[integrity],style')) rewriteResource(descendant);
       }
     };
     for (const name of ['Node', 'Element', 'Document', 'DocumentFragment']) {
@@ -212,6 +247,11 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         if (!Object.prototype.hasOwnProperty.call(proto, method)) return;
         const original = proto[method];
         proto[method] = function(...args) {
+          if (isStyle(this)) args = args.map(value => {
+            if (typeof value === 'string') return proxyCss(value);
+            if (value && value.nodeType === 3) value.textContent = proxyCss(value.textContent);
+            return value;
+          });
           for (const node of args) if (node && typeof node === 'object') rewriteTree(node);
           return original.apply(this, args);
         };
@@ -250,11 +290,12 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
     const observer = new MutationObserver(records => {
       for (const record of records) attempt(() => {
         if (record.type === 'attributes') rewriteResource(record.target);
+        else if (record.type === 'characterData') rewriteStyleText(record.target.parentNode);
         else for (const node of record.addedNodes) rewriteTree(node);
       });
     });
-    observer.observe(document, { childList: true, subtree: true, attributes: true,
-      attributeFilter: ['src', 'href', 'srcset', 'poster', 'action'] });
+    observer.observe(document, { childList: true, subtree: true, attributes: true, characterData: true,
+      attributeFilter: ['src', 'href', 'srcset', 'poster', 'action', 'style', 'integrity'] });
     rewriteTree(document.documentElement);
   });
   attempt(() => document.addEventListener('click', event => {

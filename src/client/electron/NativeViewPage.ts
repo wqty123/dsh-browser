@@ -118,6 +118,7 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   private initialize(): void {
     const child = this.options.tabId === undefined ? undefined : this.children?.child(this.options.tabId)
     if (this.mounted === undefined || (this.pending === undefined && child === undefined)) return
+    const mounted = this.mounted
     this.attachment ??= { viewport: this.mounted.viewport, lifetime: new AbortController() }
     const attachment = this.attachment
     if (attachment === undefined || this.initialization !== undefined || this.lease !== undefined) return
@@ -159,7 +160,7 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
       if (!attachment.lifetime.signal.aborted) this.fail(error)
     }).finally(() => {
       this.initialization = undefined
-      if (this.attachment !== attachment && (this.pending !== undefined || (this.options.tabId !== undefined && this.children?.child(this.options.tabId) !== undefined))) this.initialize()
+      if (this.mounted !== undefined && this.mounted !== mounted && (this.pending !== undefined || (this.options.tabId !== undefined && this.children?.child(this.options.tabId) !== undefined))) this.initialize()
     })
   }
 

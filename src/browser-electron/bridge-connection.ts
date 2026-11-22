@@ -1,3 +1,4 @@
+import { LOOPBACK_IPV4 } from '../../assets/browser-policy.mjs'
 import { readFileSync } from 'node:fs'
 /**
  * Transport for the desktop shell's browser bridge: one long-lived connection to a
@@ -21,6 +22,7 @@ import { readFileSync } from 'node:fs'
 
 import { connect, type Socket } from 'node:net'
 import type { BrowserSessionWireId, BrowserTabWireId } from '../browser/handles.ts'
+import { bridgePackageError } from '../bridge-compatibility.ts'
 
 export type BridgeRequest =
   | { readonly op: 'version' }
@@ -254,7 +256,7 @@ export class BridgeConnection {
   /** The live socket, connecting and authenticating it on first use. */
   private ensureSocket(): Socket {
     if (this.socket !== undefined) return this.socket
-    const socket = connect({ host: '127.0.0.1', port: this.endpoint.port })
+    const socket = connect({ host: LOOPBACK_IPV4, port: this.endpoint.port })
     socket.setEncoding('utf8')
     socket.on('data', chunk => this.onData(String(chunk)))
     // Both handlers pass the socket they belong to, so a late event from a socket that was
@@ -312,6 +314,11 @@ export class BridgeConnection {
       }
       try {
         const answer = JSON.parse(line) as Record<string, unknown>
+        const packageError = bridgePackageError(answer)
+        if (packageError !== undefined) {
+          entry.reject(packageError)
+          continue
+        }
         // A rejected token means the shell restarted with a new one, so this socket
         // can never succeed again: answer (the caller needs the error) and drop it,
         // so the next call dials afresh instead of retrying a doomed credential.

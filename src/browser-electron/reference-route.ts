@@ -1,3 +1,4 @@
+import { REFERENCE_LIST_ROUTE, REFERENCE_GET_ROUTE, CLIENT_VERSION_ROUTE, REFERENCE_CAPTURE_ROUTE, REFERENCE_REVEAL_ROUTE, REFERENCE_INSERT_ROUTE, REFERENCE_EXPORT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERIES_ROUTE, REFERENCE_DELIVERY_ACK_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, REFERENCE_ASSET_ROUTE, REFERENCE_STATUS_ROUTE, URL_PARSE_BASE } from '../../assets/browser-policy.mjs'
 /**
  * HTTP surface for browser references: list, read, capture, reveal, delivery
  * into the conversation draft, and the actual image bytes behind a reference.
@@ -34,8 +35,8 @@ import type { ReferenceExportFormat } from '../browser-reference/export.ts'
 import type { BrowserReferenceCarrier, BrowserReferenceEntry, BrowserReferenceOrigin, BrowserReferenceTarget } from '../browser-reference/types.ts'
 
 /** Paths this module serves. */
-export const REFERENCE_LIST_ROUTE = '/dsh-builtin-browser/reference/list'
-export const REFERENCE_GET_ROUTE = '/dsh-builtin-browser/reference/get'
+export { REFERENCE_LIST_ROUTE }
+export { REFERENCE_GET_ROUTE }
 /**
  * The id the host keys its stores on.
  *
@@ -50,27 +51,27 @@ export function bareSession(value: string): string {
 }
 
 /** 客户端产物的版本（mtime+size），用于让浏览器自动换到新 bundle。 */
-export const CLIENT_VERSION_ROUTE = '/dsh-builtin-browser/client-version'
+export { CLIENT_VERSION_ROUTE }
 
-export const REFERENCE_CAPTURE_ROUTE = '/dsh-builtin-browser/reference/capture'
-export const REFERENCE_REVEAL_ROUTE = '/dsh-builtin-browser/reference/reveal'
-export const REFERENCE_INSERT_ROUTE = '/dsh-builtin-browser/reference/insert'
-export const REFERENCE_EXPORT_ROUTE = '/dsh-builtin-browser/reference/export'
-export const REFERENCE_IMPORT_ROUTE = '/dsh-builtin-browser/reference/import'
+export { REFERENCE_CAPTURE_ROUTE }
+export { REFERENCE_REVEAL_ROUTE }
+export { REFERENCE_INSERT_ROUTE }
+export { REFERENCE_EXPORT_ROUTE }
+export { REFERENCE_IMPORT_ROUTE }
 /** The client polls this to pick up captures that belong to its conversation. */
-export const REFERENCE_DELIVERIES_ROUTE = '/dsh-builtin-browser/reference/deliveries'
+export { REFERENCE_DELIVERIES_ROUTE }
 /** Only the client may ACK, after the draft AND every image asset are durable. */
-export const REFERENCE_DELIVERY_ACK_ROUTE = '/dsh-builtin-browser/reference/delivery/ack'
+export { REFERENCE_DELIVERY_ACK_ROUTE }
 /** Remove a card: a tombstone that late retries cannot resurrect. */
-export const REFERENCE_DELIVERY_REMOVE_ROUTE = '/dsh-builtin-browser/reference/delivery/remove'
+export { REFERENCE_DELIVERY_REMOVE_ROUTE }
 /** Real bytes of a captured image, for the card thumbnail and the model block. */
-export const REFERENCE_ASSET_ROUTE = '/dsh-builtin-browser/reference/asset'
+export { REFERENCE_ASSET_ROUTE }
 
 /**
  * Diagnostic answer for the sidebar entry: which conversation this host serves, and
  * what its last scan of the conversation's sidebar pages found.
  */
-export const REFERENCE_STATUS_ROUTE = '/dsh-builtin-browser/reference/status'
+export { REFERENCE_STATUS_ROUTE }
 
 const EXPORT_FORMATS: readonly ReferenceExportFormat[] = ['jsonl', 'markdown', 'zip', 'markdown-zip']
 
@@ -157,7 +158,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
 
   const list: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
-    const url = new URL(request.url ?? '/', 'http://localhost')
+    const url = new URL(request.url ?? '/', URL_PARSE_BASE)
     const limitText = url.searchParams.get('limit')
     const limit = limitText === null ? 20 : Number(limitText)
     const references = service.list({
@@ -171,7 +172,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
 
   const get: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
-    const url = new URL(request.url ?? '/', 'http://localhost')
+    const url = new URL(request.url ?? '/', URL_PARSE_BASE)
     const id = url.searchParams.get('id')
     if (id === null || id === '') { replyJson(response, 400, { ok: false, error: 'id is required' }); return }
     const reference = service.get(id)
@@ -364,7 +365,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
 
   const exportBundle: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
-    const url = new URL(request.url ?? '/', 'http://localhost')
+    const url = new URL(request.url ?? '/', URL_PARSE_BASE)
     const format = url.searchParams.get('format') ?? 'jsonl'
     if (!(EXPORT_FORMATS as readonly string[]).includes(format)) {
       replyJson(response, 400, { ok: false, error: 'format must be jsonl, markdown, zip, or markdown-zip' })
@@ -411,7 +412,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
   const deliveries: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
     if (queue === undefined) { replyJson(response, 503, { ok: false, error: 'delivery-unavailable' }); return }
-    const url = new URL(request.url ?? '/', 'http://localhost')
+    const url = new URL(request.url ?? '/', URL_PARSE_BASE)
     const sessionId = url.searchParams.get('sessionId')
     // A poll must name its conversation. Answering without one would hand every
     // session's records to whoever asked, and the client would advance its cursor
@@ -566,7 +567,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
    */
   const asset: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
-    const url = new URL(request.url ?? '/', 'http://localhost')
+    const url = new URL(request.url ?? '/', URL_PARSE_BASE)
     const key = url.searchParams.get('key') ?? ''
     if (!/^[0-9a-f]{64}$/.test(key)) { replyJson(response, 400, { ok: false, error: 'invalid asset key' }); return }
     const file = service.assetPath(key)

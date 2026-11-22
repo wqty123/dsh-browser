@@ -72,13 +72,13 @@ test('a main patch without its deployed bridge module needs repair', () => {
   }
 })
 
-test('a deployed bridge from another plugin version needs repair', () => {
-  const root = makeInstall({ patched: true, bridge: 'export function start() {}\n' })
+test('a deployed protocol-3 bridge explicitly asks for uninstall and reinstall', () => {
+  const root = makeInstall({ patched: true, bridge: 'const PROTOCOL = 3; export function start() {}\n' })
   try {
     const status = readBridgeStatus(root)
     assert.equal(status.state, 'stale')
     assert.equal(status.present, true)
-    assert.match(status.detail, /bridge module.*differs|outdated/i)
+    assert.equal(status.detail, '桥接版本过旧，请点击 卸载并重装')
     assert.equal(status.version, '0.2.1-rc.5')
   } finally {
     rmSync(root, { recursive: true, force: true })

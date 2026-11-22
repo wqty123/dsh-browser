@@ -229,7 +229,7 @@ test('staged compiled coordinator imports without the installed package or its n
   const f = fixture(t), destination = join(f.directory, 'job')
   mkdirSync(destination)
   const worker = await stageReinstallRuntime(destination)
-  for (const file of ['desktop-bridge/install.mjs', 'dsh-host-patch/apply.mjs', 'dsh-host-patch/rc3.json']) {
+  for (const file of ['assets/browser-policy.mjs', 'desktop-bridge/install.mjs', 'dsh-host-patch/apply.mjs', 'dsh-host-patch/rc3.json']) {
     assert.ok(existsSync(join(destination, 'runtime', file)))
   }
   assert.equal(existsSync(join(destination, 'runtime/node_modules')), false)

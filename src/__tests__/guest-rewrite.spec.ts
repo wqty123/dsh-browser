@@ -46,9 +46,15 @@ describe('document rewriting', () => {
     expect(rewritten(html)).toBe(html)
   })
 
-  it('keeps a new-window link inside the panel', () => {
-    // Opening a window would leave the sidebar, which is the reported "clicking a link jumps to Edge".
-    expect(rewritten('<a href="/x" target="_blank">x</a>')).toContain('target="_self"')
+  it('preserves target="_blank" for the guest runtime child-tab handler', () => {
+    // The guest runtime intercepts _blank clicks/forms and dispatches URL-only child tabs.
+    expect(rewritten('<a href="/x" target="_blank">x</a>')).toContain('target="_blank"')
+  })
+
+  it('strips integrity attribute from proxied stylesheet links', () => {
+    const out = rewritten('<link rel="stylesheet" href="/a.css" integrity="sha384-abc">')
+    expect(out).toContain(`href="${guestPath('https://example.test/a.css')}"`)
+    expect(out).not.toContain('integrity=')
   })
 
   it('proxies a srcset candidate list', () => {

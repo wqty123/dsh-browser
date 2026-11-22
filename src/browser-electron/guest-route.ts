@@ -1,3 +1,5 @@
+import { hostMessages } from '../../assets/browser-messages.mjs'
+import { GUEST_ROUTE } from '../../assets/browser-policy.mjs'
 /**
  * Web guests execute in CSP-sandboxed opaque origins, including direct document loads.
  * Only this proxy prefix is available to guest network requests. App storage, APIs,
@@ -31,18 +33,54 @@ function isSelfTarget(url: URL): boolean {
     || /^\[(?:f[cd]|fe[89ab])/u.test(host) || /^169\.254\./u.test(host)) return true
   if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1' || host === '0.0.0.0') return true
   if (/^(?:0|127)\./u.test(host)) return true
+  if (/^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./u.test(host)) return true
   if (/^10\./u.test(host) || /^192\.168\./u.test(host)) return true
   if (/^172\.(1[6-9]|2\d|3[01])\./u.test(host)) return true
   return false
 }
 
-export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/isolated-guest'
+export { GUEST_ROUTE }
 
 class UnsafeGuestTargetError extends Error {}
 
 /** HTML responses larger than this pass through without rewriting. */
 const MAX_REWRITE_BYTES = 4 * 1024 * 1024
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
+
+const UPSTREAM_ERROR_CODES = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID',
+  'ERR_SSL_TLSV1_ALERT_NO_APPLICATION_PROTOCOL',
+])
+
+function upstreamErrorCode(error: unknown): string | undefined {
+  const cause = error !== null && typeof error === 'object' && 'cause' in error ? error.cause : undefined
+  for (const value of [error, cause]) {
+    if (value !== null && typeof value === 'object' && 'code' in value
+      && typeof value.code === 'string' && UPSTREAM_ERROR_CODES.has(value.code)) return value.code
+  }
+  return undefined
+}
+
+/** Decode CSS bytes honoring BOM, Content-Type charset, and @charset; unknown encodings pass through untouched. */
+function decodeCssBytes(bytes: Buffer, contentType: string): string | undefined {
+  let label: string | undefined
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) label = 'utf-8'
+  else if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) label = 'utf-16le'
+  else if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) label = 'utf-16be'
+  else {
+    const headerMatch = /;\s*charset\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s;]+))/iu.exec(contentType)
+    label = headerMatch?.[1] ?? headerMatch?.[2] ?? headerMatch?.[3]
+    if (label === undefined) {
+      const head = bytes.subarray(0, 1024).toString('latin1')
+      label = /^@charset\s+"([^"]+)";/u.exec(head)?.[1] ?? 'utf-8'
+    }
+  }
+  try { return new TextDecoder(label).decode(bytes).replace(/^@charset\s+"[^"]+";\s*/iu, '') }
+  catch { return undefined }
+}
 
 /** Document content types eligible for rewriting. */
 const REWRITABLE = /^(text\/|application\/(json|javascript|xhtml\+xml|xml|rss\+xml|atom\+xml))/iu
@@ -57,10 +95,16 @@ const SAFE_REQUEST_HEADERS = new Set([
   'if-none-match', 'if-modified-since', 'cache-control',
 ])
 
+function siteHeader(name: string): boolean {
+  return /^[!#$%&'*+.^_`|~\da-z-]+$/u.test(name)
+    && !/^(?:cookie2?|authorization|host|origin|referer|connection|content-length|accept-encoding|user-agent|proxy-.*|sec-.*|x-dsh-.*|x-forwarded-.*|x-real-ip)$/u.test(name)
+}
+
 /** Response headers that would break a same-origin document. */
 const DROP_RESPONSE_HEADERS = new Set([
   'content-security-policy', 'content-security-policy-report-only', 'x-frame-options',
   'content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive',
+  'alt-svc', 'alternate-protocol', 'upgrade', 'http2-settings', 'trailer', 'te',
   'strict-transport-security', 'cross-origin-opener-policy', 'cross-origin-embedder-policy',
   'cross-origin-resource-policy', 'permissions-policy', 'set-cookie', 'refresh',
 ])
@@ -155,27 +199,30 @@ function stripDocumentPolicies(html: string): string {
  */
 export function rewriteDocument(html: string, base: URL): string {
   const proxied = (raw: string): string | undefined => proxyReference(raw, base)
-  const attributes = (tag: string): string => tag.replace(
-    /(\s+)([^\s"'<>/=]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/gu,
-    (match, space: string, name: string, equals: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
-      const value = decodeAttribute(doubleQuoted ?? singleQuoted ?? bare ?? '')
-      const attribute = name.toLowerCase()
-      let next: string | undefined
-      if (['href', 'src', 'poster', 'data-src', 'action'].includes(attribute)) next = proxied(value)
-      else if (attribute === 'target' && /^_(?:blank|new|top|parent)$/iu.test(value)) next = '_self'
-      else if (attribute === 'srcset') {
-        next = value.split(',').map(part => {
-          const [url, descriptor] = part.trim().split(/\s+/u)
-          const rewritten = url === undefined ? undefined : proxied(url)
-          if (rewritten === undefined) return part.trim()
-          return descriptor === undefined ? rewritten : `${rewritten} ${descriptor}`
-        }).join(', ')
-      } else if (attribute === 'style') next = rewriteCss(value, proxied)
-      if (next === undefined) return match
-      const quote = singleQuoted === undefined ? '"' : "'"
-      return space + name + equals + quote + escapeAttribute(next, quote) + quote
-    },
-  )
+  const attributes = (tag: string): string => {
+    const isLink = /^<link\b/iu.test(tag)
+    return tag.replace(
+      /(\s+)([^\s"'<>/=]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/gu,
+      (match, space: string, name: string, equals: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
+        const value = decodeAttribute(doubleQuoted ?? singleQuoted ?? bare ?? '')
+        const attribute = name.toLowerCase()
+        if (isLink && attribute === 'integrity') return ''
+        let next: string | undefined
+        if (['href', 'src', 'poster', 'data-src', 'action'].includes(attribute)) next = proxied(value)
+        else if (attribute === 'srcset') {
+          next = value.split(',').map(part => {
+            const [url, descriptor] = part.trim().split(/\s+/u)
+            const rewritten = url === undefined ? undefined : proxied(url)
+            if (rewritten === undefined) return part.trim()
+            return descriptor === undefined ? rewritten : `${rewritten} ${descriptor}`
+          }).join(', ')
+        } else if (attribute === 'style') next = rewriteCss(value, proxied)
+        if (next === undefined) return match
+        const quote = singleQuoted === undefined ? '"' : "'"
+        return space + name + equals + quote + escapeAttribute(next, quote) + quote
+      },
+    )
+  }
   return stripDocumentPolicies(html).replace(
     /<!--[\s\S]*?-->|(<(script|style|textarea|title|xmp|iframe|noembed|noframes)\b(?:[^>"']|"[^"]*"|'[^']*')*>)([\s\S]*?)(<\/\2\s*>|$)|<[a-z][a-z\d:-]*\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu,
     (markup, open: string | undefined, kind: string | undefined, content: string, close: string) => {
@@ -229,9 +276,10 @@ export async function handleGuest(
   response.setHeader('x-content-type-options', 'nosniff')
   response.setHeader('access-control-allow-origin', 'null')
   if (method === 'OPTIONS') {
+    const requested = String(request.headers['access-control-request-headers'] ?? '').toLowerCase().split(',').map(name => name.trim())
     writeHead(204, {
       'access-control-allow-methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
-      'access-control-allow-headers': [...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub'].join(', '),
+      'access-control-allow-headers': [...new Set([...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub', 'x-dsh-guest-headers', ...requested.filter(siteHeader)])].join(', '),
     })
     response.end()
     return
@@ -286,7 +334,17 @@ export async function handleGuest(
         chunks.push(bytes)
       }
       const input: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-      const value = (storage ?? localGuestStorage()).execute(storageToken, target.origin, input)
+      const store = storage ?? localGuestStorage()
+      let value: unknown
+      if (input && typeof input === 'object' && 'area' in input && input.area === 'cookies') {
+        store.authorize(storageToken, target.origin)
+        const operation = input as Record<string, unknown>
+        const jar = cookies ?? localGuestCookies()
+        if (operation.op === 'get') value = jar.getDocumentCookie(target)
+        else if (operation.op === 'set' && typeof operation.value === 'string') {
+          jar.setDocumentCookie(target, operation.value); value = jar.getDocumentCookie(target)
+        } else throw new TypeError('Invalid cookie operation')
+      } else value = store.execute(storageToken, target.origin, input)
       writeHead(200); response.end(JSON.stringify({ ok: true, value }))
     } catch (error) {
       const name = error instanceof Error && ['SecurityError', 'TypeError', 'QuotaExceededError', 'UnknownError'].includes(error.name)
@@ -299,9 +357,26 @@ export async function handleGuest(
   const destination = request.headers['sec-fetch-dest']
   const subRequest = request.headers['x-dsh-guest-sub'] === '1'
     || (typeof destination === 'string' && destination !== 'document' && destination !== 'iframe')
+  const failUpstream = (kind: 'request' | 'response' | 'target', error: unknown): void => {
+    const message = kind === 'target' ? 'guest proxy: target is not allowed' : `guest proxy: upstream ${kind} failed`
+    writeHead(kind === 'target' ? 403 : 502, {
+      'content-type': subRequest ? 'text/plain; charset=utf-8' : 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    if (subRequest) { response.end(message); return }
+    const code = upstreamErrorCode(error)
+    response.end('<!doctype html><html><head><meta charset="utf-8"><title>' + hostMessages.bilingual.unavailableTitle + '</title>'
+      + '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href) + '</script>'
+      + '<style>body{font:16px/1.6 system-ui,sans-serif;margin:48px auto;padding:0 24px;max-width:640px;color:#334155}h1{font-size:24px}code{overflow-wrap:anywhere}button{font:inherit;padding:6px 20px;cursor:pointer}</style>'
+      + '</head><body><h1>' + hostMessages.bilingual.unavailableTitle + '</h1><p>' + hostMessages.bilingual.unavailableDetail + '</p>'
+      + '<p><code>' + message + (code === undefined ? '' : ' (' + code + ')') + '</code></p>'
+      + '<button type="button" onclick="location.reload()">' + hostMessages.bilingual.retry + '</button></body></html>')
+  }
   const headers = new Headers()
+  const siteHeaders = new Set(request.headers['x-dsh-guest-sub'] === '1'
+    ? String(request.headers['x-dsh-guest-headers'] ?? '').toLowerCase().split(',').filter(siteHeader) : [])
   for (const [name, value] of Object.entries(request.headers)) {
-    if (!SAFE_REQUEST_HEADERS.has(name.toLowerCase()) || value === undefined) continue
+    if ((!SAFE_REQUEST_HEADERS.has(name.toLowerCase()) && !siteHeaders.has(name.toLowerCase())) || value === undefined) continue
     headers.set(name, Array.isArray(value) ? value.join(', ') : value)
   }
   if (!subRequest) {
@@ -329,9 +404,9 @@ export async function handleGuest(
     response.end('guest proxy: cookie storage unavailable')
     return
   }
-  const jarCookie = cookieJar.getCookieHeader(target)
   const refreshCookies = (url = target): void => {
-    const cookie = cookieJar.getCookieHeader(url)
+    const previous = headers.get('referer')
+    const cookie = cookieJar.getCookieHeader(url, false, previous ? { site: new URL(previous), topLevel: !subRequest, method } : undefined)
     if (cookie) headers.set('cookie', cookie)
     else headers.delete('cookie')
   }
@@ -364,7 +439,7 @@ export async function handleGuest(
   // 深链接预热：直接拉 `https://host/s?…` 这类页面时，站点看到的是「没有站点 Cookie 的首跳」，
   // 百度会回「安全验证」。先取一次站点根，把服务端种的 Cookie 收进自己的罐子，并把 Referer 指向它，
   // 这次跳转就变成一次正常的站内导航。只在罐子里还没有该站 Cookie 且目标不是根路径时做一次。
-  if (safeNavigation && !jarCookie && target.pathname !== '/' && !headers.has('referer')) {
+  if (safeNavigation && !headers.has('cookie') && target.pathname !== '/' && !headers.has('referer')) {
     try { await warmRoot() } catch { /* 预热失败就按原样请求 */ }
   }
   let upstream: Response
@@ -412,72 +487,82 @@ export async function handleGuest(
       }
     }
   } catch (error) {
-    writeHead(error instanceof UnsafeGuestTargetError ? 403 : 502, { 'content-type': 'text/plain; charset=utf-8' })
-    response.end(`guest proxy: cannot reach ${target.host}: ${String((error as Error).message ?? error)}`)
+    failUpstream(error instanceof UnsafeGuestTargetError ? 'target' : 'request', error)
     return
   }
-  cookieJar.setCookies(target, upstream.headers.getSetCookie?.() ?? [])
-  const out = new Headers()
-  for (const [name, value] of upstream.headers) {
-    if (!DROP_RESPONSE_HEADERS.has(name.toLowerCase()) && !name.toLowerCase().startsWith('access-control-')) out.set(name, value)
-  }
-  const location = upstream.headers.get('location')
-  if (location !== null && upstream.status >= 300 && upstream.status < 400) {
-    let next: URL | undefined
-    try {
-      const candidate = new URL(location, target)
-      if (!await blockedResolved(candidate)) next = candidate
-    } catch {}
-    if (next === undefined) {
-      await upstream.body?.cancel()
-      writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
-      response.end('guest proxy: redirect target is not allowed')
+  try {
+    cookieJar.setCookies(target, upstream.headers.getSetCookie?.() ?? [])
+    const out = new Headers()
+    for (const [name, value] of upstream.headers) {
+      if (!DROP_RESPONSE_HEADERS.has(name.toLowerCase()) && !name.toLowerCase().startsWith('access-control-')) out.set(name, value)
+    }
+    const location = upstream.headers.get('location')
+    if (location !== null && upstream.status >= 300 && upstream.status < 400) {
+      let next: URL | undefined
+      try {
+        const candidate = new URL(location, target)
+        if (!await blockedResolved(candidate)) next = candidate
+      } catch {}
+      if (next === undefined) {
+        await upstream.body?.cancel()
+        writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        response.end('guest proxy: redirect target is not allowed')
+        return
+      }
+      out.set('location', guestPath(next.href) + (session === '' ? '' : '&s=' + encodeURIComponent(session)))
+    }
+    const type = upstream.headers.get('content-type') ?? 'application/octet-stream'
+    const length = Number(upstream.headers.get('content-length') ?? '0')
+    if (method === 'HEAD' || upstream.body === null) {
+      writeHead(upstream.status, Object.fromEntries(out))
+      response.end()
       return
     }
-    out.set('location', guestPath(next.href) + (session === '' ? '' : '&s=' + encodeURIComponent(session)))
-  }
-  const type = upstream.headers.get('content-type') ?? 'application/octet-stream'
-  const length = Number(upstream.headers.get('content-length') ?? '0')
-  if (method === 'HEAD' || upstream.body === null) {
-    writeHead(upstream.status, Object.fromEntries(out))
-    response.end()
-    return
-  }
-  if (/^text\/css(?:;|$)/iu.test(type) && !(upstream.status >= 300 && upstream.status < 400)) {
-    const css = rewriteCss(await upstream.text(), value => proxyReference(value, target))
+    if (/^text\/css(?:;|$)/iu.test(type) && !(upstream.status >= 300 && upstream.status < 400)) {
+      const bytes = Buffer.from(await upstream.arrayBuffer())
+      const decoded = decodeCssBytes(bytes, type)
+      if (decoded === undefined) {
+        writeHead(upstream.status, Object.fromEntries(out))
+        response.end(bytes)
+        return
+      }
+      const css = rewriteCss(decoded, value => proxyReference(value, target))
+      out.delete('etag')
+      out.delete('content-md5')
+      out.set('content-type', 'text/css; charset=utf-8')
+      writeHead(upstream.status, Object.fromEntries(out))
+      response.end(css)
+      return
+    }
+    if (subRequest || !REWRITABLE.test(type) || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
+      || length > MAX_REWRITE_BYTES || (upstream.status >= 300 && upstream.status < 400)) {
+      const body = Buffer.from(await upstream.arrayBuffer())
+      writeHead(upstream.status, Object.fromEntries(out))
+      response.end(/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
+        ? Buffer.from(stripDocumentPolicies(body.toString('latin1')), 'latin1') : body)
+      return
+    }
+    const raw = await upstream.text()
+    // Fetch metadata is browser-controlled: scripts must not fetch another site's storage capability.
+    const context = query.get('storage-context') ?? randomUUID()
+    const storageConfig = (destination === 'iframe' || destination === 'document') && request.headers['sec-fetch-mode'] === 'navigate'
+      && /^[\w:-]{16,128}$/u.test(context)
+      ? { token: (storage ?? localGuestStorage()).issue(target.origin, context), context, cookies: cookieJar.getDocumentCookie(target) } : undefined
+    const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig) + '</script>'
+    let body = rewriteDocument(raw, target)
+    if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
+    else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
+    else body = runtime + body
+    const tail = '\n' + overlayScript + '\n' + relayTag(session)
+    body = /<\/body\s*>/iu.test(body) ? body.replace(/<\/body\s*>/iu, match => tail + match) : body + tail
     out.delete('etag')
     out.delete('content-md5')
-    out.set('content-type', 'text/css; charset=utf-8')
+    out.set('content-type', type)
+    out.delete('last-modified')
+    out.set('cache-control', 'no-store')
     writeHead(upstream.status, Object.fromEntries(out))
-    response.end(css)
-    return
+    response.end(body)
+  } catch (error) {
+    failUpstream('response', error)
   }
-  if (subRequest || !REWRITABLE.test(type) || !/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
-    || length > MAX_REWRITE_BYTES || (upstream.status >= 300 && upstream.status < 400)) {
-    writeHead(upstream.status, Object.fromEntries(out))
-    const body = Buffer.from(await upstream.arrayBuffer())
-    response.end(/^(text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(type)
-      ? Buffer.from(stripDocumentPolicies(body.toString('latin1')), 'latin1') : body)
-    return
-  }
-  const raw = await upstream.text()
-  // Fetch metadata is browser-controlled: scripts must not fetch another site's storage capability.
-  const context = query.get('storage-context') ?? randomUUID()
-  const storageConfig = (destination === 'iframe' || destination === 'document') && request.headers['sec-fetch-mode'] === 'navigate'
-    && /^[\w:-]{16,128}$/u.test(context)
-    ? { token: (storage ?? localGuestStorage()).issue(target.origin, context), context } : undefined
-  const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig) + '</script>'
-  let body = rewriteDocument(raw, target)
-  if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
-  else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
-  else body = runtime + body
-  const tail = '\n' + overlayScript + '\n' + relayTag(session)
-  body = /<\/body\s*>/iu.test(body) ? body.replace(/<\/body\s*>/iu, match => tail + match) : body + tail
-  out.delete('etag')
-  out.delete('content-md5')
-  out.set('content-type', type)
-  out.delete('last-modified')
-  out.set('cache-control', 'no-store')
-  writeHead(upstream.status, Object.fromEntries(out))
-  response.end(body)
 }

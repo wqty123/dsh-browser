@@ -42,6 +42,8 @@ import { nativeGuestRegistry } from './native-guests.mjs'
  */
 const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
 const PANEL_INITIALIZING = 'panel-initializing'
+const RENDERING_RELEASE_TIMEOUT_MS = 250
+const RENDERING_HOLD_MS = 30_000
 
 /**
  * An Error carrying a stable code, so the code survives the socket as a field rather than as text a
@@ -566,14 +568,20 @@ async function handle(request, signal) {
   const shell = /^session-/.test(owner)
     ? webContents.getAllWebContents().find(contents => contents.getType() === 'window') : undefined
   const token = randomBytes(16).toString('hex')
+  const holdDeadline = Number.isFinite(request.deadline) ? request.deadline : Date.now() + RENDERING_HOLD_MS
   let held
   let releasePromise
   const release = () => {
     if (held === false) return Promise.resolve()
     const run = async () => {
+      let timer
       try {
-        await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.releaseRendering?.(${JSON.stringify(token)})`, true)
+        await Promise.race([
+          shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.releaseRendering?.(${JSON.stringify(token)})`, true),
+          new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, Math.min(RENDERING_RELEASE_TIMEOUT_MS, holdDeadline - Date.now()))) }),
+        ])
       } catch (error) { console.error('[dsh-browser-bridge] rendering hold release failed:', error) }
+      finally { clearTimeout(timer) }
     }
     return held === undefined ? run() : releasePromise ??= run()
   }
@@ -602,7 +610,7 @@ async function handle(request, signal) {
         held = await shell.executeJavaScript(`(async () => {
           const api = globalThis.__dshBuiltinBrowser;
           if (typeof api?.holdRendering !== 'function') return false;
-          return api.holdRendering(${JSON.stringify(owner)}, ${JSON.stringify(token)});
+          return api.holdRendering(${JSON.stringify(owner)}, ${JSON.stringify(token)}, ${holdDeadline});
         })()`, true) === true
       }
       checkCurrent()

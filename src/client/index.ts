@@ -1,3 +1,4 @@
+import { CLIENT_VERSION_ROUTE } from '../../assets/browser-policy.mjs'
 /** Register the HTTP(S) Browser tab type in the right Sidebar. */
 import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client'
 import type { Context } from '@deepseek-ai/cordis'
@@ -93,7 +94,7 @@ type SidebarHostExtensions = {
 function watchClientVersion(ctx: Context): void {
   const check = async (): Promise<void> => {
     try {
-      const response = await fetch('/dsh-builtin-browser/client-version', { credentials: 'same-origin', cache: 'no-store' })
+      const response = await fetch(CLIENT_VERSION_ROUTE, { credentials: 'same-origin', cache: 'no-store' })
       if (!response.ok) return
       const body = await response.json() as { readonly version?: string }
       const version = body.version

@@ -152,6 +152,37 @@ test('native child presentation rejects foreign owners and leaves explicit URL-o
   } finally { end() }
 })
 
+test('a blank child remounted during initialization retries only for the new mount', async () => {
+  const previous = globalThis.document
+  globalThis.document = { getElementById: () => ({ dataset: {} }) }
+  const child = tabWireId({ owner: 'session-native', session: 'sidebar', tab: 'tab-native' })
+  const adopted = [], registered = []
+  const children = { child: () => ({ request: 'request', child, lease: 'blank-lease', url: 'about:blank' }),
+    listen: () => () => {}, api: {
+      adopt: async (_request, slot) => { adopted.push(slot); return { child, lease: 'blank-lease' } },
+      registerOwner: async () => () => {},
+    } }
+  const f = fixture({ children, register: async (_tab, _scope, viewport, signal) => {
+    registered.push(viewport)
+    if (viewport === 'old') await new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    })
+    return viewport
+  } })
+  try {
+    const detach = f.page.mount('old')
+    await flush()
+    detach()
+    f.page.mount('new')
+    await flush(); await flush()
+    assert.deepEqual(registered, ['old', 'new'])
+    assert.deepEqual(adopted, ['new'])
+    assert.equal(f.page.getSnapshot().error, undefined)
+    assert.deepEqual(f.released, [])
+  } finally { await f.page.dispose(); globalThis.document = previous }
+  assert.deepEqual(f.released, ['blank-lease'])
+})
+
 test('native presentation creates no webview and waits for attachment and committed frame/loader acknowledgement', async () => {
   const previous = globalThis.document
   globalThis.document = { getElementById: () => ({ dataset: {} }), createElement() { throw new Error('No DOM guest allowed') } }

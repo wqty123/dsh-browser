@@ -1,10 +1,13 @@
 /// <reference path="../css-modules.d.ts" />
+import { GUEST_ROUTE } from '../../../assets/browser-policy.mjs'
 /** Iframe DOM and revision-tagged load observations. */
 import type { BrowserTarget } from '../browser/url.ts'
 import type { BrowserPresentation } from './BrowserPresentation.ts'
 import css from './Browser.module.css'
-import { registerIframeReference, type GuestReferenceCommand } from '../browser/iframe-reference.ts'
+import { registerIframePage, registerIframeReference, type GuestReferenceCommand } from '../browser/iframe-reference.ts'
 import { connectWebReferenceSource } from '../browser/web-reference-source.ts'
+import { registerTakeoverSummary } from '../browser/takeover-channel.ts'
+import type { TakeoverSummary } from '../../takeover-protocol.ts'
 import { sameReferenceDocument } from '../../reference-page.ts'
 import { dispatchChildTab } from '../browser/child-tabs.ts'
 import { reportReferenceCaptureFailure } from '../reference-intents.ts'
@@ -13,15 +16,15 @@ import type { BrowserChildTabRequest } from '../../types.ts'
 /** Route Web pages through the opaque-origin proxy. */
 function guestProxyUrl(url: string, context: string): string {
   if (!/^https?:\/\//iu.test(url)) return url
-  if (url.includes('/dsh-builtin-browser/browser-view/isolated-guest')) return url
-  return `${location.origin}/dsh-builtin-browser/browser-view/isolated-guest?u=${encodeURIComponent(url)}&runtime=3&storage-context=${encodeURIComponent(context)}`
+  if (url.includes(GUEST_ROUTE)) return url
+  return `${location.origin}${GUEST_ROUTE}?u=${encodeURIComponent(url)}&runtime=3&storage-context=${encodeURIComponent(context)}`
 }
 
 function capturedSourceUrl(value: unknown): unknown {
   if (typeof value !== 'string') return value
   try {
     const proxy = new URL(value)
-    if (proxy.origin === location.origin && proxy.pathname === '/dsh-builtin-browser/browser-view/isolated-guest') {
+    if (proxy.origin === location.origin && proxy.pathname === GUEST_ROUTE) {
       const source = proxy.searchParams.get('u')
       if (source !== null && /^https?:\/\//iu.test(source)) return new URL(source).href
     }
@@ -62,6 +65,7 @@ export class IframePresentation implements BrowserPresentation {
   private readonly sourceLifetime = new AbortController()
   private sourceConnection: Promise<void> | undefined
   private observedUrl: string | undefined
+  private unregisterPage: (() => void) | undefined
   private nextRequestId = 0
   private readonly pending = new Map<number, { readonly loadId: number; readonly url: string; readonly resolve: (value: Record<string, unknown>) => void; readonly reject: (error: Error) => void }>()
   private host: HTMLElement | undefined
@@ -143,11 +147,19 @@ export class IframePresentation implements BrowserPresentation {
     if (data.ready === true) this.markLoaded()
     this.observedUrl = data.url
     this.events.observed(this.document.revision, data.url)
+    if (data.ready === true && this.owner !== undefined && this.host !== undefined) {
+      this.unregisterPage?.()
+      this.unregisterPage = registerIframePage(this.owner, this.host.id, this.pageId, data.url, this.document.target.url)
+    }
     if (data.ready === true) this.events.guestReady?.(this.document.revision, this.pageId)
   }
 
   /** @param events - provider-owned load and remount callbacks. */
   constructor(private readonly events: IframePresentationEvents, private readonly owner?: string) {
+    if (owner !== undefined) this.sourceLifetime.signal.addEventListener('abort', registerTakeoverSummary(this.pageId, owner, async signal => {
+      const result = await this.command('summary', { maxChars: 1500, legacy: false }, signal, this.observedUrl ?? '', this.loadId)
+      return result as unknown as TakeoverSummary
+    }), { once: true })
     if (owner !== undefined) this.unregisterReference = registerIframeReference(this.pageId, owner, url => {
       const loadId = this.loadId
       return (operation, spec, signal) => this.command(operation, spec, signal, url, loadId)
@@ -181,6 +193,8 @@ export class IframePresentation implements BrowserPresentation {
   }
 
   private invalidateGuest(): void {
+    this.unregisterPage?.()
+    this.unregisterPage = undefined
     clearTimeout(this.identityTimer)
     this.identityTimer = undefined
     this.identityRetried = false

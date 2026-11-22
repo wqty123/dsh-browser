@@ -24,14 +24,42 @@ test('persistent and session cookies survive a real process restart without logg
     assert.equal(result.stderr, '')
   }
   run(`jar.setCookies(url, ['PERSIST=kept; Secure; Max-Age=3600; Path=/', 'SESSION=restored; Path=/']);
-    assert.equal(jar.getCookieHeader(url), 'PERSIST=kept; SESSION=restored');`)
-  run(`assert.equal(jar.getCookieHeader(url), 'PERSIST=kept; SESSION=restored');`)
+    assert.equal(jar.getCookieHeader(url), 'PERSIST=kept; SESSION=restored');
+    jar.setCookies(new URL('https://passport.example.test/'), ['LOGIN=yes; Domain=example.test; Secure; Path=/', 'HIDDEN=yes; Domain=example.test; Secure; HttpOnly; Path=/']);
+    jar.setDocumentCookie(new URL('https://www.example.test/'), 'SCRIPT=yes; Domain=example.test; Path=/');`)
+  run(`assert.equal(jar.getCookieHeader(url), 'PERSIST=kept; SESSION=restored');
+    assert.equal(jar.getCookieHeader(new URL('https://www.example.test:8443/')), 'LOGIN=yes; HIDDEN=yes; SCRIPT=yes');
+    assert.equal(jar.getDocumentCookie(new URL('https://www.example.test/')), 'LOGIN=yes; SCRIPT=yes');
+    assert.equal(jar.getDocumentCookie(new URL('http://www.example.test/')), 'SCRIPT=yes');`)
   const storage = join(directory, 'dsh-builtin-browser-host', 'web-cookies')
   assert.deepEqual(readdirSync(storage), ['cookies.json'], 'one store, with no identity keys or temporary files')
   const file = join(storage, 'cookies.json')
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(file, 'utf8'))).sort(), ['cookies', 'version'])
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).cookies.find(cookie => cookie.name === 'SESSION').expiresAt, undefined)
   if (process.platform !== 'win32') assert.equal(statSync(file).mode & 0o777, 0o600)
+})
+
+test('legacy per-origin entries migrate losslessly to host-only cookies, including colliding old origins', t => {
+  const directory = fixture(t), file = join(directory, 'cookies.json')
+  const legacy = [
+    { origin:'https://passport.example.test', name:'SAME', value:'https', path:'/', secure:false, httpOnly:false },
+    { origin:'http://passport.example.test:8080', name:'SAME', value:'http-port', path:'/', secure:false, httpOnly:false },
+    { origin:'https://passport.example.test:8443', name:'LOCKED', value:'private', path:'/account', secure:true, httpOnly:true, sameSite:'strict', expiresAt:Date.now()+3600000 },
+  ]
+  writeFileSync(file, JSON.stringify({version:1,cookies:legacy}))
+  const jar = loadGuestCookies(directory)
+  const migrated = JSON.parse(readFileSync(file,'utf8'))
+  assert.equal(migrated.version, 1)
+  assert.deepEqual(migrated.cookies, legacy.map(cookie => ({...cookie,domain:'passport.example.test',hostOnly:true})))
+  const shared = new URL('https://passport.example.test:9443/account')
+  assert.equal(jar.getCookieHeader(shared), 'LOCKED=private; SAME=https; SAME=http-port')
+  assert.equal(jar.getDocumentCookie(shared), 'SAME=https; SAME=http-port')
+  assert.equal(jar.getCookieHeader(new URL('https://child.passport.example.test/account')), undefined)
+  assert.equal(jar.getCookieHeader(new URL('https://www.example.test/account')), undefined)
+  assert.equal(loadGuestCookies(directory).getCookieHeader(shared), jar.getCookieHeader(shared))
+  jar.setDocumentCookie(shared, 'SAME=new; Path=/')
+  assert.equal(jar.getDocumentCookie(shared), 'SAME=new')
+  assert.equal(loadGuestCookies(directory).getDocumentCookie(shared), 'SAME=new')
 })
 
 test('expiry, replacement by a session cookie, and explicit deletion remain effective after restart', t => {

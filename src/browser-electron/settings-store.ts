@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Plugin-owned settings document — the switches the browser settings panel
  * exposes, stored next to the browsing history so both follow the same rules:
@@ -103,16 +104,8 @@ export interface BrowserSettings {
      */
     readonly headless: HeadlessMode
     /**
-     * Which profile the browser runs on: the user's own that `usage` needs.
-     *
-     * `entry.ts` 早就在读这个字段（`systemProfile !== 'plugin'` 就去用用户自己的 profile），但这一层
-     * 从来没有产出它——于是 `settings.get().browser.systemProfile` 恒为 `undefined`，判断永远成立，
-     * 浏览器总是跑在**用户的** Edge profile 上。用户开着 Edge 时，Chromium 直接以 exit 21
-     * （`PROFILE_IN_USE`）退出，表现为"引擎起不来、截图和点击全部失败"，而错误信息指向"残留进程"，
-     * 找遍进程也找不到占用者。
-     *
-     * 默认 `plugin`：插件自己的目录，不碰用户的窗口与登录态，装好就能用。要复用用户的登录态时
-     * 再显式改成 `user`，那时需要用户先把 Edge 关掉。
+     * `plugin` (default) launches a separate DSH-owned persistent profile.
+     * Explicit `user` attaches to the running, paired extension profile; never launches it.
      */
     readonly systemProfile: SystemProfile
   }
@@ -205,7 +198,7 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
  */
 export function settingsPath(): string {
   const home = dshHome()
-  return join(home, 'dsh-builtin-browser-host', 'settings.json')
+  return join(home, BROWSER_PROFILE_DIR, 'settings.json')
 }
 
 /** Coerce one boolean field, keeping the default when absent or mistyped. */

@@ -83,6 +83,49 @@ test('background holds do not change selection, and release is idempotent and ru
   assert.equal(state.released(), 2)
 })
 
+test('rendering holds expire without selection changes and expired acquisitions are refused', async t => {
+  const state = mount(t)
+  assert.equal(state.api.holdRendering('session-agent', 'expired', Date.now() - 1), false)
+  assert.equal(state.api.holdRendering('session-agent', 'bounded', Date.now() + 20), true)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(state.held.size, 0)
+  assert.equal(state.released(), 1)
+  state.api.releaseRendering('bounded')
+  assert.equal(state.released(), 1)
+  assert.deepEqual(state.switched, [])
+})
+
+for (const stalledReply of [false, true]) test(`a hung rendering release cannot block the request deadline (reply only=${stalledReply})`, async t => {
+  let started
+  const waiting = new Promise(resolve => { started = resolve })
+  const reader = { protocolVersion: 1, read() {}, wait(_query, signal) {
+    started()
+    return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+  } }
+  const state = mount(t, { reader })
+  const shell = contents[0]
+  const execute = shell.executeJavaScript
+  shell.executeJavaScript = async expression => {
+    if (expression.includes('releaseRendering?.')) {
+      if (stalledReply) await execute(expression)
+      return new Promise(() => {})
+    }
+    return execute(expression)
+  }
+  state.api.openPanel = () => ({ ok: true, created: true, panel: true, guestId: null, tabId: 'tab-1' })
+  const controller = new AbortController()
+  const began = Date.now()
+  const pending = bridge.handle({ op: 'ensureSidebar', handle: wire, transactionId: 'release-hang', deadline: Date.now() + 500 }, controller.signal)
+  const rejected = assert.rejects(pending, { code: 'BROWSER_DOCUMENT_TIMEOUT' })
+  await waiting
+  await rejected
+  assert.ok(Date.now() - began < 1000)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(state.held.size, 0)
+  assert.equal(state.released(), 1)
+  assert.deepEqual(state.switched, [])
+})
+
 test('selected sessions and older sidebar services do not acquire a hold', t => {
   const state = mount(t, { supported: false })
   assert.equal(state.api.holdRendering('session-agent', 'one'), false)

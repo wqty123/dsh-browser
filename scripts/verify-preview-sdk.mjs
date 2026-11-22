@@ -1,3 +1,4 @@
+import { LOOPBACK_IPV4 } from '../assets/browser-policy.mjs'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -52,8 +53,8 @@ try {
   await apply(ctx)
   connection = ctx.get('connection')
   assert.equal(typeof connection?.requestRejection, 'function')
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-  const base = 'http://127.0.0.1:' + server.address().port
+  await new Promise(resolve => server.listen(0, LOOPBACK_IPV4, resolve))
+  const base = 'http://' + LOOPBACK_IPV4 + ':' + server.address().port
   const paths = [PREVIEW_SESSIONS_ROUTE, PREVIEW_ROUTE + '?session=visible-session']
   for (const path of paths) {
     const response = await fetch(base + path, { headers: { origin: base } })

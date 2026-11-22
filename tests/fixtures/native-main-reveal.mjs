@@ -71,6 +71,7 @@ export async function nativeMainReveal(snapshot, live, guestId = 2, evaluate) {
   if (snapshot.referenceId !== undefined) store.append({ ...snapshot, manifestHash: manifestHashOf(snapshot) })
   const service = createReferenceService(ctx.browser, {
     store, assetDir: join(home, 'assets'),
+    sourceReady: async task => { (await DesktopBridgeViewHost.discover(`session-${task}`))?.dispose() },
     sourceSession: (task, page) => ctx.browser.bindPanelPage(`session-${task}`, page),
   })
   const routes = createReferenceRouteHandlers({ service })
@@ -91,7 +92,7 @@ export async function nativeMainReveal(snapshot, live, guestId = 2, evaluate) {
       })
       return outcome
     },
-    async start() {
+    async start(protocol) {
       const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
       assert.equal(manifest.dsh.desktop?.main, './desktop-bridge/main.mjs')
       assert.ok(manifest.files.includes('desktop-bridge'))
@@ -100,6 +101,7 @@ export async function nativeMainReveal(snapshot, live, guestId = 2, evaluate) {
       writeFileSync(join(folder, 'package.json'), '{"type":"module"}')
       writeFileSync(entry, readFileSync(manifest.dsh.desktop.main))
       let bridge = readFileSync('desktop-bridge/plugin-browser-bridge.js', 'utf8')
+      if (protocol !== undefined) bridge = bridge.replace(/const PROTOCOL = \d+/, `const PROTOCOL = ${protocol}`)
       bridge = bridge.replace(/import \{([^}]+)\} from ['"]electron['"]/, 'const {$1} = globalThis.__nativeMainElectron')
       writeFileSync(join(dirname(entry), 'plugin-browser-bridge.js'), bridge)
       writeFileSync(join(dirname(entry), 'guest-proxy.mjs'), readFileSync('desktop-bridge/guest-proxy.mjs'))

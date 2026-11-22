@@ -262,6 +262,7 @@ export interface BrowserReferenceServiceOptions {
   /** Page evaluation budget. Default 20 s. */
   readonly timeoutMs?: number
   readonly sourceSession?: (owner: string, pageId: string) => Promise<string>
+  readonly sourceReady?: (owner: string) => Promise<void>
 }
 
 /** Every limit after clamping; the caller's values only ever tighten these. */
@@ -374,11 +375,13 @@ export class BrowserReferenceService {
   private readonly options: ResolvedOptions
   private readonly store: ReferenceStore
   private readonly sourceSession: BrowserReferenceServiceOptions['sourceSession']
+  private readonly sourceReady: BrowserReferenceServiceOptions['sourceReady']
 
   constructor(host: ReferenceHost, store: ReferenceStore = new ReferenceStore(), options: BrowserReferenceServiceOptions = {}) {
     this.host = host
     this.store = store
     this.sourceSession = options.sourceSession
+    this.sourceReady = options.sourceReady
     this.webSources = options.webSources
     this.options = {
       context: integerOf(options.context, DEFAULTS.context, 0, 512),
@@ -680,7 +683,8 @@ export class BrowserReferenceService {
     if (request.ownerSessionId !== undefined && referenceOwnerKey(request.ownerSessionId) !== owner) {
       return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, parts: [], note: 'reference belongs to another conversation' }
     }
-    const webPage = request.sourcePageId?.startsWith('iframe:') ? request.sourcePageId : reference.owner.sourcePageId
+    const sourcePageId = request.sourcePageId ?? reference.owner.sourcePageId
+    const webPage = sourcePageId?.startsWith('iframe:') ? sourcePageId : undefined
     if (webPage !== undefined) {
       const target = request.partId === undefined ? reference.parts.slice(0, 1) : reference.parts.filter(part => part.partId === request.partId)
       if (target.length === 0) return { referenceId, status: 'not-found', pageUrl: reference.source.pageUrl, parts: [] }
@@ -690,13 +694,17 @@ export class BrowserReferenceService {
     const captured = reference.owner.browserSessionId
     const live = captured !== undefined && captured !== '' && this.host.exists(captured) ? captured : undefined
     let sessionId = live
-    if (request.sourcePageId !== undefined) {
+    if (sourcePageId !== undefined) {
       const owner = referenceOwnerKey(reference.owner.sessionId ?? '')
       if (!owner || this.sourceSession === undefined) return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, parts: [], note: 'sidebar source binding unsupported' }
-      try { sessionId = await this.sourceSession(owner, request.sourcePageId) }
+      try { sessionId = await this.sourceSession(owner, sourcePageId) }
       catch (error) { return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, parts: [], note: messageOf(error) } }
     }
     if (sessionId === undefined) {
+      if (reference.source.carrier === 'sidebar') {
+        try { await this.sourceReady?.(owner) }
+        catch (error) { return { referenceId, status: 'unavailable', pageUrl: reference.source.pageUrl, parts: [], note: messageOf(error) } }
+      }
       return {
         referenceId,
         status: captured === undefined ? 'unavailable' : 'session-unavailable',

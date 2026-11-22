@@ -21,6 +21,7 @@ import { createRequire } from 'node:module'
 
 import { readDesktopIdentity } from './desktop-identity.ts'
 import { MAIN_EXTENSION_UNSUPPORTED, type MainExtensionStatus } from './profile-extension.ts'
+import { BRIDGE_VERSION_MESSAGE } from '../bridge-compatibility.ts'
 
 // A normal Electron existsSync(app.asar) caches the archive and keeps it locked on Windows.
 // Status inspection must leave maintenance free to rename it after Desktop exits.
@@ -266,7 +267,7 @@ function readBridgeInstallStatus(installRoot: string): BridgeStatus {
   try {
     const deployed = readFileSync(bridgePath)
     const shipped = readFileSync(new URL('../../desktop-bridge/plugin-browser-bridge.js', import.meta.url))
-    if (!deployed.equals(shipped)) bridgeDetail = 'the deployed bridge module differs from this plugin version; reinstall the bridge to refresh it'
+    if (!deployed.equals(shipped)) bridgeDetail = BRIDGE_VERSION_MESSAGE
   } catch {
     bridgeDetail = 'the bridge module is missing or cannot be verified; reinstall the bridge to restore it'
   }

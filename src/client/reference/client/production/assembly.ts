@@ -39,9 +39,9 @@ import type { TextPosition } from '../ordered-submission.ts'
 import { ensureDockStyles } from './styles.ts'
 import { buildBrowserRefLinkProps } from '../BrowserRefLink.tsx'
 import { installReplyLinkBridge } from './reply-link-bridge.ts'
-import { browserSourceRule } from './user-text-rule.ts'
+import { createBrowserSourceRule } from './user-text-rule.ts'
 import { decodeBrowserRefUri } from '../scheme.ts'
-import { createElement as element } from 'react'
+import { createElement as element, useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ReferenceDock } from './ReferenceDock.tsx'
 import { ReferenceCapsules } from './ReferenceCapsules.tsx'
@@ -246,6 +246,12 @@ export const BROWSER_REF_RENDERER_GLOBAL = '__DSH_BROWSER_REF_RENDERER__'
 export const REPLY_LINK_BRIDGE_GLOBAL = '__DSH_BROWSER_REF_LINK_BRIDGE__'
 export const BROWSER_REF_SCHEME = 'dsh-browser-ref:'
 
+function SentReferenceCapsules(props: { readonly runtime: ProductionRuntime; readonly capsule: Parameters<typeof ReferenceCapsules>[0] }): ReturnType<typeof ReferenceCapsules> {
+  const view = useSyncExternalStore(props.runtime.subscribe, props.runtime.snapshot, props.runtime.snapshot)
+  const notice = view.reveal?.referenceId === props.capsule.cards[0]?.referenceId ? view.reveal?.message : undefined
+  return element(ReferenceCapsules, { ...props.capsule, ...(notice === undefined ? {} : { notice }) })
+}
+
 function renderSentCapsule(runtime: ProductionRuntime, createElement: HostElementFactory, uri: string, label?: string, key?: unknown, anchor?: HTMLElement): unknown {
   let referenceId: string | undefined
   try { referenceId = decodeBrowserRefUri(uri).referenceId } catch { /* invalid URI */ }
@@ -253,13 +259,16 @@ function renderSentCapsule(runtime: ProductionRuntime, createElement: HostElemen
   const owner = referenceId === undefined ? undefined : runtime.ownerFor(referenceId)
   if (detail !== undefined && owner?.sessionId === runtime.currentSessionId()) {
     const index = Number(/引用来源\s*(\d+)/u.exec(label ?? '')?.[1]) || detail.card.index
-    return element(ReferenceCapsules, {
+    return element(SentReferenceCapsules, {
       key: String(key ?? uri),
-      sessionId: runtime.currentSessionId(),
-      cards: [{ ...detail.card, index }],
-      labels: referenceLabels(),
-      actions: { onReveal: () => { void runtime.activateUri(uri) } },
-      ...(anchor === undefined ? {} : { anchor }),
+      runtime,
+      capsule: {
+        sessionId: runtime.currentSessionId(),
+        cards: [{ ...detail.card, index }],
+        labels: referenceLabels(),
+        actions: { onReveal: () => { void runtime.activateUri(uri) } },
+        ...(anchor === undefined ? {} : { anchor }),
+      },
     })
   }
   if (anchor !== undefined) return null
@@ -447,12 +456,13 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
   runtime.start()
   ctx.effect(() => () => { runtime.dispose() }, 'ui-browser-reference: production runtime')
 
+  const sourceRule = createBrowserSourceRule(referenceId => runtime.referenceDetail(referenceId) !== undefined)
   const textOwner = ctx.get('uiConversation') as {
-    readonly userText?: { register(rule: typeof browserSourceRule): () => void }
+    readonly userText?: { register(rule: typeof sourceRule): () => void }
   } | undefined
   if (textOwner?.userText !== undefined) {
     try {
-      ctx.effect(() => textOwner.userText?.register(browserSourceRule), 'ui-browser-reference: source text rule')
+      ctx.effect(() => textOwner.userText?.register(sourceRule), 'ui-browser-reference: source text rule')
     } catch {
       // 文本来源高亮是可选的展示增强：注册失败不能拖垮引用投递。
     }

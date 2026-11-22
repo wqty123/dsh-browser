@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /** User-requested Windows maintenance, coordinated outside the Desktop process tree. */
 import { execFile, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -179,7 +180,7 @@ export async function stageReinstallRuntime(directory: string, source = fileURLT
   const parent = fs.realpathSync(directory)
   if (parent === packageDirectory || inside(packageDirectory, parent)) throw new Error('Reinstall runtime must be staged outside the removed package')
   await mkdir(destination, { mode: 0o700 })
-  for (const name of ['lib', 'desktop-bridge', 'dsh-host-patch', 'package.json']) {
+  for (const name of ['lib', 'assets', 'desktop-bridge', 'dsh-host-patch', 'package.json']) {
     await cp(join(packageDirectory, name), join(destination, name), { recursive: true, dereference: true, errorOnExist: true, force: false })
   }
   return join(destination, 'lib', 'browser-electron', 'automatic-maintenance.js')
@@ -223,7 +224,7 @@ function reportMaintenanceFailure(label: string, error: unknown): void {
 }
 
 function homePath(): string { return resolve(dshHome()) }
-function basePath(home = homePath()): string { return join(home, 'dsh-builtin-browser-host', 'maintenance') }
+function basePath(home = homePath()): string { return join(home, BROWSER_PROFILE_DIR, 'maintenance') }
 function inside(base: string, path: string): boolean {
   const part = relative(base, path)
   return part !== '' && !isAbsolute(part) && part !== '..' && !part.startsWith('..\\') && !part.startsWith('../')

@@ -25,6 +25,8 @@
     "desktop-bridge",
     "dsh-host-patch",
     "!dsh-host-patch/sources",
+    "browser-extension",
+    "native-host",
     "cordis.patch.yml",
     "CHANGELOG.md",
     "README.md",
@@ -34,6 +36,7 @@
     "!src/**/__tests__"
   ],
   "type": "module",
+  "packageManager": "pnpm@11.7.0",
   "exports": {
     ".": "./src/index.ts",
     "./browser": "./src/browser/runtime.ts",
@@ -92,6 +95,7 @@
     "@deepseek-ai/dsh-settings": "workspace:^",
     "@types/node": "^22.0.0",
     "react-dom": "^18.2.0",
+    "tldts": "6.1.86",
     "typescript": "^5.5.0"
   },
   "engines": {

@@ -1,12 +1,12 @@
-export interface GuestStorageConfig { readonly token: string; readonly context: string }
+export interface GuestStorageConfig { readonly token: string; readonly context: string; readonly cookies?: string }
 
 /** Synchronous Web Storage remains isolated from the application's real origin. */
 export function guestStorageScript(config: GuestStorageConfig): string {
   return `(() => {
     const config = ${JSON.stringify(config).replace(/</gu, '\\u003c')};
     const XHR = XMLHttpRequest, open = XHR.prototype.open, send = XHR.prototype.send, header = XHR.prototype.setRequestHeader;
-    const endpoint = location.pathname + '?u=' + encodeURIComponent(real) + '&storage-token=' + encodeURIComponent(config.token);
     const rpc = (area, op, key, value) => {
+      const endpoint = location.pathname + '?u=' + encodeURIComponent(real) + '&storage-token=' + encodeURIComponent(config.token);
       const xhr = new XHR();
       open.call(xhr, 'POST', endpoint, false);
       header.call(xhr, 'content-type', 'text/plain;charset=UTF-8');
@@ -16,6 +16,18 @@ export function guestStorageScript(config: GuestStorageConfig): string {
       if (xhr.status !== 200 || !response.ok) throw new DOMException('Guest storage request failed', response.name || 'UnknownError');
       return response.value;
     };
+    const cookieSnapshots = new Map([[real, config.cookies || '']]);
+    Object.defineProperty(Document.prototype, 'cookie', { configurable: true, enumerable: true,
+      get: function cookie() {
+        if (this !== document) throw new TypeError('Illegal invocation');
+        try { const value = rpc('cookies', 'get'); cookieSnapshots.set(real, value); return value; }
+        catch (error) { if (error.name === 'NetworkError') return cookieSnapshots.get(real) || ''; throw error; }
+      },
+      set: function cookie(value) {
+        if (this !== document) throw new TypeError('Illegal invocation');
+        cookieSnapshots.set(real, rpc('cookies', 'set', undefined, String(value)));
+      }
+    });
     for (const area of ['local', 'session']) {
       const storage = Object.create(Storage.prototype);
       const entries = () => rpc(area, 'entries');

@@ -93,7 +93,7 @@ test('the prompt section coexists with another browser plugin in either registra
     }
     apply(ctx)
     if (!siblingFirst) ctx.systemPrompt.section({ name: 'tool:browser' })
-    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
+    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:browser-human-takeover', 'tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
     assert.ok(tools.has('dsh_browser_open'), 'tool registration completes')
   }
 })

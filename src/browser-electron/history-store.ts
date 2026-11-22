@@ -1,3 +1,4 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Persistent browsing history: which pages the shared browser actually visited,
  * kept independently from any session's operation log (`dsh_browser_history`) and
@@ -43,7 +44,7 @@ const PRUNE_SLACK = 500
  */
 export function visitedHistoryPath(): string {
   const home = dshHome()
-  return join(home, 'dsh-builtin-browser-host', 'history.jsonl')
+  return join(home, BROWSER_PROFILE_DIR, 'history.jsonl')
 }
 
 /**

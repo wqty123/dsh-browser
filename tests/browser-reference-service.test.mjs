@@ -307,6 +307,35 @@ test('reveal never treats an unacknowledged navigation request as page readiness
   assert.equal(outcome.currentUrl, 'https://example.com/other')
 })
 
+for (const storedPage of ['iframe:stored', 'native-stored']) {
+  for (const requestedPage of [undefined, 'iframe:requested', 'native-requested', '']) {
+    test(`reveal source precedence: stored=${storedPage}, requested=${requestedPage}`, async t => {
+      const { page, service, host, assets } = fixture(t)
+      page.capture = { ok: true, url: 'https://example.com/article', title: 'Article', events: [textEvent('selected words')] }
+      page.text = { ok: true, text: 'alpha selected words omega', truncated: false }
+      const original = (await service.capture({ sessionId: 'session-1' })).reference
+      const reference = { ...original, referenceId: `${original.referenceId}-stored`, owner: { ...original.owner, sourcePageId: storedPage } }
+      reference.manifestHash = manifestHashOf(reference)
+      service.references.append(reference)
+      const webCalls = [], nativeCalls = []
+      const revived = new BrowserReferenceService(host, service.references, {
+        assetDir: assets,
+        webSources: { reveal: async (_reference, pageId) => { webCalls.push(pageId); return 'revealed' } },
+        sourceSession: async (_owner, pageId) => {
+          nativeCalls.push(pageId)
+          if (pageId === '') throw new Error('source page missing')
+          return 'session-1'
+        },
+      })
+      const outcome = await revived.reveal(reference.referenceId, requestedPage === undefined ? {} : { sourcePageId: requestedPage })
+      const selected = requestedPage ?? storedPage
+      assert.equal(outcome.status, selected === '' ? 'unavailable' : 'revealed')
+      assert.deepEqual(webCalls, selected.startsWith('iframe:') ? [selected] : [])
+      assert.deepEqual(nativeCalls, selected.startsWith('iframe:') ? [] : [selected])
+    })
+  }
+}
+
 test('reveal binds the exact acknowledged source page when the capture session was replaced', async t => {
   const { page, service, host, assets } = fixture(t)
   page.capture = { ok: true, url: 'https://example.com/article', title: 'An article', events: [textEvent('selected words')] }

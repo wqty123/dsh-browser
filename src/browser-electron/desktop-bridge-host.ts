@@ -6,22 +6,12 @@ import { randomUUID } from 'node:crypto'
 import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserSessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 import type { CommandOptions, ElectronBrowserViewHost, ElectronViewHandle, BrowserUserAction } from './provider.ts'
 import type { CarrierPage, CarrierLossReason } from '../browser/types.ts'
+import { BridgeVersionError, bridgePackageError, isBridgeVersionMismatch } from '../bridge-compatibility.ts'
 
 export { bridgeEndpointPath }
 
 const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
 const PANEL_INITIALIZING = 'panel-initializing'
-
-export class BrowserBridgeVersionError extends Error {
-  readonly code = 'BROWSER_BRIDGE_OUTDATED'
-  readonly bridgeState = 'stale'
-  readonly repairAction = 'reinstall'
-  readonly requiredProtocol = 4
-  constructor(readonly actualProtocol: unknown) {
-    super(`dsh-builtin-browser: 桥接版本过旧 — desktop bridge protocol ${String(actualProtocol ?? 'unknown')} cannot serve this plugin (requires protocol 4 or newer). Use “卸载并重装” in the browser settings, then retry dsh_browser_open. No iframe navigation was queued.`)
-    this.name = 'BrowserBridgeVersionError'
-  }
-}
 
 export class BrowserPanelNotDisplayedError extends Error {
   readonly code: string
@@ -47,6 +37,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   private readonly retiredSessions = new Set<BrowserSessionWireId>()
   private lostListener: ((reason: CarrierLossReason) => void) | undefined
   private static refuseIframe = false
+  private static versionError: string | undefined
 
   private constructor(endpoint: BridgeEndpoint, private readonly isQuiet: () => boolean = () => false) {
     this.connection = new BridgeConnection(endpoint, bridgeEndpointPath(), () => this.lostListener?.('shell-exited'))
@@ -55,9 +46,11 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   onLost(listener: (reason: CarrierLossReason) => void): void { this.lostListener = listener }
   available(): boolean { return true }
   static refusedIframePanel(): boolean { return this.refuseIframe }
+  static compatibilityError(): string | undefined { return this.versionError }
 
   static async discover(_owner?: string, isQuiet?: () => boolean): Promise<DesktopBridgeViewHost | undefined> {
     this.refuseIframe = false
+    this.versionError = undefined
     let endpoint: BridgeEndpoint
     try {
       const raw = JSON.parse(readFileSync(bridgeEndpointPath(), 'utf8')) as Partial<BridgeEndpoint>
@@ -67,12 +60,17 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     const probe = new BridgeConnection(endpoint, bridgeEndpointPath())
     try {
       const answer = await probe.call({ op: 'list' }, 5_000)
+      if (isBridgeVersionMismatch(answer)) throw new BridgeVersionError()
       if (answer.ok !== true) return undefined
-      if (typeof answer.protocol !== 'number' || answer.protocol < 4) throw new BrowserBridgeVersionError(answer.protocol)
+      if (typeof answer.protocol !== 'number' || !Number.isInteger(answer.protocol)) throw new BridgeVersionError()
       if (answer.frame === 'iframe') { this.refuseIframe = true; return undefined }
       return new DesktopBridgeViewHost(endpoint, isQuiet)
     } catch (error) {
-      if (error instanceof BrowserBridgeVersionError) throw error
+      const versionError = bridgePackageError(error) ?? (error instanceof BridgeVersionError ? error : undefined)
+      if (versionError !== undefined) {
+        this.versionError = versionError.message
+        throw versionError
+      }
       return undefined
     }
     finally { probe.close() }

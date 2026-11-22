@@ -1,3 +1,5 @@
+import { referenceCaptureMessages, referenceCaptureErrors } from '../../assets/browser-messages.mjs'
+import { BROWSER_PROFILE_DIR, SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../assets/browser-policy.mjs'
 /**
  * Electron browser provider plugin entry: registers the Electron-backed
  * `BrowserProvider` with `ctx.browser`. The provider needs a view host (real
@@ -26,6 +28,10 @@ import { dshHome } from './paths.ts'
 import { setTimeout as wait } from 'node:timers/promises'
 import { DesktopBridgeViewHost } from './desktop-bridge-host.ts'
 import { SidebarOnlyHost } from './sidebar-only-host.ts'
+import { ExtensionBrowserViewHost, extensionInstallHelp } from './extension-browser.ts'
+import { PreferredBrowserViewHost } from './preferred-browser.ts'
+import { nativeRegistration, installExtension, registrationStatus, probeExtension } from './extension-setup.ts'
+import { registerCarrierTakeover } from '../browser/takeover-target.ts'
 import { detectBrowser, searchSummary, SystemBrowserViewHost } from './system-browser.ts'
 import { claimEphemeralProfile, ephemeralProfileName, sweepAbandonedEphemeralProfiles } from './ephemeral-profile.ts'
 import { MissingSystemBrowserHost } from './missing-system-browser.ts'
@@ -75,6 +81,10 @@ import {
   REFERENCE_STATUS_ROUTE,
 } from './reference-route.ts'
 
+function isPreferredCarrier(host: ElectronBrowserViewHost | undefined): host is ExtensionBrowserViewHost | PreferredBrowserViewHost {
+  return host instanceof ExtensionBrowserViewHost || host instanceof PreferredBrowserViewHost
+}
+
 /**
  * The reference bar as a <script> element, for documents served through the Web guest proxy.
  *
@@ -110,27 +120,6 @@ function readSurfaceForRoute(): 'panel' | 'builtin' {
 }
 
 
-/**
- * Locate the plugin's settings file.
- *
- * The host process does not always export DSH_HOME, so a single-environment read silently fell back to
- * "panel" for every call — which looked like the switch doing nothing. Try the documented variable, then
- * the conventional install locations.
- * @returns an existing settings path, or '' when none is readable.
- */
-function localSettingsPath(): string {
-  const candidates = [
-    process.env.DSH_HOME === undefined ? undefined : process.env.DSH_HOME + '/dsh-builtin-browser-host/settings.json',
-    'D:/dsh-home/dsh-builtin-browser-host/settings.json',
-    'C:/Users/FB/dsh-home/dsh-builtin-browser-host/settings.json',
-  ].filter((value): value is string => typeof value === 'string')
-  const fs = (process as unknown as { getBuiltinModule?: (id: string) => { existsSync: (p: string) => boolean } }).getBuiltinModule?.('fs')
-  for (const candidate of candidates) {
-    try { if (fs !== undefined && fs.existsSync(candidate)) return candidate } catch { /* next */ }
-  }
-  return candidates[1] ?? ''
-}
-
 export const OPEN_REQUEST_ROUTE = '/dsh-builtin-browser/browser/open-request'
 /** open 记录的有效期：超过就不再重放。这是一次即时事件，客户端 2 秒轮询一次，10 秒足够送达；
  *  留得越久，「关掉侧栏后刷新又被拉起来」的窗口越大（实测复现过）。 */
@@ -146,21 +135,9 @@ export type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 
-/**
- * The human's own profile directory for a detected browser.
- *
- * Chromium keeps everything that makes a browser "yours" in this directory. Reading it is what makes an
- * explicitly chosen Edge actually signed in; a separate profile would open a stranger's window.
- * @param kind - the detected browser family.
- * @returns the profile root, or undefined when this platform/path is unknown.
- */
-function userProfileRoot(kind: string): string | undefined {
-  const local = process.env.LOCALAPPDATA
-  if (typeof local !== 'string' || local === '') return undefined
-  if (kind === 'edge') return join(local, 'Microsoft', 'Edge', 'User Data')
-  if (kind === 'chrome') return join(local, 'Google', 'Chrome', 'User Data')
-  if (kind === 'brave') return join(local, 'BraveSoftware', 'Brave-Browser', 'User Data')
-  return undefined
+function carrierSettingsKey(settings: ReturnType<SettingsStore['get']>): string {
+  return JSON.stringify([settings.browser.channel, settings.browser.systemProfile, settings.browser.headless,
+    settings.browser.systemProfile === 'plugin' ? settings.cookies.persist : undefined])
 }
 
 export const name = 'browser-electron'
@@ -272,27 +249,6 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     settings: () => settings.get(),
   }
 
-  // A host supplied by the composition (the desktop shell's own seam) wins and is
-  // synchronous, so registration stays synchronous on that path.
-  if (config.viewHost !== undefined) {
-    const provider = trackProvider(new ElectronBrowserProvider(config.viewHost as ElectronBrowserViewHost, providerConfig))
-    const external = ctx.browser.registerBrowserProvider(provider)
-    ctx.browser.registerPanelProvider(async () => provider)
-    ctx.effect(() => () => { external() })
-    // The composition supplied the carrier, so `browser.channel` is not ours to honour on this
-    // surface. Saying so is the difference between a setting that cannot apply and a setting that
-    // appears not to have worked — the second is what sends people looking for a bug elsewhere.
-    const asked = settings.get().browser.channel
-    if (asked !== 'sidebar' && asked !== 'bundled') {
-      ctx.logger?.warn?.(
-        `dsh-builtin-browser: browser.channel is "${asked}", but this surface's carrier was `
-        + 'supplied by its composition (the desktop shell), which outranks the setting. Set it to '
-        + '"sidebar" to record the intent, or run on a surface that picks its own carrier.',
-      )
-    }
-    return
-  }
-
   let panelOpening: Promise<{ host: DesktopBridgeViewHost; provider: ElectronBrowserProvider } | undefined> | undefined
   let panelsDisposed = false
   const retirePanel = (panel: { host: DesktopBridgeViewHost; provider: ElectronBrowserProvider }, lost = false): void => {
@@ -304,6 +260,11 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       })
   }
   const unregisterPanel = ctx.browser.registerPanelProvider(async () => {
+    const selected = settings.get().browser
+    if ((selected.channel === 'edge' || selected.channel === 'chrome') && selected.systemProfile === 'user') {
+      if (!isPreferredCarrier(adoptedCarrier) || !referenceProvider) throw new Error('Selected personal-browser carrier is unavailable; no sidebar fallback.')
+      return referenceProvider
+    }
     if (panelOpening === undefined) {
       const opening = (async () => {
         const host = await DesktopBridgeViewHost.discover(sessionId, () => settings.get().ui.quiet)
@@ -366,9 +327,11 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   let carrierChoice = 0
   /** The carrier an `adopt` installed, so a later choice can release it. */
   let adoptedCarrier: ElectronBrowserViewHost | undefined = initialHost
+  let unregisterTakeover = (): void => {}
 
   ctx.effect(() => () => {
     disposed = true
+    unregisterTakeover()
     carrierChoice += 1
     unregister()
     // The reference pump is a real interval, not a one-shot: `unref` alone lets
@@ -376,7 +339,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     // must stop with the provider it belongs to. Retiring also silences its
     // user-action listeners, which the view host never unsubscribes.
     referenceProvider?.dispose()
-    adoptedCarrier?.dispose?.()
+    if (adoptedCarrier !== config.viewHost) adoptedCarrier?.dispose?.()
   })
 
   /**
@@ -434,13 +397,21 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       unregister()
       unregister = ctx.browser.registerBrowserProvider(trackProvider(new ElectronBrowserProvider(host, providerConfig)))
       adoptedCarrier = host
+      unregisterTakeover()
+      if (isPreferredCarrier(host)) {
+        const provider = referenceProvider!
+        unregisterTakeover = registerCarrierTakeover(ctx.browser, owner => provider.takeoverTargets(owner).map(target => ({
+          ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
+        })))
+        void host.refreshStatus()
+      }
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
       // A borrowed carrier can lose the process behind it, and this is the only notification that
       // will ever arrive. Registering AFTER the swap succeeded means a listener can never fire
       // against a provider that was never installed.
       if (!(host instanceof SidebarOnlyHost)) host.onLost?.(reason => { restoreSidebar(host, reason) })
       // Released AFTER the replacement is installed, so the surface is never without a provider.
-      if (previous !== undefined && previous !== host) {
+      if (previous !== undefined && previous !== host && previous !== config.viewHost) {
         try { previous.dispose?.() } catch { /* the replacement is already serving */ }
       }
     } catch (error) {
@@ -449,6 +420,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // process, and dropping it on the floor is how a failed upgrade becomes a leak that only
       // shows up as a stray Electron in the task manager.
       try { host.dispose?.() } catch { /* the fallback below matters more than this */ }
+      if (isPreferredCarrier(host)) {
+        ctx.logger?.warn?.(`dsh-builtin-browser: could not adopt the selected personal-browser extension (${String(error)}); no profile fallback`)
+        return
+      }
       // The fallback registration gets its own guard, because THIS is the path taken when the
       // context is already gone — and then `ctx.browser` throws `cannot get required service
       // "browser" in inactive context`. Unguarded, that second throw escaped the async retry
@@ -481,8 +456,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * nothing. Re-entrant by design — changing the channel means replacing the carrier, which is
    * exactly what a second call does.
    */
+  let chosenSettingsKey = ''
   const chooseCarrier = (): void => {
   if (disposed) return
+  chosenSettingsKey = carrierSettingsKey(settings.get())
   const choice = ++carrierChoice
   // A browser the user explicitly asked for outranks every automatic choice: the
   // whole point of the setting is that they know which browser they want. It is
@@ -499,12 +476,15 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // and a user who picked a browser that is not installed would never see the explanation
   // written for exactly that case, because the sidebar would quietly replace it.
   if (channel !== 'chrome' && channel !== 'edge') {
-    if (!(adoptedCarrier instanceof SidebarOnlyHost)) adopt(requiredSidebar(), 'using only the selected DSH sidebar', choice)
+    if (config.viewHost !== undefined) {
+      if (adoptedCarrier !== config.viewHost) adopt(config.viewHost as ElectronBrowserViewHost, 'using the composition-provided sidebar carrier', choice)
+    } else if (!(adoptedCarrier instanceof SidebarOnlyHost)) adopt(requiredSidebar(), 'using only the selected DSH sidebar', choice)
     return
   }
     const detected = detectBrowser(channel)
     if (detected === undefined) {
-        adopt(new MissingSystemBrowserHost(channel, searchSummary(channel)),
+        const missing = new MissingSystemBrowserHost(channel, searchSummary(channel))
+        adopt(settings.get().browser.systemProfile === 'user' ? new PreferredBrowserViewHost(channel, missing) : missing,
           `the selected ${channel} is not installed — commands will explain how to fix it`)
     } else {
       // Same profile root as settings-store, history-store and desktop-bridge-host: the
@@ -521,18 +501,9 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       const persist = settings.get().cookies.persist
       const profileRoot = join(home, BROWSER_PROFILE_DIR)
       adoptLegacyProfileRoot(profileRoot)
-      // Which profile a chosen Edge/Chrome runs on.
-      //
-      // "user" (the default for an explicitly chosen system browser) means the human's OWN profile
-      // directory: their logins, cookies, extensions and bookmarks are simply there. That is the whole
-      // point of picking "Edge" in settings — a fresh plugin profile opens a window that looks like Edge
-      // and is signed out of everything, which reads as "it did not use my browser".
-      // "plugin" keeps the old behaviour: a separate directory the plugin owns and may delete.
-      const wantUserProfile = (settings.get() as { browser?: { systemProfile?: unknown } }).browser?.systemProfile !== 'plugin'
-      const userProfile = wantUserProfile ? userProfileRoot(detected.kind) : undefined
-      const profileDir = userProfile ?? (persist
+      const profileDir = persist
         ? join(profileRoot, `${detected.kind}-profile`)
-        : join(profileRoot, ephemeralProfileName(detected.kind, randomUUID())))
+        : join(profileRoot, ephemeralProfileName(detected.kind, randomUUID()))
       if (!persist) {
         // A process killed outright never runs its own cleanup (see ephemeral-profile.ts),
         // so the sweep happens HERE — at the only moment that can still act on a profile
@@ -542,16 +513,17 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       }
       // The headless mode rides along so a display-less host (systemd, container, SSH-only server)
       // still gets a working browser instead of "exited immediately after launch" — issue #32.
-      ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = userProfile === undefined
-        ? 'launched-plugin-profile'
-        : 'launched-user-profile'
-      adopt(new SystemBrowserViewHost(detected, profileDir, [], userProfile === undefined && !persist ? profileDir : undefined,
-        undefined, settings.get().browser.headless, () => settings.get().ui.quiet),
+      ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = 'launched-plugin-profile'
+      const managed = new SystemBrowserViewHost(detected, profileDir, [], !persist ? profileDir : undefined,
+        undefined, settings.get().browser.headless, () => settings.get().ui.quiet,
+        undefined, { managed: true })
+      adopt(settings.get().browser.systemProfile === 'user' ? new PreferredBrowserViewHost(channel, managed) : managed,
         `will drive the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
     }
   }
 
   chooseCarrier()
+  void nativeRegistration.ensure().catch(() => {})
 
   // Wired AFTER the chooser exists, because the handler re-runs it: a settings write that changes
   // `browser.channel` is a request to switch carriers, and answering `ok` without switching is the
@@ -614,7 +586,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       }
       const last = getLastOpen()
       const fresh = last !== undefined && Date.now() - last.at <= OPEN_REQUEST_TTL_MS ? last : undefined
-      replyJson(response, 200, { ok: true, surface: readSurfaceForRoute(), open: fresh ?? null })
+      replyJson(response, 200, { ok: true, surface: readSurfaceForRoute(), open: isPreferredCarrier(adoptedCarrier) ? null : fresh ?? null })
     }),
   }, 'dsh-builtin-browser: open request slot'))
   // guest 代理由根行注册（见 src/web-guest.ts）：web 上 Electron 行可能被关闭。
@@ -780,11 +752,20 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       report: async () => {
         const mainExtension = await readHostExtensionStatus(dshHome())
         return readRuntimeStatus({
+          nativeHostRegistration: () => Object.fromEntries(registrationStatus),
           channel: () => settings.get().browser.channel,
+          systemProfile: () => settings.get().browser.systemProfile,
+          extensionConnection: () => isPreferredCarrier(adoptedCarrier) ? {
+            ...adoptedCarrier.connectionStatus(), install: extensionInstallHelp(adoptedCarrier.browser), registration: registrationStatus.get(adoptedCarrier.browser),
+          } : undefined,
           selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
-            : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
+            : adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.activeCarrier()
+            : adoptedCarrier instanceof ExtensionBrowserViewHost ? 'extension' : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
+          fallbackReason: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallbackReason : undefined,
+          systemConnection: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallback.connectionStatus?.() : adoptedCarrier instanceof SystemBrowserViewHost ? adoptedCarrier.connectionStatus() : undefined,
           hasBinary: hasElectronRuntime,
           provision: provisionSnapshot,
+          bridgeError: () => DesktopBridgeViewHost.compatibilityError(),
           bridge: () => {
             const root = findDesktopInstall()
             return root === undefined ? undefined : readBridgeStatus(root, mainExtension)
@@ -807,10 +788,24 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }
     try {
       injectRuntime(['webServer'], (host) => {
+        host.effect(() => host.webServer.register({ kind: 'exact', path: EXTENSION_INSTALL_ROUTE, handler: authenticated(ctx, async (request, response) => {
+          if (request.method !== 'POST') { response.writeHead(405); response.end(); return }
+          if (!sameOrigin(request, true)) { response.writeHead(403); response.end(); return }
+          try {
+            const browser = settings.get().browser.channel === 'chrome' ? 'chrome' : 'edge'
+            if (isPreferredCarrier(adoptedCarrier)) await adoptedCarrier.refreshStatus()
+            const connected = isPreferredCarrier(adoptedCarrier) ? adoptedCarrier.connectionStatus().connected : await probeExtension(browser)
+            const result = await installExtension(browser, connected)
+            response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(result))
+          } catch (error) { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ ok: false, detail: String(error) })) }
+        }) }, 'dsh-builtin-browser: install extension'))
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: RUNTIME_STATUS_ROUTE,
-          handler: authenticated(ctx, (request, response) => handleRuntimeStatus(request, response, deps)),
+          handler: authenticated(ctx, async (request, response) => {
+            if (request.method === 'GET' && isPreferredCarrier(adoptedCarrier)) await adoptedCarrier.refreshStatus()
+            await handleRuntimeStatus(request, response, deps)
+          }),
         }, 'dsh-builtin-browser: runtime status'))
         host.effect(() => host.webServer.register({
           kind: 'exact',
@@ -940,13 +935,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * unreachable or the user prefers the file. Measured: the document said `sidebar` and the plugin
    * kept driving the self-hosted window built for the previous choice, because nothing re-read it.
    *
-   * Change detection is on the channel alone, not the mtime: a poll that re-chose the carrier on
+   * Change detection is on carrier settings, not the mtime: a poll that re-chose the carrier on
    * every unrelated save would tear down and rebuild a working browser session for a switch that
    * cannot affect it. mtime is only the cheap trigger to go and look.
    */
   const watchSettingsFile = (): void => {
     const file = settingsPath()
-    let lastChannel = settings.get().browser.channel
     let lastMtime = 0
     try { lastMtime = statSync(file).mtimeMs } catch { /* not written yet */ }
     const timer = setInterval(() => {
@@ -955,10 +949,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       try { mtime = statSync(file).mtimeMs } catch { return }
       if (mtime === lastMtime) return
       lastMtime = mtime
-      const channel = settings.get().browser.channel
-      if (channel === lastChannel) return
-      lastChannel = channel
-      ctx.logger?.info?.(`dsh-builtin-browser: settings changed on disk, re-choosing the carrier for channel "${channel}"`)
+      if (carrierSettingsKey(settings.get()) === chosenSettingsKey) return
+      ctx.logger?.info?.('dsh-builtin-browser: carrier settings changed on disk, re-choosing the carrier')
       chooseCarrier()
     }, 5_000)
     // Unref-ed so a poll never holds the process open.
@@ -971,6 +963,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   installRuntimeStatusRoute(ctx, settings)
   // One service for the panel's routes; the tool layer builds its own over the same store file.
   const referenceService = createReferenceService(ctx.browser, {
+    sourceReady: async owner => { (await DesktopBridgeViewHost.discover(`session-${owner}`))?.dispose() },
     sourceSession: (owner, pageId) => ctx.browser.bindPanelPage(`session-${owner}`, pageId),
     // A visible-region snapshot is a read: the clipped CDP path never presents
     // the conversation, raises a window or moves the pointer.
@@ -1070,53 +1063,20 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * which internal step failed.
    */
   const captureRefusalText = (failures: readonly { readonly reason: string }[]): string => {
-    const SESSION_NOT_READY = '当前会话还没准备好，请稍后重新添加这条引用。'
-    const UNSUPPORTED_FORMAT = '这段内容格式不受支持，请换一段内容再添加。'
-    const IMAGE_UNREADABLE = '图片没能读取，请右键图片单独添加或重新选择。'
-    const copy: Readonly<Record<string, string>> = {
-      'nothing-captured': '没能读取选中内容，请重新选中后再添加。',
-      'empty-text': '选中的是空白内容，请重新选择。',
-      'page-changed': '网页刚刚跳转了，请在新页面重新选择。',
-      'page-url-missing': '没能获取网页地址，这条引用没有加入。',
-      'too-many-parts': '选中的内容片段太多，请分几次添加。',
-      'text-too-long': '选中的文字太长，请减少一些再添加。',
-      'table-too-large': '这个表格太大，请缩小选择范围。',
-      'frame-capture-invalid': '这个内嵌页面无法读取，请在主页面中选择。',
-      'frame-capture-refused': '内嵌页面不允许引用，请在主页面中选择。',
-      // Session identity could not be established. The old wording blamed the
-      // sidebar page; the actionable fix is to wait for the conversation and
-      // retry. The key stays, so an existing reason still resolves to a copy.
-      'session-unavailable': SESSION_NOT_READY,
-      'session-id-required': SESSION_NOT_READY,
-      'browser-session-id-required': SESSION_NOT_READY,
-      'no-selection': '请先选中网页内容，再点添加引用。',
-      'nothing-selected': '请先选中网页内容，再点添加引用。',
-      'excerpt-not-found': '没能定位选中的文字，请重新选择。',
-      'image-unavailable': '这张图片没能读取，请右键图片单独引用或重新选择。',
-      'image-timeout': '图片加载超时，请重试或改选其它内容。',
-      'image-too-large': '图片太大，无法加入引用。',
-      'image-version-changed': '网页图片已更新，请重新选择后再添加。',
-      'image-not-an-image': '选中的不是可引用的图片，请重新选择。',
-      'image-has-no-source': IMAGE_UNREADABLE,
-      'unsupported-part': UNSUPPORTED_FORMAT,
-      'table-missing': UNSUPPORTED_FORMAT,
-      'table-empty': UNSUPPORTED_FORMAT,
-      'invalid-frame-selector': UNSUPPORTED_FORMAT,
-      'capture-refused': '这条引用没有加入，请重新选择后再试。',
-    }
+    const copy = referenceCaptureMessages
     for (const failure of failures) {
       const reason = failure.reason
       const exact = copy[reason]
       if (exact !== undefined) return exact
       // Machine-coded reasons carry a detail suffix. A reader still deserves an
       // actionable sentence instead of the generic fallback.
-      if (reason.startsWith('capture-failed:')) return '网页内容读取失败，请重新选择后再试。'
-      if (reason.startsWith('store-refused:')) return '引用保存失败，请稍后重试。'
-      if (reason.startsWith('frame-capture-refused:')) return '内嵌页面不允许引用，请在主页面中选择。'
-      if (reason.startsWith('cell-image:')) return IMAGE_UNREADABLE
-      if (reason.startsWith('image-')) return '图片引用失败，请右键图片单独添加或重新选择。'
+      if (reason.startsWith('capture-failed:')) return referenceCaptureErrors.captureFailed
+      if (reason.startsWith('store-refused:')) return referenceCaptureErrors.storeRefused
+      if (reason.startsWith('frame-capture-refused:')) return copy['frame-capture-refused']
+      if (reason.startsWith('cell-image:')) return referenceCaptureErrors.imageUnreadable
+      if (reason.startsWith('image-')) return referenceCaptureErrors.imageFailed
     }
-    return '这条引用没有加入，请重新选择后再试。'
+    return copy['capture-refused']
   }
 
   // The self-hosted Electron host reports a right-click or a floating-button
@@ -1180,18 +1140,6 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   ctx.effect(() => disposeReferenceAction, 'dsh-builtin-browser: reference action handler')
   ctx.effect(() => () => deliveryQueue.dispose(), 'dsh-builtin-browser: reference delivery queue')
 }
-
-/** Route the settings panel reads and writes. */
-const SETTINGS_ROUTE = '/dsh-builtin-browser/settings'
-
-/**
- * The directory under the DSH home that holds this plugin's browser profile.
- *
- * Named once, because every consumer of it must agree: `settingsPath()` and the history
- * store resolve their own copy from `$DSH_HOME`, and a profile written under a different
- * root than the settings document is a pair that silently never meets.
- */
-const BROWSER_PROFILE_DIR = 'dsh-builtin-browser-host'
 
 /**
  * Move a browser profile left behind by the old layout into the directory the plugin uses now.
@@ -1301,7 +1249,7 @@ function installSettingsRoute(
  * @param request - the incoming request.
  * @param response - the response to write.
  * @param settings - the settings document.
- * @param onChannelChange - re-runs the carrier choice when this write changed `browser.channel`.
+ * @param onChannelChange - re-runs the carrier choice when this write changed carrier settings.
  */
 async function handleSettingsRequest(
   request: IncomingMessage,
@@ -1332,18 +1280,18 @@ async function handleSettingsRequest(
   try {
     const text = await readTextBody(request)
     const patch: unknown = text.trim() === '' ? {} : JSON.parse(text)
-    const before = settings.get().browser.channel
+    const before = carrierSettingsKey(settings.get())
     const updated = settings.update(patch)
-    // A changed `browser.channel` is a request to switch carriers, not just a value to store. The
+    // Changed carrier settings are a request to switch carriers, not just values to store. The
     // choice is re-run here so the write takes effect now — and the response says so, because a
     // caller that cannot tell "applied" from "stored for later" has no way to know what it got,
     // which is exactly how a write that did nothing read as a success.
-    const channelChanged = updated.browser.channel !== before
-    if (channelChanged) onChannelChange?.()
+    const carrierChanged = carrierSettingsKey(updated) !== before
+    if (carrierChanged) onChannelChange?.()
     json(200, {
       ok: true,
       settings: updated,
-      ...channelChanged ? { carrierRechosen: true } : {},
+      ...carrierChanged ? { carrierRechosen: true } : {},
     })
   } catch (error) {
     json(400, { ok: false, error: `invalid settings patch: ${String(error)}` })

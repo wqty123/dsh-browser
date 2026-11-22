@@ -8,6 +8,7 @@
  */
 
 import { pageOperationScript } from '../tool-browser/page-probe.ts'
+import { carrierTakeoverTarget, hasCarrierTakeover } from './takeover-target.ts'
 import { resolveSessionHandle, resolveTabHandle, tabWireId, type BrowserTabWireId } from './handles.ts'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -262,6 +263,9 @@ export class BrowserRuntime extends Service {
 
   /** Bind a ready sidebar page without launching or navigating another carrier. */
   async bindPanelPage(owner: string, pageId: string): Promise<BrowserSessionId> {
+    const carrier = carrierTakeoverTarget(this, owner, pageId)
+    if (carrier && this.exists(carrier.session)) return carrier.session
+    if (hasCarrierTakeover(this)) throw new Error('The selected personal-browser source tab is disconnected or foreign; list tabs again. No sidebar fallback.')
     const key = JSON.stringify([owner, pageId])
     const existing = this.panelPages.get(key)
     if (existing !== undefined) {
