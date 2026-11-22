@@ -136,8 +136,10 @@ async function recoverModules(profile: string, modules: readonly Entry[], io: Ch
 async function verifyProfile(home: string): Promise<void> {
   await installedProfileExtension(home)
   const script = `const {createRequire} = await import('node:module'); const {readFile} = await import('node:fs/promises'); await readFile(createRequire(process.argv[1]).resolve(${JSON.stringify(MAIN_EXTENSION_NAME)}));`
-  const result = await runProfileCommand(process.execPath, ['--expose-internals', '--input-type=module', '--eval', script, '--', join(home, 'profiles', 'desktop', 'package.json')],
-    { ...process.env, ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ASAR: '1' }, 10_000)
+  const isElectron = process.versions.electron !== undefined
+  const argv = [...(isElectron ? ['--expose-internals'] : []), '--input-type=module', '--eval', script, '--', join(home, 'profiles', 'desktop', 'package.json')]
+  const env: NodeJS.ProcessEnv = { ...process.env, ...(isElectron ? { ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ASAR: '1' } : {}) }
+  const result = await runProfileCommand(process.execPath, argv, env, 10_000)
   if (result.code !== 0) throw new Error(`REINSTALL_PROFILE_RESOLUTION_FAILED: ${result.output}`)
 }
 

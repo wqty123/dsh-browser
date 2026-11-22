@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict'
-import { writeFileSync } from 'node:fs'
+import { rmSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const root = resolve(process.env.NATIVE_SLOT_EVIDENCE, 'plugin')
+const evidenceDir = resolve(process.env.NATIVE_SLOT_EVIDENCE)
+const root = resolve(evidenceDir, 'plugin')
 const { DesktopBridgeViewHost } = await import(pathToFileURL(resolve(root, 'lib/browser-electron/desktop-bridge-host.js')))
 const { ElectronBrowserProvider } = await import(pathToFileURL(resolve(root, 'lib/browser-electron/provider.js')))
 const { apply } = await import(pathToFileURL(resolve(root, 'lib/tool-browser/index.js')))
 const host = await DesktopBridgeViewHost.discover()
 assert.ok(host, 'The production main extension bridge is discoverable')
-const provider = new ElectronBrowserProvider(host, { history: { enabled: false } })
+const provider = new ElectronBrowserProvider(host, { history: { enabled: false }, downloadDir: evidenceDir })
 const tools = new Map(), cleanups = []
 const browser = new Proxy(provider, { get(target, property) {
   if (property === 'openPanel') return target.open.bind(target)
@@ -23,11 +24,12 @@ const exec = { signal: AbortSignal.timeout(40000), agent: { id: 'session-package
 try {
   const opened = await tools.get('dsh_browser_open').execute({ url: process.env.NATIVE_SLOT_URL }, exec)
   assert.equal(opened.title, 'Native visible fixture')
-  const shot = await tools.get('dsh_browser_screenshot').execute({}, exec)
-  assert.match(shot.dataUrl, /^data:image\/png;base64,/)
-  const data = Buffer.from(shot.dataUrl.split(',')[1], 'base64')
-  assert.ok(data.length > 1000)
-  writeFileSync(resolve(process.env.NATIVE_SLOT_EVIDENCE, 'tool.png'), data)
+  const savePath = resolve(evidenceDir, 'tool.png')
+  rmSync(savePath, { force: true })
+  const shot = await tools.get('dsh_browser_screenshot').execute({ savePath }, exec)
+  assert.equal(shot.path, savePath)
+  const size = typeof shot.bytes === 'number' ? shot.bytes : statSync(savePath).size
+  assert.ok(size > 1000, `Expected saved screenshot > 1000 bytes, got ${size}`)
   console.log('dsh_browser_open -> snapshot -> dsh_browser_screenshot: PASS')
   process.exit(0)
 } catch (error) { console.error(error); process.exit(1) }

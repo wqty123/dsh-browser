@@ -106,7 +106,11 @@ export async function repairProfileExtension(action: BridgeAction, root: string,
 }
 
 function profileEnvironment(home: string, packedCli = false): NodeJS.ProcessEnv {
-  return { ...process.env, DSH_HOME: home, ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ASAR: packedCli ? undefined : '1',
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase() === 'ELECTRON_NO_ASAR') delete env[key]
+  }
+  return { ...env, DSH_HOME: home, ELECTRON_RUN_AS_NODE: '1', ...(packedCli ? {} : { ELECTRON_NO_ASAR: '1' }),
     npm_config_ignore_scripts: 'true', npm_config_auto_install_peers: 'false',
     PNPM_CONFIG_IGNORE_SCRIPTS: 'true', PNPM_CONFIG_AUTO_INSTALL_PEERS: 'false' }
 }

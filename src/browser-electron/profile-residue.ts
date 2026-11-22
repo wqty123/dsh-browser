@@ -40,8 +40,10 @@ export async function cleanProfileResidue(home: string): Promise<string> {
   if (residue.length === 0) return ''
   const path = join(home, 'profiles', 'desktop', 'node_modules', MAIN_EXTENSION_NAME, 'node_modules')
   const script = `process.noAsar = true; const { rm } = await import('node:fs/promises'); await rm(process.argv[1], {recursive:true, force:true, maxRetries:3, retryDelay:100});`
-  const result = await runProfileCommand(process.execPath, ['--expose-internals', '--input-type=module', '--eval', script, '--', path],
-    { ...process.env, ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ASAR: '1' })
+  const isElectron = process.versions.electron !== undefined
+  const argv = [...(isElectron ? ['--expose-internals'] : []), '--input-type=module', '--eval', script, '--', path]
+  const env: NodeJS.ProcessEnv = { ...process.env, ...(isElectron ? { ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ASAR: '1' } : {}) }
+  const result = await runProfileCommand(process.execPath, argv, env)
   if (result.code !== 0) throw new Error(`REINSTALL_RESIDUE_REMOVE_FAILED: ${result.output}`)
   return `Removed pre-existing undeclared nested dependency residue before pnpm: ${residue.join(', ')}`
 }

@@ -159,7 +159,7 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
       if (!attachment.lifetime.signal.aborted) this.fail(error)
     }).finally(() => {
       this.initialization = undefined
-      if (this.attachment !== attachment && this.pending !== undefined) this.initialize()
+      if (this.attachment !== attachment && (this.pending !== undefined || (this.options.tabId !== undefined && this.children?.child(this.options.tabId) !== undefined))) this.initialize()
     })
   }
 

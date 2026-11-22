@@ -24,6 +24,7 @@
     "tools/accept-desktop.mjs",
     "desktop-bridge",
     "dsh-host-patch",
+    "!dsh-host-patch/sources",
     "cordis.patch.yml",
     "CHANGELOG.md",
     "README.md",

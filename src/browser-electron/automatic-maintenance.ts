@@ -69,12 +69,14 @@ function validateCliBackup(path: string, kind: 'host' | 'shim'): void {
   const eol = original.includes('\r\n') ? '\r\n' : '\n'
   let expected: string
   if (kind === 'host') {
-    expected = original.replace('\tawait runDesktopCli(runtimeDir, join(dirname(runtimeArchivePath(runtimeDir) ?? runtimeDir), "runtime"));', [
+    const call = /^(\t)await runDesktopCli\(((?:runtimeDir, )?)join\(dirname\(runtimeArchivePath\(runtimeDir\) \?\? runtimeDir\), "runtime"\)\);$/m.exec(original)
+    if (call === null) throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'The CLI differs from its recognized restore baseline.')
+    expected = original.replace(call[0], () => [
       '\t// dsh-builtin-browser: recognize an unpacked `app` directory as the app root,',
       '\t// so an installation whose app.asar was moved aside still finds its runtime.',
       '\tconst cliOwnerDir = dirname(runtimeDir);',
       '\tconst cliSupportRoot = basename(cliOwnerDir) === "app" || basename(cliOwnerDir) === "app.asar" ? dirname(cliOwnerDir) : cliOwnerDir;',
-      '\tawait runDesktopCli(runtimeDir, join(cliSupportRoot, "runtime"));',
+      `\tawait runDesktopCli(${call[2]}join(cliSupportRoot, "runtime"));`,
     ].join(eol))
   } else {
     const injection = [
@@ -84,8 +86,8 @@ function validateCliBackup(path: string, kind: 'host' | 'shim'): void {
       'if not exist "%DSH_APP%\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js" set "DSH_APP=%~dp0..\\..\\..\\app.asar"',
     ].join(eol)
     const setLocal = /^.*setlocal.*$/m.exec(original)
-    expected = (setLocal === null ? injection + eol + original : original.replace(setLocal[0], setLocal[0] + eol + injection))
-      .replace(/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/, '%DSH_APP%\\dsh\\')
+    expected = (setLocal === null ? injection + eol + original : original.replace(setLocal[0], () => setLocal[0] + eol + injection))
+      .replace(/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/, () => '%DSH_APP%\\dsh\\')
   }
   if (current !== expected) throw new ReinstallPreflightError('REINSTALL_BACKUP_CONFLICT', 'The CLI differs from its recognized restore baseline.')
 }
@@ -626,7 +628,12 @@ async function runWorker(path: string): Promise<void> {
         const identity = readDesktopIdentity(plan.root)
         if (!identity.ok) throw new Error(`Desktop cannot be safely reopened: ${identity.reason}`)
         const environment: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: plan.home }
-        for (const key of Object.keys(environment)) if (key.toUpperCase() === 'ELECTRON_RUN_AS_NODE' || key.toUpperCase().startsWith('DSH_BRIDGE_')) delete environment[key]
+        for (const key of Object.keys(environment)) {
+          const upper = key.toUpperCase()
+          if (upper === 'ELECTRON_RUN_AS_NODE' || upper === 'ELECTRON_NO_ASAR' || upper.startsWith('DSH_BRIDGE_')) {
+            delete environment[key]
+          }
+        }
         return await new Promise<number>((resolve, reject) => {
           const child = spawn(join(plan.root, 'DeepSeek Harness.exe'), [], { cwd: plan.root, env: environment, stdio: 'ignore', windowsHide: true, detached: true })
           child.once('error', reject)
