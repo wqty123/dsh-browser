@@ -12,8 +12,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-const source = () => readFileSync(new URL('../src/tool-browser/index.ts', import.meta.url), 'utf8')
 const readSrc = name => readFileSync(new URL(`../src/${name}`, import.meta.url), 'utf8')
+// The entry registers what the tool modules define, so the toolset is the entry plus every module.
+const TOOL_SOURCES = ['index', 'tools-navigation', 'tools-observation', 'tools-interaction', 'tools-debug', 'tools-reference']
+  .map(file => `tool-browser/${file}.ts`)
+const source = () => TOOL_SOURCES.map(readSrc).join('\n')
+const entry = () => readSrc('tool-browser/index.ts')
 
 test('every registered tool is in the dsh_browser_ namespace, and nothing else is', () => {
   // `[a-z0-9_]`, not `[a-z_]`: `dsh_browser_a11y` contains digits, and the narrower class silently
@@ -49,7 +53,7 @@ test('one lost name cannot take the other thirty-two with it', () => {
 })
 
 test('a collision warns with the name and the reason, and does not throw', () => {
-  const text = source()
+  const text = entry()
   // The wrapper must catch, not rethrow: rethrowing inside a loop is how the sibling plugin lost
   // everything, and every tool here is registered in sequence.
   assert.match(text, /} catch \(error\) \{[\s\S]{0,400}ctx\.logger\?\.warn\?\.\(/, 'caught and reported')
@@ -63,7 +67,7 @@ test('the rename did not touch uppercase constants', () => {
   // every error code, which broke `code === 'BROWSER_...'` comparisons and left an undefined
   // identifier. Tool names are entirely lowercase, so a capital after the prefix can only be
   // collateral damage — checked on the real sources, not on the rename script.
-  for (const file of ['tool-browser/index.ts', 'browser-electron/provider.ts', 'browser-electron/entry.ts']) {
+  for (const file of [...TOOL_SOURCES, 'tool-browser/state.ts', 'tool-browser/probe-client.ts', 'browser-electron/provider.ts', 'browser-electron/entry.ts']) {
     const text = readSrc(file)
     const smashed = [...text.matchAll(/dsh_browser_[A-Z][A-Z_0-9]*/g)].map(m => m[0])
     assert.deepEqual(smashed, [], `${file} has a constant that the rename damaged`)

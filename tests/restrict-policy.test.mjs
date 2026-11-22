@@ -69,7 +69,7 @@ test('acting tools are NOT exempt, or the allow-list would do nothing', () => {
 
 test('the set has no duplicates', () => {
   // A duplicated entry means the real one was probably mistyped somewhere.
-  const source = readFileSync(new URL('../src/tool-browser/index.ts', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/tool-browser/state.ts', import.meta.url), 'utf8')
   const block = source.slice(source.indexOf('READ_ONLY_TOOLS'), source.indexOf('])', source.indexOf('READ_ONLY_TOOLS')))
   const names = [...block.matchAll(/'([a-z0-9_]+)'/g)].map(m => m[1])
   const seen = new Set()

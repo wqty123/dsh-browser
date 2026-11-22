@@ -168,7 +168,7 @@ test('default takeover fixture loads with host approval package imports explicit
 test('production has no host approval import and takeover uses only existing workspace dependencies', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
   const declared = new Set([...Object.keys(manifest.dependencies), ...Object.keys(manifest.peerDependencies), ...Object.keys(manifest.devDependencies)])
-  const takeoverFiles = new Set(['takeover-protocol.ts', 'tool-browser/index.ts', 'tool-browser/takeover.ts',
+  const takeoverFiles = new Set(['takeover-protocol.ts', 'tool-browser/index.ts', 'tool-browser/tools-debug.ts', 'tool-browser/takeover.ts',
     'client/browser/takeover-channel.ts', 'client/browser/iframe-reference.ts', 'client/view/TakeoverBanner.tsx',
     'client/view/BrowserBody.tsx', 'client/view/IframePresentation.ts', 'browser-electron/guest-runtime.ts'])
   async function visit(directory, prefix = '') {
