@@ -125,6 +125,26 @@ test('a refused capture is 422 with the failures a caller can show', async () =>
   assert.deepEqual(reply.state.payload.failures, [{ kind: 'image', reason: 'image-unavailable' }])
 })
 
+test('frozen page-overlay captures belong to the sidebar, not the selected external carrier or the page claim', async () => {
+  const captures = []
+  const handlers = createReferenceRouteHandlers({
+    carrier: () => 'edge',
+    service: service({ capture: async input => { captures.push(input); return { reference, failures: [] } } }),
+  })
+  for (const claimed of [undefined, 'edge', 'chrome']) {
+    const reply = response()
+    await handlers.capture(request({ method: 'POST', headers: SAME_ORIGIN, body: JSON.stringify({
+      sessionId: 'owner', entry: 'page-overlay', carrier: claimed, capture: { ok: true, events: [] },
+    }) }), reply)
+    assert.equal(reply.state.status, 200)
+    assert.equal(captures.at(-1).carrier, 'sidebar')
+  }
+  const reply = response()
+  await handlers.capture(request({ method: 'POST', headers: SAME_ORIGIN, body: JSON.stringify({ sessionId: 'owner', entry: 'agent-tool' }) }), reply)
+  assert.equal(reply.state.status, 200)
+  assert.equal(captures.at(-1).carrier, 'edge')
+})
+
 test('a committed capture answers with the summary and any partial failures', async () => {
   const handlers = createReferenceRouteHandlers({
     service: service({ capture: async () => ({ reference, failures: [{ kind: 'image', reason: 'image-unavailable' }] }) }),

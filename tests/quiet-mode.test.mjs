@@ -18,12 +18,16 @@ function makeHost() {
     showView: [],
     presentView: [],
     capture: [],
+    focus: [],
+    commands: [],
   }
   let loads = 0
   let current = 'about:blank'
   const view = {
     id: 'view1',
+    async focus(options) { seen.focus.push(options) },
     async sendCommand(method, params) {
+      seen.commands.push(method)
       if (method === 'Page.navigate') { loads += 1; current = params.url; return {} }
       if (method === 'Runtime.evaluate') {
         const expression = params.expression ?? ''
@@ -119,4 +123,28 @@ test('flipping the switch applies to the next operation, without a restart', asy
   setQuiet(false)
   await p.screenshot(sid)
   assert.equal(host.seen.capture.at(-1).quiet, false, 'turning it back off restores the default path')
+})
+
+test('quiet keyboard automation propagates its focus policy to the same view', async () => {
+  const { p, host } = providerWith(true)
+  const sid = await p.open()
+  await p.key(sid, { key: 'Enter' })
+  assert.deepEqual(host.seen.presentView.at(-1), { quiet: true })
+  assert.deepEqual(host.seen.focus, [{ quiet: true }])
+  assert.deepEqual(host.seen.commands.filter(method => method.startsWith('Input.')), [
+    'Input.dispatchKeyEvent', 'Input.dispatchKeyEvent',
+  ])
+})
+
+test('an undisplayed sidebar refuses quiet input instead of focusing or dispatching it', async () => {
+  const { p, host } = providerWith(true)
+  const sid = await p.open()
+  host.presentView = async () => { throw Object.assign(new Error('select this conversation first'), { code: 'panel-not-displayed' }) }
+  await assert.rejects(p.key(sid, { key: 'Enter' }), error => {
+    assert.equal(error.code, 'BROWSER_VIEW_NOT_PRESENTED')
+    assert.equal(error.cause.code, 'panel-not-displayed')
+    return true
+  })
+  assert.deepEqual(host.seen.focus, [])
+  assert.deepEqual(host.seen.commands.filter(method => method.startsWith('Input.')), [])
 })

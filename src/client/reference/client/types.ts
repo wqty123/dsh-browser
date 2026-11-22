@@ -6,6 +6,8 @@
  * self-contained, additive contract the host may wire in later.
  */
 
+import type { ReferenceTable, ReferenceTextNode } from '../../../reference-text.ts'
+
 /** Kinds of captured parts that can appear inside one ordered reference group. */
 export type BrowserReferencePartKind = 'text' | 'image' | 'table'
 
@@ -23,6 +25,8 @@ export interface BrowserReferencePart {
   readonly assetKey?: string
   /** Extracted text for text/table parts. */
   readonly text?: string
+  readonly content?: readonly ReferenceTextNode[]
+  readonly table?: ReferenceTable
   readonly mimeType?: string
   readonly label?: string
   readonly status?: BrowserReferencePartStatus
@@ -61,6 +65,7 @@ export interface PendingDelivery {
 
 /** A waitable, cancellable source-reveal intent (§14.1). */
 export interface RevealRequest {
+  readonly sourcePageId?: string
   readonly referenceId: string
   readonly partId?: string
   readonly sessionId: string
@@ -111,6 +116,7 @@ export type PromptContentPart =
     }
   | {
       readonly type: 'table'
+      readonly table?: ReferenceTable
       readonly text: string
       readonly partId?: string
       readonly referenceId?: string

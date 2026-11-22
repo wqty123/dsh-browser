@@ -16,6 +16,8 @@
 
 import { HIGHLIGHT_HOST_ID, OVERLAY_HOST_ID } from './visible.ts'
 import { captureEntrySource } from './page-script.ts'
+import { MAX_REFERENCE_TEXT } from '../reference-text.ts'
+export { MAX_REFERENCE_TEXT } from '../reference-text.ts'
 
 /**
  * The bound the service and the page bar share. The bar trims an over-long
@@ -23,17 +25,10 @@ import { captureEntrySource } from './page-script.ts'
  * bound because a page is low-trust.
  */
 export const MAX_REFERENCE_COMMENT = 2000
-/**
- * Bound for the selection text the page bar freezes before the comment field
- * takes focus. It is a locator (host re-finds the range from it), so it only
- * has to hold a realistic selection, not a whole document.
- */
-export const MAX_REFERENCE_TEXT = 20000
-
 export const REFERENCE_INTENT_CHANNEL = 'dsh-browser-ref:intent'
 export const MAX_FRAME_SELECTOR = 200
 export const MAX_FRAME_EVENTS = 24
-export const MAX_FRAME_TEXT = 20_000
+export const MAX_FRAME_TEXT = MAX_REFERENCE_TEXT
 
 /** One row of the single merged context menu. */
 /** Which element a right-click action explicitly names. */
@@ -603,32 +598,13 @@ export function frameCaptureScript(): string {
     '  frameUrl = String(element.getAttribute("src") || "")',
     '}',
     'if (!frameUrl) frameUrl = String(element.getAttribute("src") || "")',
-    'var events = []',
-    'var selection = null',
-    'try { selection = element.contentWindow.getSelection ? element.contentWindow.getSelection() : null } catch (error) { selection = null }',
-    'if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {',
-    '  var exact = String(selection.toString()).slice(0, ' + MAX_FRAME_TEXT + ')',
-    '  if (exact) {',
-    '    var all = String(frameDoc.body ? frameDoc.body.innerText || frameDoc.body.textContent || "" : "")',
-    '    var at = all.indexOf(exact)',
-    '    var prefix = at > 0 ? all.slice(Math.max(0, at - Number(spec.context || 32)), at) : ""',
-    '    var suffix = at >= 0 ? all.slice(at + exact.length, at + exact.length + Number(spec.context || 32)) : ""',
-    '    events.push({ kind: "text", exact: exact, prefix: prefix, suffix: suffix })',
-    '  }',
-    '}',
-    'var images = frameDoc.querySelectorAll ? frameDoc.querySelectorAll("img, svg, canvas") : []',
-    'for (var i = 0; i < images.length && events.length < ' + MAX_FRAME_EVENTS + '; i += 1) {',
-    '  var node = images[i]',
-    '  var src = String(node.currentSrc || node.src || node.getAttribute("src") || "")',
-    '  if (!src) continue',
-    '  var geometry = null',
-    '  try { var box = node.getBoundingClientRect(); geometry = { x: Math.round(box.left), y: Math.round(box.top), w: Math.round(box.width), h: Math.round(box.height) } } catch (error) {}',
-    '  events.push({ kind: "image", src: src, currentSrc: src, attributeSrc: src,',
-    '    alt: String(node.alt || "").slice(0, 500), geometry: geometry })',
-    '}',
-    'return JSON.stringify({ ok: true, url: String(location.href),',
-    '  frameUrl: frameUrl, title: String(frameDoc.title || location.title || ""),',
-    '  frameSelector: selector, events: events })',
+    'var result = (function (document, window, location) {',
+    '  return (' + captureEntrySource() + ')(spec)',
+    '})(frameDoc, element.contentWindow, { href: frameUrl })',
+    'result.url = String(location.href)',
+    'result.frameUrl = frameUrl',
+    'result.frameSelector = selector',
+    'return JSON.stringify(result)',
   ].join('\n')
   return pageEval(body)
 }

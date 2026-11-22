@@ -15,7 +15,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
  * `Agent → agentId` uses). The id is opaque to the wire; only the provider
  * and its host binding can interpret it.
  */
-export type BrowserSessionId = string
+export type BrowserSessionId = import('./handles.ts').BrowserSessionWireId
 
 /**
  * What one browser-capable backend is asked to do. Navigation is the minimal
@@ -567,7 +567,7 @@ export interface BrowserContentResult {
  */
 export interface BrowserTab {
   /** Stable tab id within the session. */
-  readonly id: string
+  readonly id: import('./handles.ts').BrowserTabWireId
   /** Current URL, or empty for a blank tab. */
   readonly url: string
   /** Page title, if any. */
@@ -590,8 +590,8 @@ export interface BrowserPreviewFrame {
 
 /** One page a carrier holds, whether or not this plugin created it. */
 export interface CarrierPage {
-  /** Stable within one carrier session; used to address the page. */
-  readonly id: string
+  /** Canonical owner/session/tab identity used to address the page. */
+  readonly id: import('./handles.ts').BrowserTabWireId
   readonly url: string
   readonly title?: string
 }
@@ -645,14 +645,16 @@ export interface BrowserProvider {
    * human can tell which task's page is currently shown.
    */
   open(label?: string): Promise<BrowserSessionId>
+  /** Bind an existing carrier page to this session without navigating or creating a page. */
+  bindPage?(session: BrowserSessionId, pageId: import('./handles.ts').BrowserTabWireId): Promise<void>
   /** Open a URL, optionally in a new tab. Honor `signal` for cancellation. */
   openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void>
   /** List the session's tabs. */
   listTabs(session: BrowserSessionId): Promise<readonly BrowserTab[]>
   /** Switch to a tab by id. Unknown id -> `BROWSER_TAB_UNKNOWN`. */
-  switchTab(session: BrowserSessionId, tabId: string): Promise<void>
+  switchTab(session: BrowserSessionId, tabId: import('./handles.ts').BrowserTabWireId): Promise<void>
   /** Close one tab. Closing the active tab activates the next. */
-  closeTab(session: BrowserSessionId, tabId: string): Promise<void>
+  closeTab(session: BrowserSessionId, tabId: import('./handles.ts').BrowserTabWireId): Promise<void>
   /** Close every tab and reset the session's state. */
   reset(session: BrowserSessionId): Promise<void>
   /** Navigate the active tab. Honor `signal` for cancellation. */
@@ -813,4 +815,3 @@ export interface BrowserHistoryEntry {
  * own (e.g. `BROWSER_CDP_ATTACH_FAILED`).
  */
 export class BrowserError extends HarnessError {}
-

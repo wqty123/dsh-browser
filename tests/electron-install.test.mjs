@@ -17,7 +17,7 @@ function fixture(t, installer) {
   mkdirSync(scripts, { recursive: true })
   const wrapper = join(scripts, 'install-electron.mjs')
   copyFileSync(source, wrapper)
-  const pkg = join(plugin, 'node_modules', 'electron')
+  const pkg = join(root, 'external runtime', 'node_modules', 'electron')
   if (installer !== undefined) {
     mkdirSync(pkg, { recursive: true })
     writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'electron', version: '44.10.0', main: 'index.js' }))
@@ -27,6 +27,7 @@ function fixture(t, installer) {
   }
   const marker = join(root, 'installer result.json')
   const env = { ...process.env, NODE_PATH: '', ELECTRON_RUN_AS_NODE: '0' }
+  env.DSH_BROWSER_ELECTRON_PACKAGE = pkg
   delete env.ELECTRON_SKIP_BINARY_DOWNLOAD
   const run = extraEnv => spawnSync(process.execPath, [wrapper], {
     cwd: root, env: { ...env, DSH_INSTALL_TEST_MARKER: marker, ...extraEnv },
@@ -35,13 +36,32 @@ function fixture(t, installer) {
   return { root, pkg, marker, run }
 }
 
-test('missing Electron dependency fails with a local recovery command', t => {
+test('missing external Electron package fails with a local recovery command', t => {
   const { run } = fixture(t)
   const result = run()
   assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /electron dependency|electron package/i)
+  assert.match(result.stderr, /ENOENT|electron package/i)
   assert.match(result.stderr, /dsh-browser-install-electron/)
   assert.doesNotMatch(result.stderr, /electron API entry must not be loaded/)
+})
+
+test('an external package must be explicitly selected, never resolved from the plugin generation', t => {
+  const { run, marker } = fixture(t, "require('node:fs').writeFileSync(process.env.DSH_INSTALL_TEST_MARKER, 'ran')")
+  for (const directory of ['', 'relative/node_modules/electron']) {
+    const result = run({ DSH_BROWSER_ELECTRON_PACKAGE: directory })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /absolute external electron package/)
+    assert.equal(existsSync(marker), false)
+  }
+})
+
+test('a different external package is rejected before executing its installer', t => {
+  const { run, pkg, marker } = fixture(t, "require('node:fs').writeFileSync(process.env.DSH_INSTALL_TEST_MARKER, 'ran')")
+  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'not-electron' }))
+  const result = run()
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /must be named electron/)
+  assert.equal(existsSync(marker), false)
 })
 
 test('skip download is honored before resolving an absent dependency', t => {

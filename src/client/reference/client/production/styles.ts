@@ -83,7 +83,7 @@ export function ensureDockStyles(doc: Document | undefined = typeof document ===
   if (doc.getElementById(DOCK_STYLE_ID) !== null) return
   const style = doc.createElement('style')
   style.id = DOCK_STYLE_ID
-  style.textContent = DOCK_CSS + DOCK_EXTRA_CSS
+  style.textContent = DOCK_CSS
   // A host UI served under `style-src 'nonce-…'` refuses an inline style element
   // without the nonce; borrowing the document's own keeps the dock styled there.
   let nonce: string | undefined
@@ -102,24 +102,3 @@ export function ensureDockStyles(doc: Document | undefined = typeof document ===
     // A document that refuses the node simply stays unstyled; never break the dock.
   }
 }
-
-/** 消息里引用胶囊的悬停详情卡样式（与 DOCK_CSS 一起注入）。 */
-const DOCK_EXTRA_CSS = `
-/* 消息里引用胶囊的悬停详情卡：与输入栏的明细卡同一套信息（标题/域名/原文/评论/回到原文）。 */
-.dsh-browser-ref-card {
-  position: fixed; z-index: 2147483000; display: flex; flex-direction: column; gap: 6px;
-  width: min(380px, calc(100vw - 24px)); max-height: 320px; overflow: auto; padding: 12px 14px;
-  border: .5px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35)); border-radius: 12px;
-  background: var(--dsw-alias-bg-layer-2, #1f2023); box-shadow: 0 8px 24px rgba(0,0,0,.35);
-  color: var(--dsw-alias-label-primary, #eee); font: 13px/1.5 system-ui, sans-serif;
-}
-.dsh-browser-ref-card-title { font-weight: 600; }
-.dsh-browser-ref-card-host { color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9)); font-size: 12px; }
-.dsh-browser-ref-card-quote { white-space: pre-wrap; opacity: .92; }
-.dsh-browser-ref-card-comment { margin-top: 2px; padding-top: 6px;
-  border-top: .5px solid var(--dsw-alias-border-l3, rgba(127,127,127,.25)); white-space: pre-wrap; }
-.dsh-browser-ref-card-go { align-self: flex-start; margin-top: 4px; padding: 4px 10px;
-  border: .5px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35)); border-radius: 999px;
-  background: transparent; color: inherit; font: inherit; cursor: pointer; }
-.dsh-browser-ref-card-go:hover { background: var(--dsw-alias-bg-layer-3, rgba(127,127,127,.22)); }
-`

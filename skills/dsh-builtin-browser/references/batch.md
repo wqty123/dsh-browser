@@ -1,4 +1,6 @@
-# Batching with dsh_browser_do
+# Batching browser actions
+
+## Fixed steps with dsh_browser_do
 
 One call, one result, and it stops at the first step that cannot proceed:
 
@@ -21,3 +23,31 @@ Rules that keep a batch honest:
   instead of `sleep_ms` unless the page genuinely needs wall-clock time.
 - A failed batch reports `stoppedAt`, `completed` and a per-step log, so re-running only the
   remainder is a deliberate choice, and it starts with a fresh `state`.
+
+## JavaScript cells
+
+Use `dsh_browser_code` in standard mode for branching, loops, or overlapping reads.
+In DSH PTC mode with the default tool surface, use `run_code` and the same native
+browser tool definitions. On the plugin REPL, print incremental results and keep
+variables for the next cell:
+
+```js
+await tools.dsh_browser_open({ url: 'https://example.com' })
+const [content, matches] = await Promise.all([
+  tools.dsh_browser_content({ format: 'markdown', maxChars: 400 }),
+  tools.dsh_browser_find({ text: 'Example Domain' }),
+])
+print({ content, matches })
+```
+
+To verify a response in the same REPL cell, issue the wait first, then the action:
+
+```js
+const response = tools.dsh_browser_wait_for_response({ urlContains: '/search', timeoutMs: 5000 })
+await tools.dsh_browser_click({ target: { by: 'css', value: 'button[type=submit]' } })
+print(await response)
+```
+
+Adapt the URL and selector to the current page. The scheduler arms the response
+wait before it lets the action run. Issue unrelated reads in parallel, not competing
+mutations. A timeout or cancellation does not undo actions that already ran.

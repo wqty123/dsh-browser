@@ -22,10 +22,12 @@ function makeHost() {
       return {
         id: `view${++views}`,
         async sendCommand(method, params) {
-          if (method === 'Page.navigate') { loads += 1; current = params.url; return {} }
+          if (method === 'Page.navigate') { loads += 1; current = params.url; return { frameId: 'main', loaderId: String(loads) } }
+          if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main', loaderId: String(loads), url: current } } }
+          if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 }
           if (method === 'Runtime.evaluate') {
             const expression = params.expression ?? ''
-            if (expression.includes('timeOrigin')) return { result: { value: `${loads}|complete` } }
+            if (expression === 'document.readyState') return { result: { value: 'complete' } }
             if (expression.includes('document.title')) return { result: { value: `${current}\u0000Example` } }
             return { result: { value: { ok: true } } }
           }

@@ -14,6 +14,8 @@ import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { browserSessionHandle, sessionWireId, tabWireId } from '../lib/browser/handles.js'
+const wire = owner => tabWireId({ owner, session: 'browser:test', tab: 'v1' })
 
 class FakeContents extends EventEmitter {
   constructor (id, type, url = '') {
@@ -32,7 +34,8 @@ class FakeContents extends EventEmitter {
     }
     // The panel path reaches the shell through `executeJavaScript`; it resolves with the value
     // itself, not a CDP envelope.
-    this.executeJavaScript = code => Promise.resolve(JSON.stringify(panelVerdict(String(code))))
+    this.executeJavaScript = code => Promise.resolve(code.includes('api?.holdRendering') ? false : JSON.stringify(String(code).includes('api.panelGuests')
+      ? (String(code).includes('session-A') ? [2] : [3]) : panelVerdict(String(code))))
   }
   getType () { return this.type }
   getTitle () { return this.title }
@@ -74,23 +77,27 @@ globalThis.__answerCdp__ = async (id, method, params) => {
 
 /**
  * Load the bridge with its electron import stubbed and its boot calls removed.
- * @returns the module's `handle` and `claims`, which are what the tests drive.
+ * @returns the module's `handle` and `handles`, which are what the tests drive.
  */
 async function loadBridge () {
   let src = readFileSync(BRIDGE, 'utf8')
   src = src.replace(/import \{([^}]+)\} from ['"]electron['"]/, 'const {$1} = globalThis.__electronStub__')
   src = src.replace(/^start\(\)$/m, '')
   src = src.replace(/^main\(\)$/m, '')
-  src += '\nglobalThis.__bridge_handle__ = handle;\nglobalThis.__bridge_claims__ = claims;\n'
+  src += '\nglobalThis.__bridge_handle__ = handle;\nglobalThis.__bridge_handles__ = handles;\n'
   const folder = mkdtempSync(join(tmpdir(), 'bridge-'))
   const file = join(folder, 'bridge.mjs')
   writeFileSync(file, src)
   writeFileSync(join(folder, 'guest-proxy.mjs'), readFileSync(new URL('../desktop-bridge/guest-proxy.mjs', import.meta.url)))
+  writeFileSync(join(folder, 'native-guests.mjs'), readFileSync(new URL('../desktop-bridge/native-guests.mjs', import.meta.url)))
   await import('file:///' + file.replace(/\\/g, '/'))
-  return { handle: globalThis.__bridge_handle__, claims: globalThis.__bridge_claims__ }
+  return { handle: globalThis.__bridge_handle__, handles: globalThis.__bridge_handles__ }
 }
 
-const { handle, claims } = await loadBridge()
+const { handle, handles } = await loadBridge()
+function bind(id, owner) {
+  handles.set(wire(owner), { owner, session: 'browser:test', tab: 'v1', guest: world.contents.find(guest => guest.id === id) })
+}
 const shell = new FakeContents(1, 'window', 'dsh-app://app/')
 
 test('list never exposes an unclaimed guest without a verified conversation panel', async () => {
@@ -98,15 +105,15 @@ test('list never exposes an unclaimed guest without a verified conversation pane
   const b = new FakeContents(3, 'webview', 'https://b.example/')
   const free = new FakeContents(4, 'webview', 'https://free.example/')
   world.contents = [shell, a, b, free]
-  claims.clear()
-  claims.set(2, 'sessionA')
-  claims.set(3, 'sessionB')
+  handles.clear()
+  bind(2, 'session-A')
+  bind(3, 'session-B')
 
-  const forA = (await handle({ op: 'list', owner: 'sessionA' })).sidebar.map(g => g.id)
-  assert.deepEqual(forA, [2], 'A sees only its own claimed guest, never a global unclaimed page')
+  const forA = (await handle({ op: 'list', handle: sessionWireId(browserSessionHandle('session-A', 'browser:test')) })).sidebar.map(g => g.id)
+  assert.deepEqual(forA, [wire('session-A')], 'A sees only its own bound guest, never a global unclaimed page')
 
-  const forB = (await handle({ op: 'list', owner: 'sessionB' })).sidebar.map(g => g.id)
-  assert.deepEqual(forB, [3])
+  const forB = (await handle({ op: 'list', handle: sessionWireId(browserSessionHandle('session-B', 'browser:test')) })).sidebar.map(g => g.id)
+  assert.deepEqual(forB, [wire('session-B')])
 })
 
 test('two conversations asking in turn are each answered with their own page', async () => {
@@ -117,25 +124,25 @@ test('two conversations asking in turn are each answered with their own page', a
   const a = new FakeContents(2, 'webview', 'https://a.example/')
   const b = new FakeContents(3, 'webview', 'https://b.example/')
   world.contents = [shell, a, b]
-  claims.clear()
+  handles.clear()
 
   const asked = []
   panelVerdict = (expression) => {
     asked.push(expression)
     // Real conversation ids carry the `session-` prefix; the bridge refuses anything that cannot
-    // name a conversation, so a bare 'sessionA' would be turned away before it got this far.
+    // name a conversation, so a bare 'session-A' would be turned away before it got this far.
     return expression.includes('session-aaa')
       ? { ok: true, created: false, panel: true, guestId: 2, url: '' }
       : { ok: true, created: false, panel: true, guestId: 3, url: '' }
   }
 
-  assert.equal((await handle({ op: 'ensureSidebar', owner: 'session-aaa' })).id, 2)
-  assert.equal((await handle({ op: 'ensureSidebar', owner: 'session-bbb' })).id, 3)
+  assert.equal((await handle({ op: 'ensureSidebar', handle: wire('session-aaa') })).id, wire('session-aaa'))
+  assert.equal((await handle({ op: 'ensureSidebar', handle: wire('session-bbb') })).id, wire('session-bbb'))
   assert.equal(asked.length, 2, 'one question per call')
   assert.ok(asked[0].includes('session-aaa'), 'the first named session-aaa')
   assert.ok(asked[1].includes('session-bbb'), 'the second named session-bbb')
-  assert.equal(claims.get(2), 'session-aaa', 'each guest is claimed by the conversation that asked')
-  assert.equal(claims.get(3), 'session-bbb')
+  assert.equal(handles.get(wire('session-aaa'))?.owner, 'session-aaa', 'each guest is bound to the conversation that asked')
+  assert.equal(handles.get(wire('session-bbb'))?.owner, 'session-bbb')
 })
 
 test('the bridge no longer scans the process for a free guest', () => {
@@ -154,11 +161,11 @@ test('the bridge no longer scans the process for a free guest', () => {
 test('showTab refuses a guest another session holds', async () => {
   const a = new FakeContents(2, 'webview', 'https://a.example/')
   world.contents = [shell, a]
-  claims.clear()
-  claims.set(2, 'sessionA')
+  handles.clear()
+  bind(2, 'session-A')
   await assert.rejects(
-    () => handle({ op: 'showTab', viewId: 2, owner: 'sessionB' }),
-    /not held by this conversation/,
+    () => handle({ op: 'showTab', handle: wire('session-B') }),
+    /stale/,
   )
 })
 
@@ -166,9 +173,9 @@ test('download refuses a guest another session holds before starting a transfer'
   const a = new FakeContents(2, 'webview', 'https://a.example/')
   a.session = { fetch() { assert.fail('must not transfer another conversation\'s page') } }
   world.contents = [shell, a]
-  claims.clear()
-  claims.set(2, 'sessionA')
-  await assert.rejects(() => handle({ op: 'download', id: 2, owner: 'sessionB', url: 'https://a.example/file', savePath: '/downloads/file' }), /not held by this conversation/)
+  handles.clear()
+  bind(2, 'session-A')
+  await assert.rejects(() => handle({ op: 'download', handle: wire('session-B'), url: 'https://a.example/file', savePath: '/downloads/file' }), error => error.code === 'BROWSER_HANDLE_STALE')
 })
 
 test('closeSidebarBrowser never considers another session’s guest', async () => {
@@ -177,37 +184,31 @@ test('closeSidebarBrowser never considers another session’s guest', async () =
   const a = new FakeContents(2, 'webview', 'https://a.example/')
   const b = new FakeContents(3, 'webview', 'https://b.example/')
   world.contents = [shell, a, b]
-  claims.clear()
-  claims.set(2, 'sessionA')
-  claims.set(3, 'sessionB')
+  handles.clear()
+  bind(2, 'session-A')
+  bind(3, 'session-B')
 
   try {
-    await handle({ op: 'closeSidebarBrowser', titles: [], owner: 'sessionB' })
+    await handle({ op: 'releaseSession', handle: sessionWireId(browserSessionHandle('session-B', 'browser:test')) })
   } catch {
     // Driving the DOM needs a real shell; the assertion is about which guests were eligible.
   }
-  assert.equal(claims.get(2), 'sessionA', 'A still holds its guest')
+  assert.equal(handles.get(wire('session-A'))?.owner, 'session-A', 'A still holds its guest')
 })
 
-test('a waiting call keeps asking about its own conversation, and nothing else', async () => {
-  // The wait exists because a guest attaches asynchronously once the renderer creates the
-  // webview. Every round asks the SAME question — this conversation's panel — so a guest
-  // appearing in any other conversation cannot satisfy it. The old wait compared sets of every
-  // webview in the process, which is exactly how it could.
-  let reads = 0
+test('an attached first-panel transaction only names its own conversation', async () => {
+  world.contents = [shell, new FakeContents(9, 'webview', 'about:blank')]
+  handles.clear()
   const asked = []
   panelVerdict = (expression) => {
     asked.push(expression)
-    reads += 1
-    return reads === 1
-      ? { ok: true, created: true, panel: true, guestId: null }
-      : { ok: true, created: false, panel: true, guestId: 9, url: '' }
+    return { ok: true, created: true, panel: true, guestId: 9, url: '', initialization: { stage: 'attached', guestId: '9' } }
   }
 
-  const answer = await handle({ op: 'ensureSidebar', owner: 'session-ccc' })
-  assert.equal(answer.id, 9, 'the page that eventually appeared is the one returned')
+  const answer = await handle({ op: 'ensureSidebar', handle: wire('session-ccc') })
+  assert.equal(answer.id, wire('session-ccc'), 'the page that eventually appeared is the one returned')
   assert.equal(answer.created, true, 'and the caller is told a tab was placed')
-  assert.ok(asked.length >= 2, 'it polled rather than giving up after one read')
+  assert.equal(asked.length, 1, 'the renderer owns one attachment transaction, without bridge polling')
   for (const expression of asked) {
     assert.ok(expression.includes('session-ccc'), 'every round asked about this conversation only')
   }
@@ -216,20 +217,20 @@ test('a waiting call keeps asking about its own conversation, and nothing else',
 test('cdp refuses a guest held by another conversation', async () => {
   const theirs = new FakeContents(9, 'webview', 'https://theirs.example/')
   world.contents = [shell, theirs]
-  claims.clear()
-  claims.set(9, 'session-aaa')
+  handles.clear()
+  bind(9, 'session-aaa')
   await assert.rejects(
-    () => handle({ op: 'cdp', id: 9, method: 'Runtime.evaluate', params: { expression: '1' }, owner: 'session-bbb' }),
-    /not held by this conversation/,
+    () => handle({ op: 'cdp', method: 'Runtime.evaluate', params: { expression: '1' }, handle: wire('session-bbb') }),
+    /stale/,
   )
 })
 
 test('cdp still drives the guest its own conversation holds', async () => {
   const mine = new FakeContents(9, 'webview', 'https://mine.example/')
   world.contents = [shell, mine]
-  claims.clear()
-  claims.set(9, 'session-aaa')
-  const answer = await handle({ op: 'cdp', id: 9, method: 'Runtime.evaluate', params: { expression: '1' }, owner: 'session-aaa' })
+  handles.clear()
+  bind(9, 'session-aaa')
+  const answer = await handle({ op: 'cdp', method: 'Runtime.evaluate', params: { expression: '1' }, handle: wire('session-aaa') })
   assert.equal(answer.ok, true)
 })
 

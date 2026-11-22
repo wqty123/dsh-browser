@@ -1,5 +1,6 @@
+import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
- * Prepare Windows bridge maintenance for the user to run after exiting DSH Desktop.
+ * Prepare bridge maintenance (Windows `.cmd`, macOS `.command`) for the user to run after exiting DSH Desktop.
  * Preparation writes a private launcher and plan; it never starts a process or changes Desktop.
  * The current packaged installer performs identity and running-process checks at execution time.
  * @module dsh-browser/browser-electron/bridge-maintenance
@@ -8,7 +9,7 @@ import { existsSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readDesktopIdentity } from './desktop-identity.ts'
+import { desktopLayout, desktopPaths, readDesktopIdentity } from './desktop-identity.ts'
 import { dshHome as dshHomePath } from './paths.ts'
 import type { BridgeAction } from './bridge-install.ts'
 
@@ -24,9 +25,9 @@ export interface PreparedBridgeMaintenance {
   readonly prepared: true
   readonly action: BridgeAction
   readonly path: string
-  /** Literal-path invocation for the user's PowerShell terminal. */
+  /** Literal-path invocation for the user's terminal (PowerShell on Windows, a POSIX shell on macOS). */
   readonly command: string
-  readonly commandShell: 'powershell'
+  readonly commandShell: 'powershell' | 'sh'
   readonly directory: string
   readonly runnerPath: string
   readonly planPath: string
@@ -71,6 +72,30 @@ function prospectiveRealPath(path: string): string {
   return resolve(realpathSync(ancestor), ...missing)
 }
 
+/** Case-insensitive on Windows; elsewhere both sides are already on-disk spellings (`realpathSync.native`). */
+function samePath(a: string, b: string): boolean {
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+}
+
+/** One POSIX shell word: single-quoted, with embedded quotes closed and escaped. */
+function shellLiteral(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+/** The macOS launcher: a `.command` file Finder opens in Terminal; paths stay single-quoted literals. */
+function posixLauncher(nodePath: string, electronNode: boolean): string {
+  return [
+    '#!/bin/sh',
+    'echo "Quit DSH Desktop normally before running bridge maintenance."',
+    'cd "$(dirname "$0")" || exit 1',
+    `${electronNode ? 'ELECTRON_RUN_AS_NODE=1 ' : 'ELECTRON_RUN_AS_NODE= '}${shellLiteral(nodePath)}${electronNode ? ' --expose-internals' : ''} ./run-maintenance.mjs`,
+    'code=$?',
+    'if [ "$code" -eq 0 ]; then echo "Bridge maintenance completed. You can now open DSH Desktop."; else echo "Bridge maintenance failed. Read the reason above, then prepare maintenance again if needed."; fi',
+    'exit "$code"',
+    '',
+  ].join('\n')
+}
+
 /** This runner is deliberately data-driven: paths and actions are never evaluated as shell text. */
 const RUNNER = `import { readFileSync, existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
@@ -110,13 +135,13 @@ export async function prepareBridgeMaintenance(
   const installerPath = fileURLToPath(new URL('../../desktop-bridge/install.mjs', import.meta.url))
   if (!existsSync(installerPath)) throw new Error('the packaged bridge installer is missing')
 
+  const desktopRuntime = desktopPaths(target).executable
   const currentIsNode = /^(?:node|node\.exe)$/i.test(basename(process.execPath))
-  const selected = options.nodePath ?? (currentIsNode ? process.execPath : join(target, 'DeepSeek Harness.exe'))
+  const selected = options.nodePath ?? (currentIsNode ? process.execPath : desktopRuntime)
   const nodePath = checkedPath(selected, 'Maintenance runtime')
   if (!existsSync(nodePath) || !statSync(nodePath).isFile()) throw new Error('the maintenance runtime does not exist')
   const electronNode = !/^(?:node|node\.exe)$/i.test(basename(nodePath))
-  const desktopRuntime = join(target, 'DeepSeek Harness.exe')
-  if (electronNode && (!existsSync(desktopRuntime) || realpathSync(nodePath).toLowerCase() !== realpathSync(desktopRuntime).toLowerCase())) {
+  if (electronNode && (!existsSync(desktopRuntime) || !samePath(realpathSync.native(nodePath), realpathSync.native(desktopRuntime)))) {
     throw new Error('the Electron maintenance runtime must belong to the verified Desktop installation')
   }
 
@@ -125,7 +150,7 @@ export async function prepareBridgeMaintenance(
   if (testContext && options.directory === undefined && process.env.DSH_BRIDGE_TEST_ROOT === undefined) {
     throw new Error('test preparation requires an explicit private maintenance directory')
   }
-  const directory = checkedPath(options.directory ?? join(dshHome, 'dsh-builtin-browser-host', 'maintenance'), 'Maintenance directory')
+  const directory = checkedPath(options.directory ?? join(dshHome, BROWSER_PROFILE_DIR, 'maintenance'), 'Maintenance directory')
   if (withinOrEqual(target, directory) || withinOrEqual(target, prospectiveRealPath(directory))) {
     throw new Error('maintenance launchers must be stored outside the Desktop installation')
   }
@@ -134,9 +159,10 @@ export async function prepareBridgeMaintenance(
   const output = await mkdtemp(join(directory, `${action}-`))
   const runnerPath = join(output, 'run-maintenance.mjs')
   const planPath = join(output, 'maintenance.json')
-  const path = join(output, action === 'uninstall' ? 'uninstall-bridge.cmd' : 'install-bridge.cmd')
+  const bundle = (desktopLayout(target) as { name?: string }).name === 'macos-bundle'
+  const path = join(output, `${action === 'uninstall' ? 'uninstall' : 'install'}-bridge.${bundle ? 'command' : 'cmd'}`)
   const plan: MaintenancePlan = { version: 1, action, installRoot: target, installerPath, nodePath, electronNode, dshHome }
-  const command = [
+  const command = bundle ? posixLauncher(nodePath, electronNode) : [
     '@echo off',
     'setlocal DisableDelayedExpansion',
     'chcp 65001 >nul',
@@ -156,6 +182,8 @@ export async function prepareBridgeMaintenance(
   ].join('\r\n')
   await writeFile(planPath, JSON.stringify(plan, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
   await writeFile(runnerPath, RUNNER, { flag: 'wx', mode: 0o600 })
-  await writeFile(path, command, { flag: 'wx', mode: 0o600 })
-  return { ok: true, prepared: true, action, path, command: `& '${path.replace(/'/g, "''")}'`, commandShell: 'powershell', directory: output, runnerPath, planPath }
+  await writeFile(path, command, { flag: 'wx', mode: bundle ? 0o700 : 0o600 })
+  return bundle
+    ? { ok: true, prepared: true, action, path, command: shellLiteral(path), commandShell: 'sh', directory: output, runnerPath, planPath }
+    : { ok: true, prepared: true, action, path, command: `& '${path.replace(/'/g, "''")}'`, commandShell: 'powershell', directory: output, runnerPath, planPath }
 }

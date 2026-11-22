@@ -29,13 +29,17 @@ test('the DSH range is declared where DSH reads it', () => {
 })
 
 test('engines.dsh covers every release the peers claimed', () => {
-  // The guide is explicit: peers no longer widen or narrow an engines.dsh range, so the range has to
-  // cover everything the package supports on its own. Keeping them identical is the simplest way to
-  // be sure the answer did not change when the rule did.
+  // Workspace resolution is a build concern; the documented runtime contract lives in engines.dsh.
+  assert.equal(manifest.engines.dsh, '>=0.1.1-rc.2 <0.3.0', 'the documented supported releases remain compatible')
   const ranges = new Set(dshPeerRanges())
   assert.ok(ranges.size > 0, 'the peer fallback ranges exist')
-  assert.deepEqual([...ranges], [manifest.engines.dsh],
-    'engines.dsh matches the peer ranges exactly, so either rule gives the same answer')
+  for (const range of ranges) {
+    if (range.startsWith('workspace:')) {
+      assert.equal(range, 'workspace:^', 'workspace peers track the host checkout, not a published runtime range')
+    } else {
+      assert.equal(range, manifest.engines.dsh, 'published peer ranges agree with the runtime contract')
+    }
+  }
 })
 
 test('the retired location is not presented as a decision', () => {
@@ -57,7 +61,7 @@ test('DSH itself agrees, when the checkout is available', async () => {
   const { evaluatePluginCompatibility } = await import(`file:///${checker}`)
 
   // Supported: the version this was verified on, and the two earlier ones the docs record.
-  for (const supported of ['0.2.1-rc.5', '0.2.1-rc.1', '0.2.0-rc.2', '0.1.1-rc.2']) {
+  for (const supported of ['0.2.2-rc.3', '0.2.1-rc.5', '0.2.1-rc.1', '0.2.0-rc.2', '0.1.1-rc.2']) {
     assert.equal(evaluatePluginCompatibility(manifest, {}, supported), undefined,
       `${supported} must be accepted`)
   }

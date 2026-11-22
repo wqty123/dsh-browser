@@ -1,3 +1,4 @@
+import { REFERENCE_LIST_ROUTE, REFERENCE_GET_ROUTE, CLIENT_VERSION_ROUTE, REFERENCE_CAPTURE_ROUTE, REFERENCE_REVEAL_ROUTE, REFERENCE_INSERT_ROUTE, REFERENCE_EXPORT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERIES_ROUTE, REFERENCE_DELIVERY_ACK_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, REFERENCE_ASSET_ROUTE, REFERENCE_STATUS_ROUTE, URL_PARSE_BASE } from '../../assets/browser-policy.mjs'
 /**
  * HTTP surface for browser references: list, read, capture, reveal, delivery
  * into the conversation draft, and the actual image bytes behind a reference.
@@ -14,6 +15,9 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { referenceOwnerKey } from '../reference-owner.ts'
+import { WEB_REVEAL_STATUSES, type WebRevealStatus } from '../reference-source.ts'
+import { WebSourceLeaseExpired } from '../browser-reference/web-sources.ts'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { BrowserHttpHandler } from './authenticated-route.ts'
@@ -31,8 +35,8 @@ import type { ReferenceExportFormat } from '../browser-reference/export.ts'
 import type { BrowserReferenceCarrier, BrowserReferenceEntry, BrowserReferenceOrigin, BrowserReferenceTarget } from '../browser-reference/types.ts'
 
 /** Paths this module serves. */
-export const REFERENCE_LIST_ROUTE = '/dsh-builtin-browser/reference/list'
-export const REFERENCE_GET_ROUTE = '/dsh-builtin-browser/reference/get'
+export { REFERENCE_LIST_ROUTE }
+export { REFERENCE_GET_ROUTE }
 /**
  * The id the host keys its stores on.
  *
@@ -43,31 +47,31 @@ export const REFERENCE_GET_ROUTE = '/dsh-builtin-browser/reference/get'
  * @returns the same id without a leading \`session-\`.
  */
 export function bareSession(value: string): string {
-  return value.startsWith('session-') ? value.slice('session-'.length) : value
+  return referenceOwnerKey(value)
 }
 
 /** 客户端产物的版本（mtime+size），用于让浏览器自动换到新 bundle。 */
-export const CLIENT_VERSION_ROUTE = '/dsh-builtin-browser/client-version'
+export { CLIENT_VERSION_ROUTE }
 
-export const REFERENCE_CAPTURE_ROUTE = '/dsh-builtin-browser/reference/capture'
-export const REFERENCE_REVEAL_ROUTE = '/dsh-builtin-browser/reference/reveal'
-export const REFERENCE_INSERT_ROUTE = '/dsh-builtin-browser/reference/insert'
-export const REFERENCE_EXPORT_ROUTE = '/dsh-builtin-browser/reference/export'
-export const REFERENCE_IMPORT_ROUTE = '/dsh-builtin-browser/reference/import'
+export { REFERENCE_CAPTURE_ROUTE }
+export { REFERENCE_REVEAL_ROUTE }
+export { REFERENCE_INSERT_ROUTE }
+export { REFERENCE_EXPORT_ROUTE }
+export { REFERENCE_IMPORT_ROUTE }
 /** The client polls this to pick up captures that belong to its conversation. */
-export const REFERENCE_DELIVERIES_ROUTE = '/dsh-builtin-browser/reference/deliveries'
+export { REFERENCE_DELIVERIES_ROUTE }
 /** Only the client may ACK, after the draft AND every image asset are durable. */
-export const REFERENCE_DELIVERY_ACK_ROUTE = '/dsh-builtin-browser/reference/delivery/ack'
+export { REFERENCE_DELIVERY_ACK_ROUTE }
 /** Remove a card: a tombstone that late retries cannot resurrect. */
-export const REFERENCE_DELIVERY_REMOVE_ROUTE = '/dsh-builtin-browser/reference/delivery/remove'
+export { REFERENCE_DELIVERY_REMOVE_ROUTE }
 /** Real bytes of a captured image, for the card thumbnail and the model block. */
-export const REFERENCE_ASSET_ROUTE = '/dsh-builtin-browser/reference/asset'
+export { REFERENCE_ASSET_ROUTE }
 
 /**
  * Diagnostic answer for the sidebar entry: which conversation this host serves, and
  * what its last scan of the conversation's sidebar pages found.
  */
-export const REFERENCE_STATUS_ROUTE = '/dsh-builtin-browser/reference/status'
+export { REFERENCE_STATUS_ROUTE }
 
 const EXPORT_FORMATS: readonly ReferenceExportFormat[] = ['jsonl', 'markdown', 'zip', 'markdown-zip']
 
@@ -95,6 +99,7 @@ export interface ReferenceRouteOptions {
 
 /** The handlers, one per registered exact path. */
 export interface ReferenceRouteHandlers {
+  readonly source: BrowserHttpHandler
   readonly list: BrowserHttpHandler
   readonly get: BrowserHttpHandler
   readonly capture: BrowserHttpHandler
@@ -125,9 +130,35 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
   const { service, queue } = options
   const carrier = options.carrier ?? (() => 'bundled' as BrowserReferenceCarrier)
 
+  const source: BrowserHttpHandler = async (request, response) => {
+    if (!requireWrite(request, response)) return
+    if (service.webSources === undefined) { replyJson(response, 503, { ok: false, error: 'web source channel unavailable' }); return }
+    try {
+      const body = await readJsonBody<Record<string, unknown>>(request)
+      const lease = stringOf(body.lease, 100)
+      if (body.operation === 'register') {
+        const owner = stringOf(body.sessionId, 200)
+        const pageId = stringOf(body.pageId, 200)
+        const url = stringOf(body.url, 4000)
+        if (!owner || !pageId || !url) throw new Error('source owner, page and URL required')
+        replyJson(response, 200, { ok: true, lease: service.webSources.register(owner, pageId, url) })
+      } else if (body.operation === 'poll' && lease !== undefined && typeof body.url === 'string') {
+        const acks = body.acknowledgements ?? []
+        if (!Array.isArray(acks) || acks.length > 64 || !acks.every(ack => ack !== null && typeof ack === 'object' && typeof ack.id === 'string' && WEB_REVEAL_STATUSES.includes(ack.status))) throw new Error('invalid source acknowledgements')
+        const commands = service.webSources.poll(lease, body.url, acks as { id: string; status: WebRevealStatus }[])
+        replyJson(response, 200, { ok: true, commands })
+      } else if (body.operation === 'remove' && lease !== undefined) {
+        service.webSources.remove(lease)
+        replyJson(response, 200, { ok: true })
+      } else throw new Error('invalid source operation')
+    } catch (error) {
+      replyJson(response, error instanceof WebSourceLeaseExpired ? 410 : 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   const list: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
-    const url = new URL(request.url ?? '/', 'http://localhost')
+    const url = new URL(request.url ?? '/', URL_PARSE_BASE)
     const limitText = url.searchParams.get('limit')
     const limit = limitText === null ? 20 : Number(limitText)
     const references = service.list({
@@ -141,7 +172,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
 
   const get: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
-    const url = new URL(request.url ?? '/', 'http://localhost')
+    const url = new URL(request.url ?? '/', URL_PARSE_BASE)
     const id = url.searchParams.get('id')
     if (id === null || id === '') { replyJson(response, 400, { ok: false, error: 'id is required' }); return }
     const reference = service.get(id)
@@ -171,6 +202,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
       return
     }
     const browserSessionId = stringOf(body.browserSessionId, 200)
+    const sourcePageId = stringOf(body.sourcePageId, 200)
     const tableSelector = stringOf(body.tableSelector, 1000)
     const excerptText = stringOf(body.excerptText, 20_000)
     let frameSelector: string | undefined
@@ -226,9 +258,10 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
     const outcome = await service.capture({
       sessionId,
       ...browserSessionId !== undefined ? { browserSessionId } : {},
+      ...sourcePageId !== undefined ? { sourcePageId } : {},
       origin,
       entry,
-      carrier: oneOf(body.carrier, CARRIERS) ?? carrier(),
+      carrier: entry === 'page-overlay' && frozenCapture !== undefined ? 'sidebar' : oneOf(body.carrier, CARRIERS) ?? carrier(),
       ...typeof body.allowPartial === 'boolean' ? { allowPartial: body.allowPartial } : {},
       ...tableSelector !== undefined ? { tableSelector } : {},
       ...excerptText !== undefined ? { excerptText } : {},
@@ -284,6 +317,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
     // Explicit jump: the caller wants the page moved to the stored URL rather
     // than a report that it is showing something else.
     const outcome = await service.reveal(referenceId, {
+      ...typeof body.sourcePageId === 'string' && body.sourcePageId !== '' ? { sourcePageId: body.sourcePageId } : {},
       ...partId !== undefined ? { partId } : {},
       ...body.navigate === true ? { navigate: true } : {},
     })
@@ -331,7 +365,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
 
   const exportBundle: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
-    const url = new URL(request.url ?? '/', 'http://localhost')
+    const url = new URL(request.url ?? '/', URL_PARSE_BASE)
     const format = url.searchParams.get('format') ?? 'jsonl'
     if (!(EXPORT_FORMATS as readonly string[]).includes(format)) {
       replyJson(response, 400, { ok: false, error: 'format must be jsonl, markdown, zip, or markdown-zip' })
@@ -378,7 +412,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
   const deliveries: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
     if (queue === undefined) { replyJson(response, 503, { ok: false, error: 'delivery-unavailable' }); return }
-    const url = new URL(request.url ?? '/', 'http://localhost')
+    const url = new URL(request.url ?? '/', URL_PARSE_BASE)
     const sessionId = url.searchParams.get('sessionId')
     // A poll must name its conversation. Answering without one would hand every
     // session's records to whoever asked, and the client would advance its cursor
@@ -533,7 +567,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
    */
   const asset: BrowserHttpHandler = (request, response) => {
     if (!requireRead(request, response)) return
-    const url = new URL(request.url ?? '/', 'http://localhost')
+    const url = new URL(request.url ?? '/', URL_PARSE_BASE)
     const key = url.searchParams.get('key') ?? ''
     if (!/^[0-9a-f]{64}$/.test(key)) { replyJson(response, 400, { ok: false, error: 'invalid asset key' }); return }
     const file = service.assetPath(key)
@@ -568,7 +602,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
   }
 
   return {
-    list, get, capture, reveal, insert, export: exportBundle, importBundle,
+    source, list, get, capture, reveal, insert, export: exportBundle, importBundle,
     deliveries, ack, removeDelivery, asset,
   }
 }

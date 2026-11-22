@@ -49,16 +49,16 @@ const DEFAULT_SHORTCUT_OBJECTS = DEFAULT_SHORTCUTS.map(shortcut => ({ ...shortcu
  *
  * 显式标注类型：schemastery 的 `z.object(...)` 推导类型在本仓库的声明生成里会引入无法命名的
  * `Dict` 引用（`TS2883`），导致 `target/dts` 里缺少本文件的 `.d.ts`，进而被发布前检查判为
- * 「声明缺失」。标注 `z.Schema<Config>` 只影响类型，运行期对象一字未改。
+ * 「声明缺失」。标注 `z<Config>` 只影响类型，运行期对象一字未改。
  */
-export const Config: z.Schema<Config> = z.object({
+export const Config: z<Config> = z.object({
   version: z.number().default(BROWSER_STARTPAGE_VERSION).volatile(),
   defaultSearchEngineId: z.string().default(DEFAULT_SEARCH_ENGINE_ID).volatile(),
   searchEngines: z.array(searchEngineSchema).max(MAX_STARTPAGE_ENGINES)
     .default(DEFAULT_ENGINE_OBJECTS).volatile(),
   shortcuts: z.array(shortcutSchema).max(MAX_STARTPAGE_SHORTCUTS)
     .default(DEFAULT_SHORTCUT_OBJECTS).volatile(),
-}) as z.Schema<Config>
+}) as z<Config>
 
 /**
  * Keep preference writes live instead of reloading the owning entry.

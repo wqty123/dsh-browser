@@ -63,6 +63,35 @@ function textEvent(exact = 'selected words', prefix = 'before ', suffix = ' afte
   return { kind: 'text', exact, prefix, suffix }
 }
 
+test('each capture is stored for its requested owner, even when other sessions quote identical content', async t => {
+  const { service } = fixture(t)
+  const frozenCapture = { ok: true, url: 'https://example.com/article', title: 'Article', events: [textEvent()] }
+  const first = await service.capture({ sessionId: 'owner-A', frozenCapture })
+  const second = await service.capture({ sessionId: 'owner-B', frozenCapture })
+  const repeated = await service.capture({ sessionId: 'owner-B', frozenCapture })
+  assert.deepEqual(first.failures, [])
+  assert.deepEqual(second.failures, [])
+  assert.equal(second.reference.owner.sessionId, 'owner-B')
+  assert.notEqual(second.reference.referenceId, first.reference.referenceId)
+  assert.notEqual(repeated.reference.referenceId, second.reference.referenceId)
+  assert.deepEqual(service.list({ sessionId: 'owner-A' }).map(item => item.referenceId), [first.reference.referenceId])
+  assert.deepEqual(service.list({ sessionId: 'owner-B' }).map(item => item.referenceId), [second.reference.referenceId, repeated.reference.referenceId])
+})
+
+test('different table-only selections on one page remain distinct references', async t => {
+  const { service } = fixture(t)
+  const capture = text => service.capture({ sessionId: 'owner', frozenCapture: {
+    ok: true, url: 'https://example.com/article', title: 'Article', events: [{ kind: 'table', table: {
+      rowCount: 1, columnCount: 1, completeness: 'selected-cells', cells: [{ row: 0, column: 0, text }],
+    } }],
+  } })
+  const first = await capture('one')
+  const second = await capture('two')
+  assert.deepEqual(second.failures, [])
+  assert.notEqual(second.reference.referenceId, first.reference.referenceId)
+  assert.equal(second.reference.parts[0].table.cells[0].text, 'two')
+})
+
 test('capture commits an ordered reference with a self-consistent hash', async t => {
   const { page, service, storePath, assets } = fixture(t)
   page.capture = {
@@ -223,6 +252,15 @@ test('reveal locates the first part and highlights its exact text offsets', asyn
   assert.deepEqual({ start: highlight.args[0].start, end: highlight.args[0].end }, { start: 6, end: 20 })
 })
 
+test('reveal recognizes the same document across normalized URLs and fragment changes', async t => {
+  const { page, service } = fixture(t)
+  page.capture = { ok: true, url: 'https://example.com/article#quoted', events: [textEvent('selected words')] }
+  page.text = { ok: true, text: 'alpha selected words omega', truncated: false }
+  const reference = (await service.capture({ sessionId: 'session-1' })).reference
+  page.facts = { ok: true, url: 'https://EXAMPLE.com:443/article#current' }
+  assert.equal((await service.reveal(reference.referenceId)).status, 'revealed')
+})
+
 test('reveal reports ambiguity instead of guessing between equal matches', async t => {
   const { page, service, calls } = fixture(t)
   page.capture = { ok: true, url: 'https://example.com/article', title: 'An article', events: [textEvent('same', '', '')] }
@@ -247,7 +285,7 @@ test('reveal distinguishes a page mismatch from a missing session', async t => {
   assert.equal(unavailable.status, 'not-found')
 })
 
-test('reveal takes the page to the stored URL when the caller asks to navigate', async t => {
+test('reveal never treats an unacknowledged navigation request as page readiness', async t => {
   const { page, service, host } = fixture(t)
   page.capture = { ok: true, url: 'https://example.com/article', title: 'An article', events: [textEvent('selected words')] }
   page.text = { ok: true, text: 'alpha selected words omega', truncated: false }
@@ -265,11 +303,40 @@ test('reveal takes the page to the stored URL when the caller asks to navigate',
     return await navigate(sessionId, request, signal)
   }
   const outcome = await service.reveal(reference.referenceId, { navigate: true })
-  assert.equal(outcome.status, 'revealed')
-  assert.equal(outcome.currentUrl, 'https://example.com/article')
+  assert.equal(outcome.status, 'page-mismatch')
+  assert.equal(outcome.currentUrl, 'https://example.com/other')
 })
 
-test('reveal follows the page the person has open when the capture session was replaced', async t => {
+for (const storedPage of ['iframe:stored', 'native-stored']) {
+  for (const requestedPage of [undefined, 'iframe:requested', 'native-requested', '']) {
+    test(`reveal source precedence: stored=${storedPage}, requested=${requestedPage}`, async t => {
+      const { page, service, host, assets } = fixture(t)
+      page.capture = { ok: true, url: 'https://example.com/article', title: 'Article', events: [textEvent('selected words')] }
+      page.text = { ok: true, text: 'alpha selected words omega', truncated: false }
+      const original = (await service.capture({ sessionId: 'session-1' })).reference
+      const reference = { ...original, referenceId: `${original.referenceId}-stored`, owner: { ...original.owner, sourcePageId: storedPage } }
+      reference.manifestHash = manifestHashOf(reference)
+      service.references.append(reference)
+      const webCalls = [], nativeCalls = []
+      const revived = new BrowserReferenceService(host, service.references, {
+        assetDir: assets,
+        webSources: { reveal: async (_reference, pageId) => { webCalls.push(pageId); return 'revealed' } },
+        sourceSession: async (_owner, pageId) => {
+          nativeCalls.push(pageId)
+          if (pageId === '') throw new Error('source page missing')
+          return 'session-1'
+        },
+      })
+      const outcome = await revived.reveal(reference.referenceId, requestedPage === undefined ? {} : { sourcePageId: requestedPage })
+      const selected = requestedPage ?? storedPage
+      assert.equal(outcome.status, selected === '' ? 'unavailable' : 'revealed')
+      assert.deepEqual(webCalls, selected.startsWith('iframe:') ? [selected] : [])
+      assert.deepEqual(nativeCalls, selected.startsWith('iframe:') ? [] : [selected])
+    })
+  }
+}
+
+test('reveal binds the exact acknowledged source page when the capture session was replaced', async t => {
   const { page, service, host, assets } = fixture(t)
   page.capture = { ok: true, url: 'https://example.com/article', title: 'An article', events: [textEvent('selected words')] }
   page.text = { ok: true, text: 'alpha selected words omega', truncated: false }
@@ -280,9 +347,14 @@ test('reveal follows the page the person has open when the capture session was r
   const revived = new BrowserReferenceService(
     { ...host, exists: id => id === 'session-new' },
     service.references,
-    { assetDir: assets, currentSession: () => 'session-new' },
+    { assetDir: assets, sourceSession: async (owner, pageId) => {
+      assert.equal(owner, '1')
+      assert.equal(pageId, '42')
+      return 'session-new'
+    } },
   )
-  assert.equal((await revived.reveal(reference.referenceId)).status, 'revealed')
+  assert.equal((await revived.reveal(reference.referenceId)).status, 'session-unavailable')
+  assert.equal((await revived.reveal(reference.referenceId, { sourcePageId: '42' })).status, 'revealed')
 
   // Without that live page the outcome must stay honest, not optimistic.
   const blind = new BrowserReferenceService(
@@ -309,6 +381,7 @@ test('reveal of a table part asks the page for an element locator', async t => {
   const call = calls.find(entry => entry.script.includes('return JSON.stringify(revealElement(spec))'))
   assert.equal(call.args[0].kind, 'table')
   assert.deepEqual(call.args[0].anchor.cell, { row: 0, column: 0 })
+  assert.deepEqual(call.args[0].cells, [{ row: 0, column: 0 }])
 })
 
 test('the draft adapter is a reserved seam that answers honestly when absent', async t => {
@@ -468,7 +541,7 @@ test('a frozen capture is refused when the page has navigated since it was taken
     events: [{ kind: 'text', exact: 'old words' }],
   }
   const { service } = fixture(t, { facts: { ok: true, url: 'https://example.com/new', title: 'New' } })
-  const outcome = await service.capture({ sessionId: 'session-1', frozenCapture: frozen })
+  const outcome = await service.capture({ sessionId: 'session-1', browserSessionId: 'session-1', frozenCapture: frozen })
   assert.equal(outcome.reference, undefined, 'a different document must not become a quote of the old text')
   assert.ok(outcome.failures.some(failure => failure.reason === 'page-changed'), JSON.stringify(outcome.failures))
 })

@@ -126,7 +126,7 @@ test('every registered tool produces a value its own schema accepts', async () =
   })
 
   const { ctx, tools } = makeContext({ browser })
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
   assert.ok(tools.size >= 30, `expected the full tool set, got ${tools.size}`)
 
   const failures = []

@@ -6,7 +6,7 @@
 // still in the unpacked tree, the shell loads the archive, and everything LOOKS installed.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -17,6 +17,73 @@ import { writeAsar } from './fake-asar.mjs'
 
 const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sidebar'
 const shippedBridge = readFileSync(new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta.url))
+const shippedLoader = readFileSync(new URL('../desktop-bridge/profile-loader.mjs', import.meta.url))
+
+function loaderInstall(t) {
+  const root = makeInstall({ patched: true, bridge: shippedLoader }), home = join(root, 'home')
+  const profile = join(home, 'profiles', 'desktop'), directory = join(root, 'linked-plugin')
+  mkdirSync(join(profile, 'node_modules'), { recursive: true })
+  mkdirSync(join(directory, 'desktop-bridge'), { recursive: true })
+  writeFileSync(join(profile, 'package.json'), JSON.stringify({ dependencies: { 'dsh-builtin-browser': 'link:' + directory } }))
+  symlinkSync(directory, join(profile, 'node_modules', 'dsh-builtin-browser'), 'junction')
+  const entry = join(directory, 'desktop-bridge', 'plugin-browser-bridge.js')
+  writeFileSync(entry, shippedBridge)
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    rmSync(root, { recursive: true, force: true })
+  })
+  return { root, profile, directory, entry }
+}
+
+test('the exact deployed profile loader is current and follows package bridge updates without reinstall', t => {
+  const { root, entry } = loaderInstall(t)
+  assert.equal(shippedLoader.equals(shippedBridge), false)
+  assert.equal(readBridgeStatus(root).state, 'installed')
+  writeFileSync(entry, '')
+  assert.equal(readBridgeStatus(root).state, 'stale')
+  writeFileSync(entry, 'export const protocol = 3;')
+  assert.equal(readBridgeStatus(root).state, 'stale')
+  writeFileSync(entry, shippedBridge)
+  assert.equal(readBridgeStatus(root).state, 'installed')
+  assert.deepEqual(readFileSync(join(root, 'resources/app/lib/plugin-browser-bridge.js')), shippedLoader)
+})
+
+test('an old protocol-3 full copy remains stale even when the profile bridge is current', t => {
+  const { root } = loaderInstall(t)
+  const oldBridge = shippedBridge.toString().replace(/^const PROTOCOL = \d+$/m, 'const PROTOCOL = 3')
+  assert.notEqual(oldBridge, shippedBridge.toString())
+  writeFileSync(join(root, 'resources/app/lib/plugin-browser-bridge.js'), oldBridge)
+  assert.equal(readBridgeStatus(root).state, 'stale')
+})
+
+for (const state of ['undeclared package', 'missing package', 'missing entry', 'escaping entry']) test(`profile loader status fails closed for ${state}`, t => {
+  const { root, profile, directory, entry } = loaderInstall(t)
+  if (state === 'undeclared package') writeFileSync(join(profile, 'package.json'), '{}')
+  if (state === 'missing package') rmSync(directory, { recursive: true })
+  if (state === 'missing entry' || state === 'escaping entry') rmSync(entry)
+  if (state === 'escaping entry') {
+    const outside = join(root, 'outside.js')
+    writeFileSync(outside, shippedBridge)
+    symlinkSync(outside, entry, 'file')
+  }
+  const status = readBridgeStatus(root)
+  assert.equal(status.state, 'stale')
+  assert.equal(status.code, 'DSH_BRIDGE_PACKAGE_UNAVAILABLE')
+  assert.match(status.detail, /DSH_BRIDGE_PACKAGE_UNAVAILABLE/)
+})
+
+test('a loaded main extension supersedes an unavailable legacy-loader package', t => {
+  const { root, entry } = loaderInstall(t)
+  rmSync(entry)
+  const status = readBridgeStatus(root, { state: 'loaded', version: '1.0.0' })
+  assert.equal(status.state, 'installed')
+  assert.equal(status.code, undefined)
+  assert.equal(status.detail, 'desktop main extension: loaded')
+  assert.equal(status.command, undefined)
+})
 
 /** An install tree with the pieces a given state needs. */
 function makeInstall({ archive = false, patched = false, backup = false, bridge = shippedBridge } = {}) {
@@ -72,13 +139,13 @@ test('a main patch without its deployed bridge module needs repair', () => {
   }
 })
 
-test('a deployed bridge from another plugin version needs repair', () => {
-  const root = makeInstall({ patched: true, bridge: 'export function start() {}\n' })
+test('a deployed protocol-3 bridge explicitly asks for uninstall and reinstall', () => {
+  const root = makeInstall({ patched: true, bridge: 'const PROTOCOL = 3; export function start() {}\n' })
   try {
     const status = readBridgeStatus(root)
     assert.equal(status.state, 'stale')
     assert.equal(status.present, true)
-    assert.match(status.detail, /bridge module.*differs|outdated/i)
+    assert.equal(status.detail, '桥接版本过旧，请点击 卸载并重装')
     assert.equal(status.version, '0.2.1-rc.5')
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -155,6 +222,18 @@ test('the repair command is offered, quoted, and never executed', () => {
   }
 })
 
+test('supported extension status replaces marker diagnostics and never offers the legacy installer', t => {
+  const root = makeInstall({ patched: false })
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  assert.match(readBridgeStatus(root).command, /install\.mjs/)
+  for (const state of ['loaded', 'pending-restart', 'not-installed', 'failed']) {
+    const result = readBridgeStatus(root, { state, version: '1.0.0' })
+    assert.equal(result.mainExtension.state, state)
+    assert.equal(result.command, undefined)
+    assert.equal(result.detail, `desktop main extension: ${state}`)
+  }
+})
+
 test('the install is found by identity, under either product name', () => {
   // Issue #40 changed what discovery may accept: the shape alone used to be enough, and every
   // Electron app has the shape. What the user names the directory still must not matter — the app's
@@ -224,6 +303,13 @@ test('the endpoint answers with the reading, same-origin only', async () => {
     const payload = JSON.parse(String(ok.recorded.body))
     assert.equal(payload.ok, true)
     assert.equal(payload.bridge.state, 'installed')
+
+    const failed = response(), extension = { state: 'failed', code: 'EXTENSION_START_FAILED' }
+    await handleBridgeStatus(request(), failed, base, extension)
+    const failedPayload = JSON.parse(String(failed.recorded.body))
+    assert.equal(failedPayload.bridge.state, 'stale')
+    assert.deepEqual(failedPayload.bridge.mainExtension, extension)
+    assert.equal(failedPayload.bridge.command, undefined)
 
     const foreign = response()
     await handleBridgeStatus(request('GET', 'https://evil.example'), foreign, base)

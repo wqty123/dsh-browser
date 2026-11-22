@@ -65,8 +65,13 @@
  * start the already-closed app after maintenance; it never closes a running application.
  */
 import * as nodeFs from 'node:fs'
+import { applyHostPatch, hostPatchStatus, restoreHostPatch } from '../dsh-host-patch/apply.mjs'
+import { renameMaintenanceFileSync } from './maintenance-files.mjs'
+import { isDesktopExecutable } from './desktop-processes.mjs'
+import { legacyBridgeMarker as MARKER, legacyBridgeSnippet as SNIPPET } from '../dsh-host-patch/legacy-bridge.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { homedir } from 'node:os'
 
 /**
  * The filesystem used for every installer operation.
@@ -87,7 +92,7 @@ const archiveFs = (() => {
 })()
 const { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync,
   readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } = archiveFs
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 function isWithin(root, path) {
   const part = relative(root, path)
@@ -146,11 +151,14 @@ function findDefaultInstall(testRoot) {
     if (!isWithin(testRoot, resolve(candidate))) return false
     try { return isWithin(testRoot, realpathSync(candidate)) } catch { return false }
   }
-  const looksInstalled = candidate => permitted(candidate) && (existsSync(join(candidate, 'resources', 'app', 'lib', 'main.js'))
-    || existsSync(join(candidate, 'resources', 'app.asar')))
+  const looksInstalled = candidate => {
+    if (!permitted(candidate)) return false
+    const resources = layoutPaths(candidate)?.resources
+    return resources !== undefined && (existsSync(join(resources, 'app', 'lib', 'main.js')) || existsSync(join(resources, 'app.asar')))
+  }
   const probe = (base) => {
     if (!permitted(base)) return undefined
-    for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
+    for (const named of ['DSH Desktop', 'DeepSeek Harness', 'DSH Desktop.app', 'DeepSeek Harness.app']) {
       const candidate = join(base, named)
       if (looksInstalled(candidate)) return candidate
     }
@@ -177,13 +185,15 @@ function findDefaultInstall(testRoot) {
   const roots = [
     ...(localAppData === '' ? [] : [join(localAppData, 'Programs')]),
     process.env['ProgramFiles'], process.env['ProgramFiles(x86)'], process.env.APPDATA, process.env.ProgramData,
+    ...(process.platform === 'darwin' ? ['/Applications', join(homedir(), 'Applications')] : []),
   ].filter(base => typeof base === 'string' && base !== '')
   for (const base of roots) {
     const found = probe(base)
     if (found !== undefined) return found
   }
   return testRoot === undefined
-    ? join(localAppData === '' ? '.' : join(localAppData, 'Programs'), 'DeepSeek Harness')
+    ? process.platform === 'darwin' ? '/Applications/DeepSeek Harness.app'
+      : join(localAppData === '' ? '.' : join(localAppData, 'Programs'), 'DeepSeek Harness')
     : join(testRoot, 'no-test-desktop-found')
 }
 
@@ -219,14 +229,24 @@ function selectShellProcesses(rows, root, selfPid) {
     ancestors.add(cursor)
     cursor = byPid.get(cursor)?.ParentProcessId
   }
-  const expectedExe = resolve(root, 'DeepSeek Harness.exe').toLowerCase()
+  // Windows compares case-insensitively. Elsewhere the on-disk spelling decides: `realpathSync.native`
+  // returns the volume's own case, so `/applications/…` matches the running app on a case-insensitive
+  // APFS volume while `Apps` and `apps` stay distinct on a case-sensitive one.
+  const fold = process.platform === 'win32' ? value => value.toLowerCase()
+    : value => { try { return realpathSync.native(value) } catch { return value } }
+  const layout = layoutPaths(root)
+  const expectedExe = fold(resolve(layout.executable))
+  const expectedName = fold(basename(expectedExe))
+  const bundleRoot = process.platform === 'darwin' && layout.name === 'macos-bundle' ? root : undefined
   const selected = []
   for (const row of rows) {
-    if (String(row.Name ?? '').toLowerCase() !== 'deepseek harness.exe') continue
+    const namedMain = fold(String(row.Name ?? '')) === expectedName
+    if (bundleRoot === undefined && !namedMain) continue
     if (typeof row.ExecutablePath !== 'string' || row.ExecutablePath === '') {
+      if (!namedMain && !/ Helper(?: \([^)]*\))?$/.test(String(row.Name ?? ''))) continue
       throw new Error('could not identify a running DeepSeek Harness process; refusing to close or patch the application')
     }
-    if (resolve(row.ExecutablePath).toLowerCase() !== expectedExe) continue
+    if (!isDesktopExecutable(row.ExecutablePath, expectedExe, bundleRoot, process.platform)) continue
     if (!Number.isSafeInteger(row.ProcessId) || row.ProcessId <= 0 || typeof row.CommandLine !== 'string') {
       throw new Error('the Desktop process table is incomplete; refusing to close or patch the application')
     }
@@ -250,6 +270,7 @@ function selectShellProcesses(rows, root, selfPid) {
  * @returns GUI and Chromium helper process ids.
  */
 function shellProcesses(root) {
+  if (process.platform === 'darwin') return selectShellProcesses(posixProcessTable(), root, process.pid)
   const text = runCapture('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-Command',
     '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
@@ -267,14 +288,43 @@ function shellProcesses(root) {
 }
 
 /**
+ * The process table on macOS/Linux, in the shape the Windows CIM query returns.
+ * `comm` is the full executable path (it may contain spaces, so it is read in its own pass);
+ * `args` is the command line the node-mode filter reads.
+ * @returns every process row.
+ */
+function posixProcessTable() {
+  const environment = { ...process.env, LC_ALL: 'C', LANG: 'C' }
+  const executables = runCapture('ps', ['-axww', '-o', 'pid=,ppid=,comm='], environment)
+  const commands = runCapture('ps', ['-axww', '-o', 'pid=,args='], environment)
+  if (executables === undefined || commands === undefined) throw new Error('could not enumerate Desktop processes')
+  const byPid = new Map()
+  for (const line of commands.split('\n')) {
+    const match = /^\s*(\d+)\s(.*)$/.exec(line)
+    if (match !== null) byPid.set(Number(match[1]), match[2])
+  }
+  const rows = []
+  for (const line of executables.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s(.*)$/.exec(line)
+    if (match === null) continue
+    const path = match[3].trim()
+    rows.push({ ProcessId: Number(match[1]), ParentProcessId: Number(match[2]), Name: basename(path),
+      ExecutablePath: isAbsolute(path) ? path : '', CommandLine: byPid.get(Number(match[1])) ?? '' })
+  }
+  if (rows.length === 0) throw new Error('the Desktop process table is invalid')
+  return rows
+}
+
+/**
  * Run a command and return its stdout, or undefined when it could not run.
  * @param command - the executable.
  * @param argv - its arguments.
  * @returns stdout text, or undefined.
  */
-function runCapture(command, argv) {
+function runCapture(command, argv, environment) {
   try {
-    return execFileSync(command, argv, { encoding: 'utf8', stdio: 'pipe', windowsHide: true, timeout: 30_000 })
+    return execFileSync(command, argv, { encoding: 'utf8', stdio: 'pipe', windowsHide: true, timeout: 30_000,
+      ...(environment === undefined ? {} : { env: environment }) })
   } catch {
     return undefined
   }
@@ -290,7 +340,7 @@ function runCapture(command, argv) {
  */
 let lastStartedPid
 function startShell(root) {
-  const exe = join(root, 'DeepSeek Harness.exe')
+  const exe = layoutPaths(root).executable
   if (!existsSync(exe)) {
     console.error(`could not start DSH Desktop: ${exe} does not exist; start it yourself.`)
     return false
@@ -339,21 +389,41 @@ const revert = args.includes('--revert')
 /** Start after maintenance only when the target was already closed; never close a running shell. */
 const restart = args.includes('--restart')
 
-const resourcesDir = join(installRoot, 'resources')
+const installPaths = layoutPaths(installRoot) ?? process.exit(1)
+const resourcesDir = installPaths.resources
 const appDir = join(resourcesDir, 'app')
 const asarPath = join(resourcesDir, 'app.asar')
 const asarMoved = `${asarPath}.before-bridge`
 const mainPath = join(appDir, 'lib', 'main.js')
 const bridgeTarget = join(appDir, 'lib', 'plugin-browser-bridge.js')
-const bridgeSource = join(import.meta.dirname, 'plugin-browser-bridge.js')
-const proxyTarget = join(appDir, 'lib', 'guest-proxy.mjs')
-const proxySource = join(import.meta.dirname, 'guest-proxy.mjs')
+const bridgeSource = join(import.meta.dirname, 'profile-loader.mjs')
+const bridgeBackup = bridgeTarget + '.before-profile-loader'
+const bridgeAbsent = bridgeBackup + '.absent'
 const backupPath = `${mainPath}.before-bridge`
 
-/** The bridge imports its pure proxy-policy helper from the same directory. */
-function copyBridgeModules() {
+function validateBridgeLoaderBaseline() {
+  if (existsSync(bridgeBackup) && existsSync(bridgeAbsent)) throw new Error('Conflicting bridge loader restore baselines')
+  if (!existsSync(bridgeTarget)) return
+  const current = readFileSync(bridgeTarget)
+  if (current.equals(readFileSync(bridgeSource))) return
+  if (existsSync(bridgeAbsent) || (existsSync(bridgeBackup) && !current.equals(readFileSync(bridgeBackup)))) {
+    throw new Error('Bridge module differs from its preserved restore baseline')
+  }
+}
+
+function installBridgeLoader() {
+  validateBridgeLoaderBaseline()
+  if (!existsSync(bridgeBackup) && !existsSync(bridgeAbsent)) {
+    if (existsSync(bridgeTarget)) copyFileSync(bridgeTarget, bridgeBackup)
+    else writeFileSync(bridgeAbsent, '')
+  }
   copyFileSync(bridgeSource, bridgeTarget)
-  copyFileSync(proxySource, proxyTarget)
+}
+
+function restoreBridgeLoader() {
+  validateBridgeLoaderBaseline()
+  if (existsSync(bridgeBackup)) copyFileSync(bridgeBackup, bridgeTarget)
+  else if (existsSync(bridgeAbsent)) rmSync(bridgeTarget, { force: true })
 }
 
 // Moving the archive aside breaks two more places that spell `app.asar` out
@@ -365,7 +435,7 @@ function copyBridgeModules() {
 //
 // Without them the CLI dies with MODULE_NOT_FOUND even though the app itself
 // runs fine (the shell resolves everything through app.getAppPath()).
-const cliShimPath = join(resourcesDir, 'runtime', 'cli', 'bin', 'dsh.cmd')
+const cliShimPath = installPaths.cliLauncher
 const cliShimBackup = `${cliShimPath}.before-bridge`
 const hostCliPath = join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js')
 const hostCliBackup = `${hostCliPath}.before-bridge`
@@ -373,6 +443,7 @@ const CLI_SHIM_MARKER = 'dsh-builtin-browser: resolve the app directory'
 const HOST_CLI_MARKER = 'dsh-builtin-browser: recognize an unpacked `app` directory'
 
 let targetWasClosed = false
+let hostPatch
 const resultFile = process.env.DSH_BRIDGE_ACTION_RESULT_FILE
 const installErrors = []
 if (resultFile !== undefined) {
@@ -400,11 +471,12 @@ process.once('exit', code => {
       ...lastStartedPid === undefined ? {} : { pid: lastStartedPid },
       ...installErrors.length === 0 ? {} : { error: installErrors.join('\n').slice(-2400) },
       completedAt: new Date().toISOString(),
+      ...hostPatch === undefined ? {} : { hostPatch },
     }
     try {
       const temporary = `${resultFile}.${process.pid}.tmp`
       writeFileSync(temporary, JSON.stringify(result))
-      renameSync(temporary, resultFile)
+      renameMaintenanceFileSync(temporary, resultFile, { rename: renameSync })
     } catch (error) {
       originalResultError(error)
     }
@@ -413,49 +485,8 @@ process.once('exit', code => {
 
 function originalResultError(error) {
   console.error('could not record the bridge installer result: ' + String(error))
-  process.exitCode = 1
+  process.exitCode = process.exitCode || 1
 }
-
-/** The exact block appended to main.js. Keep it recognisable: idempotence and
- *  reverting both key off this marker. */
-const MARKER = '// dsh-builtin-browser: hand the plugin a way to drive the sidebar'
-const SNIPPET = `
-${MARKER} pages.
-// The plugin runs inside the Node-mode host, where there is no Electron API, so the
-// shell is the only process that can own a view. Exposing the existing webview
-// guests (and their CDP) is what lets the agent work on the page the human is
-// looking at, instead of spawning a second, parallel browser window.
-// Installed by apps/desktop/bridge/install.mjs — re-run it after a desktop upgrade.
-// A bridge failure is never fatal to the shell.
-app.whenReady().then(async () => {
-	const bridgeUrl = new URL("./plugin-browser-bridge.js", import.meta.url);
-	const loadBridge = async (why) => {
-		try {
-			// A plain import is cached for the process lifetime, so an edited bridge
-			// would need a shell restart. The stamp makes every load read the current
-			// bytes; start() itself stops the previous instance, so this reloads in place.
-			const bridge = await import(bridgeUrl.href + "?v=" + Date.now());
-			bridge.start();
-			console.log("[dsh-browser-bridge] started" + (why ? " (" + why + ")" : ""));
-		} catch (error) {
-			console.error("[dsh-browser-bridge] start failed:", error);
-		}
-	};
-	await loadBridge();
-	// Watch the module so an edit reloads it in place instead of forcing a shell
-	// restart. Debounced; a failure here is never fatal to the shell.
-	try {
-		const { watch } = await import("node:fs");
-		let timer = null;
-		watch(bridgeUrl, { persistent: false }, () => {
-			if (timer) clearTimeout(timer);
-			timer = setTimeout(() => void loadBridge("file changed"), 300);
-		});
-	} catch (error) {
-		console.error("[dsh-browser-bridge] watch failed:", error);
-	}
-});
-`
 
 /**
  * Parse an asar header — a Chromium pickle holding
@@ -546,6 +577,7 @@ function patchCliShim() {
   if (!existsSync(cliShimPath)) return 'launcher not present (skipped)'
   const text = readFileSync(cliShimPath, 'utf8')
   if (text.includes(CLI_SHIM_MARKER)) return 'already patched'
+  if (!cliShimPath.endsWith('.cmd')) return patchPosixCliShim(text)
   if (!/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/.test(text)) return 'unexpected launcher shape (skipped)'
   if (!existsSync(cliShimBackup)) copyFileSync(cliShimPath, cliShimBackup)
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
@@ -560,6 +592,27 @@ function patchCliShim() {
     ? `${injection}${eol}${text}`
     : text.replace(setLocal[0], `${setLocal[0]}${eol}${injection}`)
   writeFileSync(cliShimPath, withVariables.replace(/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/, '%DSH_APP%\\dsh\\'))
+  return 'patched'
+}
+
+/**
+ * The macOS launcher (`runtime/cli/bin/dsh`, a POSIX shell script) spells
+ * `$resources/app.asar/dsh/…` the same way the Windows one does; it gets the same treatment.
+ * @param text - the launcher's current text.
+ * @returns what happened, for the install log.
+ */
+function patchPosixCliShim(text) {
+  const resourcesLine = /^resources=.*$/m.exec(text)
+  if (resourcesLine === null || !text.includes('"$resources/app.asar/dsh/')) return 'unexpected launcher shape (skipped)'
+  if (!existsSync(cliShimBackup)) copyFileSync(cliShimPath, cliShimBackup)
+  const injection = [
+    `# ${CLI_SHIM_MARKER} ($resources/app when the bridge is installed,`,
+    '# $resources/app.asar on a stock installation).',
+    'dsh_app=$resources/app',
+    '[ -f "$dsh_app/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js" ] || dsh_app=$resources/app.asar',
+  ].join('\n')
+  writeFileSync(cliShimPath, text.replace(resourcesLine[0], () => `${resourcesLine[0]}\n${injection}`)
+    .replace('"$resources/app.asar/dsh/', '"$dsh_app/dsh/'))
   return 'patched'
 }
 
@@ -580,8 +633,10 @@ function patchHostCli() {
   if (!existsSync(hostCliPath)) return 'cli.js not present (skipped)'
   const text = readFileSync(hostCliPath, 'utf8')
   if (text.includes(HOST_CLI_MARKER)) return 'already patched'
-  const before = '\tawait runDesktopCli(runtimeDir, join(dirname(runtimeArchivePath(runtimeDir) ?? runtimeDir), "runtime"));'
-  if (!text.includes(before)) return 'unexpected cli.js shape (skipped)'
+  // Desktop builds differ in what else they pass (`runDesktopCli(runtimeDir, <support>)` in
+  // 0.2.2-rc.3, `runDesktopCli(<support>)` in rc.5); only the support-directory expression is ours.
+  const call = /^(\t)await runDesktopCli\(((?:runtimeDir, )?)join\(dirname\(runtimeArchivePath\(runtimeDir\) \?\? runtimeDir\), "runtime"\)\);$/m.exec(text)
+  if (call === null) return 'unexpected cli.js shape (skipped)'
   if (!existsSync(hostCliBackup)) copyFileSync(hostCliPath, hostCliBackup)
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const after = [
@@ -589,9 +644,9 @@ function patchHostCli() {
     '\t// so an installation whose app.asar was moved aside still finds its runtime.',
     '\tconst cliOwnerDir = dirname(runtimeDir);',
     '\tconst cliSupportRoot = basename(cliOwnerDir) === "app" || basename(cliOwnerDir) === "app.asar" ? dirname(cliOwnerDir) : cliOwnerDir;',
-    '\tawait runDesktopCli(runtimeDir, join(cliSupportRoot, "runtime"));',
+    `\tawait runDesktopCli(${call[2]}join(cliSupportRoot, "runtime"));`,
   ].join(eol)
-  writeFileSync(hostCliPath, text.replace(before, after))
+  writeFileSync(hostCliPath, text.replace(call[0], after))
   return 'patched'
 }
 
@@ -624,15 +679,39 @@ function readIdentityRule() {
     const raw = JSON.parse(readFileSync(new URL('./desktop-identity.json', import.meta.url), 'utf8'))
     const names = raw.packageNames
     const mainEntry = raw.mainEntry
+    const layouts = raw.layouts
+    const field = value => typeof value === 'string' && value !== ''
     if (!Array.isArray(names) || names.length === 0 || names.some(name => typeof name !== 'string')
-      || typeof mainEntry !== 'string' || mainEntry === '') {
-      console.error('desktop-identity.json is malformed: expected packageNames[] and mainEntry')
+      || typeof mainEntry !== 'string' || mainEntry === ''
+      || !Array.isArray(layouts) || layouts.length === 0 || layouts.at(-1)?.marker !== undefined
+      || layouts.some(l => l === null || typeof l !== 'object' || !field(l.name) || !field(l.resources)
+        || !field(l.executable) || !field(l.cliLauncher) || (l.marker !== undefined && !field(l.marker)))) {
+      console.error('desktop-identity.json is malformed: expected packageNames[], mainEntry and layouts[]')
       return undefined
     }
-    return { packageNames: names, mainEntry }
+    return { packageNames: names, mainEntry, layouts }
   } catch (error) {
     console.error(`desktop-identity.json could not be read: ${String(error)}`)
     return undefined
+  }
+}
+
+/**
+ * Absolute paths an install keeps, from the first layout (desktop-identity.json) whose marker it
+ * has: a macOS `.app` bundle keeps resources in Contents/Resources, a Windows install in resources/.
+ * @param root - the install directory.
+ * @returns resources directory, GUI executable and CLI launcher, or undefined without a rule.
+ */
+function layoutPaths(root) {
+  const rule = readIdentityRule()
+  if (rule === undefined) return undefined
+  const layout = rule.layouts.find(l => l.marker === undefined || existsSync(join(root, ...l.marker.split('/'))))
+  const resources = join(root, ...layout.resources.split('/'))
+  return {
+    name: layout.name,
+    resources,
+    executable: join(root, ...layout.executable.split('/')),
+    cliLauncher: join(resources, ...layout.cliLauncher.split('/')),
   }
 }
 
@@ -753,7 +832,7 @@ function validateArchive(archive) {
 function verifyDesktopIdentity(root) {
   const rule = readIdentityRule()
   if (rule === undefined) return { ok: false, reason: 'the identity rule is unavailable' }
-  const resources = join(root, 'resources')
+  const resources = layoutPaths(root).resources
   const archive = join(resources, 'app.asar')
   const appDir = join(resources, 'app')
   const archivePresent = existsSync(archive)
@@ -850,10 +929,25 @@ if (!existsSync(mainPath) && !existsSync(asarPath)) {
 }
 
 if (revert) {
+  validateBridgeLoaderBaseline()
+  const targets = [appDir, join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
+  const hasHostBackup = [mainPath, join(targets[1], 'lib', 'client.js')]
+    .some(path => existsSync(path + '.before-dsh-host-patch'))
+  hostPatch = hasHostBackup ? restoreHostPatch(targets, { fs: archiveFs }) : hostPatchStatus(targets, { fs: archiveFs })
+  console.log('DSH host patch: ' + JSON.stringify(hostPatch))
+  if (hasHostBackup && hostPatch.status !== 'absent') {
+    console.error('refusing to uninstall over a host patch that cannot be safely restored: ' + hostPatch.reason)
+    process.exit(1)
+  }
+  if (hasHostBackup && readFileSync(mainPath, 'utf8').includes(MARKER)) {
+    restoreBridgeLoader()
+    console.log('restored the pre-install legacy bridge and sidebar; preserving its module copies, CLI and archive layout')
+    process.exit(0)
+  }
   // Tracked separately: restoring a CLI launcher or the runtime resolution is NOT an
   // uninstall. `reverted` only means some component was restored; whether the bridge is
   // actually gone is decided from the entry Electron loads, at the end of this branch.
-  let reverted = false
+  let reverted = hasHostBackup && hostPatch.status === 'absent'
   let mainEntrySkipped = false
   if (existsSync(asarMoved)) {
     if (existsSync(asarPath)) {
@@ -969,6 +1063,7 @@ if (revert) {
   if (packedLayout) {
     console.log(`note: ${appDir} is inert while app.asar exists; delete it to reclaim ~350 MB`)
   }
+  restoreBridgeLoader()
   process.exit(0)
 }
 
@@ -1017,9 +1112,22 @@ if (packedLayout) {
 }
 
 const current = readFileSync(mainPath, 'utf8')
+validateBridgeLoaderBaseline()
+const hostTargets = [appDir, join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')]
+hostPatch = applyHostPatch(hostTargets, {
+  fs: archiveFs,
+})
+console.log('DSH host patch: ' + JSON.stringify(hostPatch))
+if (hostPatch.status === 'applied' || current.includes('//#region lib/types/main-extensions.js')) {
+  installBridgeLoader()
+  console.log('bridge activation: DSH Desktop main extension (profile plugin); no main.js injection')
+  installCliCompatibility()
+  if (!restart) console.log('restart DSH Desktop to activate it.')
+  process.exit(0)
+}
 if (current.includes(MARKER)) {
-  console.log('bridge already installed (main.js carries the marker); refreshing the module copy')
-  copyBridgeModules()
+  console.log('bridge already installed (main.js carries the marker); refreshing the profile loader')
+  installBridgeLoader()
   installCliCompatibility()
   process.exit(0)
 }
@@ -1039,10 +1147,9 @@ if (insertAt === -1) {
 const patched = `${current.slice(0, insertAt)}${SNIPPET}${current.slice(insertAt)}`
 writeFileSync(mainPath, patched)
 
-copyBridgeModules()
+installBridgeLoader()
 console.log(`installed bridge into ${appDir}`)
 console.log(`  module: ${bridgeTarget}`)
-console.log(`  proxy policy: ${proxyTarget}`)
 console.log(`  patch:  ${mainPath} (+${SNIPPET.split('\n').length} lines)`)
 installCliCompatibility()
 if (!restart) {

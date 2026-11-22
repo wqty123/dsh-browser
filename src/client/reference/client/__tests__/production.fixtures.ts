@@ -191,6 +191,7 @@ export function fakeHostInput(initialText = '帮我总结这段网页内容', re
       text = text.slice(0, span.start) + inserted + text.slice(span.end)
       return true
     },
+    insertQuote(quote) { calls.push('insertQuote'); text += `> ${quote} `; return true },
     persistDraft() { calls.push('persistDraft') },
     readText() { calls.push('readText'); return text },
     setText(next) { text = next },
@@ -219,7 +220,7 @@ export class FakeReferenceHttp implements ReferenceHttpClient {
   readonly assetCalls: string[] = []
   readonly ackCalls: AckRequest[] = []
   readonly removeCalls: string[] = []
-  readonly revealCalls: { referenceId: string; partId?: string }[] = []
+  readonly revealCalls: { referenceId: string; partId?: string; sourcePageId?: string }[] = []
   readonly exportCalls: { format: ExportFormat; sessionId: string }[] = []
   readonly importCalls: Uint8Array[] = []
   assets: Readonly<Record<string, AssetResponse>> = {}
@@ -253,10 +254,11 @@ export class FakeReferenceHttp implements ReferenceHttpClient {
     this.removeCalls.push(intentId)
     return { ok: true, intentId, state: 'removed' }
   }
-  async reveal(referenceId: string, partId?: string, navigate?: boolean): Promise<RevealResultWire> {
+  async reveal(referenceId: string, partId?: string, navigate?: boolean, sourcePageId?: string): Promise<RevealResultWire> {
     this.revealCalls.push({
       ...(partId === undefined ? {} : { partId }),
       referenceId,
+      ...(sourcePageId === undefined ? {} : { sourcePageId }),
       ...(navigate === true ? { navigate: true } : {}),
     } as { referenceId: string; partId?: string; navigate?: boolean })
     return this.revealOutcome

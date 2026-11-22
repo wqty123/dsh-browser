@@ -1,3 +1,5 @@
+import { DEFAULT_OPERATION_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
+import { hostMessages } from '../../assets/browser-messages.mjs'
 /**
  * Electron-backed browser provider: `WebContentsView` sessions driven over
  * `webContents.debugger` (CDP). The provider itself does not import Electron — it operates through the {@link ElectronBrowserViewHost} seam, which the
@@ -12,7 +14,7 @@ import { dispatchReferenceCaptureAction } from '../browser-reference/service.ts'
 import {
   MAX_REFERENCE_COMMENT, REFERENCE_INTENT_CHANNEL, overlayScript, standaloneScript,
 } from '../browser-reference/entry.ts'
-import { validateFrozenCapture, type RawCaptureResult } from '../browser-reference/page-script.ts'
+import { noticeScript, validateFrozenCapture, type RawCaptureResult } from '../browser-reference/page-script.ts'
 import { randomUUID } from 'node:crypto'
 import { setLastOpen } from './open-slot.ts'
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
@@ -22,6 +24,7 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { HistoryStore, type VisitedPage } from './history-store.ts'
 import type { BrowserSettings } from './settings-store.ts'
 import { forgetCursor, paintCursor, type CursorAction } from './virtual-cursor.ts'
+import { documentReady, mainDocument, type DocumentIdentity } from './document-readiness.ts'
 import type {
   BrowserA11yRequest,
   BrowserA11yResult,
@@ -62,6 +65,7 @@ import type {
   ExportedCookie,
 } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
+import { browserSessionHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserTabWireId } from '../browser/handles.ts'
 import type { CarrierPage, CarrierLossReason } from '../browser/types.ts'
 import type { BrowserReferenceTarget } from '../browser-reference/types.ts'
 
@@ -73,6 +77,14 @@ import type { BrowserReferenceTarget } from '../browser-reference/types.ts'
 const DEAD_REFERENCE_TAB_MISSES = 5
 /** How long a tab that stopped answering waits before the pump tries it again. */
 const DEAD_REFERENCE_TAB_RETRY_MS = 15_000
+const PROVIDER_TIMEOUTS = Object.freeze({
+  evaluation: 3_000,
+  interaction: 5_000,
+  lookup: 10_000,
+  action: 15_000,
+  prepare: DEFAULT_OPERATION_TIMEOUT_MS + 1_000,
+  download: 60_000,
+})
 
 /**
  * Page-context human-verification (CAPTCHA / bot-detection) detection. Runs
@@ -136,6 +148,10 @@ export const ELECTRON_BROWSER_PROVIDER_ID = 'electron'
  * desktop shell with a real `WebContentsView`; a fake implements it in tests.
  */
 export interface ElectronBrowserViewHost {
+  prepare?(scope?: BrowserSessionId): Promise<void>
+  readonly referenceOverlayOwner?: 'client'
+  referenceOverlayOwnerFor?(scope: BrowserSessionId): 'client' | undefined
+  retireSession?(scope: BrowserSessionId): Promise<void>
   /**
    * Create a new browser view and return a handle to its webContents-like
    * surface. The host owns windowing (adding the view to the window, sizing,
@@ -146,7 +162,7 @@ export interface ElectronBrowserViewHost {
    *   single instance that every conversation runs through, so an owner held there would be one
    *   conversation's id applied to all of them.
    */
-  createView(owner?: string): ElectronViewHandle
+  createView(identity: BrowserTabWireId): ElectronViewHandle
   /**
    * Destroy a view created by this host. Called on session close; idempotent
    * for an already-destroyed view.
@@ -205,7 +221,7 @@ export interface ElectronBrowserViewHost {
    *   nobody asked for.
    * @returns every page this conversation's carrier holds that this host did not open.
    */
-  listPages?(owner?: string, options?: { readonly requireRunning?: boolean }): Promise<readonly CarrierPage[]>
+  listPages?(scope: BrowserSessionId, options?: { readonly requireRunning?: boolean }): Promise<readonly CarrierPage[]>
   /**
    * Optional: take over one page reported by {@link listPages}, so it becomes a page this provider
    * drives rather than one it can only see.
@@ -219,9 +235,7 @@ export interface ElectronBrowserViewHost {
    * @param id - the carrier's own page id, as {@link listPages} reported it.
    * @returns a handle for that page, usable for commands like any other view's.
    */
-  adoptPage?(id: string, owner?: string): Promise<ElectronViewHandle>
-  /** Adopt the conversation id when it becomes known after construction. */
-  setOwner?(owner: string): void
+  adoptPage?(id: BrowserTabWireId, scope?: BrowserSessionId): Promise<ElectronViewHandle>
   /**
    * Optional: close one page reported by {@link listPages}.
    *
@@ -231,7 +245,7 @@ export interface ElectronBrowserViewHost {
    * @param id - the carrier's own page id, as {@link listPages} reported it.
    * @param owner - the same task/conversation used for listing; never a global fallback.
    */
-  closePage?(id: string, owner?: string): Promise<void>
+  closePage?(id: BrowserTabWireId, scope?: BrowserSessionId): Promise<void>
   /**
    * Optional cheap usability probe (no network): whether the host can back
    * views at all right now. The self-hosted host checks for a usable Electron
@@ -292,7 +306,7 @@ export interface ElectronBrowserViewHost {
    * @param owner - the conversation whose pages to close. Omit to close every conversation's,
    *   which is only correct from a teardown that is itself global.
    */
-  releasePage?(owner?: string): Promise<void>
+  releasePage?(scope?: BrowserSessionId): Promise<void>
   /**
    * Report that this carrier can no longer serve anything, so its owner may replace it.
    *
@@ -432,14 +446,15 @@ export interface ElectronViewHandle {
  * probing a tab it already knows is blank, where a probe is a round trip on an uncommitted view
  * that can only answer nothing.
  *
- * `handle` is deliberately NOT readonly: a view that has wedged is replaced in place, and the tab
- * keeps its public id across that replacement (see `replaceTabWithBlank`).
+ * A failed guest stays attached to its tab until the caller explicitly closes or resets it.
  */
 interface Tab {
-  readonly id: string
-  handle: ElectronViewHandle
+  readonly id: BrowserTabWireId
+  readonly handle: ElectronViewHandle
   url: string
   navigation?: symbol
+  navigationAbort?: AbortController
+  failure?: BrowserError
   /**
    * Consecutive failed page evaluations, used only by the reference pump to tell
    * "mid-navigation" (retried) from "this page is gone for now" (backed off).
@@ -705,6 +720,8 @@ export interface PresentOptions {
  * to fix.
  */
 export interface CommandOptions {
+  readonly deadline?: number
+  readonly signal?: AbortSignal
   /** Present the view first (default), or only use a page that is already there. */
   readonly present?: boolean
   /** Only use a guest already attached to this handle, without sidebar initialization. */
@@ -852,6 +869,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   readonly id = ELECTRON_BROWSER_PROVIDER_ID
 
   private readonly sessions = new Map<BrowserSessionId, Session>()
+  private carrierLaunchError: unknown
   /**
    * Tick that installs the selection bar in every live tab and collects what the
    * human confirmed. The Desktop sidebar carrier is the shell's own <webview>:
@@ -933,7 +951,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** Start the page-bar pump; idempotent, unref'd so it never holds the process. */
   private startReferenceEntryPump(): void {
-    if (this.referencePump !== undefined) return
+    if (this.host.referenceOverlayOwner === 'client' || this.referencePump !== undefined) return
     this.referencePump = setInterval(() => { void this.pumpReferenceEntry() }, 1200)
     this.referencePump.unref?.()
   }
@@ -961,6 +979,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     try {
       await this.adoptSidebarPageForReference().catch(() => undefined)
       for (const session of [...this.sessions.values()]) {
+        if (this.host.referenceOverlayOwnerFor?.(session.id) === 'client') continue
         for (const tab of [...session.tabs]) {
           await this.pumpOneTab(session, tab)
           // A tab is never dropped for being unreachable: the page is the
@@ -979,6 +998,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * @returns false when the page failed enough consecutive times to be gone.
    */
   private async pumpOneTab(session: Session, tab: Tab): Promise<boolean> {
+    if (tab.failure !== undefined) return false
     // A page that stopped answering is retried on a slow timer instead of being
     // dropped: navigations and renderer swaps both look like death for a moment.
     if (tab.retryAt !== undefined && Date.now() < tab.retryAt) return true
@@ -988,36 +1008,36 @@ export class ElectronBrowserProvider implements BrowserProvider {
       const probe = await this.evaluateInTab(tab, [
         'window.__dshRefOverlayInstalled !== true ? "install"',
         ': (window.__dshRefTake ? window.__dshRefTake() : null)',
-      ].join(''), 3_000)
+      ].join(''), PROVIDER_TIMEOUTS.evaluation)
       tab.misses = 0
       tab.retryAt = undefined
       if (probe === 'install') {
-        await this.evaluateInTab(tab, standaloneScript(overlayScript(), {}), 5_000)
+        await this.evaluateInTab(tab, standaloneScript(overlayScript(), {}), PROVIDER_TIMEOUTS.interaction)
         return true
       }
-      if (probe === null || typeof probe !== 'object') return true
-      const record = probe as Record<string, unknown>
-      if (record.type !== REFERENCE_INTENT_CHANNEL) return true
-      const rawComment = typeof record.comment === 'string' ? record.comment.trim() : ''
-      const rawSelection = typeof record.selectionText === 'string' ? record.selectionText.trim() : ''
-      // The bar freezes the whole capture; the page is low-trust, so the
-      // payload is re-validated and bounded before it leaves this process.
-      const capture = validateFrozenCapture(record.capture)
-      // A refused capture used to be swallowed by this method's catch, which
-      // made it indistinguishable from a dead tab: the intent vanished, no card
-      // appeared, and nothing anywhere said why. Record the reason and keep the
-      // tab — the page is alive, our capture is what failed.
+      if (probe === null || probe === undefined) return true
       try {
+        if (typeof probe !== 'object') throw new Error('reference intent is invalid')
+        const record = probe as Record<string, unknown>
+        if (record.type !== REFERENCE_INTENT_CHANNEL) throw new Error('reference intent channel is invalid')
+        const rawComment = typeof record.comment === 'string' ? record.comment.trim() : ''
+        const rawSelection = typeof record.selectionText === 'string' ? record.selectionText.trim() : ''
+        const capture = validateFrozenCapture(record.capture)
+        if (capture === undefined) throw new Error('reference intent has no captured content')
         await this.handleUserAction({
           type: 'capture-reference',
           windowId: session.id,
           entry: 'page-overlay',
           ...rawComment !== '' ? { comment: rawComment.slice(0, MAX_REFERENCE_COMMENT) } : {},
           ...rawSelection !== '' ? { selectionText: rawSelection } : {},
-          ...capture !== undefined ? { capture } : {},
-        })
+          capture,
+        }, true)
       } catch (error) {
         this.referenceScan.lastError = 'capture refused: ' + (error instanceof Error ? error.message : String(error))
+        process.stderr.write(`[dsh-browser] ${this.referenceScan.lastError}\n`)
+        try {
+          await this.evaluateInTab(tab, standaloneScript(noticeScript(hostMessages.zh.referenceFailed)), PROVIDER_TIMEOUTS.evaluation)
+        } catch { /* The failure remains in host diagnostics when the guest disappears. */ }
       }
       return true
     } catch {
@@ -1055,9 +1075,6 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const label = typeof configured === 'function' ? configured() : configured
     this.referenceScan.label = label
     if (label === undefined || label === '') return
-    // Ownership before anything else: this host may have been built before the
-    // conversation existed, and every bridge command is refused without the right id.
-    this.host.setOwner?.(label)
     if (this.host.listPages === undefined || this.host.adoptPage === undefined) {
       this.referenceScan.lastError = 'this carrier cannot list or adopt a page it did not open'
       return
@@ -1068,11 +1085,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // the next scan adopts it). The listing is a local bridge call, not a
     // network request, so this is cheap.
     this.referenceScanCountdown = 1
+    let session = this.referenceSession === undefined ? undefined : this.sessions.get(this.referenceSession)
+    if (session?.label !== label) session = undefined
+    const candidate: Session = session ?? {
+      id: sessionWireId(browserSessionHandle(label, randomUUID())), label,
+      tabs: [], activeIndex: 0, history: [], nextSeq: 1,
+    }
     let pages: readonly CarrierPage[]
     try {
       // `requireRunning` is what keeps a scan from launching the human's
       // installed browser: only a carrier that is already up can have pages.
-      pages = await this.host.listPages(label, { requireRunning: true })
+      pages = await this.host.listPages(this.carrierScope(candidate), { requireRunning: true })
     } catch (error) {
       this.referenceScan.lastError = error instanceof Error ? error.message : String(error)
       return
@@ -1090,10 +1113,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
       this.referenceScan.lastError = 'no http page is open in this conversation\'s sidebar'
       return
     }
-    let session = this.referenceSession === undefined ? undefined : this.sessions.get(this.referenceSession)
     let refused: string | undefined
     for (const page of live) {
-      const tabId = `page:${page.id}`
+      const tabId = this.carrierTab(candidate, page.id)
       const existing = session?.tabs.find(tab => tab.id === tabId)
       if (existing !== undefined) {
         // A navigation changes the URL of a page we already hold.
@@ -1103,12 +1125,11 @@ export class ElectronBrowserProvider implements BrowserProvider {
       try {
         // The owner is passed so the adopted view is released with THIS
         // conversation and not swept up by, or lost to, another one.
-        const handle = await this.host.adoptPage(page.id, label)
+        const handle = await this.host.adoptPage(this.carrierTab(candidate, page.id), this.carrierScope(candidate))
         if (session === undefined) {
-          const id = `browser:${randomUUID()}` as BrowserSessionId
-          session = { id, label, tabs: [], activeIndex: 0, history: [], nextSeq: 1 }
-          this.sessions.set(id, session)
-          this.referenceSession = id
+          session = candidate
+          this.sessions.set(session.id, session)
+          this.referenceSession = session.id
         }
         // Append only: discovery must never switch the page the human is
         // looking at, nor open a tab they did not ask for.
@@ -1150,7 +1171,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * @param expression - the JS expression.
    * @param timeoutMs - how long to wait before treating the page as not answering.
    */
-  private async evaluateInTab(tab: Tab, expression: string, timeoutMs = 3_000): Promise<unknown> {
+  private async evaluateInTab(tab: Tab, expression: string, timeoutMs: number = PROVIDER_TIMEOUTS.evaluation): Promise<unknown> {
     const raw = await withTimeout(
       tab.handle.sendCommand('Runtime.evaluate', {
         expression, returnByValue: true, awaitPromise: true,
@@ -1184,17 +1205,41 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // The label is the calling DSH task, and it is handed to the view as its owner: a host shared
     // by several conversations (the desktop's) keeps one conversation's page out of another's on
     // the strength of it, so it is not decoration.
-    const handle = this.host.createView(label)
-    const id = `browser:${randomUUID()}`
+    const id = sessionWireId(browserSessionHandle(label || 'default', randomUUID()))
+    const tabId = tabWireId({ ...resolveSessionHandle(id), tab: randomUUID() })
+    const handle = this.host.createView(tabId)
     // Group the session's views under its own window (one window per
     // session), carrying the label for the window title. Hosts without
     // groupView keep the shared-window behavior.
     this.host.groupView?.(handle, id, label)
-    this.sessions.set(id, { id, label, tabs: [{ id: `tab:${randomUUID()}`, handle, url: '' }], activeIndex: 0, history: [], nextSeq: 1 })
+    this.sessions.set(id, { id, label, tabs: [{ id: tabId, handle, url: '' }], activeIndex: 0, history: [], nextSeq: 1 })
     return Promise.resolve(id)
   }
 
-  /** Open a URL in the active tab (default) or a new tab. */
+  private async prepareCarrier(signal?: AbortSignal, scope?: BrowserSessionId): Promise<void> {
+    if (this.host.prepare === undefined) return
+    signal?.throwIfAborted()
+    try {
+      await withTimeout(this.host.prepare(scope), PROVIDER_TIMEOUTS.prepare, signal, 'browser: carrier launch timed out before navigating a guest')
+      this.carrierLaunchError = undefined
+    } catch (error) {
+      if (!signal?.aborted) this.carrierLaunchError = error
+      throw error
+    }
+  }
+
+  async bindPage(session: BrowserSessionId, pageId: BrowserTabWireId): Promise<void> {
+    const s = this.session(session)
+    if (this.host.adoptPage === undefined || !s.label) throw new Error('sidebar page binding unsupported')
+    if (s.tabs.some(tab => tab.url !== '')) throw new Error('source binding requires a fresh browser session')
+    const id = tabWireId(resolveTabHandle(resolveSessionHandle(s.id), pageId))
+    const handle = await this.host.adoptPage(id, this.carrierScope(s))
+    const previous = [...s.tabs]
+    s.tabs.splice(0, s.tabs.length, { id: this.carrierTab(s, id), handle, url: '' })
+    s.activeIndex = 0
+    for (const tab of previous) this.destroyTab(tab)
+  }
+
   /**
    * The most recent open request, for the Web sidebar.
    *
@@ -1214,6 +1259,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   async openUrl(session: BrowserSessionId, request: BrowserOpenRequest, signal?: AbortSignal): Promise<void> {
     try { setLastOpen(request.url, Date.now()) } catch { /* best effort */ }
     const s = this.session(session)
+    await this.prepareCarrier(signal, s.id)
     if (request.newTab === true) {
       this.newTab(s)
     }
@@ -1227,8 +1273,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // Only an exact match after normalisation: a deliberate navigation to a different URL must not
     // be redirected to whatever page happens to be open.
     const tab = this.activeTab(s)
-    const navigation = tab.navigation = Symbol()
-    if (request.newTab !== true && await this.adoptMatchingPage(s, request.url, tab, navigation)) return
+    const transaction = this.beginNavigation(tab, signal)
+    const { navigation } = transaction
+    signal = transaction.signal
+    if (request.newTab !== true && await this.adoptMatchingPage(s, request.url, tab, navigation, signal)) return
     await this.navigateTab(s, tab, request.url, navigation, signal)
   }
 
@@ -1241,13 +1289,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * @param url - the URL being opened.
    * @returns whether an existing page was taken over.
    */
-  private async adoptMatchingPage(s: Session, url: string, target: Tab, navigation: symbol): Promise<boolean> {
+  private async adoptMatchingPage(s: Session, url: string, target: Tab, navigation: symbol, signal?: AbortSignal): Promise<boolean> {
     if (this.host.adoptPage === undefined || this.host.listPages === undefined) return false
     const wanted = this.comparableUrl(url)
     if (wanted === undefined) return false
     let pages: readonly CarrierPage[]
     try {
-      pages = await this.host.listPages(s.label)
+      pages = await this.host.listPages(this.carrierScope(s))
     } catch {
       // A listing must not turn "nothing to reuse" into "open failed".
       return false
@@ -1257,7 +1305,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (match === undefined) return false
     let handle: ElectronViewHandle
     try {
-      handle = await this.host.adoptPage(match.id, s.label)
+      handle = await this.host.adoptPage(this.carrierTab(s, match.id), this.carrierScope(s))
     } catch {
       // The page went away between listing and adopting: fall through to an ordinary navigation.
       return false
@@ -1266,9 +1314,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
       this.host.destroyView(handle, { keepPage: true })
       this.checkNavigation(target, navigation)
     }
-    const tab: Tab = { id: `page:${match.id}`, handle, url: match.url }
+    const tab: Tab = { id: this.carrierTab(s, match.id), handle, url: match.url, navigation, navigationAbort: target.navigationAbort }
+    delete target.navigationAbort
     s.tabs.push(tab)
     s.activeIndex = s.tabs.length - 1
+    const document = await this.documentIdentity(handle, signal, () => { this.checkNavigation(tab, navigation) })
+    await this.settleDocument(handle, document, signal, { frameId: document.id, loaderId: document.loaderId },
+      () => { this.checkNavigation(tab, navigation) })
     this.showActive(s, true)
     return true
   }
@@ -1295,7 +1347,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // the round trip can only answer nothing — and it is the round trip that costs. A tab that
       // HAS navigated is re-read, because the page may have moved itself since; a read that fails
       // keeps the last accepted URL rather than reporting the tab as blank.
-      const liveUrl = tab.url === '' ? '' : await this.currentUrl(tab.handle).catch(() => tab.url)
+      const liveUrl = tab.failure !== undefined ? tab.url : tab.url === '' ? '' : await this.currentUrl(tab.handle).catch(() => tab.url)
       if (liveUrl !== '') tab.url = liveUrl
       result.push({
         id: tab.id,
@@ -1311,36 +1363,33 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // `dsh_browser_close_tab`, so they accumulated for the life of the browser. Measured on the
     // sidebar carrier: three clicks produced three webview guests while this listed one tab.
     //
-    // `listPages` already excludes the pages it opened the view for — that filtering cannot happen
-    // here, because a tab is known by this provider's own id and a carrier page by the carrier's,
-    // and the two never match. A first version compared them anyway and listed every page twice.
-    //
-    // They are appended under a `page:` prefix so a caller can tell the two kinds apart — the
-    // prefix is also what `closeTab` uses to decide whether to close a view or a carrier page.
-    const pages = await this.host.listPages?.(s.label) ?? []
+    // Hosts exclude pages already attached to provider views.
+    const pages = await this.host.listPages?.(this.carrierScope(s)) ?? []
     for (const page of pages) {
       // A page with no URL is a blank one the carrier opened for itself. Listing it would invite a
       // caller to act on nothing, and the blank normalisation already closes those.
       if (page.url === '' || page.url === 'about:blank') continue
-      result.push({ id: `page:${page.id}`, url: page.url, active: false })
+      result.push({ id: this.carrierTab(s, page.id), url: page.url, active: false })
     }
     return result
   }
 
   /** Switch to a tab by id, making its view visible. */
-  async switchTab(session: BrowserSessionId, tabId: string): Promise<void> {
+  async switchTab(session: BrowserSessionId, tabId: BrowserTabWireId): Promise<void> {
     const s = this.session(session)
     // A page the carrier owns. Before this, switching to one threw "not open in this session" —
     // while `dsh_browser_list_tabs` was happily listing it, so the two tools disagreed and the
     // page the human was looking at could not be reached (reported as a defect).
-    if (tabId.startsWith('page:')) {
+    const carrierId = this.carrierId(s, tabId)
+    if (carrierId !== undefined) {
       const existing = s.tabs.findIndex(tab => tab.id === tabId)
       if (existing !== -1) {
+        await this.host.presentView?.(s.tabs[existing]!.handle, s.label, { quiet: this.isQuiet(), select: true })
         s.activeIndex = existing
         this.showActive(s, true)
         return
       }
-      const id = tabId.slice('page:'.length)
+      const id = carrierId
       if (this.host.adoptPage === undefined) {
         throw new BrowserError(
           'browser: this carrier cannot hand over a page it opened itself, so that page cannot be driven. '
@@ -1348,15 +1397,16 @@ export class ElectronBrowserProvider implements BrowserProvider {
           'BROWSER_TAB_NOT_FOUND',
         )
       }
-      const pages = await this.host.listPages?.(s.label).catch(() => []) ?? []
+      const pages = await this.host.listPages?.(this.carrierScope(s)).catch(() => []) ?? []
       const page = pages.find(candidate => candidate.id === id)
-      const handle = await this.host.adoptPage(id, s.label)
+      const handle = await this.host.adoptPage(id, this.carrierScope(s))
       try {
         // An adopted guest already has a document. Marking it as our never-opened
         // blank view makes the first snapshot/a11y return without reading it.
         const url = page?.url || await this.currentUrl(handle)
         if (url === '') throw new BrowserError('browser: the adopted page did not report its document URL', 'BROWSER_TAB_NOT_FOUND')
         const tab: Tab = { id: tabId, handle, url }
+        await this.host.presentView?.(handle, s.label, { quiet: this.isQuiet(), select: true })
         s.tabs.push(tab)
         s.activeIndex = s.tabs.length - 1
         this.showActive(s, true)
@@ -1372,20 +1422,22 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /** Close one tab; closing the active tab activates the next. */
-  closeTab(session: BrowserSessionId, tabId: string): Promise<void> {
-    const owner = this.session(session).label
+  async closeTab(session: BrowserSessionId, tabId: BrowserTabWireId): Promise<void> {
+    const current = this.session(session)
+    const carrierId = this.carrierId(current, tabId)
     // A page the carrier owns rather than a view we created. It was reported by `listTabs` under
     // this prefix, so closing it here is what keeps the two tools consistent — a page that can be
     // listed must be closable, or the listing reads as a contradiction.
-    if (tabId.startsWith('page:')) {
-      const id = tabId.slice('page:'.length)
+    if (carrierId !== undefined) {
+      const id = carrierId
       if (this.host.closePage === undefined) {
         return Promise.reject(new BrowserError(
           'browser: this carrier does not expose the pages it opens on its own, so that page cannot be closed',
           'BROWSER_TAB_NOT_FOUND',
         ))
       }
-      return this.host.closePage(id, owner)
+      await this.host.closePage(id, this.carrierScope(current))
+      if (!this.session(session).tabs.some(tab => tab.id === tabId)) return
     }
     const found = this.locateTab(session, tabId)
     const s = found.s
@@ -1393,7 +1445,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const removed = s.tabs[index]
     if (removed !== undefined) {
       s.tabs.splice(index, 1)
-      this.host.destroyView(removed.handle)
+      this.destroyTab(removed, { keepPage: carrierId !== undefined })
     }
     if (s.tabs.length === 0) {
       // Session keeps one blank tab so it stays usable.
@@ -1413,28 +1465,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /**
-   * Find a tab by id, preferring the calling session. Tab ids are globally
-   * unique UUIDs, so when the calling session does not hold the tab (the tool
-   * layer's session resolution can drift from the session that opened it),
-   * fall back to locating it in any other session instead of failing — the
-   * caller explicitly named a tab, so acting on it is what they want. Throws
-   * BROWSER_TAB_UNKNOWN with the session's actual tabs when the id exists
-   * nowhere.
+   * Find a canonical tab within the calling session.
    */
   private locateTab(session: BrowserSessionId, tabId: string): { s: Session; index: number } {
     const s = this.session(session)
-    // Accept the bare uuid as well as the "tab:<uuid>" form the tools print:
-    // ids are globally unique, so requiring the printed prefix only produced a
-    // misleading "is not open in this session" error that listed the very tab
-    // the caller had just named.
-    const wanted = stripTabPrefix(tabId)
-    const own = s.tabs.findIndex(tab => stripTabPrefix(tab.id) === wanted)
+    resolveTabHandle(resolveSessionHandle(session), tabId)
+    const own = s.tabs.findIndex(tab => tab.id === tabId)
     if (own >= 0) return { s, index: own }
-    // Deliberately NOT searched across other sessions. Accepting a bare uuid and
-    // searching elsewhere are different things: ids are globally unique, so the first is
-    // harmless convenience, but the second lets a stale id close or switch a tab that
-    // belongs to another task — or to the human — while reporting success, which
-    // contradicts the isolation the tools promise.
     const ownIds = s.tabs.map(t => t.id).join(', ') || '(none)'
     throw new BrowserError(
       `browser: tab "${tabId}" is not open in this session (session tabs: ${ownIds})`,
@@ -1445,7 +1482,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Close every tab and reset to one blank tab. */
   reset(session: BrowserSessionId): Promise<void> {
     const s = this.session(session)
-    for (const tab of s.tabs) this.host.destroyView(tab.handle)
+    for (const tab of s.tabs) this.destroyTab(tab)
     s.tabs.length = 0
     this.newTab(s)
     s.activeIndex = 0
@@ -1456,12 +1493,28 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Navigate the active tab's view to a URL, honoring HTTP(S)-only admission. */
   async navigate(session: BrowserSessionId, request: { readonly url: string }, signal?: AbortSignal): Promise<void> {
     const s = this.session(session)
+    await this.prepareCarrier(signal, s.id)
     const tab = this.activeTab(s)
-    const navigation = tab.navigation = Symbol()
+    const transaction = this.beginNavigation(tab, signal)
+    const { navigation } = transaction
+    signal = transaction.signal
     await this.navigateTab(s, tab, request.url, navigation, signal)
   }
 
+  private beginNavigation(tab: Tab, signal?: AbortSignal): { navigation: symbol; signal: AbortSignal } {
+    signal?.throwIfAborted()
+    const previous = tab.navigationAbort
+    tab.navigation = Symbol()
+    tab.navigationAbort = new AbortController()
+    previous?.abort(Object.assign(new Error('a newer navigation was requested for this browser tab'), { code: 'panel-navigation-superseded' }))
+    return { navigation: tab.navigation, signal: signal === undefined ? tab.navigationAbort.signal : AbortSignal.any([signal, tab.navigationAbort.signal]) }
+  }
+
   private checkNavigation(tab: Tab, navigation: symbol): void {
+    if (tab.failure !== undefined) throw tab.failure
+    if (![...this.sessions.values()].some(session => session.tabs.includes(tab))) {
+      throw new BrowserError('browser: the navigation guest was closed', 'BROWSER_GUEST_CLOSED')
+    }
     if (tab.navigation !== navigation) {
       throw Object.assign(new Error('a newer navigation was requested for this browser tab'), { code: 'panel-navigation-superseded' })
     }
@@ -1486,45 +1539,48 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // Page.navigate can hang on an unreachable/slow host; bound it like the
       // evaluate paths so a wedged navigation surfaces as an error instead of
       // blocking the tool call forever.
-      const timeoutMs = 30_000
+      const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
+      const deadline = Date.now() + timeoutMs
       // Document identity of the page we are leaving (see settleDocument).
-      const before = await this.documentStamp(handle)
+      const before = await this.documentIdentity(handle, signal, () => { this.checkNavigation(tab, navigation) }, deadline).catch(() => undefined)
       this.checkNavigation(tab, navigation)
+      signal?.throwIfAborted()
       const result = await withTimeout(
-        handle.sendCommand(CDP_PAGE_NAVIGATE, { url } satisfies CdpNavigateParams),
-        timeoutMs,
+        handle.sendCommand(CDP_PAGE_NAVIGATE, { url } satisfies CdpNavigateParams, { deadline, signal }),
+        Math.max(1, deadline - Date.now()),
         signal,
         `browser: navigation timed out after ${timeoutMs}ms`,
         // Best-effort: cancel the in-flight navigation so a wedged load does
         // not leave the debugger queue busy.
-        () => { if (tab.navigation === navigation) void handle.sendCommand('Page.stopLoading').catch(() => {}) },
+        timedOut => { if (tab.navigation === navigation) this.interrupt(handle, timedOut) },
       )
       // Page.navigate resolves even when the navigation fails; surface the
       // failure instead of leaving a silent white screen.
       this.checkNavigation(tab, navigation)
-      const errorText = (result as { errorText?: string }).errorText
+      const errorText = (result as { errorText?: string } | undefined)?.errorText
       if (typeof errorText === 'string' && errorText !== '') {
         throw new BrowserError(`browser: navigation to "${url}" failed: ${errorText}`, 'BROWSER_NAVIGATION_FAILED')
       }
-      // Record as soon as the navigation has committed: history bookkeeping must
-      // not wait on the best-effort settle below (which only delays what the
-      // NEXT observation sees, not whether this action happened).
-      // The page has already moved by now, so a caller that aborted must be told that rather
-      // than handed a success: settleDocument returns quietly on abort by design, so without
-      // this the whole path completes exception-free — success reported, success recorded, and
-      // the visit written to the persistent history for a navigation nobody awaits any more.
       signal?.throwIfAborted()
-      this.record(s, 'navigate', { url }, true)
-      // The tab now holds a committed document, which is what the blank short-circuit in
-      // `snapshot`/`a11y` keys on. Recorded here rather than after the settle below: the
-      // navigation HAS committed, and a tab wrongly treated as blank would return empty results
-      // for a page that is really there.
+      const acknowledgement = result as { frameId?: string; loaderId?: string } | undefined
+      if (typeof acknowledgement?.frameId !== 'string' || acknowledgement.frameId === '') {
+        throw new BrowserError('browser: navigation returned no frame acknowledgement', 'BROWSER_DOCUMENT_UNACKNOWLEDGED')
+      }
+      if (acknowledgement.loaderId === undefined ? before === undefined
+        : typeof acknowledgement.loaderId !== 'string' || acknowledgement.loaderId === '') {
+        throw new BrowserError('browser: navigation returned no document acknowledgement', 'BROWSER_DOCUMENT_UNACKNOWLEDGED')
+      }
       tab.url = url
-      await this.settleDocument(handle, before, signal)
+      await this.settleDocument(handle, before, signal, acknowledgement, () => { this.checkNavigation(tab, navigation) }, undefined, deadline)
       this.checkNavigation(tab, navigation)
+      this.record(s, 'navigate', { url }, true)
       this.recordVisit(s, handle)
       this.showActive(s, true)
     } catch (error) {
+      const code = (error as { code?: string })?.code
+      if (tab.navigation === navigation && (code === 'BROWSER_DOCUMENT_TIMEOUT' || code === 'BROWSER_DOCUMENT_UNACKNOWLEDGED')) {
+        this.quarantine(handle)
+      }
       if (!(error instanceof BrowserError && (error as { code?: string }).code === 'BROWSER_NAVIGATION_BLOCKED')) {
         this.record(s, 'navigate', { url }, false, { error: String(error) })
       }
@@ -1532,41 +1588,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
     }
   }
 
-  /**
-   * A per-document stamp: `performance.timeOrigin` is unique per document load,
-   * so it tells a same-URL reload and an A→B→A redirect apart from the document
-   * that was current before the navigation. Empty string when unreadable.
-   */
-  private async documentStamp(handle: ElectronViewHandle): Promise<string> {
-    const probe = await this.documentProbe(handle)
-    return probe?.stamp ?? ''
-  }
-
-  /**
-   * One cheap in-page reading of the document's identity and parse state.
-   *
-   * Returns null when the page did NOT answer (mid-commit, execution context
-   * destroyed) — the caller keeps waiting. A page that answered with an
-   * unexpected shape (an override or a non-conforming host; the production
-   * expression always yields a string) is reported as `unknown` rather than as
-   * "no answer": blocking the navigation for the whole budget on a page that
-   * demonstrably responded has no upside.
-   */
-  private async documentProbe(handle: ElectronViewHandle): Promise<{ stamp: string; readyState: string } | null> {
-    try {
-      const result = await withTimeout(
-        handleSendEvaluate(handle, 'String(performance.timeOrigin) + "|" + document.readyState', undefined, { present: false, initialize: false }),
-        3_000,
-        undefined,
-        'browser: document probe timed out',
-      )
-      if (!result.ok) return null
-      if (typeof result.value !== 'string') return { stamp: '', readyState: 'unknown' }
-      const [stamp = '', readyState = ''] = result.value.split('|')
-      return { stamp, readyState }
-    } catch {
-      return null
-    }
+  private async documentIdentity(handle: ElectronViewHandle, signal?: AbortSignal, checkCurrent?: () => void,
+    deadline = Date.now() + PROVIDER_TIMEOUTS.evaluation, allowErrorDocument = false): Promise<DocumentIdentity> {
+    signal?.throwIfAborted()
+    checkCurrent?.()
+    return mainDocument(await withTimeout(
+      handle.sendCommand('Page.getFrameTree', undefined, { present: false, initialize: false }),
+      Math.max(1, Math.min(PROVIDER_TIMEOUTS.evaluation, deadline - Date.now())), signal, 'browser: document identity timed out', timedOut => {
+        try { checkCurrent?.() } catch { return }
+        this.interrupt(handle, timedOut)
+      },
+    ), { allowErrorDocument })
   }
 
   /**
@@ -1577,38 +1609,56 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * interactive elements — and why a separate dsh_browser_snapshot right after
    * always found them.
    *
-   * Wait — bounded, best-effort — for the new document to settle: readyState
-   * must reach interactive/complete AND the document identity must have
-   * changed. A page that never settles must not fail a navigation that already
-   * succeeded, so a timeout here is swallowed.
+   * The CDP frame/loader acknowledgement, not elapsed time or URL equality,
+   * identifies the document whose parse readiness can complete the transaction.
    */
-  private async settleDocument(handle: ElectronViewHandle, before: string, signal?: AbortSignal): Promise<void> {
-    const started = Date.now()
-    const deadline = started + SETTLE_TIMEOUT_MS
+  private async settleDocument(handle: ElectronViewHandle, before: DocumentIdentity | undefined, signal?: AbortSignal,
+    acknowledgement?: { readonly frameId?: string; readonly loaderId?: string }, checkCurrent?: () => void,
+    historyEntry?: number, deadline = Date.now() + DEFAULT_OPERATION_TIMEOUT_MS, allowErrorDocument = false): Promise<void> {
     // The document is being replaced, so the synthetic pointer drawn into the old one
     // is gone. Dropping the remembered position is what lets it be painted again:
     // without this, a paint at coincidentally identical coordinates would be skipped
     // and the pointer would never come back after a navigation.
     forgetCursor(handle)
     for (;;) {
-      if (signal?.aborted === true) return
-      // A probe failure is expected while the navigation commits (the context is
-      // being destroyed) — keep polling rather than giving up.
-      const probe = await this.documentProbe(handle)
-      if (probe !== null) {
-        const settled = probe.readyState === 'interactive'
-          || probe.readyState === 'complete'
-          || probe.readyState === 'unknown'
-        const isNewDocument = before === '' || probe.stamp === '' || probe.stamp !== before
-        // The common case: the new document exists and is parsed — return now.
-        if (settled && isNewDocument) return
-        // Same document (hash navigation, cancelled/aborted load): there is no
-        // parse to wait for, so do not burn the budget. Outlast the brief
-        // window in which the OUTGOING document may still answer instead.
-        if (settled && Date.now() - started >= SETTLE_GRACE_MS) return
+      signal?.throwIfAborted()
+      checkCurrent?.()
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        this.quarantine(handle)
+        throw new BrowserError('browser: the navigation document was not ready within its deadline', 'BROWSER_DOCUMENT_TIMEOUT')
       }
-      if (Date.now() >= deadline) return
-      await delay(SETTLE_POLL_MS, signal)
+      const ready = await withTimeout((async () => {
+        if (historyEntry !== undefined) {
+          const history = await handle.sendCommand('Page.getNavigationHistory') as { entries?: Array<{ id?: number }>; currentIndex?: number }
+          if (history.entries?.[history.currentIndex ?? -1]?.id !== historyEntry) return false
+        }
+        const current = await this.documentIdentity(handle, signal, checkCurrent, deadline, allowErrorDocument)
+        if (acknowledgement?.frameId !== undefined && current.id !== acknowledgement.frameId) {
+          throw new BrowserError('browser: navigation frame was superseded', 'BROWSER_NAVIGATION_SUPERSEDED')
+        }
+        const loader = acknowledgement?.loaderId ?? (acknowledgement === undefined ? undefined : before?.loaderId)
+        if (loader !== undefined && current.loaderId !== loader) {
+          if (current.loaderId === before?.loaderId) return false
+          throw new BrowserError('browser: navigation document was superseded', 'BROWSER_NAVIGATION_SUPERSEDED')
+        }
+        if (acknowledgement === undefined && current.loaderId === before?.loaderId) return false
+        return documentReady(handle, current, () => {
+          signal?.throwIfAborted()
+          checkCurrent?.()
+          if (Date.now() >= deadline) {
+            this.quarantine(handle)
+            throw new BrowserError('browser: document readiness deadline expired', 'BROWSER_DOCUMENT_TIMEOUT')
+          }
+        })
+      })(), remaining, signal, 'browser: document readiness timed out', timedOut => {
+        try { checkCurrent?.() } catch { return }
+        this.interrupt(handle, timedOut)
+      })
+      signal?.throwIfAborted()
+      checkCurrent?.()
+      if (ready) return
+      await delay(Math.min(SETTLE_POLL_MS, Math.max(0, deadline - Date.now())), signal)
     }
   }
 
@@ -1629,7 +1679,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       return this.activeTab(s).handle
     }
     signal?.throwIfAborted()
-    const timeoutMs = 10_000
+    const timeoutMs = PROVIDER_TIMEOUTS.lookup
     try {
       await withTimeout(
         present(handle, s.label, { quiet: this.isQuiet() }),
@@ -1707,7 +1757,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // and this runs before typing, so an unresponsive child would hang dsh_browser_key for
       // good. A timeout is caught below exactly like any other focus failure, so the
       // best-effort contract is unchanged.
-      await withTimeout(handle.focus(quiet ? { quiet } : undefined), 5_000, undefined, 'browser: focusing the view timed out')
+      await withTimeout(handle.focus(quiet ? { quiet } : undefined), PROVIDER_TIMEOUTS.interaction, undefined, 'browser: focusing the view timed out')
     } catch (error) {
       if (quiet) throw error
       // Best-effort: a view that refuses focus must not fail the caller's key
@@ -1753,7 +1803,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const handle = await this.present(s, signal)
     const viewport = await withTimeout(
       handleSendEvaluate(handle, '({width:innerWidth,height:innerHeight})'),
-      5_000, signal, 'browser: pointer viewport check timed out',
+      PROVIDER_TIMEOUTS.interaction, signal, 'browser: pointer viewport check timed out',
     )
     if (!viewport.ok) throw new BrowserError('browser: could not read the pointer viewport', 'BROWSER_POINTER_INVALID')
     const size = viewport.value as { width: number; height: number }
@@ -1763,7 +1813,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const send = async (params: CdpMouseParams): Promise<void> => {
       signal?.throwIfAborted()
       this.assertSameView(session, handle, this.activeTab(s).handle)
-      await withTimeout(handle.sendCommand('Input.dispatchMouseEvent', { ...params }), 5_000, signal, 'browser: pointer input timed out')
+      await withTimeout(handle.sendCommand('Input.dispatchMouseEvent', { ...params }), PROVIDER_TIMEOUTS.interaction, signal, 'browser: pointer input timed out')
     }
     await send({ type: 'mouseMoved', x: from.x, y: from.y, buttons: 0 })
     if (to === undefined) return { ok: true, value: 'true' }
@@ -1816,7 +1866,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // (navigate returned but the renderer has not committed). Bound it so a
       // stuck call surfaces as BROWSER_EXECUTE_TIMEOUT instead of wedging the
       // whole tool call. The caller's signal wins when it fires first.
-      const timeoutMs = request.timeoutMs ?? 30_000
+      const timeoutMs = request.timeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS
       const result = await withTimeout(
         handle.sendCommand(CDP_RUNTIME_EVALUATE, {
           expression,
@@ -1828,7 +1878,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
         `browser: execute timed out after ${timeoutMs}ms`,
         // Best-effort: kill the wedged page script so the renderer (and the
         // debugger queue) is not stuck behind a busy loop forever.
-        () => terminatePage(handle),
+        timedOut => { this.interrupt(handle, timedOut) },
       )
       if (result.exceptionDetails !== undefined) {
         const detail = result.exceptionDetails as { text?: string; exception?: { description?: string } }
@@ -1849,7 +1899,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // that belongs to the caller rather than to this call.
       if (signal?.aborted) throw signal.reason
       if (error instanceof Error && error.name === 'TimeoutError') {
-        throw new BrowserError(`browser: execute timed out after ${request.timeoutMs ?? 30_000}ms`, 'BROWSER_EXECUTE_TIMEOUT', { cause: error })
+        throw new BrowserError(`browser: execute timed out after ${request.timeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS}ms`, 'BROWSER_EXECUTE_TIMEOUT', { cause: error })
       }
       throw new BrowserError(`browser: execute failed: ${String(error)}`, 'BROWSER_EXECUTE_FAILED', { cause: error })
     }
@@ -1865,7 +1915,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
   async waitFor(session: BrowserSessionId, request: BrowserWaitRequest, signal?: AbortSignal): Promise<BrowserWaitResult> {
     const tab = this.activeTab(this.session(session))
     signal?.throwIfAborted()
-    const timeoutMs = request.timeoutMs ?? 30_000
+    const timeoutMs = request.timeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS
     const deadline = Date.now() + timeoutMs
     const url = request.url ?? ''
     const selector = request.selector ?? ''
@@ -1899,10 +1949,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
     for (;;) {
       const result = await withTimeout(
         handleSendEvaluate(tab.handle, expression),
-        Math.min(5_000, Math.max(250, deadline - Date.now())),
+        Math.min(PROVIDER_TIMEOUTS.interaction, Math.max(250, deadline - Date.now())),
         signal,
         'browser: wait poll timed out',
-        () => terminatePage(tab.handle),
+        timedOut => { this.interrupt(tab.handle, timedOut) },
       )
       if (!result.ok) {
         throw new BrowserError(`browser: wait failed: ${result.exception}`, 'BROWSER_WAIT_FAILED')
@@ -2076,7 +2126,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     })()`
     // Same hang guard as execute: a renderer that has not committed after
     // navigate would otherwise block snapshot forever.
-    const timeoutMs = 30_000
+    const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
     let result: { ok: true; value: unknown } | { ok: false; exception: string }
     try {
       result = await withTimeout(
@@ -2084,18 +2134,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
         timeoutMs,
         signal,
         `browser: snapshot timed out after ${timeoutMs}ms`,
-        () => terminatePage(tab.handle),
+        timedOut => { this.interrupt(tab.handle, timedOut) },
       ) as { ok: true; value: unknown } | { ok: false; exception: string }
     } catch (error) {
-      // A timeout leaves the wedged view in the session, so every later read would pay the same
-      // 30 seconds again — and `terminatePage` only interrupts the running script, it does not
-      // make the view readable. Replacing it is what turns a permanent loss into one bad call:
-      // the tab keeps the id the caller holds, and the next dsh_browser_open with the real URL
-      // repopulates it.
       if (error instanceof Error && error.name === 'TimeoutError') {
-        this.replaceTabWithBlank(s, tab)
+        this.quarantine(tab.handle)
         throw new BrowserError(
-          'browser: snapshot timed out; the stuck tab was reset to blank. Call dsh_browser_open with the real target URL before reading it again.',
+          'browser: snapshot timed out; the guest is quarantined. Close this tab or explicitly reset the session.',
           'BROWSER_SNAPSHOT_TIMEOUT',
           { cause: error },
         )
@@ -2282,7 +2327,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       walk(document, false, 0)
       return { url: location.href, title: document.title || undefined, count: out.length, nodes: out, truncated: out.length >= maxNodes }
     })()`
-    const timeoutMs = 30_000
+    const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
     let result: { ok: true; value: unknown } | { ok: false; exception: string }
     try {
       result = await withTimeout(
@@ -2290,15 +2335,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
         timeoutMs,
         signal,
         `browser: a11y timed out after ${timeoutMs}ms`,
-        () => terminatePage(tab.handle),
+        timedOut => { this.interrupt(tab.handle, timedOut) },
       ) as { ok: true; value: unknown } | { ok: false; exception: string }
     } catch (error) {
-      // As in `snapshot`: a timeout means the view is wedged, and leaving it in the session would
-      // charge every later read the same 30 seconds. Replaced in place, so the tab id survives.
       if (error instanceof Error && error.name === 'TimeoutError') {
-        this.replaceTabWithBlank(s, tab)
+        this.quarantine(tab.handle)
         throw new BrowserError(
-          'browser: a11y timed out; the stuck tab was reset to blank. Call dsh_browser_open with the real target URL before reading it again.',
+          'browser: a11y timed out; the guest is quarantined. Close this tab or explicitly reset the session.',
           'BROWSER_A11Y_TIMEOUT',
           { cause: error },
         )
@@ -2316,13 +2359,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
-    const timeoutMs = 15_000
+    const timeoutMs = PROVIDER_TIMEOUTS.action
     const result = await withTimeout(
       handleSendEvaluate(tab.handle, CHALLENGE_DETECT_EXPRESSION),
       timeoutMs,
       signal,
       `browser: challenge detection timed out after ${timeoutMs}ms`,
-      () => terminatePage(tab.handle),
+      timedOut => { this.interrupt(tab.handle, timedOut) },
     )
     if (!result.ok) {
       throw new BrowserError(`browser: challenge detection failed: ${result.exception}`, 'BROWSER_CHALLENGE_DETECT_FAILED')
@@ -2426,13 +2469,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // Honor a per-call timeout: content evaluation can hang on a heavy page,
     // so a caller-supplied budget bounds it. Unlike a bare signal entry check,
     // withTimeout also interrupts a call already in flight.
-    const timeoutMs = request.timeoutMs ?? 30_000
+    const timeoutMs = request.timeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS
     const result = await withTimeout(
       handleSendEvaluate(tab.handle, script),
       timeoutMs,
       signal,
       `browser: content timed out after ${timeoutMs}ms`,
-      () => terminatePage(tab.handle),
+      timedOut => { this.interrupt(tab.handle, timedOut) },
     )
     if (!result.ok) throw new BrowserError(`browser: content evaluation failed: ${result.exception}`, 'BROWSER_CONTENT_FAILED')
     const value = result.value as { ok: boolean; reason?: string; content?: string; truncated?: boolean }
@@ -2459,7 +2502,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if ('target' in request) {
       // Semantic targeting (②): locate the element in-page, scroll it into
       // view, and click its center — no coordinate guessing needed.
-      const locateMs = 10_000
+      const locateMs = PROVIDER_TIMEOUTS.lookup
       const body = `
         el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' })
         const r = el.getBoundingClientRect()
@@ -2493,7 +2536,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // earlier; if the human switched tabs meanwhile, these coordinates belong to one page
     // and the dispatch would go to another — and Chromium answers success either way.
     if ('target' in request) this.assertSameView(session, locateHandle, handle)
-    const timeoutMs = 30_000
+    const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
     const send = (params: Record<string, unknown>, label: string): Promise<unknown> =>
       withTimeout(
         handle.sendCommand('Input.dispatchMouseEvent', params),
@@ -2583,7 +2626,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     }
     // One barrier for the whole run: cheap, and it is the view that needs a surface, not each press.
     const handle = await this.present(s, signal)
-    const timeoutMs = 30_000
+    const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
     // 40 ms is above one frame at 30 fps, which is what keeps the page from reading two presses as a
     // double click. Faster runs were measured dropping presses outright.
     const gap = typeof request.intervalMs === 'number' && request.intervalMs >= 0 ? request.intervalMs : 40
@@ -2639,7 +2682,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     signal?.throwIfAborted()
     const hasTarget = 'target' in request
     if (hasTarget) {
-      const locateMs = 10_000
+      const locateMs = PROVIDER_TIMEOUTS.lookup
       const script = this.buildTargetScript(request.target, locateMs, `
         el.focus()
         return { ok: true }
@@ -2650,7 +2693,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       if (cursorPoint !== undefined) this.showCursor(locateTab.handle, cursorPoint.x, cursorPoint.y, 'click', 'type', true)
     }
     const text = 'text' in request ? request.text : ''
-    const timeoutMs = 30_000
+    const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
     // Input.insertText goes through the Input domain: same display-surface
     // requirement as click/key. It also reports which view is active once the barrier has
     // settled, which is what makes the tab-switch check below meaningful.
@@ -2693,13 +2736,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
       window.scrollBy({ top: ${request.deltaY ?? 0}, left: ${request.deltaX ?? 0} })
       return { ok: true }
     })()`
-    const timeoutMs = 15_000
+    const timeoutMs = PROVIDER_TIMEOUTS.action
     const result = await withTimeout(
       handleSendEvaluate(tab.handle, script),
       timeoutMs,
       signal,
       `browser: scroll timed out after ${timeoutMs}ms`,
-      () => terminatePage(tab.handle),
+      timedOut => { this.interrupt(tab.handle, timedOut) },
     )
     if (!result.ok) throw new BrowserError(`browser: scroll failed: ${result.exception}`, 'BROWSER_SCROLL_FAILED')
     const value = result.value as { ok?: boolean; reason?: string }
@@ -2710,15 +2753,21 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Go back (-1) or forward (+1) in the active tab's navigation history. */
   private async historyStep(session: BrowserSessionId, direction: -1 | 1, signal?: AbortSignal): Promise<void> {
     const s = this.session(session)
-    const { handle } = this.activeTab(s)
+    const tab = this.activeTab(s)
+    const { handle } = tab
+    const transaction = this.beginNavigation(tab, signal)
+    const { navigation } = transaction
+    signal = transaction.signal
     signal?.throwIfAborted()
-    const timeoutMs = 30_000
+    const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
+    const deadline = Date.now() + timeoutMs
     const hist = await withTimeout(
       handle.sendCommand('Page.getNavigationHistory'),
       timeoutMs,
       signal,
       `browser: history read timed out after ${timeoutMs}ms`,
-    ) as { entries?: Array<{ id?: number }>; currentIndex?: number }
+    ) as { entries?: Array<{ id?: number; url?: string }>; currentIndex?: number }
+    this.checkNavigation(tab, navigation)
     const entries = hist.entries ?? []
     const currentIndex = hist.currentIndex ?? -1
     const target = currentIndex + direction
@@ -2732,16 +2781,25 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (entry?.id === undefined) throw new BrowserError('browser: history entry missing id', 'BROWSER_HISTORY_INVALID')
     // A history step is a navigation too: the classic A→B→A redirect would
     // otherwise read the outgoing document's identity (see settleDocument).
-    const before = await this.documentStamp(handle)
+    const before = await this.documentIdentity(handle, signal, () => { this.checkNavigation(tab, navigation) }, deadline, true)
+    const inPage = await withTimeout(handleSendEvaluate(handle, `(() => {
+      if (typeof navigation === 'undefined') return false;
+      const entry = navigation.entries().find(entry => entry.index === navigation.currentEntry.index + ${direction});
+      return entry?.url === ${JSON.stringify(entry.url)} && entry.sameDocument === true;
+    })()`), Math.max(1, deadline - Date.now()), signal, 'browser: history document identity timed out', timedOut => { this.interrupt(handle, timedOut) })
+    this.checkNavigation(tab, navigation)
+    signal?.throwIfAborted()
     await withTimeout(
       handle.sendCommand('Page.navigateToHistoryEntry', { entryId: entry.id }),
-      timeoutMs,
+      Math.max(1, deadline - Date.now()),
       signal,
       `browser: history navigation timed out after ${timeoutMs}ms`,
-      () => { void handle.sendCommand('Page.stopLoading').catch(() => {}) },
+      () => { if (tab.navigation === navigation) void handle.sendCommand('Page.stopLoading').catch(() => {}) },
     )
+    await this.settleDocument(handle, before, signal,
+      inPage.ok && inPage.value === true ? { frameId: before.id, loaderId: before.loaderId } : undefined,
+      () => { this.checkNavigation(tab, navigation) }, entry.id, deadline, true)
     this.record(s, direction === -1 ? 'back' : 'forward', {}, true)
-    await this.settleDocument(handle, before, signal)
     this.recordVisit(s, handle)
     this.showActive(s)
   }
@@ -2759,22 +2817,29 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Reload the active tab. */
   async reload(session: BrowserSessionId, signal?: AbortSignal): Promise<void> {
     const s = this.session(session)
-    const { handle } = this.activeTab(s)
+    const tab = this.activeTab(s)
+    const { handle } = tab
+    const transaction = this.beginNavigation(tab, signal)
+    const { navigation } = transaction
+    signal = transaction.signal
     signal?.throwIfAborted()
-    const timeoutMs = 30_000
+    const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
+    const deadline = Date.now() + timeoutMs
     // Same-URL reload: only the per-load document identity can tell the new
     // document from the old one, so capture it before reloading.
-    const before = await this.documentStamp(handle)
+    const before = await this.documentIdentity(handle, signal, () => { this.checkNavigation(tab, navigation) }, deadline, true)
+    this.checkNavigation(tab, navigation)
+    signal?.throwIfAborted()
     await withTimeout(
       handle.sendCommand('Page.reload', { ignoreCache: false }),
-      timeoutMs,
+      Math.max(1, deadline - Date.now()),
       signal,
       `browser: reload timed out after ${timeoutMs}ms`,
       // Best-effort: cancel the reload if it wedges the debugger queue.
-      () => { void handle.sendCommand('Page.stopLoading').catch(() => {}) },
+      () => { if (tab.navigation === navigation) void handle.sendCommand('Page.stopLoading').catch(() => {}) },
     )
+    await this.settleDocument(handle, before, signal, undefined, () => { this.checkNavigation(tab, navigation) }, undefined, deadline, true)
     this.record(s, 'reload', {}, true)
-    await this.settleDocument(handle, before, signal)
     this.recordVisit(s, handle)
     this.showActive(s)
   }
@@ -2788,7 +2853,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       throw new BrowserError(`browser: unsupported key "${request.key}" (supported: ${BROWSER_KEY_NAMES.join(', ')})`, 'BROWSER_KEY_UNSUPPORTED')
     }
     const params = { key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.vk, nativeVirtualKeyCode: spec.vk, ...spec.text !== undefined ? { text: spec.text } : {} }
-    const timeoutMs = 15_000
+    const timeoutMs = PROVIDER_TIMEOUTS.action
     // Input.dispatchKeyEvent is subject to the same display-surface rule. The handle comes
     // back from the presentation barrier rather than from a capture taken before it: this
     // session is shared with the human, who may switch tabs while the barrier round-trips,
@@ -3012,13 +3077,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
       }
       return { fields: out, submitted }
     })()`
-    const timeoutMs = request.timeoutMs ?? 30_000
+    const timeoutMs = request.timeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS
     const result = await withTimeout(
       handleSendEvaluate(tab.handle, script),
       timeoutMs,
       signal,
       `browser: fillForm timed out after ${timeoutMs}ms`,
-      () => terminatePage(tab.handle),
+      timedOut => { this.interrupt(tab.handle, timedOut) },
     )
     if (!result.ok) {
       throw new BrowserError(`browser: fillForm evaluation failed: ${result.exception}`, 'BROWSER_FILL_FAILED')
@@ -3174,7 +3239,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       timeoutMs + TARGET_SCRIPT_GRACE_MS,
       signal,
       `${errorLabel} timed out after ${timeoutMs}ms`,
-      () => terminatePage(tab.handle),
+      timedOut => { this.interrupt(tab.handle, timedOut) },
     )
     if (!result.ok) throw new BrowserError(`${errorLabel} failed: ${result.exception}`, errorCode)
     const value = result.value as { ok?: boolean; error?: string } | undefined
@@ -3187,7 +3252,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
-    const timeoutMs = request.timeoutMs ?? 5_000
+    const timeoutMs = request.timeoutMs ?? PROVIDER_TIMEOUTS.interaction
     const body = `
       const value = ${JSON.stringify(String(request.value))}
       const setNative = (el, proto, v) => {
@@ -3236,7 +3301,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
-    const timeoutMs = request.timeoutMs ?? 5_000
+    const timeoutMs = request.timeoutMs ?? PROVIDER_TIMEOUTS.interaction
     const want = request.checked ?? true
     const body = `
       const want = ${String(want)}
@@ -3264,7 +3329,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
-    const timeoutMs = request.timeoutMs ?? 5_000
+    const timeoutMs = request.timeoutMs ?? PROVIDER_TIMEOUTS.interaction
     const body = `
       if (el.tagName !== 'SELECT') return { ok: false, error: 'element is not a <select> (' + el.tagName + ')' }
       const optionValue = ${JSON.stringify(request.optionValue ?? null)}
@@ -3298,7 +3363,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
-    const timeoutMs = request.timeoutMs ?? 5_000
+    const timeoutMs = request.timeoutMs ?? PROVIDER_TIMEOUTS.interaction
     const body = `
       const setNative = (el, proto) => {
         const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
@@ -3334,7 +3399,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
-    const timeoutMs = request.timeoutMs ?? 5_000
+    const timeoutMs = request.timeoutMs ?? PROVIDER_TIMEOUTS.interaction
     const body = `
       const type = (el.type || '').toLowerCase()
       if (type === 'checkbox' || type === 'radio') return { ok: true, value: null, checked: el.checked }
@@ -3365,7 +3430,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     const s = this.session(session)
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
-    const timeoutMs = request.timeoutMs ?? 5_000
+    const timeoutMs = request.timeoutMs ?? PROVIDER_TIMEOUTS.interaction
     const script = `(async () => {
       const itemSel = ${JSON.stringify(request.item)}
       const fields = ${JSON.stringify(request.fields)}
@@ -3410,7 +3475,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       timeoutMs + TARGET_SCRIPT_GRACE_MS,
       signal,
       `browser: scrape timed out after ${timeoutMs}ms`,
-      () => terminatePage(tab.handle),
+      timedOut => { this.interrupt(tab.handle, timedOut) },
     )
     if (!result.ok) throw new BrowserError(`browser: scrape evaluation failed: ${result.exception}`, 'BROWSER_SCRAPE_FAILED')
     const value = result.value as { ok?: boolean; error?: string; count?: number; items?: Record<string, string | null>[] }
@@ -3566,7 +3631,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // parent's timeout fires the child continues writing. The parent's pending
     // entry is cleaned up (the promise settles) and the child's eventual
     // reply is harmlessly consumed by the RPC layer.
-    const timeoutMs = 60_000
+    const timeoutMs = PROVIDER_TIMEOUTS.download
     await withTimeout(
       downloadable.download(request.url, savePath),
       timeoutMs,
@@ -3590,7 +3655,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     }
     const s = this.session(session)
     const { handle } = this.activeTab(s)
-    const timeoutMs = 30_000
+    const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
     // The self-hosted carrier has a native path (the child reads its own session), which
     // is worth preferring: it reports exactly what the browser persisted.
     const native = handle
@@ -3644,7 +3709,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     this.assertActionAllowed('credentialWrite')
     const s = this.session(session)
     const { handle } = this.activeTab(s)
-    const timeoutMs = 30_000
+    const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
     const native = handle
     if (typeof native.restoreAuth === 'function') {
       const restored = await withTimeout(native.restoreAuth(cookies), timeoutMs, undefined, `browser: auth restore timed out after ${timeoutMs}ms`)
@@ -3786,7 +3851,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // raises the window); the host switches the visible tab inside the window and, if the
       // window has no surface to capture, falls through to CDP.
       if (!this.isQuiet()) this.showActive(s)
-      const timeoutMs = 30_000
+      const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
       const shot = await withTimeout(
         capturable.capture({
           ...format === 'jpeg' ? { format, quality: request?.quality } : {},
@@ -3820,7 +3885,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // installed Chrome or Edge is the real browser and has no such defect, so it says so
     // through `supportsCdpJpeg` and gets the format it asked for, and the same for
     // downscaling, which CDP performs through a full-document clip.
-    const timeoutMs = 30_000
+    const timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
     const params: Record<string, unknown> = {}
     const region = request?.clip
     if (region !== undefined) {
@@ -4083,22 +4148,24 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /** Close the session and destroy all its views. Idempotent. */
-  close(session: BrowserSessionId): Promise<void> {
+  async close(session: BrowserSessionId): Promise<void> {
     const existing = this.sessions.get(session)
     if (existing !== undefined) {
       this.sessions.delete(session)
-      for (const tab of existing.tabs) this.host.destroyView(tab.handle)
+      for (const tab of existing.tabs) this.destroyTab(tab)
       // Releasing the browser at session end is a setting, not fixed behaviour
       // (requirements §3). A self-hosted carrier already tore its window down with
       // the views above; the desktop's sidebar does not, so it is asked explicitly
       // — and its cookies plus the browsing history outlive the page either way.
-      if (this.settingsSource !== undefined && this.settingsSource().ui.closeWithSession) {
-        // Named, because one host serves every conversation: an unnamed release would end the
-        // pages of conversations that are still running.
-        void this.host.releasePage?.(existing.label).catch(() => undefined)
+      try {
+        if (this.settingsSource !== undefined && this.settingsSource().ui.closeWithSession) {
+          // Never release another conversation's pages.
+          await this.host.releasePage?.(this.carrierScope(existing))
+        }
+      } finally {
+        await this.host.retireSession?.(session)
       }
     }
-    return Promise.resolve()
   }
 
   /** Look up a session or throw the unknown-session error. */
@@ -4112,49 +4179,56 @@ export class ElectronBrowserProvider implements BrowserProvider {
 
   /** The active tab of a session. */
   private activeTab(s: Session): Tab {
+    if (this.carrierLaunchError !== undefined) throw this.carrierLaunchError
     const tab = s.tabs[s.activeIndex]
     if (tab === undefined) throw new BrowserError('browser: session has no active tab', 'BROWSER_TAB_UNKNOWN')
+    if (tab.failure !== undefined) throw tab.failure
     return tab
   }
 
   /** Append a fresh tab and make it active. */
   private newTab(s: Session): void {
-    const handle = this.host.createView(s.label)
+    const id = tabWireId({ ...resolveSessionHandle(s.id), tab: randomUUID() })
+    const handle = this.host.createView(id)
     // Same window as the session's other tabs.
     this.host.groupView?.(handle, s.id, s.label)
-    s.tabs.push({ id: `tab:${randomUUID()}`, handle, url: '' })
+    s.tabs.push({ id, handle, url: '' })
     s.activeIndex = s.tabs.length - 1
     this.showActive(s)
   }
 
-  /**
-   * Swap a wedged view for a fresh blank one, keeping the tab's public id.
-   *
-   * A view whose renderer never commits cannot be read again: every evaluate into it runs out its
-   * whole budget. Replacing it is what turns that from permanent into one bad call — the tab id
-   * callers hold stays valid, and the next `dsh_browser_open` with the real URL re-populates it.
-   *
-   * The old view is destroyed AFTER the new one is in place, so a failure here cannot leave the
-   * session holding a handle that is already gone.
-   * @param s - the session owning the tab.
-   * @param tab - the tab to reset.
-   */
-  private replaceTabWithBlank(s: Session, tab: Tab): void {
-    const index = s.tabs.indexOf(tab)
-    if (index < 0) return
-    let handle: ElectronViewHandle
-    try {
-      handle = this.host.createView(s.label)
-      this.host.groupView?.(handle, s.id, s.label)
-    } catch {
-      // Creating the replacement failed: leaving the wedged tab in place is worse than nothing
-      // only for the caller, who is about to be told the tab timed out either way.
-      return
+  private carrierScope(s: Session): BrowserSessionId {
+    return s.id
+  }
+
+  private carrierTab(s: Session, id: string): BrowserTabWireId {
+    const scope = resolveSessionHandle(s.id)
+    return tabWireId(resolveTabHandle(scope, id))
+  }
+
+  private carrierId(s: Session, id: BrowserTabWireId): BrowserTabWireId | undefined {
+    const tab = resolveTabHandle(resolveSessionHandle(s.id), id).tab
+    if (!tab.startsWith('page:') && this.host.closePage === undefined) return undefined
+    return id
+  }
+
+  private destroyTab(tab: Tab, options?: { readonly keepPage?: boolean }): void {
+    tab.navigationAbort?.abort(new BrowserError('browser: the navigation guest was closed', 'BROWSER_GUEST_CLOSED'))
+    this.host.destroyView(tab.handle, options)
+  }
+
+  private interrupt(handle: ElectronViewHandle, timedOut: boolean): void {
+    if (timedOut) this.quarantine(handle)
+    else terminatePage(handle)
+  }
+
+  private quarantine(handle: ElectronViewHandle): void {
+    for (const session of this.sessions.values()) {
+      const tab = session.tabs.find(tab => tab.handle === handle)
+      if (tab === undefined || tab.failure !== undefined) continue
+      tab.failure = new BrowserError('browser: this guest stopped acknowledging operations and is quarantined; close this tab or explicitly reset the session before retrying', 'BROWSER_GUEST_QUARANTINED')
+      terminatePage(handle)
     }
-    const wedged = tab.handle
-    s.tabs[index] = { id: tab.id, handle, url: '' }
-    if (index === s.activeIndex) this.showActive(s)
-    this.host.destroyView(wedged)
   }
 
   /** Find a session's tab by its backing view id (toolbar actions carry view ids). */
@@ -4184,6 +4258,14 @@ export class ElectronBrowserProvider implements BrowserProvider {
     return [...this.sessions.keys()]
   }
 
+  takeoverTargets(owner: string): readonly { session: BrowserSessionId; owner: string; tabId: string; pageId: string; url: string }[] {
+    return [...this.sessions.values()].filter(s => (s.label ?? 'default').replace(/^session-/u, '') === owner).flatMap(s => {
+      const tab = s.tabs[s.activeIndex]
+      return tab && !tab.failure && /^https?:\/\//u.test(tab.url)
+        ? [{ session: s.id, owner: s.label ?? 'default', tabId: tab.id, pageId: tab.id, url: tab.url }] : []
+    })
+  }
+
   /**
    * The human closed a browser window: the session that window showed is over.
    * Ending it here is what makes the next call a clean start rather than a
@@ -4204,8 +4286,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * URL typed into the address bar) must never crash the host UI loop — it
    * is reported to the host (toolbar) when the host supports it, else logged.
    */
-  private async handleUserAction(action: BrowserUserAction): Promise<void> {
-    const s = this.sessions.get(action.windowId)
+  private async handleUserAction(action: BrowserUserAction, propagate = false): Promise<void> {
+    const s = this.sessions.get(action.windowId as BrowserSessionId)
     if (s === undefined) {
       // The window the human clicked in has no live session here (session
       // closed, or a child restart changed identity). Never swallow the click
@@ -4213,6 +4295,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       const message = `action ${action.type} failed: no live browser session for window "${action.windowId}"`
       process.stderr.write(`[dsh-browser] ${message}\n`)
       this.notifyUserActionError(action, new Error('no live browser session'))
+      if (propagate) throw new Error('no live browser session')
       return
     }
     try {
@@ -4262,6 +4345,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       }
     } catch (error) {
       this.notifyUserActionError(action, error)
+      if (propagate) throw error
     }
   }
 
@@ -4318,7 +4402,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
    */
   private showActive(s: Session, select = false): void {
     const quiet = this.isQuiet()
-    this.host.showView?.(this.activeTab(s).handle, s.label, { quiet, ...select ? { select: true } : {} })
+    const active = s.tabs[s.activeIndex]
+    if (active !== undefined) this.host.showView?.(active.handle, s.label, { quiet, ...select ? { select: true } : {} })
     if (quiet || select) return
     const autoExpand = this.settingsSource === undefined || this.settingsSource().ui.autoExpandOnce
     if (autoExpand) return
@@ -4329,23 +4414,17 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Read the current URL of a view through CDP. */
   private async currentUrl(handle: ElectronViewHandle): Promise<string> {
     // Bound the read: a wedged renderer would otherwise hang listTabs.
-    const timeoutMs = 10_000
+    const timeoutMs = PROVIDER_TIMEOUTS.lookup
     const result = await withTimeout(
       handleSendEvaluate(handle, 'location.href'),
       timeoutMs,
       undefined,
       `browser: url read timed out after ${timeoutMs}ms`,
-      () => terminatePage(handle),
+      timedOut => { this.interrupt(handle, timedOut) },
     )
     return result.ok && typeof result.value === 'string' ? result.value : ''
   }
 }
-
-/**
- * Hard cap on waiting for a navigation's new document to be parsed. Bounded and
- * best-effort: a page that never settles must not fail the navigation.
- */
-const SETTLE_TIMEOUT_MS = 5_000
 
 /**
  * Bounds for one passive preview frame.
@@ -4360,13 +4439,6 @@ const PREVIEW_QUALITY = 70
 const PREVIEW_MAX_WIDTH = 1280
 const PREVIEW_MAX_HEIGHT = 720
 
-/**
- * When the document already looks settled but its identity has NOT changed
- * (same-document navigation, or the outgoing document still answering), wait
- * only this long before returning — there is no parse in flight to wait for.
- */
-const SETTLE_GRACE_MS = 150
-
 /** Poll interval for the document-settle loop. */
 const SETTLE_POLL_MS = 25
 
@@ -4377,10 +4449,6 @@ const SETTLE_POLL_MS = 25
  */
 const TARGET_SCRIPT_GRACE_MS = 2_000
 
-/** `tab:<uuid>` ↔ `<uuid>`: ids accept either form (see locateTab). */
-function stripTabPrefix(id: string): string {
-  return id.startsWith('tab:') ? id.slice(4) : id
-}
 
 /** Abortable sleep used by the settle loop. */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -4409,7 +4477,7 @@ function withTimeout<T>(
   ms: number,
   signal: AbortSignal | undefined,
   message: string,
-  onCancel?: () => void,
+  onCancel?: (timedOut: boolean) => void,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let done = false
@@ -4423,7 +4491,7 @@ function withTimeout<T>(
       error.name = 'TimeoutError'
       reject(error)
       // Best-effort interrupt of the underlying CDP call (see onCancel).
-      onCancel?.()
+      onCancel?.(true)
     }, ms)
     const finish = (fn: () => void): void => {
       if (done) return
@@ -4437,7 +4505,7 @@ function withTimeout<T>(
       done = true
       clearTimeout(timer)
       reject(signal?.reason instanceof Error ? signal.reason : new Error('aborted'))
-      onCancel?.()
+      onCancel?.(false)
     }
     if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true })
     promise.then(
@@ -4463,7 +4531,7 @@ function terminatePage(handle: ElectronViewHandle): void {
   const count = pendingTerminations.get(handle) ?? 0
   if (count >= MAX_PENDING_TERMINATIONS) return
   pendingTerminations.set(handle, count + 1)
-  void handle.sendCommand('Runtime.terminateExecution').finally(() => {
+  void handle.sendCommand('Runtime.terminateExecution', undefined, { present: false, initialize: false }).finally(() => {
     pendingTerminations.set(handle, Math.max(0, (pendingTerminations.get(handle) ?? 1) - 1))
   }).catch(() => {})
 }
@@ -4501,4 +4569,3 @@ async function handleSendEvaluate(
   }
   return { ok: true, value: (result.result as { value?: unknown } | undefined)?.value ?? null }
 }
-

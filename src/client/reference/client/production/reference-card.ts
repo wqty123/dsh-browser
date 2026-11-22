@@ -10,6 +10,7 @@
  *
  * @module dsh-browser-reference/production/reference-card
  */
+import { isReferenceText, type ReferenceTextNode } from '../../../../reference-text.ts'
 import type { AssetBinding, AssetStore } from './asset-store.ts'
 import type { SourceDescription } from './snapshot-adapter.ts'
 import {
@@ -56,6 +57,7 @@ export interface CardTableCell {
   readonly columnSpan: number
   readonly role: 'header' | 'data'
   readonly text: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly includedAs: 'selection' | 'header-context'
   readonly partialText: boolean
   readonly inlineImages: readonly CardInlineImage[]
@@ -78,6 +80,7 @@ export interface CardTable {
 export interface CardText {
   readonly partId: string
   readonly text: string
+  readonly content?: readonly ReferenceTextNode[]
   readonly exact: string
   readonly prefix: string
   readonly suffix: string
@@ -147,6 +150,7 @@ function cardTable(
     columnSpan: cell.columnSpan,
     role: cell.role,
     text: cell.text,
+    ...(cell.content === undefined ? {} : { content: cell.content }),
     includedAs: cell.includedAs,
     partialText: cell.partialText,
     inlineImages: (cell.inlineContent ?? [])
@@ -186,6 +190,7 @@ export function buildCardViewModel(
         return { kind: 'text', value: {
           partId: part.partId,
           text: part.text,
+          ...(isReferenceText(part.content) ? { content: part.content } : {}),
           exact: part.anchor.exact,
           prefix: part.anchor.prefix,
           suffix: part.anchor.suffix,

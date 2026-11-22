@@ -9,9 +9,12 @@
 // node_modules and would be lost on the next update.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { createFakeBrowser } from './fixtures/fake-cdp-browser.mjs'
+import { DEFAULT_SETTINGS, resolveSettings } from '../lib/browser-electron/settings-store.js'
 
 const systemBrowser = readFileSync(new URL('../src/browser-electron/system-browser.ts', import.meta.url), 'utf8')
 const settingsStore = readFileSync(new URL('../src/browser-electron/settings-store.ts', import.meta.url), 'utf8')
@@ -28,12 +31,13 @@ function fakeChild(exited = false) {
  * which is what these tests are about. A fake browser supplies the CDP side for the cases that need
  * a connected session.
  */
-async function capturedArgs(headlessMode, quiet = false, exited = false) {
+async function capturedArgs(headlessMode, quiet = false, exited = true) {
   const { SystemBrowserViewHost } = await import('../lib/browser-electron/system-browser.js')
   const seen = []
+  const profile = mkdtempSync(join(tmpdir(), 'dsh-headless-args-'))
   const host = new SystemBrowserViewHost(
     { kind: 'chrome', path: 'fake-browser' },
-    'D:/dsh-workspace/_scratch/headless-probe',
+    profile,
     [],
     undefined,
     (_path, args) => { seen.push(args); return fakeChild(exited) },
@@ -46,6 +50,7 @@ async function capturedArgs(headlessMode, quiet = false, exited = false) {
     // Expected: the stub is not a browser. The arguments are the evidence.
   } finally {
     host.dispose?.()
+    rmSync(profile, { recursive: true, force: true })
   }
   return seen[0] ?? []
 }
@@ -54,7 +59,9 @@ test('a display-less host gets headless, a display gets a window', async () => {
   // The setting exists in the manifest, defaults to auto, and `auto` is resolved from the
   // environment rather than guessed.
   assert.match(settingsStore, /readonly headless: HeadlessMode/, 'the setting is declared')
-  assert.match(settingsStore, /browser: \{ channel: 'bundled', headless: 'auto' \}/, 'and defaults to auto')
+  assert.equal(DEFAULT_SETTINGS.browser.headless, 'auto', 'and defaults to auto')
+  assert.equal(DEFAULT_SETTINGS.browser.channel, 'sidebar', 'external windows require explicit opt-in')
+  assert.equal(resolveSettings({ browser: {} }).browser.headless, 'auto', 'missing persisted settings retain auto')
   assert.match(settingsStore, /export type HeadlessMode = 'auto' \| 'headless' \| 'windowed'/,
     'three modes, not a boolean — a JSON document mixing strings and booleans is ambiguous')
   // Booleans are still accepted, because "headless: true" is what a person writes first.
@@ -108,20 +115,21 @@ test('quiet mode does not override an explicitly headless setting either', async
     `an explicit headless setting still wins while quiet: ${JSON.stringify(args)}`)
 })
 
-test('--no-sandbox is conditional and announced, never silent', () => {
-  // Dropping the sandbox weakens process isolation, so it happens only where the sandbox cannot
-  // start (root, or a container) and is written to stderr — whoever reads the log has to be able
-  // to disagree with the decision.
-  assert.match(systemBrowser, /function needsNoSandbox\(/, 'the check exists')
-  assert.match(systemBrowser, /process\.getuid\(\) === 0/, 'root is one reason')
-  assert.match(systemBrowser, /\.dockerenv|env\.container/, 'a container is the other')
-  assert.match(systemBrowser, /if \(launch\.headless && needsNoSandbox\(\)\)/,
-    'and it only applies to a headless launch')
-  assert.match(systemBrowser, /launching with --no-sandbox/, 'the decision is reported')
-  // Not unconditional: a plain windowed launch on a desktop keeps the sandbox.
-  const windowed = systemBrowser.slice(systemBrowser.indexOf("const launch = resolveLaunchMode"))
-  assert.doesNotMatch(windowed.slice(0, windowed.indexOf('about:blank')), /'--no-sandbox'[^']*,\s*$/,
-    'not appended unconditionally before the URL')
+test('headless and container launches never automatically disable the sandbox', async () => {
+  const previous = process.env.container
+  process.env.container = 'docker'
+  try {
+    for (const mode of ['headless', 'windowed', 'auto']) {
+      const args = await capturedArgs(mode)
+      assert.ok(args.length > 0, 'the launcher was reached')
+      assert.ok(!args.includes('--no-sandbox'), JSON.stringify(args))
+      assert.ok(!args.includes('--disable-setuid-sandbox'), JSON.stringify(args))
+    }
+  } finally {
+    if (previous === undefined) delete process.env.container
+    else process.env.container = previous
+  }
+  assert.doesNotMatch(systemBrowser, /needsNoSandbox|--no-sandbox/)
 })
 
 test('an operator can override the setting without editing it', () => {

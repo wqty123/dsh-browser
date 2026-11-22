@@ -1,3 +1,5 @@
+import { hostMessages } from '../../assets/browser-messages.mjs'
+import { LOOPBACK_IPV4, BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
 /**
  * Self-hosted Electron browser host (child side): the Electron main process
  * spawned by {@link RemoteElectronViewHost}. Owns one `BrowserWindow` PER
@@ -44,6 +46,7 @@ import { createRpcLineReader } from './rpc-input.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withTimeoutShared } from './timing.ts'
+import { dshHome } from './paths.ts'
 
 // Report the binary actually running this child, even when ELECTRON_PATH
 // intentionally selects a different version from the plugin's dependency.
@@ -64,8 +67,8 @@ for (const line of electronRuntimeDiagnosticLines(process.versions)) {
 // (capturePage then fails). A dedicated userData also persists cookies across
 // host restarts (on top of dsh_browser_auth). Must run before app is ready.
 try {
-  const base = process.env.DSH_HOME ?? app.getPath('appData')
-  app.setPath('userData', join(base, 'dsh-builtin-browser-host'))
+  const base = dshHome()
+  app.setPath('userData', join(base, BROWSER_PROFILE_DIR))
 } catch (error) {
   process.stderr.write(`[dsh-browser host] userData setup failed: ${String(error)}\n`)
 }
@@ -421,6 +424,7 @@ function windowFor(windowId: string | undefined): HostWindow {
   // (measured: the setting was on and the window still popped up). The first presentation decides:
   // quiet shows it inactive, a normal call shows it normally.
   const w = new BrowserWindow({ width: 1400, height: 900, show: false, title: 'dsh-browser' })
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   w.on('closed', () => {
     const closing = windows.get(key)
     windows.delete(key)
@@ -720,9 +724,7 @@ async function handle(op: string, msg: { id: number; viewId?: string; windowId?:
             }
             return { action: 'deny' }
           }
-          // Non-HTTP popups (OAuth redirects, mailto:, custom schemes):
-          // allow the native window so OAuth flows and deep links work.
-          return { action: 'allow' }
+          return { action: 'deny' }
         })
         // Attach the debugger BEFORE the view can be seen: an attach failure
         // then leaves nothing in the window (no visible ghost view).
@@ -1257,7 +1259,7 @@ function attachReferenceEntry(contents: import('electron').WebContents): void {
   })
   contents.on('dom-ready', () => {
     if (isToolbarContents(contents)) return
-    void contents.executeJavaScript(standaloneScript(overlayScript(), { label: '引用到 DSH' }))
+    void contents.executeJavaScript(standaloneScript(overlayScript(), { label: hostMessages.zh.referenceLabel }))
       .catch(() => { /* an extension-managed page owns its own entry */ })
   })
 }
@@ -1303,7 +1305,7 @@ void app.whenReady().then(() => {
     app.exit(1)
     return
   }
-  const socket = createConnection({ host: '127.0.0.1', port })
+  const socket = createConnection({ host: LOOPBACK_IPV4, port })
   rpcSocket = socket
   socket.setEncoding('utf8')
   // Prove we know the parent's spawn token before anything else; the parent

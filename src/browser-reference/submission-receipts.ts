@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { referenceOwnerKey } from '../reference-owner.ts'
 import { linkSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { deliveryStorePath, type DeliveryQueue } from './delivery.ts'
@@ -49,6 +50,7 @@ export function createSubmissionReceipts(
   }
   return {
     bind(sessionId: string, requestId: string, ids: readonly string[]): boolean {
+      sessionId = referenceOwnerKey(sessionId)
       if (!uuid.test(requestId) || ids.length === 0) return false
       if (ids.some(id => {
         const row = queue.get(id)
@@ -72,6 +74,7 @@ export function createSubmissionReceipts(
       return true
     },
     observe(sessionId: string, event: ReceiptEvent): void {
+      sessionId = referenceOwnerKey(sessionId)
       for (const id of acceptedIds(event)) {
         const path = file(sessionId, id)
         const attempt = read(path)
@@ -81,6 +84,7 @@ export function createSubmissionReceipts(
     /** Called before a session's delivery feed is exposed. If the Session is
      * still loading, only its previously submitted cards need a retry. */
     recover(sessionId: string): readonly string[] {
+      sessionId = referenceOwnerKey(sessionId)
       const dir = directory(sessionId)
       let names: string[]
       try { names = readdirSync(dir) } catch (error) { if (absent(error)) return []; throw error }

@@ -25,10 +25,10 @@ describe('document rewriting', () => {
     expect(rewritten("<link href='/a.css'>")).toContain(`href='${guestPath('https://example.test/a.css')}'`)
   })
 
-  it('proxies an UNQUOTED asset, keeping it unquoted', () => {
+  it('proxies an UNQUOTED asset, quoting the rewritten value', () => {
     // The form example.com uses for its only script. Missing this left the page script-less.
     const out = rewritten('<script src=/s.js></script>')
-    expect(out).toBe(`<script src=${guestPath('https://example.test/s.js')}></script>`)
+    expect(out).toBe(`<script src="${guestPath('https://example.test/s.js')}"></script>`)
   })
 
   it('resolves relative assets against the page, not the host', () => {
@@ -46,9 +46,15 @@ describe('document rewriting', () => {
     expect(rewritten(html)).toBe(html)
   })
 
-  it('keeps a new-window link inside the panel', () => {
-    // Opening a window would leave the sidebar, which is the reported "clicking a link jumps to Edge".
-    expect(rewritten('<a href="/x" target="_blank">x</a>')).toContain('target="_self"')
+  it('preserves target="_blank" for the guest runtime child-tab handler', () => {
+    // The guest runtime intercepts _blank clicks/forms and dispatches URL-only child tabs.
+    expect(rewritten('<a href="/x" target="_blank">x</a>')).toContain('target="_blank"')
+  })
+
+  it('strips integrity attribute from proxied stylesheet links', () => {
+    const out = rewritten('<link rel="stylesheet" href="/a.css" integrity="sha384-abc">')
+    expect(out).toContain(`href="${guestPath('https://example.test/a.css')}"`)
+    expect(out).not.toContain('integrity=')
   })
 
   it('proxies a srcset candidate list', () => {
@@ -62,8 +68,8 @@ describe('document rewriting', () => {
     expect(out).toContain(guestPath('https://example.test/bg.png'))
   })
 
-  it('does not rewrite a form action, which the relay script handles', () => {
+  it('rewrites a form action for the relay script', () => {
     const html = '<form action="/search"></form>'
-    expect(rewritten(html)).toBe(html)
+    expect(rewritten(html)).toBe(`<form action="${guestPath('https://example.test/search')}"></form>`)
   })
 })

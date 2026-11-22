@@ -11,6 +11,10 @@ export interface BrowserConnection {
   authorizeIndex(request: IncomingMessage, response: ServerResponse): boolean
 }
 
+export interface BrowserPairingConnection {
+  requestRejection(request: IncomingMessage): 401 | 403 | undefined
+}
+
 /** An exact HTTP route registered with the DSH web server. */
 export type BrowserHttpHandler = (request: IncomingMessage, response: ServerResponse) => void | Promise<void>
 
@@ -38,6 +42,30 @@ export function authenticatedRoute(
     }
     // A false result owns the response. Preserving it also preserves host-specific login behavior.
     if (!host.authorizeIndex(request, response)) return
+    return handler(request, response)
+  }
+}
+
+/** Admit passive previews through the same live-Peer and Host fence as DSH's API. */
+export function pairedRoute(
+  connection: () => BrowserPairingConnection | undefined,
+  handler: BrowserHttpHandler,
+): BrowserHttpHandler {
+  return (request, response) => {
+    let rejection: 401 | 403 | undefined
+    try {
+      const host = connection()
+      if (typeof host?.requestRejection !== 'function') throw new Error('pairing unavailable')
+      rejection = host.requestRejection(request)
+      if (rejection !== undefined && rejection !== 401 && rejection !== 403) throw new Error('invalid admission')
+    } catch {
+      replyJson(response, 503, { error: 'browser-pairing-unavailable' })
+      return
+    }
+    if (rejection !== undefined) {
+      replyJson(response, rejection, { error: rejection === 401 ? 'unauthorized' : 'forbidden' })
+      return
+    }
     return handler(request, response)
   }
 }

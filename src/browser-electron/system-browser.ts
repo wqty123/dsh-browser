@@ -1,3 +1,5 @@
+import { PATH_NAMES, INSTALL_LOCATIONS } from '../../assets/browser-products.mjs'
+import { cdpVersionUrl, CDP_DEFAULT_ATTACH_PORT, CDP_ATTACH_PROBE_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 /**
  * Drive the browser the user already has (Chrome / Edge / any Chromium) instead of
  * the Electron we ship — the same approach Codex Browser Use takes.
@@ -28,6 +30,8 @@
 import { readFileSync, rmSync, statSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { acquireProfileLease, type ProfileLease } from './profile-lease.ts'
+import { BrowserProcessOwnership, type ProcessOwnershipOptions } from './process-ownership.ts'
 // Type-only: settings-store imports BrowserChannel from here, so a value import would be a cycle.
 // `hasDisplay` lives here instead of there for the same reason — it is a runtime function.
 import type { HeadlessMode } from './settings-store.ts'
@@ -69,30 +73,6 @@ const CLOSE_GRACE_MS = 6_000
 const PORT_PROBE_MS = 250
 
 /**
- * How long to keep trying to adopt a browser after a launcher reported a clean exit.
- *
- * Exit code 0 means the launcher handed the request to an instance already holding this profile —
- * but on Windows that stub exits BEFORE the real browser writes `DevToolsActivePort`. Measured on
- * Chrome 156: stub gone at 300 ms, port file present at 441 ms (issue #33). A single attempt read
- * too early and reported a launch failure for a browser that was starting normally, so this is a
- * retry rather than one shot.
- *
- * 8 s is the reporter's measured-working bound and is generous against that ~150 ms gap: an honest
- * hand-off resolves in well under a second, and a launch that genuinely failed still reaches the
- * error within the same budget the CDP loop already allows.
- */
-/**
- * How long a hand-off is given to prove it can be adopted.
- *
- * A hand-off means the human's browser was already running: the launch handed the command line over and
- * exited 0. Waiting 8 s for a debugging port that instance will never expose kept the call alive long
- * enough to look like a second launch — reported as "one open, two Edge". Two probe intervals is enough to
- * read a port file that a browser which IS starting writes within ~450 ms, and short enough that a
- * browser which is simply not driveable is reported at once.
- */
-const HANDOFF_ADOPT_MS = 1_200
-
-/**
  * Starts a browser process and returns a handle to it.
  *
  * Injectable so tests can supply something that speaks CDP — the seam a recovery test needs
@@ -103,13 +83,30 @@ const HANDOFF_ADOPT_MS = 1_200
  */
 export type BrowserLauncher = (path: string, args: readonly string[]) => ReturnType<typeof spawn>
 
-/** The real launcher: spawn a detached-free child with pipes closed. */
+export interface SystemBrowserLaunchDiagnostic {
+  cleanup?: 'ownership-unverified'
+  stderrTail: string
+  exitCode: number | null
+  signal: string | null
+  devToolsActivePortPresent: boolean
+}
+
+function diagnosticTail(value: string): string {
+  return value.replace(/\b(?:https?|wss?):\/\/[^\s]+/giu, '[URL redacted]')
+    .replace(/\b(authorization|cookie|password|token|secret)(\s*[:=]\s*)[^\r\n]+/giu, '$1$2[redacted]')
+    .replace(/\bBearer\s+[^\s]+/giu, 'Bearer [redacted]')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/gu, '')
+    .split('\n').slice(-12).join('\n').slice(-2048)
+}
+
+/** The real launcher: retain stderr for bounded launch diagnostics. */
 const defaultLauncher: BrowserLauncher = (path, args) =>
-  spawn(path, [...args], { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false })
+  spawn(path, [...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: false })
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
 import type { CarrierPage } from '../browser/types.ts'
+import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserSessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 
 /** Which browser the user asked for. */
 export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'auto' | 'sidebar'
@@ -122,99 +119,6 @@ export interface DetectedBrowser {
   readonly path: string
 }
 
-/**
- * Launcher names to look for on PATH, per product and per platform.
- *
- * The names genuinely differ: Linux distributions package the launcher under a
- * versioned name (`microsoft-edge-stable`, `google-chrome-stable`), Windows puts
- * `chrome.exe` in an Application directory that may or may not be on PATH, and macOS
- * ships the executable inside the .app bundle. PATH is still consulted first on every
- * platform — it is what reflects how the user actually installed the browser.
- */
-const PATH_NAMES: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.Platform, string[]>>> = {
-  chrome: {
-    win32: ['chrome'],
-    darwin: ['Google Chrome', 'Chromium'],
-    linux: ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser'],
-  },
-  edge: {
-    win32: ['msedge'],
-    darwin: ['Microsoft Edge'],
-    linux: ['microsoft-edge-stable', 'microsoft-edge', 'microsoft-edge-dev'],
-  },
-  brave: {
-    win32: ['brave'],
-    darwin: ['Brave Browser'],
-    linux: ['brave-browser', 'brave'],
-  },
-}
-
-/**
- * Where each product installs when its launcher is not on PATH.
- *
- * Windows keeps the executable inside a version-less Application directory; macOS
- * keeps it inside the .app bundle; Linux distributions that do not use a launcher
- * put it under /usr/bin or /opt. All are checked, and anything missed can be named
- * explicitly with DSH_BROWSER_<KIND>_PATH.
- */
-const INSTALL_LOCATIONS: Record<DetectedBrowser['kind'], Partial<Record<NodeJS.Platform, string[]>>> = {
-  chrome: {
-    win32: [
-      String.raw`%ProgramFiles%\Google\Chrome\Application\chrome.exe`,
-      String.raw`%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe`,
-      // Where a per-user install lands, which is what Chrome's own installer chooses when it
-      // cannot (or should not) write to Program Files. Missing this meant the plugin reported
-      // "no browser found" on machines that plainly had one.
-      String.raw`%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`,
-      String.raw`%LOCALAPPDATA%\Chromium\Application\chrome.exe`,
-    ],
-    darwin: [
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    ],
-    linux: [
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/google-chrome',
-      '/usr/bin/chromium',
-      '/opt/google/chrome/chrome',
-      '/snap/bin/chromium',
-    ],
-  },
-  edge: {
-    win32: [
-      String.raw`%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe`,
-      String.raw`%ProgramFiles%\Microsoft\Edge\Application\msedge.exe`,
-      String.raw`%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe`,
-    ],
-    darwin: ['/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'],
-    linux: [
-      '/usr/bin/microsoft-edge-stable',
-      '/usr/bin/microsoft-edge',
-      '/usr/bin/microsoft-edge-dev',
-    ],
-  },
-  brave: {
-    win32: [
-      String.raw`%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe`,
-      String.raw`%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe`,
-      String.raw`%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe`,
-    ],
-    darwin: ['/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'],
-    linux: ['/usr/bin/brave-browser', '/usr/bin/brave', '/snap/bin/brave'],
-  },
-}
-
-/**
- * Resolve the environment references in one install location.
- *
- * The list is static strings, but a per-user install lands under %LOCALAPPDATA%, so the entry
- * has to be resolved against the environment detection was HANDED rather than process.env — a
- * caller that supplies a platform and an environment (which is what makes detection testable)
- * must not end up reading the developer's real machine.
- * @param location - one entry from the install-location table.
- * @param env - the environment to resolve against.
- * @returns the path with %NAME% references replaced, or the entry unchanged when unknown.
- */
 /**
  * Whether a browser's self-reported product name is one this carrier could have launched.
  *
@@ -242,32 +146,6 @@ function hasDisplay(env: NodeJS.ProcessEnv = process.env): boolean {
   // Windows and macOS use neither variable, and always have a window server.
   if (process.platform === 'win32' || process.platform === 'darwin') return true
   return (env.DISPLAY ?? '') !== '' || (env.WAYLAND_DISPLAY ?? '') !== ''
-}
-
-/**
- * Whether Chromium's own sandbox cannot start here.
- *
- * Two cases, both of which make the browser exit at once rather than degrade: running as root
- * (the sandbox refuses), and running inside a container that lacks the namespaces it needs. The
- * check is deliberately conservative — when it is unsure it answers false, so the default is the
- * sandboxed launch and the weaker mode only happens where it is required.
- * @param env - the environment to inspect; defaults to the current process.
- * @returns true when `--no-sandbox` is required for the browser to start at all.
- */
-function needsNoSandbox(env: NodeJS.ProcessEnv = process.env): boolean {
-  if (process.platform === 'win32') return false
-  try {
-    if (typeof process.getuid === 'function' && process.getuid() === 0) return true
-  } catch {
-    // No getuid: not a POSIX process; the container checks below still apply.
-  }
-  if ((env.container ?? '') !== '') return true
-  try {
-    if (existsSync('/.dockerenv')) return true
-  } catch {
-    // An unreadable root is not evidence of a container.
-  }
-  return false
 }
 
 /**
@@ -452,8 +330,8 @@ class CdpClient {
     return this.socket.readyState === WebSocket.OPEN
   }
 
-  async whenReady(): Promise<void> {
-    const timeoutMs = 30_000
+  async whenReady(deadline = Date.now() + 30_000): Promise<void> {
+    const timeoutMs = Math.max(1, deadline - Date.now())
     let timer: NodeJS.Timeout | undefined
     try {
       await Promise.race([
@@ -470,6 +348,11 @@ class CdpClient {
     }
   }
 
+  async whenClosed(): Promise<void> {
+    if (this.socket.readyState === WebSocket.CLOSED) return
+    await new Promise<void>(resolve => this.socket.addEventListener('close', () => resolve(), { once: true }))
+  }
+
   /**
    * Send one CDP command, optionally on an attached session.
    * @param method - the CDP method.
@@ -477,7 +360,7 @@ class CdpClient {
    * @param sessionId - the flattened session to target, when this is a page command.
    * @returns the CDP result.
    */
-  async send(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown> {
+  async send(method: string, params?: Record<string, unknown>, sessionId?: string, timeoutMs = 30_000): Promise<unknown> {
     // Fail fast and say why. Waiting out the timeout on a closed socket produced
     // only "timed out", which reads as a slow page and hides the real cause.
     if (!this.isAlive()) {
@@ -491,7 +374,7 @@ class CdpClient {
       this.socket.send(JSON.stringify(message))
       setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error(`dsh-builtin-browser: ${method} timed out`))
-      }, 30_000).unref?.()
+      }, timeoutMs).unref?.()
     })
   }
 
@@ -555,9 +438,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    */
   private clientSuspect = false
   private child: ChildProcess | undefined
-  /** Whether this connection's surplus blank pages have been collapsed already. */
-  private blanksNormalized = false
+  private profileLease: ProfileLease | undefined
   private starting: Promise<CdpClient> | undefined
+  private lastLaunchError: string | undefined
+  private launchDiagnostic: SystemBrowserLaunchDiagnostic | undefined
 
   /**
    * Browsers that ignored a kill.
@@ -566,7 +450,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * are still running, still holding the profile, and still something release must try to
    * stop. Forgetting them is what allowed a launch this host could not undo.
    */
-  private readonly stubborn: { kill: () => void; exitCode: number | null; signalCode: NodeJS.Signals | null }[] = []
+  private readonly stubborn: ChildProcess[] = []
+  private readonly ownership: BrowserProcessOwnership
+  private readonly ownedClients = new WeakMap<CdpClient, ChildProcess>()
+  private readonly ownedChildren = new WeakSet<ChildProcess>()
+  private readonly createdTargets = new WeakMap<CdpClient, Map<string, BrowserTabWireId>>()
 
   /**
    * @param browser - the detected installation to launch on first use.
@@ -594,7 +482,43 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
      */
     private readonly headlessMode: HeadlessMode = 'auto',
     private readonly isQuiet: () => boolean = () => false,
-  ) {}
+    private readonly profileError?: string,
+    ownership: ProcessOwnershipOptions = { managed: false },
+  ) {
+    this.ownership = new BrowserProcessOwnership(browser.path, profileDir, ownership)
+  }
+
+  private async stopChild(child: ChildProcess): Promise<boolean> {
+    if (child.exitCode !== null || child.signalCode !== null) return true
+    if (await this.ownership.terminate(child)) return true
+    this.lastLaunchError = 'Cleanup refused: process ownership could not be verified; browser left running.'
+    if (this.launchDiagnostic) this.launchDiagnostic.cleanup = 'ownership-unverified'
+    return false
+  }
+
+  async prepare(): Promise<void> {
+    try {
+      await this.ensureClient()
+    } catch (error) {
+      const launch = this.connectionStatus().launch
+      if (!(error instanceof Error) || launch === undefined) throw error
+      throw Object.assign(new Error(`${error.message} Launch diagnostic: ${JSON.stringify(launch)}`, { cause: error }),
+        'code' in error ? { code: error.code } : {})
+    }
+  }
+
+  connectionStatus(): { connected: boolean; detail: string; launch?: SystemBrowserLaunchDiagnostic } {
+    const connected = !this.disposed && this.client?.isAlive() === true && !this.clientSuspect
+    return { connected, detail: connected ? 'Browser launched and connected over CDP.'
+      : this.profileError ?? this.lastLaunchError ?? (this.disposed ? 'Browser carrier was released.'
+        : this.starting ? 'Browser launch is in progress; no live CDP connection yet.'
+          : this.client ? 'Browser CDP connection was lost or is awaiting verification.'
+            : 'Browser has not launched; run a browser command to establish CDP. No live CDP connection.'),
+      ...this.launchDiagnostic === undefined ? {} : { launch: {
+        ...this.launchDiagnostic, devToolsActivePortPresent: existsSync(join(this.profileDir, 'DevToolsActivePort')),
+      } },
+    }
+  }
 
   /** Which product this host would drive (for diagnostics). */
   get kind(): DetectedBrowser['kind'] {
@@ -651,16 +575,13 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private forgetBrowserState(): void {
     this.views.clear()
     this.sessions.clear()
-    // A new browser comes with its own surplus pages, so the tidy-up runs again for it. Without
-    // this, a restart would inherit the previous connection's "already handled" and leave the new
-    // browser's extra blank page in place for the rest of the session.
-    this.blanksNormalized = false
   }
 
   private async ensureClient(): Promise<CdpClient> {
     // A disposed host must never start a browser: doing so would spawn a process
     // nobody owns and nobody will kill.
     if (this.disposed) throw new Error('dsh-builtin-browser: this browser host was released')
+    if (this.profileError !== undefined) throw new Error(this.profileError)
     // The exit listener clears this, but a socket can also die without the process doing so
     // (the browser closing its debugging endpoint, a dropped connection). Checking the
     // socket's own state costs nothing and turns a 30s hang into a restart.
@@ -686,15 +607,14 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       this.forgetBrowserState()
     }
     // Concurrent first calls share one startup rather than racing two browsers.
-    this.starting ??= this.start().finally(() => { this.starting = undefined })
-    const client = await this.starting
-    // Once per connection. A browser opens more than one page when it starts, and the surplus is
-    // invisible to the plugin's tab model — see normalizeBlankPages for why that matters.
-    if (!this.blanksNormalized) {
-      this.blanksNormalized = true
-      await this.normalizeBlankPages(client)
-    }
-    return client
+    this.starting ??= this.start().then(client => {
+      this.lastLaunchError = undefined
+      return client
+    }).catch(error => {
+      this.lastLaunchError = error instanceof Error ? error.message : String(error)
+      throw error
+    }).finally(() => { this.starting = undefined })
+    return await this.starting
   }
 
   /**
@@ -715,7 +635,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * @param _why - a short phrase for the log, naming which attempt this is.
    * @returns a connected client for the running browser, or undefined when there is none.
    */
-  private async adoptRunningBrowser(_why: string, explicitPort?: number): Promise<CdpClient | undefined> {
+  private async adoptRunningBrowser(_why: string, explicitPort?: number, deadline = Date.now() + 30_000): Promise<CdpClient | undefined> {
     const portFile = join(this.profileDir, 'DevToolsActivePort')
     let port: number
     if (typeof explicitPort === 'number' && explicitPort > 0) {
@@ -728,27 +648,34 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     } catch {
       return undefined
     }
+    let client: CdpClient | undefined
+    let identified = false
     try {
-      const version = await (await fetch(`http://127.0.0.1:${port}/json/version`, {
-        signal: AbortSignal.timeout(PORT_PROBE_MS),
+      const version = await (await fetch(cdpVersionUrl(port), {
+        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
       })).json() as { webSocketDebuggerUrl?: string; Browser?: string }
       if (typeof version.webSocketDebuggerUrl !== 'string') return undefined
       // The port number alone proves nothing — it can be reused once the browser that owned it
       // exits. The endpoint's own answer is the evidence, and it has to name a browser.
       if (!isBrowserProduct(version.Browser)) return undefined
-      const client = new CdpClient(version.webSocketDebuggerUrl)
-      await client.whenReady()
+      identified = true
+      client = new CdpClient(version.webSocketDebuggerUrl)
+      await client.whenReady(deadline)
       // Asked through the protocol too, so a websocket that merely accepts connections is not
       // mistaken for a browser that answers.
-      const info = await client.send('Browser.getVersion', {}) as { product?: string }
-      if (!isBrowserProduct(info?.product)) {
-        client.close()
-        return undefined
-      }
+      const info = await client.send('Browser.getVersion', {}, undefined, Math.max(1, deadline - Date.now())) as { product?: string }
+      if (!isBrowserProduct(info?.product) || info.product !== version.Browser) throw new Error('browser did not acknowledge its identity')
       if (this.disposed) { client.close(); return undefined }
+      await client.send('Target.setDiscoverTargets', { discover: true }, undefined, Math.max(1, deadline - Date.now()))
+      if (this.disposed || Date.now() >= deadline) { client.close(); return undefined }
       this.client = client
       return client
-    } catch {
+    } catch (error) {
+      client?.close()
+      if (identified) throw error
+      if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+        throw new Error('browser did not acknowledge its discovery endpoint before the launch deadline', { cause: error })
+      }
       // No endpoint, nothing listening, or not a browser: all of them mean "launch one".
       return undefined
     }
@@ -763,19 +690,22 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * @returns the connected client.
    */
   private async start(): Promise<CdpClient> {
+    const deadline = Date.now() + 30_000
+    this.profileLease ??= acquireProfileLease(this.profileDir)
     // Before spawning anything: is a browser for THIS profile already running? A DSH restart
     // leaves one behind, and launching into it is the failure reported as "exited immediately
     // after launch (exit code 0)" that required killing seven processes by hand.
     // A browser the human started with an explicit debugging port. Port 0 makes Chromium write the chosen
     // port into the profile, which the probe below already finds; an explicit port leaves no file, so this
     // is the only way to reach it. Attaching means driving the window they already have open.
-    const explicitPort = Number(process.env.DSH_BROWSER_ATTACH_PORT ?? '') || 9222
-    const attached = await this.adoptRunningBrowser('explicit attach port', explicitPort)
+    const explicitPort = Number(process.env.DSH_BROWSER_ATTACH_PORT ?? '')
+    const attached = Number.isSafeInteger(explicitPort) && explicitPort > 0
+      ? await this.adoptRunningBrowser('explicit attach port', explicitPort, deadline) : undefined
     if (attached !== undefined) {
       ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = 'attached'
       return attached
     }
-    const adopted = await this.adoptRunningBrowser('before launch')
+    const adopted = await this.adoptRunningBrowser('before launch', undefined, deadline)
     if (adopted !== undefined) return adopted
     // Whether a window exists is decided by `browser.headless` ALONE (plus the operator's
     // DSH_BROWSER_HEADLESS override inside resolveLaunchMode). `ui.quiet` must not force
@@ -813,19 +743,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // `--no-startup-window` keeps the browser alive with no window and no initial page; measured
       // by the reporter on Chrome 156 as writing DevToolsActivePort in 599 ms, answering
       // `/json/version`, listing two extension targets and no page, and then creating windows
-      // normally through `Target.createTarget`. A browser that does start a blank despite this is
-      // still handled: `normalizeBlankPages` closes the surplus and `buildSession` adopts the rest.
+      // normally through `Target.createTarget`.
       '--no-startup-window',
     ]
-    // Chromium's own sandbox cannot start in some of these environments — running as root, or
-    // inside a container without the namespaces it needs — and it exits rather than degrading.
-    // Only then is the sandbox dropped, and never silently: a setting that weakens process
-    // isolation must be visible in the log, because whoever reads it has to be able to disagree.
-    if (launch.headless && needsNoSandbox()) {
-      args.splice(args.length - 2, 0, '--no-sandbox')
-      process.stderr.write('[dsh-browser] launching with --no-sandbox: '
-        + 'this process runs as root or in a container, where the Chromium sandbox cannot start\n')
-    }
     if (launch.headless) {
       process.stderr.write(`[dsh-browser] launching headless (${launch.why}); `
         + 'the browser has no window but every tool works the same\n')
@@ -835,7 +755,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // exit would then be treated as the launch failing.
     if (this.child !== undefined) {
       const dying = this.child
-      try { dying.kill() } catch { /* already gone */ }
+      if (!await this.stopChild(dying)) throw new Error(this.lastLaunchError)
       this.child = undefined
 
       // Whatever the old browser issued is worthless now, and its exit listener cannot clean
@@ -867,6 +787,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
           if (at2 !== -1) this.stubborn.splice(at2, 1)
         })
       })
+      if (dying.exitCode === null && dying.signalCode === null) throw new Error('dsh-builtin-browser: the previous browser still holds this profile; refusing another launch')
     }
     // The port file is deliberately NOT deleted here, and that is a reversal.
     //
@@ -902,6 +823,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       }
     })()
     let child: ReturnType<typeof spawn>
+    if (this.disposed || Date.now() >= deadline) throw new Error('dsh-builtin-browser: launch was cancelled or its deadline expired')
+    const launchDiagnostic: SystemBrowserLaunchDiagnostic = {
+      stderrTail: '', exitCode: null, signal: null, devToolsActivePortPresent: existsSync(portFile),
+    }
+    this.launchDiagnostic = launchDiagnostic
     try {
       child = this.launcher(this.browser.path, args)
     } catch (error) {
@@ -911,6 +837,12 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       throw new Error(`dsh-builtin-browser: could not launch ${this.browser.path}: ${error instanceof Error ? error.message : String(error)}`)
     }
     this.child = child
+    launchDiagnostic.exitCode = child.exitCode
+    launchDiagnostic.signal = child.signalCode
+    child.on('exit', (code, signal) => {
+      launchDiagnostic.exitCode = code ?? child.exitCode
+      launchDiagnostic.signal = signal ?? child.signalCode
+    })
     /**
      * A launch that fails (ENOENT, no permission, a broken binary) is reported by an
      * asynchronous 'error' event on the child, NOT by a throw here and NOT by exitCode.
@@ -918,7 +850,19 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
      * down — one bad browser path would kill DSH, not just fail a tool call.
      */
     let launchError: Error | undefined
-    child.on('error', error => { launchError = error })
+    let diagnostic = ''
+    child.stderr?.on('data', chunk => {
+      diagnostic = (diagnostic + String(chunk)).slice(-4096)
+      launchDiagnostic.stderrTail = diagnosticTail(diagnostic)
+      if (/remote debugging requires a non-default data directory/iu.test(diagnostic)) {
+        launchError = new Error('The browser refused remote debugging on its default user profile. A live CDP connection is required; no alternative profile was substituted.')
+      }
+    })
+    child.on('error', error => {
+      launchError = error
+      launchDiagnostic.exitCode = child.exitCode
+      launchDiagnostic.signal = child.signalCode
+    })
     // A browser that exits later is as unusable as one that never started, and the failure
     // has to reach the NEXT call rather than being swallowed: clearing the client here is
     // what makes ensureClient() start a fresh browser instead of returning a socket to a
@@ -928,11 +872,13 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       this.client?.close()
       this.client = undefined
       this.child = undefined
+      this.lastLaunchError = 'Browser exited; the CDP connection is no longer live.'
       // The pages this client opened belong to the process that just died; keeping their
       // session ids means every later command is sent to a browser that never issued them.
       // Clearing these is what makes the restart usable rather than merely alive.
       this.forgetBrowserState()
     })
+    await this.ownership.capture(child)
     /**
      * The port this launch wrote, or undefined while it has not written one yet.
      *
@@ -951,14 +897,13 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         // keeps this correct on a filesystem whose timestamps are coarser than a millisecond.
         if (portFileBefore !== undefined
           && after.mtimeMs <= portFileBefore.mtimeMs
-          && contents === portFileBefore.contents) return undefined
+          && contents === portFileBefore.contents && child.exitCode !== 0) return undefined
         const value = Number(contents.split('\n')[0]?.trim() ?? '')
         return Number.isInteger(value) && value > 0 ? value : undefined
       } catch {
         return undefined
       }
     }
-    const deadline = Date.now() + 30_000
     /**
      * Why the loop stopped, so the failure can say what actually happened. Reporting
      * every ending as "did not expose CDP within 30s" was wrong three ways: the cause,
@@ -971,40 +916,57 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // browser that dispose() has already killed, which would leave a connection
       // to a dead process behind. The child is killed here too — dispose() may have
       // run before this child was recorded, leaving nobody else to do it.
-      if (this.disposed) { child.kill(); if (this.child === child) this.child = undefined; stopped = 'released'; break }
+      if (this.disposed) { await this.stopChild(child); if (this.child === child) this.child = undefined; stopped = 'released'; break }
       if (launchError !== undefined) { if (this.child === child) this.child = undefined; stopped = 'launch-failed'; break }
-      if (Date.now() > deadline) { child.kill(); if (this.child === child) this.child = undefined; stopped = 'timeout'; break }
+      if (Date.now() > deadline) { await this.stopChild(child); stopped = 'timeout'; break }
       // signalCode too: a browser killed by a signal never sets exitCode, so checking exitCode
       // alone made a killed browser look alive and the launch run out its full 30s deadline
       // before reporting "did not expose CDP" — a timeout for something that died at once.
       // The sibling check on the release path already looked at both.
-      if (child.exitCode !== null || child.signalCode !== null) { if (this.child === child) this.child = undefined; stopped = 'exited'; break }
+      if (child.signalCode !== null || (child.exitCode !== null && child.exitCode !== 0)) { if (this.child === child) this.child = undefined; stopped = 'exited'; break }
       // Only a port THIS launch wrote: reading whatever file happened to be there is how a
           // restart could adopt the previous browser, or any process now holding that port.
           const port = freshPort()
           if (port !== undefined) {
         try {
-            const version = await (await fetch(`http://127.0.0.1:${port}/json/version`, {
+            const version = await (await fetch(cdpVersionUrl(port), {
               // Bounded: an unanswered loopback request would otherwise park inside this
               // iteration for the rest of the budget, and the deadline above is only re-checked
               // between iterations. Deliberately no larger than the 250 ms sleep — see
               // PORT_PROBE_MS.
-              signal: AbortSignal.timeout(PORT_PROBE_MS),
-            })).json() as { webSocketDebuggerUrl?: string }
+              signal: AbortSignal.timeout(Math.max(1, Math.min(PORT_PROBE_MS, deadline - Date.now()))),
+            })).json() as { webSocketDebuggerUrl?: string; Browser?: string }
             if (typeof version.webSocketDebuggerUrl === 'string') {
               const client = new CdpClient(version.webSocketDebuggerUrl)
               // `whenReady` has its own 30 s ceiling, and it is reached only after the port
               // answered above — so the browser is listening and this is a handshake, not a
               // discovery. A handshake that outlives the launch is reported as the timeout it
               // is, by the same deadline that governs everything else here.
-              await client.whenReady()
+              try {
+                await client.whenReady(deadline)
+                const info = await client.send('Browser.getVersion', {}, undefined, Math.max(1, deadline - Date.now())) as { product?: string }
+                if (typeof info.product !== 'string' || info.product === '' || info.product !== version.Browser) throw Object.assign(new Error('browser did not acknowledge its identity'), { code: 'BROWSER_LAUNCH_UNACKNOWLEDGED' })
+                await client.send('Target.setDiscoverTargets', { discover: true }, undefined, Math.max(1, deadline - Date.now()))
+              } catch (error) { client.close(); throw error }
               // Still wanted? A dispose() during the handshake has already killed the
               // process, so publishing the client would leave a dangling connection.
+              if (this.disposed || Date.now() >= deadline) { client.close(); break }
+              if (await this.ownership.verify(child)) {
+                try {
+                  const processes = await client.send('SystemInfo.getProcessInfo', {}, undefined, 1000) as { processInfo?: { type: string; id: number }[] }
+                  if (processes.processInfo?.some(entry => entry.type === 'browser' && entry.id === child.pid)
+                    && await this.ownership.verify(child)) {
+                    this.ownedClients.set(client, child)
+                    this.ownedChildren.add(child)
+                  }
+                } catch { /* An unidentified endpoint is borrowed, never owned. */ }
+              }
               if (this.disposed) { client.close(); break }
               this.client = client
               return client
             }
-        } catch {
+        } catch (error) {
+          if ((error as { code?: string })?.code === 'BROWSER_LAUNCH_UNACKNOWLEDGED') throw error
           // The file can exist a moment before the port answers; poll again.
         }
       }
@@ -1024,32 +986,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // which is the same mistake this message was written to correct, pointing the other way.
       const code = child.exitCode
       const signal = child.signalCode
-      const clean = code === 0 && signal === null
-      // Exit code 0 IS the hand-off: the request went to an instance already holding this profile,
-      // so that instance is our browser and it is running right now. Adopting it turns the
-      // reported "kill the leftovers by hand, on every restart" into a call that just works.
-      //
-      // Adopted with a bounded RETRY, because on Windows the launcher stub exits before the browser
-      // has written its port file: measured 300 ms to exit against 441 ms for DevToolsActivePort.
-      // One attempt therefore read too early and reported "exited immediately after launch" for a
-      // browser that was starting normally — reported as issue #33, where the reporter's own
-      // retry loop fixed it. 8 s at 250 ms is their measured-working bound and is generous against
-      // the ~150 ms gap, without turning a genuinely failed launch into a slow failure.
-      if (clean) {
-        const deadline = Date.now() + HANDOFF_ADOPT_MS
-        for (;;) {
-          const recovered = await this.adoptRunningBrowser('after a hand-off')
-          if (recovered !== undefined) return recovered
-          if (this.disposed || Date.now() >= deadline) break
-          await new Promise(resolve => setTimeout(resolve, PORT_PROBE_MS))
-        }
-      }
       throw new Error(
-        clean
-          ? `dsh-builtin-browser: ${target} exited immediately after launch (exit code 0). `
-            + 'That means it handed the request to an instance already using this profile '
-            + 'directory and quit — look for a leftover browser process from an earlier run, then retry.'
-          : `dsh-builtin-browser: ${target} exited immediately after launch `
+          `dsh-builtin-browser: ${target} exited immediately after launch `
             + `(${signal !== null ? `killed by ${signal}` : `exit code ${String(code)}`}), so it did not `
             + 'hand the request anywhere — the browser failed to start rather than deferring to another '
             + 'instance. Check that it can run at all: run it by hand, and look for a crash or a missing '
@@ -1059,7 +997,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     if (stopped === 'released') {
       throw new Error(`dsh-builtin-browser: ${target} was released while it was starting`)
     }
-    throw new Error(`dsh-builtin-browser: ${target} did not expose CDP within 30s`)
+    throw new Error(`dsh-builtin-browser: ${target} did not expose CDP within 30s. `
+      + (child.exitCode === 0 && !existsSync(portFile)
+        ? 'The launcher exited successfully without DevToolsActivePort; it may have handed off to an already-running browser without debugging enabled. '
+        : 'The selected profile did not provide a live debugging endpoint. ')
+      + 'No alternative browser profile was substituted.')
   }
 
   /**
@@ -1081,7 +1023,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * Those pages are real: they hold memory and stay until something closes them. Measured on a real
    * window: four pages present while `dsh_browser_list_tabs` reported one.
    *
-   * Discovery is already on at connection time (see the blank-page normalisation), so
+   * Discovery is enabled before the connection is published, so
    * `Target.getTargets` also lists pages that existed before this client connected.
    * @returns the browser's pages, or an empty list when it cannot answer.
    */
@@ -1098,14 +1040,14 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * CDP target id, and the two never match. The first version returned everything and relied on the
    * caller to filter, which reported the same page twice.
    *
-   * Discovery is already on at connection time (see the blank-page normalisation), so
+   * Discovery is enabled before the connection is published, so
    * `Target.getTargets` also lists pages that existed before this client connected.
    * @returns the browser's pages that are not ours, or an empty list when it cannot answer.
    */
   async listPages(
     // The installed browser is one shared instance, not a per-conversation
     // panel, so ownership does not scope its listing.
-    _owner?: string,
+    scope: BrowserSessionWireId,
     options: { readonly requireRunning?: boolean } = {},
   ): Promise<readonly CarrierPage[]> {
     // Looking for a page must never START the human's browser. Before this
@@ -1124,7 +1066,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         .filter(entry => !/^edge:\/\/sync-confirmation-dialog(?:\/|$)/.test(entry.url ?? ''))
         .filter(entry => !ours.has(entry.targetId as string))
         .map(entry => ({
-          id: entry.targetId as string,
+          id: tabWireId({ ...resolveSessionHandle(scope), tab: `page:${entry.targetId as string}` }),
           url: typeof entry.url === 'string' ? entry.url : '',
           ...typeof entry.title === 'string' && entry.title !== '' ? { title: entry.title } : {},
         }))
@@ -1137,24 +1079,36 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   /**
    * Close one page by the target id {@link listPages} reported.
    *
-   * `Target.closeTarget` is the browser's own close, so it works for pages this plugin never
-   * created. The page may already be gone if the human closed it in the meantime — the caller
-   * asked for it to be closed and it is, so that is not an error.
+   * Only targets created by this owner/session on this connection may be closed.
    * @param id - the CDP target id.
    */
-  async closePage(id: string): Promise<void> {
+  async closePage(id: BrowserTabWireId, scope = sessionWireId(readTabHandle(id))): Promise<void> {
+    const identity = resolveTabHandle(resolveSessionHandle(scope), id)
+    const view = this.views.get(id)
+    if (view === undefined && !identity.tab.startsWith('page:')) return
     const client = await this.ensureClient()
-    await client.send('Target.closeTarget', { targetId: id }).catch(() => undefined)
+    const targetId = view === undefined ? identity.tab.replace(/^page:/, '') : this.sessions.get(view.session)
+    if (targetId === undefined) throw new Error('dsh-builtin-browser: browser page is stale')
+    const creator = this.createdTargets.get(client)?.get(targetId)
+    if (creator === undefined) throw new Error('dsh-builtin-browser: personal or adopted tabs are detach-only; close the tab in the browser')
+    resolveTabHandle(resolveSessionHandle(scope), creator)
+    const answer = await client.send('Target.closeTarget', { targetId }) as { success?: boolean }
+    if (answer.success !== true) throw new Error('dsh-builtin-browser: browser close was not acknowledged')
+    this.createdTargets.get(client)?.delete(targetId)
   }
 
-  createView(): ElectronViewHandle {
-    const viewId = randomUUID()
+  createView(identity?: BrowserTabWireId): ElectronViewHandle {
+    const viewId = identity ?? tabWireId({ owner: 'standalone', session: randomUUID(), tab: randomUUID() })
+    readTabHandle(viewId)
     return {
       id: viewId,
       // This is the real browser, not Electron: CDP's JPEG encoder works here, so the
       // provider may pass format and quality through instead of falling back to PNG.
       supportsCdpJpeg: true,
       sendCommand: async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Browser.close' || method === 'Target.closeTarget' || method === 'Page.close') {
+        throw new Error('dsh-builtin-browser: use explicit tab close; browser-wide and unowned-tab closes are not allowed')
+      }
       // A command that never answered is the only signal that a client has wedged — the
       // socket can stay OPEN while nothing comes back, which is the form the reporter saw with
       // a live, healthy-looking Edge. Dropping the client here means the next call starts a new
@@ -1242,23 +1196,16 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-  destroyView(handle: ElectronViewHandle, options?: { readonly keepPage?: boolean }): void {
+  destroyView(handle: ElectronViewHandle, _options?: { readonly keepPage?: boolean }): void {
     const cachedView = this.views.get(handle.id)
     this.views.delete(handle.id)
     if (cachedView === undefined) return
     const session = cachedView.session
-    // A session id is not a target id: closing the page needs the target the session
-    // was attached to, which is why they are tracked separately.
     const targetId = this.sessions.get(session)
     this.sessions.delete(session)
     // Nothing to close if the browser was never started.
     if (targetId !== undefined && this.client !== undefined) {
-      if (options?.keepPage === true) {
-        void this.client.send('Target.detachFromTarget', { sessionId: session }).catch(() => undefined)
-        return
-      }
-      // Best-effort: a page that is already gone is not an error.
-      void this.client.send('Target.closeTarget', { targetId }).catch(() => undefined)
+      void cachedView.client.send('Target.detachFromTarget', { sessionId: session }).catch(() => undefined)
     }
   }
 
@@ -1306,7 +1253,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * view-level concern and not available to the host.
    */
   async focus(): Promise<void> {
-    try { this.child?.kill('SIGCONT') } catch { /* Windows has no SIGCONT; nothing to do */ }
+    if (this.child && await this.ownership.verify(this.child)) {
+      try { this.child.kill('SIGCONT') } catch { /* Windows has no SIGCONT. */ }
+    }
   }
 
 
@@ -1324,13 +1273,19 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     const client = this.client
     this.forgetBrowserState()
     this.client = undefined
-    // Ask before killing. `kill()` on Windows is TerminateProcess, which gives the browser no
-    // chance to flush its profile — and Chrome records how it ended in that profile, so a
-    // hard kill leaves it marked as a crash and the NEXT launch offers to restore a session.
-    // That is a visible symptom (an extra window) traced all the way back to this line.
-    if (client !== undefined) {
-      try { void client.send('Browser.close', {}).catch(() => { /* it is closing, not talking */ }) } catch { /* already gone */ }
+    const disconnect = async (): Promise<void> => {
+      if (!client) return
+      const owner = this.ownedClients.get(client)
+      try {
+        if (owner && await this.ownership.verify(owner)) {
+          const result = await client.send('SystemInfo.getProcessInfo', {}, undefined, 1000) as { processInfo?: { type: string; id: number }[] }
+          if (result.processInfo?.some(entry => entry.type === 'browser' && entry.id === owner.pid)
+            && await this.ownership.verify(owner)) await client.send('Browser.close', {}, undefined, 1000)
+        }
+      } catch { /* An unverified endpoint is detach-only. */ }
+      finally { client.close() }
     }
+    void disconnect()
     // Both the browser we launched and anything that ignored an earlier kill. They hold this
     // profile, so leaving them running means the next launch contends with a browser nobody owns.
     const doomed = [this.child, ...this.stubborn.splice(0)].filter(
@@ -1345,34 +1300,35 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
        * ending does not wait for this, and the browser — having been asked to close — generally
        * gets there on its own. If it does not, the kill still lands while the process lives.
        */
-      const force = (): void => { try { dying.kill() } catch { /* already gone */ } }
+      const force = (): void => { void this.stopChild(dying) }
       const timer = setTimeout(force, CLOSE_GRACE_MS)
       timer.unref?.()
       dying.once('exit', () => { clearTimeout(timer) })
     }
     const ephemeral = this.ephemeralDir
-    if (ephemeral !== undefined) {
-      const removeEphemeral = (): void => {
-        try { rmSync(ephemeral, { recursive: true, force: true }) } catch { /* best effort */ }
-      }
-      // `this.child` was cleared above; the saved processes still own the profile until
-      // their exit events arrive. Deleting it now races Chromium's final cookie flush.
-      const live = doomed.filter(child => child.exitCode === null && child.signalCode === null)
-      if (live.length > 0) {
-        const remaining = new Set(live)
-        for (const child of live) child.once('exit', () => {
-          remaining.delete(child)
-          if (remaining.size === 0) removeEphemeral()
-        })
-      } else if (client !== undefined) {
-        // A handed-off browser has no process handle. Give its graceful close time to
-        // finish; abandoned profiles remain eligible for the next startup's safe sweep.
-        setTimeout(() => {
-          if (!client.isAlive()) removeEphemeral()
-        }, CLOSE_GRACE_MS).unref?.()
-      } else {
-        removeEphemeral()
-      }
+    const cleanup = (): void => {
+      void (async () => {
+        const removeProfile = (): void => {
+          if (ephemeral !== undefined && doomed.length > 0 && doomed.every(child => this.ownership.ownsDirectory(child, ephemeral) && this.ownedChildren.has(child)
+            && (child.exitCode !== null || child.signalCode !== null))) rmSync(ephemeral, { recursive: true, force: true })
+        }
+        if (this.profileLease !== undefined) await this.profileLease.release(removeProfile)
+        else removeProfile()
+        this.profileLease = undefined
+      })().catch(error => process.stderr.write(`[dsh-browser] profile release failed: ${String(error)}\n`))
+    }
+    // Saved processes retain the profile until their exit events arrive.
+    const live = doomed.filter(child => child.exitCode === null && child.signalCode === null)
+    if (live.length > 0) {
+      const remaining = new Set(live)
+      for (const child of live) child.once('exit', () => {
+        remaining.delete(child)
+        if (remaining.size === 0) cleanup()
+      })
+    } else if (client !== undefined) {
+      void client.whenClosed().then(cleanup)
+    } else {
+      cleanup()
     }
   }
 
@@ -1416,10 +1372,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // through the tools. Taking the blank instead makes the page the browser already opened the
       // one the caller gets.
       const adopted = await this.adoptBlankTarget(client)
-      const targetId = adopted ?? await this.createTarget(client)
+      const targetId = adopted ?? await this.createTarget(client, viewId)
       const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
       const sessionId = attached?.sessionId
       if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
+      if (adopted !== undefined) this.rememberTarget(client, targetId, viewId)
       // The session id is what page commands ride; the target id is what closes it.
       this.sessions.set(sessionId, targetId)
       this.views.set(viewId, { session: sessionId, client })
@@ -1445,8 +1402,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * @param targetId - the carrier's page id, which for this carrier IS the CDP target id.
    * @returns a handle for that page, in the same shape {@link createView} returns.
    */
-  async adoptPage(targetId: string): Promise<ElectronViewHandle> {
-    const handle = this.createView()
+  async adoptPage(identity: BrowserTabWireId, scope = sessionWireId(readTabHandle(identity))): Promise<ElectronViewHandle> {
+    const tab = resolveTabHandle(resolveSessionHandle(scope), identity).tab
+    if (!tab.startsWith('page:')) throw new Error('dsh-builtin-browser: invalid carrier page handle')
+    const targetId = tab.slice('page:'.length)
+    const handle = this.createView(identity)
     const client = await this.ensureClient()
     const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
     const sessionId = attached?.sessionId
@@ -1464,89 +1424,41 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * Take an unclaimed blank page, if the browser has one to spare.
    *
    * "Unclaimed" is what matters: a blank page the plugin is already driving belongs to a view, and
-   * handing the same target to a second view would make two views share one page. The page kept by
-   * {@link normalizeBlankPages} is exactly the unclaimed one this is looking for.
+   * handing the same target to a second view would make two views share one page.
    * @param client - the connected browser.
    * @returns the target id to reuse, or undefined when a new page has to be created.
    */
   private async adoptBlankTarget(client: CdpClient): Promise<string | undefined> {
-    try {
-      const listed = await client.send('Target.getTargets', {}) as {
-        targetInfos?: Array<{ targetId?: string; type?: string; url?: string }>
-      }
-      const claimed = new Set(this.sessions.values())
-      for (const entry of listed?.targetInfos ?? []) {
-        if (entry.type !== 'page' || typeof entry.targetId !== 'string') continue
-        if (!isBlankUrl(entry.url)) continue
-        if (claimed.has(entry.targetId)) continue
-        return entry.targetId
-      }
-      return undefined
-    } catch {
-      // Discovery is best-effort; creating a page is the behaviour this replaced.
-      return undefined
+    const listed = await client.send('Target.getTargets', {}) as {
+      targetInfos?: Array<{ targetId?: string; type?: string; url?: string }>
     }
+    if (!Array.isArray(listed?.targetInfos)) throw new Error('dsh-builtin-browser: the browser did not acknowledge its target inventory')
+    const claimed = new Set(this.sessions.values())
+    for (const entry of listed.targetInfos) {
+      if (entry.type !== 'page' || typeof entry.targetId !== 'string') continue
+      if (!isBlankUrl(entry.url)) continue
+      if (claimed.has(entry.targetId)) continue
+      return entry.targetId
+    }
+    return undefined
   }
 
   /** Create one page, refusing to go on without an id. */
-  private async createTarget(client: CdpClient): Promise<string> {
+  private async createTarget(client: CdpClient, viewId: string): Promise<string> {
     const created = await client.send('Target.createTarget', {
       url: 'about:blank',
       ...this.isQuiet() ? { background: true } : {},
     }) as { targetId?: string }
     const targetId = created?.targetId
-    if (typeof targetId !== 'string') throw new Error('dsh-builtin-browser: the browser did not create a page')
+    if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')
+    this.rememberTarget(client, targetId, viewId)
     return targetId
   }
 
-  /**
-   * Collapse the blank pages a freshly started browser comes with down to one.
-   *
-   * Chrome opens more than one page when it is given a URL on top of its own start page, and this
-   * is the browser's behaviour rather than a session restore: measured on a cleanly exited profile
-   * as well as a crashed one, both pages appear within a second of launch. There is nothing to
-   * configure away — by the time a client can talk to the browser, both already exist.
-   *
-   * Left alone the surplus page is invisible to the plugin's tab model and therefore unclosable
-   * through the tools, so it survives every navigation and accumulates for as long as the window
-   * lives. One is kept deliberately: {@link buildSession} adopts it instead of creating a third.
-   *
-   * `Target.setDiscoverTargets` has to come first. Without it the browser may omit pages that
-   * existed before this client connected — which is precisely the page that needs closing, and the
-   * reason the first attempt at this fix failed silently.
-   * @param client - the connected browser.
-   * @returns how many surplus blank pages were closed.
-   */
-  private async normalizeBlankPages(client: CdpClient): Promise<number> {
-    try {
-      await client.send('Target.setDiscoverTargets', { discover: true })
-      const listed = await client.send('Target.getTargets', {}) as {
-        targetInfos?: Array<{ targetId?: string; type?: string; url?: string }>
-      }
-      const blanks = (listed?.targetInfos ?? []).filter(
-        entry => entry.type === 'page' && typeof entry.targetId === 'string' && isBlankUrl(entry.url),
-      )
-      const claimed = new Set(this.sessions.values())
-      let closed = 0
-      // Keep the first unclaimed blank (that is the one buildSession will adopt) and close the rest.
-      let kept = false
-      for (const entry of blanks) {
-        const targetId = entry.targetId as string
-        if (claimed.has(targetId)) continue
-        if (!kept) { kept = true; continue }
-        try {
-          await client.send('Target.closeTarget', { targetId })
-          closed += 1
-        } catch {
-          // It may already be gone; one failure must not stop the rest.
-        }
-      }
-      return closed
-    } catch {
-      // A browser that will not answer Target commands has a real problem, and the next command
-      // will report it. Turning a tidy-up into a functional error here would hide that.
-      return 0
-    }
+  private rememberTarget(client: CdpClient, targetId: string, viewId: string): void {
+    let targets = this.createdTargets.get(client)
+    if (!targets) { targets = new Map(); this.createdTargets.set(client, targets) }
+    targets.set(targetId, viewId as BrowserTabWireId)
   }
 
   /** Views whose session is being created right now, so a second caller waits for the first. */
@@ -1569,11 +1481,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
  * @param timeoutMs - how long to wait for the endpoint.
  * @returns the browser banner when an endpoint answers, undefined otherwise.
  */
-export async function probeAttach(port: number = 9222, timeoutMs: number = 600): Promise<string | undefined> {
+export async function probeAttach(port: number = CDP_DEFAULT_ATTACH_PORT, timeoutMs: number = CDP_ATTACH_PROBE_TIMEOUT_MS): Promise<string | undefined> {
   const controller = new AbortController()
   const timer = setTimeout(() => { controller.abort() }, timeoutMs)
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: controller.signal })
+    const response = await fetch(cdpVersionUrl(port), { signal: controller.signal })
     if (!response.ok) return undefined
     const body = await response.json() as { Browser?: unknown }
     return typeof body.Browser === 'string' ? body.Browser : 'unknown'

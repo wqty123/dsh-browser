@@ -33,10 +33,8 @@ async function waitFor(fn, ms = 3000) {
   }
 }
 
-/** Host stub answering the probes a navigation makes (stamp + url/title). */
+/** Host stub answering the document acknowledgement and URL/title probes. */
 function makeHost() {
-  // The document stamp must change per navigation, exactly like a real load,
-  // and the URL must reflect the address actually navigated to.
   let loads = 0
   let current = 'about:blank'
   return {
@@ -44,10 +42,12 @@ function makeHost() {
       return {
         id: 'view1',
         async sendCommand(method, params) {
-          if (method === 'Page.navigate') { loads += 1; current = params.url; return {} }
+          if (method === 'Page.navigate') { loads += 1; current = params.url; return { frameId: 'main', loaderId: String(loads) } }
+          if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main', loaderId: String(loads), url: current } } }
+          if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 }
           if (method === 'Runtime.evaluate') {
             const expr = params.expression ?? ''
-            if (expr.includes('timeOrigin')) return { result: { value: `${loads}|complete` } }
+            if (expr === 'document.readyState') return { result: { value: 'complete' } }
             if (expr.includes('document.title')) return { result: { value: `${current}\u0000Example` } }
             return { result: { value: { ok: true } } }
           }
@@ -62,6 +62,7 @@ function makeHost() {
 test('a missing file resolves to the documented defaults', () => {
   const store = new SettingsStore(settingsFile())
   assert.deepEqual(store.get(), DEFAULT_SETTINGS)
+  assert.equal(store.get().browser.channel, 'sidebar', 'native windows require an explicit external browser choice')
   assert.equal(store.get().history.enabled, true, 'history records by default')
   assert.equal(store.get().ui.autoExpandOnce, true, 'auto-expand is once-per-task by default')
   assert.equal(store.get().ui.closeWithSession, false, 'closing the interface is not the default end of a session')
