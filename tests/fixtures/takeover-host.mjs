@@ -48,7 +48,7 @@ export function takeoverHost(browser = {}, ApprovalService = ApprovalContract) {
     effect: callback => { const dispose = callback(); if (typeof dispose === 'function') disposers.push(dispose) },
     inject: (_dependencies, callback) => callback(ctx),
   }
-  apply(ctx)
+  apply(ctx, { surface: 'tools' })
   events.on('approval/request', request => new Promise(resolve => {
     let answerable = true
     const answer = decision => {
