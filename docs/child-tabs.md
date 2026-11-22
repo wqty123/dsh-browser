@@ -1,37 +1,13 @@
-# Sidebar child-tab contract
+# 侧栏子标签契约
 
-No operation may create a popup or replace an opener as a substitute for a child.
+子标签归发起的对话所有。不能为它另开系统窗口，也不能用替换 opener 的页面来冒充子标签。
 
-`DesktopBrowserBridge.childTabs` version 1 registers a lease-scoped `onRequested`
-listener. A host sends `BrowserChildTabRequest` with an absolute HTTP(S) URL and
-one of these modes:
+| 载体 | 行为 |
+| --- | --- |
+| 支持 `childTabs` 协议 2 的 Desktop | 通过宿主把 Chromium 创建的原生子页接入同一侧栏，保留受浏览器同源规则约束的 opener、命名目标复用、表单提交和关闭语义。 |
+| 旧版 Desktop 桥接 | 仅支持 URL 分发契约。不承诺真实子页、窗口句柄或跨窗口消息。 |
+| Web 隔离页 | 普通新标签链接与支持的 GET 表单进入所属侧栏的新标签；显式 `noopener` 的 `window.open` 返回 `null`。需要 opener 的请求报告能力限制，不导航原页。普通 `_self` 仍在当前页导航。 |
 
-- `url-only`: no opener, named-target reuse, child handle or cross-window messaging
-  is promised. `url-only-dispatched` acknowledges dispatch into the owning
-  conversation's sidebar tab model, **not** guest readiness or native adoption.
-- `native-opener`: requires a real native child. The current plugin returns
-  `unsupported / native-child-opener-unavailable`. The host must honor this
-  decision before creating anything; it must not downgrade it to `url-only`.
+Desktop 的宿主先校验父标签租约与侧栏槽，再接入原生子页，不根据 URL 重新导航。关闭子页只移除它的标签；会话销毁或租约过期后不会继续接受它的请求。没有协议 2 时不得把依赖 opener 的请求降级为 URL 分发后报告成功。
 
-Invalid URLs return `invalid-child-url`; callbacks from a retired guest return
-`guest-disposed`. Registration is removed with the guest lease lifetime. Hosts
-without this API retain only the legacy `onOpenRequested` URL notification.
-That notification cannot distinguish opener-dependent requests, so it cannot
-establish native-child support on an installed host.
-
-The opaque Web guest implements only URL-only tabs. Its channel is checked
-against the owned iframe window, opaque origin, current load identity and
-monotonic request identity. Ordinary blank links and GET forms use URL-only
-dispatch. Explicit noopener `window.open` returns `null`; requests that need an
-opener throw `NotSupportedError` with a stable `code`. Unsupported link/form
-requests report the same capability failure without navigating or submitting.
-Before the parent handshake, a scripted open fails with
-`sidebar-tab-owner-not-ready`, rather than dropping a request or guessing an
-owner. Ordinary `_self` navigation remains in the current view.
-
-Real Desktop child support remains host-blocked. It needs an API that preserves
-the engine-created child WebContents/WindowProxy, adopts that same native child
-into a conversation-owned sidebar surface, and owns named-target reuse, opener
-messaging, close and disposal. A URL notification or a new independently loaded
-webview cannot implement that contract. Version 1 deliberately does not advertise
-these capabilities. No upstream DSH files or installer hooks implement them here.
+Web 消息必须来自当前已登记的隔离 iframe 和本次加载身份。父侧尚未建立通道时，脚本打开页面报告 `sidebar-tab-owner-not-ready`；非 HTTP(S) 子标签目标不交给侧栏分发。

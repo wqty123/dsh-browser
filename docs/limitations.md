@@ -1,37 +1,29 @@
-# 已知限制
+# 兼容性与边界
 
-这些是本插件**有意接受**或**受宿主约束**的边界。它们不是待办事项：写在这里是因为"知道为什么"能省掉一次排查。
+## 宿主与安装
 
-## Web 登录态持久化
+- **Desktop：** Windows 和 macOS 提供设置内桥接维护。可用功能取决于宿主公开的接口及桥接状态。宿主补丁按 DSH **0.2.2-rc.3 / rc.5** 的受支持构建校验，不承诺同版本号的任意产物都能应用；rc.5 Desktop 的补丁基线来自源码构建，不代表已验证所有分发包。遇到无法识别的文件、备份或冲突修改时会拒绝，而不是强行安装。
+- **Web：** 有手动浏览和引用，没有 Desktop CDP、原生视图及 opener 语义。Web 宿主补丁不把 iframe 升级成原生浏览器。
+- **无独立回退：** 默认和旧的 `bundled` / `auto` 值都只使用侧栏。不存在自动下载 Electron 或自动选择外部浏览器的路径。
+- **原生子标签：** 有协议支持的 Desktop 将真正的浏览器子页放在同一侧栏。Web 和仅有 URL 通知的旧宿主只支持不依赖 opener 的子标签；不伪造窗口句柄，也不会用覆盖原标签冒充新标签。见[子标签契约](child-tabs.md)。
+- **安静模式：** 插件的操作不抢系统焦点或移动系统鼠标。浏览器的调试提示条、权限提示、下载提示等不受插件控制。
 
-DSH 是本地单用户应用：每个 `DSH_HOME` 只有一个持久 Cookie 存储，所有工作区、会话和标签共享站点登录 Cookie。不使用用户、profile、工作区或会话 ID 分罐。
+## Web 隔离与站点兼容性
 
-Web 代理的上游 Cookie 保存在 `<DSH_HOME>/dsh-builtin-browser-host/web-cookies/cookies.json`，临时文件原子替换，权限 0600（Windows 仍需 DSH_HOME 的用户 ACL 保护）。它们不是加密保险库；不要共享或上传该目录。Cookie 值不写日志，也不回传到 DSH 页面的 Cookie 存储。关闭标签及重启 Web 服务均保留登录 Cookie，包括没有 Expires/Max-Age 的 session Cookie，类似 Chrome“继续浏览上次打开的网页”的恢复策略；session Cookie 不会被人为添加有效期。显式有效期与删除仍生效：过期 Expires、非正 Max-Age 会删除 Cookie，且不会在重启时恢复；Max-Age 优先于 Expires。Cookie 按规范化的 origin（协议、主机、端口）隔离。无效条目逐条丢弃；文件损坏或不可读时使用空罐并尝试原子重写。磁盘写入失败不阻断网页，但此次变更可能无法跨重启保留。
+网页和嵌套 iframe 是 opaque-origin guest，禁止访问 DSH 应用的存储、Cookie 或已认证 API。代理保留上游站点所需的会话状态，但这不能替代所有浏览器 API。依赖跨窗口登录、第三方存储、worker 或其它受限能力的页面可能需要 Desktop 原生侧栏或本机浏览器。
 
-这不保证所有网站均可登录：opaque-origin guest 的隔离、第三方登录流程和依赖浏览器存储的站点仍有限制。桌面侧栏使用 #64 宿主提供的 Electron partition；Web 的持久化不改变 Desktop 的 partition 行为。
+嵌套文档仍受响应沙箱约束。由于 opaque-origin 祖先无法匹配 CSP 的同源条件，guest 路由不使用 `frame-ancestors` 来禁止所有外部嵌入；隔离边界不是防点击劫持保证。
 
-## Web 代理文档的嵌套与隔离
+## 登录态与接管
 
-Web 页面和嵌套 iframe 都受响应级 `sandbox allow-scripts allow-forms` 约束，不带 `allow-same-origin`。代理不转发 DSH cookie/token，CSP 的网络目标仍只允许 guest 路由，不能访问 DSH API 或存储。
-
-**嵌入限制的取舍：** opaque-origin 祖先不匹配 CSP 的 `'self'`，也没有可单独授权的源表达式。因此 guest 路由不设置 `frame-ancestors`，以支持嵌套文档；外部站点也可能嵌入这些隔离页面（包括点击劫持风险），但不会获得 DSH 同源权限。若必须拒绝所有外部嵌入，需要独立 guest origin 或由宿主支持的已认证嵌入协议，不能仅靠给 opaque 祖先添加 CSP 白名单实现。
+- Desktop 原生侧栏和 Web 代理各自在 `DSH_HOME` 下保存站点登录状态。归同一个 DSH 实例的侧栏共享站点登录，不按任务分开；Desktop 和 Web 不互相导入。已保存的会话 Cookie 不人为添加过期时间，主动退出和到期仍生效。不要共享或上传状态目录。
+- 本机 Chrome / Edge 的独立配置不等于用户的个人配置。只有可用的个人浏览器扩展可以复用后者；回退的 CDP 会话没有个人浏览器的登录态。
+- 持久会话不是 `dsh_browser_auth` 的导入／导出；该工具还受独立的读写权限和当前站点范围限制。URL 不明时拒绝导出，不扩大范围。
+- CAPTCHA、滑块、登录和其它敏感确认由人工接管。插件不会绕过站点验证或重新提交敏感动作。
 
 ## 截图
 
-当前默认与回退载体仅限 DSH 侧栏：`bundled`、`auto` 是 `sidebar` 的旧设置别名，不再启动自托管 Electron 或自动选择本机浏览器。下文自托管实现的描述仅供历史诊断，不代表可选载体。外部 Chrome / Edge 需要显式选择。缺少宿主侧栏 API 时，工具报告能力错误；不要用修改 `app.asar` 的旧 bridge 安装器补齐该能力。
-
-- JPEG 在**自托管**与**本机 Chrome / Edge** 上可用;**桌面端侧栏**走外壳的 `webContents.debugger`,其 Electron 的 CDP JPEG 编码会挂起,因此该载体下请求 JPEG 会返回 PNG。
-- 降采样(`maxWidth`/`maxHeight`)**三种载体都支持**(经 CDP `clip.scale`,或自托管走原生 `capturePage`)。
-- 自托管截图优先走 Electron 原生 `capturePage`(CDP `captureScreenshot` 在多视图下会挂起);截图前自动把目标标签置顶 —— 除非开启**安静模式**,那时不碰窗口(见下)。
-- `fullPage` 在部分主机的**软件合成**下不稳定 —— 请求 `fullPage` 时**原生 `capturePage` 路径被整体跳过**(它没有捕获滚动区以外内容的能力),因此**三种载体都走 CDP 的 `captureBeyondViewport`**。也就是说 `fullPage` 的不稳定性与载体无关,任何载体都可能碰到;只有视口截图才优先走原生路径。
-
-## 验证与登录
-
-- 人机验证(CAPTCHA)无法自动解决:快照会标注检测到的挑战,此时应请用户在共享窗口中人工完成,而不是反复重试。
-- `dsh_browser_auth` 的 cookie 往返**不保留** `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie)。
-- `flush` **只导出当前页所属站点的 cookie**,不是整台机器的共享 cookie 罐 —— 范围按本会话所在页面的 URL 收敛;页面没有可用 URL 时**直接拒绝**,而不是扩大范围去读全部域(自托管侧栏载体报"无法确定 cookie 范围",CDP 载体报 `BROWSER_AUTH_SCOPE_UNKNOWN`)。
-- `dsh_browser_restrict` 的白名单**也管着 `dsh_browser_auth`**,因为 `restore` 是向任意域写 cookie 的动作,不是观察。
-- 自托管浏览器的 cookie 在磁盘上**以明文存储**(Electron 默认行为);需要加密落盘的部署应在宿主层接入系统钥匙串 / DPAPI。
+截图和尺寸设置取决于所选载体。桌面侧栏请求 JPEG 时可能得到 PNG；读取返回的媒体类型。整页截图在部分软件合成环境下可能失败，必要时改用视口截图。只读远程预览不是 Web guest 的 CDP 截图接口。
 
 ## 权限与门控
 
@@ -46,64 +38,6 @@ Web 页面和嵌套 iframe 都受响应级 `sandbox allow-scripts allow-forms` �
 - 单文件上限 **256MB**(流式限流,按 Content-Length 提前拒绝),文件由浏览器子进程直接落盘。下载与截图使用独占的随机临时文件,不会覆盖既有 `.part` 或最终文件;支持硬链接的文件系统原子提交,不支持时用独占复制提交,该回退在进程崩溃时可能留下未完成的新文件。
 - 准入还会解析路径的**真实归属**:`downloadDir` 里的符号链接无法把写入带出目录,悬空链接同样被拒(它读作"名字已被占用",而不是"路径空闲")。
 
-## 载体行为
+## 本机浏览器窗口模式
 
-- **本机 Chrome / Edge 载体**在无显示环境会自动改用 headless。`browser.headless` 仅作用于这个载体:默认 `auto` 是"有显示开窗口,没显示走 headless"。使用 systemd、容器或 SSH 服务器时,应选择已安装的 Chrome / Edge;默认内置 Electron 和桌面侧栏没有接入此设置,不能据此保证无显示启动。修改后重新选择载体或重启 DSH 生效。
-
-  想显式控制时:
-
-  | 设置 | 行为 |
-  | --- | --- |
-  | `"auto"`(默认) | 有显示 → 窗口;无显示 → headless |
-  | `"headless"` | 强制 headless(服务器 / 截图专用 / CI) |
-  | `"windowed"` | 强制窗口;显示不可用时**直接报错**,而不是悄悄退化 |
-
-  手写 `true` / `false` 也接受,分别等价于 `headless` / `windowed`。运行中的部署可以用环境变量覆盖设置,不必改文件:`DSH_BROWSER_HEADLESS=1` 强制 headless,`=0` 强制窗口(环境变量优先于设置项)。
-
-  headless 启动会自动带上 `--disable-gpu` 与 `--disable-dev-shm-usage`;`--no-sandbox` **只在必要时**加(以 root 运行,或在容器内),并且会在 stderr 明确写出——降低进程隔离这件事必须让人能看见并反对。
-
-- **侧栏载体有前置条件**,不是装上 bridge 就成立。官方侧栏浏览器面板只在**外壳同时满足**两个条件时才是 `<webview>`:
-  1. `preload` 暴露 `dshDesktop.browser`(而不只是 `protocolVersion`);
-  2. 外壳窗口开启 `webviewTag`。
-
-  **两个条件缺任一个,面板就是 `<iframe>`** —— 没有 webContents、没有 `getWebContentsId()`、没有 CDP 端点,而本插件的全部工具都建立在 CDP 之上。**DSH Desktop 2.0.17 两者皆无**(`lib/preload.cjs` 只暴露 `protocolVersion`;窗口设置里 `webviewTag: false`),所以那个版本上的侧栏面板不可驱动。
-
-  插件从 0.4.10 起**在接管之前先读面板形态**(面板自己带的 `data-sidebar-browser-frame` 属性),判到 `iframe` 就不接管,直接用自托管载体,并在日志里说明原因。**结果是"能用但多一个窗口",而不是"装完就坏"。**
-
-  0.4.16 适配 rc.5 的嵌套会话标记和无 React fiber 的 webview。列页和关闭仍须能确认请求会话与 tab 身份;归属缺失、身份冲突或未知宿主结构会明确拒绝。**插件更新不会更新外壳或外壳内的 bridge**,使用侧栏需另行备份并重装新版 bridge。
-
-- **侧栏载体不上报"用户操作"事件**:人在那个页面里点击是外壳自己的事件,而 bridge 没有用于回报它的操作。因此依赖该事件的功能(如自定义的接管提示)在桌面端侧栏下不会触发;换到自托管载体则可以。
-- **本机 Chrome / Edge 载体使用插件自己的 profile**:插件用它自己的用户数据目录启动浏览器(`$DSH_HOME/dsh-builtin-browser-host/<chrome|edge>-profile`),所以你日常浏览器里的书签、扩展与登录态**不会自动继承** —— 这是刻意的,避免插件操作与你的个人会话混在一起;登录态是否跨重启保留由 `cookies.persist` 决定。
-- 页面不能打开原生弹窗。Web 的普通 `target=_blank` 链接、GET 表单及显式 `window.open(url, '_blank', 'noopener')` 只请求同会话侧栏中的 URL 标签，不建立 child/opener、命名窗口、`WindowProxy` 或跨窗口通信；`window.open` 的该受限模式返回 `null`。需要 opener、命名目标、空白子窗口或 POST 新目标的请求会明确报 `native-child-opener-unavailable`，不会改为覆盖原页面。Desktop 的旧 `onOpenRequested` 也只是 URL 通知，不能证明支持原生 child/opener。新宿主可实现 `DesktopBrowserBridge.childTabs` v1 的结构化请求/拒绝协议（见 `docs/child-tabs.md`）；当前插件仍不支持原生子窗口接管。
-- 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建** —— 仅页面状态丢失,无需手动 `dsh_browser_reset_session`。`dsh_browser_reset_session` 仍可用于主动重置。
-- 新视图创建前会先有界加载 `about:blank`(3 秒上限,保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时。
-- 子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`;写之前若该文件已超过 2 MiB,则**丢弃旧内容、只写入一行带时间戳的轮转记录**(形如 `<ISO 时间戳> log rotated: previous content exceeded 2097152 bytes and was discarded`)—— 旧内容就此消失不留副本,但那一行证明"曾发生过轮转",纯 `dsh web` 自托管可据此自助排查崩溃循环。
-
-## 安静模式(`ui.quiet`)
-
-默认关闭。默认契约是"人机共享同一个窗口":每次操作把窗口带到前面,用户能直接看见 agent 在做什么。开启后,自托管的 Electron 载体改成"能操作,但不接管屏幕":
-
-| 操作 | 默认 | 安静模式 |
-| --- | --- | --- |
-| 截图 | 显示 / 还原 / 聚焦窗口,再 `capturePage` | 不碰窗口;窗口不可见时直接走 CDP `Page.captureScreenshot` |
-| 输入(点击 / 输入 / 按键) | `show()` + `moveTop()` + 聚焦 | 最小化则 `restore()`,不可见则 `showInactive()`;不激活应用、不抢键盘焦点、不 `moveTop()` |
-| 标签切换 / 导航 | 同输入,把窗口置前 | 只换窗口内可见的标签,最小化的窗口保持最小化 |
-
-它不是"不显示窗口"。合成输入(CDP `Input.*`)仍需要视图有**显示表面**,Chromium 对没有表面的视图会静默丢弃输入 —— 所以点击/输入可能把最小化的窗口恢复成可见,但不会成为 key window,也不会盖在用户正在用的窗口上。截图和导航没有这个约束,因此是安静模式下完全不动窗口的操作。
-
-边界:
-
-- **只作用于自托管 Electron 载体**(插件的 `host-main` 子进程)。桌面端侧栏由外壳承载,`ui.quiet` 不改变外壳的展示策略;安装版 Chrome / Edge 载体各自管理自己的窗口。
-- 用户主动操作(点工具栏、切标签)不受影响 —— 它们本来就发生在那个窗口里。
-- 窗口完全不可见时,安静模式仍会让它出现在屏幕上(只是不聚焦)。要"连出现都不要",请在截图之外使用非视觉能力(snapshot / a11y / content),它们本来就不需要显示表面。
-
-## 不提供的东西
-
-- **无痕模式(`privateMode`)未实现**:它需要 Electron 的 session 分区能力,属于宿主层,本插件不承诺。
-- **本插件不提供任何浏览器界面**:地址栏、标签条、侧栏面板都不是插件画的。桌面端的浏览器界面是**外壳自带的官方侧栏**,我们只是借它的页面来驱动;自托管载体下画窗口的是插件拉起的那个 Electron 子进程,那是载体本身而非插件 UI。别把"侧栏"或"浏览器列"当成插件能力。
-
-## Electron 运行时
-
-- Electron 包自身在 44+ 使用懒下载。本插件没有安装期生命周期脚本,不会在安装过程中下载二进制。需要修复运行时的操作员可显式运行准备命令(约 100MB,需网络);这不启用独立 Electron 窗口作为侧栏回退。
-- `--ignore-scripts` 或显式跳过下载会保留未下载状态。可在正确 profile 目录运行 `npx --no dsh-browser-install-electron`,它也遵守 `ELECTRON_SKIP_BINARY_DOWNLOAD`;需要下载时先撤销跳过设置。运行时探测仍为纯文件系统操作,不自动下载。离线时可用 `ELECTRON_PATH` 指定预装二进制,详见[用户指南](user-guide.md#准备-electron-二进制)。
-- 0.4.16 的依赖为 `^44.10.0`,锁文件解析到 `44.10.0`,安全最低阈值为 `44.9.1`。**已有且有效的 `ELECTRON_PATH` 优先于这份依赖**,升级插件不会更改该覆盖;旧覆盖可能让实际使用的内核继续停在旧版。侧栏使用的是桌面外壳的内核,也不随插件升级。
+`browser.headless` 只用于 DSH 启动的独立 Chrome / Edge 配置。默认 `auto` 根据显示环境选择窗口或无头；`headless` 强制无头，`windowed` 要求显示可用。它不会改变 Desktop 或 Web 侧栏，也不控制扩展连接中的个人浏览器。
