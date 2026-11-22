@@ -49,10 +49,11 @@ jobs:
         run: node scripts/build.mjs
       - name: Test
         working-directory: ${{ env.WORKSPACE }}/packages/web/dsh-browser
+        # A virtual display: `headless: auto` launches assume a desktop session, as on a user's machine.
         # These two rebuild a staged copy outside the workspace, where the build plugin cannot find
         # the monorepo declaration tree; the pack check below covers the packed contents instead.
         run: >-
-          node tests/run.mjs
+          xvfb-run -a node tests/run.mjs
           "--test-skip-pattern=^pack includes the extension and dependency-free native host"
           "--test-skip-pattern=^packed host and cookie jar load after extraction"
       - name: Pack check
