@@ -141,6 +141,26 @@ test('the REPL keeps variables across calls and prints the last expression', asy
   assert.equal(value.output, '[2,4,6]')
 })
 
+test('destructured bindings, hoisted functions and multiline template strings persist cleanly', async () => {
+  const { run } = mount()
+  const first = await run(`
+    const hoisted = triple(4)
+    function triple(n) { return n * 3 }
+    const [a, b] = [10, 20]
+    const { x: alias = 5, nested: { y } } = { nested: { y: 7 } }
+    const snippet = \`
+const notTopLevel = 1
+return 'still-inside-template'
+\`
+    ({ hoisted, len: snippet.length })
+  `)
+  assert.equal(first.ok, true, first.output)
+  assert.match(first.output, /"hoisted":12/)
+  const second = await run('[a, b, alias, y, triple(2), typeof notTopLevel]')
+  assert.equal(second.ok, true, second.output)
+  assert.equal(second.output, '[10,20,5,7,6,"undefined"]')
+})
+
 test('a cell past its deadline is killed, even a busy loop after await, and the REPL restarts', async () => {
   const { tools } = mount()
   const code = tools.get('dsh_browser_code')
@@ -163,6 +183,35 @@ test('an already cancelled call runs no browser action', async () => {
   assert.equal(calls.some(([name]) => name === 'click'), false)
 })
 
+test('a cell cancelled mid-run still returns output printed before cancellation', async () => {
+  const { tools } = mount()
+  const code = tools.get('dsh_browser_code')
+  const exec = { agent: { id: 'mid-cancel-owner' } }
+  await code.execute({ code: '1' }, exec)
+  const controller = new AbortController()
+  const running = code.execute({ code: "print('partial finding'); await sleep(5000); print('never')" }, { ...exec, signal: controller.signal })
+  setTimeout(() => controller.abort(new Error('user stopped')), 150)
+  const value = await running
+  assert.equal(value.ok, false)
+  assert.match(value.output, /partial finding/)
+  assert.match(value.output, /cell cancelled/)
+  assert.doesNotMatch(value.output, /never/)
+})
+
+test('concurrent calls for the same task serialize without clobbering worker callbacks', async () => {
+  const { tools } = mount()
+  const code = tools.get('dsh_browser_code')
+  const exec = { agent: { id: 'serial-owner' } }
+  const [first, second] = await Promise.all([
+    code.execute({ code: 'await sleep(80); const shared = 41; shared' }, exec),
+    code.execute({ code: 'shared + 1' }, exec),
+  ])
+  assert.equal(first.ok, true, first.output)
+  assert.equal(first.output, '41')
+  assert.equal(second.ok, true, second.output)
+  assert.equal(second.output, '42')
+})
+
 test('fill throws when a field fails, so later steps do not run', async () => {
   const { run } = mount({ fillForm: async () => ({ fields: [{ ok: false, target: '#email', error: 'not found' }], submitted: false }) })
   await run(`await call('open', { url: 'https://example.test/', surface: 'builtin' })`)
@@ -170,6 +219,24 @@ test('fill throws when a field fails, so later steps do not run', async () => {
   assert.equal(value.ok, false)
   assert.match(value.output, /fill: 1 field\(s\) failed: #email: not found/)
   assert.doesNotMatch(value.output, /submitted/)
+})
+
+test('type() rejects an object target without a string text argument', async () => {
+  const { run } = mount()
+  await run(`await call('open', { url: 'https://example.test/', surface: 'builtin' })`)
+  const value = await run(`await type({ css: '#q' })`)
+  assert.equal(value.ok, false)
+  assert.match(value.output, /text must be a string when target is an object/)
+})
+
+test('scroll(x, y, dy) uses coordinates via elementFromPoint instead of dropping them', async () => {
+  const scripts = []
+  const { run } = mount({ execute: async (_session, request) => { scripts.push(request.script); return { ok: true, value: JSON.stringify('Scrolled element.') } } })
+  await run(`await call('open', { url: 'https://example.test/', surface: 'builtin' })`)
+  const value = await run('await scroll(120, 240, 300)')
+  assert.equal(value.ok, true, value.output)
+  assert.match(scripts.at(-1), /elementFromPoint\(120, 240\)/)
+  assert.match(scripts.at(-1), /top: 300/)
 })
 
 test('js() returns page strings exactly, even when they look like JSON numbers', async () => {
@@ -209,8 +276,12 @@ test('the REPL that replaces a killed one keeps its variables', async () => {
 })
 
 test('cells become REPL cells: declarations persist and the last expression is the value', () => {
-  assert.equal(prepare('const a = 1\nlet b = 2\na + b'), 'globalThis.a = 1\nglobalThis.b = 2\nreturn (a + b)')
-  assert.equal(prepare('async function f() {\n  return 1\n}'), 'globalThis.f = async function f() {\n  return 1\n}')
+  const decl = prepare('const a = 1\nlet b = 2\na + b')
+  assert.match(decl, /globalThis\.a = a/)
+  assert.match(decl, /globalThis\.b = b/)
+  assert.match(decl, /return \(a \+ b\)/)
+  const fn = prepare('async function f() {\n  return 1\n}')
+  assert.match(fn, /globalThis\.f = f/)
   assert.equal(prepare('if (x) {\n  y()\n}'), 'if (x) {\n  y()\n}')
   assert.equal(prepare('return 5'), 'return 5')
 })

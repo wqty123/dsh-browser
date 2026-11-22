@@ -8,6 +8,7 @@
  * screenshot path are the same as when those tools were called directly.
  */
 import { fork, type ChildProcess } from 'node:child_process'
+import { existsSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -82,6 +83,17 @@ function format(value: unknown): string {
   return typeof value === 'string' ? value : JSON.stringify(value) ?? String(value)
 }
 
+/**
+ * Resolve the worker script path for both built (`lib/*.js`) and dev (`src/*.ts`) installs,
+ * and include both symlink and real paths for Node's `--allow-fs-read` permission flag (pnpm).
+ */
+function resolveWorkerScript(): { readonly script: string; readonly allowRead: readonly string[] } {
+  const jsPath = fileURLToPath(new URL('./code-worker.js', import.meta.url))
+  const raw = existsSync(jsPath) ? jsPath : fileURLToPath(new URL('./code-worker.ts', import.meta.url))
+  const real = (() => { try { return realpathSync(raw) } catch { return raw } })()
+  return { script: real, allowRead: [...new Set([raw, real])] }
+}
+
 class CellWorker {
   readonly child: ChildProcess
   readonly ready: Promise<void>
@@ -91,9 +103,9 @@ class CellWorker {
   private idleTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor() {
-    const script = fileURLToPath(new URL('./code-worker.js', import.meta.url))
+    const { script, allowRead } = resolveWorkerScript()
     this.child = fork(script, [], {
-      execArgv: permissionArgs(script),
+      execArgv: permissionArgs(allowRead),
       // An allow-listed environment: the cell never sees the host's keys or tokens.
       env: { ...process.versions.electron !== undefined ? { ELECTRON_RUN_AS_NODE: '1' } : {}, NODE_NO_WARNINGS: '1' },
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
@@ -106,12 +118,23 @@ class CellWorker {
       this.onMessage = message => { if (message.type === 'ready') resolve() }
       this.child.once('exit', () => reject(new Error(`the REPL worker did not start: ${stderr.trim() || 'exited'}`)))
     })
+    // Prevent unhandled rejections if the caller aborts while the worker is starting and kills it.
+    this.ready.catch(() => {})
     this.child.on('message', message => this.onMessage?.(message as WorkerMessage))
     this.child.once('exit', (code, signal) => {
       this.exited = true
       this.onExit?.(stderr.trim() || `exited (${signal ?? code})`)
     })
     this.idle()
+  }
+
+  send(message: unknown): boolean {
+    if (this.exited || !this.child.connected) return false
+    try {
+      return this.child.send(message)
+    } catch {
+      return false
+    }
   }
 
   busy(): void {
@@ -140,12 +163,32 @@ class CellWorker {
  * Node's permission model for the worker: it may read its own script and nothing else, and it
  * cannot spawn processes, start workers or load addons. Model code that escapes the vm context
  * reaches only this process.
- * @param script - the worker script path.
+ * @param paths - the worker script paths (symlink and resolved realpath).
  */
-function permissionArgs(script: string): string[] {
+function permissionArgs(paths: readonly string[]): string[] {
   const flags = process.allowedNodeEnvironmentFlags
   const flag = flags.has('--permission') ? '--permission' : flags.has('--experimental-permission') ? '--experimental-permission' : undefined
-  return flag === undefined ? [] : [flag, `--allow-fs-read=${script}`]
+  return flag === undefined ? [] : [flag, ...paths.map(path => `--allow-fs-read=${path}`)]
+}
+
+/** Wait for a worker to finish booting, aborting promptly if the caller cancels before execution starts. */
+async function awaitWorkerReady(worker: CellWorker, signal: AbortSignal | undefined, onCancel: () => void): Promise<void> {
+  signal?.throwIfAborted()
+  if (signal === undefined) {
+    await worker.ready
+    return
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      onCancel()
+      reject(signal.reason ?? new Error('cell cancelled'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    worker.ready.then(
+      () => { signal.removeEventListener('abort', onAbort); resolve() },
+      error => { signal.removeEventListener('abort', onAbort); reject(error) },
+    )
+  })
 }
 
 /**
@@ -155,6 +198,21 @@ function permissionArgs(script: string): string[] {
  */
 export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
   const workers = new Map<string, CellWorker>()
+  const locks = new Map<string, Promise<unknown>>()
+  const serialize = async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = locks.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const next = new Promise<void>(resolve => { release = resolve })
+    const chain = prev.then(() => next)
+    locks.set(key, chain)
+    await prev
+    try {
+      return await fn()
+    } finally {
+      release()
+      if (locks.get(key) === chain) locks.delete(key)
+    }
+  }
   const workerFor = (key: string): CellWorker => {
     const existing = workers.get(key)
     if (existing !== undefined && !existing.exited) return existing
@@ -212,118 +270,129 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
       if (typeof args.code !== 'string' || args.code.trim() === '') throw new Error('code must be a non-empty JavaScript cell')
       const budget = Math.min(Math.max(Number(args.timeoutMs ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS, 1000), MAX_TIMEOUT_MS)
       const key = (exec as { agent?: { id?: string } }).agent?.id ?? 'default'
-      const controller = new AbortController()
-      const lines: string[] = []
-      const images: ImageAttachment[] = []
-      let calls = 0
-      let ok = true
-      // Same scheduling as DSH run_code: concurrency-safe calls overlap (bounded), an action waits
-      // for everything before it and holds back everything after it.
-      let barrier: Promise<unknown> = Promise.resolve()
-      const inflight = new Set<Promise<unknown>>()
-      let slots = MAX_PARALLEL_CALLS
-      const waiters: (() => void)[] = []
-      const acquire = async () => { while (slots === 0) await new Promise<void>(go => waiters.push(go)); slots-- }
-      const release = () => { slots++; waiters.shift()?.() }
-      const schedule = (safe: boolean, watcher: 'arming' | boolean, run: (armed?: () => void) => Promise<void>): void => {
-        if (watcher !== false) {
-          const gate = barrier
-          let arm = (): void => {}
-          const armed = new Promise<void>(go => { arm = go })
-          void (async () => { await gate; await run(arm) })().finally(arm)
-          if (watcher === 'arming') barrier = Promise.all([gate, armed])
-        } else if (safe) {
-          const gate = barrier
-          const call = (async () => { await gate; await acquire(); try { await run() } finally { release() } })()
-          inflight.add(call)
-          void call.finally(() => inflight.delete(call))
-        } else {
-          const prior = Promise.all([barrier, ...inflight])
-          barrier = (async () => { await prior; await run() })()
+      return serialize(key, async () => {
+        exec.signal?.throwIfAborted()
+        const controller = new AbortController()
+        const lines: string[] = []
+        const images: ImageAttachment[] = []
+        let calls = 0
+        let ok = true
+        // Same scheduling as DSH run_code: concurrency-safe calls overlap (bounded), an action waits
+        // for everything before it and holds back everything after it.
+        let barrier: Promise<unknown> = Promise.resolve()
+        const inflight = new Set<Promise<unknown>>()
+        let slots = MAX_PARALLEL_CALLS
+        const waiters: (() => void)[] = []
+        const acquire = async () => { while (slots === 0) await new Promise<void>(go => waiters.push(go)); slots-- }
+        const release = () => { slots++; waiters.shift()?.() }
+        const schedule = (safe: boolean, watcher: 'arming' | boolean, run: (armed?: () => void) => Promise<void>): void => {
+          if (watcher !== false) {
+            const gate = barrier
+            let arm = (): void => {}
+            const armed = new Promise<void>(go => { arm = go })
+            void (async () => { await gate; await run(arm) })().finally(arm)
+            if (watcher === 'arming') barrier = Promise.all([gate, armed])
+          } else if (safe) {
+            const gate = barrier
+            const call = (async () => { await gate; await acquire(); try { await run() } finally { release() } })()
+            inflight.add(call)
+            void call.finally(() => inflight.delete(call))
+          } else {
+            const prior = Promise.all([barrier, ...inflight])
+            barrier = (async () => { await prior; await run() })()
+          }
         }
-      }
-      const concurrencySafe = (name: string, toolArgs: Record<string, unknown>): boolean => {
-        try { return resolve(name).isConcurrencySafe?.(toolArgs as never) === true } catch { return false }
-      }
-      const worker = workerFor(key)
-      const forget = () => { if (workers.get(key) === worker) workers.delete(key) }
-      worker.busy()
-      try {
-        await worker.ready
-        const outcome = await new Promise<{ ok: boolean; error?: string }>(finish => {
-          let timer: ReturnType<typeof setTimeout> | undefined
-          const settle = (result: { ok: boolean; error?: string }) => {
-            clearTimeout(timer)
-            exec.signal?.removeEventListener('abort', onAbort)
-            worker.onMessage = undefined
-            worker.onExit = undefined
-            finish(result)
-          }
-          const stop = (reason: string) => {
-            controller.abort(new Error(reason))
-            worker.onExit = undefined
-            worker.kill()
-            forget()
-            settle({ ok: false, error: `${reason}; the REPL was restarted, so its variables are gone (browser state is kept)` })
-          }
-          const onAbort = () => stop('cell cancelled')
-          exec.signal?.addEventListener('abort', onAbort, { once: true })
-          if (exec.signal?.aborted === true) { onAbort(); return }
-          timer = setTimeout(() => stop(`cell exceeded its ${budget}ms deadline`), budget)
-          worker.onExit = reason => { forget(); settle({ ok: false, error: `the REPL worker exited: ${reason}` }) }
-          worker.onMessage = message => {
-            if (message.type === 'log') lines.push(message.text)
-            else if (message.type === 'done') settle(message)
-            else if (message.type === 'call') {
-              const { id, name, args: toolArgs } = message
-              if (name === '__help') void dispatch(id, name, toolArgs)
-              else {
-                const full = name.startsWith(PREFIX) ? name : PREFIX + name
-                schedule(concurrencySafe(name, toolArgs), ARMING.has(full) ? 'arming' : WATCHERS.has(full), armed => dispatch(id, name, toolArgs, armed))
+        const concurrencySafe = (name: string, toolArgs: Record<string, unknown>): boolean => {
+          try { return resolve(name).isConcurrencySafe?.(toolArgs as never) === true } catch { return false }
+        }
+        const worker = workerFor(key)
+        const forget = () => { if (workers.get(key) === worker) workers.delete(key) }
+        worker.busy()
+        let cellStarted = false
+        try {
+          await awaitWorkerReady(worker, exec.signal, () => { worker.kill(); forget() })
+          exec.signal?.throwIfAborted()
+          const outcome = await new Promise<{ ok: boolean; error?: string }>(finish => {
+            let timer: ReturnType<typeof setTimeout> | undefined
+            const settle = (result: { ok: boolean; error?: string }) => {
+              clearTimeout(timer)
+              exec.signal?.removeEventListener('abort', onAbort)
+              worker.onMessage = undefined
+              worker.onExit = undefined
+              finish(result)
+            }
+            const stop = (reason: string) => {
+              controller.abort(new Error(reason))
+              worker.onExit = undefined
+              worker.kill()
+              forget()
+              settle({ ok: false, error: `${reason}; the REPL was restarted, so its variables are gone (browser state is kept)` })
+            }
+            const onAbort = () => stop('cell cancelled')
+            exec.signal?.addEventListener('abort', onAbort, { once: true })
+            if (exec.signal?.aborted === true) { onAbort(); return }
+            timer = setTimeout(() => stop(`cell exceeded its ${budget}ms deadline`), budget)
+            worker.onExit = reason => { forget(); settle({ ok: false, error: `the REPL worker exited: ${reason}` }) }
+            worker.onMessage = message => {
+              if (message.type === 'log') lines.push(message.text)
+              else if (message.type === 'done') settle(message)
+              else if (message.type === 'call') {
+                const { id, name, args: toolArgs } = message
+                if (name === '__help') void dispatch(id, name, toolArgs)
+                else {
+                  const full = name.startsWith(PREFIX) ? name : PREFIX + name
+                  schedule(concurrencySafe(name, toolArgs), ARMING.has(full) ? 'arming' : WATCHERS.has(full), armed => dispatch(id, name, toolArgs, armed))
+                }
               }
             }
-          }
-          const dispatch = async (id: number, name: string, toolArgs: Record<string, unknown>, armed?: () => void) => {
-            try {
-              if (name === '__help') {
-                const value = typeof toolArgs.name === 'string'
-                  ? resolve(toolArgs.name).description ?? ''
-                  : [...catalog.keys()].filter(n => n !== CODE_TOOL && n !== 'dsh_browser_request_takeover').map(n => n.slice(PREFIX.length)).join(', ')
-                worker.child.send({ type: 'reply', id, value })
-                return
+            const dispatch = async (id: number, name: string, toolArgs: Record<string, unknown>, armed?: () => void) => {
+              try {
+                if (name === '__help') {
+                  const value = typeof toolArgs.name === 'string'
+                    ? resolve(toolArgs.name).description ?? ''
+                    : [...catalog.keys()].filter(n => n !== CODE_TOOL && n !== 'dsh_browser_request_takeover').map(n => n.slice(PREFIX.length)).join(', ')
+                  worker.send({ type: 'reply', id, value })
+                  return
+                }
+                controller.signal.throwIfAborted()
+                const target = resolve(name)
+                calls++
+                const value = await target.execute(toolArgs as never, { ...exec, signal: controller.signal, ...armed !== undefined ? { armed } : {} } as never)
+                const blocks = (target.output?.render?.(toolArgs as never, value as never) ?? [{ type: 'text', text: format(value) }]) as readonly Block[]
+                for (const block of blocks) {
+                  if (block.type === 'image' && block.attachment !== undefined && images.length < MAX_IMAGES) images.push(block.attachment as ImageAttachment)
+                }
+                const text = blocks.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n')
+                worker.send({ type: 'reply', id, value: structuredClone(value), text })
+              } catch (error) {
+                worker.send({ type: 'reply', id, error: error instanceof Error ? error.message : String(error) })
               }
-              controller.signal.throwIfAborted()
-              const target = resolve(name)
-              calls++
-              const value = await target.execute(toolArgs as never, { ...exec, signal: controller.signal, ...armed !== undefined ? { armed } : {} } as never)
-              const blocks = (target.output?.render?.(toolArgs as never, value as never) ?? [{ type: 'text', text: format(value) }]) as readonly Block[]
-              for (const block of blocks) {
-                if (block.type === 'image' && block.attachment !== undefined && images.length < MAX_IMAGES) images.push(block.attachment as ImageAttachment)
-              }
-              const text = blocks.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n')
-              if (!worker.exited) worker.child.send({ type: 'reply', id, value: structuredClone(value), text })
-            } catch (error) {
-              if (!worker.exited) worker.child.send({ type: 'reply', id, error: error instanceof Error ? error.message : String(error) })
             }
+            cellStarted = true
+            if (!worker.send({ type: 'run', code: args.code })) {
+              forget()
+              settle({ ok: false, error: 'the REPL worker IPC channel disconnected' })
+            }
+          })
+          if (!outcome.ok) {
+            ok = false
+            lines.push(`Error: ${outcome.error ?? 'cell failed'}`)
           }
-          worker.child.send({ type: 'run', code: args.code })
-        })
-        if (!outcome.ok) {
+        } catch (error) {
+          if (!cellStarted && exec.signal?.aborted === true) throw error
           ok = false
-          lines.push(`Error: ${outcome.error ?? 'cell failed'}`)
+          forget()
+          lines.push(`Error: ${error instanceof Error ? error.message : String(error)}`)
+        } finally {
+          if (!worker.exited) worker.idle()
         }
-      } catch (error) {
-        ok = false
-        forget()
-        lines.push(`Error: ${error instanceof Error ? error.message : String(error)}`)
-      } finally {
-        if (!worker.exited) worker.idle()
-      }
-      exec.signal?.throwIfAborted()
-      let output = lines.join('\n')
-      if (output === '') output = ok ? '(no output; end the cell with an expression or print() what you need)' : 'Error'
-      if (output.length > MAX_OUTPUT_CHARS) output = `${output.slice(0, MAX_OUTPUT_CHARS)}\n[output truncated at ${MAX_OUTPUT_CHARS} chars; print less or slice it]`
-      return { output, ok, calls, images }
+        // Only reject when cancelled before the cell started; once running, return partial printed output.
+        if (!cellStarted) exec.signal?.throwIfAborted()
+        let output = lines.join('\n')
+        if (output === '') output = ok ? '(no output; end the cell with an expression or print() what you need)' : 'Error'
+        if (output.length > MAX_OUTPUT_CHARS) output = `${output.slice(0, MAX_OUTPUT_CHARS)}\n[output truncated at ${MAX_OUTPUT_CHARS} chars; print less or slice it]`
+        return { output, ok, calls, images }
+      })
     },
   })
   return { tool, dispose: () => { for (const worker of workers.values()) worker.kill(); workers.clear() } }
