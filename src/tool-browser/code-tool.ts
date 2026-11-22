@@ -7,7 +7,7 @@
  * tool, so restriction, takeover blocking, per-task sessions, references and the vision-gated
  * screenshot path are the same as when those tools were called directly.
  */
-import { fork, type ChildProcess } from 'node:child_process'
+import { fork, type ChildProcess, type Serializable } from 'node:child_process'
 import { existsSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -126,7 +126,7 @@ class CellWorker {
     this.idle()
   }
 
-  send(message: unknown): boolean {
+  send(message: Serializable): boolean {
     if (this.exited || !this.child.connected) return false
     try { return this.child.send(message) } catch { return false }
   }
