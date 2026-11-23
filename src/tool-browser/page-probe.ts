@@ -214,33 +214,28 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
     return { x: Math.round(offset.x + rect.left + rect.width / 2), y: Math.round(offset.y + rect.top + rect.height / 2), w: Math.round(rect.width), h: Math.round(rect.height), described: describe(node) }
   }
 
-  const composedParent = (node) => node.parentElement || (node.parentNode && node.parentNode.host) ||
-    (node.ownerDocument && node.ownerDocument.defaultView && node.ownerDocument.defaultView.frameElement) || null
+  const composedParent = (node) => node.parentElement || (node.parentNode && node.parentNode.host) || null
   const deepHit = (x, y) => {
-    let node = document.elementFromPoint(x, y), ox = 0, oy = 0
-    for (let i = 0; node && i < 8; i += 1) {
-      if (node.shadowRoot && node.shadowRoot.elementFromPoint) {
-        const inner = node.shadowRoot.elementFromPoint(x - ox, y - oy)
-        if (inner && inner !== node) { node = inner; continue }
-      }
-      if (node.tagName === 'IFRAME' || node.tagName === 'FRAME') {
-        let doc = null
-        try { doc = node.contentDocument } catch (error) { doc = null }
-        if (doc && doc.elementFromPoint) {
-          const r = node.getBoundingClientRect()
-          ox += r.left
-          oy += r.top
-          const inner = doc.elementFromPoint(x - ox, y - oy)
-          if (inner) { node = inner; continue }
-        }
-      }
-      break
+    let node = document.elementFromPoint(x, y)
+    for (let i = 0; node && node.shadowRoot && node.shadowRoot.elementFromPoint && i < 8; i += 1) {
+      const inner = node.shadowRoot.elementFromPoint(x, y)
+      if (!inner || inner === node) break
+      node = inner
     }
     return node
   }
-  // A click at the point lands on the target when what is there is the target or inside it (an icon or label in a button).
+  const floats = (node) => {
+    let style = null
+    try { style = getComputedStyle(node) } catch (error) { style = null }
+    return !!style && (style.position === 'fixed' || style.position === 'sticky' || Number(style.zIndex) >= 100)
+  }
+  // A click at the point lands on the target when what is there is the target or inside it (an icon or label in a
+  // button), unless a floating layer between them (a modal inside the target) is what takes the click.
   const lands = (target, x, y) => {
-    for (let node = deepHit(x, y), depth = 0; node && depth < 64; node = composedParent(node), depth += 1) if (node === target) return true
+    for (let node = deepHit(x, y), depth = 0; node && depth < 64; node = composedParent(node), depth += 1) {
+      if (node === target) return true
+      if (floats(node)) return false
+    }
     return false
   }
 

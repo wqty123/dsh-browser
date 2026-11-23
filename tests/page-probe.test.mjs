@@ -200,7 +200,7 @@ test('overlayAt reports what covers a point, and the dismiss control when there 
   assert.equal(cover.dismiss.y, 212)
 })
 
-test('overlayAt does not take the found target own child, in a shadow root or a frame, for an overlay', () => {
+test('overlayAt does not take the found target own child, also in a shadow root, for an overlay', () => {
   const element = (tagName, parentElement, extra = {}) => ({ tagName, innerText: 'Login', parentElement, getAttribute: () => null,
     getBoundingClientRect: () => ({ left: 100, top: 200, width: 80, height: 24 }), querySelectorAll: () => [], ...extra })
   const button = element('BUTTON', null)
@@ -223,11 +223,14 @@ test('overlayAt does not take the found target own child, in a shadow root or a 
   page.__dshProbe.lastFound = shadowButton
   assert.equal(page.__dshProbe.overlayAt(140, 212).covers, null, 'a hit inside the shadow tree of the target lands on it')
 
-  const frameButton = element('BUTTON', null)
-  const frame = element('IFRAME', null, { contentDocument: { elementFromPoint: (x, y) => (x === 40 && y === 12 ? element('I', frameButton) : null) } })
-  page.document.elementFromPoint = () => frame
-  page.__dshProbe.lastFound = frameButton
-  assert.equal(page.__dshProbe.overlayAt(140, 212).covers, null, 'frame coordinates are made relative to the frame')
+  const panel = element('SECTION', null)
+  const modal = element('DIV', panel, { innerText: 'Dialog' })
+  const close = element('BUTTON', modal, { innerText: 'Close' })
+  modal.querySelectorAll = () => [close]
+  page.document.elementFromPoint = () => close
+  page.getComputedStyle = node => (node === modal ? { position: 'fixed', zIndex: '1000' } : { position: 'static', zIndex: '0' })
+  page.__dshProbe.lastFound = panel
+  assert.equal(page.__dshProbe.overlayAt(140, 212).dismiss.label, 'Close', 'a modal inside the target is still an overlay to dismiss')
 
   const banner = element('DIV', null)
   page.document.elementFromPoint = () => banner
