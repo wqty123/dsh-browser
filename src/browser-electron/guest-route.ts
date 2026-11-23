@@ -1,5 +1,5 @@
 import { hostMessages } from '../../assets/browser-messages.mjs'
-import { GUEST_ROUTE } from '../../assets/browser-policy.mjs'
+import { GUEST_ROUTE, RELAXED_BROWSER_SANDBOX, WEB_BROWSER_SANDBOX } from '../../assets/browser-policy.mjs'
 /**
  * Web guests execute in CSP-sandboxed opaque origins, including direct document loads.
  * Only this proxy prefix is available to guest network requests. App storage, APIs,
@@ -244,9 +244,9 @@ export function relayTag(_sessionId: string): string {
   </script>`
 }
 
-function guestPolicy(authority: string): string {
+function guestPolicy(authority: string, framed: boolean): string {
   const sources = ['http:', 'https:'].map(protocol => new URL(protocol + '//' + authority).origin + GUEST_ROUTE).join(' ')
-  return "sandbox allow-scripts allow-forms; default-src " + sources
+  return "sandbox " + (framed ? RELAXED_BROWSER_SANDBOX : WEB_BROWSER_SANDBOX) + "; default-src " + sources
     + "; script-src " + sources + " 'unsafe-inline' 'unsafe-eval'; style-src " + sources
     + " 'unsafe-inline'; img-src " + sources + " data: blob:; font-src " + sources + " data:; connect-src " + sources
     + "; frame-src " + sources + "; form-action " + sources
@@ -269,7 +269,7 @@ export async function handleGuest(
     response.end('guest proxy: invalid host')
     return
   }
-  const policy = guestPolicy(authority)
+  const policy = guestPolicy(authority, request.headers['sec-fetch-dest'] === 'iframe')
   const writeHead = (status: number, headers: OutgoingHttpHeaders = {}): void => {
     response.writeHead(status, { ...headers, 'content-security-policy': policy })
   }

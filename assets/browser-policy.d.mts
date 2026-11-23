@@ -41,6 +41,8 @@ export const PREVIEW_ROUTE: string
 export const PREVIEW_SESSIONS_ROUTE: string
 export const BRIDGE_STATUS_ROUTE: string
 export const GUEST_ROUTE: string
+export const WEB_BROWSER_SANDBOX: string
+export const RELAXED_BROWSER_SANDBOX: string
 export const RUNTIME_STATUS_ROUTE: string
 export const RUNTIME_PROVISION_ROUTE: string
 export const SHORTCUTS_ROUTE: string

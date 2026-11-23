@@ -70,7 +70,7 @@ module.exports = ({ app, createHash, fs, path }) => {
       fs.mkdirSync(directory, { recursive: true })
       reserved.add(target)
       item.once('done', () => reserved.delete(target))
-      item.setSavePath(target)
+      item.setSaveDialogOptions({ defaultPath: target })
     },
     partition() {
       return 'persist:dsh-sidebar-browser-' + createHash('sha256').update(home).digest('hex').slice(0, 32)
