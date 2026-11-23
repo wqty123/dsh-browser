@@ -185,7 +185,6 @@ export function createLiveCardDockComponent(
       labels: referenceLabels(face?.t, view.cards.length),
       actions: {
         onEditComment: (referenceId, comment) => { runtime.setComment(referenceId, comment) },
-        onRemove: (referenceId) => { void runtime.removeCard(referenceId) },
         onReveal: (referenceId) => { void runtime.revealReference(referenceId) },
       },
       ...(view.issue === undefined ? {} : { notice: view.issue }),

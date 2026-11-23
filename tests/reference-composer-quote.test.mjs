@@ -141,3 +141,23 @@ function boundAssets() {
   for (const [key, bytes] of Object.entries(ASSET_MAP)) assets.bind(assetOf(key, bytes))
   return assets
 }
+
+test('deleting the host quote removes its card, and nothing removed is sent', async t => {
+  const { runtime, composer } = await captured()
+  t.after(() => runtime.dispose())
+  const session = runtime.currentSessionId()
+  runtime.noteDraft(session, composer.face.readText())
+  assert.equal(runtime.cards().length, 1)
+  composer.quotes.length = 0
+  runtime.noteDraft(session, composer.face.readText())
+  assert.equal(runtime.cards().length, 0, 'the card follows the quote the host sends')
+  const text = composer.send().filter(part => part.type === 'text').map(part => part.text).join('')
+  assert.equal(occurrences(text, LONG_TEXT.split('\n')[0]), 0)
+})
+
+test('a card is kept until its quote has been seen in the draft', async t => {
+  const { runtime } = await captured()
+  t.after(() => runtime.dispose())
+  runtime.noteDraft(runtime.currentSessionId(), '这张表的第二行是什么？')
+  assert.equal(runtime.cards().length, 1, 'a draft read before the editor applies the quote does not drop the card')
+})

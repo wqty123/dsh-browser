@@ -882,6 +882,8 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
    * the delivery queue and removed on the plugin side in one step, so the next
    * send simply does not see it (there is no window in which it can be undone).
    */
+  const quotesSeen = new Set<string>()
+
   const removeReferences = (sessionId: string, ids: readonly string[]): void => {
     if (ids.length === 0) return
     const store = draftStoreFor(sessionId)
@@ -908,12 +910,22 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       if (disposed) return
       const previous = lastDraft
       lastDraft = draft
-      // 上游接受消息后会清空草稿：这一刻把本会话的引用全部退役，输入框里的胶囊随之消失。
-      if (draft.trim() !== '' || previous.trim() === '') return
       const store = draftStoreFor(sessionId)
       const ids = store.state().groups.map(group => group.referenceId)
-      if (ids.length === 0) return
-      void consumeSubmitted(sessionId, ids)
+      // 上游接受消息后会清空草稿：这一刻把本会话的引用全部退役，输入框里的胶囊随之消失。
+      if (draft.trim() === '') {
+        if (previous.trim() !== '' && ids.length > 0) void consumeSubmitted(sessionId, ids)
+        return
+      }
+      // The host quote is what gets sent, so it is the single source of truth: once a quote has been
+      // seen in the draft, the user deleting it removes its card too.
+      const removed: string[] = []
+      for (const referenceId of ids) {
+        const key = `${sessionId} ${referenceId}`
+        if (draft.includes(encodeBrowserRefUri({ referenceId }))) quotesSeen.add(key)
+        else if (quotesSeen.delete(key)) removed.push(referenceId)
+      }
+      if (removed.length > 0) removeReferences(sessionId, removed)
     },
     setSession(sessionId) {
       sessionId = referenceOwnerKey(sessionId)
