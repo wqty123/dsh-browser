@@ -11,6 +11,12 @@ import assert from 'node:assert/strict'
 
 import { DEFAULT_SETTINGS } from '../lib/browser-electron/settings-store.js'
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
+import { tabWireId } from '../lib/browser/handles.js'
+import { createFakeBrowser } from './fixtures/fake-cdp-browser.mjs'
 
 /** Host stub: records how the provider asked for presentation and capture. */
 function makeHost() {
@@ -147,4 +153,37 @@ test('an undisplayed sidebar refuses quiet input instead of focusing or dispatch
   })
   assert.deepEqual(host.seen.focus, [])
   assert.deepEqual(host.seen.commands.filter(method => method.startsWith('Input.')), [])
+})
+
+/**
+ * The page parameters an Installed Chrome/Edge carrier sends when the agent opens its first page.
+ * @param quiet - the live `ui.quiet` value.
+ */
+async function firstPageParams(t, quiet) {
+  const browser = createFakeBrowser()
+  await browser.listen()
+  t.after(() => browser.kill())
+  const profile = mkdtempSync(join(tmpdir(), 'dsh-quiet-first-page-'))
+  const child = { pid: process.pid, exitCode: null, signalCode: null, kill() {}, once() {}, on() {} }
+  const host = new SystemBrowserViewHost({ kind: 'chrome', path: process.execPath }, profile, [], undefined,
+    () => { writeFileSync(join(profile, 'DevToolsActivePort'), `${browser.port}
+`); return child }, 'auto', () => quiet)
+  t.after(() => { child.exitCode = 0; host.dispose(); rmSync(profile, { recursive: true, force: true }) })
+  const view = host.createView(tabWireId({ owner: 'task-a', session: 'main', tab: 'view' }))
+  await view.sendCommand('Runtime.evaluate', { expression: '1' })
+  return browser.commands.filter(command => command.method === 'Target.createTarget').map(command => command.params)
+}
+
+test('quiet mode opens the first Installed Chrome page without focusing its new window', async t => {
+  // The launch has no startup window, so this page creates the window. `background` alone left
+  // Chromium free to activate that window; `focus: false` is what keeps window focus where it was.
+  const [params] = await firstPageParams(t, true)
+  assert.equal(params.focus, false)
+  assert.equal(params.background, true)
+})
+
+test('with quiet mode off, the first page keeps the default foreground creation', async t => {
+  const [params] = await firstPageParams(t, false)
+  assert.equal('focus' in params, false)
+  assert.equal('background' in params, false)
 })
