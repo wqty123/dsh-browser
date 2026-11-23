@@ -159,8 +159,8 @@ test('an undisplayed sidebar refuses quiet input instead of focusing or dispatch
  * The page parameters an Installed Chrome/Edge carrier sends when the agent opens its first page.
  * @param quiet - the live `ui.quiet` value.
  */
-async function firstPageParams(t, quiet) {
-  const browser = createFakeBrowser()
+async function quietHost(t, quiet, options) {
+  const browser = createFakeBrowser(options)
   await browser.listen()
   t.after(() => browser.kill())
   const profile = mkdtempSync(join(tmpdir(), 'dsh-quiet-first-page-'))
@@ -171,8 +171,17 @@ async function firstPageParams(t, quiet) {
   t.after(() => { child.exitCode = 0; host.dispose(); rmSync(profile, { recursive: true, force: true }) })
   const view = host.createView(tabWireId({ owner: 'task-a', session: 'main', tab: 'view' }))
   await view.sendCommand('Runtime.evaluate', { expression: '1' })
+  return { browser, host, view }
+}
+
+async function firstPageParams(t, quiet, options) {
+  const { browser } = await quietHost(t, quiet, options)
   return browser.commands.filter(command => command.method === 'Target.createTarget').map(command => command.params)
 }
+
+const minimizedWindow = message => message.method === 'Browser.getWindowForTarget'
+  ? { result: { windowId: 7, bounds: { windowState: 'minimized' } } }
+  : message.method === 'Browser.setWindowBounds' ? { result: {} } : undefined
 
 test('quiet mode opens the first Installed Chrome page without focusing its new window', async t => {
   // The launch has no startup window, so this page creates the window. `background` alone left
@@ -182,8 +191,38 @@ test('quiet mode opens the first Installed Chrome page without focusing its new 
   assert.equal(params.background, true)
 })
 
+test('quiet mode opens the first Installed Chrome window minimized, so it does not cover the screen', async t => {
+  const [params] = await firstPageParams(t, true)
+  assert.equal(params.windowState, 'minimized')
+})
+
+test('a Chromium that rejects windowState still gets its quiet first page, unfocused', async t => {
+  const calls = await firstPageParams(t, true, {
+    respond: message => message.method === 'Target.createTarget' && message.params?.windowState !== undefined
+      ? { error: { message: 'Invalid parameters' } }
+      : undefined,
+  })
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].windowState, 'minimized')
+  assert.deepEqual(calls[1], { url: 'about:blank', background: true, focus: false })
+})
+
+test('an explicit selection restores the window quiet mode minimized, once and without bringToFront', async t => {
+  const { browser, host, view } = await quietHost(t, true, { respond: minimizedWindow })
+  await host.presentView(view, 'view', { quiet: true })
+  assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false, 'a quiet operation leaves it minimized')
+  await host.presentView(view, 'view', { quiet: true, select: true })
+  const restores = browser.commands.filter(c => c.method === 'Browser.setWindowBounds')
+  assert.deepEqual(restores.map(c => c.params), [{ windowId: 7, bounds: { windowState: 'normal' } }])
+  assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false)
+  await host.presentView(view, 'view', { quiet: true, select: true })
+  assert.equal(browser.commands.filter(c => c.method === 'Browser.setWindowBounds').length, 1,
+    'once restored, the window belongs to the user: minimizing it again keeps it minimized')
+})
+
 test('with quiet mode off, the first page keeps the default foreground creation', async t => {
   const [params] = await firstPageParams(t, false)
   assert.equal('focus' in params, false)
   assert.equal('background' in params, false)
+  assert.equal('windowState' in params, false)
 })

@@ -44,6 +44,13 @@ async function capturedArgs(headlessMode) {
   return seen[0] ?? []
 }
 
+test('the launch keeps a minimized quiet window rendering at full speed', async () => {
+  const args = await capturedArgs('windowed')
+  for (const flag of ['--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling']) {
+    assert.ok(args.includes(flag), flag + ' must be present: ' + JSON.stringify(args))
+  }
+})
+
 test('the launch asks for no startup window, so no tab appears that we never created', async () => {
   const args = await capturedArgs('windowed')
   assert.ok(args.includes('--no-startup-window'),

@@ -734,6 +734,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // page, windowed or not, which bot walls read as "a script, not a person" — even while the
       // person is the one browsing. Chrome's own switch turns that marker off; nothing else changes.
       '--disable-blink-features=AutomationControlled',
+      // Quiet mode opens its first window minimized; without these Chromium pauses rAF, clamps
+      // timers and stalls screenshots for a window nobody can see. Passed always: quiet is a live setting.
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
       // Headless only where there is nothing to draw on. `--headless=new` rather than the legacy
       // flag: the new mode behaves like a windowed browser, which matters because every command
       // here was written and measured against one — including CDP input, which Chromium silently
@@ -1237,8 +1242,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * two, and the order is honoured either way.
    * @param handle - the view to present.
    */
-  async presentView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean }): Promise<void> {
-    if (options?.quiet === true || this.isQuiet()) return
+  async presentView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean }): Promise<void> {
+    if (options?.quiet === true || this.isQuiet()) {
+      if (options?.select === true) await this.restoreQuietWindow(handle)
+      return
+    }
     try {
       await handle.sendCommand('Page.bringToFront')
     } catch {
@@ -1472,16 +1480,43 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
 
   /** Create one page, refusing to go on without an id. */
   private async createTarget(client: CdpClient, viewId: string): Promise<string> {
-    const created = await client.send('Target.createTarget', {
-      url: 'about:blank',
-      // `background` only keeps the user's tab active inside an existing window. The first page after
-      // `--no-startup-window` opens a new window, which Chromium activates unless `focus: false`.
-      ...this.isQuiet() ? { background: true, focus: false } : {},
-    }) as { targetId?: string }
+    const quiet = this.isQuiet()
+    const created = await (quiet ? this.createQuietTarget(client) : client.send('Target.createTarget', { url: 'about:blank' })) as { targetId?: string }
     const targetId = created?.targetId
     if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')
     this.rememberTarget(client, targetId, viewId)
+    if (quiet) this.quietMinimized.add(viewId)
     return targetId
+  }
+
+  /**
+   * `background` only keeps the user's tab active inside an existing window; the first page after
+   * `--no-startup-window` opens a new one. `focus: false` keeps keyboard focus where it was, and
+   * `windowState: 'minimized'` keeps that window from covering the screen. Chromium that predates
+   * `windowState` rejects the call, so it is retried without it.
+   */
+  private async createQuietTarget(client: CdpClient): Promise<unknown> {
+    const params = { url: 'about:blank', background: true, focus: false }
+    try {
+      return await client.send('Target.createTarget', { ...params, windowState: 'minimized' })
+    } catch {
+      return client.send('Target.createTarget', params)
+    }
+  }
+
+  /** Views whose window quiet mode minimized itself; a window the user minimized is not listed. */
+  private readonly quietMinimized = new Set<string>()
+
+  /** An explicit selection shows a window quiet mode minimized, without `Page.bringToFront`. */
+  private async restoreQuietWindow(handle: ElectronViewHandle): Promise<void> {
+    if (!this.quietMinimized.delete(handle.id)) return
+    try {
+      const found = await handle.sendCommand('Browser.getWindowForTarget') as { windowId?: unknown; bounds?: { windowState?: unknown } }
+      if (typeof found?.windowId !== 'number' || found.bounds?.windowState !== 'minimized') return
+      await handle.sendCommand('Browser.setWindowBounds', { windowId: found.windowId, bounds: { windowState: 'normal' } })
+    } catch {
+      // The page went away; the command that selected it reports that itself.
+    }
   }
 
   private rememberTarget(client: CdpClient, targetId: string, viewId: string): void {

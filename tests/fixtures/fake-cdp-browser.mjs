@@ -98,6 +98,8 @@ function createFakeBrowser(options = {}) {
   function handleCommand(message, state) {
     if (message.id === undefined) return undefined
     commands.push(message)
+    const answered = options.respond?.(message)
+    if (answered !== undefined) return { id: message.id, sessionId: message.sessionId, ...answered }
     if (message.method === 'SystemInfo.getProcessInfo') {
       return { id: message.id, result: { processInfo: options.browserPid ? [{ type: 'browser', id: options.browserPid }] : [] } }
     }
