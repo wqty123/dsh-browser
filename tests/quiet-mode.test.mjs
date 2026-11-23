@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
+import { parseForegroundLine } from '../lib/browser-electron/foreground-watch.js'
 import { tabWireId } from '../lib/browser/handles.js'
 import { createFakeBrowser } from './fixtures/fake-cdp-browser.mjs'
 
@@ -168,6 +169,7 @@ async function quietHost(t, quiet, options) {
   const host = new SystemBrowserViewHost({ kind: 'chrome', path: process.execPath }, profile, [], undefined,
     () => { writeFileSync(join(profile, 'DevToolsActivePort'), `${browser.port}
 `); return child }, 'auto', () => quiet)
+  host.watchForeground = options?.watch ?? (() => undefined)
   t.after(() => { child.exitCode = 0; host.dispose(); rmSync(profile, { recursive: true, force: true }) })
   const view = host.createView(tabWireId({ owner: 'task-a', session: 'main', tab: 'view' }))
   await view.sendCommand('Runtime.evaluate', { expression: '1' })
@@ -188,6 +190,7 @@ const parkedBrowser = (overrides = {}) => {
     respond: message => {
       if (message.method === 'Browser.getWindowForTarget') return { result: { windowId: 7, bounds: { left: state.left, top: state.top, width: state.width, height: state.height, windowState: 'normal' } } }
       if (message.method === 'Browser.setWindowBounds') { Object.assign(state, message.params.bounds); return { result: {} } }
+      if (message.method === 'SystemInfo.getProcessInfo') return { result: { processInfo: [{ type: 'browser', id: 4242 }] } }
       if (message.method === 'Runtime.evaluate' && String(message.params?.expression).includes('screen.availLeft')) {
         return { result: { result: { type: 'object', value: { sl: 0, st: 0, sw: 1600, sh: 1160, x: state.left, y: state.top, ow: state.width, oh: state.height, hidden: state.hidden } } } }
       }
@@ -263,24 +266,107 @@ test('a takeover reveals the parked window without bringing a visible page to th
   assert.equal(await host.revealQuietWindow(view), false, 'only once')
 })
 
-test('a person activating the parked window from the taskbar gets it on the primary display', async t => {
-  const fake = parkedBrowser()
-  let focused = false
-  const respond = message => message.method === 'Runtime.evaluate' && message.params?.expression === 'document.hasFocus()'
-    ? { result: { result: { type: 'boolean', value: focused } } } : fake.respond(message)
-  const { browser } = await quietHost(t, true, { respond })
-  await new Promise(resolve => setTimeout(resolve, 700))
-  assert.deepEqual(moves(browser), [], 'an unfocused parked window stays off-screen')
-  focused = true
-  const deadline = Date.now() + 3000
-  while (moves(browser).length === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50))
-  assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 40, top: 40 } }])
-  assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false, 'the window is already the active one')
-  await new Promise(resolve => setTimeout(resolve, 700))
-  assert.equal(moves(browser).length, 1, 'revealed once, then the window belongs to the person')
+const fakeWatch = (options = {}) => {
+  const w = { emit: undefined, fail: undefined, started: 0, stopped: 0 }
+  w.watch = (onChange, onFail) => {
+    w.started++
+    w.emit = onChange
+    w.fail = onFail
+    if (options.unavailable) { onFail('powershell.exe not found'); return undefined }
+    return { stop: () => { w.stopped++ } }
+  }
+  return w
+}
+const until = async (check, ms = 2000) => { const end = Date.now() + ms; while (!check() && Date.now() < end) await settle() }
+
+test('the foreground watcher starts only for a parked window and stops once nothing is parked', async t => {
+  const w = fakeWatch()
+  const { browser, host, view } = await quietHost(t, true, { ...parkedBrowser(), watch: w.watch })
+  await until(() => w.started === 1)
+  assert.equal(w.started, 1)
+  assert.equal(await host.revealQuietWindow(view), true)
+  assert.equal(w.stopped, 1, 'unparked, so the watcher stops')
+  assert.equal(moves(browser).length, 1)
 })
 
-test('a takeover on a page hidden behind another tab brings that page to the front', async t => {
+test('without quiet mode, or in a window quiet mode did not park, no watcher starts', async t => {
+  for (const [quiet, respond] of [[false, undefined], [true, message => message.method === 'Target.getTargets' ? { result: { targetInfos: [{ type: 'page' }] } } : parkedBrowser().respond(message)]]) {
+    const w = fakeWatch()
+    await quietHost(t, quiet, { respond, watch: w.watch })
+    await settle()
+    assert.equal(w.started, 0)
+  }
+})
+
+test('a taskbar activation of the parked window brings it on-screen, also after a reset left no view', async t => {
+  for (const reset of [false, true]) {
+    const w = fakeWatch()
+    const { browser, host, view } = await quietHost(t, true, { ...parkedBrowser(), watch: w.watch })
+    await until(() => w.emit !== undefined)
+    if (reset) host.destroyView(view)
+    w.emit({ pid: 999, offscreen: true })
+    w.emit({ pid: 4242, offscreen: false })
+    await settle()
+    assert.deepEqual(moves(browser), [], 'another application, or our window on a display, is not the trap')
+    w.emit({ pid: 4242, offscreen: true })
+    await until(() => moves(browser).length > 0)
+    assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 40, top: 40 } }])
+    assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false)
+    assert.equal(w.stopped, 1)
+  }
+})
+
+test('an agent click on the parked page never moves it: page focus is not window focus', async t => {
+  const w = fakeWatch()
+  const { browser, view } = await quietHost(t, true, { ...parkedBrowser(), watch: w.watch })
+  await view.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', x: 10, y: 10, button: 'left', clickCount: 1 })
+  await settle()
+  assert.deepEqual(moves(browser), [])
+  assert.equal(browser.commands.some(c => c.method === 'Runtime.evaluate' && /hasFocus/u.test(String(c.params?.expression))), false)
+})
+
+test('a takeover of a hidden tab brings it to the front only once the person activates the window', async t => {
+  const w = fakeWatch()
+  const { browser, host, view } = await quietHost(t, true, { ...parkedBrowser({ hidden: true }), watch: w.watch })
+  await until(() => w.emit !== undefined)
+  assert.equal(await host.revealQuietWindow(view), true)
+  const fronts = () => browser.commands.filter(c => c.method === 'Page.bringToFront').length
+  assert.equal(fronts(), 0, 'Page.bringToFront would take the foreground from the person')
+  assert.equal(w.stopped, 0, 'still waiting for the activation')
+  w.emit({ pid: 4242, offscreen: false })
+  await until(() => fronts() > 0)
+  assert.equal(fronts(), 1)
+  assert.equal(w.stopped, 1)
+})
+
+test('when PowerShell is unavailable or the watcher dies, quiet mode logs once and keeps the panel and takeover reveal', async t => {
+  const warnings = []
+  const warn = console.warn
+  console.warn = message => { warnings.push(String(message)) }
+  t.after(() => { console.warn = warn })
+  const missing = fakeWatch({ unavailable: true })
+  const first = await quietHost(t, true, { ...parkedBrowser({ hidden: true }), watch: missing.watch })
+  await until(() => missing.started === 1)
+  assert.equal(await first.host.revealQuietWindow(first.view), true)
+  assert.equal(first.browser.commands.filter(c => c.method === 'Page.bringToFront').length, 1, 'with nothing watching, the hidden page comes to the front at once')
+  const dying = fakeWatch()
+  const second = await quietHost(t, true, { ...parkedBrowser({ hidden: true }), watch: dying.watch })
+  await until(() => dying.fail !== undefined)
+  assert.equal(await second.host.revealQuietWindow(second.view), true)
+  dying.fail('exited (1)')
+  dying.fail('exited (1)')
+  await until(() => second.browser.commands.some(c => c.method === 'Page.bringToFront'))
+  assert.equal(second.browser.commands.filter(c => c.method === 'Page.bringToFront').length, 1, 'a pending front is sent when the watcher dies')
+  assert.equal(warnings.filter(line => /cannot watch the foreground window/u.test(line)).length, 2, 'once per host')
+})
+
+test('the watcher output is parsed line by line', () => {
+  assert.deepEqual(parseForegroundLine('4242 1\r'), { pid: 4242, offscreen: true })
+  assert.deepEqual(parseForegroundLine('17 0'), { pid: 17, offscreen: false })
+  assert.equal(parseForegroundLine('garbage'), undefined)
+})
+
+test('with nothing watching the foreground, a takeover on a page hidden behind another tab brings it to the front', async t => {
   const fake = parkedBrowser({ hidden: true })
   const { browser, host, view } = await quietHost(t, true, fake)
   assert.equal(await host.revealQuietWindow(view), true)

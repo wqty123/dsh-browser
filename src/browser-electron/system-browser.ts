@@ -31,6 +31,7 @@ import { readFileSync, rmSync, statSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { acquireProfileLease, type ProfileLease } from './profile-lease.ts'
+import { watchForeground, type ForegroundWatch, type ForegroundWatcher } from './foreground-watch.ts'
 import { BrowserProcessOwnership, type ProcessOwnershipOptions } from './process-ownership.ts'
 // Type-only: settings-store imports BrowserChannel from here, so a value import would be a cycle.
 // `hasDisplay` lives here instead of there for the same reason — it is a runtime function.
@@ -290,7 +291,6 @@ export function searchSummary(
 const QUIET_PARK = { left: 30000, top: 0, width: 1280, height: 800 } as const
 const QUIET_PARK_GAP = 200
 const QUIET_REVEAL_INSET = 40
-const QUIET_FOCUS_POLL_MS = 500
 
 interface WindowGeometry { readonly sl: number; readonly st: number; readonly sw: number; readonly sh: number; readonly x: number; readonly y: number; readonly ow: number; readonly oh: number; readonly hidden: boolean }
 
@@ -596,6 +596,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private forgetBrowserState(): void {
     this.views.clear()
     this.sessions.clear()
+    this.quietParked.clear()
+    this.parkedTargets.clear()
+    this.quietFront = undefined
+    this.stopForeground()
   }
 
   private async ensureClient(): Promise<CdpClient> {
@@ -1305,8 +1309,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * browser) simply tears down its bookkeeping.
    */
   dispose(): void {
-    clearInterval(this.quietFocusTimer)
-    this.quietFocusTimer = undefined
+    this.stopForeground()
     if (this.disposed) return
     this.disposed = true
     const client = this.client
@@ -1549,7 +1552,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       }
       this.quietParked.add(found.windowId)
       this.parkedTargets.set(targetId, found.windowId)
-      this.watchQuietFocus()
+      this.watchQuietFocus(client)
     } catch {
       // Without its id the window cannot be moved or revealed later, so it stays where Chromium put it.
     }
@@ -1577,46 +1580,84 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-  private quietFocusTimer: ReturnType<typeof setInterval> | undefined
-  private quietFocusBusy = false
+  private foreground: ForegroundWatch | undefined
+  private foregroundStarting = false
+  private foregroundFailed = false
+  /** A takeover page hidden behind another tab, brought to the front once the person activates its revealed window. */
+  private quietFront: { readonly client: CdpClient; readonly session: string } | undefined
+  /** The real watcher exists on Windows only; tests replace it. */
+  watchForeground: ForegroundWatcher = watchForeground
+
+  private quietWatched(): boolean { return this.quietParked.size > 0 || this.quietFront !== undefined }
 
   /**
-   * Agent actions never focus a parked window, so a page there reporting focus means a person
-   * activated it (taskbar, Alt-Tab) and is looking at a window that is not on any display.
+   * Agent actions never make Chrome the foreground window (a CDP click focuses the page, not the
+   * window), so our Chrome in the foreground off every display means a person activated the parked
+   * window from the taskbar or Alt-Tab. Asked of the OS, it works with no view attached (after a reset).
    */
-  private watchQuietFocus(): void {
-    if (this.quietFocusTimer !== undefined) return
-    this.quietFocusTimer = setInterval(() => void this.checkQuietFocus(), QUIET_FOCUS_POLL_MS)
-    this.quietFocusTimer.unref?.()
+  private watchQuietFocus(client: CdpClient): void {
+    if (this.foreground !== undefined || this.foregroundStarting) return
+    this.foregroundStarting = true
+    void (async () => {
+      try {
+        const info = await client.send('SystemInfo.getProcessInfo', {}, undefined, 1000) as { processInfo?: Array<{ type?: string; id?: number }> } | undefined
+        const pid = info?.processInfo?.find(entry => entry.type === 'browser')?.id
+        if (typeof pid !== 'number' || this.disposed || !this.quietWatched()) return
+        const watch = this.watchForeground(event => { if (event.pid === pid) void this.onForeground(client, event.offscreen) }, reason => {
+          if (!this.foregroundFailed) {
+            this.foregroundFailed = true
+            console.warn(`[dsh-browser] quiet window: cannot watch the foreground window (${reason}); the panel and takeovers still bring it on-screen`)
+          }
+          if (this.foreground === watch) this.foreground = undefined
+          const front = this.quietFront
+          this.quietFront = undefined
+          if (front !== undefined) void front.client.send('Page.bringToFront', {}, front.session).catch(() => undefined)
+        })
+        this.foreground = watch
+      } catch {
+        // Without the browser's process id, the panel and a takeover still reveal the window.
+      } finally {
+        this.foregroundStarting = false
+      }
+    })()
   }
 
-  private async checkQuietFocus(): Promise<void> {
-    if (this.quietParked.size === 0) {
-      clearInterval(this.quietFocusTimer)
-      this.quietFocusTimer = undefined
-      return
-    }
-    if (this.quietFocusBusy) return
-    this.quietFocusBusy = true
-    try {
-      for (const [id, view] of [...this.views]) {
-        const focused = await Promise.race([
-          view.client.send('Runtime.evaluate', { expression: 'document.hasFocus()', returnByValue: true }, view.session)
-            .then(out => (out as { result?: { value?: unknown } } | undefined)?.result?.value === true, () => false),
-          new Promise<boolean>(resolve => setTimeout(resolve, QUIET_FOCUS_POLL_MS, false)),
-        ])
-        if (focused && await this.revealQuietWindow({ id } as ElectronViewHandle)) return
+  private async onForeground(client: CdpClient, offscreen: boolean): Promise<void> {
+    if (offscreen) {
+      for (const windowId of [...this.quietParked]) {
+        this.quietParked.delete(windowId)
+        await this.moveOnScreen(client, windowId).catch(() => undefined)
       }
-    } finally {
-      this.quietFocusBusy = false
+    } else if (this.quietFront !== undefined) {
+      const front = this.quietFront
+      this.quietFront = undefined
+      await front.client.send('Page.bringToFront', {}, front.session).catch(() => undefined)
     }
+    if (!this.quietWatched()) this.stopForeground()
+  }
+
+  private stopForeground(): void {
+    this.foreground?.stop()
+    this.foreground = undefined
+  }
+
+  /** Move a window onto the primary display (it holds the origin), sized to fit when its page can say so, without activating it. */
+  private async moveOnScreen(client: CdpClient, windowId: number, session?: string): Promise<WindowGeometry | undefined> {
+    await client.send('Browser.setWindowBounds', { windowId, bounds: { left: QUIET_REVEAL_INSET, top: QUIET_REVEAL_INSET } })
+    const g = session === undefined ? undefined : await windowGeometry(client, session)
+    if (g !== undefined && (g.ow > g.sw - QUIET_REVEAL_INSET || g.oh > g.sh - QUIET_REVEAL_INSET)) {
+      await client.send('Browser.setWindowBounds', { windowId, bounds: {
+        width: Math.min(g.ow, g.sw - QUIET_REVEAL_INSET), height: Math.min(g.oh, g.sh - QUIET_REVEAL_INSET) } })
+    }
+    return g
   }
 
   /**
-   * Move a window quiet mode parked onto the primary display (it holds the origin), sized to fit,
-   * without activating it. Quiet tabs open in the background, so the window may be showing an
-   * earlier tab: on a person's own selection, or when the page is hidden behind another tab, it is
-   * brought to the front. From then on the window is the person's and quiet mode never moves it.
+   * Move a window quiet mode parked onto the primary display. Quiet tabs open in the background, so
+   * the window may be showing an earlier tab: a person's own selection brings the page to the front.
+   * `Page.bringToFront` activates the window, so for a takeover of a hidden page it waits until the
+   * person activates the revealed window (where nothing watches the foreground, it is sent at once).
+   * From then on the window is the person's and quiet mode never moves it.
    * @returns whether a parked window was moved.
    */
   async revealQuietWindow(handle: ElectronViewHandle, options?: { readonly select?: boolean }): Promise<boolean> {
@@ -1627,13 +1668,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // Asked of the browser by target id: the view's own command path would replace a closed page with a blank one.
       const found = await view.client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown } | undefined
       if (typeof found?.windowId !== 'number' || !this.quietParked.delete(found.windowId)) return false
-      await view.client.send('Browser.setWindowBounds', { windowId: found.windowId, bounds: { left: QUIET_REVEAL_INSET, top: QUIET_REVEAL_INSET } })
-      const g = await windowGeometry(view.client, view.session)
-      if (g !== undefined && (g.ow > g.sw - QUIET_REVEAL_INSET || g.oh > g.sh - QUIET_REVEAL_INSET)) {
-        await view.client.send('Browser.setWindowBounds', { windowId: found.windowId, bounds: {
-          width: Math.min(g.ow, g.sw - QUIET_REVEAL_INSET), height: Math.min(g.oh, g.sh - QUIET_REVEAL_INSET) } })
-      }
-      if (options?.select === true || g?.hidden === true) await view.client.send('Page.bringToFront', {}, view.session)
+      const g = await this.moveOnScreen(view.client, found.windowId, view.session)
+      if (options?.select === true) await view.client.send('Page.bringToFront', {}, view.session)
+      else if (g?.hidden === true && this.foreground !== undefined) this.quietFront = { client: view.client, session: view.session }
+      else if (g?.hidden === true) await view.client.send('Page.bringToFront', {}, view.session)
+      if (!this.quietWatched()) this.stopForeground()
       return true
     } catch {
       // The page went away; the command that selected it reports that itself.
