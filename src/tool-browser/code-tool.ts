@@ -45,6 +45,44 @@ export interface CatalogTool {
 interface Block { readonly type: string; readonly text?: string; readonly attachment?: unknown }
 interface ImageAttachment { attachmentId: string; mediaType: string; bytes: number; width: number; height: number }
 /** One browser tool call a cell started: `interrupted` means it was still running when the cell stopped. */
+const TABS = '__tabs'
+const LIST_TABS = 'dsh_browser_list_tabs'
+
+/** One tab as dsh_browser_list_tabs reports it. */
+export interface TabRow { readonly id: string; readonly url: string; readonly active: boolean }
+
+async function tabsOf(tool: CatalogTool, exec: never): Promise<readonly TabRow[] | undefined> {
+  try {
+    const value = await tool.execute({} as never, exec) as { tabs?: readonly TabRow[] }
+    return Array.isArray(value?.tabs) ? value.tabs : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The post-action line: where the browser is after an action, compared with before it. Browser Use
+ * reports this after every step so the model never has to spend a turn asking what happened.
+ */
+export function actionSummary(before: readonly TabRow[] | undefined, after: readonly TabRow[]): string {
+  if (before === undefined) {
+    const now = after.find(tab => tab.active)
+    return `\u2192 ${now === undefined ? 'no active tab' : `on ${now.url || 'about:blank'}`}${after.length > 1 ? ` (${after.length} tabs)` : ''}`
+  }
+  const known = new Map(before.map(tab => [tab.id, tab]))
+  const still = new Set(after.map(tab => tab.id))
+  const parts: string[] = []
+  for (const tab of after) if (!known.has(tab.id)) parts.push(`new tab ${tab.id} ${tab.url || 'about:blank'}`)
+  for (const tab of before) if (!still.has(tab.id)) parts.push(`closed tab ${tab.id}`)
+  const was = before.find(tab => tab.active)
+  const now = after.find(tab => tab.active)
+  if (now === undefined) parts.push('no active tab')
+  else if (was?.id !== now.id) parts.push(`active tab ${now.id} ${now.url || 'about:blank'}`)
+  else if (was.url !== now.url) parts.push(`navigated to ${now.url || 'about:blank'}`)
+  else if (parts.length === 0) parts.push(`still on ${now.url || 'about:blank'}`)
+  return `\u2192 ${parts.join('; ')}`
+}
+
 interface TraceEntry { tool: string; status: 'ok' | 'error' | 'interrupted'; error?: string }
 type WorkerMessage =
   | { readonly type: 'ready' }
@@ -60,17 +98,17 @@ export const CODE_PROMPT = `Operate the built-in browser with dsh_browser_code. 
 
 Browser helpers (pre-installed):
 - goto_url(url), new_tab(url), wait_for_load(), page_info() -> {url,title,w,h,sx,sy,pw,ph}, back(), forward(), refresh().
-- list_tabs(), switch_tab(tabId), close_tab(tabId).
+- list_tabs(), switch_tab(tabId), close_tab(tabId). wait_for_new_tab(triggerFn?, timeoutMs?) runs triggerFn (e.g. () => click('Open report')) and resolves to the tab {id,url,active} it opened; with_tab(tabId, fn) runs fn with that tab active, then switches back.
 - js(expression) runs in the page and returns the value as data (objects, arrays, exact strings); \`return\` works for multi-statement scripts.
 - click(target), type(target, text, {submit}), fill_input(target, text) replaces a field's value, select(target, optionText), fill(fields, {submit}). target is visible text ('Sign in'), a CSS selector ('#email', 'button[type=submit]'), {text|css|xpath, index}, or {x, y}.
 - click_at_xy(x, y) sends real mouse events in viewport coordinates; type_text(text) inserts into the focused element; press_key('Enter'); scroll(dy) or scroll(x, y, dy).
 - read({format, selector, maxChars}) returns page text (markdown); snapshot() lists numbered interactive elements with labels and selectors; find(text); state().
-- wait_for_element(selector), wait_for_network_idle(), upload_file(selector, path), screenshot({fullPage}) (vision models see the image).
+- wait_for_element(selector), wait_for_network_idle(), upload_file(selector, path), screenshot({fullPage, annotate}) (vision models see the image; annotate:true draws numbered boxes on interactive elements and lists them as {id, x, y, role, label}).
 - refs.capture({excerptText}), refs.list(), refs.reveal({referenceId}) manage browser references.
 - call(name, args) runs any other browser action and returns its structured result (download, console, network, wait_for_response, dialog, hover, drag, set_value, check, get_value, scrape, a11y, assert, do, ...); await help() lists them and help(name) describes one.
 - print()/log() print. A failing helper throws; catch it to try another way in the same cell.
 
-Prefer structure for discovery: snapshot() or js() that filters the DOM to what you need; avoid repeated full-page dumps. Read state, not just labels. Coordinates hit whatever is visible: inspect overlays and disabled controls first and never force a click through them. Element positions expire after navigation. Verify the actual outcome after every mutation.
+Prefer structure for discovery: snapshot() or js() that filters the DOM to what you need; avoid repeated full-page dumps. Read state, not just labels. Coordinates hit whatever is visible: inspect overlays and disabled controls first and never force a click through them. Element positions expire after navigation. Verify the actual outcome after every mutation: each action's printed result ends with a → line saying where the browser is now (URL change, new or closed tabs, active tab). Element lookups reach into open shadow roots and same-origin iframes; cross-origin iframes stay opaque.
 
 Use js(...) for extraction: return exactly the fields you need as JSON. Use screenshots for visual questions, canvas and geometry.
 
@@ -398,6 +436,7 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
               else if (message.type === 'call') {
                 const { id, name, args: toolArgs } = message
                 if (name === '__help') void dispatch(id, name, toolArgs)
+                else if (name === TABS) schedule(true, false, () => dispatch(id, name, toolArgs))
                 else {
                   const full = name.startsWith(PREFIX) ? name : PREFIX + name
                   schedule(concurrencySafe(name, toolArgs), ARMING.has(full) ? 'arming' : WATCHERS.has(full), armed => dispatch(id, name, toolArgs, armed))
@@ -415,16 +454,26 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
                   return
                 }
                 controller.signal.throwIfAborted()
+                const runContext = { ...exec, signal: controller.signal } as never
+                if (name === TABS) {
+                  worker.send({ type: 'reply', id, value: structuredClone(await resolve(LIST_TABS).execute({} as never, runContext)) })
+                  return
+                }
                 const target = resolve(name)
                 entry = { tool: target.name, status: 'interrupted' }
                 trace.push(entry)
+                // list_tabs never starts a browser, so reading it around an action has no side effects.
+                const summarized = !concurrencySafe(name, toolArgs) && !WATCHERS.has(target.name) && catalog.has(LIST_TABS)
+                const before = summarized ? await tabsOf(resolve(LIST_TABS), runContext) : undefined
                 const value = await target.execute(toolArgs as never, { ...exec, signal: controller.signal, ...armed !== undefined ? { armed } : {} } as never)
                 entry.status = 'ok'
+                const after = summarized ? await tabsOf(resolve(LIST_TABS), runContext) : undefined
                 const blocks = (target.output?.render?.(toolArgs as never, value as never) ?? [{ type: 'text', text: format(value) }]) as readonly Block[]
                 for (const block of blocks) {
                   if (block.type === 'image' && block.attachment !== undefined && images.length < MAX_IMAGES) images.push(block.attachment as ImageAttachment)
                 }
-                const text = blocks.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n')
+                const summary = after !== undefined ? actionSummary(before, after) : undefined
+                const text = [...blocks.filter(block => block.type === 'text').map(block => block.text ?? ''), ...summary !== undefined ? [summary] : []].join('\n')
                 worker.send({ type: 'reply', id, value: structuredClone(value), text })
               } catch (error) {
                 const message = error instanceof Error ? error.message : String(error)

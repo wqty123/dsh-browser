@@ -4,6 +4,11 @@
 
 ## 未发布 — 适配 DSH 0.2.3-alpha.2
 
+- **Browser Use P0：动作后摘要。** `dsh_browser_code` 中每个动作（click、goto_url、type 等）的输出末尾多一行 `→`，说明动作后浏览器所处位置：导航到的 URL、新开或关闭的标签页、当前活动标签页；读取类调用不加。摘要通过 `list_tabs` 读取，它从不启动浏览器。
+- **Browser Use P0：`wait_for_new_tab(triggerFn?, timeoutMs?)` 与 `with_tab(tabId, fn)`。** 前者执行触发函数（如 `() => click('打开报告')`）并返回它新开的标签页 `{ id, url, active }`，不传触发函数时等待调用之后出现的新标签页；后者在指定标签页上运行 `fn`，结束（含抛错）后切回原标签页。标签页轮询不进入调用 trace。
+- **Browser Use P0：带标注的截图。** `dsh_browser_screenshot({ annotate: true })` / `screenshot({ annotate: true })` 仅在本次截图期间为视口内可交互元素绘制编号框，截图后立即移除，并返回 `elements: [{ id, x, y, role, label }]`（x/y 为视口 CSS 像素中心点，可直接用于 `click({ x, y })`）；不支持与 `fullPage` 同用。
+- **Browser Use P0：同源 iframe 与开放 Shadow DOM 遍历统一。** 新增页面侧共享遍历 `deep-dom`，`find`、按 CSS/文本定位、`wait_for_element`、`read({ selector })`、`scrape`、`scroll` 到选择器、`upload_file` 与标注截图都会进入开放 shadow root 和同源 iframe（跨源 iframe 与 closed shadow root 仍不可见）；iframe 内命中的坐标换算为顶层视口坐标。`find` 不再命中 `<script>` / `<style>` 中的文本。
+
 - **`dsh_browser_code` 超时或取消后保留已打印输出与已完成调用。** 之前 DSH 会把被取消调用的返回内容替换成 `tool call aborted`，已打印的输出因此丢失；现在由 `finalizeContent` 写回本单元的输出。单元停止时会先等仍在执行的调用结束（最多 5 秒），输出末尾和结构化结果的 `trace` 中列出每个调用的结果（`ok`、`error`、`interrupted`），避免与下一单元重叠，也便于判断哪些动作已经发生。
 - **快捷函数失败也抛出 `ToolCallError`。** `click`、`goto_url` 等与 `tools.*` 一样带 `toolName` 和 `code`。
 - **CI 同时验证 DSH 0.2.2-rc.3 与 0.2.3-alpha.2。** 两条线分别使用各自的 Cordis / Schemastery 版本组装工作区。

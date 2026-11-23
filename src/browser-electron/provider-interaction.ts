@@ -1,5 +1,6 @@
 import { DEFAULT_OPERATION_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 import { pageOperationScript } from '../tool-browser/page-probe.ts'
+import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
 import { paintCursor, type CursorAction } from './virtual-cursor.ts'
 import type { BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserClickSequenceRequest, BrowserClickSequenceResult, BrowserElementTarget, BrowserPageOperationRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserTypeRequest, BrowserScrollRequest, BrowserKeyRequest } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
@@ -318,10 +319,10 @@ export abstract class ProviderInteraction extends ProviderObservation {
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
     const selector = request.selector ?? ''
-    const script = `(() => {
+    const script = `(() => {${DEEP_DOM_SOURCE}
       const sel = ${JSON.stringify(selector)}
       if (sel !== '') {
-        const el = document.querySelector(sel)
+        const el = __dshQuery(sel)
         if (!el) return { ok: false, reason: 'selector not found' }
         el.scrollIntoView({ behavior: 'instant', block: 'center' })
         return { ok: true }
@@ -430,7 +431,7 @@ export abstract class ProviderInteraction extends ProviderObservation {
         if (spec.label) {
           if (el.getAttribute('aria-label') === spec.label) return true
           if (el.id) {
-            const lbl = document.querySelector('label[for=' + JSON.stringify(el.id) + ']')
+            const lbl = (el.getRootNode().querySelector ? el.getRootNode() : document).querySelector('label[for=' + JSON.stringify(el.id) + ']')
             if (lbl && (lbl.textContent || '').trim() === spec.label) return true
           }
           const wrap = el.closest('label')
@@ -543,7 +544,8 @@ export abstract class ProviderInteraction extends ProviderObservation {
             out.push({ ok: true, method: 'checkbox', target: describe(spec) })
           } else if (type === 'radio') {
             const wanted = String(spec.value)
-            const radio = [...document.querySelectorAll('input[type="radio"][name=' + JSON.stringify(el.name || '') + ']')]
+            const radio = [...(el.getRootNode().querySelectorAll ? el.getRootNode() : document).querySelectorAll('input[type="radio"][name=' + JSON.stringify(el.name || '') + ']')]
+              .filter(r => r.form === el.form)
               .find(r => r.value === wanted || (r === el && (spec.value === true || spec.value === 'true')))
             if (!radio) { out.push({ ok: false, error: 'radio option not found: ' + wanted, target: describe(spec) }); continue }
             if (!radio.checked) radio.click()

@@ -50,6 +50,9 @@ const value = async (name: string, args?: Record<string, unknown>): Promise<unkn
 const tools: Record<string, (args?: Record<string, unknown>) => Promise<unknown>> = new Proxy(Object.create(null), {
   get: (_target, name) => typeof name !== 'string' || name === 'then' ? undefined : (args: Record<string, unknown> = {}) => value(name, args),
 })
+interface TabRow { readonly id: string; readonly url: string; readonly active: boolean }
+/** The task's tabs, read without a trace entry (wait_for_new_tab polls this). */
+const tabs = async (): Promise<readonly TabRow[]> => ((await value('__tabs')) as { tabs?: readonly TabRow[] }).tabs ?? []
 const text = async (name: string, args?: Record<string, unknown>): Promise<string> => (await ask(name, args)).text ?? ''
 
 export type Target = string | { css?: string; text?: string; xpath?: string; by?: string; value?: string; index?: number; x?: number; y?: number }
@@ -528,6 +531,29 @@ const helpers = {
   list_tabs: () => value('list_tabs'),
   switch_tab: (tabId: string) => text('switch_tab', { tabId }),
   close_tab: (tabId: string) => text('close_tab', { tabId }),
+  wait_for_new_tab: async (trigger?: (() => unknown) | number, timeoutMs?: number): Promise<TabRow> => {
+    const budget = typeof trigger === 'number' ? trigger : timeoutMs ?? 10_000
+    const known = new Set((await tabs()).map(tab => tab.id))
+    if (typeof trigger === 'function') await trigger()
+    const deadline = Date.now() + Math.min(Math.max(Number(budget) || 0, 0), 600_000)
+    for (;;) {
+      const fresh = (await tabs()).filter(tab => !known.has(tab.id))
+      if (fresh.length > 0) return fresh[fresh.length - 1]!
+      if (Date.now() >= deadline) throw new Error(`no new tab opened within ${budget}ms`)
+      await new Promise<void>(done => setTimeout(done, 150))
+    }
+  },
+  with_tab: async <T>(tabId: string, fn: () => T | Promise<T>): Promise<T> => {
+    if (typeof fn !== 'function') throw new TypeError('with_tab(tabId, fn) needs a function')
+    const previous = (await tabs()).find(tab => tab.active)?.id
+    if (previous !== tabId) await text('switch_tab', { tabId })
+    try {
+      return await fn()
+    } finally {
+      const now = await tabs()
+      if (previous !== undefined && now.find(tab => tab.active)?.id !== previous && now.some(tab => tab.id === previous)) await text('switch_tab', { tabId: previous })
+    }
+  },
   js: (script: string) => js(script),
   click_at_xy: (x: number, y: number) => text('click', { x, y }),
   type_text: (input: string) => text('type', { text: input }),

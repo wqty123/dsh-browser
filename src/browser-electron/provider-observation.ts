@@ -1,6 +1,7 @@
 import { DEFAULT_OPERATION_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 import type { BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserContentRequest, BrowserContentResult, BrowserScrapeRequest, BrowserScrapeResult, BrowserSessionId, BrowserSnapshotResult, BrowserWaitRequest, BrowserWaitResult } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
+import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
 import { PROVIDER_TIMEOUTS, TARGET_SCRIPT_GRACE_MS, delay, withTimeout, handleSendEvaluate } from './provider-core.ts'
 import { ProviderNavigation } from './provider-navigation.ts'
 
@@ -77,16 +78,10 @@ export abstract class ProviderObservation extends ProviderNavigation {
     const url = request.url ?? ''
     const selector = request.selector ?? ''
     const checkLoaded = request.loaded !== false
-    const expression = `(() => {
+    const expression = `(() => {${DEEP_DOM_SOURCE}
       const wantUrl = ${JSON.stringify(url)}
       const wantSelector = ${JSON.stringify(selector)}
-      const inDoc = (doc, sel) => {
-        if (doc.querySelector(sel)) return true
-        for (const el of doc.querySelectorAll('iframe')) {
-          try { const d = el.contentDocument; if (d && inDoc(d, sel)) return true } catch { /* cross-origin */ }
-        }
-        return false
-      }
+      const inDoc = (_doc, sel) => { try { return __dshQuery(sel) !== null } catch { return false } }
       const href = location.href
       // Exact match wins; otherwise prefix-match within the SAME origin only,
       // so wantUrl "https://a.com" never matches a cross-origin page whose
@@ -547,8 +542,8 @@ export abstract class ProviderObservation extends ProviderNavigation {
     const maxChars = request.maxChars
       ?? this.contentMaxChars
       ?? (format === 'html' || format === 'json' ? 50_000 : 20_000)
-    const script = `(() => {
-      const root = ${selector === '' ? 'document.body' : `document.querySelector(${JSON.stringify(selector)})`}
+    const script = `(() => {${DEEP_DOM_SOURCE}
+      const root = ${selector === '' ? 'document.body' : `__dshQuery(${JSON.stringify(selector)})`}
       if (!root) return { ok: false, reason: 'selector not found' }
       const fmt = ${JSON.stringify(format)}
       // Both walkers pierce shadow roots and same-origin iframes (cross-origin
@@ -651,7 +646,7 @@ export abstract class ProviderObservation extends ProviderNavigation {
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
     const timeoutMs = request.timeoutMs ?? PROVIDER_TIMEOUTS.interaction
-    const script = `(async () => {
+    const script = `(async () => {${DEEP_DOM_SOURCE}
       const itemSel = ${JSON.stringify(request.item)}
       const fields = ${JSON.stringify(request.fields)}
       const timeoutMs = ${String(timeoutMs)}
@@ -665,7 +660,7 @@ export abstract class ProviderObservation extends ProviderNavigation {
       let items = []
       for (;;) {
         // Immediate, like match() above: an unparseable selector can never match.
-        try { items = Array.from(document.querySelectorAll(itemSel)) }
+        try { items = __dshQueryAll(itemSel) }
         catch (error) { return { ok: false, error: 'invalid CSS selector ' + JSON.stringify(itemSel) + ' (' + String((error && error.message) || error) + ')' } }
         if (items.length > 0) break
         if (Date.now() >= deadline) return { ok: false, error: 'no elements matched: ' + itemSel }
@@ -681,7 +676,7 @@ export abstract class ProviderObservation extends ProviderNavigation {
           if (!el) { row[f.name] = null; continue }
           if (attr !== null) {
             const v = el.getAttribute(attr)
-            row[f.name] = attr === 'href' && el.tagName === 'A' && v ? new URL(v, location.href).href : v
+            row[f.name] = attr === 'href' && el.tagName === 'A' && v ? new URL(v, el.baseURI).href : v
             continue
           }
           row[f.name] = (el.textContent || '').trim()
