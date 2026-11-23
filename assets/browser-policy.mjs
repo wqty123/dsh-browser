@@ -10,6 +10,12 @@ export const EXTENSION_READY_TIMEOUT_MS = 2500
 export const EXTENSION_PROBE_TIMEOUT_MS = 1500
 export const NATIVE_REGISTRATION_TIMEOUT_MS = 60_000
 export const NATIVE_REGISTRATION_MAX_BUFFER = 1024 * 1024
+export const TOOL_DEFAULT_TIMEOUT_MS = 60_000
+export const TOOL_WAIT_RESERVE_MS = 5_000
+export const TOOL_WAIT_MIN_MS = 250
+export const MAX_FILL_FIELDS = 200
+export const CODE_TOOL_DEFAULT_TIMEOUT_MS = 120_000
+export const CODE_TOOL_MAX_TIMEOUT_MS = 600_000
 export const extensionPageUrl = browser => `${browser}://extensions`
 export const cdpVersionUrl = port => `http://${LOOPBACK_IPV4}:${port}/json/version`
 export const folderOpener = platform => platform === 'win32' ? 'explorer.exe' : platform === 'darwin' ? 'open' : 'xdg-open'

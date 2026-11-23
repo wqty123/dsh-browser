@@ -10,6 +10,17 @@ export const EXTENSION_READY_TIMEOUT_MS: number
 export const EXTENSION_PROBE_TIMEOUT_MS: number
 export const NATIVE_REGISTRATION_TIMEOUT_MS: number
 export const NATIVE_REGISTRATION_MAX_BUFFER: number
+/** Default per-call budget of a dsh_browser_* tool. */
+export const TOOL_DEFAULT_TIMEOUT_MS: number
+/** Kept back from a tool budget so a wait can still return its verdict before the call aborts. */
+export const TOOL_WAIT_RESERVE_MS: number
+/** Shortest wait budget a tool call is given, whatever its budget. */
+export const TOOL_WAIT_MIN_MS: number
+/** Most fields dsh_browser_fill accepts in one batch. */
+export const MAX_FILL_FIELDS: number
+/** Default and largest per-cell deadline of dsh_browser_code. */
+export const CODE_TOOL_DEFAULT_TIMEOUT_MS: number
+export const CODE_TOOL_MAX_TIMEOUT_MS: number
 export function extensionPageUrl(browser: 'edge' | 'chrome'): string
 export function cdpVersionUrl(port: number): string
 export function folderOpener(platform: string): string

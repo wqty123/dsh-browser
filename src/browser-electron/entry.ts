@@ -202,7 +202,7 @@ function readSessionId(ctx: unknown): string | undefined {
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
   // Which session is this process serving?
   //
-  // The desktop shell keeps ONE sidebar per conversation — measured: two `[class*=_tabStrip]`
+  // The desktop shell keeps ONE sidebar per conversation — measured: two sidebar tab-strip
   // containers sat in the DOM at once, each carrying its own session id on the React fiber, and
   // the invisible one's webview was unloaded. So the bridge CAN tell which sidebar belongs to
   // whom; what it lacked was the other half, this process's own identity. Without it, the bridge
@@ -488,7 +488,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // Same profile root as settings-store, history-store and desktop-bridge-host: the
       // `?.dsh` component used to be missing HERE only, so a desktop launched from a
       // shortcut (no DSH_HOME in the environment) put its browser profile in
-      // `C:\Users\<user>\dsh-builtin-browser-host\` while its settings and history lived in
+      // `%USERPROFILE%\dsh-builtin-browser-host\` while its settings and history lived in
       // `~/.dsh/dsh-builtin-browser-host/` — two half-profiles that never met, and a
       // settings panel whose switches appeared not to apply.
       const home = dshHome()

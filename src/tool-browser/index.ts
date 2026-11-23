@@ -18,6 +18,7 @@ import { SettingsStore } from '../browser-electron/settings-store.ts'
 import { browserSessionHandle, resolveTabHandle } from '../browser/handles.ts'
 import { readSurface, createState, liveStates, READ_ONLY_TOOLS, taskKey, type ToolScope, maxWaitFor, MAX_FILL_FIELDS, REGISTRATION_ORDER } from './state.ts'
 import { navigationTools } from './tools-navigation.ts'
+import { TOOL_DEFAULT_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 import { observationTools } from './tools-observation.ts'
 import { interactionTools } from './tools-interaction.ts'
 import { debugTools } from './tools-debug.ts'
@@ -85,7 +86,7 @@ const CORE_PROMPT = 'Operate the built-in browser with the dsh_browser_* tools. 
 
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
-  const timeoutMs = config.timeoutMs ?? 60_000
+  const timeoutMs = config.timeoutMs ?? TOOL_DEFAULT_TIMEOUT_MS
   const surface = config.surface ?? 'core'
   const maxWaitMs = maxWaitFor(timeoutMs)
   const maxFillFields = MAX_FILL_FIELDS

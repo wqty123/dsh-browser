@@ -9,7 +9,7 @@ import { createShortcutStore, type ShortcutSettings } from '../browser-electron/
 import type { BrowserSessionId } from '../browser/types.ts'
 import { browserSessionHandle, resolveTabHandle, scopedTabs, sessionWireId, tabWireId } from '../browser/handles.ts'
 import { ELEMENT_ITEM_SCHEMA, projectElement } from './element-fields.ts'
-import { readSurface, enforceSurface, assertSurfaceCanHost, assertAllowed, agentOf, taskKey, rememberSession, ensureSession, type ToolScope, type ToolDefinition } from './state.ts'
+import { readSurface, enforceSurface, assertSurfaceCanHost, assertAllowed, agentOf, taskKey, rememberSession, ensureSession, panelBound, type ToolScope, type ToolDefinition } from './state.ts'
 import { formatSnapshot } from './tools-observation.ts'
 
 /**
@@ -126,7 +126,7 @@ export function navigationTools(scope: ToolScope): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'dsh_browser_open',
-    description: 'Open a URL on the selected controllable surface (default: panel). Success returns a live snapshot and supports subsequent browser tools on that same page. A Web iframe or unavailable desktop bridge is refused; no manual-only navigation is queued. Reading tools never start another browser. newTab is optional on CDP surfaces. Never treat the bare DSH host (e.g. http://127.0.0.1:3080/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
+    description: 'Open a URL on the selected controllable surface (default: panel). Success returns a live snapshot and supports subsequent browser tools on that same page. A Web iframe or unavailable desktop bridge is refused; no manual-only navigation is queued. Reading tools never start another browser. newTab is optional on CDP surfaces. Never treat the bare DSH host (e.g. http://127.0.0.1:<port>/) as the target — it needs the authenticated URL printed by `dsh web`, and the bare root is refused.',
     parameters: {
       url: { type: 'string', required: true, description: 'The URL to open (HTTP/HTTPS).' },
       newTab: { type: 'boolean', description: 'Open in a new tab instead of the active one.' },
@@ -190,7 +190,7 @@ export function navigationTools(scope: ToolScope): ToolDefinition[] {
           const target = new URL(args.url)
           if (target.protocol !== 'http:' && target.protocol !== 'https:') throw new Error('dsh_browser_open: panel requires an HTTP/HTTPS URL')
           exec.signal?.throwIfAborted()
-          session = state.panelUrlByTask.has(key) && previous !== undefined && browser.exists(previous)
+          session = panelBound(state, key) && previous !== undefined && browser.exists(previous)
             ? previous : await browser.openPanel?.(key)
           if (session === undefined) {
             assertSurfaceCanHost(surface, args.url)
@@ -223,7 +223,7 @@ export function navigationTools(scope: ToolScope): ToolDefinition[] {
       }
       await state.pendingPanelOpens.get(key)
       await state.pendingOpens.get(key)
-      if (state.panelUrlByTask.has(key)) {
+      if (panelBound(state, key)) {
         const previous = state.sessionsByTask.get(key)
         state.sessionsByTask.delete(key)
         state.panelUrlByTask.delete(key)

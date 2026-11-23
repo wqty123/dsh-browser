@@ -5,27 +5,23 @@
 // bundle's own calls and checks them against both locale tables.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { bundledModule } from './helpers/client-build.mjs'
 
-const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+// Both halves come from the shipped bundle: the locale tables as inlined there, and the panel's own
+// compiled code, so a label the bundler dropped or renamed is caught too.
+const locales = bundledModule('assets/browser-panel-locales.mjs')
+const source = bundledModule('src/client/settings/panel.ts')
 
-const ZH_START = source.indexOf('const zh = {')
-const EN_START = source.indexOf('const en = {')
-// The English table ends where the panel's code begins. Slicing to the end of the file instead
-// pulled that code in, and its own `key: "…"` lines read as locale keys.
-//
-// Anchored on a function declaration rather than on a comment: the comment above it was rewritten
-// once and this extractor reported "both locale tables are absent", which is a confusing way to say
-// "the anchor moved".
-const EN_END = source.indexOf('async function callSettings')
-assert.ok(ZH_START !== -1 && EN_START !== -1 && EN_END !== -1 && EN_START > ZH_START, 'both locale tables are present')
+const EN_START = locales.search(/const en(?:\$\d+)? = \{/)
+assert.ok(/const zh(?:\$\d+)? = \{/.test(locales) && EN_START !== -1, 'both locale tables are present')
 
-const zhBlock = source.slice(ZH_START, EN_START)
-const enBlock = source.slice(EN_START, EN_END)
+const zhBlock = locales.slice(0, EN_START)
+const enBlock = locales.slice(EN_START)
 
 /**
  * The keys a locale table declares.
  *
+ * Values are string literals or a shared message (`extensionMessages.zh.connected`).
  * Both spellings matter: dotted keys are written quoted (`"history.title":`) while the
  * single-word ones are bare (`nav: "Browser"`). Matching only the quoted form silently
  * missed seven labels — including `lead` and `saved`, which the panel does render — and
@@ -34,7 +30,7 @@ const enBlock = source.slice(EN_START, EN_END)
  */
 function declaredKeys(block) {
   const keys = new Set()
-  for (const match of block.matchAll(/^\s*(?:"([A-Za-z][\w.]*)"|([A-Za-z]\w*)):\s*"/gm)) {
+  for (const match of block.matchAll(/^\s*(?:"([A-Za-z][\w.]*)"|([A-Za-z]\w*)):\s*(?:"|[A-Za-z_$])/gm)) {
     keys.add(match[1] ?? match[2])
   }
   return keys

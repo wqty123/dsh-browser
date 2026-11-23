@@ -8,7 +8,8 @@ import { BrowserTakeovers } from './takeover.ts'
 import { readFileSync } from 'node:fs'
 import type { defineTool } from '@deepseek-ai/dsh-tools'
 import { SettingsStore, settingsPath } from '../browser-electron/settings-store.ts'
-import type { BrowserSessionId } from '../browser/types.ts'
+import { assertCapability, CDP_CARRIER_CAPABILITIES, WEB_PANEL_CAPABILITIES, type BrowserSessionId, type CarrierCapabilities } from '../browser/types.ts'
+import { MAX_FILL_FIELDS, TOOL_WAIT_MIN_MS, TOOL_WAIT_RESERVE_MS } from '../../assets/browser-policy.mjs'
 import type { Config } from './index.ts'
 
 /**
@@ -202,6 +203,20 @@ export function taskKey(exec: { agent?: { id?: string } } | undefined): string {
   return exec?.agent?.id ?? 'default'
 }
 
+/** Whether this task's page was placed in the DSH sidebar panel rather than a plugin-owned window. */
+export function panelBound(state: ToolBrowserState, key: string): boolean {
+  return state.panelUrlByTask.has(key)
+}
+
+/**
+ * What the task's current carrier can do. A panel placement without a live CDP session is the Web
+ * iframe panel: it can only be navigated. Everything else is a CDP-backed page.
+ */
+export function carrierCapabilities(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string): CarrierCapabilities {
+  const session = state.sessionsByTask.get(key)
+  return panelBound(state, key) && (session === undefined || !browser.exists(session)) ? WEB_PANEL_CAPABILITIES : CDP_CARRIER_CAPABILITIES
+}
+
 export function rememberSession(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string, agent: ExecAgent | undefined, session: BrowserSessionId | undefined, panelUrl?: string): void {
   const previous = state.sessionsByTask.get(key)
   const previousPanelUrl = state.panelUrlByTask.get(key)
@@ -251,12 +266,11 @@ export async function ensureSession(browser: NonNullable<Context['browser']>, st
   }
   const pending = state.pendingOpens.get(key)
   if (pending !== undefined) return pending
-  if (state.panelUrlByTask.has(key)) {
-    throw new Error('dsh-builtin-browser: the panel surface has no live CDP session for this operation. '
-      + 'Use the CDP-backed DSH desktop sidebar with a connected desktop bridge and call dsh_browser_open again. '
-      + 'The Web iframe panel cannot provide live snapshots, a11y, content, scrape, screenshots, interactions, '
-      + 'uploads, downloads, or reference capture. Reading tools never start a separate browser.')
-  }
+  assertCapability(carrierCapabilities(browser, state, key), 'cdp',
+    'dsh-builtin-browser: the panel surface has no live CDP session for this operation. '
+    + 'Use the CDP-backed DSH desktop sidebar with a connected desktop bridge and call dsh_browser_open again. '
+    + 'The Web iframe panel cannot provide live snapshots, a11y, content, scrape, screenshots, interactions, '
+    + 'uploads, downloads, or reference capture. Reading tools never start a separate browser.')
   // Starting a browser is `dsh_browser_open`'s job and nobody else's. A read tool asking "what is on
   // screen" used to start one — which, with the human's own Edge already running, handed the command over
   // and opened yet another window, reported as "one look, two Edge windows". A reader with nothing open
@@ -305,7 +319,7 @@ export type ToolDefinition = ReturnType<typeof defineTool>
  * what keeps the promise: the polling stops, the reason is returned.
  */
 export function maxWaitFor(timeoutMs: number): number {
-  return Math.max(250, timeoutMs - 5_000)
+  return Math.max(TOOL_WAIT_MIN_MS, timeoutMs - TOOL_WAIT_RESERVE_MS)
 }
 
 /**
@@ -316,7 +330,7 @@ export function maxWaitFor(timeoutMs: number): number {
  * throws, which is the opposite of the documented "per-field failures are reported instead
  * of throwing". Real forms are far smaller than this; anything larger should be split.
  */
-export const MAX_FILL_FIELDS = 200
+export { MAX_FILL_FIELDS }
 
 /** Every tool, in the order the entry registers it (and the code tool's catalog lists it). */
 export const REGISTRATION_ORDER: readonly string[] = [

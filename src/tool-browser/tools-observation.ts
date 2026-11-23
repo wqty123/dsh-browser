@@ -7,7 +7,8 @@ import type { ImageBlock } from '@deepseek-ai/dsh-llm'
 import { SCREENSHOT_MAX_WIDTH, SCREENSHOT_MAX_HEIGHT, screenshotDimension, screenshotBytes, screenshotVisionEnabled, saveScreenshotImage } from './screenshot-image.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { NODE_ITEM_SCHEMA, projectElement, projectNode } from './element-fields.ts'
-import { assertAllowed, agentOf, taskKey, ensureSession, type ToolScope, type ToolDefinition } from './state.ts'
+import { assertCapability } from '../browser/types.ts'
+import { assertAllowed, agentOf, taskKey, ensureSession, carrierCapabilities, type ToolScope, type ToolDefinition } from './state.ts'
 import { installProbe, probe, type ProbeRow } from './probe-client.ts'
 
 /**
@@ -385,9 +386,8 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
       const key = taskKey(exec)
       await state.pendingPanelOpens.get(key)
       const existing = state.sessionsByTask.get(key)
-      if (state.panelUrlByTask.has(key) && (existing === undefined || !browser.exists(existing))) {
-        throw new Error('Web 侧栏暂不支持截图：iframe 无法被网页静默截图 (panel surface unavailable). Use the CDP-backed DSH desktop sidebar with a connected desktop bridge for screenshots.')
-      }
+      assertCapability(carrierCapabilities(browser, state, key), 'screenshot',
+        'Web 侧栏暂不支持截图：iframe 无法被网页静默截图 (panel surface unavailable). Use the CDP-backed DSH desktop sidebar with a connected desktop bridge for screenshots.')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const vision = await screenshotVisionEnabled(ctx, exec, exec.signal)
       const maxWidth = screenshotDimension(args.maxWidth, SCREENSHOT_MAX_WIDTH)
