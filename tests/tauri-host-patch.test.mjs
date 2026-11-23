@@ -157,6 +157,24 @@ test('patched: session cookies are checkpointed and restored before the next gue
   await settle()
 })
 
+test('patched: partitioned (CHIPS) cookies are never checkpointed or restored outside their partition', async t => {
+  const root = temporary(t)
+  const first = await boot(patched, root)
+  const { partition } = await first.guests.acquire(first.host, 'cwd:/project')
+  const jar = first.sessions.get(partition).cookies
+  await jar.set({ url: 'https://www.saucedemo.com/', name: 'session-username', value: 'standard_user' })
+  jar.emit('changed', {}, { name: 'embed', value: 'x', domain: 'widget.example', hostOnly: true, path: '/', secure: true, session: true, partitionKey: { topLevelSite: 'https://site.example' } }, 'explicit', false)
+  await settle()
+  const file = path.join(first.sessions.get(partition).storagePath, 'dsh-sidebar-session-cookies.json')
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).map(cookie => cookie.name), ['session-username'])
+  fs.writeFileSync(file, JSON.stringify([...JSON.parse(fs.readFileSync(file, 'utf8')),
+    { url: 'https://widget.example/', name: 'embed', value: 'x', partitionKey: { topLevelSite: 'https://site.example' } }]))
+  const restarted = await boot(patched, root)
+  await restarted.guests.acquire(restarted.host, 'cwd:/project')
+  assert.deepEqual(restarted.sessions.get(partition).cookies.sets.map(cookie => cookie.name), ['session-username'])
+  await settle()
+})
+
 test('patched: a pending checkpoint is written synchronously when the app quits', async t => {
   const root = temporary(t)
   const first = await boot(patched, root)

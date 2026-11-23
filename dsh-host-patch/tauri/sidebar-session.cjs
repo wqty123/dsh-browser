@@ -18,6 +18,8 @@ module.exports = ({ app, createHash, fs, path }) => {
   })
   const valid = value => value !== null && typeof value === 'object' && typeof value.url === 'string'
     && typeof value.name === 'string' && typeof value.value === 'string' && value.expirationDate === undefined
+    && value.partitionKey === undefined && value.partitioned === undefined
+  const unpartitioned = cookie => cookie.partitionKey == null && cookie.partitioned !== true
   const write = state => {
     clearTimeout(state.timer)
     state.timer = undefined
@@ -56,7 +58,7 @@ module.exports = ({ app, createHash, fs, path }) => {
       }
       target.cookies.on('changed', (_event, cookie, _cause, removed) => {
         const key = keyOf(cookie)
-        if (removed || cookie.session !== true) state.cookies.delete(key)
+        if (removed || cookie.session !== true || !unpartitioned(cookie)) state.cookies.delete(key)
         else state.cookies.set(key, record(cookie))
         if (cookie.session !== true) target.cookies.flushStore().catch(() => {})
         schedule()
