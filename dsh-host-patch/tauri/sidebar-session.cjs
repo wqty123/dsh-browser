@@ -3,7 +3,6 @@
 // One persistent sidebar partition per DSH home (as on rc.5), plus a checkpoint for the session cookies
 // Chromium drops at exit, so the sidebar keeps its logins across DSH Tauri restarts.
 module.exports = ({ app, createHash, fs, path }) => {
-  const GESTURE_MS = 10_000
   const FILE = 'dsh-sidebar-session-cookies.json'
   const states = new Map()
   const keyOf = cookie => JSON.stringify([cookie.name, cookie.domain ?? '', cookie.path ?? '/'])
@@ -44,7 +43,6 @@ module.exports = ({ app, createHash, fs, path }) => {
   // so will-quit rarely runs and Chromium's lazy localStorage commit is lost. Commit after the
   // input and loads that change a sidebar page's storage instead.
   const storageCommit = new WeakMap()
-  const gestures = new WeakMap()
   const commitSoon = target => {
     clearTimeout(storageCommit.get(target))
     storageCommit.set(target, setTimeout(() => flushStorage(target), 300))
@@ -53,11 +51,7 @@ module.exports = ({ app, createHash, fs, path }) => {
     const target = contents.session
     if (!states.has(target)) return
     const commit = () => commitSoon(target)
-    contents.on('input-event', (_input, input) => {
-      if (input.type !== 'mouseUp' && input.type !== 'keyUp') return
-      gestures.set(contents, Date.now())
-      commit()
-    })
+    contents.on('input-event', (_input, input) => { if (input.type === 'mouseUp' || input.type === 'keyUp') commit() })
     for (const event of ['did-finish-load', 'did-navigate-in-page', 'destroyed']) contents.on(event, commit)
   })
   app.on('will-quit', flushAll)
@@ -66,8 +60,7 @@ module.exports = ({ app, createHash, fs, path }) => {
   const home = process.env.DSH_HOME || app.getPath('userData')
   const reserved = new Set()
   return {
-    download(event, item, contents) {
-      if (!(Date.now() - (gestures.get(contents) ?? -Infinity) < GESTURE_MS)) return event.preventDefault()
+    download(item) {
       const directory = app.getPath('downloads')
       const name = path.basename(item.getFilename() || 'download')
       const extension = path.extname(name)
@@ -77,7 +70,7 @@ module.exports = ({ app, createHash, fs, path }) => {
       fs.mkdirSync(directory, { recursive: true })
       reserved.add(target)
       item.once('done', () => reserved.delete(target))
-      item.setSavePath(target)
+      item.setSaveDialogOptions({ defaultPath: target })
     },
     partition() {
       return 'persist:dsh-sidebar-browser-' + createHash('sha256').update(home).digest('hex').slice(0, 32)

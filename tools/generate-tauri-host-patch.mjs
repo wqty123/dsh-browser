@@ -43,7 +43,7 @@ export function tauriHostPatchSpec() {
         },
         {
           before: 'e.on(`will-download`,e=>e.preventDefault()),',
-          after: 'e.on(`will-download`,(e,t,n)=>dshSidebarSession.download(e,t,n)),',
+          after: 'e.on(`will-download`,(e,t)=>dshSidebarSession.download(t)),',
         },
         {
           before: 'this.partitions.set(r,i)}let a=(0,n.randomUUID)();',
