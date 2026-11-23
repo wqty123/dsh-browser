@@ -128,7 +128,7 @@ function plan(packages, restoring, io) {
         if (original === undefined) throw new Error('no backup for the previous host patch revision')
         if (patchText(patchSource(original, previousTarget, path, io), previousTarget) !== text) throw new Error('previous patch revision differs from its recorded backup; refusing to overwrite other edits')
         return { path, backup, text, output: restoring ? original : patchText(patchSource(original, target, path, io), target),
-          applied: false, previous: true, held, mode: io.statSync(path).mode }
+          applied: false, previous: version === 'tauri' ? 'tauri' : 'electron', held, mode: io.statSync(path).mode }
       }
       if (restoring) {
         if (original !== undefined && original !== text) throw new Error('file changed after restore or Desktop update')
@@ -149,7 +149,9 @@ function inspect(packages, restoring, io) {
   try {
     const entries = plan(packages, restoring, io)
     return { status: entries.every(entry => entry.applied) ? 'applied' : 'absent',
-      ...(entries.some(entry => entry.previous) ? { reason: 'a previous host patch revision is applied; explicit bootstrap upgrade required' } : {}), entries }
+      ...(entries.some(entry => entry.previous) ? { reason: entries.some(entry => entry.previous === 'tauri')
+        ? 'host patch revision 1; explicit bootstrap upgrade to revision 2 required'
+        : 'host patch revision 1 or 2 or 3 or 4 or 5 or 6 or 7 or 8; explicit bootstrap upgrade to revision 9 required' } : {}), entries }
   } catch (error) {
     return { status: error.status ?? 'anchors mismatch', reason: String(error.message ?? error) }
   }
