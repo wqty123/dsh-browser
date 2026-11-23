@@ -20,7 +20,7 @@
 export type CursorAction = 'move' | 'click'
 
 /** Element id of the overlay root, stable so repeat calls update one node. */
-const CURSOR_ID = '__dsh_agent_cursor__'
+export const CURSOR_ID = '__dsh_agent_cursor__'
 
 /**
  * Where the overlay was last placed, so an unchanged position is not repainted.
@@ -76,18 +76,19 @@ export function cursorScript(x: number, y: number, action: CursorAction, label?:
     // The bubble sits below-right of the pointer tip and is capped in width so a long
     // label cannot cover the page it is describing.
     const bubble = '<span data-dsh-role="bubble" style="position:absolute;left:18px;top:16px;max-width:280px;padding:3px 8px;border-radius:5px;background:rgba(17,17,17,.92);color:#fff;font:12px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:0;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>'
-    root.innerHTML = svg + ripple + bubble
+    root.attachShadow({ mode: 'open' }).innerHTML = svg + ripple + bubble
     ;(document.body || document.documentElement).appendChild(root)
   }
+  const parts = root.shadowRoot || root
   root.style.transform = 'translate(${x}px, ${y}px)'
-  ${action === 'click' ? `const ripple = root.querySelector('[data-dsh-role="ripple"]')
+  ${action === 'click' ? `const ripple = parts.querySelector('[data-dsh-role="ripple"]')
   if (ripple && typeof ripple.animate === 'function') {
     ripple.animate(
       [{ transform: 'scale(.25)', opacity: 0.95 }, { transform: 'scale(1.6)', opacity: 0 }],
       { duration: 550, easing: 'ease-out' },
     )
   }` : ''}
-  ${label !== undefined && label !== '' ? `const bubble = root.querySelector('[data-dsh-role="bubble"]')
+  ${label !== undefined && label !== '' ? `const bubble = parts.querySelector('[data-dsh-role="bubble"]')
   if (bubble) {
     bubble.textContent = ${JSON.stringify(label)}
     if (typeof bubble.animate === 'function') {

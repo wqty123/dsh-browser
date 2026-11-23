@@ -119,3 +119,19 @@ test('an unchanged position is not repainted, and a new document resets that', (
   paintCursor(handle, 10, 20, 'move', evaluate)
   assert.equal(painted.length, 4, 'after a navigation the pointer is drawn again')
 })
+
+test('the pointer overlay changes neither the page fingerprint nor its text in real Chromium', {
+  skip: !process.env.DSH_TEST_CHROME && 'set DSH_TEST_CHROME to a Chromium executable',
+}, async t => {
+  const { chromiumPage } = await import('./fixtures/chromium-page.mjs')
+  const { pageFingerprint } = await import('../lib/tool-browser/probe-client.js')
+  const chrome = await chromiumPage(t)
+  await chrome.evaluate(`document.body.innerHTML = '<form><input name="a"><button>Submit order</button></form>'; true`)
+  const browser = { execute: async (_session, { script }) => ({ ok: true, value: await chrome.evaluate(script) }) }
+  const before = await pageFingerprint(browser, 's')
+  await chrome.evaluate(cursorScript(40, 50, 'click', 'click'))
+  await chrome.evaluate(cursorScript(90, 120, 'click', 'type'))
+  assert.equal(await pageFingerprint(browser, 's'), before)
+  assert.equal(await chrome.evaluate('document.body.innerText.trim()'), 'Submit order')
+  assert.equal(await chrome.evaluate(`document.getElementById('__dsh_agent_cursor__').shadowRoot.querySelector('[data-dsh-role="bubble"]').textContent`), 'type')
+})
