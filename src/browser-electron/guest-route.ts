@@ -589,44 +589,55 @@ function realGuestUrl(raw: string): URL {
 /**
  * Fetch one resource a guest page loaded, on the server and under the proxy's own target rules.
  * The Web sidebar's guest is an iframe with no browser session, so this is the only way a frozen
- * quote can get an image's bytes; it sends the page as referer and the guest cookie jar's cookies,
- * like the proxy did when the page loaded the image.
+ * quote can get an image's bytes. It sends what the proxy sent when the page loaded the image:
+ * guest documents are no-referrer, so no referer and the cookie jar's unscoped cookies, and it
+ * keeps the cookies each redirect hop sets.
  */
 export async function fetchGuestResource(raw: string, options: {
-  readonly referer?: string
+  readonly dshHost?: string
   readonly maxBytes: number
   readonly signal?: AbortSignal
   readonly cookies?: GuestCookieJar
 }): Promise<Buffer> {
   const own = Object.values(networkInterfaces()).flatMap(list => (list ?? []).map(entry => entry.address))
+  let host = ''
+  try { host = options.dshHost === undefined ? '' : new URL('http://' + options.dshHost).hostname.toLowerCase().replace(/[.]$/u, '') } catch {}
   let url = realGuestUrl(raw)
-  let referer: URL | undefined
-  try { referer = options.referer === undefined ? undefined : realGuestUrl(options.referer) } catch { referer = undefined }
   let jar: GuestCookieJar | undefined
   try { jar = options.cookies ?? localGuestCookies() } catch { jar = undefined }
   for (let hop = 0; hop <= 5; hop++) {
-    if (await blockedResolvedTarget(url, '', own)) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
+    if (await blockedResolvedTarget(url, host, own)) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
     const headers = new Headers({
       'user-agent': DESKTOP_UA, accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8', 'accept-encoding': 'identity',
-      'sec-fetch-dest': 'image', 'sec-fetch-mode': 'no-cors',
     })
-    if (referer !== undefined && !blockedTarget(referer, '')) headers.set('referer', referer.href)
-    const cookie = jar?.getCookieHeader(url, false, referer === undefined ? undefined : { site: referer, topLevel: false, method: 'GET' })
+    const cookie = jar?.getCookieHeader(url)
     if (cookie !== undefined && cookie !== '') headers.set('cookie', cookie)
     const response = await fetch(url, { headers, redirect: 'manual', ...options.signal === undefined ? {} : { signal: options.signal } })
+    jar?.setCookies(url, response.headers.getSetCookie?.() ?? [])
     const location = response.headers.get('location')
     if (response.status >= 300 && response.status < 400 && location !== null) {
       await response.body?.cancel()
       url = new URL(location, url)
       continue
     }
-    if (!response.ok || Number(response.headers.get('content-length') ?? '0') > options.maxBytes) {
+    if (!response.ok) {
       await response.body?.cancel()
-      throw new Error(response.ok ? `guest resource exceeds ${options.maxBytes} bytes` : `guest resource answered ${response.status}`)
+      throw new Error('guest resource answered ' + response.status)
     }
-    const bytes = Buffer.from(await response.arrayBuffer())
-    if (bytes.length > options.maxBytes) throw new Error(`guest resource exceeds ${options.maxBytes} bytes`)
-    return bytes
+    const chunks: Uint8Array[] = []
+    let size = 0
+    const reader = response.body?.getReader()
+    while (reader !== undefined) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > options.maxBytes) {
+        await reader.cancel()
+        throw new Error('guest resource exceeds ' + options.maxBytes + ' bytes')
+      }
+      chunks.push(value)
+    }
+    return Buffer.concat(chunks)
   }
   throw new Error('guest resource redirected too many times')
 }

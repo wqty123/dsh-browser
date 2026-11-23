@@ -98,7 +98,7 @@ export interface ReferenceHost {
   /** Save one URL to a local file with the session's cookies, when the carrier can. */
   download?(sessionId: string, url: string, savePath: string, signal?: AbortSignal): Promise<void>
   /** Save one image a Web sidebar page loaded, fetched the way the guest proxy loaded it; a frozen Web capture has no browser session. */
-  fetchWebImage?(url: string, pageUrl: string, savePath: string, signal?: AbortSignal): Promise<void>
+  fetchWebImage?(url: string, savePath: string, web: WebImageContext, signal?: AbortSignal): Promise<void>
   /**
    * Capture a clipped, read-only visible-region screenshot. Optional: a host
    * without this capability keeps the source-image / rasterised-image paths.
@@ -112,7 +112,12 @@ type ImagePolicy = {
   readonly verifyImageVersion: boolean
   readonly allowVisibleSnapshot: boolean
   /** Set for a frozen Web capture: its images come from the page's own URLs, never a browser session. */
-  readonly web?: { readonly pageUrl: string }
+  readonly web?: WebImageContext
+}
+
+type WebImageContext = {
+  /** The Host the capture reached DSH on: the guest proxy refuses it as a target, so this fetch does too. */
+  readonly dshHost?: string
 }
 
 type MaterializedAsset = {
@@ -177,6 +182,8 @@ export interface CaptureOutcome {
 
 /** What the caller wants captured. */
 export interface CaptureRequest {
+  /** The Host header the capture request reached DSH on; a frozen Web capture never fetches its images from it. */
+  readonly dshHost?: string
   readonly sourcePageId?: string
   /** The DSH session that owns the reference. */
   readonly sessionId: string
@@ -597,7 +604,7 @@ export class BrowserReferenceService {
       } else if (kind === 'image') {
         const imagePart = await this.imagePart(browserSessionId, event as RawCaptureEvent, nextPartId, signal, {
           verifyImageVersion: request.verifyImageVersion !== false,
-          ...webImages ? { web: { pageUrl } } : {},
+          ...webImages ? { web: request.dshHost === undefined ? {} : { dshHost: request.dshHost } } : {},
           allowVisibleSnapshot: request.allowVisibleSnapshot !== false,
         })
         if ('reason' in imagePart) failures.push(imagePart)
@@ -607,7 +614,7 @@ export class BrowserReferenceService {
           // A cell image is one image, not "whatever region is selected"; a
           // masked visible snapshot of the table would misreport it.
           verifyImageVersion: request.verifyImageVersion !== false,
-          ...webImages ? { web: { pageUrl } } : {},
+          ...webImages ? { web: request.dshHost === undefined ? {} : { dshHost: request.dshHost } } : {},
           allowVisibleSnapshot: false,
         })
         if ('reason' in tablePart) failures.push(tablePart)
@@ -944,7 +951,7 @@ export class BrowserReferenceService {
     const { download, fetchWebImage } = this.host
     const fetchImage: ((url: string, savePath: string) => Promise<void>) | undefined = web === undefined
       ? download && ((url, savePath) => download.call(this.host, sessionId, url, savePath, signal))
-      : fetchWebImage && ((url, savePath) => fetchWebImage.call(this.host, url, web.pageUrl, savePath, signal))
+      : fetchWebImage && ((url, savePath) => fetchWebImage.call(this.host, url, savePath, web, signal))
     let webFailure: string | undefined
     let versionChangedUrl = ''
     for (const url of image.urls) {
@@ -1331,8 +1338,8 @@ export function createReferenceService(
     download: async (sessionId, url, savePath, signal) => {
       await browser.download(sessionId, { url, savePath }, signal)
     },
-    fetchWebImage: async (url, pageUrl, savePath, signal) => {
-      writeFileSync(savePath, await fetchGuestResource(url, { referer: pageUrl, maxBytes: rest.maxImageBytes ?? 20 * 1024 * 1024, ...signal === undefined ? {} : { signal } }))
+    fetchWebImage: async (url, savePath, web, signal) => {
+      writeFileSync(savePath, await fetchGuestResource(url, { ...web, maxBytes: rest.maxImageBytes ?? 20 * 1024 * 1024, ...signal === undefined ? {} : { signal } }))
     },
     ...visibleCapture !== undefined ? { captureVisible: visibleCapture } : {},
   }, store ?? new ReferenceStore(), { webSources: webReferenceSources(browser), ...rest })

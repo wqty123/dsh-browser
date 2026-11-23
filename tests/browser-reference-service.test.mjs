@@ -582,8 +582,8 @@ test('a frozen Web capture fetches its images through the web host, never a brow
   const { host, assets, directory } = fixture(t)
   const fetched = []
   let fail = false
-  host.fetchWebImage = async (url, pageUrl, savePath) => {
-    fetched.push([url, pageUrl])
+  host.fetchWebImage = async (url, savePath, web) => {
+    fetched.push([url, web.dshHost])
     if (fail) throw new Error('guest resource answered 404')
     writeFileSync(savePath, PNG)
   }
@@ -596,10 +596,10 @@ test('a frozen Web capture fetches its images through the web host, never a brow
     { kind: 'table', table: { rowCount: 1, columnCount: 1, completeness: 'selected-cells', cells: [{ row: 0, column: 0, text: 'flag',
       inlineContent: [{ type: 'image', src: 'https://upload.example/flag.png', currentSrc: 'https://upload.example/flag.png' }] }] } },
   ] }
-  const outcome = await service.capture({ sessionId: 'owner', sourcePageId: 'iframe:a', frozenCapture })
+  const outcome = await service.capture({ sessionId: 'owner', sourcePageId: 'iframe:a', dshHost: 'dsh.example:3180', frozenCapture })
   assert.ok(outcome.reference, JSON.stringify(outcome.failures))
   assert.deepEqual(outcome.failures, [])
-  assert.deepEqual(fetched, [['https://upload.example/earth.png', frozenCapture.url], ['https://upload.example/flag.png', frozenCapture.url]])
+  assert.deepEqual(fetched, [['https://upload.example/earth.png', 'dsh.example:3180'], ['https://upload.example/flag.png', 'dsh.example:3180']])
   const images = outcome.reference.parts.filter(part => part.type === 'image')
   assert.equal(images.length, 2)
   assert.ok(images.every(part => part.representation === 'source-image'))

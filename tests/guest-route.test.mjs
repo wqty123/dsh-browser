@@ -872,3 +872,8 @@ test('a bracketed IPv6 image URL is looked up unbracketed and loopback is refuse
   } finally { dns.lookup = mocked }
   assert.deepEqual(names, ['2606:4700::1'])
 })
+
+test('a server-side guest resource fetch refuses the DSH Host it was reached on', async () => {
+  await assert.rejects(fetchGuestResource('https://client-only.example/a.png', { dshHost: 'client-only.example:3102', maxBytes: 1024 }), /not allowed/u)
+  await assert.rejects(fetchGuestResource('https://dsh.example/a.png', { dshHost: 'DSH.example.:3180', maxBytes: 1024 }), /not allowed/u)
+})
