@@ -550,7 +550,8 @@ const helpers = {
     try {
       return await fn()
     } finally {
-      if (previous !== undefined && previous !== tabId && (await tabs()).some(tab => tab.id === previous)) await text('switch_tab', { tabId: previous })
+      const now = await tabs()
+      if (previous !== undefined && now.find(tab => tab.active)?.id !== previous && now.some(tab => tab.id === previous)) await text('switch_tab', { tabId: previous })
     }
   },
   js: (script: string) => js(script),
