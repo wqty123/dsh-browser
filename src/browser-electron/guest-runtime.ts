@@ -32,6 +32,13 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       const inner = proxyURL.searchParams.get('u');
       if (inner) return new URL(inner);
     }
+    const own = raw === '' || /^[?#]/.test(raw) ? undefined : new URL(raw, location.href);
+    if (own && own.origin === location.origin && own.pathname === route && !own.searchParams.has('u')) {
+      const url = new URL(real);
+      url.search = own.search;
+      url.hash = own.hash;
+      return url;
+    }
     let url = new URL(raw, real);
     if (url.origin === location.origin) {
       url = new URL(url.pathname + url.search + url.hash, new URL(real).origin);
