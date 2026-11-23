@@ -290,6 +290,7 @@ export function searchSummary(
 const QUIET_PARK = { left: 30000, top: 0, width: 1280, height: 800 } as const
 const QUIET_PARK_GAP = 200
 const QUIET_REVEAL_INSET = 40
+const QUIET_FOCUS_POLL_MS = 500
 
 interface WindowGeometry { readonly sl: number; readonly st: number; readonly sw: number; readonly sh: number; readonly x: number; readonly y: number; readonly ow: number; readonly oh: number; readonly hidden: boolean }
 
@@ -1304,6 +1305,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * browser) simply tears down its bookkeeping.
    */
   dispose(): void {
+    clearInterval(this.quietFocusTimer)
+    this.quietFocusTimer = undefined
     if (this.disposed) return
     this.disposed = true
     const client = this.client
@@ -1546,6 +1549,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       }
       this.quietParked.add(found.windowId)
       this.parkedTargets.set(targetId, found.windowId)
+      this.watchQuietFocus()
     } catch {
       // Without its id the window cannot be moved or revealed later, so it stays where Chromium put it.
     }
@@ -1570,6 +1574,41 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       }
     } catch {
       // A page that cannot report its geometry keeps the provisional position.
+    }
+  }
+
+  private quietFocusTimer: ReturnType<typeof setInterval> | undefined
+  private quietFocusBusy = false
+
+  /**
+   * Agent actions never focus a parked window, so a page there reporting focus means a person
+   * activated it (taskbar, Alt-Tab) and is looking at a window that is not on any display.
+   */
+  private watchQuietFocus(): void {
+    if (this.quietFocusTimer !== undefined) return
+    this.quietFocusTimer = setInterval(() => void this.checkQuietFocus(), QUIET_FOCUS_POLL_MS)
+    this.quietFocusTimer.unref?.()
+  }
+
+  private async checkQuietFocus(): Promise<void> {
+    if (this.quietParked.size === 0) {
+      clearInterval(this.quietFocusTimer)
+      this.quietFocusTimer = undefined
+      return
+    }
+    if (this.quietFocusBusy) return
+    this.quietFocusBusy = true
+    try {
+      for (const [id, view] of [...this.views]) {
+        const focused = await Promise.race([
+          view.client.send('Runtime.evaluate', { expression: 'document.hasFocus()', returnByValue: true }, view.session)
+            .then(out => (out as { result?: { value?: unknown } } | undefined)?.result?.value === true, () => false),
+          new Promise<boolean>(resolve => setTimeout(resolve, QUIET_FOCUS_POLL_MS, false)),
+        ])
+        if (focused && await this.revealQuietWindow({ id } as ElectronViewHandle)) return
+      }
+    } finally {
+      this.quietFocusBusy = false
     }
   }
 

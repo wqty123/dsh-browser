@@ -263,6 +263,23 @@ test('a takeover reveals the parked window without bringing a visible page to th
   assert.equal(await host.revealQuietWindow(view), false, 'only once')
 })
 
+test('a person activating the parked window from the taskbar gets it on the primary display', async t => {
+  const fake = parkedBrowser()
+  let focused = false
+  const respond = message => message.method === 'Runtime.evaluate' && message.params?.expression === 'document.hasFocus()'
+    ? { result: { result: { type: 'boolean', value: focused } } } : fake.respond(message)
+  const { browser } = await quietHost(t, true, { respond })
+  await new Promise(resolve => setTimeout(resolve, 700))
+  assert.deepEqual(moves(browser), [], 'an unfocused parked window stays off-screen')
+  focused = true
+  const deadline = Date.now() + 3000
+  while (moves(browser).length === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50))
+  assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 40, top: 40 } }])
+  assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false, 'the window is already the active one')
+  await new Promise(resolve => setTimeout(resolve, 700))
+  assert.equal(moves(browser).length, 1, 'revealed once, then the window is the person's')
+})
+
 test('a takeover on a page hidden behind another tab brings that page to the front', async t => {
   const fake = parkedBrowser({ hidden: true })
   const { browser, host, view } = await quietHost(t, true, fake)
