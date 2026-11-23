@@ -1224,7 +1224,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /** Nothing to show: the browser owns its own windows. */
-  showView(): void {}
+  showView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean }): void {
+    if (options?.select === true && (options.quiet === true || this.isQuiet())) void this.restoreQuietWindow(handle)
+  }
 
   /**
    * Bring the target's page to the front, then report success.
@@ -1481,11 +1483,13 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   /** Create one page, refusing to go on without an id. */
   private async createTarget(client: CdpClient, viewId: string): Promise<string> {
     const quiet = this.isQuiet()
-    const created = await (quiet ? this.createQuietTarget(client) : client.send('Target.createTarget', { url: 'about:blank' })) as { targetId?: string }
-    const targetId = created?.targetId
+    const { created, minimized } = quiet
+      ? await this.createQuietTarget(client)
+      : { created: await client.send('Target.createTarget', { url: 'about:blank' }), minimized: false }
+    const targetId = (created as { targetId?: string } | undefined)?.targetId
     if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')
     this.rememberTarget(client, targetId, viewId)
-    if (quiet) this.quietMinimized.add(viewId)
+    if (minimized) this.quietMinimized.add(viewId)
     return targetId
   }
 
@@ -1493,14 +1497,19 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * `background` only keeps the user's tab active inside an existing window; the first page after
    * `--no-startup-window` opens a new one. `focus: false` keeps keyboard focus where it was, and
    * `windowState: 'minimized'` keeps that window from covering the screen. Chromium that predates
-   * `windowState` rejects the call, so it is retried without it.
+   * `windowState` rejects the call, so it is retried without it. Only a page that opens a new window
+   * is minimized by this; a tab joining an existing window leaves that window as the user has it.
    */
-  private async createQuietTarget(client: CdpClient): Promise<unknown> {
+  private async createQuietTarget(client: CdpClient): Promise<{ readonly created: unknown; readonly minimized: boolean }> {
     const params = { url: 'about:blank', background: true, focus: false }
+    const listed = await client.send('Target.getTargets') as { targetInfos?: Array<{ type?: string }> } | undefined
+    if (listed?.targetInfos?.some(entry => entry.type === 'page') === true) {
+      return { created: await client.send('Target.createTarget', params), minimized: false }
+    }
     try {
-      return await client.send('Target.createTarget', { ...params, windowState: 'minimized' })
+      return { created: await client.send('Target.createTarget', { ...params, windowState: 'minimized' }), minimized: true }
     } catch {
-      return client.send('Target.createTarget', params)
+      return { created: await client.send('Target.createTarget', params), minimized: false }
     }
   }
 

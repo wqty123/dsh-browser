@@ -210,12 +210,16 @@ test('a Chromium that rejects windowState still gets its quiet first page, unfoc
 test('an explicit selection restores the window quiet mode minimized, once and without bringToFront', async t => {
   const { browser, host, view } = await quietHost(t, true, { respond: minimizedWindow })
   await host.presentView(view, 'view', { quiet: true })
+  host.showView(view, 'view', { quiet: true })
+  await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false, 'a quiet operation leaves it minimized')
-  await host.presentView(view, 'view', { quiet: true, select: true })
+  host.showView(view, 'view', { quiet: true, select: true })
+  await new Promise(resolve => setTimeout(resolve, 50))
   const restores = browser.commands.filter(c => c.method === 'Browser.setWindowBounds')
   assert.deepEqual(restores.map(c => c.params), [{ windowId: 7, bounds: { windowState: 'normal' } }])
   assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false)
-  await host.presentView(view, 'view', { quiet: true, select: true })
+  host.showView(view, 'view', { quiet: true, select: true })
+  await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(browser.commands.filter(c => c.method === 'Browser.setWindowBounds').length, 1,
     'once restored, the window belongs to the user: minimizing it again keeps it minimized')
 })
@@ -225,4 +229,17 @@ test('with quiet mode off, the first page keeps the default foreground creation'
   assert.equal('focus' in params, false)
   assert.equal('background' in params, false)
   assert.equal('windowState' in params, false)
+})
+
+test('a quiet tab that joins an existing window neither minimizes it nor restores it later', async t => {
+  const { browser, host } = await quietHost(t, true, { respond: minimizedWindow })
+  const second = host.createView(tabWireId({ owner: 'task-a', session: 'main', tab: 'second' }))
+  await second.sendCommand('Runtime.evaluate', { expression: '1' })
+  const created = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
+  assert.equal(created.length, 2)
+  assert.equal('windowState' in created[1], false)
+  host.showView(second, 'second', { quiet: true, select: true })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false,
+    'the user may have minimized that window; selecting its tab leaves it minimized')
 })
