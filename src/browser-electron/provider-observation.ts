@@ -676,7 +676,7 @@ export abstract class ProviderObservation extends ProviderNavigation {
           if (!el) { row[f.name] = null; continue }
           if (attr !== null) {
             const v = el.getAttribute(attr)
-            row[f.name] = attr === 'href' && el.tagName === 'A' && v ? new URL(v, location.href).href : v
+            row[f.name] = attr === 'href' && el.tagName === 'A' && v ? new URL(v, el.baseURI).href : v
             continue
           }
           row[f.name] = (el.textContent || '').trim()
