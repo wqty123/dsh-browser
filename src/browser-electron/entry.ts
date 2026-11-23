@@ -405,6 +405,11 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
         })))
         void host.refreshStatus()
+      } else if (host instanceof SystemBrowserViewHost) {
+        const provider = referenceProvider!
+        unregisterTakeover = registerCarrierTakeover(ctx.browser, owner => provider.takeoverTargets(owner).map(target => ({
+          ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
+        })), { exclusive: false })
       }
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
       // A borrowed carrier can lose the process behind it, and this is the only notification that

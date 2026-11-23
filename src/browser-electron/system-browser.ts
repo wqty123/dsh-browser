@@ -524,6 +524,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
+  connectedView(id: string): boolean {
+    return this.views.has(id) && this.connectionStatus().connected
+  }
+
   /** Which product this host would drive (for diagnostics). */
   get kind(): DetectedBrowser['kind'] {
     return this.browser.kind
