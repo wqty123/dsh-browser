@@ -585,6 +585,8 @@ export interface PresentOptions {
   readonly quiet?: boolean
   /** Explicit navigation or tab selection may change the task's sidebar tab without OS activation. */
   readonly select?: boolean
+  /** A person's own selection, not the agent's: only this may restore a window quiet mode minimized. */
+  readonly user?: boolean
 }
 
 /**
@@ -1074,6 +1076,6 @@ export abstract class ProviderCore {
   protected abstract handleViewClosed(windowId: string): Promise<void>
   protected abstract handleUserAction(action: BrowserUserAction, propagate?: boolean): Promise<void>
   protected abstract isQuiet(): boolean
-  protected abstract showActive(s: Session, select?: boolean): void
+  protected abstract showActive(s: Session, select?: boolean, user?: boolean): void
   protected abstract currentUrl(handle: ElectronViewHandle): Promise<string>
 }

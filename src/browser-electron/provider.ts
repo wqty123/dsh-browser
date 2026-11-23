@@ -574,7 +574,7 @@ export class ElectronBrowserProvider extends ProviderMedia implements BrowserPro
           return
         case 'activateTab': {
           const tab = this.tabByViewId(s, action.viewId)
-          if (tab !== undefined) await this.switchTab(s.id, tab.id)
+          if (tab !== undefined) await this.switchTab(s.id, tab.id, { user: true })
           return
         }
         case 'closeTab': {
@@ -649,10 +649,10 @@ export class ElectronBrowserProvider extends ProviderMedia implements BrowserPro
    * method did nothing at all on carriers without `collapse` (the self-hosted one),
    * silently desynchronising the two and failing every screenshot.
    */
-  protected showActive(s: Session, select = false): void {
+  protected showActive(s: Session, select = false, user = false): void {
     const quiet = this.isQuiet()
     const active = s.tabs[s.activeIndex]
-    if (active !== undefined) this.host.showView?.(active.handle, s.label, { quiet, ...select ? { select: true } : {} })
+    if (active !== undefined) this.host.showView?.(active.handle, s.label, { quiet, ...select ? { select: true } : {}, ...user ? { user: true } : {} })
     if (quiet || select) return
     const autoExpand = this.settingsSource === undefined || this.settingsSource().ui.autoExpandOnce
     if (autoExpand) return

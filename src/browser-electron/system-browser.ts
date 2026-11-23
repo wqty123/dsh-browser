@@ -1224,8 +1224,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /** Nothing to show: the browser owns its own windows. */
-  showView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean }): void {
-    if (options?.select === true && (options.quiet === true || this.isQuiet())) void this.restoreQuietWindow(handle)
+  showView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean; readonly user?: boolean }): void {
+    if (options?.user === true && (options.quiet === true || this.isQuiet())) void this.restoreQuietWindow(handle)
   }
 
   /**
@@ -1244,9 +1244,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * two, and the order is honoured either way.
    * @param handle - the view to present.
    */
-  async presentView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean }): Promise<void> {
+  async presentView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean; readonly user?: boolean }): Promise<void> {
     if (options?.quiet === true || this.isQuiet()) {
-      if (options?.select === true) await this.restoreQuietWindow(handle)
+      if (options?.user === true) await this.restoreQuietWindow(handle)
       return
     }
     try {
@@ -1525,7 +1525,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-  /** An explicit selection shows a window quiet mode minimized, with the selected tab active in it. */
+  /** A person's own selection shows a window quiet mode minimized, with the selected tab active in it. Agent navigation never does. */
   private async restoreQuietWindow(handle: ElectronViewHandle): Promise<void> {
     if (this.quietMinimized.size === 0) return
     try {

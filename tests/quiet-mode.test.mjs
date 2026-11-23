@@ -207,20 +207,21 @@ test('a Chromium that rejects windowState still gets its quiet first page, unfoc
   assert.deepEqual(calls[1], { url: 'about:blank', background: true, focus: false })
 })
 
-test('an explicit selection restores the window quiet mode minimized once, showing the selected tab', async t => {
+test('only a person selecting the tab restores the window quiet mode minimized, once, showing the selected tab', async t => {
   const { browser, host, view } = await quietHost(t, true, { respond: minimizedWindow })
   await host.presentView(view, 'view', { quiet: true })
   host.showView(view, 'view', { quiet: true })
-  await new Promise(resolve => setTimeout(resolve, 50))
-  assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false, 'a quiet operation leaves it minimized')
   host.showView(view, 'view', { quiet: true, select: true })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false, 'a quiet operation or an agent selection leaves it minimized')
+  host.showView(view, 'view', { quiet: true, select: true, user: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   const restores = browser.commands.filter(c => c.method === 'Browser.setWindowBounds')
   assert.deepEqual(restores.map(c => c.params), [{ windowId: 7, bounds: { windowState: 'normal' } }])
   const restoreAt = browser.commands.findIndex(c => c.method === 'Browser.setWindowBounds')
   assert.deepEqual(browser.commands.slice(restoreAt + 1).filter(c => c.method === 'Page.bringToFront').length, 1,
     'the selected tab, created in the background, becomes the visible one')
-  host.showView(view, 'view', { quiet: true, select: true })
+  host.showView(view, 'view', { quiet: true, select: true, user: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(browser.commands.filter(c => c.method === 'Browser.setWindowBounds').length, 1,
     'once restored, the window belongs to the user: minimizing it again keeps it minimized')
@@ -239,7 +240,7 @@ test('selecting a later tab in the window quiet mode minimized restores that win
   await second.sendCommand('Runtime.evaluate', { expression: '1' })
   const created = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
   assert.equal('windowState' in created[1], false, 'a tab joining the window does not minimize it again')
-  host.showView(second, 'second', { quiet: true, select: true })
+  host.showView(second, 'second', { quiet: true, select: true, user: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.deepEqual(browser.commands.filter(c => c.method === 'Browser.setWindowBounds').map(c => c.params),
     [{ windowId: 7, bounds: { windowState: 'normal' } }])
@@ -255,8 +256,21 @@ test('a window quiet mode did not minimize stays minimized when a quiet tab in i
   await second.sendCommand('Runtime.evaluate', { expression: '1' })
   const created = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
   assert.equal(created.length, 3, 'the first page fell back once; the second joined its window')
-  host.showView(second, 'second', { quiet: true, select: true })
+  host.showView(second, 'second', { quiet: true, select: true, user: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false,
     'the user may have minimized that window; selecting its tab leaves it minimized')
+})
+
+test('in quiet mode an agent tab switch never asks to restore the window; a person selecting the tab does', async () => {
+  const { p, host } = providerWith(true)
+  const sid = await p.open()
+  host.seen.showView.length = 0
+  const [tab] = await p.listTabs(sid)
+  await p.switchTab(sid, tab.id)
+  assert.ok(host.seen.showView.length > 0)
+  assert.equal(host.seen.showView.some(options => options.user === true), false, 'the agent never restores the quiet window')
+  host.seen.showView.length = 0
+  await p.handleUserAction({ type: 'activateTab', windowId: sid, viewId: 'view1' }, true)
+  assert.deepEqual(host.seen.showView.at(-1), { quiet: true, select: true, user: true }, 'a tab click in the panel is the person selecting it')
 })
