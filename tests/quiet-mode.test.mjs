@@ -277,7 +277,7 @@ test('a person activating the parked window from the taskbar gets it on the prim
   assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 40, top: 40 } }])
   assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false, 'the window is already the active one')
   await new Promise(resolve => setTimeout(resolve, 700))
-  assert.equal(moves(browser).length, 1, 'revealed once, then the window is the person's')
+  assert.equal(moves(browser).length, 1, 'revealed once, then the window belongs to the person')
 })
 
 test('a takeover on a page hidden behind another tab brings that page to the front', async t => {
