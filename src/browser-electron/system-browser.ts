@@ -602,6 +602,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     this.quietParked.clear()
     this.parkedTargets.clear()
     this.quietFront = undefined
+    this.quietRevealed.clear()
     this.stopForeground()
   }
 
@@ -1588,6 +1589,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private foregroundFailed = false
   /** A takeover page hidden behind another tab, brought to the front once the person activates its revealed window. */
   private quietFront: QuietFront | undefined
+  /** Windows quiet mode parked and has since put on-screen. */
+  private readonly quietRevealed = new Set<number>()
   /** The real watcher exists on Windows only; tests replace it. */
   watchForeground: ForegroundWatcher = watchForeground
 
@@ -1605,20 +1608,20 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       try {
         const info = await client.send('SystemInfo.getProcessInfo', {}, undefined, 1000) as { processInfo?: Array<{ type?: string; id?: number }> } | undefined
         const pid = info?.processInfo?.find(entry => entry.type === 'browser')?.id
-        if (typeof pid !== 'number' || this.disposed || !this.quietWatched()) return
+        if (typeof pid !== 'number' || this.disposed || !this.quietWatched()) return this.sendQuietFront()
         const watch = this.watchForeground(event => { if (event.pid === pid) void this.onForeground(client, event) }, reason => {
           if (!this.foregroundFailed) {
             this.foregroundFailed = true
             console.warn(`[dsh-browser] quiet window: cannot watch the foreground window (${reason}); the panel and takeovers still bring it on-screen`)
           }
           if (this.foreground === watch) this.foreground = undefined
-          const front = this.quietFront
-          this.quietFront = undefined
-          if (front !== undefined) void front.client.send('Page.bringToFront', {}, front.session).catch(() => undefined)
+          this.sendQuietFront()
         })
         this.foreground = watch
+        if (watch === undefined) this.sendQuietFront()
       } catch {
         // Without the browser's process id, the panel and a takeover still reveal the window.
+        this.sendQuietFront()
       } finally {
         this.foregroundStarting = false
       }
@@ -1664,6 +1667,13 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
+  /** Nothing can tell when the person activates the window, so a waiting hidden page comes to the front now. */
+  private sendQuietFront(): void {
+    const front = this.quietFront
+    this.quietFront = undefined
+    if (front !== undefined) void front.client.send('Page.bringToFront', {}, front.session).catch(() => undefined)
+  }
+
   private stopForeground(): void {
     this.foreground?.stop()
     this.foreground = undefined
@@ -1691,14 +1701,18 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   async revealQuietWindow(handle: ElectronViewHandle, options?: QuietRevealOptions): Promise<boolean> {
     const view = this.views.get(handle.id)
     const targetId = view === undefined ? undefined : this.sessions.get(view.session)
-    if (this.quietParked.size === 0 || view === undefined || targetId === undefined) return false
+    if ((this.quietParked.size === 0 && this.quietRevealed.size === 0) || view === undefined || targetId === undefined) return false
     try {
       // Asked of the browser by target id: the view's own command path would replace a closed page with a blank one.
       const found = await view.client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown } | undefined
-      if (typeof found?.windowId !== 'number' || !this.quietParked.delete(found.windowId)) return false
-      const g = await this.moveOnScreen(view.client, found.windowId, view.session)
+      if (typeof found?.windowId !== 'number') return false
+      const parked = this.quietParked.delete(found.windowId)
+      if (!parked && !this.quietRevealed.has(found.windowId)) return false
+      // A window already revealed (a skipped takeover, retried) stays where the person has it; only its tab is selected.
+      const g = parked ? await this.moveOnScreen(view.client, found.windowId, view.session) : await windowGeometry(view.client, view.session)
+      this.quietRevealed.add(found.windowId)
       if (options?.select === true) await view.client.send('Page.bringToFront', {}, view.session)
-      else if (g?.hidden === true && this.foreground !== undefined) {
+      else if (g?.hidden === true) {
         const front = { client: view.client, session: view.session, targetId }
         this.quietFront = front
         options?.until?.addEventListener('abort', () => {
@@ -1706,10 +1720,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
           this.quietFront = undefined
           if (!this.quietWatched()) this.stopForeground()
         }, { once: true })
+        this.watchQuietFocus(view.client)
       }
-      else if (g?.hidden === true) await view.client.send('Page.bringToFront', {}, view.session)
       if (!this.quietWatched()) this.stopForeground()
-      return true
+      return parked
     } catch {
       // The page went away; the command that selected it reports that itself.
       return false

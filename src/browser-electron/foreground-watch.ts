@@ -28,9 +28,13 @@ const script = (parent: number): string => [
   '  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out Rect r);',
   '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);',
   '  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c);',
+  '  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();',
   '}',
   '"@',
   '} catch { exit 3 }',
+  // Physical pixels from GetWindowRect, so dividing by the window DPI gives DIPs at any scaling.
+  'if (-not [DshForeground]::SetProcessDpiAwarenessContext([IntPtr](-4))) { [void][DshForeground]::SetProcessDPIAware() }',
   '$last = ""; $tick = 0',
   'try { while ($true) {',
   '  $tick++; if ($tick % 8 -eq 0 -and -not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { exit }',
