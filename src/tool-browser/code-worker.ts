@@ -23,6 +23,10 @@ function format(value: unknown): string {
 }
 const log = (...values: unknown[]): void => { send({ type: 'log', text: values.map(format).join(' ') }) }
 
+const SLEEP_HINT_AFTER = 3
+const SLEEP_HINT = `[hint] sleep() called ${SLEEP_HINT_AFTER} times in this cell; wait on the condition instead: wait_for_element, wait_for_text, wait_for_gone, wait_until(expr) or wait_for_response(url, trigger).`
+let sleepsThisCell = 0
+
 /** A failed browser tool call (a helper or `tools.*`), named after the tool, like DSH run_code's ToolCallError. */
 class ToolCallError extends Error {
   readonly toolName: string
@@ -667,7 +671,10 @@ const helpers = {
   },
   call: (name: string, args: Record<string, unknown> = {}) => value(name, args),
   help: (name?: string) => value('__help', name === undefined ? {} : { name }),
-  sleep: (ms: number) => new Promise<void>(done => setTimeout(done, Math.min(Math.max(Number(ms) || 0, 0), 60_000))),
+  sleep: (ms: number) => {
+    if (++sleepsThisCell === SLEEP_HINT_AFTER) log(SLEEP_HINT)
+    return new Promise<void>(done => setTimeout(done, Math.min(Math.max(Number(ms) || 0, 0), 60_000)))
+  },
   print: log,
   log,
   console: { log, info: log, warn: log, error: log, debug: log },
@@ -702,6 +709,7 @@ process.on('message', (message: Reply | Run) => {
     return
   }
   if (message.type === 'run') {
+    sleepsThisCell = 0
     void (async () => {
       try {
         const result = await (runInContext(`(async () => {\n${prepare(message.code)}\n})()`, context, { filename: 'cell.js' }) as Promise<unknown>)

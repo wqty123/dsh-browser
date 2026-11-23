@@ -47,7 +47,7 @@ The next cell can keep using `rows`.
   `wait_until(jsExpression, { timeoutMs, intervalMs })` (returns the truthy value; a timeout quotes
   the last result), `wait_for_response(urlContains, trigger, { status, timeoutMs })`,
   `wait_for_network_idle()`. Each returns as soon as its condition holds and throws when it never
-  does; `sleep(ms)` only as a last resort.
+  does; `sleep(ms)` only as a last resort (capped at 60 s; a cell that keeps sleeping gets a hint).
 - Data: `inspect_data_sources()` reports embedded state (`__NEXT_DATA__`, `__INITIAL_STATE__`,
   JSON and ld+json scripts) with sizes, keys and array paths, the JSON APIs the page called,
   data-like resources (including requests made before the probe) and declared endpoints.
