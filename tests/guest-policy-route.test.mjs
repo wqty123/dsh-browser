@@ -5,6 +5,7 @@ import { once } from 'node:events'
 import { promises as dns } from 'node:dns'
 import { registerWebGuest } from '../src/web-guest.ts'
 import { guestPath } from '../src/browser-electron/guest-route.ts'
+import { RELAXED_BROWSER_SANDBOX } from '../assets/browser-policy.mjs'
 
 test('registered guest route commits the same data-font policy on HTML navigations and every response branch', async t => {
   const originalFetch = globalThis.fetch
@@ -63,7 +64,11 @@ test('registered guest route commits the same data-font policy on HTML navigatio
   assert.doesNotMatch(document.body, /<meta\b/iu)
   const policy = document.headers['content-security-policy']
   assert.match(policy, /(?:^|;)\s*font-src [^;]*\bdata:/u)
-  assert.match(policy, /^sandbox allow-scripts allow-forms;/u)
+  assert.match(policy, /^sandbox allow-scripts allow-forms allow-downloads [^;]*;/u)
+  const sandbox = policy.split(';')[0].split(' ').slice(1)
+  assert.deepEqual(sandbox, RELAXED_BROWSER_SANDBOX.split(' '))
+  for (const token of ['allow-same-origin', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-top-navigation'])
+    assert.ok(!sandbox.includes(token), token)
   for (const [path, options, status] of [
     ['/document', { method: 'POST', ...navigation }, 200],
     ['/document', { method: 'HEAD', ...navigation }, 200],
