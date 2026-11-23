@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { BrowserTakeovers, installTakeovers } from './takeover.ts'
 import { TAKEOVER_TOOL } from '../takeover-protocol.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { BrowserToolError, toBrowserToolError } from './errors.ts'
 import { CODE_PROMPT, CODE_TOOL, createCodeTool, type CatalogTool } from './code-tool.ts'
 import { SettingsStore } from '../browser-electron/settings-store.ts'
 import { browserSessionHandle, resolveTabHandle } from '../browser/handles.ts'
@@ -154,10 +155,14 @@ export function apply(ctx: Context, config: Config = {}): void {
             if (session) tab = resolveTabHandle(browserSessionHandle(owner, session), requested).tab
           }
           if (tab === undefined || takeovers.blocks(owner, tab)) {
-            throw new Error('Browser tab is awaiting human takeover. Agent browser actions are refused until the human confirms completion or skips the request.')
+            throw new BrowserToolError('Browser tab is awaiting human takeover. Agent browser actions are refused until the human confirms completion or skips the request.', 'BROWSER_TAKEOVER_PENDING')
           }
         }
-        return execute(args, exec)
+        try {
+          return await execute(args, exec)
+        } catch (error) {
+          throw toBrowserToolError(error, (exec as { signal?: AbortSignal } | undefined)?.signal)
+        }
       } }
       catalog.set(definition.name, definition as unknown as CatalogTool)
       if (surface === 'tools' || definition.name === TAKEOVER_TOOL || (surface === 'core' && CORE_TOOLS.has(definition.name))) {
@@ -221,7 +226,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         async execute(args) {
           const groups = Array.isArray(args.groups) ? args.groups.map(String) : []
           const unknown = groups.filter(group => !(group in TOOL_GROUPS))
-          if (groups.length === 0 || unknown.length > 0) throw new Error(`unknown tool group(s): ${unknown.join(', ') || '(none given)'}; groups are ${Object.keys(TOOL_GROUPS).join(', ')}`)
+          if (groups.length === 0 || unknown.length > 0) throw new BrowserToolError(`unknown tool group(s): ${unknown.join(', ') || '(none given)'}; groups are ${Object.keys(TOOL_GROUPS).join(', ')}`, 'BROWSER_UNKNOWN_TOOL_GROUP')
           const names = [...new Set(groups.flatMap(members))]
           const fresh: string[] = []
           for (const name of names) {

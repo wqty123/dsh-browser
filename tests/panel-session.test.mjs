@@ -144,7 +144,7 @@ test('a queued Web panel switch closes the old session instead of driving its st
 test('panel navigation errors propagate, close the failed session, and never fall back to builtin', async () => {
   const failure = new Error('sidebar navigation failed')
   const { run, calls } = mount({ openUrl: async () => { throw failure } })
-  await assert.rejects(run('open', { url: 'https://example.com/' }), error => error === failure)
+  await assert.rejects(run('open', { url: 'https://example.com/' }), error => error.cause === failure && error.code === 'BROWSER_TOOL_FAILED' && error.message === failure.message)
   assert.deepEqual(calls.map(call => call.name), ['openPanel', 'close'])
   await assert.rejects(run('a11y'), /nothing is open/)
 })

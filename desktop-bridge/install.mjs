@@ -687,16 +687,19 @@ function readIdentityRule() {
     const names = raw.packageNames
     const mainEntry = raw.mainEntry
     const layouts = raw.layouts
+    const unsupportedMainEntries = raw.unsupportedMainEntries ?? {}
     const field = value => typeof value === 'string' && value !== ''
     if (!Array.isArray(names) || names.length === 0 || names.some(name => typeof name !== 'string')
       || typeof mainEntry !== 'string' || mainEntry === ''
       || !Array.isArray(layouts) || layouts.length === 0 || layouts.at(-1)?.marker !== undefined
       || layouts.some(l => l === null || typeof l !== 'object' || !field(l.name) || !field(l.resources)
-        || !field(l.executable) || !field(l.cliLauncher) || (l.marker !== undefined && !field(l.marker)))) {
-      console.error('desktop-identity.json is malformed: expected packageNames[], mainEntry and layouts[]')
+        || !field(l.executable) || !field(l.cliLauncher) || (l.marker !== undefined && !field(l.marker)))
+      || unsupportedMainEntries === null || typeof unsupportedMainEntries !== 'object' || Array.isArray(unsupportedMainEntries)
+      || Object.entries(unsupportedMainEntries).some(([entry, reason]) => entry === '' || !field(reason))) {
+      console.error('desktop-identity.json is malformed: expected packageNames[], mainEntry, layouts[] and an optional unsupportedMainEntries map')
       return undefined
     }
-    return { packageNames: names, mainEntry, layouts }
+    return { packageNames: names, mainEntry, unsupportedMainEntries, layouts }
   } catch (error) {
     console.error(`desktop-identity.json could not be read: ${String(error)}`)
     return undefined
@@ -879,10 +882,14 @@ function verifyDesktopIdentity(root) {
         + `${rule.packageNames.join(' / ')} — a generic Electron layout is not proof of identity`,
     }
   }
-  const mainPresent = archivePresent
-    ? readAsarEntry(archive, rule.mainEntry) !== undefined
-    : existsSync(join(appDir, ...rule.mainEntry.split('/')))
-  if (!mainPresent) {
+  const hasEntry = entry => archivePresent
+    ? readAsarEntry(archive, entry) !== undefined
+    : existsSync(join(appDir, ...entry.split('/')))
+  if (!hasEntry(rule.mainEntry)) {
+    const foreign = Object.entries(rule.unsupportedMainEntries).find(([entry]) => hasEntry(entry))
+    if (foreign !== undefined) {
+      return { ok: false, reason: `${foreign[0]} instead of ${rule.mainEntry}: ${foreign[1]}; use DSH Web or DeepSeek Harness Desktop` }
+    }
     return { ok: false, reason: `${rule.mainEntry} is not present under ${archivePresent ? archive : appDir}` }
   }
   return {

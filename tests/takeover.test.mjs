@@ -117,7 +117,7 @@ for (const mode of ['button-done', 'button-skip', 'card-done', 'card-skip', 'abo
     const { notice } = await post({ operation: 'poll', lease, url: registration.url, active: true })
     assert.equal(notice.reason, 'Complete login')
     for (const name of ['dsh_browser_open', 'dsh_browser_click', 'dsh_browser_execute', 'dsh_browser_reset', 'dsh_browser_reset_session', 'dsh_browser_reference_reveal']) {
-      await assert.rejects(host.tools.get(name).execute({}, host.exec), /awaiting human takeover/)
+      await assert.rejects(host.tools.get(name).execute({}, host.exec), error => /awaiting human takeover/.test(error.message) && error.code === 'BROWSER_TAKEOVER_PENDING')
     }
     const repeated = tool.execute({ reason: 'same tab' }, host.exec)
     assert.equal(host.native.length, 1)
