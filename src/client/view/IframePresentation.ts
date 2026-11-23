@@ -1,5 +1,5 @@
 /// <reference path="../css-modules.d.ts" />
-import { GUEST_ROUTE } from '../../../assets/browser-policy.mjs'
+import { GUEST_ROUTE, RELAXED_BROWSER_SANDBOX, WEB_BROWSER_SANDBOX } from '../../../assets/browser-policy.mjs'
 /** Iframe DOM and revision-tagged load observations. */
 import type { BrowserTarget } from '../browser/url.ts'
 import type { BrowserPresentation } from './BrowserPresentation.ts'
@@ -31,10 +31,6 @@ function capturedSourceUrl(value: unknown): unknown {
   } catch { /* Invalid source URLs remain subject to capture validation. */ }
   return value
 }
-
-/** Opaque guest documents cannot access the application's origin or open native windows. */
-export const WEB_BROWSER_SANDBOX = 'allow-scripts allow-forms'
-const RELAXED_BROWSER_SANDBOX = `${WEB_BROWSER_SANDBOX} allow-downloads allow-modals allow-pointer-lock allow-orientation-lock allow-presentation allow-storage-access-by-user-activation`
 
 interface IframeDocument {
   readonly target: BrowserTarget

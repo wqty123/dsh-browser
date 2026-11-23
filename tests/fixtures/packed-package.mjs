@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -52,12 +52,31 @@ export function stagePackage(source, destination) {
   for (;;) {
     const dependencies = join(directory, 'node_modules')
     if (existsSync(dependencies)) {
-      symlinkSync(realpathSync(dependencies), join(destination, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
+      linkDependencies(dependencies, join(destination, 'node_modules'))
       return destination
     }
     const parent = dirname(directory)
     assert.notEqual(parent, directory, 'node_modules is unavailable for the isolated pack fixture')
     directory = parent
+  }
+}
+
+/**
+ * Links every installed package to its real location instead of linking the whole folder: pnpm's
+ * entries are relative symlinks, and Windows resolves those against the path walked to reach them,
+ * so through a junction (the only directory link that needs no privilege) they point nowhere.
+ */
+function linkDependencies(source, destination) {
+  mkdirSync(destination, { recursive: true })
+  for (const name of readdirSync(source)) {
+    const entry = join(source, name)
+    if (name.startsWith('@') && !lstatSync(entry).isSymbolicLink()) {
+      linkDependencies(entry, join(destination, name))
+      continue
+    }
+    let target
+    try { target = realpathSync(entry) } catch { continue }
+    if (statSync(target).isDirectory()) symlinkSync(target, join(destination, name), process.platform === 'win32' ? 'junction' : 'dir')
   }
 }
 

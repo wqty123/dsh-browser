@@ -3,7 +3,7 @@ import { isDesktopExecutable } from '../desktop-bridge/desktop-processes.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, realpathSync } from 'node:fs'
-import { resolve, join, dirname, basename, isAbsolute } from 'node:path'
+import { resolve, join, dirname, basename, isAbsolute, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -226,7 +226,7 @@ test('macOS bundle helpers alone block installation while other bundles and Node
   assert.deepEqual(Array.from(select([], root, 99)), [])
   assert.deepEqual(Array.from(select([
     row(10), row(11, exe, `${exe} --expose-internals cli.mjs`),
-    row(12, helper.replace('Harness.app/', 'Harness.app-other/')),
+    row(12, helper.replace(`Harness.app${sep}`, `Harness.app-other${sep}`)),
   ], root, 99)), [10])
   assert.throws(() => select([{ ...row(10), ExecutablePath: '' }], root, 99), /could not identify/)
   assert.throws(() => select([{ ...row(10), CommandLine: undefined }], root, 99), /incomplete/)

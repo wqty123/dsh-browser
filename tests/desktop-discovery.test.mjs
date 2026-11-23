@@ -99,7 +99,7 @@ test('a directory that is not DSH Desktop is not reported', () => {
     mkdirSync(join(stranger, 'resources'), { recursive: true })
     writeFileSync(join(stranger, 'resources', 'app'), 'not an archive')
     assert.equal(
-      withEnv(base, { ProgramFiles: join(base, 'ProgramFilesRoot') }, () => findDesktopInstall()),
+      withEnv(base, { ProgramFiles: join(base, 'ProgramFilesRoot') }, () => findDesktopInstall(undefined, () => [])),
       undefined,
       'an arbitrary directory must not be offered as DSH Desktop',
     )
@@ -114,7 +114,7 @@ test('a foreign packed app cannot shadow the real DSH installation in a scanned 
     const programs = join(base, 'ProgramFilesRoot')
     fakeInstall(programs, 'DSH Desktop', 'unrelated-meeting-app')
     const actual = fakeInstall(programs, 'Verified DSH')
-    assert.equal(withEnv(base, { ProgramFiles: programs }, () => findDesktopInstall()), actual)
+    assert.equal(withEnv(base, { ProgramFiles: programs }, () => findDesktopInstall(undefined, () => [])), actual)
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
