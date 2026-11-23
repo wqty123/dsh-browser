@@ -135,6 +135,9 @@ test('fetch handles string, URL and Request inputs, preserving POST body and add
   assert.equal(requests[2].init.headers.get('authorization'), 'Bearer site')
   for (const { init } of requests) assert.equal(init.headers.get('x-dsh-guest-sub'), '1')
   for (const { init } of requests) assert.match(init.headers.get('x-dsh-guest-referer'), /^https:\/\/[^/]+\.example\//u)
+  await context.fetch('/api', { referrerPolicy: 'no-referrer' })
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'no-referrer')
+  assert.equal(requests[0].init.headers.get('x-dsh-guest-referrer-policy'), null)
 })
 
 test('query-only, fragment-only and empty URLs resolve against the real page, including after history changes', () => {

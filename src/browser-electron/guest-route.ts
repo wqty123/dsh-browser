@@ -146,6 +146,22 @@ const SAFE_REQUEST_HEADERS = new Set([
   'if-none-match', 'if-modified-since', 'cache-control',
 ])
 
+function guestReferer(page: URL, target: URL, policy: string): string | undefined {
+  const sameOrigin = page.origin === target.origin
+  const downgrade = page.protocol === 'https:' && target.protocol === 'http:'
+  const origin = page.origin + '/'
+  switch (policy) {
+    case 'no-referrer': return undefined
+    case 'unsafe-url': return page.href
+    case 'origin': return origin
+    case 'same-origin': return sameOrigin ? page.href : undefined
+    case 'strict-origin': return downgrade ? undefined : origin
+    case 'origin-when-cross-origin': return sameOrigin ? page.href : origin
+    case 'no-referrer-when-downgrade': return downgrade ? undefined : page.href
+    default: return downgrade ? undefined : sameOrigin ? page.href : origin
+  }
+}
+
 function siteHeader(name: string): boolean {
   return /^[!#$%&'*+.^_`|~\da-z-]+$/u.test(name)
     && !/^(?:cookie2?|authorization|host|origin|referer|connection|content-length|accept-encoding|user-agent|proxy-.*|sec-.*|x-dsh-.*|x-forwarded-.*|x-real-ip)$/u.test(name)
@@ -330,7 +346,7 @@ export async function handleGuest(
     const requested = String(request.headers['access-control-request-headers'] ?? '').toLowerCase().split(',').map(name => name.trim())
     writeHead(204, {
       'access-control-allow-methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
-      'access-control-allow-headers': [...new Set([...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub', 'x-dsh-guest-headers', 'x-dsh-guest-referer', ...requested.filter(siteHeader)])].join(', '),
+      'access-control-allow-headers': [...new Set([...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub', 'x-dsh-guest-headers', 'x-dsh-guest-referer', 'x-dsh-guest-referrer-policy', ...requested.filter(siteHeader)])].join(', '),
     })
     response.end()
     return
@@ -441,9 +457,9 @@ export async function handleGuest(
       page.hash = ''
       page.username = ''
       page.password = ''
-      if (/^https?:$/u.test(page.protocol) && !blocked(page) && !(page.protocol === 'https:' && target.protocol === 'http:')) {
-        headers.set('referer', page.origin === target.origin ? page.href : page.origin + '/')
-      }
+      const policy = request.headers['x-dsh-guest-referrer-policy']
+      const value = blocked(page) ? undefined : guestReferer(page, target, typeof policy === 'string' ? policy : '')
+      if (value !== undefined) headers.set('referer', value)
     } catch {}
   }
   let cookieJar: GuestCookieJar

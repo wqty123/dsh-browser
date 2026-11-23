@@ -55,6 +55,21 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
     } catch { return value; }
   };
   window.__dshGuestToProxy = toProxy;
+  const policies = ['no-referrer', 'no-referrer-when-downgrade', 'origin', 'origin-when-cross-origin', 'same-origin', 'strict-origin', 'strict-origin-when-cross-origin', 'unsafe-url'];
+  const referrerPolicy = override => {
+    if (policies.includes(override)) return override;
+    const metas = attempt(() => [...document.querySelectorAll('meta[name="referrer" i]')]) || [];
+    for (const meta of metas.reverse()) {
+      const token = String(meta.content || '').split(',').map(item => item.trim().toLowerCase()).reverse().find(item => policies.includes(item));
+      if (token) return token;
+    }
+    return '';
+  };
+  const refererHeaders = (set, override) => {
+    set('x-dsh-guest-referer', real);
+    const policy = referrerPolicy(override);
+    if (policy) set('x-dsh-guest-referrer-policy', policy);
+  };
   const nativeFetch = window.fetch && window.fetch.bind(window);
   window.__dshGuestFetch = nativeFetch;
   attempt(() => {
@@ -66,7 +81,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         const headers = new Headers(init && init.headers || (isRequest ? input.headers : undefined));
         headers.set('x-dsh-guest-headers', [...headers.keys()].filter(name => !name.startsWith('x-dsh-')).join(','));
         headers.set('x-dsh-guest-sub', '1');
-        headers.set('x-dsh-guest-referer', real);
+        refererHeaders((name, value) => headers.set(name, value), init && init.referrerPolicy || (isRequest ? input.referrerPolicy : ''));
         const options = Object.assign({}, init, { headers, mode: 'cors', credentials: 'omit' });
         return nativeFetch(isRequest ? new Request(new URL(url, location.href), input) : url, options);
       } catch (error) { return Promise.reject(error); }
@@ -81,7 +96,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       const result = open.call(this, method, toProxy(url), ...args);
       names.set(this, new Set());
       attempt(() => this.setRequestHeader('x-dsh-guest-sub', '1'));
-      attempt(() => this.setRequestHeader('x-dsh-guest-referer', real));
+      attempt(() => refererHeaders((name, value) => this.setRequestHeader(name, value)));
       return result;
     };
     XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
@@ -99,8 +114,9 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
   attempt(() => {
     navigator.sendBeacon = (url, data) => {
       try {
-        nativeFetch(toProxy(url), { method: 'POST', body: data, keepalive: true,
-          headers: { 'x-dsh-guest-sub': '1', 'x-dsh-guest-referer': real } }).catch(() => {});
+        const headers = { 'x-dsh-guest-sub': '1' };
+        refererHeaders((name, value) => { headers[name] = value; });
+        nativeFetch(toProxy(url), { method: 'POST', body: data, keepalive: true, headers }).catch(() => {});
         return true;
       } catch { return false; }
     };
