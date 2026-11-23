@@ -28,8 +28,10 @@ const { createBrowserInitializationJournal, createBrowserInitializationReader } 
 const { DEFAULT_SETTINGS } = await import('../lib/browser-electron/settings-store.js')
 
 const panelSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8')).replace(/^export /gm, '').replace(/^import[^\n]+\n/gm, '')
+// The panel's one module import, inlined the way the bundler does.
+const hostFeaturesSource = stripTypeScriptTypes(readFileSync(new URL('../src/compat/host-features.ts', import.meta.url), 'utf8')).replace(/^export /gm, '').replace(/^import[^\n]+\n/gm, '')
 const SOURCE = `window.__ModuleLoader__.load({ factory(require) {
-  const { ${Object.keys(browserPolicy).join(', ')} } = ${JSON.stringify(browserPolicy)};\n  const extensionMessages = ${JSON.stringify(extensionMessages)};\n  const zh = ${JSON.stringify(zh)}; const en = ${JSON.stringify(en)};\n  ${panelSource}
+  const { ${Object.keys(browserPolicy).join(', ')} } = ${JSON.stringify(browserPolicy)};\n  const extensionMessages = ${JSON.stringify(extensionMessages)};\n  const zh = ${JSON.stringify(zh)}; const en = ${JSON.stringify(en)};\n  ${hostFeaturesSource}\n  ${panelSource}
   return loadSettingsPanel(require);
 } })`
 const ROUTE = '/dsh-builtin-browser/settings'
@@ -2697,4 +2699,21 @@ test('a failed reference load keeps the records section and a working retry', as
   const recovered = await renderPanel(Component, mounted.host, fetchMock)
   assert.equal(elements(recovered).some(node => node.props.role === 'alert'), false)
   assert.ok(textOf(recovered).join(' ').includes('暂无网页引用'))
+})
+
+test('a third-party desktop shell hides bridge install / repair and recommends the system browser first', async () => {
+  const locale = lazyLocale()
+  const runtime = bridgeRuntime('missing', true)
+  runtime.shell = { kind: 'third-party-shell', patchable: false, reason: 'out/main/index.js instead of lib/main.js', recommendedCarrier: 'edge', version: '0.14.0' }
+  const fetchMock = readinessFetch({ runtime })
+  const mounted = await mount({ production: true, fetch: fetchMock, render: false, locale: locale.api })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+  assert.equal(elements(tree).some(node => node.props.key === 'bridge-controls'), false, 'no install or repair for a shell the bridge never patches')
+  assert.equal(bridgeButton(tree, 'readiness.bridge.reinstall'), undefined)
+  const guidance = elements(tree).find(node => node.props.key === 'third-party-shell')
+  assert.ok(guidance)
+  const [first, second] = textOf(guidance)
+  assert.match(first, /本机 Edge/, 'the system browser usable right now comes first')
+  assert.match(second, /官方 DeepSeek Harness Desktop 或 DSH Web/, 'the native sidebar follows')
+  assert.match(textOf(tree).join(' | '), /第三方 Desktop 外壳/)
 })

@@ -10,6 +10,7 @@ import { parseBrowserAddress, type BrowserTarget } from '../browser/url.ts'
 import { captureReferenceIntent } from '../reference-intents.ts'
 import { installReferenceOverlay } from './reference-overlay.ts'
 import { dispatchChildTab } from '../browser/child-tabs.ts'
+import { urlChildTabs } from '../../compat/host-features.ts'
 
 interface NavigationEvent extends Event { readonly isMainFrame: boolean; readonly isInPlace?: boolean }
 interface LoadFailureEvent extends NavigationEvent {
@@ -221,8 +222,9 @@ export class ElectronWebViewImpl implements BrowserFrame {
       }
       return result
     }
-    const unsubscribeOpen = this.bridge.childTabs?.protocolVersion === 1
-      ? this.bridge.childTabs.onRequested(reservation.lease, requested)
+    const childTabs = urlChildTabs(this.bridge)
+    const unsubscribeOpen = childTabs !== undefined
+      ? childTabs.onRequested(reservation.lease, requested)
       : this.bridge.onOpenRequested(reservation.lease, url => { requested({ mode: 'url-only', url }) })
     signal.addEventListener('abort', unsubscribeOpen, { once: true })
     element.addEventListener('dom-ready', () => {
