@@ -18,12 +18,14 @@ export function processIdentity(pid: number): string | undefined {
       ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
         `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()`],
       { encoding: 'utf8', timeout: 10_000, windowsHide: true })
-      : execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 })
+      : execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000, env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' } })
     return text.trim() || undefined
   } catch {
     return undefined
   }
 }
+
+let ownIdentity: string | undefined
 
 /** A live PID is still the owner only if the OS gives it the start the owner recorded; Windows reuses PIDs quickly. */
 function ownerAlive(pid: number, identity: unknown): boolean {
@@ -64,6 +66,7 @@ export function acquireProfileLease(directory: string): ProfileLease {
   const file = join(root, '.dsh-browser-lease.json')
   const guard = join(dirname(root), `.${basename(root)}.dsh-browser-lease.guard`)
   const token = randomUUID()
+  const identity = ownIdentity ??= processIdentity(process.pid) ?? ''
   const busy = (): Error => new Error(`dsh-builtin-browser: browser profile is leased or its ownership cannot be verified: ${root}`)
   const guarded = <T>(operation: () => T): T => {
     let acquired = false
@@ -109,7 +112,7 @@ export function acquireProfileLease(directory: string): ProfileLease {
       unlinkSync(file)
     }
     const fd = openSync(file, 'wx', 0o600)
-    try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token, identity: processIdentity(process.pid) })) }
+    try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token, ...(identity === '' ? {} : { identity }) })) }
     finally { closeSync(fd) }
   })
   let released = false
