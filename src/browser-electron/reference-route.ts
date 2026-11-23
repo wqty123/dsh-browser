@@ -124,7 +124,6 @@ function requireRead(request: IncomingMessage, response: ServerResponse): boolea
   return true
 }
 
-/** Build every reference handler over one service. */
 /**
  * The page-side bar posts its whole frozen capture, images inlined, and that capture is bounded by
  * `MAX_FROZEN_CAPTURE_CHARS`. JSON keeps non-ASCII raw, so a character can take three UTF-8 bytes;
@@ -132,6 +131,7 @@ function requireRead(request: IncomingMessage, response: ServerResponse): boolea
  */
 const MAX_CAPTURE_BODY_BYTES = MAX_FROZEN_CAPTURE_CHARS * 3 + 64 * 1024
 
+/** Build every reference handler over one service. */
 export function createReferenceRouteHandlers(options: ReferenceRouteOptions): ReferenceRouteHandlers {
   const { service, queue } = options
   const carrier = options.carrier ?? (() => 'bundled' as BrowserReferenceCarrier)
