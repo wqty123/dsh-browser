@@ -18,7 +18,7 @@ const POLL_MS = 500
 const script = (parent: number): string => [
   `$parent = ${parent}`,
   'try {',
-  'Add-Type -AssemblyName System.Windows.Forms',
+  'Add-Type -AssemblyName System.Windows.Forms, System.Drawing',
   'Add-Type -TypeDefinition @"',
   'using System; using System.Runtime.InteropServices;',
   'public static class DshForeground {',
