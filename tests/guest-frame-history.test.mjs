@@ -26,6 +26,7 @@ test('Web guest Back follows only the guest frame history, not the session histo
   const { output } = await bundle.generate({ format: 'esm' }).finally(() => bundle.close())
   const javascript = output.find(chunk => chunk.type === 'chunk').code
   const requests = []
+  let pushOnLoad = false
   const originalFetch = globalThis.fetch, originalLookup = dns.lookup
   dns.lookup = async (...args) => args[0] === 'history.example' ? [{ address: '93.184.216.34', family: 4 }] : originalLookup(...args)
   globalThis.fetch = async (target, options) => {
@@ -34,7 +35,7 @@ test('Web guest Back follows only the guest frame history, not the session histo
     requests.push(method)
     return new Response(method === 'POST' ? '<!doctype html><title>Posted</title><p>posted</p>'
       : `<!doctype html><title>One</title><form method="post" action="/one"><input name="q" value="1"></form>
-        <script>addEventListener('message', event => { if (event.data === 'submit') document.forms[0].submit() })</script>`, { headers: { 'content-type': 'text/html' } })
+        ${pushOnLoad ? `<script>history.pushState({}, '', location.href)</script>` : ''}<script>addEventListener('message', event => { if (event.data === 'submit') document.forms[0].submit() })</script>`, { headers: { 'content-type': 'text/html' } })
   }
   const jar = new GuestCookieJar(), storage = new GuestStorage()
   const server = createServer((req, res) => {
@@ -64,5 +65,12 @@ test('Web guest Back follows only the guest frame history, not the session histo
   await page.evaluate('framePage.frame.goBack()')
   await until(() => requests.lastIndexOf('GET') > requests.indexOf('POST'), 'Back did not return the guest to its first document')
   await until(async () => !await canGoBack(), 'Back stayed available at the first guest document')
+  assert.equal(await page.evaluate('location.pathname'), '/host/c')
+  pushOnLoad = true
+  await page.navigate(`http://127.0.0.1:${server.address().port}/`)
+  await page.evaluate(`new Promise(resolve => { const poll = () => window.startFrame ? resolve(startFrame()) : setTimeout(poll, 10); poll() })`)
+  await until(canGoBack, 'a same-URL entry the guest pushed while starting was not offered to Back')
+  await page.evaluate('framePage.frame.goBack()')
+  await until(async () => !await canGoBack(), 'Back did not return to the entry before the startup push')
   assert.equal(await page.evaluate('location.pathname'), '/host/c')
 })

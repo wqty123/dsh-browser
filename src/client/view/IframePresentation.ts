@@ -342,8 +342,8 @@ export class IframePresentation implements BrowserPresentation {
     element.addEventListener('error', () => {
       if (this.element === element) { this.invalidateGuest(); this.events.failed(current.revision) }
     })
-    this.baseDepth = undefined
-    this.lastDepth = 1
+    this.baseDepth = history.length
+    this.lastDepth = this.baseDepth
     this.frameIndex = 0
     this.loadId = ++this.nextLoadId
     this.element = element

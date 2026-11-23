@@ -60,7 +60,7 @@ it('observes navigation and drives history only through the current opaque guest
   presentation.show({ target: { kind: 'https', url: 'https://example.test/', title: 'Example' }, revision: 7, sandboxed: true })
   const frame = host.querySelector('iframe')!
   const post = vi.spyOn(frame.contentWindow!, 'postMessage')
-  const data = { type: 'dsh.browser.guest.navigation', url: 'https://example.test/next', depth: 3, documentId: 'guest-document' }
+  const data = { type: 'dsh.browser.guest.navigation', url: 'https://example.test/next', depth: history.length, documentId: 'guest-document' }
   const send = (source: Window | null, origin = 'null', payload: unknown = data) =>
     window.dispatchEvent(new MessageEvent('message', { source, origin, data: payload }))
   send(null)
@@ -77,7 +77,7 @@ it('observes navigation and drives history only through the current opaque guest
   expect(presentation.historyDepth()).toBe(1)
   expect(presentation.historyStep(-1)).toBe(false)
   expect(post).not.toHaveBeenCalledWith({ type: 'dsh.browser.guest.history', delta: -1 }, '*')
-  send(frame.contentWindow, 'null', { ...data, depth: 4, loadId: request.loadId })
+  send(frame.contentWindow, 'null', { ...data, depth: history.length + 1, loadId: request.loadId })
   expect(presentation.historyDepth()).toBe(2)
   expect(presentation.historyStep(-1)).toBe(true)
   expect(post).toHaveBeenCalledWith({ type: 'dsh.browser.guest.history', delta: -1 }, '*')
