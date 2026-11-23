@@ -231,13 +231,28 @@ test('with quiet mode off, the first page keeps the default foreground creation'
   assert.equal('windowState' in params, false)
 })
 
-test('a quiet tab that joins an existing window neither minimizes it nor restores it later', async t => {
+test('selecting a later tab in the window quiet mode minimized restores that window', async t => {
   const { browser, host } = await quietHost(t, true, { respond: minimizedWindow })
   const second = host.createView(tabWireId({ owner: 'task-a', session: 'main', tab: 'second' }))
   await second.sendCommand('Runtime.evaluate', { expression: '1' })
   const created = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
-  assert.equal(created.length, 2)
-  assert.equal('windowState' in created[1], false)
+  assert.equal('windowState' in created[1], false, 'a tab joining the window does not minimize it again')
+  host.showView(second, 'second', { quiet: true, select: true })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.deepEqual(browser.commands.filter(c => c.method === 'Browser.setWindowBounds').map(c => c.params),
+    [{ windowId: 7, bounds: { windowState: 'normal' } }])
+})
+
+test('a window quiet mode did not minimize stays minimized when a quiet tab in it is selected', async t => {
+  const { browser, host } = await quietHost(t, true, {
+    respond: message => message.method === 'Target.createTarget' && message.params?.windowState !== undefined
+      ? { error: { message: 'Invalid parameters' } }
+      : minimizedWindow(message),
+  })
+  const second = host.createView(tabWireId({ owner: 'task-a', session: 'main', tab: 'second' }))
+  await second.sendCommand('Runtime.evaluate', { expression: '1' })
+  const created = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
+  assert.equal(created.length, 3, 'the first page fell back once; the second joined its window')
   host.showView(second, 'second', { quiet: true, select: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false,

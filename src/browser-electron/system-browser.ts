@@ -1489,7 +1489,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     const targetId = (created as { targetId?: string } | undefined)?.targetId
     if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')
     this.rememberTarget(client, targetId, viewId)
-    if (minimized) this.quietMinimized.add(viewId)
+    if (minimized) await this.rememberQuietWindow(client, targetId)
     return targetId
   }
 
@@ -1513,15 +1513,25 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-  /** Views whose window quiet mode minimized itself; a window the user minimized is not listed. */
-  private readonly quietMinimized = new Set<string>()
+  /** Windows quiet mode minimized itself; a window the user minimized is not listed. */
+  private readonly quietMinimized = new Set<number>()
+
+  private async rememberQuietWindow(client: CdpClient, targetId: string): Promise<void> {
+    try {
+      const found = await client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown } | undefined
+      if (typeof found?.windowId === 'number') this.quietMinimized.add(found.windowId)
+    } catch {
+      // Without its id the window cannot be told apart from one the user minimized, so it stays as it is.
+    }
+  }
 
   /** An explicit selection shows a window quiet mode minimized, without `Page.bringToFront`. */
   private async restoreQuietWindow(handle: ElectronViewHandle): Promise<void> {
-    if (!this.quietMinimized.delete(handle.id)) return
+    if (this.quietMinimized.size === 0) return
     try {
       const found = await handle.sendCommand('Browser.getWindowForTarget') as { windowId?: unknown; bounds?: { windowState?: unknown } }
-      if (typeof found?.windowId !== 'number' || found.bounds?.windowState !== 'minimized') return
+      if (typeof found?.windowId !== 'number' || !this.quietMinimized.delete(found.windowId)) return
+      if (found.bounds?.windowState !== 'minimized') return
       await handle.sendCommand('Browser.setWindowBounds', { windowId: found.windowId, bounds: { windowState: 'normal' } })
     } catch {
       // The page went away; the command that selected it reports that itself.
