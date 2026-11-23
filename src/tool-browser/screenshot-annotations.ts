@@ -56,18 +56,21 @@ export const ANNOTATE_SCRIPT = `(async () => {${DEEP_DOM_SOURCE}
     if (!text) text = el.innerText || buttonValue || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || ''
     return String(text).replace(/\\s+/g, ' ').trim().slice(0, 80)
   }
-  const offsetOf = (el) => {
-    let x = 0, y = 0
+  const vw = window.innerWidth, vh = window.innerHeight
+  // The element's box in top-viewport coordinates, clipped by every enclosing iframe's viewport.
+  const visibleBox = (el) => {
+    const r = el.getBoundingClientRect()
+    let box = { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
     let doc = el.ownerDocument
     while (doc && doc.defaultView && doc.defaultView.frameElement) {
-      const r = doc.defaultView.frameElement.getBoundingClientRect()
-      x += r.left
-      y += r.top
-      doc = doc.defaultView.frameElement.ownerDocument
+      const view = doc.defaultView
+      box = { left: Math.max(box.left, 0), top: Math.max(box.top, 0), right: Math.min(box.right, view.innerWidth), bottom: Math.min(box.bottom, view.innerHeight) }
+      const f = view.frameElement.getBoundingClientRect()
+      box = { left: box.left + f.left, top: box.top + f.top, right: box.right + f.left, bottom: box.bottom + f.top }
+      doc = view.frameElement.ownerDocument
     }
-    return { x, y }
+    return { left: Math.max(box.left, 0), top: Math.max(box.top, 0), right: Math.min(box.right, vw), bottom: Math.min(box.bottom, vh) }
   }
-  const vw = window.innerWidth, vh = window.innerHeight
   const rows = []
   const boxes = []
   for (const root of __dshRoots()) {
@@ -78,14 +81,13 @@ export const ANNOTATE_SCRIPT = `(async () => {${DEEP_DOM_SOURCE}
       if (r.width < 2 || r.height < 2) continue
       const style = el.ownerDocument.defaultView.getComputedStyle(el)
       if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) continue
-      const o = offsetOf(el)
-      const left = o.x + r.left, top = o.y + r.top
-      if (left + r.width <= 0 || top + r.height <= 0 || left >= vw || top >= vh) continue
-      const x = Math.round(Math.min(Math.max(left + r.width / 2, 0), vw - 1))
-      const y = Math.round(Math.min(Math.max(top + r.height / 2, 0), vh - 1))
+      const v = visibleBox(el)
+      if (v.right - v.left < 2 || v.bottom - v.top < 2) continue
+      const x = Math.round((v.left + v.right) / 2)
+      const y = Math.round((v.top + v.bottom) / 2)
       const id = rows.length + 1
       rows.push({ id, x, y, role: el.getAttribute('role') || implicit(el), label: labelOf(el) })
-      boxes.push({ id, left, top, width: r.width, height: r.height })
+      boxes.push({ id, left: v.left, top: v.top, width: v.right - v.left, height: v.bottom - v.top })
     }
   }
   const host = document.createElement('div')
