@@ -428,6 +428,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * spawned when a view is actually needed.
    */
   private client: CdpClient | undefined
+  /** Whether the running browser was launched headless, so its pages get a plain Chrome user agent. */
+  /** The browser's user agent without the `HeadlessChrome` token, read once per connection. */
+  private plainUserAgent: Promise<string | undefined> | undefined
   /**
    * Set when a command went unanswered rather than being refused.
    *
@@ -669,6 +672,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       await client.send('Target.setDiscoverTargets', { discover: true }, undefined, Math.max(1, deadline - Date.now()))
       if (this.disposed || Date.now() >= deadline) { client.close(); return undefined }
       this.client = client
+      this.plainUserAgent = undefined
       return client
     } catch (error) {
       client?.close()
@@ -726,6 +730,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       '--disable-features=Translate,MediaRouter',
       '--disable-session-crashed-bubble',
       '--hide-crash-restore-bubble',
+      // The remote-debugging port this plugin drives makes Chrome set `navigator.webdriver` on every
+      // page, windowed or not, which bot walls read as "a script, not a person" — even while the
+      // person is the one browsing. Chrome's own switch turns that marker off; nothing else changes.
+      '--disable-blink-features=AutomationControlled',
       // Headless only where there is nothing to draw on. `--headless=new` rather than the legacy
       // flag: the new mode behaves like a windowed browser, which matters because every command
       // here was written and measured against one — including CDP input, which Chromium silently
@@ -963,6 +971,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
               }
               if (this.disposed) { client.close(); break }
               this.client = client
+              this.plainUserAgent = undefined
               return client
             }
         } catch (error) {
@@ -1377,6 +1386,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       const sessionId = attached?.sessionId
       if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
       if (adopted !== undefined) this.rememberTarget(client, targetId, viewId)
+      await this.presentAsChrome(client, sessionId)
       // The session id is what page commands ride; the target id is what closes it.
       this.sessions.set(sessionId, targetId)
       this.views.set(viewId, { session: sessionId, client })
@@ -1385,6 +1395,23 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       release()
       if (this.targetBuilds.get(client) === building) this.targetBuilds.delete(client)
     }
+  }
+
+  /**
+   * Give a page this plugin created in a headless browser (launched or adopted) the same user agent
+   * the browser has with a window. Headless Chrome announces itself as `HeadlessChrome/<version>`, which sites
+   * refuse outright; it is the same engine and version, so the windowed string is the truthful one.
+   * A person's own tab ({@link adoptPage}) and a windowed browser are left exactly as they are.
+   * @param client - the connected browser.
+   * @param sessionId - the page's CDP session.
+   */
+  private async presentAsChrome(client: CdpClient, sessionId: string): Promise<void> {
+    this.plainUserAgent ??= (client.send('Browser.getVersion', {}) as Promise<{ userAgent?: string }>)
+      .then(info => typeof info?.userAgent === 'string' && info.userAgent.includes('HeadlessChrome/')
+        ? info.userAgent.replace(/HeadlessChrome\//u, 'Chrome/') : undefined, () => undefined)
+    const userAgent = await this.plainUserAgent
+    if (userAgent === undefined) return
+    await client.send('Emulation.setUserAgentOverride', { userAgent }, sessionId).catch(() => {})
   }
 
   /**

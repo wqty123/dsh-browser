@@ -72,7 +72,7 @@ jobs:
         run: |
           export DSH_TEST_CHROME="$(dirname "$(readlink -f "$(command -v google-chrome)")")/chrome"
           test -x "$DSH_TEST_CHROME"
-          node tests/run.mjs tests/browser-use-p0.test.mjs tests/browser-use-p1.test.mjs
+          node tests/run.mjs tests/browser-use-p0.test.mjs tests/browser-use-p1.test.mjs tests/browser-use-antibot.test.mjs
       - name: Pack check
         working-directory: ${{ env.WORKSPACE }}/packages/web/dsh-browser
         run: node tools/check-pack.mjs

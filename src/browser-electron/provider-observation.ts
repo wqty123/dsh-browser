@@ -2,62 +2,12 @@ import { DEFAULT_OPERATION_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 import type { BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserContentRequest, BrowserContentResult, BrowserScrapeRequest, BrowserScrapeResult, BrowserSessionId, BrowserSnapshotResult, BrowserWaitRequest, BrowserWaitResult } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
 import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
+import { challengeDetectSource } from '../browser/anti-bot.ts'
 import { PROVIDER_TIMEOUTS, TARGET_SCRIPT_GRACE_MS, delay, withTimeout, handleSendEvaluate } from './provider-core.ts'
 import { ProviderNavigation } from './provider-navigation.ts'
 
-/**
- * Page-context human-verification (CAPTCHA / bot-detection) detection. Runs
- * inside the page; returns `{ blocked, kind?, reason? }`. Marker-based and
- * best-effort: checks for Cloudflare's interstitial, hCaptcha, reCAPTCHA,
- * Turnstile, and generic challenge wording.
- */
-const CHALLENGE_DETECT_EXPRESSION = `(() => {
-  const title = (document.title || '').trim()
-  const bodyText = (document.body && document.body.innerText || '').slice(0, 4000)
-  // Challenge widgets often live in same-origin iframes or shadow roots;
-  // scan those too (cross-origin frames stay opaque).
-  let extraText = ''
-  try {
-    const seen = new Set()
-    const scan = (doc) => {
-      if (seen.has(doc)) return
-      seen.add(doc)
-      for (const el of doc.querySelectorAll('*')) {
-        if (el.shadowRoot) {
-          extraText += (el.shadowRoot.textContent || '').slice(0, 2000)
-          scan(el.shadowRoot)
-        }
-        if (el.tagName === 'IFRAME') {
-          try {
-            const d = el.contentDocument
-            if (d) {
-              extraText += ((d.body && d.body.innerText) || '').slice(0, 2000)
-              scan(d)
-            }
-          } catch { /* cross-origin */ }
-        }
-      }
-    }
-    scan(document)
-  } catch { /* never fail the challenge check */ }
-  const lower = (title + '\\n' + bodyText + '\\n' + extraText).toLowerCase()
-  const frameSrcs = [...document.querySelectorAll('iframe')].map(f => f.src || '').join(' ')
-  const framesLower = frameSrcs.toLowerCase()
-  const hasCfInterstitial = /just a moment|checking your browser|attention required|cf_chl/i.test(lower)
-    || !!document.querySelector('#challenge-running, #challenge-stage, #cf-chl-container')
-  const hasHCaptcha = !!window.hcaptcha || !!document.querySelector('.h-captcha') || /hcaptcha\\.com/i.test(framesLower)
-  const hasRecaptcha = !!window.grecaptcha || !!document.querySelector('.g-recaptcha') || /recaptcha\\/api|google\\.com\\/recaptcha/i.test(framesLower)
-  const hasTurnstile = !!window.turnstile || /challenges\\.cloudflare\\.com/i.test(framesLower) || /turnstile|challenge-platform/i.test(lower)
-  const verifyWording = /verify you are human|verify you are not a robot|\\u4eba\\u673a\\u9a8c\\u8bc1|\\u5b89\\u5168\\u9a8c\\u8bc1|enable javascript and cookies|\\u8bf7.*\\u9a8c\\u8bc1/i.test(lower)
-  if (hasCfInterstitial) return { blocked: true, kind: 'cloudflare', reason: 'Cloudflare "Just a moment" interstitial' }
-  if (hasHCaptcha) return { blocked: true, kind: 'hcaptcha', reason: 'hCaptcha verification' }
-  if (hasRecaptcha) return { blocked: true, kind: 'recaptcha', reason: 'Google reCAPTCHA verification' }
-  if (hasTurnstile) return { blocked: true, kind: 'turnstile', reason: 'Cloudflare Turnstile verification' }
-  if (verifyWording && /challenge|captcha|verification|security check|access denied|blocked|\\u9a8c\\u8bc1/i.test(lower)) {
-    return { blocked: true, kind: 'generic', reason: 'Human-verification challenge' }
-  }
-  return { blocked: false }
-})()`
+/** Page-context block / human-verification detection; the classifier lives in `browser/anti-bot.ts`. */
+const CHALLENGE_DETECT_EXPRESSION = challengeDetectSource()
 
 /** Cap on content returned by a snapshot fetch to keep the wire bounded. */
 const SNAPSHOT_LABEL_MAX = 120
@@ -523,7 +473,13 @@ export abstract class ProviderObservation extends ProviderNavigation {
       throw new BrowserError(`browser: challenge detection failed: ${result.exception}`, 'BROWSER_CHALLENGE_DETECT_FAILED')
     }
     const value = result.value as BrowserChallenge
-    return { blocked: value.blocked === true, kind: value.kind, reason: value.reason }
+    return {
+      blocked: value.blocked === true,
+      kind: value.kind,
+      reason: value.reason,
+      ...value.recovery !== undefined ? { recovery: value.recovery } : {},
+      ...typeof value.status === 'number' ? { status: value.status } : {},
+    }
   }
 
   /** Fetch page content in a requested format. */

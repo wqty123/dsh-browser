@@ -10,6 +10,9 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+// The proxy's one retry pauses first; nothing here measures the pause.
+process.env.DSH_BROWSER_BLOCK_RETRY_MS ??= '0'
+
 const nativeFetch = globalThis.fetch
 const nativeLookup = dns.lookup
 const resolved = new Map()
@@ -62,6 +65,12 @@ before(async () => {
     } else if (req.url === '/' && req.headers['x-fixture-host'] !== 'empty.example') {
       res.writeHead(200, { 'set-cookie': 'VISITED=root; Path=/' })
       res.end('root')
+    } else if (req.url === '/denied') {
+      res.writeHead(403, { 'content-type': 'text/html' })
+      res.end('<html><head><title>Access Denied</title></head><body>Access denied</body></html>')
+    } else if (req.url === '/ip-blocked') {
+      res.writeHead(403, { 'content-type': 'text/html' })
+      res.end('<html><body>Your IP address has been blocked. Requests from hosting providers are not allowed.</body></html>')
     } else if (req.url === '/challenge' || req.url === '/cookie-scopes/challenge') {
       res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': 'CHALLENGE=seen; Path=/' })
       res.end('<html><body>安全验证</body></html>')
@@ -607,6 +616,18 @@ test('GET challenge warms once and retries once, merging challenge, root and inb
   ])
   assert.equal(requests[2].options.headers.get('cookie'), 'CHALLENGE=seen; VISITED=root')
   assert.equal(requests[2].options.headers.get('referer'), 'https://challenge.example/')
+})
+
+test('an access-denied refusal is retried once; a network (IP) block is reported as is, never retried', async () => {
+  let before = forwarded.length
+  await call(guestPath('https://challenge.example/denied'), { headers: { referer: 'https://dsh.example' + guestPath('https://challenge.example/previous') } })
+  assert.deepEqual(forwarded.slice(before).map(item => item.target), [
+    'https://challenge.example/denied', 'https://challenge.example/', 'https://challenge.example/denied',
+  ])
+  before = forwarded.length
+  const blocked = await call(guestPath('https://challenge.example/ip-blocked'), { headers: { referer: 'https://dsh.example' + guestPath('https://challenge.example/previous') } })
+  assert.equal(blocked.status, 403)
+  assert.deepEqual(forwarded.slice(before).map(item => item.target), ['https://challenge.example/ip-blocked'])
 })
 
 test('POST and sub-request challenges are never warmed or retried', async () => {

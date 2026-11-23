@@ -7,6 +7,7 @@ import { annotationLines, clearAnnotations, drawAnnotations, type ScreenshotAnno
 import type { ImageBlock } from '@deepseek-ai/dsh-llm'
 import { SCREENSHOT_MAX_WIDTH, SCREENSHOT_MAX_HEIGHT, screenshotDimension, screenshotBytes, screenshotVisionEnabled, saveScreenshotImage } from './screenshot-image.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { CHALLENGE_SCHEMA, challengeBanner, reportChallenge, type ChallengeReport } from './block-recovery.ts'
 import { NODE_ITEM_SCHEMA, projectElement, projectNode } from './element-fields.ts'
 import { assertCapability } from '../browser/types.ts'
 import { assertAllowed, agentOf, taskKey, ensureSession, carrierCapabilities, type ToolScope, type ToolDefinition } from './state.ts'
@@ -28,7 +29,7 @@ export function formatSnapshot(snapshot: {
   title?: string
   elements: readonly { ref: number; kind: string; label: string; x: number; y: number; frame?: boolean; selector?: string }[]
   truncated?: boolean
-  challenge?: { blocked: boolean; kind?: string; reason?: string }
+  challenge?: ChallengeReport
   blank?: boolean
   note?: string
   canvas?: boolean
@@ -47,9 +48,7 @@ export function formatSnapshot(snapshot: {
         + 'A DOM snapshot cannot describe it; use `dsh_browser_screenshot` and coordinate clicks.'
       : lines.length > 0 ? lines.join('\n') : '(no interactive elements found)'
   const tail = snapshot.truncated === true ? '\n(snapshot truncated)' : ''
-  const banner = snapshot.challenge?.blocked === true
-    ? `\n\nCHALLENGE: ${snapshot.challenge.reason ?? 'human-verification'}. Do NOT keep retrying — ask the human to complete it in the shared browser window, then re-snapshot.`
-    : ''
+  const banner = challengeBanner(snapshot.challenge)
   return `${header}\n\n${body}${tail}${banner}`
 }
 
@@ -98,15 +97,7 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
               },
             },
           },
-          challenge: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              blocked: { type: 'boolean', required: true },
-              kind: { type: 'string' },
-              reason: { type: 'string' },
-            },
-          },
+          challenge: CHALLENGE_SCHEMA,
         },
       },
       render: (args, value) => [{ type: 'text', text: formatSnapshot(value, { coords: args.coords === true }) }],
@@ -124,7 +115,7 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
         elements: snapshot.elements.map(el => projectElement(el)),
         truncated: snapshot.truncated,
-        ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
+        ...snapshot.challenge !== undefined ? { challenge: reportChallenge(snapshot.challenge, snapshot.url) } : {},
       }
     },
   }))
@@ -217,24 +208,13 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'dsh_browser_challenge',
-    description: 'Check whether a human-verification challenge (CAPTCHA / bot detection: Cloudflare "Just a moment", reCAPTCHA, hCaptcha, Turnstile) is blocking the current page. When blocked, do NOT keep retrying automated steps — ask the human to complete the verification in the shared browser window, then re-check with dsh_browser_snapshot.',
+    description: 'Check whether the current page is a bot wall: a human verification (CAPTCHA, slider, press-and-hold, Cloudflare Turnstile), a "Just a moment" interstitial, an access-denied/429 refusal, or a network (IP) block. Returns the kind, what to do (recovery: takeover | wait | retry | environment) and public fallback routes (site API, search results, archives). Never solve or retry a human verification: call dsh_browser_request_takeover.',
     parameters: {},
     output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          blocked: { type: 'boolean', required: true },
-          kind: { type: 'string' },
-          reason: { type: 'string' },
-          hint: { type: 'string' },
-        },
-      },
+      schema: CHALLENGE_SCHEMA,
       render: (_args, value) => [{
         type: 'text',
-        text: value.blocked
-          ? `Challenge detected: ${value.reason ?? value.kind ?? 'human-verification'}. ${value.hint ?? ''}`
-          : 'No human-verification challenge detected.',
+        text: value.blocked ? challengeBanner(value).trimStart() : 'No challenge or block detected.',
       }],
     },
     timeoutMs,
@@ -244,14 +224,8 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const challenge = await browser.detectChallenge(session, exec.signal)
-      return {
-        blocked: challenge.blocked,
-        ...challenge.kind !== undefined ? { kind: challenge.kind } : {},
-        ...challenge.reason !== undefined ? { reason: challenge.reason } : {},
-        hint: challenge.blocked
-          ? 'Ask the human to complete the verification in the shared browser window (the page is visible to them), then re-check with dsh_browser_snapshot.'
-          : '',
-      }
+      const tabs = await browser.listTabs(session).catch(() => [])
+      return reportChallenge(challenge, tabs.find(tab => tab.active)?.url ?? '')
     },
   }))
 

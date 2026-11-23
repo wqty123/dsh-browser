@@ -529,10 +529,14 @@ export interface BrowserA11yResult {
 export interface BrowserChallenge {
   /** Whether a challenge currently blocks the page. */
   readonly blocked: boolean
-  /** Machine-readable kind: cloudflare | hcaptcha | recaptcha | turnstile | generic. */
+  /** Machine-readable kind, e.g. cloudflare | hcaptcha | recaptcha | turnstile | slider | access-denied | ip-block. */
   readonly kind?: string
   /** Short human-readable description, e.g. 'Cloudflare "Just a moment" interstitial'. */
   readonly reason?: string
+  /** What to do about it: takeover (human verification), wait, retry, or environment (network refused). */
+  readonly recovery?: 'takeover' | 'wait' | 'retry' | 'environment'
+  /** HTTP status of the main document, when known. */
+  readonly status?: number
 }
 
 /**
