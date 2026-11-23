@@ -1391,6 +1391,13 @@ const react = require("react")
   }
 
   /**
+   * DSH 0.2.2-rc.3 has no `data-sidebar-right-session` markers, so its tab strip is found by its
+   * CSS Modules class. This is the only class-name lookup: every shell with the markers takes
+   * `panelRootsFor` instead.
+   */
+  const LEGACY_TAB_STRIP_SELECTOR = "[class*=_tabStrip]"
+
+  /**
    * This conversation's own sidebar strip, or null when the shell has not mounted it.
    *
    * Its presence is the precondition `openTabIn` needs: it is minted together with the
@@ -1399,7 +1406,7 @@ const react = require("react")
    * the caller can report, instead of a page that never appears.
    */
   function tabStripFor(sessionId) {
-    for (const strip of Array.from(document.querySelectorAll("[class*=_tabStrip]"))) {
+    for (const strip of Array.from(document.querySelectorAll(LEGACY_TAB_STRIP_SELECTOR))) {
       if (sessionIdOfElement(strip) === sessionId) return strip
     }
     return null
@@ -1444,7 +1451,7 @@ const react = require("react")
     // still reached.
     let node = strip
     while (node !== null && node !== undefined && node !== document.body) {
-      const foreign = Array.from(node.querySelectorAll("[class*=_tabStrip]"))
+      const foreign = Array.from(node.querySelectorAll(LEGACY_TAB_STRIP_SELECTOR))
         .some(el => sessionIdOfElement(el) !== sessionId)
       if (foreign) break
       const found = Array.from(node.querySelectorAll("webview")).filter(view => {
@@ -2105,7 +2112,7 @@ const react = require("react")
           // causes — the shell has mounted no sidebar for this conversation (nothing this side can
           // do), or it writes its session id somewhere this lookup does not read (fixable) — and a
           // refusal that says only "not mounted" cannot tell them apart.
-          const strips = Array.from(document.querySelectorAll("[class*=_tabStrip]"))
+          const strips = Array.from(document.querySelectorAll(LEGACY_TAB_STRIP_SELECTOR))
           return {
             ok: false,
             reason: "this conversation's sidebar is not mounted, so a panel cannot be opened in it",

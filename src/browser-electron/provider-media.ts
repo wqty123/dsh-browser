@@ -96,8 +96,8 @@ export abstract class ProviderMedia extends ProviderInteraction {
     if (this.downloadDir !== undefined) {
       const dir = resolve(this.downloadDir)
       // Windows paths are case-insensitive and resolve() does not normalize case, so there
-      // the containment check folds case — otherwise C:\Users\X\Downloads and
-      // c:\users\x\downloads would read as different roots. Everywhere else the fold is
+      // the containment check folds case — otherwise %USERPROFILE%\Downloads and
+      // %userprofile%\downloads would read as different roots. Everywhere else the fold is
       // REMOVED: a case-sensitive filesystem (Linux) treats /home/u/DOWNLOADS and
       // /home/u/Downloads as different directories, so folding case there let a savePath
       // that merely differed in case pass admission — a directory-confinement escape, and

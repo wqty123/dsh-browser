@@ -815,3 +815,50 @@ export interface BrowserHistoryEntry {
  * own (e.g. `BROWSER_CDP_ATTACH_FAILED`).
  */
 export class BrowserError extends HarnessError {}
+
+/** What a browser carrier can do for a tool call; tools ask for one capability instead of naming carriers. */
+export interface CarrierCapabilities {
+  /** A live Chrome DevTools Protocol session drives the page. */
+  readonly cdp: boolean
+  readonly liveSnapshot: boolean
+  readonly interaction: boolean
+  readonly screenshot: boolean
+  readonly nativeTabs: boolean
+  readonly backgroundRender: boolean
+  readonly takeover: boolean
+  readonly referenceCapture: boolean
+}
+
+export type CarrierCapability = keyof CarrierCapabilities
+
+/** A CDP-backed page: the plugin browser, an attached system browser or the desktop sidebar. */
+export const CDP_CARRIER_CAPABILITIES: CarrierCapabilities = Object.freeze({
+  cdp: true, liveSnapshot: true, interaction: true, screenshot: true,
+  nativeTabs: true, backgroundRender: true, takeover: true, referenceCapture: true,
+})
+
+/** The Web sidebar's iframe: it can be navigated, nothing else. */
+export const WEB_PANEL_CAPABILITIES: CarrierCapabilities = Object.freeze({
+  cdp: false, liveSnapshot: false, interaction: false, screenshot: false,
+  nativeTabs: false, backgroundRender: false, takeover: false, referenceCapture: false,
+})
+
+/** A tool needed a capability the current carrier lacks. */
+export class CarrierCapabilityError extends BrowserError {
+  readonly capability: CarrierCapability
+  constructor(capability: CarrierCapability, message: string) {
+    super(message, 'BROWSER_CARRIER_CAPABILITY_UNAVAILABLE')
+    this.name = 'CarrierCapabilityError'
+    this.capability = capability
+  }
+}
+
+/**
+ * Refuse an operation the carrier cannot perform.
+ * @param capabilities - the current carrier's capabilities.
+ * @param required - the one capability the operation needs.
+ * @param guidance - the refusal the model sees: what is missing and which carrier to switch to.
+ */
+export function assertCapability(capabilities: CarrierCapabilities, required: CarrierCapability, guidance: string): void {
+  if (!capabilities[required]) throw new CarrierCapabilityError(required, guidance)
+}

@@ -7,7 +7,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createReferenceService, summarizeReference, type BrowserReferenceService } from '../browser-reference/service.ts'
 import type { BrowserReferenceCarrier } from '../browser-reference/types.ts'
 import { resolveSessionHandle, sessionWireId } from '../browser/handles.ts'
-import { agentOf, taskKey, ensureSession, type ToolScope, type ToolDefinition } from './state.ts'
+import { agentOf, taskKey, ensureSession, panelBound, type ToolScope, type ToolDefinition } from './state.ts'
 
 /**
  * Define this module's tools for one apply.
@@ -112,7 +112,7 @@ export function referenceTools(scope: ToolScope): ToolDefinition[] {
         browserSessionId: session,
         origin: args.excerptText !== undefined ? 'agent-excerpt' : 'user-selection',
         entry: 'agent-tool',
-        carrier: state.panelUrlByTask.has(taskKey(exec)) ? 'sidebar' : referenceCarrier(),
+        carrier: panelBound(state, taskKey(exec)) ? 'sidebar' : referenceCarrier(),
         ...args.allowPartial !== undefined ? { allowPartial: args.allowPartial } : {},
         ...args.tableSelector !== undefined ? { tableSelector: args.tableSelector } : {},
         ...args.excerptText !== undefined ? { excerptText: args.excerptText } : {},

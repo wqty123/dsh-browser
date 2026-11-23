@@ -13,11 +13,10 @@ import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ImageBlock } from '@deepseek-ai/dsh-llm'
+import { CODE_TOOL_DEFAULT_TIMEOUT_MS as DEFAULT_TIMEOUT_MS, CODE_TOOL_MAX_TIMEOUT_MS as MAX_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 
 export const CODE_TOOL = 'dsh_browser_code'
 const PREFIX = 'dsh_browser_'
-const DEFAULT_TIMEOUT_MS = 120_000
-const MAX_TIMEOUT_MS = 600_000
 /** Per-cell output cap, as Browser Use 1.0's MAX_OUTPUT_CHARS. */
 const MAX_OUTPUT_CHARS = 12_000
 const MAX_IMAGES = 4
