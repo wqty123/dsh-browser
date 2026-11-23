@@ -119,8 +119,9 @@ export async function poll<T>(check: () => Promise<T | undefined>, budgetMs: num
   for (;;) {
     const value = await check()
     if (value !== undefined) return value
-    if (Date.now() >= deadline) return undefined
-    await pause(intervalMs)
+    const left = deadline - Date.now()
+    if (left <= 0) return undefined
+    await pause(Math.min(intervalMs, left))
   }
 }
 
