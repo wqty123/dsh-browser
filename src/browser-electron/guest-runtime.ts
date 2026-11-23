@@ -66,6 +66,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         const headers = new Headers(init && init.headers || (isRequest ? input.headers : undefined));
         headers.set('x-dsh-guest-headers', [...headers.keys()].filter(name => !name.startsWith('x-dsh-')).join(','));
         headers.set('x-dsh-guest-sub', '1');
+        headers.set('x-dsh-guest-referer', real);
         const options = Object.assign({}, init, { headers, mode: 'cors', credentials: 'omit' });
         return nativeFetch(isRequest ? new Request(new URL(url, location.href), input) : url, options);
       } catch (error) { return Promise.reject(error); }
@@ -80,6 +81,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       const result = open.call(this, method, toProxy(url), ...args);
       names.set(this, new Set());
       attempt(() => this.setRequestHeader('x-dsh-guest-sub', '1'));
+      attempt(() => this.setRequestHeader('x-dsh-guest-referer', real));
       return result;
     };
     XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
@@ -98,7 +100,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
     navigator.sendBeacon = (url, data) => {
       try {
         nativeFetch(toProxy(url), { method: 'POST', body: data, keepalive: true,
-          headers: { 'x-dsh-guest-sub': '1' } }).catch(() => {});
+          headers: { 'x-dsh-guest-sub': '1', 'x-dsh-guest-referer': real } }).catch(() => {});
         return true;
       } catch { return false; }
     };

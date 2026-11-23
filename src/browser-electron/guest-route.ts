@@ -330,7 +330,7 @@ export async function handleGuest(
     const requested = String(request.headers['access-control-request-headers'] ?? '').toLowerCase().split(',').map(name => name.trim())
     writeHead(204, {
       'access-control-allow-methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
-      'access-control-allow-headers': [...new Set([...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub', 'x-dsh-guest-headers', ...requested.filter(siteHeader)])].join(', '),
+      'access-control-allow-headers': [...new Set([...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub', 'x-dsh-guest-headers', 'x-dsh-guest-referer', ...requested.filter(siteHeader)])].join(', '),
     })
     response.end()
     return
@@ -431,6 +431,18 @@ export async function handleGuest(
       const previous = guestTarget(new URL(referer).pathname + new URL(referer).search)
       if (previous !== undefined && !blocked(previous)) {
         headers.set('referer', previous.href)
+      }
+    } catch {}
+  }
+  const pageReferer = request.headers['x-dsh-guest-referer']
+  if (subRequest && !headers.has('referer') && typeof pageReferer === 'string') {
+    try {
+      const page = new URL(pageReferer)
+      page.hash = ''
+      page.username = ''
+      page.password = ''
+      if (/^https?:$/u.test(page.protocol) && !blocked(page) && !(page.protocol === 'https:' && target.protocol === 'http:')) {
+        headers.set('referer', page.origin === target.origin ? page.href : page.origin + '/')
       }
     } catch {}
   }

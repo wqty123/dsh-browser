@@ -134,6 +134,7 @@ test('fetch handles string, URL and Request inputs, preserving POST body and add
   assert.equal(await requests[2].input.text(), 'body')
   assert.equal(requests[2].init.headers.get('authorization'), 'Bearer site')
   for (const { init } of requests) assert.equal(init.headers.get('x-dsh-guest-sub'), '1')
+  for (const { init } of requests) assert.match(init.headers.get('x-dsh-guest-referer'), /^https:\/\/[^/]+\.example\//u)
 })
 
 test('query-only, fragment-only and empty URLs resolve against the real page, including after history changes', () => {
@@ -155,6 +156,7 @@ test('XHR and beacon stay in the proxy; window.open never impersonates a child b
   assert.equal(xhr.args[1], guestPath('https://ordinary.example/api'))
   assert.equal(xhr.args[2], false)
   assert.equal(xhr.headers.get('x-dsh-guest-sub'), '1')
+  assert.match(xhr.headers.get('x-dsh-guest-referer'), /^https:\/\/[^/]+\.example\//u)
   xhr.setRequestHeader('X-Site-Config', 'page-value')
   xhr.withCredentials = true
   xhr.send('payload')
@@ -164,6 +166,7 @@ test('XHR and beacon stay in the proxy; window.open never impersonates a child b
   assert.equal(context.navigator.sendBeacon('/metrics', 'payload'), true)
   assert.equal(requests[0].input, guestPath('https://ordinary.example/metrics'))
   assert.equal(requests[0].init.headers['x-dsh-guest-sub'], '1')
+  assert.match(requests[0].init.headers['x-dsh-guest-referer'], /^https:\/\/[^/]+\.example\//u)
   assert.equal(requests[0].init.body, 'payload')
   assert.throws(() => context.open('next', '_blank'), error => error.name === 'NotSupportedError' && error.code === 'BROWSER_NATIVE_CHILD_UNAVAILABLE')
   assert.deepEqual(navigations, [])
