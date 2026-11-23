@@ -69,7 +69,8 @@ export interface HostInputFace {
   /** 把光标放回编辑器（确认按钮在侧栏里点击时焦点不在输入框）。 */
   focusEditor?(): void
   /** Add captured images to the composer attachments, which the host sends ahead of the text. */
-  attachImages?(images: readonly ComposerImage[]): boolean
+  attachImages?(images: readonly ComposerImage[]): readonly string[]
+  removeAttachments?(ids: readonly string[]): void
 }
 
 export interface PreservationSnapshot {

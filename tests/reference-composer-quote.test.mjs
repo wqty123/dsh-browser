@@ -28,11 +28,16 @@ function stockComposer(typed) {
     persistDraft() {},
     readText: () => [...quotes.map(formatQuoteText), typed].join(' '),
     insertQuote: text => { quotes.push(text); return true },
-    attachImages: images => { attachments.push(...images.map(image => ({ type: 'image', mediaType: image.binding.mime, data: image.binding.data }))); return true },
+    attachImages: images => images.map(image => {
+      const id = `draft-${attachments.length}`
+      attachments.push({ id, part: { type: 'image', mediaType: image.binding.mime, data: image.binding.data } })
+      return id
+    }),
+    removeAttachments: ids => { attachments.splice(0, attachments.length, ...attachments.filter(entry => !ids.includes(entry.id))) },
   }
   const send = () => {
     const text = [...quotes.map(quote => `${formatQuoteText(quote)} `), typed].join('')
-    return [...attachments, ...text === '' ? [] : [{ type: 'text', text }]]
+    return [...attachments.map(entry => entry.part), ...text === '' ? [] : [{ type: 'text', text }]]
   }
   return { face, quotes, attachments, send }
 }
@@ -117,7 +122,7 @@ test('images go through the host drop path: createDrafts then addAttachments', (
       ? { createDrafts: (sessionId, files, uploadImages) => { created.push({ sessionId, files, uploadImages }); return files.map((_, i) => ({ id: `draft-${i}` })) } }
       : name === 'sessions' ? { binding: () => ({ session: { getSnapshot: () => ({ subagent: null }) } }) } : undefined,
   }
-  assert.equal(attachImages(ctx, 'session-1', [image], { addAttachments: ids => { added.push(...ids); return true } }), true)
+  assert.deepEqual(attachImages(ctx, 'session-1', [image], { addAttachments: ids => { added.push(...ids); return true } }), ['draft-0'])
   assert.deepEqual(added, ['draft-0'])
   const [{ sessionId, files, uploadImages }] = created
   assert.equal(sessionId, 'session-1')
@@ -132,7 +137,7 @@ test('a refused attachment is released, not leaked', () => {
   const ctx = { get: name => name === 'conversation'
     ? { createDrafts: (_s, files) => files.map((_, i) => ({ id: `d${i}` })), releaseDraftAttachments: drafts => released.push(...drafts) }
     : undefined }
-  assert.equal(attachImages(ctx, 's', [image], { addAttachments: () => false }), false)
+  assert.deepEqual(attachImages(ctx, 's', [image], { addAttachments: () => false }), [])
   assert.deepEqual(released, [{ id: 'd0' }])
 })
 
@@ -153,6 +158,7 @@ test('deleting the host quote removes its card, and nothing removed is sent', as
   assert.equal(runtime.cards().length, 0, 'the card follows the quote the host sends')
   const text = composer.send().filter(part => part.type === 'text').map(part => part.text).join('')
   assert.equal(occurrences(text, LONG_TEXT.split('\n')[0]), 0)
+  assert.equal(composer.send().filter(part => part.type === 'image').length, 0, 'its image attachments go with it')
 })
 
 test('a card is kept until its quote has been seen in the draft', async t => {

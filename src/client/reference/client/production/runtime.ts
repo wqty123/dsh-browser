@@ -503,7 +503,10 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       return false
     }
     if (inserted && reference.images.length > 0) {
-      try { host.attachImages?.(reference.images) } catch { /* 图片附件是尽力而为：引文已带占位说明 */ }
+      try {
+        const ids = host.attachImages?.(reference.images) ?? []
+        if (ids.length > 0) attachedImages.set(`${sessionId} ${delivery.referenceId}`, ids)
+      } catch { /* 图片附件是尽力而为：引文已带占位说明 */ }
     }
     return inserted
   }
@@ -883,6 +886,7 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
    * send simply does not see it (there is no window in which it can be undone).
    */
   const quotesSeen = new Set<string>()
+  const attachedImages = new Map<string, readonly string[]>()
 
   const removeReferences = (sessionId: string, ids: readonly string[]): void => {
     if (ids.length === 0) return
@@ -923,7 +927,14 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       for (const referenceId of ids) {
         const key = `${sessionId} ${referenceId}`
         if (draft.includes(encodeBrowserRefUri({ referenceId }))) quotesSeen.add(key)
-        else if (quotesSeen.delete(key)) removed.push(referenceId)
+        else if (quotesSeen.delete(key)) {
+          removed.push(referenceId)
+          const images = attachedImages.get(key)
+          attachedImages.delete(key)
+          if (images !== undefined) {
+            try { hostInputFor(sessionId).removeAttachments?.(images) } catch { /* the user can still remove them in the composer */ }
+          }
+        }
       }
       if (removed.length > 0) removeReferences(sessionId, removed)
     },

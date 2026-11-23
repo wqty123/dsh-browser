@@ -12,21 +12,22 @@ interface AttachmentContext {
 
 interface AttachmentActions {
   addAttachments?(ids: readonly string[]): boolean
+  removeAttachment?(id: string): void
 }
 
 /**
  * Put captured images into the composer attachments through the host's own drop path
  * (`conversation.createDrafts` + `inputActions.addAttachments`), so the send serializes them
- * ahead of the text exactly like a pasted image.
+ * ahead of the text exactly like a pasted image. Returns the ids it attached (none when refused).
  */
 export function attachImages(
   ctx: AttachmentContext,
   sessionId: string,
   images: readonly ComposerImage[],
   actions: AttachmentActions,
-): boolean {
+): readonly string[] {
   const conversation = ctx.get('conversation') as Partial<DraftAttachmentService> | undefined
-  if (typeof conversation?.createDrafts !== 'function' || typeof actions.addAttachments !== 'function') return false
+  if (typeof conversation?.createDrafts !== 'function' || typeof actions.addAttachments !== 'function') return []
   const files = images.map(({ partId, binding }) => {
     const bytes = Uint8Array.from(atob(binding.data), char => char.charCodeAt(0))
     const extension = binding.mime.split('/')[1]?.replace(/[^a-z0-9]/giu, '') || 'bin'
@@ -36,7 +37,8 @@ export function attachImages(
     ?.binding?.(sessionId)
   const uploadImages = (binding?.session?.getSnapshot?.().subagent ?? null) === null
   const drafts = conversation.createDrafts(sessionId, files, uploadImages)
-  if (actions.addAttachments(drafts.map(draft => draft.id))) return true
+  const ids = drafts.map(draft => draft.id)
+  if (actions.addAttachments(ids)) return ids
   conversation.releaseDraftAttachments?.(drafts)
-  return false
+  return []
 }

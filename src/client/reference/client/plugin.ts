@@ -140,6 +140,9 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
         ...(typeof actions.addAttachments === 'function'
           ? { attachImages: (images: readonly ComposerImage[]) => attachImages(ctx, rawSession.trim(), images, actions) }
           : {}),
+        ...(typeof actions.removeAttachment === 'function'
+          ? { removeAttachments: (ids: readonly string[]) => { for (const id of ids) actions.removeAttachment?.(id) } }
+          : {}),
         ...(typeof actions.insertReference === 'function'
           ? { insertReference: (ref: ReferenceChipInsert, span: CaretSpan) => actions.insertReference?.(ref, span) === true }
           : {}),
