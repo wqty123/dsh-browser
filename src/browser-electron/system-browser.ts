@@ -405,10 +405,18 @@ class CdpClient {
   }
 
   /** Route one CDP message to its waiter. */
+  private readonly eventListeners = new Set<(method: string, params: unknown) => void>()
+
+  /** Receive the browser's own CDP events (those without a command id). */
+  onEvent(listener: (method: string, params: unknown) => void): void { this.eventListeners.add(listener) }
+
   private onMessage(raw: string): void {
-    let message: { id?: number; result?: unknown; error?: { message?: string } }
+    let message: { id?: number; method?: string; params?: unknown; result?: unknown; error?: { message?: string } }
     try { message = JSON.parse(raw) } catch { return }
-    if (message.id === undefined) return
+    if (message.id === undefined) {
+      if (typeof message.method === 'string') for (const listener of this.eventListeners) listener(message.method, message.params)
+      return
+    }
     const entry = this.pending.get(message.id)
     if (entry === undefined) return
     this.pending.delete(message.id)
@@ -699,6 +707,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       await client.send('Target.setDiscoverTargets', { discover: true }, undefined, Math.max(1, deadline - Date.now()))
       if (this.disposed || Date.now() >= deadline) { client.close(); return undefined }
       this.client = client
+      this.placeOpenedWindows(client)
       this.plainUserAgent = undefined
       return client
     } catch (error) {
@@ -1007,6 +1016,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
               }
               if (this.disposed) { client.close(); break }
               this.client = client
+      this.placeOpenedWindows(client)
               this.plainUserAgent = undefined
               return client
             }
@@ -1514,7 +1524,51 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /** Create one page, refusing to go on without an id. */
-  private async createTarget(client: CdpClient, viewId: string): Promise<string> {
+  private createTarget(client: CdpClient, viewId: string): Promise<string> {
+    const run = this.createTargetNow(client, viewId)
+    this.creating = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  private creating: Promise<void> = Promise.resolve()
+
+  /**
+   * A quiet launch makes Chromium open every new window off-screen, so a window a person or a page
+   * opens (Ctrl+N, a popup) is brought on-screen, unless it is a popup of a window still parked.
+   */
+  private placeOpenedWindows(client: CdpClient): void {
+    client.onEvent((method, params) => {
+      if (method !== 'Target.targetCreated' || !this.launchParked) return
+      const info = (params as { targetInfo?: { targetId?: unknown; type?: unknown; openerId?: unknown } } | undefined)?.targetInfo
+      if (info?.type === 'page' && typeof info.targetId === 'string') void this.placeOpenedWindow(client, info.targetId, info.openerId)
+    })
+  }
+
+  private async placeOpenedWindow(client: CdpClient, targetId: string, openerId: unknown): Promise<void> {
+    try {
+      for (let pending = this.creating; ; pending = this.creating) {
+        await pending
+        if (pending === this.creating) break
+      }
+      if (this.createdTargets.get(client)?.has(targetId) === true) return
+      const windowOf = async (id: string) => (await client.send('Browser.getWindowForTarget', { targetId: id }) as { windowId?: unknown; bounds?: { left?: unknown } } | undefined)
+      const found = await windowOf(targetId)
+      if (typeof found?.windowId !== 'number' || found.bounds?.left !== QUIET_PARK.left || this.quietParked.has(found.windowId)) return
+      if (typeof openerId === 'string' && openerId !== '') {
+        const opener = await windowOf(openerId).catch(() => undefined)
+        if (typeof opener?.windowId === 'number' && this.quietParked.has(opener.windowId)) {
+          this.quietParked.add(found.windowId)
+          this.watchQuietFocus(client)
+          return
+        }
+      }
+      await this.moveOnScreen(client, found.windowId)
+    } catch {
+      // A window that closed or a browser that went away needs no placing.
+    }
+  }
+
+  private async createTargetNow(client: CdpClient, viewId: string): Promise<string> {
     const quiet = this.isQuiet()
     const { created, parked } = quiet
       ? await this.createQuietTarget(client)

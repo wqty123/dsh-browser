@@ -494,3 +494,23 @@ test('revealing a closed quiet tab never opens a replacement page', async t => {
   assert.equal(await host.revealQuietWindow(view), false)
   assert.deepEqual(browser.commands.slice(before).filter(c => /^Target.(createTarget|attachToTarget)$/u.test(c.method)), [])
 })
+
+test('after a quiet launch, a window Chrome opens itself is brought on-screen unless its opener is parked', async t => {
+  const fake = parkedBrowser()
+  const own = fake.respond
+  const opened = { left: PARK_LEFT, top: 0 }
+  fake.respond = message => {
+    const id = message.params?.targetId
+    if (message.method === 'Browser.getWindowForTarget' && (id === 'manual' || id === 'popup')) {
+      return { result: { windowId: id === 'manual' ? 9 : 11, bounds: { ...opened, width: 1280, height: 800, windowState: 'normal' } } }
+    }
+    return own(message)
+  }
+  const { browser } = await quietHost(t, true, { ...fake, launched: () => undefined })
+  const [ownPage] = browser.created
+  browser.emit('Target.targetCreated', { targetInfo: { targetId: ownPage, type: 'page' } })
+  browser.emit('Target.targetCreated', { targetInfo: { targetId: 'popup', type: 'page', openerId: ownPage } })
+  browser.emit('Target.targetCreated', { targetInfo: { targetId: 'manual', type: 'page' } })
+  await settle()
+  assert.deepEqual(moves(browser).filter(m => m.windowId !== 7), [{ windowId: 9, bounds: { left: 40, top: 40 } }])
+})

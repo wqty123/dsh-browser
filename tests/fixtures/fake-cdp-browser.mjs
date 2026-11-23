@@ -179,6 +179,10 @@ function createFakeBrowser(options = {}) {
       for (const socket of sockets) socket.destroy()
       sockets.clear()
     },
+    /** Send a CDP event to every connected client. */
+    emit(method, params) {
+      for (const socket of sockets) socket.write(encodeFrame(JSON.stringify({ method, params })))
+    },
     /** Kill it the way a closed window ends: sockets drop, the port stops answering. */
     async kill() {
       for (const socket of sockets) socket.destroy()
