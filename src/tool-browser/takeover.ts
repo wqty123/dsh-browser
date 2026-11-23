@@ -13,7 +13,7 @@ export const MINIMIZED_TAKEOVER_NOTE = 'The browser window is minimized in the t
 
 interface Page {
   readonly connected?: () => boolean
-  readonly minimized?: boolean
+  readonly minimized?: () => Promise<boolean>
   readonly owner: string
   readonly tabId: string
   readonly pageId: string

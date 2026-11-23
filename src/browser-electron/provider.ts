@@ -507,12 +507,13 @@ export class ElectronBrowserProvider extends ProviderMedia implements BrowserPro
     return [...this.sessions.keys()]
   }
 
-  takeoverTargets(owner: string): readonly { session: BrowserSessionId; owner: string; tabId: string; pageId: string; url: string; minimized?: boolean }[] {
+  takeoverTargets(owner: string): readonly { session: BrowserSessionId; owner: string; tabId: string; pageId: string; url: string; minimized?: () => Promise<boolean> }[] {
+    const minimized = this.host.windowMinimizedByQuiet?.bind(this.host)
     return [...this.sessions.values()].filter(s => (s.label ?? 'default').replace(/^session-/u, '') === owner).flatMap(s => {
       const tab = s.tabs[s.activeIndex]
       return tab && !tab.failure && /^https?:\/\//u.test(tab.url)
         ? [{ session: s.id, owner: s.label ?? 'default', tabId: tab.id, pageId: tab.id, url: tab.url,
-          ...this.host.windowMinimizedByQuiet?.(s.id) === true ? { minimized: true } : {} }] : []
+          ...minimized ? { minimized: () => minimized(tab.handle) } : {} }] : []
     })
   }
 

@@ -33,8 +33,8 @@ export interface ElectronBrowserViewHost {
   readonly referenceOverlayOwner?: 'client'
   referenceOverlayOwnerFor?(scope: BrowserSessionId): 'client' | undefined
   retireSession?(scope: BrowserSessionId): Promise<void>
-  /** Whether quiet mode left this session's window minimized, so a person asked to act must open it from the taskbar. */
-  windowMinimizedByQuiet?(scope: BrowserSessionId): boolean
+  /** Whether the view's window is still the one quiet mode minimized, so a person asked to act must open it from the taskbar. */
+  windowMinimizedByQuiet?(handle: ElectronViewHandle): Promise<boolean>
   /**
    * Create a new browser view and return a handle to its webContents-like
    * surface. The host owns windowing (adding the view to the window, sizing,

@@ -47,8 +47,9 @@ export class PreferredBrowserViewHost implements ElectronBrowserViewHost {
       ? this.fallback.connectionStatus?.().connected === true : this.extension.connectedView(id))
   }
 
-  windowMinimizedByQuiet(scope: BrowserSessionId): boolean {
-    return this.decisions.get(scope)?.windowMinimizedByQuiet?.(scope) === true
+  async windowMinimizedByQuiet(handle: ElectronViewHandle): Promise<boolean> {
+    const real = await this.mapped.get(handle.id)?.real?.catch(() => undefined)
+    return await real?.host.windowMinimizedByQuiet?.(real.handle) === true
   }
 
   private route(scope: BrowserSessionId): Promise<ElectronBrowserViewHost> {

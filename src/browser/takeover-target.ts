@@ -8,7 +8,7 @@ export interface CarrierTakeoverTarget {
   readonly tabId: string
   readonly pageId: string
   readonly url: string
-  readonly minimized?: boolean
+  readonly minimized?: () => Promise<boolean>
   readonly connected: () => boolean
 }
 

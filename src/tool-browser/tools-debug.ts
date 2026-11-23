@@ -45,7 +45,7 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
       const navigationUrl = open?.owner === owner && Date.now() - open.at < 10000 ? open.url : undefined
       const page = await takeovers.adopt(owner, exec.signal, navigationUrl)
       if (navigationUrl !== undefined && getLastOpen()?.owner === owner) clearLastOpen(open!.at)
-      const instructions = page.minimized === true ? [args.instructions, MINIMIZED_TAKEOVER_NOTE].filter(Boolean).join('\n') : args.instructions
+      const instructions = await page.minimized?.().catch(() => false) === true ? [args.instructions, MINIMIZED_TAKEOVER_NOTE].filter(Boolean).join('\n') : args.instructions
       return takeovers.run(page, args.reason.trim(), instructions, exec.signal, async (pending): Promise<{ outcome: TakeoverOutcome; page: TakeoverSummary }> => {
         const approval = ctx.get('approval' as never) as unknown as { request(request: {
           agent: ToolRunContext['agent']; toolName: string; reason: string; displayReason: { en: string; zh: string };

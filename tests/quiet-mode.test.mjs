@@ -214,7 +214,7 @@ test('only a person selecting the tab restores the window quiet mode minimized, 
   host.showView(view, 'view', { quiet: true, select: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false, 'a quiet operation or an agent selection leaves it minimized')
-  assert.equal(host.windowMinimizedByQuiet(), true, 'a takeover notice must point the person at the taskbar')
+  assert.equal(await host.windowMinimizedByQuiet(view), true, 'a takeover notice must point the person at the taskbar')
   host.showView(view, 'view', { quiet: true, select: true, user: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   const restores = browser.commands.filter(c => c.method === 'Browser.setWindowBounds')
@@ -222,7 +222,7 @@ test('only a person selecting the tab restores the window quiet mode minimized, 
   const restoreAt = browser.commands.findIndex(c => c.method === 'Browser.setWindowBounds')
   assert.deepEqual(browser.commands.slice(restoreAt + 1).filter(c => c.method === 'Page.bringToFront').length, 1,
     'the selected tab, created in the background, becomes the visible one')
-  assert.equal(host.windowMinimizedByQuiet(), false)
+  assert.equal(await host.windowMinimizedByQuiet(view), false)
   host.showView(view, 'view', { quiet: true, select: true, user: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(browser.commands.filter(c => c.method === 'Browser.setWindowBounds').length, 1,
@@ -275,4 +275,17 @@ test('in quiet mode an agent tab switch never asks to restore the window; a pers
   host.seen.showView.length = 0
   await p.handleUserAction({ type: 'activateTab', windowId: sid, viewId: 'view1' }, true)
   assert.deepEqual(host.seen.showView.at(-1), { quiet: true, select: true, user: true }, 'a tab click in the panel is the person selecting it')
+})
+
+test('a quiet window the person restored from the taskbar is no longer reported as minimized', async t => {
+  let windowState = 'minimized'
+  const { host, view } = await quietHost(t, true, {
+    respond: message => message.method === 'Browser.getWindowForTarget' ? { result: { windowId: 7, bounds: { windowState } } } : undefined,
+  })
+  await host.presentView(view, 'view', { quiet: true })
+  assert.equal(await host.windowMinimizedByQuiet(view), true)
+  windowState = 'normal'
+  assert.equal(await host.windowMinimizedByQuiet(view), false)
+  windowState = 'minimized'
+  assert.equal(await host.windowMinimizedByQuiet(view), false, 'minimized again by the person, quiet mode no longer reports it')
 })

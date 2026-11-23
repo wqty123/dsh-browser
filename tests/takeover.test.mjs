@@ -198,7 +198,7 @@ test('a takeover on a quiet-minimized personal browser window tells the person t
   for (const minimized of [true, false]) {
     const browser = { bindPanelPage: async () => { throw new Error('page closed') } }
     const remove = registerCarrierTakeover(browser, owner => [{ session: 'browser-1', owner, tabId: 'tab-1', pageId: 'tab-1',
-      url: 'https://example.test/login', connected: () => true, ...minimized ? { minimized } : {} }])
+      url: 'https://example.test/login', connected: () => true, minimized: async () => minimized }])
     const host = takeoverHost(browser)
     t.after(() => { host.dispose(); remove() })
     const result = host.tools.get(TAKEOVER_TOOL).execute({ reason: 'Login' }, host.exec)
