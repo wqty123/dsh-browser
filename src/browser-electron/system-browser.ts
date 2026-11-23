@@ -1474,7 +1474,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private async createTarget(client: CdpClient, viewId: string): Promise<string> {
     const created = await client.send('Target.createTarget', {
       url: 'about:blank',
-      ...this.isQuiet() ? { background: true } : {},
+      // `background` only keeps the user's tab active inside an existing window. The first page after
+      // `--no-startup-window` opens a new window, which Chromium activates unless `focus: false`.
+      ...this.isQuiet() ? { background: true, focus: false } : {},
     }) as { targetId?: string }
     const targetId = created?.targetId
     if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')
