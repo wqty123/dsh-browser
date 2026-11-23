@@ -561,6 +561,35 @@ test('cookie jar ignores malformed cookies and protects Secure and host-prefixed
   assert.equal(jar.getCookieHeader(https), 'empty=; SID=safe; __Secure-valid=yes; __Host-valid=yes')
 })
 
+test('a guest sub-request carries its document as Referer, origin-only across sites', async () => {
+  let n = 0
+  const referer = async (page, target = 'https://ordinary.example/echo', policy) => {
+    await call(guestPath(target + '?r=' + ++n), { headers: { 'x-dsh-guest-sub': '1', 'x-dsh-guest-referer': page,
+      ...policy === undefined ? {} : { 'x-dsh-guest-referrer-policy': policy } } })
+    return forwarded.at(-1).options.headers.get('referer') ?? undefined
+  }
+  assert.equal(await referer('https://user:pw@ordinary.example/dir/page?n=1#top'), 'https://ordinary.example/dir/page?n=1')
+  assert.equal(await referer('https://other.example/dir/page?n=1'), 'https://other.example/')
+  assert.equal(await referer('https://ordinary.example/dir/page', 'http://ordinary.example/echo'), undefined)
+  assert.equal(await referer('http://127.0.0.1/admin'), undefined)
+  assert.equal(await referer('file:///etc/passwd'), undefined)
+  assert.equal(await referer('https://dsh.example:3102' + guestPath('https://ordinary.example/dir')), undefined)
+  assert.equal(await referer('http://dsh.example:3102/'), undefined)
+  const page = 'https://ordinary.example/dir/page?n=1'
+  assert.equal(await referer(page, undefined, 'no-referrer'), undefined)
+  assert.equal(await referer(page, undefined, 'origin'), 'https://ordinary.example/')
+  assert.equal(await referer(page, 'https://other.example/echo', 'same-origin'), undefined)
+  assert.equal(await referer(page, 'https://other.example/echo', 'unsafe-url'), page)
+  assert.equal(await referer(page, 'https://other.example/echo', 'no-referrer-when-downgrade'), page)
+  assert.equal(await referer(page, 'http://other.example/echo', 'strict-origin'), undefined)
+  for (const { options } of forwarded) assert.doesNotMatch(options.headers.get('referer') ?? '', /dsh\.example|isolated-guest/u)
+  await call(guestPath('https://ordinary.example/echo?r=real'), { headers: {
+    'x-dsh-guest-sub': '1', 'x-dsh-guest-referer': 'https://ordinary.example/forged',
+    referer: 'https://dsh.example' + guestPath('https://ordinary.example/previous'),
+  } })
+  assert.equal(forwarded.at(-1).options.headers.get('referer'), 'https://ordinary.example/previous')
+})
+
 test('restores navigation headers and defaults language without overwriting inbound language', async () => {
   const result = await call(guestPath('https://ordinary.example/echo'), {
     headers: { referer: 'https://dsh.example' + guestPath('https://other.example/previous') },
