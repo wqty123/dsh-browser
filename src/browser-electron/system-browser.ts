@@ -1517,9 +1517,12 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private readonly quietMinimized = new Set<number>()
 
   async windowMinimizedByQuiet(handle: ElectronViewHandle): Promise<boolean> {
-    if (this.quietMinimized.size === 0) return false
+    const view = this.views.get(handle.id)
+    const targetId = view === undefined ? undefined : this.sessions.get(view.session)
+    if (this.quietMinimized.size === 0 || view === undefined || targetId === undefined) return false
     try {
-      const found = await handle.sendCommand('Browser.getWindowForTarget') as { windowId?: unknown; bounds?: { windowState?: unknown } }
+      // Asked of the browser by target id: the view's own command path would replace a closed page with a blank one.
+      const found = await view.client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown; bounds?: { windowState?: unknown } } | undefined
       if (typeof found?.windowId !== 'number' || !this.quietMinimized.has(found.windowId)) return false
       if (found.bounds?.windowState === 'minimized') return true
       // The person restored it from the taskbar: from now on the window is theirs.

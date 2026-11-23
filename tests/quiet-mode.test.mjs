@@ -289,3 +289,13 @@ test('a quiet window the person restored from the taskbar is no longer reported 
   windowState = 'minimized'
   assert.equal(await host.windowMinimizedByQuiet(view), false, 'minimized again by the person, quiet mode no longer reports it')
 })
+
+test('asking whether a closed quiet tab is minimized never opens a replacement page', async t => {
+  const { browser, host, view } = await quietHost(t, true, { respond: minimizedWindow })
+  await host.presentView(view, 'view', { quiet: true })
+  assert.equal(await host.windowMinimizedByQuiet(view), true)
+  host.destroyView(view)
+  const before = browser.commands.length
+  assert.equal(await host.windowMinimizedByQuiet(view), false)
+  assert.deepEqual(browser.commands.slice(before).filter(c => /^Target.(createTarget|attachToTarget)$/u.test(c.method)), [])
+})
