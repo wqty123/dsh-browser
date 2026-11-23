@@ -167,8 +167,8 @@ async function quietHost(t, quiet, options) {
   const profile = mkdtempSync(join(tmpdir(), 'dsh-quiet-first-page-'))
   const child = { pid: process.pid, exitCode: null, signalCode: null, kill() {}, once() {}, on() {} }
   const host = new SystemBrowserViewHost({ kind: 'chrome', path: process.execPath }, profile, [], undefined,
-    () => { writeFileSync(join(profile, 'DevToolsActivePort'), `${browser.port}
-`); return child }, 'auto', () => quiet)
+    (_path, args) => { options?.launched?.(args); writeFileSync(join(profile, 'DevToolsActivePort'), `${browser.port}
+`); return child }, 'auto', typeof quiet === 'function' ? quiet : () => quiet)
   host.watchForeground = options?.watch ?? (() => undefined)
   t.after(() => { child.exitCode = 0; host.dispose(); rmSync(profile, { recursive: true, force: true }) })
   const view = host.createView(tabWireId({ owner: 'task-a', session: 'main', tab: 'view' }))
@@ -430,6 +430,17 @@ test('a takeover retried after a skip still waits to bring its hidden tab to the
   w.emit({ pid: 4242, offscreen: false, left: 40, top: 40 })
   await until(() => browser.commands.some(c => c.method === 'Page.bringToFront'))
   assert.equal(browser.commands.filter(c => c.method === 'Page.bringToFront').length, 1)
+})
+
+test('quiet turned off after a quiet launch opens the first window on-screen, not where the launch parks it', async t => {
+  let quiet = true
+  const { browser } = await quietHost(t, () => quiet, { launched: () => { quiet = false } })
+  const [params] = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
+  assert.equal(params.newWindow, true)
+  assert.equal(params.left, 40)
+  assert.equal(params.top, 40)
+  assert.equal('focus' in params, false)
+  assert.equal('background' in params, false)
 })
 
 test('with quiet mode off, the first page keeps the default foreground creation', async t => {

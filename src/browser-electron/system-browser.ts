@@ -462,6 +462,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    */
   private clientSuspect = false
   private child: ChildProcess | undefined
+  private launchParked = false
   private profileLease: ProfileLease | undefined
   private starting: Promise<CdpClient> | undefined
   private lastLaunchError: string | undefined
@@ -785,6 +786,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // normally through `Target.createTarget`.
       '--no-startup-window',
     ]
+    // Chromium shows a new window at its default spot and only then applies Target.createTarget's
+    // left/top, so a quiet first window flashed on-screen; the launch position is applied before show.
+    this.launchParked = !launch.headless && this.isQuiet()
+    if (this.launchParked) args.push(`--window-position=${QUIET_PARK.left},${QUIET_PARK.top}`, `--window-size=${QUIET_PARK.width},${QUIET_PARK.height}`)
     if (launch.headless) {
       process.stderr.write(`[dsh-browser] launching headless (${launch.why}); `
         + 'the browser has no window but every tool works the same\n')
@@ -1513,7 +1518,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     const quiet = this.isQuiet()
     const { created, parked } = quiet
       ? await this.createQuietTarget(client)
-      : { created: await client.send('Target.createTarget', { url: 'about:blank' }), parked: false }
+      : { created: await this.createPlainTarget(client), parked: false }
     const targetId = (created as { targetId?: string } | undefined)?.targetId
     if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')
     this.rememberTarget(client, targetId, viewId)
@@ -1540,6 +1545,15 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     } catch {
       return { created: await client.send('Target.createTarget', params), parked: true }
     }
+  }
+
+  /** A browser launched while quiet opens new windows off-screen, so a first window after quiet is turned off is placed on-screen. */
+  private async createPlainTarget(client: CdpClient): Promise<unknown> {
+    const params = { url: 'about:blank' }
+    if (!this.launchParked) return client.send('Target.createTarget', params)
+    const listed = await client.send('Target.getTargets') as { targetInfos?: Array<{ type?: string }> } | undefined
+    if (listed?.targetInfos?.some(entry => entry.type === 'page') === true) return client.send('Target.createTarget', params)
+    return client.send('Target.createTarget', { ...params, newWindow: true, left: QUIET_REVEAL_INSET, top: QUIET_REVEAL_INSET })
   }
 
   /** Windows quiet mode parked off-screen; a window quiet mode has revealed is not listed. */
