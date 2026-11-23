@@ -10,7 +10,7 @@ export interface ForegroundWatch { stop(): void }
 /** `onFail` runs at most once, when the watcher cannot start or dies; `stop()` never triggers it. */
 export type ForegroundWatcher = (onChange: (event: ForegroundEvent) => void, onFail: (reason: string) => void) => ForegroundWatch | undefined
 
-const POLL_MS = 250
+const POLL_MS = 500
 
 const script = (parent: number): string => [
   `$parent = ${parent}`,
@@ -25,9 +25,9 @@ const script = (parent: number): string => [
   '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);',
   '}',
   '"@',
-  '$last = ""',
+  '$last = ""; $tick = 0',
   'while ($true) {',
-  '  if (-not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { exit }',
+  '  $tick++; if ($tick % 8 -eq 0 -and -not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { exit }',
   '  $h = [DshForeground]::GetForegroundWindow(); $p = [uint32]0',
   '  [void][DshForeground]::GetWindowThreadProcessId($h, [ref]$p)',
   '  $r = New-Object DshForeground+Rect; [void][DshForeground]::GetWindowRect($h, [ref]$r)',
