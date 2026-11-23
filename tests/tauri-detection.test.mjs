@@ -87,3 +87,13 @@ test('the sidebar on a running DSH Tauri is ready without a Desktop bridge', () 
   assert.equal(report.readiness, 'ready')
   assert.equal(report.shell.kind, 'tauri')
 })
+
+test('on macOS the running Electron binary inside <runtime>/<name>.app is recognised', t => {
+  const base = withBase(t)
+  const root = join(base, 'DSH Tauri.app')
+  const runtime = join(root, 'Contents', 'Resources', 'runtime', 'darwin-arm64')
+  mkdirSync(join(runtime, 'DSH Tauri.app', 'Contents', 'MacOS'), { recursive: true })
+  writeFileSync(join(runtime, 'electron-rs.json'), JSON.stringify({ appName: 'DSH Tauri', identifier: 'dsh-tauri', target: 'darwin', arch: 'arm64', version: 2 }))
+  const executable = join(runtime, 'DSH Tauri.app', 'Contents', 'MacOS', 'DSH Tauri')
+  assert.deepEqual(runningTauriRuntime(executable), { root, runtime, identifier: 'dsh-tauri', appName: 'DSH Tauri', running: true })
+})

@@ -85,16 +85,21 @@ function rootOf(runtime: string, rule: TauriRule): string | undefined {
 }
 
 /**
- * The Tauri runtime this process runs from, when the plugin is hosted by DSH Tauri.
+ * The Tauri runtime this process runs from, when the plugin is hosted by DSH Tauri. On macOS the
+ * Electron binary sits in `<runtime>/<name>.app/Contents/MacOS/`, beside which electron-rs keeps
+ * `electron-rs.json` and `runtime/`, so the directory holding the `.app` is the runtime.
  * @param execPath - the running executable.
  * @returns the runtime, or undefined outside DSH Tauri.
  */
 export function runningTauriRuntime(execPath: string = process.execPath): TauriRuntime | undefined {
   const rule = readTauriRule()
   if (rule === undefined) return undefined
-  const runtime = dirname(execPath)
-  const metadata = metadataOf(runtime, rule)
-  if (metadata === undefined) return undefined
+  const binary = dirname(execPath)
+  const bundle = basename(binary) === 'MacOS' && basename(dirname(binary)) === 'Contents' && dirname(dirname(binary)).endsWith('.app')
+    ? dirname(dirname(dirname(binary))) : undefined
+  const runtime = [binary, bundle].find(directory => directory !== undefined && metadataOf(directory, rule) !== undefined)
+  if (runtime === undefined) return undefined
+  const metadata = metadataOf(runtime, rule)!
   const root = rootOf(runtime, rule)
   return { ...root === undefined ? {} : { root }, runtime, identifier: metadata.identifier, ...metadata.appName === undefined ? {} : { appName: metadata.appName }, running: true }
 }
