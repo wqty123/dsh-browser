@@ -5,12 +5,24 @@
 
 import { setLastOpen } from '../browser-electron/open-slot.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { CHALLENGE_SCHEMA, challengeBanner, reportChallenge, type ChallengeReport } from './block-recovery.ts'
 import { createShortcutStore, type ShortcutSettings } from '../browser-electron/startpage-shortcuts.ts'
 import type { BrowserSessionId } from '../browser/types.ts'
 import { browserSessionHandle, resolveTabHandle, scopedTabs, sessionWireId, tabWireId } from '../browser/handles.ts'
 import { ELEMENT_ITEM_SCHEMA, projectElement } from './element-fields.ts'
 import { readSurface, enforceSurface, assertSurfaceCanHost, assertAllowed, agentOf, taskKey, rememberSession, ensureSession, panelBound, type ToolScope, type ToolDefinition } from './state.ts'
 import { formatSnapshot } from './tools-observation.ts'
+import { blockRetryDelayMs } from '../browser/anti-bot.ts'
+
+/** Sleep, cut short by the call's cancellation. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted === true) { reject(signal.reason); return }
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve() }, ms)
+    const abort = (): void => { clearTimeout(timer); reject(signal?.reason) }
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+}
 
 /**
  * Refuse the bare DSH web root, which answers 401 and looks like a real page.
@@ -149,15 +161,7 @@ export function navigationTools(scope: ToolScope): ToolDefinition[] {
             // Same shared item schema as dsh_browser_open's, so the two cannot drift apart.
             items: ELEMENT_ITEM_SCHEMA,
           },
-          challenge: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              blocked: { type: 'boolean', required: true },
-              kind: { type: 'string' },
-              reason: { type: 'string' },
-            },
-          },
+          challenge: CHALLENGE_SCHEMA,
         },
       },
       // dsh_browser_open is an overview of what just loaded, not a locator: it has no
@@ -208,7 +212,7 @@ export function navigationTools(scope: ToolScope): ToolDefinition[] {
             ...snapshot.title !== undefined ? { title: snapshot.title } : {},
             elements: snapshot.elements.map(el => projectElement(el)),
             truncated: snapshot.truncated,
-            ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
+            ...snapshot.challenge !== undefined ? { challenge: reportChallenge(snapshot.challenge, snapshot.url) } : {},
           }
         })()
         const pending = opening.then(() => {})
@@ -229,7 +233,9 @@ export function navigationTools(scope: ToolScope): ToolDefinition[] {
         state.panelUrlByTask.delete(key)
         if (previous !== undefined) await browser.close(previous)
       }
-      const session = await ensureSession(browser, state, key, agentOf(exec), true)
+      const existing = state.sessionsByTask.get(key)
+      const fresh = args.newTab !== true && (existing === undefined || !browser.exists(existing))
+      let session = await ensureSession(browser, state, key, agentOf(exec), true)
       try {
         await browser.openUrl(session, {
           url: args.url,
@@ -265,13 +271,35 @@ export function navigationTools(scope: ToolScope): ToolDefinition[] {
           truncated: false,
         }
       }
+      // A refusal (access denied, 429, empty 403) gets exactly one more try: after a pause, and in a
+      // fresh session when this open started the task's browser, so nothing the first attempt left
+      // behind rides along. Human verifications and network blocks are never retried — the first
+      // goes to the human, the second is an environment limit — and a second refusal is reported
+      // with the fallback routes instead of being tried again.
+      let retried = false
+      if (snapshot.challenge?.blocked === true && snapshot.challenge.recovery === 'retry') {
+        retried = true
+        if (fresh) {
+          // The refused page goes too: a closed session leaves its pages to the browser, and the
+          // retry must not leave a second copy of the wall behind in the human's window.
+          for (const tab of await browser.listTabs(session).catch(() => [])) await browser.closeTab(session, tab.id).catch(() => {})
+          await browser.close(session).catch(() => {})
+          state.sessionsByTask.delete(key)
+        }
+        await pause(blockRetryDelayMs(), exec.signal)
+        if (fresh) session = await ensureSession(browser, state, key, agentOf(exec), true)
+        // `navigate`, not `openUrl`: an open adopts a page already showing this URL, which here is
+        // the refused page itself, and the retry would read it again without asking the site.
+        await browser.navigate(session, { url: args.url }, exec.signal)
+        snapshot = await browser.snapshot(session, exec.signal)
+      }
       return {
         url: snapshot.url,
         carrier: String((globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier ?? 'bundled'),
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
         elements: snapshot.elements.map(el => projectElement(el)),
         truncated: snapshot.truncated,
-        ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
+        ...snapshot.challenge !== undefined ? { challenge: reportChallenge(snapshot.challenge, snapshot.url, retried) } : {},
       }
     },
   }))

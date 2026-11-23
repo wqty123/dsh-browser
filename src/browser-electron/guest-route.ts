@@ -10,6 +10,7 @@ import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:
 import { promises as dns } from 'node:dns'
 import { randomUUID } from 'node:crypto'
 import { guestRuntimeScript } from './guest-runtime.ts'
+import { blockRetryDelayMs, classifyBlock } from '../browser/anti-bot.ts'
 import type { GuestCookieJar } from './guest-cookie-jar.ts'
 import { localGuestCookies } from './guest-cookie-store.ts'
 import { rewriteCss } from './guest-css.ts'
@@ -470,15 +471,17 @@ export async function handleGuest(
     }
     upstream = await fetchTarget(target, { method, headers, body: body as BodyInit | undefined, redirect: 'manual' })
     cookieJar.setCookies(target, upstream.headers.getSetCookie?.() ?? [])
-    // 反爬挑战识别 + 一次重试：站点（百度 `/s?wd=…`）在没有「先访问过站点」的痕迹时回「安全验证」。
-    // 罐子里可能已经带着上次挑战页的 Cookie，所以这里不看有没有 Cookie，而是看**内容**：
-    // 命中挑战就先取站点根补一次 Cookie，带上根的 Referer 重试一次。仍失败就把挑战页交给上层。
-    const looksLikeChallenge = /安全验证|wappass|cf-browser-verification|Just a moment/iu
+    // 反爬拦截识别 + 一次重试（分类器与页面内检测共用 `browser/anti-bot.ts`）：站点（百度 `/s?wd=…`）在没有
+    // 「先访问过站点」的痕迹时回「安全验证」。罐子里可能已经带着上次挑战页的 Cookie，所以看**内容**而不看有没有 Cookie。
+    // 只对「可重试」类（拒绝访问 / 429 / 空 403）与需人工验证类做一次放慢节奏的重试：先停一下，取站点根补 Cookie、
+    // 带上根的 Referer 再请求一次。仍失败就把原页交给上层（页内检测会给出接管或换路的建议）；网络（IP）封锁不重试。
     if (safeNavigation && target.pathname !== '/' && /^text\/html/iu.test(upstream.headers.get('content-type') ?? '')
       && Number(upstream.headers.get('content-length') ?? '0') <= MAX_REWRITE_BYTES) {
       const probe = await upstream.clone().text()
-      if (looksLikeChallenge.test(probe)) {
+      const verdict = classifyBlock({ status: upstream.status, text: probe.slice(0, 64 * 1024) })
+      if (verdict.blocked && verdict.recovery !== 'environment') {
         try {
+          await new Promise(resolve => setTimeout(resolve, blockRetryDelayMs()))
           await warmRoot()
           const retried = await fetchTarget(target, { method, headers, redirect: 'manual' })
           await upstream.body?.cancel()
