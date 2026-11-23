@@ -82,7 +82,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         const headers = new Headers(init && init.headers || (isRequest ? input.headers : undefined));
         headers.set('x-dsh-guest-headers', [...headers.keys()].filter(name => !name.startsWith('x-dsh-')).join(','));
         headers.set('x-dsh-guest-sub', '1');
-        refererHeaders((name, value) => headers.set(name, value), init && init.referrer === '' || isRequest && input.referrer === '' ? 'no-referrer' : init && init.referrerPolicy || (isRequest ? input.referrerPolicy : ''));
+        refererHeaders((name, value) => headers.set(name, value), (init && init.referrer !== undefined ? init.referrer : isRequest ? input.referrer : undefined) === '' ? 'no-referrer' : init && init.referrerPolicy || (isRequest ? input.referrerPolicy : ''));
         const options = Object.assign({}, init, { headers, mode: 'cors', credentials: 'omit' });
         return nativeFetch(isRequest ? new Request(new URL(url, location.href), input) : url, options);
       } catch (error) { return Promise.reject(error); }
