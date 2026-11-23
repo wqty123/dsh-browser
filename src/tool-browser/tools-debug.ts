@@ -244,6 +244,83 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
   }))
 
   tools.push(defineTool({
+    name: 'dsh_browser_data_sources',
+    description: 'Find where the page keeps its data before reading the DOM: embedded state (__NEXT_DATA__, __NUXT_DATA__, window.__INITIAL_STATE__/__APOLLO_STATE__, application/json and ld+json scripts) with size, top-level keys and the largest arrays; the fetch/XHR APIs the page called (method, status, content type); data-like resources it fetched before the probe was installed; and endpoints it declares (preload as=fetch, data-api, data-endpoint). Shapes only, never bodies. Use it before scraping a list, directory, paginated or lazy-loaded data: a JSON source is usually complete where the DOM is not.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          url: { type: 'string', required: true },
+          embedded: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true },
+          apis: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true },
+          resources: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true },
+          declared: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: formatDataSources(value as unknown as DataSources) }],
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(_args, exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const found = await probeLive<{ url: string; embedded: ProbeRow[]; apis: ProbeRow[]; resources: ProbeRow[]; declared: ProbeRow[] }>(browser, session, 'dataSources', [], exec.signal)
+      return { url: found.url, embedded: found.embedded, apis: found.apis, resources: found.resources, declared: found.declared }
+    },
+  }))
+
+  tools.push(defineTool({
+    name: 'dsh_browser_fetch_json',
+    description: 'Fetch a URL from inside the page (so it carries the site\'s same-origin cookies) and return its JSON. A non-2xx status or a body that is not JSON is an error naming the status and the start of the body. Use it to read an API found with dsh_browser_data_sources instead of paging through the DOM; GET requests may run in parallel.',
+    parameters: {
+      url: { type: 'string', required: true, description: 'Absolute, or relative to the current page.' },
+      method: { type: 'string', description: 'HTTP method (default GET).' },
+      headers: { type: 'object', additionalProperties: true, description: 'Request headers, as string values.' },
+      body: { type: 'string', description: 'Request body (e.g. JSON.stringify(payload)).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          status: { type: 'number', required: true },
+          url: { type: 'string', required: true },
+          bytes: { type: 'number', required: true },
+          body: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => {
+        const body = String(value.body)
+        return [{ type: 'text', text: `${String(value.status)} ${String(value.url)} (${String(value.bytes)} bytes)\n${body.length > 2_000 ? `${body.slice(0, 2_000)}…` : body}` }]
+      },
+    },
+    timeoutMs,
+    isConcurrencySafe: args => isReadMethod(args.method),
+    async execute(args, exec) {
+      assertAllowed(state, 'dsh_browser_fetch_json', taskKey(exec))
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
+      const headers: Record<string, string> = {}
+      for (const [key, raw] of Object.entries(args.headers ?? {})) headers[key] = String(raw)
+      const init = {
+        ...args.method !== undefined ? { method: args.method } : {},
+        ...Object.keys(headers).length > 0 ? { headers } : {},
+        ...args.body !== undefined ? { body: args.body } : {},
+      }
+      const text = await pageOperationValue(browser, session, { operation: 'fetch', url: args.url, init }, exec.signal)
+      const out = JSON.parse(text) as { ok: boolean; status: number; statusText: string; url: string; type: string; body: string }
+      const head = out.body.slice(0, 200)
+      if (!out.ok) throw new Error(`fetch_json: HTTP ${out.status}${out.statusText ? ` ${out.statusText}` : ''} from ${out.url || args.url}: ${head}`)
+      try { JSON.parse(out.body) } catch { throw new Error(`fetch_json: ${out.url || args.url} answered ${out.status} with ${out.type || 'no content type'}, not JSON: ${head}`) }
+      return { status: out.status, url: out.url || args.url, bytes: out.body.length, body: out.body }
+    },
+  }))
+
+  tools.push(defineTool({
     name: 'dsh_browser_dialog',
     description: 'Report JavaScript dialogs (alert/confirm/prompt) the page raised, and choose how they are answered. Dialogs use the native browser UI by default. Setting policy "dismiss" answers alert/prompt with nothing and confirm with false, "accept" answers confirm with true and prompt with its current text. Policy "native" restores the original dialog functions. Reading preserves the current policy; changing it is an action. A dialog raised by the browser itself (beforeunload, HTTP auth) is not covered.',
     parameters: {
@@ -426,7 +503,7 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
       const topics: Record<string, string> = {
         locate: 'Prefer dsh_browser_a11y (roles, names, states) or dsh_browser_snapshot (numbered elements), then click with {target:{by:"text"|css|xpath, value}}. Elements carry a stable CSS selector, so a click re-resolves the element instead of trusting an index that a re-render invalidates.',
         wait: 'dsh_browser_wait waits for load + an optional URL/selector. dsh_browser_wait_for_response waits for a server answer (that is the "did it submit" wait). dsh_browser_console/network then explain what the page did.',
-        batch: 'dsh_browser_do runs several steps in one call: open/tap/field/type/key/scroll/sleep_ms/wait_text/wait_gone/wait_url/wait_idle/eval/check. It stops at the first step that cannot proceed and reports which one; a tap whose target is covered by a cookie banner dismisses the banner first.',
+        batch: 'dsh_browser_do runs several steps in one call: open/tap/field/type/key/scroll/sleep_ms/wait_text/wait_gone/wait_url/wait_idle/wait_js/eval/check. It stops at the first step that cannot proceed and reports which one; a tap whose target is covered by a cookie banner dismisses the banner first.',
         dialogs: 'JavaScript dialogs are answered automatically (default: dismiss). dsh_browser_dialog reports them and can switch to "accept". A dialog from the browser itself (beforeunload, HTTP auth) is not covered — expect a stalled call there and reload.',
         network: 'dsh_browser_network lists fetch/XHR/resource rows. Status 0 means the page never saw a status (aborted, blocked, or a resource-timing row). Only fetch/XHR rows carry a real status.',
         verify: 'dsh_browser_assert asserts selector/text/url/js and returns evidence per assertion. Prefer it over reading a screenshot: "clicked" and "the form accepted it" are different claims, and a retry of an unverified submit can double it.',
@@ -445,7 +522,7 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'dsh_browser_do',
-    description: 'Run several steps in ONE call and report one compact result: "click search, type a query, press Enter, wait for results" is one call instead of five. Steps run in order and stop at the first that cannot proceed. Each step is an object with exactly one key: open {url} | tap {target} | field {target, text} | type {text} | key {key} | scroll {deltaY} | sleep_ms {ms} | wait_text {text} | wait_gone {text} | wait_url {url} | wait_idle {} | eval {script} | check {selector|text|url|js}. A tap whose target is covered by a cookie banner or modal dismisses it first. Waits know when the page has settled and return as soon as the condition holds.',
+    description: 'Run several steps in ONE call and report one compact result: "click search, type a query, press Enter, wait for results" is one call instead of five. Steps run in order and stop at the first that cannot proceed. Each step is an object with exactly one key: open {url} | tap {target} | field {target, text} | type {text} | key {key} | scroll {deltaY} | sleep_ms {ms} | wait_text {text} | wait_gone {text} | wait_url {url} | wait_idle {} | wait_js {script, intervalMs?} | eval {script} | check {selector|text|url|js}. A tap whose target is covered by a cookie banner or modal dismisses it first. Waits know when the page has settled and return as soon as the condition holds.',
     parameters: {
       steps: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true, description: 'Steps, in order (max 40).' },
       timeoutMs: { type: 'number', description: 'Budget for the whole batch (default 60000, capped by the tool timeout).' },
@@ -490,13 +567,13 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
       const autoDismiss = args.autoDismiss !== false
       const budget = Math.min(args.timeoutMs ?? timeoutMs, maxWaitMs)
       const deadline = Date.now() + budget
-      const log: Array<{ index: number; kind: string; detail: string }> = []
+      const log: Array<{ index: number; kind: string; detail: string; value?: string }> = []
       // Set once a step that can change server state has run. A failure after that point must not
       // read like a failure before it: measured on the first real benchmark run, where a batch died
       // after the form had already been submitted and the message said nothing about it.
       let dispatched = false
       const dispatchable = new Set(['tap', 'key', 'eval'])
-      const kinds = ['open', 'tap', 'field', 'type', 'key', 'scroll', 'sleep_ms', 'wait_text', 'wait_gone', 'wait_url', 'wait_idle', 'eval', 'check']
+      const kinds = ['open', 'tap', 'field', 'type', 'key', 'scroll', 'sleep_ms', 'wait_text', 'wait_gone', 'wait_url', 'wait_idle', 'wait_js', 'eval', 'check']
 
       /** Resolve a target: a string is visible text; an object passes through. */
       const asTarget = (value: unknown): { by: 'css' | 'text' | 'xpath'; value: string } | undefined => {
@@ -603,6 +680,27 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
             }, Math.max(1_000, Math.min(deadline - Date.now(), 30_000)))
             if (idle === undefined) throw new Error('timed out waiting for the page to go quiet')
             detail = `quiet for ${String(idle.quietMs)}ms`
+          } else if (kind === 'wait_js') {
+            const spec = typeof value === 'string' ? { script: value } : value as { script?: unknown; intervalMs?: unknown }
+            if (typeof spec?.script !== 'string') throw new Error('wait_js needs a script string or {script, intervalMs}')
+            const script = spec.script
+            const interval = Math.min(Math.max(Number(spec.intervalMs ?? 200) || 200, 50), 5_000)
+            let last = 'nothing yet'
+            const started = Date.now()
+            const hit = await poll(async () => {
+              let raw: string
+              try { raw = await pageValue(browser, session, script, exec.signal) } catch (error) {
+                last = error instanceof Error ? error.message : String(error)
+                return undefined
+              }
+              last = raw
+              let parsed: unknown
+              try { parsed = JSON.parse(raw) } catch { parsed = raw }
+              return parsed ? raw : undefined
+            }, Math.max(0, deadline - Date.now()), interval)
+            if (hit === undefined) throw new Error(`timed out after ${Date.now() - started}ms waiting for the script to return a truthy value; last result: ${last.slice(0, 200)}`)
+            log.push({ index: index + 1, kind, detail: hit.slice(0, 80), value: hit })
+            continue
           } else if (kind === 'eval') {
             const script = typeof value === 'string' ? value : (value as { script?: unknown })?.script
             if (typeof script !== 'string') throw new Error('eval needs a script string or {script}')
@@ -635,4 +733,44 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
   }))
 
   return tools
+}
+
+const isReadMethod = (method: unknown): boolean => method === undefined || /^(GET|HEAD)$/i.test(String(method))
+
+/** What dsh_browser_data_sources finds; rows are the probe's own, kept loose. */
+export interface DataSources {
+  readonly url: string
+  readonly embedded: readonly { name: string; bytes: number; parsed?: boolean; keys?: readonly string[]; arrays?: readonly { path: string; length: number }[] }[]
+  readonly apis: readonly { method: string; url: string; status: number; type?: string; calls?: number }[]
+  readonly resources: readonly { url: string; initiator?: string; bytes?: number }[]
+  readonly declared: readonly { from: string; url: string }[]
+}
+
+/** The compact text form: one line per source, so the answer stays around 1-2 KB. */
+export function formatDataSources(found: DataSources): string {
+  const kb = (bytes: number | undefined): string => bytes === undefined || bytes <= 0 ? '' : bytes < 1024 ? ` ${bytes} B` : ` ${(bytes / 1024).toFixed(1)} KB`
+  const lines: string[] = []
+  if (found.embedded.length > 0) {
+    lines.push('Embedded state:')
+    for (const item of found.embedded) {
+      const keys = item.keys !== undefined && item.keys.length > 0 ? ` keys: ${item.keys.join(', ')}` : item.parsed === false ? ' (not JSON)' : ''
+      const arrays = item.arrays !== undefined && item.arrays.length > 0 ? `; arrays: ${item.arrays.map(row => `${row.path} (${row.length})`).join(', ')}` : ''
+      lines.push(`  ${item.name}${kb(item.bytes)}${keys}${arrays}`)
+    }
+  }
+  if (found.apis.length > 0) {
+    lines.push('APIs the page called:')
+    for (const row of found.apis) lines.push(`  ${row.method} ${row.status}${row.type ? ` ${row.type}` : ''}${row.calls !== undefined && row.calls > 1 ? ` ×${row.calls}` : ''} ${row.url}`)
+  }
+  if (found.resources.length > 0) {
+    lines.push('Data-like resources (resource timing, includes requests before the probe):')
+    for (const row of found.resources) lines.push(`  ${row.initiator ?? ''}${kb(row.bytes)} ${row.url}`.replace(/^ {2} /, '  '))
+  }
+  if (found.declared.length > 0) {
+    lines.push('Declared endpoints:')
+    for (const row of found.declared) lines.push(`  ${row.from} ${row.url}`)
+  }
+  return lines.length === 0
+    ? `No embedded state, JSON APIs or declared endpoints found on ${found.url}; read the DOM.`
+    : lines.join('\n')
 }

@@ -594,6 +594,42 @@ const helpers = {
     if (!out.ok) throw new Error(`wait_for_network_idle: ${out.reason ?? 'not idle'}`)
     return true
   },
+  // Deterministic waits: each returns as soon as its condition holds and throws when it never does.
+  wait_for_text: async (needle: string, timeoutMs?: number) => { await doStep('wait_for_text', { wait_text: { text: needle } }, timeoutMs); return true },
+  wait_for_gone: async (needle: string, timeoutMs?: number) => { await doStep('wait_for_gone', { wait_gone: { text: needle } }, timeoutMs); return true },
+  wait_until: async (expression: string, opts: { timeoutMs?: number; intervalMs?: number } = {}): Promise<unknown> => {
+    if (typeof expression !== 'string') throw new Error('wait_until(expression): pass page JavaScript as a string, e.g. wait_until("document.querySelectorAll(\'.row\').length >= 20")')
+    const out = await doStep('wait_until', { wait_js: { script: pageScript(expression), ...opts.intervalMs !== undefined ? { intervalMs: opts.intervalMs } : {} } }, opts.timeoutMs ?? 10_000)
+    const raw = out.log.at(-1)?.value
+    return raw === undefined ? true : JSON.parse(raw)
+  },
+  wait_for_response: async (urlContains: string, trigger?: (() => unknown) | { status?: number; timeoutMs?: number }, opts: { status?: number; timeoutMs?: number } = {}): Promise<unknown> => {
+    if (typeof trigger === 'object' && trigger !== null) { opts = trigger; trigger = undefined }
+    // Sent before the trigger runs: the scheduler holds the trigger until the watcher has its cursor.
+    const pending = value('wait_for_response', { urlContains, ...opts })
+    pending.catch(() => undefined)
+    if (typeof trigger === 'function') await trigger()
+    const out = await pending as { matched: boolean; reason: string; entry?: unknown }
+    if (!out.matched) throw new Error(`wait_for_response: ${out.reason}`)
+    return out.entry
+  },
+  // Data first: what the page already holds, and its JSON APIs read with the page's own cookies.
+  inspect_data_sources: () => value('data_sources'),
+  fetch_json: async (url: string, init: { method?: string; headers?: Record<string, string>; body?: unknown } = {}): Promise<unknown> => {
+    const headers = { ...init.headers }
+    let body = init.body
+    if (body !== undefined && typeof body !== 'string') {
+      body = JSON.stringify(body)
+      if (!Object.keys(headers).some(key => key.toLowerCase() === 'content-type')) headers['content-type'] = 'application/json'
+    }
+    const out = await value('fetch_json', {
+      url,
+      ...init.method !== undefined ? { method: init.method } : {},
+      ...Object.keys(headers).length > 0 ? { headers } : {},
+      ...body !== undefined ? { body } : {},
+    }) as { body: string }
+    return JSON.parse(out.body)
+  },
   upload_file: (selector: string, path: string) => text('upload', { target: { by: 'css', value: selector }, path }),
   // Semantic helpers over the dsh tools.
   click: (target: Target) => text('click', targetArgs(target)),
@@ -635,6 +671,12 @@ const helpers = {
   print: log,
   log,
   console: { log, info: log, warn: log, error: log, debug: log },
+}
+
+async function doStep(label: string, step: Record<string, unknown>, timeoutMs?: number): Promise<{ log: { value?: string }[] }> {
+  const out = await value('do', { steps: [step], ...timeoutMs !== undefined ? { timeoutMs } : {} }) as { ok: boolean; reason?: string; log: { value?: string }[] }
+  if (!out.ok) throw new Error(`${label}: ${out.reason ?? 'condition never held'}`)
+  return out
 }
 
 async function js(script: string): Promise<unknown> {

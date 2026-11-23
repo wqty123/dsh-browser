@@ -114,13 +114,13 @@ export async function pause(ms: number): Promise<void> {
 }
 
 /** Poll until the callback returns something, or the budget runs out. */
-export async function poll<T>(check: () => Promise<T | undefined>, budgetMs: number): Promise<T | undefined> {
+export async function poll<T>(check: () => Promise<T | undefined>, budgetMs: number, intervalMs = 200): Promise<T | undefined> {
   const deadline = Date.now() + budgetMs
   for (;;) {
     const value = await check()
     if (value !== undefined) return value
     if (Date.now() >= deadline) return undefined
-    await pause(200)
+    await pause(intervalMs)
   }
 }
 
