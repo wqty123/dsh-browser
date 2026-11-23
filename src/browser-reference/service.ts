@@ -18,6 +18,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { referenceOwnerKey } from '../reference-owner.ts'
 import { webReferenceSources, type WebReferenceSources } from './web-sources.ts'
+import { fetchGuestResource } from '../browser-electron/guest-route.ts'
 import { sameReferenceDocument as samePage } from '../reference-page.ts'
 import { isReferenceText, normalizeReferenceText, MAX_REFERENCE_TEXT, referenceTextContent, renderReferenceText } from '../reference-text.ts'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
@@ -96,6 +97,8 @@ export interface ReferenceHost {
   exists(sessionId: string): boolean
   /** Save one URL to a local file with the session's cookies, when the carrier can. */
   download?(sessionId: string, url: string, savePath: string, signal?: AbortSignal): Promise<void>
+  /** Save one image a Web sidebar page loaded, fetched the way the guest proxy loaded it; a frozen Web capture has no browser session. */
+  fetchWebImage?(url: string, pageUrl: string, savePath: string, signal?: AbortSignal): Promise<void>
   /**
    * Capture a clipped, read-only visible-region screenshot. Optional: a host
    * without this capability keeps the source-image / rasterised-image paths.
@@ -103,6 +106,13 @@ export interface ReferenceHost {
   captureVisible?(sessionId: string, clip: VisibleClip, signal?: AbortSignal): Promise<VisibleCaptureResult>
   now?(): Date
   newId?(): string
+}
+
+type ImagePolicy = {
+  readonly verifyImageVersion: boolean
+  readonly allowVisibleSnapshot: boolean
+  /** Set for a frozen Web capture: its images come from the page's own URLs, never a browser session. */
+  readonly web?: { readonly pageUrl: string }
 }
 
 type MaterializedAsset = {
@@ -492,6 +502,7 @@ export class BrowserReferenceService {
     if (request.sourcePageId !== undefined && (!fromFrozen || !this.webSources?.owns(sessionId, request.sourcePageId))) {
       return { failures: [{ kind: 'reference', reason: 'web-source-not-owned' }] }
     }
+    const webImages = fromFrozen && request.sourcePageId !== undefined
     if (!fromFrozen && !this.host.exists(browserSessionId)) {
       return { failures: [{ kind: 'reference', reason: 'session-unavailable' }] }
     }
@@ -586,6 +597,7 @@ export class BrowserReferenceService {
       } else if (kind === 'image') {
         const imagePart = await this.imagePart(browserSessionId, event as RawCaptureEvent, nextPartId, signal, {
           verifyImageVersion: request.verifyImageVersion !== false,
+          ...webImages ? { web: { pageUrl } } : {},
           allowVisibleSnapshot: request.allowVisibleSnapshot !== false,
         })
         if ('reason' in imagePart) failures.push(imagePart)
@@ -595,6 +607,7 @@ export class BrowserReferenceService {
           // A cell image is one image, not "whatever region is selected"; a
           // masked visible snapshot of the table would misreport it.
           verifyImageVersion: request.verifyImageVersion !== false,
+          ...webImages ? { web: { pageUrl } } : {},
           allowVisibleSnapshot: false,
         })
         if ('reason' in tablePart) failures.push(tablePart)
@@ -851,7 +864,7 @@ export class BrowserReferenceService {
     event: RawCaptureEvent,
     nextPartId: () => string,
     signal?: AbortSignal,
-    policy: { readonly verifyImageVersion: boolean; readonly allowVisibleSnapshot: boolean } = {
+    policy: ImagePolicy = {
       verifyImageVersion: true, allowVisibleSnapshot: true,
     },
   ): Promise<ImageReferencePart | CaptureFailure> {
@@ -923,10 +936,16 @@ export class BrowserReferenceService {
     sessionId: string,
     image: { readonly urls: readonly string[]; readonly path?: readonly number[]; readonly selector?: string },
     signal?: AbortSignal,
-    policy: { readonly verifyImageVersion: boolean; readonly allowVisibleSnapshot: boolean } = {
+    policy: ImagePolicy = {
       verifyImageVersion: true, allowVisibleSnapshot: true,
     },
   ): Promise<MaterializedAsset | { reason: string; detail?: Record<string, unknown> }> {
+    const web = policy.web
+    const { download, fetchWebImage } = this.host
+    const fetchImage: ((url: string, savePath: string) => Promise<void>) | undefined = web === undefined
+      ? download && ((url, savePath) => download.call(this.host, sessionId, url, savePath, signal))
+      : fetchWebImage && ((url, savePath) => fetchWebImage.call(this.host, url, web.pageUrl, savePath, signal))
+    let webFailure: string | undefined
     let versionChangedUrl = ''
     for (const url of image.urls) {
       if (/^data:image\//i.test(url)) {
@@ -937,15 +956,15 @@ export class BrowserReferenceService {
         }
         continue
       }
-      if (/^https?:/i.test(url) && this.host.download !== undefined) {
+      if (/^https?:/i.test(url) && fetchImage !== undefined) {
         const temp = join(this.assetDir, '.tmp', `${randomUUID()}.bin`)
         mkdirSync(dirname(temp), { recursive: true })
         try {
-          await this.host.download(sessionId, url, temp, signal)
+          await fetchImage(url, temp)
           const bytes = readFileSync(temp)
           if (bytes.length > 0 && bytes.length <= this.options.maxImageBytes) {
             let status: VersionStatus = 'unverifiable'
-            if (policy.verifyImageVersion) {
+            if (policy.verifyImageVersion && web === undefined) {
               try {
                 const probe = await this.run<unknown>(sessionId, versionProbeScript(), [{ url }], signal)
                 status = compareImageVersion(probe, bytes)
@@ -963,12 +982,14 @@ export class BrowserReferenceService {
             const saved = this.saveAsset(bytes, url, 'source-image', { versionStatus: status })
             if (saved !== undefined) return { ...saved, versionStatus: status }
           }
-        } catch { /* the page-side raster below is the next honest attempt */ } finally {
+        } catch (error) { webFailure = messageOf(error) } finally {
           try { rmSync(temp, { force: true }) } catch { /* temp file already gone */ }
         }
       }
     }
 
+    // Nothing can rasterize or screenshot a page that has no browser session.
+    if (web !== undefined) return { reason: 'image-unavailable', detail: { web: webFailure ?? (fetchImage === undefined ? 'no-web-image-fetch' : 'no-image-bytes') } }
     let rasterReason: string | undefined
     try {
       const raster = await this.run<RawRasterResult>(sessionId, rasterizeScript(), [{
@@ -1093,7 +1114,7 @@ export class BrowserReferenceService {
     event: RawCaptureEvent,
     nextPartId: () => string,
     signal?: AbortSignal,
-    policy: { readonly verifyImageVersion: boolean; readonly allowVisibleSnapshot: boolean } = {
+    policy: ImagePolicy = {
       verifyImageVersion: true, allowVisibleSnapshot: false,
     },
   ): Promise<{ part: TableReferencePart; cellImages: ImageReferencePart[]; failures: CaptureFailure[] } | CaptureFailure> {
@@ -1309,6 +1330,9 @@ export function createReferenceService(
     exists: sessionId => browser.exists(sessionId),
     download: async (sessionId, url, savePath, signal) => {
       await browser.download(sessionId, { url, savePath }, signal)
+    },
+    fetchWebImage: async (url, pageUrl, savePath, signal) => {
+      writeFileSync(savePath, await fetchGuestResource(url, { referer: pageUrl, maxBytes: rest.maxImageBytes ?? 20 * 1024 * 1024, ...signal === undefined ? {} : { signal } }))
     },
     ...visibleCapture !== undefined ? { captureVisible: visibleCapture } : {},
   }, store ?? new ReferenceStore(), { webSources: webReferenceSources(browser), ...rest })

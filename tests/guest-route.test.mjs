@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createServer, request as httpRequest } from 'node:http'
 import { once } from 'node:events'
 import { promises as dns } from 'node:dns'
-import { handleGuest, guestPath, rewriteDocument } from '../src/browser-electron/guest-route.ts'
+import { handleGuest, guestPath, rewriteDocument, fetchGuestResource } from '../src/browser-electron/guest-route.ts'
 import { GuestCookieJar } from '../src/browser-electron/guest-cookie-jar.ts'
 import { loadGuestCookies } from '../src/browser-electron/guest-cookie-store.ts'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -844,4 +844,11 @@ test('srcset candidates decode entities before resolving and safely retain liter
   }
   assert.equal(rewriteDocument('<img srcset=/image?a=1&amp;b=2>', base), `<img srcset="${guestPath('https://ordinary.example/image?a=1&b=2')}">`)
   assert.equal(rewriteDocument('<img srcset="about:&quot;blank&quot;">', base), '<img srcset="about:&#34;blank&#34;">')
+})
+
+test('a server-side guest resource fetch keeps the proxy target rules', async () => {
+  for (const url of ['http://127.0.0.1:1/a.png', guestPath('http://localhost/a.png'), 'http://10.0.0.1/a.png', 'file:///etc/passwd',
+    'https://user:pw@example.com/a.png', '/relative.png']) {
+    await assert.rejects(fetchGuestResource(url, { maxBytes: 1024 }), /not allowed|must be absolute/u, url)
+  }
 })
