@@ -71,7 +71,7 @@ function metadataOf(directory: string, rule: TauriRule): { identifier: string; a
 }
 
 function rootOf(runtime: string, rule: TauriRule): string | undefined {
-  for (const base of rule.runtimeRoots) {
+  for (const base of [...rule.runtimeRoots].sort((a, b) => b.split('/').length - a.split('/').length)) {
     const parts = base.split('/')
     let directory = dirname(runtime)
     let matches = true
