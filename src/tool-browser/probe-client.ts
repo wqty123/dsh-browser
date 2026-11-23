@@ -19,15 +19,16 @@ export async function pageFingerprint(browser: NonNullable<Context['browser']>, 
       script: `(() => {
         const a = document.activeElement
         const b = document.body
-        const own = b ? [...b.children].filter(e => e.id === ${JSON.stringify(CURSOR_ID)}) : []
+        const c = typeof document.getElementById === 'function' ? document.getElementById(${JSON.stringify(CURSOR_ID)}) : null
+        const own = b && c && c.parentNode === b ? c : null
         return JSON.stringify([
           location.href, document.title,
           a ? [a.tagName, a.id || a.getAttribute('name') || a.className || '',
             typeof a.value === 'string' ? a.value.length : null, a.checked, a.selectedIndex,
             a.selectionStart, a.selectionEnd, a.scrollLeft, a.scrollTop] : null,
           window.scrollX, window.scrollY,
-          b ? b.childElementCount - own.length : 0,
-          b ? b.innerHTML.length - own.reduce((n, e) => n + e.outerHTML.length, 0) : 0,
+          b ? b.childElementCount - (own ? 1 : 0) : 0,
+          b ? b.innerHTML.length - (own ? own.outerHTML.length : 0) : 0,
         ])
       })()`,
     })
