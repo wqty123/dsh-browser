@@ -18,10 +18,12 @@ import { SettingsStore } from '../browser-electron/settings-store.ts'
 import { browserSessionHandle, resolveTabHandle } from '../browser/handles.ts'
 import { readSurface, createState, liveStates, READ_ONLY_TOOLS, taskKey, type ToolScope, maxWaitFor, MAX_FILL_FIELDS, REGISTRATION_ORDER } from './state.ts'
 import { navigationTools } from './tools-navigation.ts'
+import { TOOL_DEFAULT_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 import { observationTools } from './tools-observation.ts'
 import { interactionTools } from './tools-interaction.ts'
 import { debugTools } from './tools-debug.ts'
 import { referenceTools } from './tools-reference.ts'
+import { ptcRuntimeActive, registerTool } from '../compat/host-features.ts'
 
 export { READ_ONLY_TOOLS, internals } from './state.ts'
 
@@ -84,7 +86,7 @@ const CORE_PROMPT = 'Operate the built-in browser with the dsh_browser_* tools. 
 
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
-  const timeoutMs = config.timeoutMs ?? 60_000
+  const timeoutMs = config.timeoutMs ?? TOOL_DEFAULT_TIMEOUT_MS
   const surface = config.surface ?? 'core'
   const maxWaitMs = maxWaitFor(timeoutMs)
   const maxFillFields = MAX_FILL_FIELDS
@@ -188,16 +190,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (definition !== undefined) registerSafely(definition)
   }
 
-  // Under DSH's PTC executor run_code already batches every tool, so the code tool steps aside.
-  const ptcMode = (): boolean => {
-    try { return (ctx as { get?: (name: string) => unknown }).get?.('ptcRuntime') !== undefined } catch { return false }
-  }
   if (surface !== 'tools') {
     try {
       const code = createCodeTool(catalog)
-      // Registration options (`when`) arrived with DSH 0.2.2; older registries ignore them.
-      // On the code surface it is the only browser tool, so it stays even under PTC.
-      ;(ctx.tools.register as (tool: unknown, options?: { when: () => boolean }) => unknown)(code.tool, surface === 'core' ? { when: () => !ptcMode() } : undefined)
+      // On the code surface it is the only browser tool, so it stays even under PTC; on `core`,
+      // DSH's PTC run_code already batches every tool, so the code tool steps aside.
+      registerTool(ctx.tools, code.tool, surface === 'core' ? () => !ptcRuntimeActive(ctx) : undefined)
       ctx.effect(() => code.dispose)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-builtin-browser: could not register ${CODE_TOOL} (${String(error)}).`)

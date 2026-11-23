@@ -13,14 +13,13 @@ import { apply } from '../plugin.ts'
 import type { HostContext } from '../production/assembly.ts'
 import { browserSourceRule } from '../production/user-text-rule.ts'
 import { makeDelivery, manualScheduler, memoryKV } from './production.fixtures.ts'
-import { apply as applyQuotes } from '@deepseek-ai/dsh-message-quotes/src/client/index.ts'
+import { apply as applyQuotes } from '@deepseek-ai/dsh-message-quotes/client'
 import { guestReferenceHandlerScript } from '../../../../browser-reference/page-script.ts'
 import { registerIframeReference, iframeReferenceSource } from '../../../browser/iframe-reference.ts'
 
 vi.mock('@deepseek-ai/dsh-client-ui-primitives', async () => {
-  const primitives = await vi.importActual('@deepseek-ai/dsh-client-ui-primitives')
-  const { formatQuoteText } = await import('@deepseek-ai/dsh-client-ui-primitives/src/markdown/quote-text.ts')
-  const { QuotePreview } = await import('@deepseek-ai/dsh-client-ui-primitives/src/QuotePreview.tsx')
+  const primitives = await vi.importActual<typeof import('@deepseek-ai/dsh-client-ui-primitives')>('@deepseek-ai/dsh-client-ui-primitives')
+  const { formatQuoteText, QuotePreview } = primitives
   const passthrough = ({ children }: { children?: unknown }) => createElement(Fragment, null, children)
   return { ...primitives, formatQuoteText, Tooltip: passthrough, HoverCardGroup: passthrough, UserMessageBubble: passthrough,
     UserTextRun: ({ text }: { text: string }) => createElement('span', { 'data-plain-run': '' }, text),

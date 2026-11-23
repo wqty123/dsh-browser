@@ -25,6 +25,7 @@ import { createNativePage } from './electron/NativeViewPage.ts'
 import { NativeChildPresentation } from './electron/NativeChildPresentation.ts'
 import type { DesktopBrowserBridge, SidebarNativeSlot } from '../types.ts'
 import { browserWorkspace } from './electron/workspace.ts'
+import { desktopBrowserBridge, nativeChildTabs, nativeViews } from '../compat/host-features.ts'
 import type { BrowserPageFactory } from './browser/BrowserPage.ts'
 import { BROWSER_ID, BROWSER_KIND, browserDefinition } from './definition.tsx'
 import { en, ja, es, fr, de, ru, pt, zh } from './locales.ts'
@@ -230,10 +231,7 @@ export function apply(ctx: Context): void {
     }, 'ui-sidebar-browser: start-page preferences')
   })
   const openTabs = ctx.sidebarRight.openTabs
-  const carrier = (globalThis as typeof globalThis & {
-    dshDesktop?: { readonly protocolVersion: number; readonly browser?: DesktopBrowserBridge }
-  }).dshDesktop
-  const desktop = carrier?.protocolVersion === 1 ? carrier.browser : undefined
+  const desktop = desktopBrowserBridge()
   ctx.effect(() => ctx.locale.register(namespace, { zh, en, ja, es, fr, de, ru, pt }), 'ui-sidebar-browser.copy')
   ctx.effect(() => ctx.sidebarRightTabs.register({ ...browserDefinition(t), keepMounted: desktop !== undefined }), 'ui-sidebar-browser.type')
   const installFrames = (scope: Context, factory: (sessionId: BrowserBodyProps['sessionId']) => BrowserPageFactory): void => {
@@ -266,15 +264,15 @@ export function apply(ctx: Context): void {
   }
   else ctx.inject(['workspaces'], (scope) => {
     installFrames(scope, sessionId => {
-      const childApi = desktop.childTabs
+      const childApi = nativeChildTabs(desktop)
       const sidebar = scope.sidebarRight as typeof scope.sidebarRight & SidebarHostExtensions
-      const children = childApi?.protocolVersion === 2 && sidebar.openReservedTab !== undefined ? new NativeChildPresentation(childApi, sessionId,
+      const children = childApi !== undefined && sidebar.openReservedTab !== undefined ? new NativeChildPresentation(childApi, sessionId,
         tab => sidebar.openReservedTab?.(sessionId, BROWSER_KIND, tab) === true,
         tab => { sidebar.closeIn(sessionId, tab) }) : undefined
       return options => {
-        const native = desktop.nativeViews
+        const native = nativeViews(desktop)
         const workspace = (signal: AbortSignal): Promise<string> => browserWorkspace(scope.workspaces.list, sessionId, signal)
-        if (native?.protocolVersion === 1) {
+        if (native !== undefined) {
           const sidebar = scope.sidebarRight as typeof scope.sidebarRight & {
             nativeSlot?: (session: typeof sessionId, tab: TabId, address: string, viewport: string, signal: AbortSignal) => Promise<SidebarNativeSlot>
           }

@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
 import { desktopPaths, readDesktopIdentity } from './desktop-identity.ts'
+import { classifyDesktopShell, noDesktopShell, type DesktopShellReport } from './desktop-shell.ts'
 import { MAIN_EXTENSION_UNSUPPORTED, type MainExtensionStatus } from './profile-extension.ts'
 import { BRIDGE_VERSION_MESSAGE } from '../bridge-compatibility.ts'
 import { conventionalInstallRoots, registeredInstallLocations } from '../../desktop-bridge/desktop-discovery.mjs'
@@ -48,19 +49,57 @@ export function findDesktopInstall(
   registry: () => readonly string[] = registeredInstallLocations,
   conventions: () => readonly string[] = conventionalInstallRoots,
 ): string | undefined {
-  // Not every install lives in %LOCALAPPDATA%\\Programs: people put the app on another drive, under
-  // Program Files, or in their own folder. DSH_DESKTOP_PATH names one explicitly, and the usual roots
-  // are all probed. A test or a caller that passes a base directory gets exactly that base, so the
-  // behaviour stays pinnable.
-  const isDesktop = (candidate: string): boolean => readDesktopIdentity(candidate).ok
+  for (const candidate of desktopInstallCandidates(localAppData, registry, conventions)) {
+    if (readDesktopIdentity(candidate).ok) return candidate
+  }
+  return undefined
+}
+
+/**
+ * Classify the desktop shell on this machine.
+ *
+ * Walks the same candidates as {@link findDesktopInstall}; a verified official install wins, else the
+ * first recognised DSH-named shell (third-party or unsupported) is reported, so the settings page can
+ * say what it found instead of "no install" — and never offer to patch it.
+ * @param options - discovery overrides and the browser to recommend when the sidebar is unavailable.
+ * @returns the structured report.
+ */
+export function detectDesktopShell(options: {
+  readonly localAppData?: string
+  readonly registry?: () => readonly string[]
+  readonly conventions?: () => readonly string[]
+  readonly preferredBrowser?: string
+  readonly platform?: NodeJS.Platform
+} = {}): DesktopShellReport {
+  let recognised: DesktopShellReport | undefined
+  for (const candidate of desktopInstallCandidates(options.localAppData, options.registry, options.conventions)) {
+    const report = classifyDesktopShell(candidate, readDesktopIdentity(candidate), options)
+    if (report.kind === 'official-supported') return report
+    if (report.kind !== 'none' && recognised === undefined) recognised = report
+  }
+  return recognised ?? noDesktopShell(options)
+}
+
+/**
+ * Every directory that might hold a desktop install, most specific first.
+ *
+ * Not every install lives in %LOCALAPPDATA%\\Programs: people put the app on another drive, under
+ * Program Files, or in their own folder. DSH_DESKTOP_PATH names one explicitly, and the usual roots
+ * are all probed. A test or a caller that passes a base directory gets exactly that base, so the
+ * behaviour stays pinnable. Candidates are unverified; callers check identity.
+ */
+function* desktopInstallCandidates(
+  localAppData?: string,
+  registry: () => readonly string[] = registeredInstallLocations,
+  conventions: () => readonly string[] = conventionalInstallRoots,
+): Generator<string> {
   for (const explicit of [process.env.DSH_DESKTOP_PATH, process.env.DSH_DESKTOP_APP]) {
     if (explicit !== undefined && explicit !== '') {
-      const named = explicit
-      if (isDesktop(named)) return named
+      yield explicit
       // A parent directory is a reasonable thing to point at too: look one level down.
       try {
-        for (const entry of readdirSync(named, { withFileTypes: true })) {
-          if (entry.isDirectory() && isDesktop(join(named, entry.name))) return join(named, entry.name)
+        for (const entry of readdirSync(explicit, { withFileTypes: true })) {
+          if (entry.isDirectory()) yield join(explicit, entry.name)
         }
       } catch {
         // Not a directory: fall through to the usual roots.
@@ -69,28 +108,20 @@ export function findDesktopInstall(
   }
   const roots = localAppData === undefined ? desktopInstallRoots() : [join(localAppData, 'Programs')]
   for (const base of roots) {
-    for (const named of DESKTOP_INSTALL_NAMES) {
-      const candidate = join(base, named)
-      if (isDesktop(candidate)) return candidate
-    }
+    for (const named of DESKTOP_INSTALL_NAMES) yield join(base, named)
     try {
       for (const entry of readdirSync(base, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue
-        const candidate = join(base, entry.name)
-        if (isDesktop(candidate)) return candidate
+        if (entry.isDirectory()) yield join(base, entry.name)
       }
     } catch {
       // A root that does not exist is a state, not an error.
     }
   }
   for (const source of [registry, conventions]) {
-    try {
-      for (const candidate of source()) {
-        if (isDesktop(candidate)) return candidate
-      }
-    } catch {}
+    let found: readonly string[] = []
+    try { found = source() } catch {}
+    yield* found
   }
-  return undefined
 }
 
 /** Directory names an install is given: a plain directory on Windows, an `.app` bundle on macOS. */

@@ -18,7 +18,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { BrowserError } from '../browser/types.ts'
 import { replyJson } from './json-reply.ts'
 import { sameOrigin } from './settings-route.ts'
-import { findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
+import { detectDesktopShell, readBridgeStatus } from './bridge-status.ts'
 import type { MainExtensionStatus } from './profile-extension.ts'
 
 /** Where the frame endpoint lives. The viewer must use exactly this path, same origin. */
@@ -195,6 +195,7 @@ export async function handleBridgeStatus(
   mainExtension?: MainExtensionStatus,
   registry?: () => readonly string[],
   conventions?: () => readonly string[],
+  preferredBrowser?: string,
 ): Promise<void> {
   if (request.method !== 'GET') {
     replyJson(response, 405, { error: 'method-not-allowed' })
@@ -204,15 +205,11 @@ export async function handleBridgeStatus(
     replyJson(response, 403, { error: 'not-same-origin' })
     return
   }
-  const installRoot = findDesktopInstall(localAppData, registry, conventions)
-  const status = installRoot === undefined
-    ? {
-      state: 'missing' as const,
-      present: false,
-      archivePresent: false,
-      detail: 'no DSH Desktop install found in the usual roots, at DSH_DESKTOP_PATH or DSH_DESKTOP_APP, '
-        + 'in the uninstall registry, or at this platform\'s conventional locations',
-    }
-    : readBridgeStatus(installRoot, mainExtension)
-  replyJson(response, 200, { ok: true, bridge: status })
+  const shell = detectDesktopShell({ localAppData, registry, conventions, preferredBrowser })
+  // Only a verified official install is read for a bridge; any other shell is reported as missing
+  // without a repair command, and `shell` says why.
+  const status = shell.kind === 'official-supported' && shell.root !== undefined
+    ? readBridgeStatus(shell.root, mainExtension)
+    : { state: 'missing' as const, present: false, archivePresent: false, detail: shell.reason }
+  replyJson(response, 200, { ok: true, bridge: status, shell })
 }
