@@ -1525,7 +1525,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-  /** An explicit selection shows a window quiet mode minimized, without `Page.bringToFront`. */
+  /** An explicit selection shows a window quiet mode minimized, with the selected tab active in it. */
   private async restoreQuietWindow(handle: ElectronViewHandle): Promise<void> {
     if (this.quietMinimized.size === 0) return
     try {
@@ -1533,6 +1533,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       if (typeof found?.windowId !== 'number' || !this.quietMinimized.delete(found.windowId)) return
       if (found.bounds?.windowState !== 'minimized') return
       await handle.sendCommand('Browser.setWindowBounds', { windowId: found.windowId, bounds: { windowState: 'normal' } })
+      // A quiet tab was created in the background, so the restored window would show its previous tab.
+      await handle.sendCommand('Page.bringToFront')
     } catch {
       // The page went away; the command that selected it reports that itself.
     }

@@ -207,7 +207,7 @@ test('a Chromium that rejects windowState still gets its quiet first page, unfoc
   assert.deepEqual(calls[1], { url: 'about:blank', background: true, focus: false })
 })
 
-test('an explicit selection restores the window quiet mode minimized, once and without bringToFront', async t => {
+test('an explicit selection restores the window quiet mode minimized once, showing the selected tab', async t => {
   const { browser, host, view } = await quietHost(t, true, { respond: minimizedWindow })
   await host.presentView(view, 'view', { quiet: true })
   host.showView(view, 'view', { quiet: true })
@@ -217,7 +217,9 @@ test('an explicit selection restores the window quiet mode minimized, once and w
   await new Promise(resolve => setTimeout(resolve, 50))
   const restores = browser.commands.filter(c => c.method === 'Browser.setWindowBounds')
   assert.deepEqual(restores.map(c => c.params), [{ windowId: 7, bounds: { windowState: 'normal' } }])
-  assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false)
+  const restoreAt = browser.commands.findIndex(c => c.method === 'Browser.setWindowBounds')
+  assert.deepEqual(browser.commands.slice(restoreAt + 1).filter(c => c.method === 'Page.bringToFront').length, 1,
+    'the selected tab, created in the background, becomes the visible one')
   host.showView(view, 'view', { quiet: true, select: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(browser.commands.filter(c => c.method === 'Browser.setWindowBounds').length, 1,
