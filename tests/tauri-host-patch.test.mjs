@@ -58,7 +58,7 @@ function fakeElectron(root) {
       const storagePath = name.startsWith('persist:') ? path.join(root, 'Partitions', name.slice(8)) : null
       if (storagePath !== null) fs.mkdirSync(storagePath, { recursive: true })
       sessions.set(name, Object.assign(new EventEmitter(), {
-        name, storagePath, cookies: new FakeCookies(),
+        name, storagePath, cookies: new FakeCookies(), storageFlushes: 0, flushStorageData() { this.storageFlushes++ },
         setPermissionRequestHandler() {}, setPermissionCheckHandler() {}, setDevicePermissionHandler() {}, setDisplayMediaRequestHandler() {},
         webRequest: { onBeforeRequest() {} },
       }))
@@ -143,6 +143,8 @@ test('patched: session cookies are checkpointed and restored before the next gue
   jar.emit('changed', {}, gone, 'explicit', true)
   await settle()
   assert.ok(jar.flushes > 0, 'persistent cookies are flushed to disk as they change')
+  await new Promise(resolve => setTimeout(resolve, 1100))
+  assert.ok(first.sessions.get(partition).storageFlushes > 0, 'localStorage is flushed periodically')
   const file = path.join(first.sessions.get(partition).storagePath, 'dsh-sidebar-session-cookies.json')
   const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
   assert.deepEqual(saved.map(cookie => cookie.name).sort(), ['rack.session', 'session-username'])
@@ -180,7 +182,9 @@ test('patched: a pending checkpoint is written synchronously when the app quits'
   const first = await boot(patched, root)
   const { partition } = await first.guests.acquire(first.host, 'cwd:/project')
   await first.sessions.get(partition).cookies.set({ url: 'https://www.saucedemo.com/', name: 'session-username', value: 'standard_user' })
+  const flushed = first.sessions.get(partition).storageFlushes
   first.electron.app.emit('will-quit')
+  assert.equal(first.sessions.get(partition).storageFlushes, flushed + 1, 'localStorage is flushed at quit')
   const file = path.join(first.sessions.get(partition).storagePath, 'dsh-sidebar-session-cookies.json')
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8'))[0].value, 'standard_user')
   await settle()

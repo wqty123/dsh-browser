@@ -32,7 +32,13 @@ module.exports = ({ app, createHash, fs, path }) => {
       console.error('dsh sidebar session cookie checkpoint failed', error)
     }
   }
-  const flushAll = () => { for (const state of states.values()) if (state.timer !== undefined) write(state) }
+  const flushStorage = target => { try { target.flushStorageData() } catch {} }
+  const flushAll = () => {
+    for (const [target, state] of states) {
+      flushStorage(target)
+      if (state.timer !== undefined) write(state)
+    }
+  }
   app.on('will-quit', flushAll)
   process.on('exit', flushAll)
   const storage = target => target.storagePath ?? target.getStoragePath?.() ?? undefined
@@ -63,6 +69,8 @@ module.exports = ({ app, createHash, fs, path }) => {
         if (cookie.session !== true) target.cookies.flushStore().catch(() => {})
         schedule()
       })
+      // Chromium commits localStorage lazily; electron-rs can be stopped without will-quit.
+      setInterval(() => flushStorage(target), 1000).unref?.()
       state.ready = Promise.all(restored.map(cookie => target.cookies.set(cookie).catch(() => {}))).then(() => undefined)
       return state.ready
     },
