@@ -95,9 +95,15 @@ export abstract class ProviderNavigation extends ProviderTabs {
         Math.max(1, deadline - Date.now()),
         signal,
         `browser: navigation timed out after ${timeoutMs}ms`,
-        // Best-effort: cancel the in-flight navigation so a wedged load does
-        // not leave the debugger queue busy.
-        timedOut => { if (tab.navigation === navigation) this.interrupt(handle, timedOut) },
+        // A wedged navigation quarantines the guest. A cancelled one only stops loading:
+        // terminating script execution here, with no script running, would kill the next
+        // evaluation instead, so the tab's next operation stalls into quarantine.
+        timedOut => {
+          if (tab.navigation !== navigation) return
+          if (timedOut) this.interrupt(handle, timedOut)
+          // Never initialize a guest just to stop it: a cancelled first sidebar load must not reopen the sidebar.
+          else void handle.sendCommand('Page.stopLoading', undefined, { present: false, initialize: false }).catch(() => {})
+        },
       )
       // Page.navigate resolves even when the navigation fails; surface the
       // failure instead of leaving a silent white screen.

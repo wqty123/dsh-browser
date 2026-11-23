@@ -65,6 +65,14 @@ jobs:
           xvfb-run -a node tests/run.mjs
           "--test-skip-pattern=^pack includes the extension and dependency-free native host"
           "--test-skip-pattern=^packed host and cookie jar load after extraction"
+      - name: Real-browser E2E (Browser Use P0/P1)
+        working-directory: ${{ env.WORKSPACE }}/packages/web/dsh-browser
+        # The Chrome binary itself, not the google-chrome wrapper script: the host only stops a
+        # browser whose running executable is the one it launched.
+        run: |
+          export DSH_TEST_CHROME="$(dirname "$(readlink -f "$(command -v google-chrome)")")/chrome"
+          test -x "$DSH_TEST_CHROME"
+          node tests/run.mjs tests/browser-use-p0.test.mjs tests/browser-use-p1.test.mjs
       - name: Pack check
         working-directory: ${{ env.WORKSPACE }}/packages/web/dsh-browser
         run: node tools/check-pack.mjs
