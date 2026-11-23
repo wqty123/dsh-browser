@@ -27,6 +27,7 @@ const FOCUSED_EDITABLE_SCRIPT = `(() => {
   if (doc.designMode === 'on' || (el && el.isContentEditable)) return { editable: true, active }
   if (el && el.tagName === 'TEXTAREA') return { editable: !el.readOnly && !el.disabled, active }
   if (el && el.tagName === 'INPUT') return { editable: !el.readOnly && !el.disabled && !NON_TEXT_INPUTS.includes(String(el.type || '').toLowerCase()), active }
+  if (el && el.tagName.includes('-') && !el.shadowRoot) return { editable: true, active }
   return { editable: false, active }
 })()`
 
