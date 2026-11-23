@@ -7,7 +7,8 @@ import { GUEST_ROUTE, RELAXED_BROWSER_SANDBOX, WEB_BROWSER_SANDBOX } from '../..
  * @module dsh-builtin-browser/browser-electron/guest-route
  */
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
-import { promises as dns } from 'node:dns'
+import { promises as dns, type LookupAddress } from 'node:dns'
+import { Agent } from 'undici'
 import { networkInterfaces } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { guestRuntimeScript } from './guest-runtime.ts'
@@ -48,19 +49,47 @@ function blockedTarget(url: URL, host: string): boolean {
     || isSelfTarget(url) || url.hostname.toLowerCase().replace(/\.$/u, '') === host
 }
 
-async function addressesFor(hostname: string): Promise<string[]> {
-  return (await dns.lookup(hostname.replace(/^\[|\]$/gu, ''), { all: true })).map(record => record.address)
+async function lookupAll(hostname: string): Promise<LookupAddress[]> {
+  return await dns.lookup(hostname.replace(/^\[|\]$/gu, ''), { all: true })
 }
 
-async function blockedResolvedTarget(url: URL, host: string, ownAddresses: readonly string[]): Promise<boolean> {
-  if (blockedTarget(url, host)) return true
-  const addresses = await addressesFor(url.hostname)
+async function addressesFor(hostname: string): Promise<string[]> {
+  return (await lookupAll(hostname)).map(record => record.address)
+}
+
+async function vettedAddress(url: URL, host: string, ownAddresses: readonly string[]): Promise<LookupAddress | undefined> {
+  if (blockedTarget(url, host)) return undefined
+  const records = await lookupAll(url.hostname)
   const hostUrl = host === '' ? undefined : new URL('http://' + host)
   const hostAddresses = hostUrl === undefined || isSelfTarget(hostUrl) ? [] : await addressesFor(host).catch(() => [])
-  return addresses.length === 0 || addresses.some(address => {
+  const unsafe = records.length === 0 || records.some(({ address }) => {
     const literal = new URL('http://' + (address.includes(':') ? '[' + address + ']' : address))
     return isSelfTarget(literal) || hostAddresses.includes(address) || ownAddresses.includes(address)
   })
+  return unsafe ? undefined : records[0]
+}
+
+async function blockedResolvedTarget(url: URL, host: string, ownAddresses: readonly string[]): Promise<boolean> {
+  return await vettedAddress(url, host, ownAddresses) === undefined
+}
+
+/** Connect to the address that was vetted, so a second DNS answer (rebinding) never picks the peer. */
+async function fetchVetted(url: URL, init: RequestInit, host: string, ownAddresses: readonly string[]): Promise<Response> {
+  const address = await vettedAddress(url, host, ownAddresses)
+  if (address === undefined) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
+  const dispatcher = new Agent({
+    connect: {
+      lookup: (_hostname: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
+        if (options.all === true) callback(null, [address])
+        else callback(null, address.address, address.family)
+      },
+    } as never,
+  })
+  try {
+    return await fetch(url, { ...init, dispatcher } as RequestInit)
+  } finally {
+    void dispatcher.close()
+  }
 }
 
 class UnsafeGuestTargetError extends Error {}
@@ -319,10 +348,8 @@ export async function handleGuest(
   const blocked = (url: URL): boolean => blockedTarget(url, host)
   const blockedResolved = (url: URL): Promise<boolean> =>
     blockedResolvedTarget(url, host, request.socket.localAddress === undefined ? [] : [request.socket.localAddress])
-  const fetchTarget = async (url: URL, options: RequestInit): Promise<Response> => {
-    if (await blockedResolved(url)) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
-    return fetch(url, options)
-  }
+  const fetchTarget = (url: URL, options: RequestInit): Promise<Response> =>
+    fetchVetted(url, options, host, request.socket.localAddress === undefined ? [] : [request.socket.localAddress])
   if (blocked(target)) {
     writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
     response.end('guest proxy: local and DSH host targets are not allowed')
@@ -606,13 +633,12 @@ export async function fetchGuestResource(raw: string, options: {
   let jar: GuestCookieJar | undefined
   try { jar = options.cookies ?? localGuestCookies() } catch { jar = undefined }
   for (let hop = 0; hop <= 5; hop++) {
-    if (await blockedResolvedTarget(url, host, own)) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
     const headers = new Headers({
       'user-agent': DESKTOP_UA, accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8', 'accept-encoding': 'identity',
     })
     const cookie = jar?.getCookieHeader(url)
     if (cookie !== undefined && cookie !== '') headers.set('cookie', cookie)
-    const response = await fetch(url, { headers, redirect: 'manual', ...options.signal === undefined ? {} : { signal: options.signal } })
+    const response = await fetchVetted(url, { headers, redirect: 'manual', ...options.signal === undefined ? {} : { signal: options.signal } }, host, own)
     jar?.setCookies(url, response.headers.getSetCookie?.() ?? [])
     const location = response.headers.get('location')
     if (response.status >= 300 && response.status < 400 && location !== null) {
