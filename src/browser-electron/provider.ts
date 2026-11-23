@@ -509,12 +509,14 @@ export class ElectronBrowserProvider extends ProviderMedia implements BrowserPro
 
   takeoverTargets(owner: string): readonly { session: BrowserSessionId; owner: string; tabId: string; pageId: string; url: string; reveal?: (until?: AbortSignal) => Promise<boolean> }[] {
     const reveal = this.host.revealQuietWindow?.bind(this.host)
-    return [...this.sessions.values()].filter(s => (s.label ?? 'default').replace(/^session-/u, '') === owner).flatMap(s => {
+    const targets = [...this.sessions.values()].filter(s => (s.label ?? 'default').replace(/^session-/u, '') === owner).flatMap(s => {
       const tab = s.tabs[s.activeIndex]
       return tab && !tab.failure && /^https?:\/\//u.test(tab.url)
         ? [{ session: s.id, owner: s.label ?? 'default', tabId: tab.id, pageId: tab.id, url: tab.url,
           ...reveal ? { reveal: (until?: AbortSignal) => reveal(tab.handle, until === undefined ? undefined : { until }) } : {} }] : []
     })
+    const own = targets.filter(target => target.session !== this.referenceSession)
+    return own.length > 0 ? own : targets
   }
 
   /**

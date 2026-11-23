@@ -311,6 +311,8 @@ class CdpClient {
   private nextId = 1
   private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
   private readonly ready: Promise<void>
+  readonly destroyedTargets = new Set<string>()
+  headless = false
 
   /**
    * @param url - the browser's `webSocketDebuggerUrl`.
@@ -414,6 +416,8 @@ class CdpClient {
     let message: { id?: number; method?: string; params?: unknown; result?: unknown; error?: { message?: string } }
     try { message = JSON.parse(raw) } catch { return }
     if (message.id === undefined) {
+      const targetId = message.method === 'Target.targetDestroyed' ? (message.params as { targetId?: unknown } | undefined)?.targetId : undefined
+      if (typeof targetId === 'string') this.destroyedTargets.add(targetId)
       if (typeof message.method === 'string') for (const listener of this.eventListeners) listener(message.method, message.params)
       return
     }
@@ -472,6 +476,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private child: ChildProcess | undefined
   private launchParked = false
   private profileLease: ProfileLease | undefined
+  private profileLeasing: Promise<ProfileLease> | undefined
   private starting: Promise<CdpClient> | undefined
   private lastLaunchError: string | undefined
   private launchDiagnostic: SystemBrowserLaunchDiagnostic | undefined
@@ -551,6 +556,12 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         ...this.launchDiagnostic, devToolsActivePortPresent: existsSync(join(this.profileDir, 'DevToolsActivePort')),
       } },
     }
+  }
+
+  connectedView(id: string): boolean {
+    const view = this.views.get(id), target = view === undefined ? undefined : this.sessions.get(view.session)
+    return view !== undefined && target !== undefined && view.client === this.client && !view.client.headless
+      && !view.client.destroyedTargets.has(target) && this.connectionStatus().connected
   }
 
   /** Which product this host would drive (for diagnostics). */
@@ -703,6 +714,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // mistaken for a browser that answers.
       const info = await client.send('Browser.getVersion', {}, undefined, Math.max(1, deadline - Date.now())) as { product?: string }
       if (!isBrowserProduct(info?.product) || info.product !== version.Browser) throw new Error('browser did not acknowledge its identity')
+      client.headless = /^HeadlessChrome\//u.test(info.product ?? '')
       if (this.disposed) { client.close(); return undefined }
       await client.send('Target.setDiscoverTargets', { discover: true }, undefined, Math.max(1, deadline - Date.now()))
       if (this.disposed || Date.now() >= deadline) { client.close(); return undefined }
@@ -731,7 +743,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    */
   private async start(): Promise<CdpClient> {
     const deadline = Date.now() + 30_000
-    this.profileLease ??= acquireProfileLease(this.profileDir)
+    if (this.profileLease === undefined) {
+      const lease = await (this.profileLeasing ??= acquireProfileLease(this.profileDir).finally(() => { this.profileLeasing = undefined }))
+      if (this.disposed) { await lease.release(); throw new Error('dsh-builtin-browser: the browser host was disposed while launching') }
+      this.profileLease = lease
+    }
     // Before spawning anything: is a browser for THIS profile already running? A DSH restart
     // leaves one behind, and launching into it is the failure reported as "exited immediately
     // after launch (exit code 0)" that required killing seven processes by hand.
@@ -1015,6 +1031,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
                 } catch { /* An unidentified endpoint is borrowed, never owned. */ }
               }
               if (this.disposed) { client.close(); break }
+              client.headless = launch.headless
               this.client = client
       this.placeOpenedWindows(client)
               this.plainUserAgent = undefined

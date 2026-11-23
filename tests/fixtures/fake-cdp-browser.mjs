@@ -175,6 +175,10 @@ function createFakeBrowser(options = {}) {
      * `start()`'s own cleanup: a browser that closed its debugging endpoint, or a socket the
      * OS tore down. Nothing has cleared the view and session maps by the time it happens.
      */
+    destroyTarget(targetId) {
+      const event = encodeFrame(JSON.stringify({ method: 'Target.targetDestroyed', params: { targetId } }))
+      for (const socket of sockets) socket.write(event)
+    },
     dropConnections() {
       for (const socket of sockets) socket.destroy()
       sockets.clear()
