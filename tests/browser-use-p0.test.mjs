@@ -112,6 +112,17 @@ failed
   assert.match(value.output, /no new tab opened within 300ms/)
 })
 
+test('with_tab on the active tab still restores it when fn switches away', async () => {
+  const { run, tabs } = mount({ tabs: [{ id: 'tab-main', url: 'https://example.test/', active: true }, { id: 'tab-other', url: 'https://example.test/other', active: false }] })
+  const value = await run(`
+await goto_url('https://example.test/')
+const list = (await list_tabs()).tabs
+await with_tab(list.find(t => t.active).id, () => switch_tab(list.find(t => !t.active).id))
+`)
+  assert.equal(value.ok, true, value.output)
+  assert.equal(tabs.find(t => t.active).id, 'tab-main')
+})
+
 test('with_tab switches back even when the function throws', async () => {
   const { run, tabs } = mount({ tabs: [{ id: 'tab-main', url: 'https://example.test/', active: true }, { id: 'tab-other', url: 'https://example.test/other', active: false }] })
   const value = await run(`
@@ -145,9 +156,10 @@ test('annotated screenshots draw, capture, clear, and list { id, x, y, role, lab
 test('Chromium: lookups, find and annotations reach open shadow roots and same-origin iframes', {
   skip: !process.env.DSH_TEST_CHROME && 'set DSH_TEST_CHROME to a Chromium executable',
 }, async t => {
-  const frame = '<!doctype html><body style="margin:0"><label for="q">Frame query</label><input id="q" placeholder="search here"><p>needle in the frame</p></body>'
+  const frame = '<!doctype html><body style="margin:0"><label for="q">Frame query</label><input id="q" placeholder="search here"><p>needle in the frame</p><button style="margin-top:600px">Clipped below</button></body>'
   const page = `<!doctype html><body style="margin:0">
     <div id="host"></div>
+    <input id="pw" type="password" value="hunter2-secret" style="position:absolute;left:600px;top:10px">
     <iframe id="f" style="position:absolute;left:100px;top:200px;width:400px;height:200px;border:0" src="/frame"></iframe>
     <script>
       const root = document.getElementById('host').attachShadow({ mode: 'open' })
@@ -164,7 +176,7 @@ test('Chromium: lookups, find and annotations reach open shadow roots and same-o
   await chrome.evaluate(`new Promise(resolve => { const f = document.getElementById('f'); if (f.contentDocument && f.contentDocument.readyState === 'complete' && f.contentDocument.getElementById('q')) resolve(); else f.addEventListener('load', () => resolve()) })`)
 
   const found = await chrome.evaluate(`(() => {${DEEP_DOM_SOURCE}; return [__dshQuery('#deep')?.id, __dshQuery('#q')?.id, __dshQueryAll('button, input').length] })()`)
-  assert.deepEqual(found, ['deep', 'q', 2])
+  assert.deepEqual(found, ['deep', 'q', 4])
 
   await chrome.evaluate(PROBE_INSTALL_SCRIPT)
   const hits = JSON.parse(await chrome.evaluate(probeCallScript('findText', ['needle', true])))
@@ -179,6 +191,8 @@ test('Chromium: lookups, find and annotations reach open shadow roots and same-o
   assert.equal(query?.role, 'textbox')
   assert.ok(query.x > 100 && query.y > 200)
   assert.deepEqual(Object.keys(save).sort(), ['id', 'label', 'role', 'x', 'y'])
+  assert.ok(!JSON.stringify(rows).includes('hunter2-secret'), 'typed values never become labels')
+  assert.equal(rows.find(row => row.label === 'Clipped below'), undefined, 'controls clipped by their iframe are not annotated')
   assert.equal(await chrome.evaluate(`!!document.getElementById('__dsh_annotations__')`), true)
   await chrome.evaluate(CLEAR_ANNOTATIONS_SCRIPT)
   assert.equal(await chrome.evaluate(`!!document.getElementById('__dsh_annotations__')`), false)
