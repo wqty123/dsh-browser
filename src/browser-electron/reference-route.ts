@@ -27,6 +27,7 @@ import { replyJson } from './json-reply.ts'
 import { sameOrigin } from './settings-route.ts'
 import { importReferenceBundle } from '../browser-reference/import.ts'
 import { validateFrameSelector } from '../browser-reference/entry.ts'
+import { MAX_FROZEN_CAPTURE_CHARS } from '../browser-reference/page-script.ts'
 import { summarizeReference, type ReferenceSummary } from '../browser-reference/service.ts'
 import type { BrowserReferenceService } from '../browser-reference/service.ts'
 import type { DeliveryQueue } from '../browser-reference/delivery.ts'
@@ -123,6 +124,13 @@ function requireRead(request: IncomingMessage, response: ServerResponse): boolea
   return true
 }
 
+/**
+ * The page-side bar posts its whole frozen capture, images inlined, and that capture is bounded by
+ * `MAX_FROZEN_CAPTURE_CHARS`. JSON keeps non-ASCII raw, so a character can take three UTF-8 bytes;
+ * the other fields are short and bounded on their own.
+ */
+const MAX_CAPTURE_BODY_BYTES = MAX_FROZEN_CAPTURE_CHARS * 3 + 64 * 1024
+
 /** Build every reference handler over one service. */
 export function createReferenceRouteHandlers(options: ReferenceRouteOptions): ReferenceRouteHandlers {
   const { service, queue } = options
@@ -182,7 +190,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
     if (!requireWrite(request, response)) return
     let body: Record<string, unknown>
     try {
-      body = await readJsonBody<Record<string, unknown>>(request)
+      body = await readJsonBody<Record<string, unknown>>(request, MAX_CAPTURE_BODY_BYTES)
     } catch (error) {
       replyJson(response, 400, { ok: false, error: `unreadable body: ${String(error)}` })
       return
@@ -267,6 +275,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
       ...target !== undefined ? { target } : {},
       ...comment !== undefined ? { comment } : {},
       ...frozenCapture !== undefined ? { frozenCapture } : {},
+      ...typeof request.headers.host === 'string' ? { dshHost: request.headers.host } : {},
     })
     if (outcome.reference === undefined) {
       replyJson(response, 422, { ok: false, failures: outcome.failures })

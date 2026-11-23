@@ -11,13 +11,25 @@ import type { DesktopBrowserBridge, DesktopBrowserChildTabs, DesktopNativeChildT
 interface ServiceLookup { readonly get?: (name: string) => unknown }
 interface ToolRegistry { readonly register: (tool: never, options?: never) => unknown }
 
+interface ScopedExecutors { readonly selectExecutor?: (scope?: unknown) => { readonly describe?: (tools: readonly never[]) => { readonly knownNames?: readonly string[] } } }
+
 /**
  * Whether DSH's PTC executor is active, so `run_code` already batches every tool.
+ *
+ * Since 0.2.2-rc.5 dsh-base mounts the `ptcRuntime` provider in every mode and only the PTC
+ * overlay selects its executor, so a registry that selects executors per scope is asked which
+ * one the calling agent gets; an older registry has no selector and the service alone decides.
  * @param ctx - the plugin context.
- * @returns true when the `ptcRuntime` service is present.
+ * @param scope - the tool-activation context (`{ agent }`) a conditional registration receives.
+ * @returns true when the agent's executor exposes `run_code`, or, without a selector, when `ptcRuntime` is present.
  */
-export function ptcRuntimeActive(ctx: unknown): boolean {
-  try { return (ctx as ServiceLookup).get?.('ptcRuntime') !== undefined } catch { return false }
+export function ptcRuntimeActive(ctx: unknown, scope?: { readonly agent?: unknown }): boolean {
+  try {
+    if ((ctx as ServiceLookup).get?.('ptcRuntime') === undefined) return false
+    const tools = (ctx as { readonly tools?: ScopedExecutors }).tools
+    if (typeof tools?.selectExecutor !== 'function') return true
+    return tools.selectExecutor(scope?.agent)?.describe?.([])?.knownNames?.includes('run_code') === true
+  } catch { return false }
 }
 
 /**
@@ -30,8 +42,8 @@ export function ptcRuntimeActive(ctx: unknown): boolean {
  * @param when - visibility predicate; omitted registers unconditionally.
  * @returns whatever the registry returns.
  */
-export function registerTool(registry: ToolRegistry, tool: unknown, when?: () => boolean): unknown {
-  const register = registry.register as (tool: unknown, options?: { when: () => boolean }) => unknown
+export function registerTool<C>(registry: ToolRegistry, tool: unknown, when?: (context?: C) => boolean): unknown {
+  const register = registry.register as (tool: unknown, options?: { when: (context?: C) => boolean }) => unknown
   return when === undefined ? register.call(registry, tool) : register.call(registry, tool, { when })
 }
 

@@ -3,7 +3,7 @@ import type { BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCo
 import { BrowserError } from '../browser/types.ts'
 import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
 import { challengeDetectSource } from '../browser/anti-bot.ts'
-import { PROVIDER_TIMEOUTS, TARGET_SCRIPT_GRACE_MS, delay, withTimeout, handleSendEvaluate } from './provider-core.ts'
+import { PROVIDER_TIMEOUTS, TARGET_SCRIPT_GRACE_MS, delay, pagePollSlice, withTimeout, handleSendEvaluate } from './provider-core.ts'
 import { ProviderNavigation } from './provider-navigation.ts'
 
 /** Page-context block / human-verification detection; the classifier lives in `browser/anti-bot.ts`. */
@@ -602,24 +602,25 @@ export abstract class ProviderObservation extends ProviderNavigation {
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
     const timeoutMs = request.timeoutMs ?? PROVIDER_TIMEOUTS.interaction
-    const script = `(async () => {${DEEP_DOM_SOURCE}
+    const script = (sliceMs: number, last: boolean): string => `(async () => {${DEEP_DOM_SOURCE}
       const itemSel = ${JSON.stringify(request.item)}
       const fields = ${JSON.stringify(request.fields)}
-      const timeoutMs = ${String(timeoutMs)}
+      const sliceMs = ${String(sliceMs)}
+      const last = ${String(last)}
       const sleep = ms => new Promise(r => setTimeout(r, ms))
       const parseField = f => {
         const m = /^(.*)@([A-Za-z][A-Za-z0-9_-]*)$/.exec(f.selector.trim())
         if (m) return { base: m[1].trim(), attr: m[2] }
         return { base: f.selector, attr: null }
       }
-      const deadline = Date.now() + timeoutMs
+      const deadline = Date.now() + sliceMs
       let items = []
       for (;;) {
         // Immediate, like match() above: an unparseable selector can never match.
         try { items = __dshQueryAll(itemSel) }
         catch (error) { return { ok: false, error: 'invalid CSS selector ' + JSON.stringify(itemSel) + ' (' + String((error && error.message) || error) + ')' } }
         if (items.length > 0) break
-        if (Date.now() >= deadline) return { ok: false, error: 'no elements matched: ' + itemSel }
+        if (Date.now() >= deadline) return last ? { ok: false, error: 'no elements matched: ' + itemSel } : { pending: true }
         await sleep(100)
       }
       const out = []
@@ -641,15 +642,20 @@ export abstract class ProviderObservation extends ProviderNavigation {
       }
       return { ok: true, count: out.length, items: out }
     })()`
-    const result = await withTimeout(
-      handleSendEvaluate(tab.handle, script),
-      timeoutMs + TARGET_SCRIPT_GRACE_MS,
-      signal,
-      `browser: scrape timed out after ${timeoutMs}ms`,
-      timedOut => { this.interrupt(tab.handle, timedOut) },
-    )
-    if (!result.ok) throw new BrowserError(`browser: scrape evaluation failed: ${result.exception}`, 'BROWSER_SCRAPE_FAILED')
-    const value = result.value as { ok?: boolean; error?: string; count?: number; items?: Record<string, string | null>[] }
+    const deadline = Date.now() + timeoutMs
+    let value: { ok?: boolean; pending?: boolean; error?: string; count?: number; items?: Record<string, string | null>[] }
+    do {
+      const { sliceMs, last } = pagePollSlice(deadline)
+      const result = await withTimeout(
+        handleSendEvaluate(tab.handle, script(sliceMs, last)),
+        Math.max(sliceMs, deadline - Date.now()) + TARGET_SCRIPT_GRACE_MS,
+        signal,
+        `browser: scrape timed out after ${timeoutMs}ms`,
+        timedOut => { this.interrupt(tab.handle, timedOut) },
+      )
+      if (!result.ok) throw new BrowserError(`browser: scrape evaluation failed: ${result.exception}`, 'BROWSER_SCRAPE_FAILED')
+      value = result.value as typeof value
+    } while (value?.pending === true)
     if (value.ok !== true) throw new BrowserError(`browser: scrape failed: ${value.error ?? 'unknown'}`, 'BROWSER_SCRAPE_FAILED')
     const items = value.items ?? []
     this.record(s, 'scrape', { item: request.item, fields: request.fields.map(f => f.name) }, true, { result: `${items.length} items` })

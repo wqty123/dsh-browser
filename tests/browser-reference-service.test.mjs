@@ -577,3 +577,34 @@ test('an asset sidecar is a complete JSON file and leaves no temporary file behi
   assert.equal(leftovers.length, 0,
     'the temporary file is renamed away, not left beside the sidecar')
 })
+
+test('a frozen Web capture fetches its images through the web host, never a browser session', async t => {
+  const { host, assets, directory } = fixture(t)
+  const fetched = []
+  let fail = false
+  host.fetchWebImage = async (url, savePath, web) => {
+    fetched.push([url, web.dshHost])
+    if (fail) throw new Error('guest resource answered 404')
+    writeFileSync(savePath, PNG)
+  }
+  host.download = async () => { throw new Error('browser: session "owner" is not open') }
+  host.evaluate = async () => { throw new Error('browser: session "owner" is not open') }
+  const service = new BrowserReferenceService(host, new ReferenceStore(join(directory, 'web.jsonl')), { assetDir: assets, webSources: { owns: () => true } })
+  const frozenCapture = { ok: true, url: 'https://en.wikipedia.org/wiki/Earth', title: 'Earth', events: [
+    { kind: 'text', exact: 'Earth is the third planet', prefix: '', suffix: '' },
+    { kind: 'image', src: 'https://upload.example/earth.png', currentSrc: 'https://upload.example/earth.png', alt: 'Earth' },
+    { kind: 'table', table: { rowCount: 1, columnCount: 1, completeness: 'selected-cells', cells: [{ row: 0, column: 0, text: 'flag',
+      inlineContent: [{ type: 'image', src: 'https://upload.example/flag.png', currentSrc: 'https://upload.example/flag.png' }] }] } },
+  ] }
+  const outcome = await service.capture({ sessionId: 'owner', sourcePageId: 'iframe:a', dshHost: 'dsh.example:3180', frozenCapture })
+  assert.ok(outcome.reference, JSON.stringify(outcome.failures))
+  assert.deepEqual(outcome.failures, [])
+  assert.deepEqual(fetched, [['https://upload.example/earth.png', 'dsh.example:3180'], ['https://upload.example/flag.png', 'dsh.example:3180']])
+  const images = outcome.reference.parts.filter(part => part.type === 'image')
+  assert.equal(images.length, 2)
+  assert.ok(images.every(part => part.representation === 'source-image'))
+  fail = true
+  const failed = await service.capture({ sessionId: 'owner', sourcePageId: 'iframe:a', frozenCapture: { ...frozenCapture, events: frozenCapture.events.slice(0, 2) } })
+  assert.equal(failed.reference, undefined)
+  assert.deepEqual(failed.failures.map(failure => [failure.reason, failure.detail?.web]), [['image-unavailable', 'guest resource answered 404']])
+})

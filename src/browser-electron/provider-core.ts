@@ -698,6 +698,23 @@ export function defaultDownloadDir(): string {
  */
 export const TARGET_SCRIPT_GRACE_MS = 2_000
 
+/**
+ * Longest a single in-page wait may hold one `Runtime.evaluate` open. The desktop sidebar's bridge
+ * gives every CDP command 15 s and then refuses the guest for good, because a renderer command cannot
+ * be cancelled; a locate or scrape that polled its whole caller budget inside one evaluate (15 s on
+ * Baidu) crossed that limit while the page was healthy. Longer budgets are polled in slices instead.
+ */
+export const PAGE_POLL_SLICE_MS = 3_000
+
+/**
+ * The next in-page poll slice before `deadline`: `last` when it reaches the deadline, so only that
+ * slice reports a miss and earlier ones answer `{ pending: true }` for the caller to poll again.
+ */
+export function pagePollSlice(deadline: number): { readonly sliceMs: number; readonly last: boolean } {
+  const remaining = Math.max(0, deadline - Date.now())
+  return remaining <= PAGE_POLL_SLICE_MS ? { sliceMs: remaining, last: true } : { sliceMs: PAGE_POLL_SLICE_MS, last: false }
+}
+
 /** Abortable sleep used by the settle loop. */
 export function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {

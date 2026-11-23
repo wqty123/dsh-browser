@@ -7,7 +7,9 @@ import { GUEST_ROUTE, RELAXED_BROWSER_SANDBOX, WEB_BROWSER_SANDBOX } from '../..
  * @module dsh-builtin-browser/browser-electron/guest-route
  */
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
-import { promises as dns } from 'node:dns'
+import { promises as dns, type LookupAddress } from 'node:dns'
+import { Agent } from 'undici'
+import { networkInterfaces } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { guestRuntimeScript } from './guest-runtime.ts'
 import { blockRetryDelayMs, classifyBlock } from '../browser/anti-bot.ts'
@@ -41,6 +43,54 @@ function isSelfTarget(url: URL): boolean {
 }
 
 export { GUEST_ROUTE }
+
+function blockedTarget(url: URL, host: string): boolean {
+  return !/^https?:$/u.test(url.protocol) || url.username !== '' || url.password !== ''
+    || isSelfTarget(url) || url.hostname.toLowerCase().replace(/\.$/u, '') === host
+}
+
+async function lookupAll(hostname: string): Promise<LookupAddress[]> {
+  return await dns.lookup(hostname.replace(/^\[|\]$/gu, ''), { all: true })
+}
+
+async function addressesFor(hostname: string): Promise<string[]> {
+  return (await lookupAll(hostname)).map(record => record.address)
+}
+
+async function vettedAddress(url: URL, host: string, ownAddresses: readonly string[]): Promise<LookupAddress[] | undefined> {
+  if (blockedTarget(url, host)) return undefined
+  const records = await lookupAll(url.hostname)
+  const hostUrl = host === '' ? undefined : new URL('http://' + host)
+  const hostAddresses = hostUrl === undefined || isSelfTarget(hostUrl) ? [] : await addressesFor(host).catch(() => [])
+  const unsafe = records.length === 0 || records.some(({ address }) => {
+    const literal = new URL('http://' + (address.includes(':') ? '[' + address + ']' : address))
+    return isSelfTarget(literal) || hostAddresses.includes(address) || ownAddresses.includes(address)
+  })
+  return unsafe ? undefined : records
+}
+
+async function blockedResolvedTarget(url: URL, host: string, ownAddresses: readonly string[]): Promise<boolean> {
+  return await vettedAddress(url, host, ownAddresses) === undefined
+}
+
+/** Connect to the address that was vetted, so a second DNS answer (rebinding) never picks the peer. */
+async function fetchVetted(url: URL, init: RequestInit, host: string, ownAddresses: readonly string[]): Promise<Response> {
+  const addresses = await vettedAddress(url, host, ownAddresses)
+  if (addresses === undefined) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
+  const dispatcher = new Agent({
+    connect: {
+      lookup: (_hostname: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
+        if (options.all === true) callback(null, addresses)
+        else callback(null, addresses[0]?.address, addresses[0]?.family)
+      },
+    } as never,
+  })
+  try {
+    return await fetch(url, { ...init, dispatcher } as RequestInit)
+  } finally {
+    void dispatcher.close()
+  }
+}
 
 class UnsafeGuestTargetError extends Error {}
 
@@ -295,26 +345,11 @@ export async function handleGuest(
   }
   let host = ''
   try { host = new URL('http://' + (request.headers.host ?? '')).hostname.toLowerCase().replace(/\.$/u, '') } catch {}
-  const blocked = (url: URL): boolean => {
-    return !/^https?:$/u.test(url.protocol) || url.username !== '' || url.password !== ''
-      || isSelfTarget(url) || url.hostname.toLowerCase().replace(/\.$/u, '') === host
-  }
-  const addressesFor = async (hostname: string): Promise<string[]> =>
-    (await dns.lookup(hostname.replace(/^\[|\]$/gu, ''), { all: true })).map(record => record.address)
-  const blockedResolved = async (url: URL): Promise<boolean> => {
-    if (blocked(url)) return true
-    const addresses = await addressesFor(url.hostname)
-    const hostUrl = host === '' ? undefined : new URL('http://' + host)
-    const hostAddresses = hostUrl === undefined || isSelfTarget(hostUrl) ? [] : await addressesFor(host).catch(() => [])
-    return addresses.length === 0 || addresses.some(address => {
-      const literal = new URL('http://' + (address.includes(':') ? '[' + address + ']' : address))
-      return isSelfTarget(literal) || hostAddresses.includes(address) || address === request.socket.localAddress
-    })
-  }
-  const fetchTarget = async (url: URL, options: RequestInit): Promise<Response> => {
-    if (await blockedResolved(url)) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
-    return fetch(url, options)
-  }
+  const blocked = (url: URL): boolean => blockedTarget(url, host)
+  const blockedResolved = (url: URL): Promise<boolean> =>
+    blockedResolvedTarget(url, host, request.socket.localAddress === undefined ? [] : [request.socket.localAddress])
+  const fetchTarget = (url: URL, options: RequestInit): Promise<Response> =>
+    fetchVetted(url, options, host, request.socket.localAddress === undefined ? [] : [request.socket.localAddress])
   if (blocked(target)) {
     writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
     response.end('guest proxy: local and DSH host targets are not allowed')
@@ -568,4 +603,67 @@ export async function handleGuest(
   } catch (error) {
     failUpstream('response', error)
   }
+}
+
+function realGuestUrl(raw: string): URL {
+  const parsed = new URL(raw, 'http://guest.invalid')
+  const inner = parsed.pathname === GUEST_ROUTE ? guestTarget(parsed.pathname + parsed.search) : undefined
+  if (inner !== undefined) return inner
+  if (parsed.origin === 'http://guest.invalid') throw new UnsafeGuestTargetError('a guest resource URL must be absolute')
+  return parsed
+}
+
+/**
+ * Fetch one resource a guest page loaded, on the server and under the proxy's own target rules.
+ * The Web sidebar's guest is an iframe with no browser session, so this is the only way a frozen
+ * quote can get an image's bytes. It sends what the proxy sent when the page loaded the image:
+ * guest documents are no-referrer, so no referer and the cookie jar's unscoped cookies, and it
+ * keeps the cookies each redirect hop sets.
+ */
+export async function fetchGuestResource(raw: string, options: {
+  readonly dshHost?: string
+  readonly maxBytes: number
+  readonly signal?: AbortSignal
+  readonly cookies?: GuestCookieJar
+}): Promise<Buffer> {
+  const own = Object.values(networkInterfaces()).flatMap(list => (list ?? []).map(entry => entry.address))
+  let host = ''
+  try { host = options.dshHost === undefined ? '' : new URL('http://' + options.dshHost).hostname.toLowerCase().replace(/[.]$/u, '') } catch {}
+  let url = realGuestUrl(raw)
+  let jar: GuestCookieJar | undefined
+  try { jar = options.cookies ?? localGuestCookies() } catch { jar = undefined }
+  for (let hop = 0; hop <= 5; hop++) {
+    const headers = new Headers({
+      'user-agent': DESKTOP_UA, accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8', 'accept-encoding': 'identity',
+    })
+    const cookie = jar?.getCookieHeader(url)
+    if (cookie !== undefined && cookie !== '') headers.set('cookie', cookie)
+    const response = await fetchVetted(url, { headers, redirect: 'manual', ...options.signal === undefined ? {} : { signal: options.signal } }, host, own)
+    jar?.setCookies(url, response.headers.getSetCookie?.() ?? [])
+    const location = response.headers.get('location')
+    if (response.status >= 300 && response.status < 400 && location !== null) {
+      await response.body?.cancel()
+      url = new URL(location, url)
+      continue
+    }
+    if (!response.ok) {
+      await response.body?.cancel()
+      throw new Error('guest resource answered ' + response.status)
+    }
+    const chunks: Uint8Array[] = []
+    let size = 0
+    const reader = response.body?.getReader()
+    while (reader !== undefined) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > options.maxBytes) {
+        await reader.cancel()
+        throw new Error('guest resource exceeds ' + options.maxBytes + ' bytes')
+      }
+      chunks.push(value)
+    }
+    return Buffer.concat(chunks)
+  }
+  throw new Error('guest resource redirected too many times')
 }

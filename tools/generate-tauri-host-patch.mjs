@@ -9,17 +9,26 @@ import { fileURLToPath } from 'node:url'
 const root = new URL('../', import.meta.url)
 const output = fileURLToPath(new URL('dsh-host-patch/tauri.json', root))
 const releases = ['0.33.0']
-const marker = '/* dsh-host-patch: tauri sidebar session r1 */'
+const marker = '/* dsh-host-patch: tauri sidebar session r2 */'
+
+function embedded(name) {
+  const source = readFileSync(new URL(`dsh-host-patch/tauri/${name}`, root), 'utf8')
+  const start = source.indexOf('module.exports = ')
+  if (start < 0) throw new Error(`${name} must assign module.exports`)
+  return source.slice(start + 'module.exports = '.length).trim()
+}
 
 export function tauriSidebarSessionSource() {
-  const source = readFileSync(new URL('dsh-host-patch/tauri/sidebar-session.cjs', root), 'utf8')
-  const start = source.indexOf('module.exports = ')
-  if (start < 0) throw new Error('sidebar-session.cjs must assign module.exports')
-  return source.slice(start + 'module.exports = '.length).trim()
+  return embedded('sidebar-session.cjs')
+}
+
+export function tauriDesktopMainSource() {
+  return embedded('desktop-main.cjs')
 }
 
 export function tauriHostPatchSpec() {
   const session = tauriSidebarSessionSource()
+  const main = tauriDesktopMainSource()
   const targets = releases.map(release => {
     const pristine = readFileSync(new URL(`tests/fixtures/dsh-host-patch/tauri-${release}/browser.cjs`, root), 'utf8')
     return {
@@ -31,7 +40,11 @@ export function tauriHostPatchSpec() {
       edits: [
         {
           before: 'let t=require("electron"),n=require("node:crypto");',
-          after: `let t=require("electron"),n=require("node:crypto");${marker}const dshSidebarSession=(${session})({app:t.app,createHash:n.createHash,fs:require("node:fs"),path:require("node:path")});`,
+          after: `let t=require("electron"),n=require("node:crypto");${marker}const dshSidebarSession=(${session})({app:t.app,createHash:n.createHash,fs:require("node:fs"),path:require("node:path")});const dshDesktopMain=(${main})({app:t.app,webContents:t.webContents,fs:require("node:fs"),path:require("node:path"),os:require("node:os"),url:require("node:url"),importEntry:e=>import(e)});`,
+        },
+        {
+          before: 'bind(n){let r=n.trustedOrigin;if(r===`null`)throw Error(`browser guest: host requires a document origin`);',
+          after: 'bind(n){let r=n.trustedOrigin;if(r===`null`)throw Error(`browser guest: host requires a document origin`);dshDesktopMain.host(n.contents);',
         },
         {
           before: 'acquire(e,r){if(this.owner(e),',
@@ -52,7 +65,7 @@ export function tauriHostPatchSpec() {
       ],
     }
   })
-  return { host: 'electron-rs', identifiers: ['dsh-tauri'], version: 'tauri', revision: 1, targets }
+  return { host: 'electron-rs', identifiers: ['dsh-tauri'], version: 'tauri', revision: 2, targets }
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

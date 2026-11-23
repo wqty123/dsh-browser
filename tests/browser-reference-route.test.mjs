@@ -145,6 +145,29 @@ test('frozen page-overlay captures belong to the sidebar, not the selected exter
   assert.equal(captures.at(-1).carrier, 'edge')
 })
 
+test('a frozen capture over 64 KiB with inlined images is accepted, and only an oversized body is refused', async () => {
+  const captures = []
+  const handlers = createReferenceRouteHandlers({
+    service: service({ capture: async input => { captures.push(input); return { reference, failures: [] } } }),
+  })
+  const image = 'data:image/png;base64,' + 'A'.repeat(300 * 1024)
+  const capture = { ok: true, title: '数独', events: [{ type: 'text', text: '标题与首段' }, { type: 'image', src: image }] }
+  const body = JSON.stringify({ sessionId: 'owner', entry: 'page-overlay', capture })
+  assert.ok(Buffer.byteLength(body) > 64 * 1024)
+  const reply = response()
+  await handlers.capture(request({ method: 'POST', headers: SAME_ORIGIN, body }), reply)
+  assert.equal(reply.state.status, 200)
+  assert.equal(captures.at(-1).frozenCapture.events[1].src, image, 'the image reaches the service whole')
+
+  const oversized = response()
+  await handlers.capture(request({ method: 'POST', headers: SAME_ORIGIN, body: JSON.stringify({
+    sessionId: 'owner', entry: 'page-overlay', capture: { ok: true, events: [{ type: 'text', text: 'x'.repeat(13 * 1024 * 1024) }] },
+  }) }), oversized)
+  assert.equal(oversized.state.status, 400)
+  assert.match(oversized.state.payload.error, /exceeds/u)
+  assert.equal(captures.length, 1)
+})
+
 test('a committed capture answers with the summary and any partial failures', async () => {
   const handlers = createReferenceRouteHandlers({
     service: service({ capture: async () => ({ reference, failures: [{ kind: 'image', reason: 'image-unavailable' }] }) }),
