@@ -60,7 +60,7 @@ const SIGNATURES: readonly Signature[] = [
   { kind: 'turnstile', recovery: 'takeover', reason: 'Cloudflare Turnstile verification', widget: 'turnstile', frames: 'challenges\\.cloudflare\\.com/cdn-cgi/challenge-platform/.*turnstile' },
   { kind: 'perimeterx', recovery: 'takeover', reason: 'PerimeterX "Press & Hold" verification', text: 'press (?:&|and) hold|px-captcha', widget: 'perimeterx' },
   { kind: 'datadome', recovery: 'takeover', reason: 'DataDome verification', frames: 'captcha-delivery\\.com|geo\\.captcha-delivery' },
-  { kind: 'slider', recovery: 'takeover', reason: 'Slider / puzzle verification', text: '\u6ed1\u52a8|\u62d6\u52a8.{0,12}(?:\u6ed1\u5757|\u5b8c\u6210)|slide to verify|drag the slider|geetest', widget: 'slider' },
+  { kind: 'slider', recovery: 'takeover', reason: 'Slider / puzzle verification', text: '\u6ed1\u52a8.{0,8}(?:\u9a8c\u8bc1|\u6ed1\u5757|\u62fc\u56fe)|\u62d6\u52a8.{0,12}(?:\u6ed1\u5757|\u62fc\u56fe)|slide to verify|drag the slider|geetest', widget: 'slider' },
   { kind: 'google-sorry', recovery: 'environment', reason: 'Google "unusual traffic from your computer network" block', text: 'unusual traffic from your computer network|our systems have detected unusual traffic' },
   { kind: 'ip-block', recovery: 'environment', reason: 'The site refuses this network (IP / hosting provider block)', text: 'your ip(?: address)? (?:has been|is|was) (?:blocked|banned|blacklisted)|requests from your (?:ip|network) |datacenter|data center ip|hosting provider|vpn or proxy', errorOnly: true },
   { kind: 'cloudflare', recovery: 'wait', reason: 'Cloudflare "Just a moment" interstitial', widget: 'cloudflare', text: 'just a moment\\.\\.\\.|checking your browser|checking if the site connection is secure|cf-browser-verification|cf_chl_|cf-chl-' },
@@ -175,6 +175,10 @@ export interface FallbackRoute {
 
 const enc = encodeURIComponent
 
+function safeDecode(text: string): string {
+  try { return decodeURIComponent(text) } catch { return text }
+}
+
 /**
  * Public, documented endpoints of well-known sites that serve the same content without a browser.
  * @param url - the blocked page.
@@ -217,13 +221,16 @@ export function fallbackRoutes(target: string): FallbackRoute[] {
   let url: URL
   try { url = new URL(target) } catch { return [] }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return []
-  const bare = url.href.replace(/^https?:\/\//u, '')
-  const terms = `${url.hostname} ${decodeURIComponent(url.pathname).replace(/[/_-]+/gu, ' ').trim()}`.trim()
+  // Third parties get the page's address only: a query, fragment or userinfo can carry a session
+  // token or a signature, and these routes are fetched from other services.
+  const page = `${url.protocol}//${url.host}${url.pathname}`
+  const bare = page.replace(/^https?:\/\//u, '')
+  const terms = `${url.hostname} ${safeDecode(url.pathname).replace(/[/_-]+/gu, ' ').trim()}`.trim()
   return [
     ...siteApis(url),
     { kind: 'search', url: `https://www.bing.com/search?q=${enc(terms)}`, note: 'Bing results: snippets and other copies of the page' },
     { kind: 'search', url: `https://duckduckgo.com/html/?q=${enc(terms)}`, note: 'DuckDuckGo HTML results' },
-    { kind: 'archive', url: `https://web.archive.org/web/2/${url.href}`, note: 'Wayback Machine: latest archived copy' },
+    { kind: 'archive', url: `https://web.archive.org/web/2/${page}`, note: 'Wayback Machine: latest archived copy' },
     { kind: 'archive', url: `https://archive.ph/newest/${bare}`, note: 'archive.today: latest snapshot' },
   ]
 }

@@ -40,6 +40,7 @@ test('ordinary pages are not blocks, even when they mention the words', () => {
   assert.equal(classifyBlock({ status: 200, title: 'Docs', text: 'If you see "Access denied", check your token. Our CDN is forbidden from caching this.' }).blocked, false)
   assert.equal(classifyBlock({ status: 200, title: 'Sign in', text: 'Email Password Sign in', frames: 'https://www.google.com/recaptcha/api2/anchor?size=invisible' }).blocked, false)
   assert.equal(classifyBlock({ status: 404, text: 'Not found. '.repeat(10) }).blocked, false)
+  assert.equal(classifyBlock({ status: 200, title: '商品', text: '左右滑动查看更多商品，拖动图片调整顺序' }).blocked, false)
   assert.equal(classifyBlock({ status: 403, text: 'Members only. '.repeat(60) }).blocked, false)
 })
 
@@ -60,7 +61,12 @@ test('fallback routes: the site API first, then search, then archives', () => {
   assert.equal(fallbackRoutes('https://pypi.org/project/requests/')[0].url, 'https://pypi.org/pypi/requests/json')
   const plain = fallbackRoutes('https://shop.example/item/42?ref=x')
   assert.deepEqual(plain.map(route => route.kind), ['search', 'search', 'archive', 'archive'])
-  assert.equal(plain[2].url, 'https://web.archive.org/web/2/https://shop.example/item/42?ref=x')
+  assert.equal(plain[2].url, 'https://web.archive.org/web/2/https://shop.example/item/42')
+  // A query, fragment or userinfo can carry a token; third-party routes get the address only.
+  const signed = fallbackRoutes('https://user:pw@files.example/doc.pdf?X-Amz-Signature=secret&token=t#k')
+  assert.ok(signed.every(route => !/secret|token=|pw@|#k/u.test(route.url)), JSON.stringify(signed))
+  // A literal percent sign is a valid path but not valid percent-encoding: still a report, not a throw.
+  assert.match(fallbackRoutes('https://shop.example/discount/50%off')[0].url, /bing\.com.*50%25off/u)
   assert.deepEqual(fallbackRoutes('about:blank'), [])
   assert.deepEqual(fallbackRoutes('not a url'), [])
 })
