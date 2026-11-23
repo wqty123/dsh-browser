@@ -852,3 +852,23 @@ test('a server-side guest resource fetch keeps the proxy target rules', async ()
     await assert.rejects(fetchGuestResource(url, { maxBytes: 1024 }), /not allowed|must be absolute/u, url)
   }
 })
+
+test('a target named like the DSH Host header is blocked by name, with or without a trailing dot', async () => {
+  const options = { headers: { host: 'client-only.example:3102', 'x-dsh-guest-sub': '1' } }
+  const count = forwarded.length
+  for (const target of ['https://client-only.example/a.png', 'https://CLIENT-ONLY.example./a.png']) {
+    assert.equal((await call(guestPath(target), options)).status, 403, target)
+  }
+  assert.equal(forwarded.length, count)
+})
+
+test('a bracketed IPv6 image URL is looked up unbracketed and loopback is refused as unsafe', async () => {
+  await assert.rejects(fetchGuestResource('http://[::1]/a.png', { maxBytes: 1024 }), /not allowed/u)
+  const mocked = dns.lookup
+  const names = []
+  dns.lookup = async (hostname, options) => { names.push(hostname); return [{ address: '::1', family: 6 }] }
+  try {
+    await assert.rejects(fetchGuestResource('http://[2606:4700::1]/a.png', { maxBytes: 1024 }), /not allowed/u)
+  } finally { dns.lookup = mocked }
+  assert.deepEqual(names, ['2606:4700::1'])
+})

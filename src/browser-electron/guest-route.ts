@@ -45,11 +45,11 @@ export { GUEST_ROUTE }
 
 function blockedTarget(url: URL, host: string): boolean {
   return !/^https?:$/u.test(url.protocol) || url.username !== '' || url.password !== ''
-    || isSelfTarget(url) || url.hostname.toLowerCase().replace(/.$/u, '') === host
+    || isSelfTarget(url) || url.hostname.toLowerCase().replace(/\.$/u, '') === host
 }
 
 async function addressesFor(hostname: string): Promise<string[]> {
-  return (await dns.lookup(hostname.replace(/^[|]$/gu, ''), { all: true })).map(record => record.address)
+  return (await dns.lookup(hostname.replace(/^\[|\]$/gu, ''), { all: true })).map(record => record.address)
 }
 
 async function blockedResolvedTarget(url: URL, host: string, ownAddresses: readonly string[]): Promise<boolean> {
