@@ -48,8 +48,9 @@ module.exports = ({ app, createHash, fs, path }) => {
     storageCommit.set(target, setTimeout(() => flushStorage(target), 300))
   }
   app.on('web-contents-created', (_event, contents) => {
-    if (!states.has(contents.session)) return
-    const commit = () => commitSoon(contents.session)
+    const target = contents.session
+    if (!states.has(target)) return
+    const commit = () => commitSoon(target)
     contents.on('input-event', (_input, input) => { if (input.type === 'mouseUp' || input.type === 'keyUp') commit() })
     for (const event of ['did-finish-load', 'did-navigate-in-page', 'destroyed']) contents.on(event, commit)
   })
