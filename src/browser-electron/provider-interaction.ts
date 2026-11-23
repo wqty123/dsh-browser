@@ -545,6 +545,7 @@ export abstract class ProviderInteraction extends ProviderObservation {
           } else if (type === 'radio') {
             const wanted = String(spec.value)
             const radio = [...(el.getRootNode().querySelectorAll ? el.getRootNode() : document).querySelectorAll('input[type="radio"][name=' + JSON.stringify(el.name || '') + ']')]
+              .filter(r => r.form === el.form)
               .find(r => r.value === wanted || (r === el && (spec.value === true || spec.value === 'true')))
             if (!radio) { out.push({ ok: false, error: 'radio option not found: ' + wanted, target: describe(spec) }); continue }
             if (!radio.checked) radio.click()
