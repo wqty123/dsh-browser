@@ -8,15 +8,17 @@ export interface ForegroundEvent {
   /** That window's top-left corner, in DIPs like CDP window bounds. */
   readonly left?: number
   readonly top?: number
+  /** The browser took the foreground off every display with no input from the person, and the watcher gave it back. */
+  readonly yielded?: boolean
 }
 export interface ForegroundWatch { stop(): void }
 /** `onFail` runs at most once, when the watcher cannot start or dies; `stop()` never triggers it. */
-export type ForegroundWatcher = (onChange: (event: ForegroundEvent) => void, onFail: (reason: string) => void) => ForegroundWatch | undefined
+export type ForegroundWatcher = (onChange: (event: ForegroundEvent) => void, onFail: (reason: string) => void, browserPid?: number) => ForegroundWatch | undefined
 
-const POLL_MS = 500
+const POLL_MS = 50
 
-const script = (parent: number): string => [
-  `$parent = ${parent}`,
+const script = (parent: number, browserPid: number): string => [
+  `$parent = ${parent}; $browser = ${browserPid}`,
   'try {',
   'Add-Type -AssemblyName System.Windows.Forms, System.Drawing',
   'Add-Type -TypeDefinition @"',
@@ -30,16 +32,22 @@ const script = (parent: number): string => [
   '  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);',
   '  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c);',
   '  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();',
+  '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);',
+  '  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
+  '  [StructLayout(LayoutKind.Sequential)] public struct InputInfo { public uint Size, Time; }',
+  '  [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref InputInfo i);',
+  '  public static uint LastInput() { var i = new InputInfo(); i.Size = 8; GetLastInputInfo(ref i); return i.Time; }',
   '}',
   '"@',
   '} catch { exit 3 }',
   // Physical pixels from GetWindowRect, so dividing by the window DPI gives DIPs at any scaling.
   'if (-not [DshForeground]::SetProcessDpiAwarenessContext([IntPtr](-4))) { [void][DshForeground]::SetProcessDPIAware() }',
-  '$last = ""; $tick = 0',
+  '$last = ""; $tick = 0; $input = [DshForeground]::LastInput(); $prev = [IntPtr]::Zero; $prevPid = [uint32]0',
   'try { while ($true) {',
-  '  $tick++; if ($tick % 8 -eq 0 -and -not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { exit }',
+  '  $tick++; if ($tick % 80 -eq 0 -and -not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { exit }',
   '  $h = [DshForeground]::GetForegroundWindow(); $p = [uint32]0',
-  '  [void][DshForeground]::GetWindowThreadProcessId($h, [ref]$p)',
+  '  $thread = [DshForeground]::GetWindowThreadProcessId($h, [ref]$p)',
   '  $r = New-Object DshForeground+Rect; [void][DshForeground]::GetWindowRect($h, [ref]$r)',
   '  $box = New-Object System.Drawing.Rectangle($r.Left, $r.Top, ($r.Right - $r.Left), ($r.Bottom - $r.Top))',
   '  $off = 1',
@@ -47,30 +55,39 @@ const script = (parent: number): string => [
   '  foreach ($s in [System.Windows.Forms.Screen]::AllScreens) { if ($s.Bounds.IntersectsWith($box)) { $off = 0 } }',
   '  $dpi = [DshForeground]::GetDpiForWindow($h); if ($dpi -le 0) { $dpi = 96 }',
   '  $line = "$p $off $([math]::Round($r.Left * 96 / $dpi)) $([math]::Round($r.Top * 96 / $dpi))"',
+  // Chrome activates its own window for a tab a click opens; with no input since the last poll, no person did it.
+  '  $now = [DshForeground]::LastInput()',
+  '  if ($p -eq $browser -and $off -eq 1 -and $now -eq $input -and $prevPid -ne $browser -and $prev -ne [IntPtr]::Zero) {',
+  '    $me = [DshForeground]::GetCurrentThreadId(); [void][DshForeground]::AttachThreadInput($me, $thread, $true)',
+  '    if ([DshForeground]::SetForegroundWindow($prev)) { $line = "$line 1" }',
+  '    [void][DshForeground]::AttachThreadInput($me, $thread, $false)',
+  '  }',
+  '  $prev = $h; $prevPid = $p; $input = $now',
   '  if ($line -ne $last) { [Console]::Out.WriteLine($line); [Console]::Out.Flush(); $last = $line }',
   `  Start-Sleep -Milliseconds ${POLL_MS}`,
   '} } catch { exit 4 }',
 ].join('\n')
 
-/** One line of the watcher's output, `<pid> <0|1> [<left> <top>]`. */
+/** One line of the watcher's output, `<pid> <0|1> [<left> <top> [1]]`, the last `1` when it gave the foreground back. */
 export function parseForegroundLine(line: string): ForegroundEvent | undefined {
-  const match = /^(\d+) ([01])(?: (-?\d+) (-?\d+))?$/u.exec(line.trim())
+  const match = /^(\d+) ([01])(?: (-?\d+) (-?\d+)( 1)?)?$/u.exec(line.trim())
   if (match === null) return undefined
   const event = { pid: Number(match[1]), offscreen: match[2] === '1' }
-  return match[3] === undefined ? event : { ...event, left: Number(match[3]), top: Number(match[4]) }
+  if (match[3] === undefined) return event
+  return { ...event, left: Number(match[3]), top: Number(match[4]), ...match[5] === undefined ? {} : { yielded: true } }
 }
 
 /**
  * Report the foreground window's process, and whether that window is off every display, each time
- * either changes. Windows only: CDP cannot tell a person activating a window from an agent's click,
- * which focuses the page without the window. The watcher exits with this process.
+ * either changes. Windows only: CDP cannot tell a person activating a window from Chrome activating
+ * it for a tab an agent's click opened, but only the person's leaves input. The watcher exits with this process.
  */
-export const watchForeground: ForegroundWatcher = (onChange, onFail) => {
+export const watchForeground: ForegroundWatcher = (onChange, onFail, browserPid = 0) => {
   if (process.platform !== 'win32') return undefined
   let child
   try {
     child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
-      Buffer.from(script(process.pid), 'utf16le').toString('base64')], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+      Buffer.from(script(process.pid, browserPid), 'utf16le').toString('base64')], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
   } catch (error) {
     onFail(String(error))
     return undefined

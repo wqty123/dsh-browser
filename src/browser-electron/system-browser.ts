@@ -1682,9 +1682,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private quietWatched(): boolean { return this.quietParked.size > 0 || this.quietFront !== undefined }
 
   /**
-   * Agent actions never make Chrome the foreground window (a CDP click focuses the page, not the
-   * window), so our Chrome in the foreground off every display means a person activated the parked
-   * window from the taskbar or Alt-Tab. Asked of the OS, it works with no view attached (after a reset).
+   * A CDP click focuses the page, not the window, but Chrome activates its window for a tab the click
+   * opens; the watcher gives that foreground back. Our Chrome in the foreground off every display
+   * otherwise means a person activated the parked window from the taskbar or Alt-Tab. Asked of the OS,
+   * it works with no view attached (after a reset).
    */
   private watchQuietFocus(client: CdpClient): void {
     if (this.foreground !== undefined || this.foregroundStarting) return
@@ -1701,7 +1702,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
           }
           if (this.foreground === watch) this.foreground = undefined
           this.sendQuietFront()
-        })
+        }, pid)
         this.foreground = watch
         if (watch === undefined) this.sendQuietFront()
       } catch {
@@ -1714,6 +1715,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   private async onForeground(client: CdpClient, event: ForegroundEvent): Promise<void> {
+    if (event.yielded === true) return
     if (event.offscreen) {
       for (const windowId of [...this.quietParked]) {
         this.quietParked.delete(windowId)

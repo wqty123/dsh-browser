@@ -267,9 +267,10 @@ test('a takeover reveals the parked window without bringing a visible page to th
 })
 
 const fakeWatch = (options = {}) => {
-  const w = { emit: undefined, fail: undefined, started: 0, stopped: 0 }
-  w.watch = (onChange, onFail) => {
+  const w = { emit: undefined, fail: undefined, started: 0, stopped: 0, browserPid: undefined }
+  w.watch = (onChange, onFail, browserPid) => {
     w.started++
+    w.browserPid = browserPid
     w.emit = onChange
     w.fail = onFail
     if (options.unavailable) { onFail('powershell.exe not found'); return undefined }
@@ -314,6 +315,20 @@ test('a taskbar activation of the parked window brings it on-screen, also after 
     assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false)
     assert.equal(w.stopped, 1)
   }
+})
+
+test('a parked window Chrome activated itself for a tab the agent opened stays parked; the next person activation reveals it', async t => {
+  const w = fakeWatch()
+  const { browser } = await quietHost(t, true, { ...parkedBrowser(), watch: w.watch })
+  await until(() => w.emit !== undefined)
+  assert.equal(w.browserPid, 4242, 'the watcher hands the foreground back only from our browser')
+  w.emit({ pid: 4242, offscreen: true, left: 30000, top: 0, yielded: true })
+  await settle()
+  assert.deepEqual(moves(browser), [])
+  assert.equal(w.stopped, 0, 'still waiting for the person')
+  w.emit({ pid: 4242, offscreen: true, left: 30000, top: 0 })
+  await until(() => moves(browser).length > 0)
+  assert.deepEqual(moves(browser)[0], { windowId: 7, bounds: { left: 40, top: 40 } })
 })
 
 test('an agent click on the parked page never moves it: page focus is not window focus', async t => {
@@ -398,6 +413,7 @@ test('a taskbar activation fits the revealed window to the display when a page i
 
 test('the watcher output carries the window corner when it has one', () => {
   assert.deepEqual(parseForegroundLine('4242 0 -8 33'), { pid: 4242, offscreen: false, left: -8, top: 33 })
+  assert.deepEqual(parseForegroundLine('4242 1 30000 0 1'), { pid: 4242, offscreen: true, left: 30000, top: 0, yielded: true })
 })
 
 test('the watcher output is parsed line by line', () => {
