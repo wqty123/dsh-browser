@@ -27,9 +27,10 @@
  */
 
 import type { BrowserPageOperationRequest, BrowserProbeMethod } from '../browser/types.ts'
+import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
 
 /** Bumped when the probe's shape changes; an older probe is replaced rather than trusted. */
-export const PROBE_VERSION = 5
+export const PROBE_VERSION = 6
 
 /** Where the probe keeps itself, and the only global it adds. */
 const PROBE_KEY = '__dshProbe'
@@ -40,7 +41,18 @@ const PROBE_KEY = '__dshProbe'
  * Written as a string because it runs in the page, not here. Keep it dependency-free and ES5-safe:
  * a page may be older than the harness.
  */
-export const PROBE_INSTALL_SCRIPT = `(() => {
+export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
+  const frameOffset = (node) => {
+    let x = 0, y = 0
+    let doc = node && node.ownerDocument
+    while (doc && doc.defaultView && doc.defaultView.frameElement) {
+      const r = doc.defaultView.frameElement.getBoundingClientRect()
+      x += r.left
+      y += r.top
+      doc = doc.defaultView.frameElement.ownerDocument
+    }
+    return { x: x, y: y }
+  }
   const KEY = ${JSON.stringify(PROBE_KEY)}
   const VERSION = ${PROBE_VERSION}
   const previous = globalThis[KEY]
@@ -181,11 +193,11 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
     if (!target) return null
     let node = null
     try {
-      if (target.css) node = document.querySelector(String(target.css))
+      if (target.css) node = __dshQuery(String(target.css))
       else if (target.xpath) node = document.evaluate(String(target.xpath), document, null, 9, null).singleNodeValue
       else if (target.text) {
         const wanted = String(target.text).trim().toLowerCase()
-        const nodes = document.querySelectorAll('button, a, [role=button], input, label, [role=tab], [role=option], [role=link]')
+        const nodes = __dshQueryAll('button, a, [role=button], input, label, [role=tab], [role=option], [role=link]')
         for (let i = 0; i < nodes.length; i += 1) {
           const value = ((nodes[i].innerText || nodes[i].getAttribute('aria-label') || nodes[i].value || '') + '').trim().toLowerCase()
           if (value && value.indexOf(wanted) !== -1) { node = nodes[i]; break }
@@ -195,7 +207,8 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
     if (!node) return null
     if (scroll === true && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
     const rect = node.getBoundingClientRect()
-    return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2), w: Math.round(rect.width), h: Math.round(rect.height), described: describe(node) }
+    const offset = frameOffset(node)
+    return { x: Math.round(offset.x + rect.left + rect.width / 2), y: Math.round(offset.y + rect.top + rect.height / 2), w: Math.round(rect.width), h: Math.round(rect.height), described: describe(node) }
   }
 
   const DISMISS = /(accept|agree|allow|continue|close|got it|dismiss|ok|agree|同意|接受|允许|继续|关闭|知道了|我知道了|我同意)/i
@@ -268,28 +281,35 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
     const out = []
     if (needle === '') return out
     const wanted = needle.toLowerCase()
-    const root = document.body || document.documentElement
-    if (!root || typeof document.createTreeWalker !== 'function') return out
-    const walker = document.createTreeWalker(root, 4, null) // 4 = SHOW_TEXT
+    const roots = __dshRoots()
+    for (let r = 0; r < roots.length; r += 1) {
+    const scope = roots[r]
+    const owner = scope.ownerDocument || scope
+    const root = scope.nodeType === 9 ? (scope.body || scope.documentElement) : scope
+    if (!root || typeof owner.createTreeWalker !== 'function') continue
+    const walker = owner.createTreeWalker(root, 4, null) // 4 = SHOW_TEXT
     let node = walker.nextNode()
     while (node) {
-      const value = node.nodeValue || ''
+      const parent = node.parentElement
+      const value = parent && /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(parent.tagName) ? '' : node.nodeValue || ''
       let at = value.toLowerCase().indexOf(wanted)
       while (at !== -1) {
-        const range = document.createRange()
+        const range = owner.createRange()
         range.setStart(node, at)
         range.setEnd(node, at + needle.length)
         const rect = range.getBoundingClientRect()
+        const offset = frameOffset(node)
         out.push({
           text: short(value.slice(Math.max(0, at - 20), at + needle.length + 20).replace(/\\s+/g, ' ').trim(), 80),
-          x: Math.round(rect.left + rect.width / 2),
-          y: Math.round(rect.top + rect.height / 2),
+          x: Math.round(offset.x + rect.left + rect.width / 2),
+          y: Math.round(offset.y + rect.top + rect.height / 2),
           host: node.parentElement ? describe(node.parentElement) : 'text',
         })
         if (out.length >= (all ? 50 : 5)) return out
         at = value.toLowerCase().indexOf(wanted, at + 1)
       }
       node = walker.nextNode()
+    }
     }
     return out
   }
@@ -426,13 +446,13 @@ export function uploadScript(
   file: { readonly name: string; readonly mime: string; readonly base64: string },
 ): string {
   const spec = JSON.stringify({ target, file })
-  return `(() => {
+  return `(() => {${DEEP_DOM_SOURCE}
     const spec = ${spec}
     const probe = globalThis[${JSON.stringify(PROBE_KEY)}]
     const where = probe ? probe.find(spec.target) : null
     let node = null
     try {
-      if (spec.target.by === 'css') node = document.querySelector(spec.target.value)
+      if (spec.target.by === 'css') node = __dshQuery(spec.target.value)
       else if (spec.target.by === 'xpath') node = document.evaluate(spec.target.value, document, null, 9, null).singleNodeValue
       else if (where) node = document.elementFromPoint(where.x, where.y)
     } catch (error) { node = null }
