@@ -146,6 +146,10 @@ test('fetch handles string, URL and Request inputs, preserving POST body and add
   assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), null)
   await context.fetch(new Request('https://ordinary.example/api', { referrerPolicy: 'origin' }))
   assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'origin')
+  await context.fetch('/api', Object.create({ referrer: '' }))
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'no-referrer')
+  await context.fetch(new Request('https://ordinary.example/api', { referrerPolicy: 'unsafe-url' }), { signal: undefined })
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'unsafe-url')
 })
 
 test("the document's upstream Referrer-Policy header governs sub-request referers unless the request overrides it", async () => {

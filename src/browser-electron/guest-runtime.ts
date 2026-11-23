@@ -66,6 +66,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
     }
     return last(${JSON.stringify(referrerPolicy).replace(/</gu, '\\u003c')}) || '';
   };
+  const requestInit = ['body', 'cache', 'credentials', 'duplex', 'headers', 'integrity', 'keepalive', 'method', 'mode', 'priority', 'redirect', 'referrer', 'referrerPolicy', 'signal', 'window'];
   const refererHeaders = (set, override) => {
     set('x-dsh-guest-referer', real);
     const policy = referrerPolicy(override);
@@ -82,7 +83,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         const headers = new Headers(init && init.headers || (isRequest ? input.headers : undefined));
         headers.set('x-dsh-guest-headers', [...headers.keys()].filter(name => !name.startsWith('x-dsh-')).join(','));
         headers.set('x-dsh-guest-sub', '1');
-        const source = init && Object.keys(init).length ? init : isRequest ? input : {};
+        const source = init && requestInit.some(name => init[name] !== undefined) ? init : isRequest ? input : {};
         refererHeaders((name, value) => headers.set(name, value), source.referrer === '' ? 'no-referrer' : source.referrerPolicy || '');
         const options = Object.assign({}, init, { headers, mode: 'cors', credentials: 'omit' });
         return nativeFetch(isRequest ? new Request(new URL(url, location.href), input) : url, options);
