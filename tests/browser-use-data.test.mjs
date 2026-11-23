@@ -9,6 +9,7 @@ import { apply } from '../lib/tool-browser/index.js'
 import { actionSummary } from '../lib/tool-browser/code-tool.js'
 import { formatDataSources } from '../lib/tool-browser/tools-debug.js'
 import { PROBE_INSTALL_SCRIPT, probeCallScript, pageOperationScript } from '../src/tool-browser/page-probe.ts'
+import { poll } from '../src/tool-browser/probe-client.ts'
 import { chromiumPage } from './fixtures/chromium-page.mjs'
 
 function mount({ onClick } = {}) {
@@ -153,6 +154,14 @@ print(entry.status)
   assert.match(value.output, /true\nwait_for_gone: timed out waiting for "Results ready" to be gone\n201/)
 })
 
+test('poll never sleeps past its budget, even with a longer interval', async () => {
+  let checks = 0
+  const started = Date.now()
+  assert.equal(await poll(async () => { checks += 1; return undefined }, 150, 5_000), undefined)
+  assert.ok(Date.now() - started < 1_000, 'the last pause is cut to the time left')
+  assert.equal(checks, 2, 'one check at the start and one at the deadline')
+})
+
 test('formatDataSources stays compact and says when there is nothing to use', () => {
   assert.match(formatDataSources({ url: 'https://a.test/', embedded: [], apis: [], resources: [], declared: [] }), /No embedded state.*read the DOM/)
   const text = formatDataSources({
@@ -189,6 +198,7 @@ test('Chromium: data sources, the page pulse and same-origin fetches on a real p
     if (request.url.startsWith('/api/search')) { response.setHeader('content-type', 'application/json; charset=utf-8'); response.end('{"hits":[]}'); return }
     if (request.url === '/api/regions.json') { response.setHeader('content-type', 'application/json'); response.end('[]'); return }
     if (request.url === '/api/private') { response.statusCode = 403; response.end(request.headers.cookie === 'sid=abc' ? 'forbidden for sid' : 'no cookie'); return }
+    if (request.url === '/v2/me') { response.setHeader('content-type', 'application/json'); response.end('{"base":true}'); return }
     if (request.url === '/api/me') { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ cookie: request.headers.cookie ?? null })); return }
     response.setHeader('content-type', 'text/html')
     response.end(page)
@@ -204,7 +214,8 @@ test('Chromium: data sources, the page pulse and same-origin fetches on a real p
   assert.equal(await chrome.evaluate('typeof globalThis.__dshProbe'), 'undefined')
 
   await chrome.evaluate(PROBE_INSTALL_SCRIPT)
-  await chrome.evaluate(`fetch('/api/search?q=a').then(r => r.text())`)
+  const longQuery = `/api/search?q=a&filter=${'x'.repeat(200)}`
+  await chrome.evaluate(`fetch('/api/search?q=a').then(r => r.text()).then(() => fetch(${JSON.stringify(longQuery)})).then(r => r.text())`)
   const found = JSON.parse(await chrome.evaluate(probeCallScript('dataSources')))
   const next = found.embedded.find(row => row.name === '#__NEXT_DATA__')
   assert.deepEqual(next.keys, ['props', 'page'])
@@ -213,7 +224,8 @@ test('Chromium: data sources, the page pulse and same-origin fetches on a real p
   assert.ok(found.embedded.some(row => row.name === 'script[type="application/ld+json"][0]'))
   assert.deepEqual(found.embedded.find(row => row.name === 'window.__INITIAL_STATE__')?.arrays, [{ path: 'cart.items', length: 4 }])
   assert.deepEqual(found.apis.map(row => [row.method, row.status, row.type, row.json]), [['GET', 200, 'application/json', true]])
-  assert.match(found.apis[0].url, /\/api\/search\?q=a$/)
+  assert.ok(found.apis[0].url.endsWith(longQuery), 'a discovered URL comes back whole, so it can be fetched as is')
+  assert.equal(found.apis[0].calls, 2)
   assert.ok(found.resources.some(row => row.url.endsWith('/api/stores.json')), `first-screen JSON is found through resource timing: ${JSON.stringify(found.resources)}`)
   assert.ok(found.declared.some(row => row.from === 'data-api' && row.url === '/api/v2/stores'))
   assert.ok(found.declared.some(row => row.from.startsWith('link[rel=preload') && row.url.endsWith('/api/regions.json')))
@@ -225,4 +237,7 @@ test('Chromium: data sources, the page pulse and same-origin fetches on a real p
   assert.deepEqual(JSON.parse(me.body), { cookie: 'sid=abc' }, 'the fetch carries the page cookies')
   const denied = JSON.parse(await chrome.evaluate(pageOperationScript({ operation: 'fetch', url: '/api/private', init: {} })))
   assert.deepEqual([denied.ok, denied.status, denied.body], [false, 403, 'forbidden for sid'])
+  await chrome.evaluate(`document.head.append(Object.assign(document.createElement('base'), { href: '/v2/' }))`)
+  const based = JSON.parse(await chrome.evaluate(pageOperationScript({ operation: 'fetch', url: 'me', init: {} })))
+  assert.deepEqual([based.ok, based.body], [true, '{"base":true}'], 'relative URLs resolve against <base href> as the page\'s own fetch does')
 })

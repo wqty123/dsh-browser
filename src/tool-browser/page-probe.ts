@@ -408,8 +408,8 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
       const id = row.method + ' ' + String(row.url).split('?')[0]
       const json = /json/i.test(String(row.type || ''))
       const hit = called.get(id)
-      if (hit) { hit.calls += 1; hit.url = short(row.url, 160); hit.status = row.status; continue }
-      const entry = { method: row.method, url: short(row.url, 160), status: row.status, type: short(String(row.type || '').split(';')[0], 40), calls: 1, json: json }
+      if (hit) { hit.calls += 1; hit.url = row.url; hit.status = row.status; continue }
+      const entry = { method: row.method, url: row.url, status: row.status, type: short(String(row.type || '').split(';')[0], 40), calls: 1, json: json }
       called.set(id, entry)
       apis.push(entry)
     }
@@ -424,18 +424,18 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
       if (initiator !== 'fetch' && initiator !== 'xmlhttprequest' && !DATA_URL.test(url)) continue
       if (/^(script|css|img|link|image)$/.test(initiator) && !/[.]json([?#]|$)/i.test(url)) continue
       const base = url.split('?')[0]
-      if (known.has(base)) continue
+      if (url.length > 2048 || known.has(base)) continue
       known.add(base)
-      resources.push({ url: short(url, 160), initiator: initiator, bytes: entry.transferSize || entry.encodedBodySize || 0 })
+      resources.push({ url: url, initiator: initiator, bytes: entry.transferSize || entry.encodedBodySize || 0 })
       if (resources.length >= 12) break
     }
     const declared = []
-    const declare = (from, url) => { if (url && declared.length < 10 && !declared.some(entry => entry.url === url)) declared.push({ from: from, url: short(url, 160) }) }
+    const declare = (from, url) => { if (url && url.length <= 2048 && declared.length < 10 && !declared.some(entry => entry.url === url)) declared.push({ from: from, url: url }) }
     try {
       for (const link of Array.from(document.querySelectorAll('link[rel~="preload"][as="fetch"], link[rel~="prefetch"][as="fetch"]'))) declare('link[rel=' + link.rel + ']', link.href)
       for (const node of Array.from(document.querySelectorAll('[data-api], [data-endpoint]')).slice(0, 20)) declare(node.hasAttribute('data-api') ? 'data-api' : 'data-endpoint', String(node.getAttribute('data-api') || node.getAttribute('data-endpoint') || ''))
     } catch (error) { /* a document without these still answers the rest */ }
-    return { url: short(String(location.href), 160), embedded: embedded, apis: apis.slice(0, 12), resources: resources, declared: declared }
+    return { url: String(location.href), embedded: embedded, apis: apis.slice(0, 12), resources: resources, declared: declared }
   }
   globalThis[KEY] = state
   return VERSION
@@ -582,7 +582,7 @@ const PULSE_SCRIPT = `(() => {
 /** A fetch from the page, so it carries the page's same-origin cookies. The body comes back as text. */
 function fetchScript(url: string, init: { readonly method?: string; readonly headers?: Readonly<Record<string, string>>; readonly body?: string }): string {
   return `(async () => {
-    const response = await fetch(new URL(${JSON.stringify(url)}, location.href).href, Object.assign({ credentials: 'same-origin' }, ${JSON.stringify(init)}))
+    const response = await fetch(new URL(${JSON.stringify(url)}, document.baseURI).href, Object.assign({ credentials: 'same-origin' }, ${JSON.stringify(init)}))
     const body = await response.text()
     return JSON.stringify({ ok: response.ok, status: response.status, statusText: response.statusText, url: response.url, type: response.headers.get('content-type') || '', body: body })
   })()`
