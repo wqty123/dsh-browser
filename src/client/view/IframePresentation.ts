@@ -68,7 +68,9 @@ export class IframePresentation implements BrowserPresentation {
   private element: HTMLIFrameElement | undefined
   private document: IframeDocument | undefined
   private rendered = false
-  private depth = 1
+  private baseDepth: number | undefined
+  private lastDepth = 1
+  private frameIndex = 0
   private loadId: number | undefined
   private documentId: string | undefined
   private loadedId: number | undefined
@@ -139,7 +141,7 @@ export class IframePresentation implements BrowserPresentation {
     clearTimeout(this.identityTimer)
     this.identityTimer = undefined
     this.identityRetried = false
-    this.depth = Number.isSafeInteger(data.depth) && data.depth > 0 ? data.depth : 1
+    this.recordDepth(Number.isSafeInteger(data.depth) && data.depth > 0 ? data.depth : 1)
     if (data.ready === true) this.markLoaded()
     this.observedUrl = data.url
     this.events.observed(this.document.revision, data.url)
@@ -221,19 +223,28 @@ export class IframePresentation implements BrowserPresentation {
 
   /** Request history movement in the guest without reading its cross-origin window. */
   historyStep(delta: number): boolean {
+    const back = delta < 0
+    if (back && this.frameIndex === 0) return false
     const win = this.element?.contentWindow
     if (win === undefined || win === null) return false
     try {
-      win.postMessage({ type: 'dsh.browser.guest.history', delta: delta < 0 ? -1 : 1 }, '*')
-      return true
+      win.postMessage({ type: 'dsh.browser.guest.history', delta: back ? -1 : 1 }, '*')
     } catch {
       return false
     }
+    this.frameIndex = Math.max(0, this.frameIndex + (back ? -1 : 1))
+    return true
   }
 
-  /** History depth reported by the guest. */
+  /** Entries this guest iframe itself added, counting the current one; the joint session history is excluded. */
   historyDepth(): number {
-    return this.depth
+    return this.frameIndex + 1
+  }
+
+  private recordDepth(depth: number): void {
+    if (this.baseDepth === undefined || depth < this.baseDepth) this.baseDepth = depth
+    if (depth > this.lastDepth) this.frameIndex = depth - this.baseDepth
+    this.lastDepth = depth
   }
 
   /** @param viewportId - mounted placeholder. @returns removes only the iframe presentation. */
@@ -331,7 +342,9 @@ export class IframePresentation implements BrowserPresentation {
     element.addEventListener('error', () => {
       if (this.element === element) { this.invalidateGuest(); this.events.failed(current.revision) }
     })
-    this.depth = 1
+    this.baseDepth = undefined
+    this.lastDepth = 1
+    this.frameIndex = 0
     this.loadId = ++this.nextLoadId
     this.element = element
     this.rendered = true
