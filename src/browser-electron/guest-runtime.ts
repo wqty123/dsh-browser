@@ -3,7 +3,7 @@ import { guestStorageScript, type GuestStorageConfig } from './guest-storage-run
 import { guestCssRuntimeScript } from './guest-css-runtime.ts'
 
 /** Early, self-contained interception for documents served from the guest proxy. */
-export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig): string {
+export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig, referrerPolicy = ''): string {
   return `(() => {
   if (window.__dshGuestRuntime) return;
   window.__dshGuestRuntime = true;
@@ -59,11 +59,12 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
   const referrerPolicy = override => {
     if (policies.includes(override)) return override;
     const metas = attempt(() => [...document.querySelectorAll('meta[name="referrer" i]')]) || [];
+    const last = value => String(value || '').split(',').map(item => item.trim().toLowerCase()).reverse().find(item => policies.includes(item));
     for (const meta of metas.reverse()) {
-      const token = String(meta.content || '').split(',').map(item => item.trim().toLowerCase()).reverse().find(item => policies.includes(item));
+      const token = last(meta.content);
       if (token) return token;
     }
-    return '';
+    return last(${JSON.stringify(referrerPolicy).replace(/</gu, '\\u003c')}) || '';
   };
   const refererHeaders = (set, override) => {
     set('x-dsh-guest-referer', real);
@@ -81,7 +82,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
         const headers = new Headers(init && init.headers || (isRequest ? input.headers : undefined));
         headers.set('x-dsh-guest-headers', [...headers.keys()].filter(name => !name.startsWith('x-dsh-')).join(','));
         headers.set('x-dsh-guest-sub', '1');
-        refererHeaders((name, value) => headers.set(name, value), init && init.referrerPolicy || (isRequest ? input.referrerPolicy : ''));
+        refererHeaders((name, value) => headers.set(name, value), init && init.referrer === '' || isRequest && input.referrer === '' ? 'no-referrer' : init && init.referrerPolicy || (isRequest ? input.referrerPolicy : ''));
         const options = Object.assign({}, init, { headers, mode: 'cors', credentials: 'omit' });
         return nativeFetch(isRequest ? new Request(new URL(url, location.href), input) : url, options);
       } catch (error) { return Promise.reject(error); }

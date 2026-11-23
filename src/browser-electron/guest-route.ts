@@ -614,7 +614,7 @@ export async function handleGuest(
     const storageConfig = (destination === 'iframe' || destination === 'document') && request.headers['sec-fetch-mode'] === 'navigate'
       && /^[\w:-]{16,128}$/u.test(context)
       ? { token: (storage ?? localGuestStorage()).issue(target.origin, context), context, cookies: cookieJar.getDocumentCookie(target) } : undefined
-    const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig) + '</script>'
+    const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig, upstream.headers.get('referrer-policy') ?? '') + '</script>'
     let body = rewriteDocument(raw, target)
     if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
     else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')

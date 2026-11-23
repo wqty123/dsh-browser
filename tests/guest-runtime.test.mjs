@@ -4,7 +4,7 @@ import vm from 'node:vm'
 import { guestRuntimeScript } from '../src/browser-electron/guest-runtime.ts'
 import { GUEST_ROUTE, guestPath, relayTag } from '../src/browser-electron/guest-route.ts'
 
-function page(storage, storageAvailable = true) {
+function page(storage, storageAvailable = true, referrerPolicy) {
   const requests = [], navigations = [], listeners = new Map(), observers = []
   class Element {
     nodeType = 1
@@ -50,7 +50,7 @@ function page(storage, storageAvailable = true) {
   context.window = context
   if (!storageAvailable) delete context.Storage
   vm.createContext(context)
-  vm.runInContext(guestRuntimeScript('https://ordinary.example/dir/page', storage), context)
+  vm.runInContext(guestRuntimeScript('https://ordinary.example/dir/page', storage, referrerPolicy), context)
   return { context, requests, navigations, listeners, Element, Form, XHR, observers }
 }
 
@@ -138,6 +138,20 @@ test('fetch handles string, URL and Request inputs, preserving POST body and add
   await context.fetch('/api', { referrerPolicy: 'no-referrer' })
   assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'no-referrer')
   assert.equal(requests[0].init.headers.get('x-dsh-guest-referrer-policy'), null)
+  await context.fetch('/api', { referrer: '' })
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'no-referrer')
+})
+
+test("the document's upstream Referrer-Policy header governs sub-request referers unless the request overrides it", async () => {
+  const { context, requests } = page(undefined, true, 'unsafe-url, same-origin')
+  await context.fetch('/api')
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'same-origin')
+  await context.fetch('/api', { referrerPolicy: 'origin' })
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'origin')
+})
+
+test('an upstream Referrer-Policy value cannot close the runtime script', () => {
+  assert.doesNotMatch(guestRuntimeScript('https://ordinary.example/', undefined, '</script><script>alert(1)</script>'), /<\/script>/iu)
 })
 
 test('query-only, fragment-only and empty URLs resolve against the real page, including after history changes', () => {
