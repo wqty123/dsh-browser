@@ -214,7 +214,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const code = createCodeTool(catalog, pulse)
       // On the code surface it is the only browser tool, so it stays even under PTC; on `core`,
       // DSH's PTC run_code already batches every tool, so the code tool steps aside.
-      registerTool(ctx.tools, code.tool, surface === 'core' ? () => !ptcRuntimeActive(ctx) : undefined)
+      registerTool(ctx.tools, code.tool, surface === 'core' ? (context?: { readonly agent?: unknown }) => !ptcRuntimeActive(ctx, context) : undefined)
       ctx.effect(() => code.dispose)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-builtin-browser: could not register ${CODE_TOOL} (${String(error)}).`)

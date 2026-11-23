@@ -28,7 +28,7 @@ function mount(overrides = {}, config = {}, services = {}) {
     ...overrides,
   }
   apply({
-    tools: { register: (tool, opts) => { tools.set(tool.name, tool); if (opts) options.set(tool.name, opts) } },
+    tools: { ...services.tools, register: (tool, opts) => { tools.set(tool.name, tool); if (opts) options.set(tool.name, opts) } },
     systemPrompt: { section: section => { sections.push(section) } },
     effect: fn => { disposers.push(fn()) },
     get: name => name === 'browser' ? browser : services[name],
@@ -55,6 +55,17 @@ test('the default surface is the core tools, the loader and the code tool', asyn
 test('the code tool steps aside when DSH runs in PTC mode', () => {
   assert.equal(mount().options.get('dsh_browser_code').when(), true)
   assert.equal(mount({}, {}, { ptcRuntime: {} }).options.get('dsh_browser_code').when(), false)
+})
+
+test('the code tool stays in standard mode when the PTC runtime is mounted but the agent runs the native executor', () => {
+  const ptc = { describe: () => ({ schemas: [], knownNames: ['run_code'] }) }
+  const native = { describe: tools => ({ schemas: tools }) }
+  const ptcAgent = {}
+  const tools = { selectExecutor: agent => agent === ptcAgent ? ptc : native }
+  const when = mount({}, {}, { ptcRuntime: {}, tools }).options.get('dsh_browser_code').when
+  assert.equal(when({ agent: {} }), true)
+  assert.equal(when({ agent: ptcAgent }), false)
+  assert.equal(mount({}, {}, { ptcRuntime: {}, tools: { selectExecutor: () => { throw new Error('unavailable') } } }).options.get('dsh_browser_code').when({ agent: {} }), true)
 })
 
 test('tools.* bindings return JSON values, overlap safe reads and keep actions in order', async () => {
