@@ -473,7 +473,13 @@ export abstract class ProviderObservation extends ProviderNavigation {
       throw new BrowserError(`browser: challenge detection failed: ${result.exception}`, 'BROWSER_CHALLENGE_DETECT_FAILED')
     }
     const value = result.value as BrowserChallenge
-    return { blocked: value.blocked === true, kind: value.kind, reason: value.reason }
+    return {
+      blocked: value.blocked === true,
+      kind: value.kind,
+      reason: value.reason,
+      ...value.recovery !== undefined ? { recovery: value.recovery } : {},
+      ...typeof value.status === 'number' ? { status: value.status } : {},
+    }
   }
 
   /** Fetch page content in a requested format. */

@@ -104,6 +104,8 @@ test('an ordinary page is not a block, and dsh_browser_challenge agrees with the
   await open('/captcha')
   const checked = await tools.get('dsh_browser_challenge').execute({}, { ...exec, callId: 'challenge-2' })
   assert.equal(checked.kind, 'recaptcha')
+  assert.equal(checked.recovery, 'takeover')
+  assert.match(checked.advice, /dsh_browser_request_takeover/u)
   assert.ok(checked.fallbacks.length > 0)
 })
 
