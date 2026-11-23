@@ -4,6 +4,7 @@
 
 ## 未发布 — 适配 DSH 0.2.3-alpha.2
 
+- **带图片的网页引用不再在提交时断开。** 页面侧引用栏把整份冻结快照（图片内联）POST 到 `/dsh-builtin-browser/reference/capture`，快照本身允许到 `MAX_FROZEN_CAPTURE_CHARS`（400 万字符），但这条路由沿用了设置接口 64 KiB 的请求体上限，超出就销毁连接，浏览器只看到 `net::ERR_UNEXPECTED`（Tauri 实测 65,728 字节的标题+首段+信息框图片选择失败，纯文本成功）。capture 路由的上限现在由快照上限推出（每字符最多 3 字节 UTF-8，加 64 KiB 其余字段）；其它路由仍是 64 KiB。
 - **网页引用的内容真正送到模型。** 之前引用的正文、表格和图片只在 `browserReferenceSubmission` 提交缝里拼装，而 DSH 0.2.2-rc.5 与 0.2.3-alpha.2 的发送路径是 `[...附件, { type: 'text', text }]`，从不调用它，模型只收到一个 `<dsh-browser-reference …/>` 标记。现在提交缝已删除：引用确认时，正文与 Markdown 表格作为一段 `<dsh-browser-quote>…</dsh-browser-quote>` 引文连同来源标记插入输入框，随消息原样发送且只发送一次；图片经宿主自己的拖放路径（`conversation.createDrafts` + `inputActions.addAttachments`）放进输入框附件，引文中留有对应占位。已发送气泡仍只显示引用胶囊。卡片上的「引用评论」不再单独发送，补充说明直接写在输入框里。
 - **安静模式下 Installed Chrome / Edge 打开第一个页面不再抢焦点。** 浏览器以 `--no-startup-window` 启动，第一个页面会新建窗口；`Target.createTarget` 只带 `background: true` 时 Chromium 仍会激活这个新窗口并把它带到前台。安静模式现在同时传 `focus: false`，新窗口打开但不改变当前窗口焦点；已有窗口里的新标签页仍在后台打开。
 - **DSH Tauri 侧栏登录在重启后保留。** DSH Tauri 不运行 DeepSeek Harness Desktop 的 `lib/main.js`，主进程是 electron-rs，侧栏页面拿到的是内存分区 `electron-browser-<uuid>`，重启后 Cookie 和 localStorage 全部丢失；插件也因此报告「DSH Desktop not found」。现在插件按 `runtime/<平台>/electron-rs.json` 的 `dsh-tauri` 标识识别 DSH Tauri（优先识别承载当前进程的那一个），设置页显示「DSH Tauri 侧栏补丁」，一键把宿主补丁 `dsh-host-patch/tauri.json` 应用到 `runtime/browser.cjs`（按 v0.33.0 原文件的 sha256 匹配，可恢复）：侧栏改用按 DSH_HOME 区分的持久分区（与 rc.5 一致，多个窗口共用同一份登录），并把 Chromium 退出时丢弃的会话 Cookie 存档、在下次发放侧栏页面前恢复。重启 DSH Tauri 后生效。Electron DSH Desktop rc.3 / rc.5 的补丁与桥接不变。
