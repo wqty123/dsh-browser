@@ -264,20 +264,22 @@ async function sendCdp(id, method, params, checkCurrent) {
     checkCurrent?.()
     const current = guestById(id)
     if (current !== guest || current.isDestroyed()) throw new Error(`guest ${id} is not available`)
-    if (timedOutGuests.has(current)) throw new Error(`guest ${id} has a timed-out command; close and reopen its page before sending more commands`)
+    if (timedOutGuests.has(current)) throw new Error(`guest ${id} has a timed-out command still running; wait for it to finish, or close and reopen its page`)
     let timer
+    const running = execute()
     try {
       return await Promise.race([
         new Promise((_, reject) => {
           timer = setTimeout(() => {
             // A renderer command cannot be cancelled reliably, even by detaching its debugger.
-            // Never send another command to this page while its effects remain uncertain.
+            // Refuse this page until the command settles and its effects are known.
             timedOutGuests.add(current)
-            reject(new Error(`cdp command ${method} on guest ${id} did not answer within ${CDP_COMMAND_TIMEOUT_MS}ms; close and reopen its page before sending more commands`))
+            running.then(() => timedOutGuests.delete(current), () => timedOutGuests.delete(current))
+            reject(new Error(`cdp command ${method} on guest ${id} did not answer within ${CDP_COMMAND_TIMEOUT_MS}ms; the page takes commands again once it finishes, or close and reopen it`))
           }, CDP_COMMAND_TIMEOUT_MS)
           timer.unref?.()
         }),
-        execute(),
+        running,
       ])
     } finally {
       clearTimeout(timer)
