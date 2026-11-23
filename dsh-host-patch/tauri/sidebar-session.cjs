@@ -57,7 +57,20 @@ module.exports = ({ app, createHash, fs, path }) => {
   process.on('exit', flushAll)
   const storage = target => target.storagePath ?? target.getStoragePath?.() ?? undefined
   const home = process.env.DSH_HOME || app.getPath('userData')
+  const reserved = new Set()
   return {
+    download(item) {
+      const directory = app.getPath('downloads')
+      const name = path.basename(item.getFilename() || 'download')
+      const extension = path.extname(name)
+      const stem = name.slice(0, name.length - extension.length)
+      let target = path.join(directory, name)
+      for (let n = 1; reserved.has(target) || fs.existsSync(target); n++) target = path.join(directory, `${stem} (${n})${extension}`)
+      fs.mkdirSync(directory, { recursive: true })
+      reserved.add(target)
+      item.once('done', () => reserved.delete(target))
+      item.setSavePath(target)
+    },
     partition() {
       return 'persist:dsh-sidebar-browser-' + createHash('sha256').update(home).digest('hex').slice(0, 32)
     },

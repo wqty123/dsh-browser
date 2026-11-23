@@ -65,7 +65,7 @@ function fakeElectron(root) {
     }
     return sessions.get(name)
   }
-  const app = Object.assign(new EventEmitter(), { getPath: () => path.join(root, 'userData') })
+  const app = Object.assign(new EventEmitter(), { getPath: name => path.join(root, name) })
   return { electron: { session: { fromPartition }, app }, sessions }
 }
 
@@ -198,6 +198,37 @@ test('patched: a pending checkpoint is written synchronously when the app quits'
   const file = path.join(first.sessions.get(partition).storagePath, 'dsh-sidebar-session-cookies.json')
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8'))[0].value, 'standard_user')
   await settle()
+})
+
+function download(session, filename) {
+  const item = Object.assign(new EventEmitter(), { savePath: undefined, getFilename: () => filename, setSavePath(value) { this.savePath = value } })
+  const event = { prevented: false, preventDefault() { this.prevented = true } }
+  session.emit('will-download', event, item, {})
+  return { item, event }
+}
+
+test('unpatched DSH Tauri cancels every sidebar download (the bug)', async t => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'tauri-download-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const { guests, host, sessions } = await boot(pristine, root)
+  const { partition } = await guests.acquire(host, 'workspace-a')
+  assert.equal(download(sessions.get(partition), 'some-file.txt').event.prevented, true)
+})
+
+test('patched: sidebar downloads are saved to Downloads under a name that is not taken', async t => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'tauri-download-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const { guests, host, sessions } = await boot(patched, root)
+  const session = sessions.get((await guests.acquire(host, 'workspace-a')).partition)
+  const downloads = path.join(root, 'downloads')
+  const first = download(session, 'some-file.txt')
+  assert.equal(first.event.prevented, false)
+  assert.equal(first.item.savePath, path.join(downloads, 'some-file.txt'))
+  assert.equal(download(session, 'some-file.txt').item.savePath, path.join(downloads, 'some-file (1).txt'), 'a download in flight keeps its name')
+  first.item.emit('done')
+  fs.writeFileSync(path.join(downloads, 'some-file.txt'), 'x')
+  assert.equal(download(session, 'some-file.txt').item.savePath, path.join(downloads, 'some-file (2).txt'), 'an existing file is not overwritten')
+  assert.equal(download(session, '../escape.txt').item.savePath, path.join(downloads, 'escape.txt'))
 })
 
 test('apply.mjs patches a DSH Tauri runtime by electron-rs identity and pristine sha256, and restores it', t => {

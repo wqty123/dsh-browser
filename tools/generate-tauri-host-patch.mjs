@@ -42,6 +42,10 @@ export function tauriHostPatchSpec() {
           after: 'let i=dshSidebarSession.partition();if(!this.partitions.has(i)){',
         },
         {
+          before: 'e.on(`will-download`,e=>e.preventDefault()),',
+          after: 'e.on(`will-download`,(e,t)=>dshSidebarSession.download(t)),',
+        },
+        {
           before: 'this.partitions.set(r,i)}let a=(0,n.randomUUID)();',
           after: 'this.partitions.set(i,i)}if(await dshSidebarSession.attach(t.session.fromPartition(i)),this.owner(e),e.trustedNavigationPending)throw Error(`browser guest: trusted navigation pending`);let a=(0,n.randomUUID)();',
         },
