@@ -10,6 +10,7 @@ const previousSpecs = ['rc3', 'rc5'].flatMap(name => [8, 7, 6, 5, 4, 3, 2, 1].ma
   JSON.parse(revision >= 3
     ? gunzipSync(fs.readFileSync(new URL(`./${name}-revision${revision}.json.gz`, import.meta.url))).toString('utf8')
     : fs.readFileSync(new URL(`./${name}-revision${revision}.json`, import.meta.url), 'utf8'))))
+  .concat(JSON.parse(fs.readFileSync(new URL('./tauri-revision1.json', import.meta.url), 'utf8')))
 const suffix = '.before-dsh-host-patch'
 const digest = value => createHash('sha256').update(value).digest('hex')
 
@@ -148,7 +149,7 @@ function inspect(packages, restoring, io) {
   try {
     const entries = plan(packages, restoring, io)
     return { status: entries.every(entry => entry.applied) ? 'applied' : 'absent',
-      ...(entries.some(entry => entry.previous) ? { reason: 'host patch revision 1 or 2 or 3 or 4 or 5 or 6 or 7 or 8; explicit bootstrap upgrade to revision 9 required' } : {}), entries }
+      ...(entries.some(entry => entry.previous) ? { reason: 'a previous host patch revision is applied; explicit bootstrap upgrade required' } : {}), entries }
   } catch (error) {
     return { status: error.status ?? 'anchors mismatch', reason: String(error.message ?? error) }
   }

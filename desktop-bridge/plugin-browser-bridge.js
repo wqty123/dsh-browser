@@ -212,6 +212,16 @@ async function evaluateInPanel(shellId, sessionId, method, params) {
 }
 
 
+/**
+ * The webContents rendering the DSH shell. Desktop's shell is its BrowserWindow; a host whose shell is
+ * a view (DSH Tauri's electron-rs) names it through `api.shellContents`.
+ */
+function shellContents() {
+  const named = globalThis[ACTIVE]?.api?.shellContents
+  const shell = typeof named === 'function' ? named() : webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+  return shell !== undefined && shell !== null && !shell.isDestroyed() ? shell : undefined
+}
+
 function guestById(id) {
   if (typeof id === 'string') return nativeGuests.get(id)
   for (const contents of webContents.getAllWebContents()) {
@@ -566,7 +576,7 @@ async function handle(request, signal) {
   }
   checkCurrent()
   const shell = /^session-/.test(owner)
-    ? webContents.getAllWebContents().find(contents => contents.getType() === 'window') : undefined
+    ? shellContents() : undefined
   const token = randomBytes(16).toString('hex')
   const holdDeadline = Number.isFinite(request.deadline) ? request.deadline : Date.now() + RENDERING_HOLD_MS
   let held
@@ -640,7 +650,7 @@ async function handleRequest(request, checkCancelled, controller) {
     if (typeof request.transactionId !== 'string' || pending?.transactionId !== request.transactionId) return { ok: true, cancelled: false }
     pending.cancelled = true
     pending.abort()
-    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+    const shell = shellContents()
     if (shell) await shell.executeJavaScript(`globalThis.__dshBuiltinBrowser?.cancelPanelInitialization?.(${JSON.stringify(scope.owner)}, ${JSON.stringify(key)}, ${JSON.stringify(request.transactionId)})`)
     return { ok: true, cancelled: true }
   }
@@ -712,7 +722,7 @@ async function dispatch(request, checkCurrent) {
       mainExtension: typeof api?.mainExtensions?.status === 'function'
         ? await api.mainExtensions.status('dsh-builtin-browser') : { code: 'DESKTOP_MAIN_EXTENSION_UNSUPPORTED' } }
   }
-  const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+  const shell = shellContents()
   if (op === 'list') {
     const frame = await sidebarFrameKind(shell?.id)
     if (request.handle === undefined) return { ok: true, protocol: PROTOCOL, frame }

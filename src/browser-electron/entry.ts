@@ -44,7 +44,7 @@ import { GUEST_ROUTE, handleGuest } from './guest-route.ts'
 import { resolveSessionHandle, sessionWireId } from '../browser/handles.ts'
 import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.ts'
 import { detectDesktopShell, findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
-import { runningTauriRuntime } from './tauri-host.ts'
+import { publishTauriDesktopMain, runningTauriRuntime } from './tauri-host.ts'
 import { readHostExtensionStatus } from './profile-extension.ts'
 import { readBridgeEndpoint } from './bridge-endpoint.ts'
 import { runBridgeAction } from './bridge-install.ts'
@@ -201,6 +201,9 @@ function readSessionId(ctx: unknown): string | undefined {
 
 /** Register the Electron browser provider with `ctx.browser`. */
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
+  if (runningTauriRuntime() !== undefined) {
+    try { publishTauriDesktopMain() } catch (error) { ctx.logger?.warn?.(`dsh-builtin-browser: cannot name the sidebar bridge to DSH Tauri: ${String(error)}`) }
+  }
   // Which session is this process serving?
   //
   // The desktop shell keeps ONE sidebar per conversation — measured: two sidebar tab-strip

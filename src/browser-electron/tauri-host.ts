@@ -8,8 +8,10 @@
  * is that same Electron binary in Node mode, so a running Tauri is recognised from `process.execPath`.
  * @module dsh-browser/browser-electron/tauri-host
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { dshHome } from './paths.ts'
 import { registeredInstallLocations } from '../../desktop-bridge/desktop-discovery.mjs'
 
 const { hostPatchStatus }: { hostPatchStatus: (directory: string) => TauriHostPatch } = await import(new URL('../../dsh-host-patch/apply.mjs', import.meta.url).href)
@@ -171,4 +173,22 @@ export function findTauriRuntime(options: {
  */
 export function tauriHostPatchStatus(runtime: string): TauriHostPatch {
   try { return hostPatchStatus(runtime) } catch (error) { return { status: 'anchors mismatch', reason: String(error) } }
+}
+
+/**
+ * Name this plugin's package to the Tauri host patch, which starts its `dsh.desktop.main` (the sidebar
+ * bridge) inside electron-rs: Tauri has no Desktop main-extension loader to find it in the profile.
+ * @param home - the DSH home the host patch reads.
+ * @param root - this plugin's package directory.
+ * @returns the pointer file path.
+ */
+export function publishTauriDesktopMain(home: string = dshHome(), root: string = fileURLToPath(new URL('../../', import.meta.url))): string {
+  const file = join(home, 'dsh-builtin-browser-desktop-main.json')
+  const text = JSON.stringify({ root }) + '\n'
+  try { if (readFileSync(file, 'utf8') === text) return file } catch { /* absent */ }
+  const temporary = `${file}.${process.pid}.tmp`
+  mkdirSync(home, { recursive: true })
+  writeFileSync(temporary, text, { mode: 0o600 })
+  renameSync(temporary, file)
+  return file
 }

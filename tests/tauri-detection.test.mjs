@@ -77,15 +77,18 @@ test('a registry InstallLocation written in quotes (the DSH Tauri NSIS installer
   assert.deepEqual([...new Set(registeredInstallLocations('win32', query, 'DSH Tauri'))], ['C:\\Users\\me\\AppData\\Local\\DSH Tauri'])
 })
 
-test('the sidebar on a running DSH Tauri is ready without a Desktop bridge', () => {
-  const report = readRuntimeStatus({
+test('the sidebar on a running DSH Tauri is ready once its host patch runs the bridge, not before', () => {
+  const status = (endpoint, hostPatch = 'applied') => readRuntimeStatus({
     channel: () => 'sidebar', hasBinary: () => false, provision: () => ({ state: 'idle', detail: '' }),
-    bridge: () => undefined, endpoint: () => undefined,
-    shell: () => ({ kind: 'tauri', patchable: true, reason: 'DSH Tauri', recommendedCarrier: 'sidebar', running: true, hostPatch: { status: 'applied' } }),
+    bridge: () => undefined, endpoint: () => endpoint,
+    shell: () => ({ kind: 'tauri', patchable: true, reason: 'DSH Tauri', recommendedCarrier: 'sidebar', running: true, hostPatch: { status: hostPatch } }),
   })
-  assert.equal(report.resolvedCarrier, 'sidebar')
-  assert.equal(report.readiness, 'ready')
-  assert.equal(report.shell.kind, 'tauri')
+  const live = { alive: true, detail: 'bridge endpoint answered' }
+  assert.equal(status(live).resolvedCarrier, 'sidebar')
+  assert.equal(status(live).readiness, 'ready')
+  assert.equal(status(live).shell.kind, 'tauri')
+  assert.equal(status(undefined).readiness, 'blocked')
+  assert.equal(status(live, 'absent').readiness, 'blocked')
 })
 
 test('on macOS the running Electron binary inside <runtime>/<name>.app is recognised', t => {

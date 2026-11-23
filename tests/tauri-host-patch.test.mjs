@@ -10,11 +10,14 @@ import { EventEmitter } from 'node:events'
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import * as os from 'node:os'
+import * as url from 'node:url'
 import { tmpdir } from 'node:os'
 import { Readable } from 'node:stream'
 import { applyHostPatch, hostPatchStatus, patchText, restoreHostPatch } from '../dsh-host-patch/apply.mjs'
 import { tauriHostPatchSpec } from '../tools/generate-tauri-host-patch.mjs'
 import { createHostPatchMaintenance } from '../src/browser-electron/host-patch-maintenance.ts'
+import { publishTauriDesktopMain } from '../src/browser-electron/tauri-host.ts'
 
 const fixtureDir = new URL('./fixtures/dsh-host-patch/tauri-0.33.0/', import.meta.url)
 const pristine = fs.readFileSync(new URL('browser.cjs', fixtureDir), 'utf8')
@@ -65,20 +68,21 @@ function fakeElectron(root) {
     }
     return sessions.get(name)
   }
-  const app = Object.assign(new EventEmitter(), { getPath: name => path.join(root, name) })
-  return { electron: { session: { fromPartition }, app }, sessions }
+  const app = Object.assign(new EventEmitter(), { getPath: name => path.join(root, name), whenReady: () => Promise.resolve() })
+  const webContents = { getFocusedWebContents: () => undefined, getAllWebContents: () => [] }
+  return { electron: { session: { fromPartition }, app, webContents }, sessions }
 }
 
 function loadGuests(source, electron) {
   const module = { exports: {} }
-  const modules = { electron, 'node:crypto': crypto, 'node:fs': fs, 'node:path': path, './origin.cjs': { documentOrigin: url => new URL(url).origin } }
+  const modules = { electron, 'node:crypto': crypto, 'node:fs': fs, 'node:path': path, 'node:os': os, 'node:url': url, './origin.cjs': { documentOrigin: url => new URL(url).origin } }
   new Function('exports', 'require', 'module', source)(module.exports, name => modules[name], module)
   return module.exports.BrowserGuests
 }
 
 function owner(profileStorage) {
   const contents = Object.assign(new EventEmitter(), {
-    isDestroyed: () => false, getURL: () => 'http://127.0.0.1:4567/', mainFrame: {}, session: { storagePath: profileStorage },
+    isDestroyed: () => false, getURL: () => 'http://127.0.0.1:4567/', getType: () => 'browserView', mainFrame: {}, session: { storagePath: profileStorage },
   })
   return Object.assign(new EventEmitter(), { id: 1, contents, trustedOrigin: 'http://127.0.0.1:4567', trustedNavigationPending: false })
 }
@@ -274,4 +278,66 @@ test('settings maintains the running DSH Tauri runtime and asks for a Tauri rest
   const restored = await request('POST', 'restore')
   assert.equal(restored.body.hostPatch.status, 'absent')
   assert.equal(fs.readFileSync(path.join(runtime, 'runtime', 'browser.cjs'), 'utf8'), pristine)
+})
+
+function plugin(root, { name = 'dsh-builtin-browser', main = './desktop-bridge/main.mjs' } = {}) {
+  const directory = path.join(root, 'plugin')
+  fs.mkdirSync(path.join(directory, 'desktop-bridge'), { recursive: true })
+  fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify({ name, dsh: { desktop: { main } } }))
+  fs.writeFileSync(path.join(directory, 'desktop-bridge', 'main.mjs'),
+    'export function start(api) { (globalThis.dshTauriMainStarts ??= []).push(api); return () => { globalThis.dshTauriMainStopped = true } }\n')
+  return directory
+}
+
+test('unpatched DSH Tauri never starts the sidebar bridge, so agent tools have no CDP (the bug)', async t => {
+  const root = temporary(t)
+  const home = path.join(root, 'dsh-home')
+  publishTauriDesktopMain(home, plugin(root))
+  globalThis.dshTauriMainStarts = []
+  await boot(pristine, root, { home })
+  await settle()
+  assert.equal(globalThis.dshTauriMainStarts.length, 0)
+})
+
+test('patched: the plugin named in DSH_HOME starts its desktop bridge once, with the trusted shell view', async t => {
+  const root = temporary(t)
+  const home = path.join(root, 'dsh-home')
+  publishTauriDesktopMain(home, plugin(root))
+  globalThis.dshTauriMainStarts = []
+  globalThis.dshTauriMainStopped = false
+  const { host, electron } = await boot(patched, root, { home })
+  t.after(() => electron.app.emit('will-quit'))
+  await settle()
+  assert.equal(globalThis.dshTauriMainStarts.length, 1)
+  const [api] = globalThis.dshTauriMainStarts
+  assert.equal(api.dshHome, home)
+  assert.equal(api.app, electron.app)
+  assert.equal(api.shellContents(), host.contents)
+  host.contents.emit('destroyed')
+  assert.equal(api.shellContents(), undefined)
+  electron.app.emit('will-quit')
+  assert.equal(globalThis.dshTauriMainStopped, true)
+})
+
+test('patched: a pointer that names another package or an entry outside it starts nothing', async t => {
+  for (const options of [{ name: 'someone-else' }, { main: '../outside.mjs' }]) {
+    const root = temporary(t)
+    const home = path.join(root, 'dsh-home')
+    publishTauriDesktopMain(home, plugin(root, options))
+    globalThis.dshTauriMainStarts = []
+    const { electron } = await boot(patched, root, { home })
+    await settle()
+    electron.app.emit('will-quit')
+    assert.equal(globalThis.dshTauriMainStarts.length, 0)
+  }
+})
+
+test('apply.mjs upgrades a runtime carrying the revision 1 Tauri patch to the bridge-starting revision', t => {
+  const previous = JSON.parse(fs.readFileSync(new URL('../dsh-host-patch/tauri-revision1.json', import.meta.url), 'utf8'))
+  const runtime = runtimeDir(temporary(t), patchText(pristine, previous.targets[0]))
+  fs.writeFileSync(path.join(runtime, 'runtime', 'browser.cjs.before-dsh-host-patch'), pristine)
+  assert.equal(hostPatchStatus(runtime).status, 'absent')
+  applyHostPatch(runtime)
+  assert.equal(fs.readFileSync(path.join(runtime, 'runtime', 'browser.cjs'), 'utf8'), patched)
+  assert.equal(hostPatchStatus(runtime).status, 'applied')
 })

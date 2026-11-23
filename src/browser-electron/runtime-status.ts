@@ -197,9 +197,10 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
 
   // The sidebar needs BOTH halves: our patch inside the shell it will be driven through, and that
   // shell actually running. Either one alone is the false green this report exists to prevent.
-  // DSH Tauri hosts the sidebar through its own `dshDesktop.browser`, with no bridge to install.
+  // On DSH Tauri the patch is the host patch, which starts the same bridge inside electron-rs.
   const shell = deps.shell?.()
-  const sidebarReady = (bridge.state === 'installed' && bridge.running) || (shell?.kind === 'tauri' && shell.running === true)
+  const sidebarReady = bridge.running && (bridge.state === 'installed'
+    || (shell?.kind === 'tauri' && shell.running === true && shell.hostPatch?.status === 'applied'))
 
   const selected = preferExtension ? deps.selectedCarrier?.() ?? (extension?.connected ? 'extension' : 'cdp') : undefined
   const checkSystemBrowser = carrier === 'system' || selected === 'cdp'
