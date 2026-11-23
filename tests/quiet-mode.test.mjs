@@ -333,7 +333,7 @@ test('a takeover of a hidden tab brings it to the front only once the person act
   const fronts = () => browser.commands.filter(c => c.method === 'Page.bringToFront').length
   assert.equal(fronts(), 0, 'Page.bringToFront would take the foreground from the person')
   assert.equal(w.stopped, 0, 'still waiting for the activation')
-  w.emit({ pid: 4242, offscreen: false })
+  w.emit({ pid: 4242, offscreen: false, left: 40, top: 40 })
   await until(() => fronts() > 0)
   assert.equal(fronts(), 1)
   assert.equal(w.stopped, 1)
@@ -358,6 +358,45 @@ test('when PowerShell is unavailable or the watcher dies, quiet mode logs once a
   await until(() => second.browser.commands.some(c => c.method === 'Page.bringToFront'))
   assert.equal(second.browser.commands.filter(c => c.method === 'Page.bringToFront').length, 1, 'a pending front is sent when the watcher dies')
   assert.equal(warnings.filter(line => /cannot watch the foreground window/u.test(line)).length, 2, 'once per host')
+})
+
+test('a hidden-tab takeover is not brought to the front when the person activates another window of that Chrome', async t => {
+  const w = fakeWatch()
+  const { browser, host, view } = await quietHost(t, true, { ...parkedBrowser({ hidden: true }), watch: w.watch })
+  await until(() => w.emit !== undefined)
+  assert.equal(await host.revealQuietWindow(view), true)
+  w.emit({ pid: 4242, offscreen: false, left: 600, top: 300 })
+  await settle()
+  assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false, 'another window of the same process')
+  w.emit({ pid: 4242, offscreen: false, left: 33, top: 40 })
+  await until(() => browser.commands.some(c => c.method === 'Page.bringToFront'))
+  assert.equal(browser.commands.filter(c => c.method === 'Page.bringToFront').length, 1, 'the revealed window, give or take its frame')
+})
+
+test('a skipped takeover no longer brings its tab to the front on a later activation', async t => {
+  const w = fakeWatch()
+  const { browser, host, view } = await quietHost(t, true, { ...parkedBrowser({ hidden: true }), watch: w.watch })
+  await until(() => w.emit !== undefined)
+  const ended = new AbortController()
+  assert.equal(await host.revealQuietWindow(view, { until: ended.signal }), true)
+  ended.abort()
+  assert.equal(w.stopped, 1, 'nothing left to wait for')
+  w.emit({ pid: 4242, offscreen: false, left: 40, top: 40 })
+  await settle()
+  assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false)
+})
+
+test('a taskbar activation fits the revealed window to the display when a page in it can measure it', async t => {
+  const w = fakeWatch()
+  const { browser } = await quietHost(t, true, { ...parkedBrowser({ width: 1900, height: 1300 }), watch: w.watch })
+  await until(() => w.emit !== undefined)
+  w.emit({ pid: 4242, offscreen: true, left: 30000, top: 0 })
+  await until(() => moves(browser).length > 1)
+  assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 40, top: 40 } }, { windowId: 7, bounds: { width: 1560, height: 1120 } }])
+})
+
+test('the watcher output carries the window corner when it has one', () => {
+  assert.deepEqual(parseForegroundLine('4242 0 -8 33'), { pid: 4242, offscreen: false, left: -8, top: 33 })
 })
 
 test('the watcher output is parsed line by line', () => {

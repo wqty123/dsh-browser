@@ -31,7 +31,7 @@ import { readFileSync, rmSync, statSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { acquireProfileLease, type ProfileLease } from './profile-lease.ts'
-import { watchForeground, type ForegroundWatch, type ForegroundWatcher } from './foreground-watch.ts'
+import { watchForeground, type ForegroundEvent, type ForegroundWatch, type ForegroundWatcher } from './foreground-watch.ts'
 import { BrowserProcessOwnership, type ProcessOwnershipOptions } from './process-ownership.ts'
 // Type-only: settings-store imports BrowserChannel from here, so a value import would be a cycle.
 // `hasDisplay` lives here instead of there for the same reason — it is a runtime function.
@@ -105,7 +105,7 @@ const defaultLauncher: BrowserLauncher = (path, args) =>
   spawn(path, [...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: false })
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
+import type { ElectronBrowserViewHost, ElectronViewHandle, QuietRevealOptions } from './provider.ts'
 import type { CarrierPage } from '../browser/types.ts'
 import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserSessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 
@@ -291,6 +291,9 @@ export function searchSummary(
 const QUIET_PARK = { left: 30000, top: 0, width: 1280, height: 800 } as const
 const QUIET_PARK_GAP = 200
 const QUIET_REVEAL_INSET = 40
+const QUIET_FRONT_SLACK = 16
+
+interface QuietFront { readonly client: CdpClient; readonly session: string; readonly targetId: string }
 
 interface WindowGeometry { readonly sl: number; readonly st: number; readonly sw: number; readonly sh: number; readonly x: number; readonly y: number; readonly ow: number; readonly oh: number; readonly hidden: boolean }
 
@@ -1584,7 +1587,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private foregroundStarting = false
   private foregroundFailed = false
   /** A takeover page hidden behind another tab, brought to the front once the person activates its revealed window. */
-  private quietFront: { readonly client: CdpClient; readonly session: string } | undefined
+  private quietFront: QuietFront | undefined
   /** The real watcher exists on Windows only; tests replace it. */
   watchForeground: ForegroundWatcher = watchForeground
 
@@ -1603,7 +1606,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         const info = await client.send('SystemInfo.getProcessInfo', {}, undefined, 1000) as { processInfo?: Array<{ type?: string; id?: number }> } | undefined
         const pid = info?.processInfo?.find(entry => entry.type === 'browser')?.id
         if (typeof pid !== 'number' || this.disposed || !this.quietWatched()) return
-        const watch = this.watchForeground(event => { if (event.pid === pid) void this.onForeground(client, event.offscreen) }, reason => {
+        const watch = this.watchForeground(event => { if (event.pid === pid) void this.onForeground(client, event) }, reason => {
           if (!this.foregroundFailed) {
             this.foregroundFailed = true
             console.warn(`[dsh-browser] quiet window: cannot watch the foreground window (${reason}); the panel and takeovers still bring it on-screen`)
@@ -1622,18 +1625,43 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     })()
   }
 
-  private async onForeground(client: CdpClient, offscreen: boolean): Promise<void> {
-    if (offscreen) {
+  private async onForeground(client: CdpClient, event: ForegroundEvent): Promise<void> {
+    if (event.offscreen) {
       for (const windowId of [...this.quietParked]) {
         this.quietParked.delete(windowId)
-        await this.moveOnScreen(client, windowId).catch(() => undefined)
+        await this.moveOnScreen(client, windowId, await this.sessionInWindow(client, windowId)).catch(() => undefined)
       }
-    } else if (this.quietFront !== undefined) {
+    } else if (this.quietFront !== undefined && await this.isFrontWindow(this.quietFront, event)) {
       const front = this.quietFront
       this.quietFront = undefined
       await front.client.send('Page.bringToFront', {}, front.session).catch(() => undefined)
     }
     if (!this.quietWatched()) this.stopForeground()
+  }
+
+  /** A page attached in the window, to measure the display it lands on. */
+  private async sessionInWindow(client: CdpClient, windowId: number): Promise<string | undefined> {
+    for (const view of [...this.views.values()]) {
+      const targetId = this.sessions.get(view.session)
+      if (targetId === undefined || view.client !== client) continue
+      const found = await client.send('Browser.getWindowForTarget', { targetId }).catch(() => undefined) as { windowId?: unknown } | undefined
+      if (found?.windowId === windowId) return view.session
+    }
+    return undefined
+  }
+
+  /** The watcher names the process, not the window: only the takeover's own window, where it now is, counts. */
+  private async isFrontWindow(front: QuietFront, event: ForegroundEvent): Promise<boolean> {
+    if (event.left === undefined || event.top === undefined) return false
+    try {
+      const found = await front.client.send('Browser.getWindowForTarget', { targetId: front.targetId }) as { bounds?: { left?: unknown; top?: unknown } } | undefined
+      const left = found?.bounds?.left
+      const top = found?.bounds?.top
+      return typeof left === 'number' && typeof top === 'number' &&
+        Math.abs(left - event.left) <= QUIET_FRONT_SLACK && Math.abs(top - event.top) <= QUIET_FRONT_SLACK
+    } catch {
+      return false
+    }
   }
 
   private stopForeground(): void {
@@ -1660,7 +1688,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * From then on the window is the person's and quiet mode never moves it.
    * @returns whether a parked window was moved.
    */
-  async revealQuietWindow(handle: ElectronViewHandle, options?: { readonly select?: boolean }): Promise<boolean> {
+  async revealQuietWindow(handle: ElectronViewHandle, options?: QuietRevealOptions): Promise<boolean> {
     const view = this.views.get(handle.id)
     const targetId = view === undefined ? undefined : this.sessions.get(view.session)
     if (this.quietParked.size === 0 || view === undefined || targetId === undefined) return false
@@ -1670,7 +1698,15 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       if (typeof found?.windowId !== 'number' || !this.quietParked.delete(found.windowId)) return false
       const g = await this.moveOnScreen(view.client, found.windowId, view.session)
       if (options?.select === true) await view.client.send('Page.bringToFront', {}, view.session)
-      else if (g?.hidden === true && this.foreground !== undefined) this.quietFront = { client: view.client, session: view.session }
+      else if (g?.hidden === true && this.foreground !== undefined) {
+        const front = { client: view.client, session: view.session, targetId }
+        this.quietFront = front
+        options?.until?.addEventListener('abort', () => {
+          if (this.quietFront !== front) return
+          this.quietFront = undefined
+          if (!this.quietWatched()) this.stopForeground()
+        }, { once: true })
+      }
       else if (g?.hidden === true) await view.client.send('Page.bringToFront', {}, view.session)
       if (!this.quietWatched()) this.stopForeground()
       return true

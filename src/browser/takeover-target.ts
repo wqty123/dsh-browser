@@ -8,7 +8,8 @@ export interface CarrierTakeoverTarget {
   readonly tabId: string
   readonly pageId: string
   readonly url: string
-  readonly reveal?: () => Promise<boolean>
+  /** `until` aborts when the takeover ends. */
+  readonly reveal?: (until?: AbortSignal) => Promise<boolean>
   readonly connected: () => boolean
 }
 

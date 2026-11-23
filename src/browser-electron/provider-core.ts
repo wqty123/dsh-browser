@@ -24,6 +24,9 @@ export const PROVIDER_TIMEOUTS = Object.freeze({
 /** Stable provider id registered with `ctx.browser`. */
 export const ELECTRON_BROWSER_PROVIDER_ID = 'electron'
 
+/** `until`: a hidden page waiting for the person's activation to come to the front stops waiting when this aborts (the takeover ended). */
+export interface QuietRevealOptions { readonly select?: boolean; readonly until?: AbortSignal }
+
 /**
  * The minimal Electron surface this provider needs. Implemented by the
  * desktop shell with a real `WebContentsView`; a fake implements it in tests.
@@ -34,7 +37,7 @@ export interface ElectronBrowserViewHost {
   referenceOverlayOwnerFor?(scope: BrowserSessionId): 'client' | undefined
   retireSession?(scope: BrowserSessionId): Promise<void>
   /** Move the view's window onto the screen if quiet mode parked it off-screen, without activating it; whether it moved. */
-  revealQuietWindow?(handle: ElectronViewHandle, options?: { readonly select?: boolean }): Promise<boolean>
+  revealQuietWindow?(handle: ElectronViewHandle, options?: QuietRevealOptions): Promise<boolean>
   /**
    * Create a new browser view and return a handle to its webContents-like
    * surface. The host owns windowing (adding the view to the window, sizing,

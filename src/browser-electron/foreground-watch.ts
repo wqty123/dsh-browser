@@ -5,6 +5,9 @@ export interface ForegroundEvent {
   readonly pid: number
   /** Whether that window lies off every display (a minimized window does not count). */
   readonly offscreen: boolean
+  /** That window's top-left corner, in DIPs like CDP window bounds. */
+  readonly left?: number
+  readonly top?: number
 }
 export interface ForegroundWatch { stop(): void }
 /** `onFail` runs at most once, when the watcher cannot start or dies; `stop()` never triggers it. */
@@ -14,6 +17,7 @@ const POLL_MS = 500
 
 const script = (parent: number): string => [
   `$parent = ${parent}`,
+  'try {',
   'Add-Type -AssemblyName System.Windows.Forms',
   'Add-Type -TypeDefinition @"',
   'using System; using System.Runtime.InteropServices;',
@@ -23,10 +27,12 @@ const script = (parent: number): string => [
   '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);',
   '  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out Rect r);',
   '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);',
   '}',
   '"@',
+  '} catch { exit 3 }',
   '$last = ""; $tick = 0',
-  'while ($true) {',
+  'try { while ($true) {',
   '  $tick++; if ($tick % 8 -eq 0 -and -not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { exit }',
   '  $h = [DshForeground]::GetForegroundWindow(); $p = [uint32]0',
   '  [void][DshForeground]::GetWindowThreadProcessId($h, [ref]$p)',
@@ -35,16 +41,19 @@ const script = (parent: number): string => [
   '  $off = 1',
   '  if ([DshForeground]::IsIconic($h) -or $box.Width -le 0) { $off = 0 }',
   '  foreach ($s in [System.Windows.Forms.Screen]::AllScreens) { if ($s.Bounds.IntersectsWith($box)) { $off = 0 } }',
-  '  $line = "$p $off"',
+  '  $dpi = [DshForeground]::GetDpiForWindow($h); if ($dpi -le 0) { $dpi = 96 }',
+  '  $line = "$p $off $([math]::Round($r.Left * 96 / $dpi)) $([math]::Round($r.Top * 96 / $dpi))"',
   '  if ($line -ne $last) { [Console]::Out.WriteLine($line); [Console]::Out.Flush(); $last = $line }',
   `  Start-Sleep -Milliseconds ${POLL_MS}`,
-  '}',
+  '} } catch { exit 4 }',
 ].join('\n')
 
-/** One line of the watcher's output, `<pid> <0|1>`. */
+/** One line of the watcher's output, `<pid> <0|1> [<left> <top>]`. */
 export function parseForegroundLine(line: string): ForegroundEvent | undefined {
-  const match = /^(\d+) ([01])$/u.exec(line.trim())
-  return match === null ? undefined : { pid: Number(match[1]), offscreen: match[2] === '1' }
+  const match = /^(\d+) ([01])(?: (-?\d+) (-?\d+))?$/u.exec(line.trim())
+  if (match === null) return undefined
+  const event = { pid: Number(match[1]), offscreen: match[2] === '1' }
+  return match[3] === undefined ? event : { ...event, left: Number(match[3]), top: Number(match[4]) }
 }
 
 /**

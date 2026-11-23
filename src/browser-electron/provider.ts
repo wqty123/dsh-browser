@@ -20,7 +20,7 @@ import { PROVIDER_TIMEOUTS, withTimeout, handleSendEvaluate, type BrowserUserAct
 import { ProviderMedia } from './provider-media.ts'
 
 export { ELECTRON_BROWSER_PROVIDER_ID, CDP_PAGE_CAPTURE_SCREENSHOT, layoutSize, toExportedCookies, toCdpCookie, CDP_RUNTIME_EVALUATE, CDP_PAGE_NAVIGATE, BROWSER_KEY_NAMES } from './provider-core.ts'
-export type { ElectronBrowserViewHost, BrowserUserAction, ElectronViewHandle, ElectronBrowserProviderConfig, CdpNavigateParams, CdpMouseParams, CdpInsertTextParams, CdpEvaluateParams, PresentOptions, CommandOptions, ScreenshotOptions } from './provider-core.ts'
+export type { ElectronBrowserViewHost, QuietRevealOptions, BrowserUserAction, ElectronViewHandle, ElectronBrowserProviderConfig, CdpNavigateParams, CdpMouseParams, CdpInsertTextParams, CdpEvaluateParams, PresentOptions, CommandOptions, ScreenshotOptions } from './provider-core.ts'
 
 /**
  * Consecutive failed evaluations after which the reference pump forgets an
@@ -507,13 +507,13 @@ export class ElectronBrowserProvider extends ProviderMedia implements BrowserPro
     return [...this.sessions.keys()]
   }
 
-  takeoverTargets(owner: string): readonly { session: BrowserSessionId; owner: string; tabId: string; pageId: string; url: string; reveal?: () => Promise<boolean> }[] {
+  takeoverTargets(owner: string): readonly { session: BrowserSessionId; owner: string; tabId: string; pageId: string; url: string; reveal?: (until?: AbortSignal) => Promise<boolean> }[] {
     const reveal = this.host.revealQuietWindow?.bind(this.host)
     return [...this.sessions.values()].filter(s => (s.label ?? 'default').replace(/^session-/u, '') === owner).flatMap(s => {
       const tab = s.tabs[s.activeIndex]
       return tab && !tab.failure && /^https?:\/\//u.test(tab.url)
         ? [{ session: s.id, owner: s.label ?? 'default', tabId: tab.id, pageId: tab.id, url: tab.url,
-          ...reveal ? { reveal: () => reveal(tab.handle) } : {} }] : []
+          ...reveal ? { reveal: (until?: AbortSignal) => reveal(tab.handle, until === undefined ? undefined : { until }) } : {} }] : []
     })
   }
 

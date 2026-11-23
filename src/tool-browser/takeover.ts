@@ -11,7 +11,7 @@ import { TAKEOVER_ROUTE, TAKEOVER_TOOL, type TakeoverDecision, type TakeoverNoti
 
 interface Page {
   readonly connected?: () => boolean
-  readonly reveal?: () => Promise<boolean>
+  readonly reveal?: (until?: AbortSignal) => Promise<boolean>
   readonly owner: string
   readonly tabId: string
   readonly pageId: string
