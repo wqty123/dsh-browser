@@ -30,7 +30,7 @@ import type { BrowserPageOperationRequest, BrowserProbeMethod } from '../browser
 import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
 
 /** Bumped when the probe's shape changes; an older probe is replaced rather than trusted. */
-export const PROBE_VERSION = 6
+export const PROBE_VERSION = 7
 
 /** Where the probe keeps itself, and the only global it adds. */
 const PROBE_KEY = '__dshProbe'
@@ -105,12 +105,12 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
       const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase()
       const started = Date.now()
       state.pending += 1
-      const settle = (status) => {
+      const settle = (status, type) => {
         state.pending = Math.max(0, state.pending - 1)
-        note({ at: started, kind: 'fetch', method: method, url: short(url, 300), status: status, ms: Date.now() - started })
+        note({ at: started, kind: 'fetch', method: method, url: short(url, 300), status: status, type: short(type || '', 80), ms: Date.now() - started })
       }
       return nativeFetch.apply(this, arguments).then(
-        (response) => { settle(response.status); return response },
+        (response) => { let type = ''; try { type = response.headers.get('content-type') || '' } catch (error) { /* opaque */ } settle(response.status, type); return response },
         (error) => { settle(0); throw error },
       )
     })
@@ -129,7 +129,9 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
       state.pending += 1
       const done = () => {
         state.pending = Math.max(0, state.pending - 1)
-        note({ at: meta.at, kind: 'xhr', method: meta.method, url: short(meta.url, 300), status: this.status || 0, ms: Date.now() - meta.at })
+        let type = ''
+        try { type = this.getResponseHeader('content-type') || '' } catch (error) { /* not readable */ }
+        note({ at: meta.at, kind: 'xhr', method: meta.method, url: short(meta.url, 300), status: this.status || 0, type: short(type, 80), ms: Date.now() - meta.at })
         this.removeEventListener('loadend', done)
       }
       this.addEventListener('loadend', done)
@@ -354,6 +356,87 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
       text: short(String(body || '').replace(/\\s+/g, ' ').trim(), 400),
     }
   }
+  // Where a page keeps its data before it becomes DOM: embedded state, the JSON APIs it called,
+  // resources it fetched before the probe existed, and endpoints it declares. Shapes only, never
+  // bodies, so the answer stays around 1-2 KB.
+  state.dataSources = function () {
+    const DATA_URL = /[.]json([?#]|$)|[/]api[/]|graphql|[/](locations?|stores?|search|query|products?|items?|listings?)([/?#.]|$)/i
+    const bytes = (text) => { try { return new Blob([text]).size } catch (error) { return String(text).length } }
+    const shape = (value) => {
+      const keys = value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value).slice(0, 12) : []
+      const arrays = []
+      const seen = new Set()
+      const walk = (node, path, depth) => {
+        if (!node || typeof node !== 'object' || seen.has(node) || depth > 6 || seen.size > 2000) return
+        seen.add(node)
+        if (Array.isArray(node)) {
+          if (node.length >= 3) arrays.push({ path: path || '(root)', length: node.length })
+          walk(node[0], path + '[0]', depth + 1)
+          return
+        }
+        for (const key of Object.keys(node).slice(0, 60)) walk(node[key], path ? path + '.' + key : key, depth + 1)
+      }
+      walk(value, '', 0)
+      arrays.sort((a, b) => b.length - a.length)
+      return { keys: keys, arrays: arrays.slice(0, 5) }
+    }
+    const embedded = []
+    const counts = {}
+    const scripts = Array.from(document.querySelectorAll('script#__NEXT_DATA__, script#__NUXT_DATA__, script[type="application/json"], script[type="application/ld+json"]'))
+    for (const node of scripts) {
+      const type = node.type || 'text/javascript'
+      const index = counts[type] = (counts[type] === undefined ? 0 : counts[type] + 1)
+      const text = node.textContent || ''
+      if (text.trim().length < 2 || embedded.length >= 8) continue
+      let parsed
+      try { parsed = JSON.parse(text) } catch (error) { parsed = undefined }
+      const name = node.id ? '#' + node.id : 'script[type="' + type + '"][' + index + ']'
+      embedded.push(Object.assign({ name: short(name, 80), bytes: bytes(text) }, parsed === undefined ? { parsed: false } : shape(parsed)))
+    }
+    for (const key of ['__NEXT_DATA__', '__NUXT__', '__INITIAL_STATE__', '__PRELOADED_STATE__', '__APOLLO_STATE__', '__remixContext']) {
+      let value
+      try { value = globalThis[key] } catch (error) { value = undefined }
+      if (value === undefined || value === null || typeof value !== 'object' || embedded.length >= 10) continue
+      let size = 0
+      try { size = bytes(JSON.stringify(value)) } catch (error) { size = 0 }
+      embedded.push(Object.assign({ name: 'window.' + key, bytes: size }, shape(value)))
+    }
+    const apis = []
+    const called = new Map()
+    for (const row of state.network) {
+      if ((row.kind !== 'fetch' && row.kind !== 'xhr') || !(row.status > 0)) continue
+      const id = row.method + ' ' + String(row.url).split('?')[0]
+      const json = /json/i.test(String(row.type || ''))
+      const hit = called.get(id)
+      if (hit) { hit.calls += 1; hit.url = row.url; hit.status = row.status; continue }
+      const entry = { method: row.method, url: row.url, status: row.status, type: short(String(row.type || '').split(';')[0], 40), calls: 1, json: json }
+      called.set(id, entry)
+      apis.push(entry)
+    }
+    apis.sort((a, b) => Number(b.json) - Number(a.json) || Number(DATA_URL.test(b.url)) - Number(DATA_URL.test(a.url)))
+    const known = new Set(apis.map(entry => String(entry.url).split('?')[0]))
+    const resources = []
+    let timings = []
+    try { timings = performance.getEntriesByType('resource') } catch (error) { timings = [] }
+    for (const entry of timings) {
+      const url = String(entry.name || '')
+      const initiator = String(entry.initiatorType || '')
+      if (initiator !== 'fetch' && initiator !== 'xmlhttprequest' && !DATA_URL.test(url)) continue
+      if (/^(script|css|img|link|image)$/.test(initiator) && !/[.]json([?#]|$)/i.test(url)) continue
+      const base = url.split('?')[0]
+      if (url.length > 2048 || known.has(base)) continue
+      known.add(base)
+      resources.push({ url: url, initiator: initiator, bytes: entry.transferSize || entry.encodedBodySize || 0 })
+      if (resources.length >= 12) break
+    }
+    const declared = []
+    const declare = (from, url) => { if (url && url.length <= 2048 && declared.length < 10 && !declared.some(entry => entry.url === url)) declared.push({ from: from, url: url }) }
+    try {
+      for (const link of Array.from(document.querySelectorAll('link[rel~="preload"][as="fetch"], link[rel~="prefetch"][as="fetch"]'))) declare('link[rel=' + link.rel + ']', link.href)
+      for (const node of Array.from(document.querySelectorAll('[data-api], [data-endpoint]')).slice(0, 20)) declare(node.hasAttribute('data-api') ? 'data-api' : 'data-endpoint', String(node.getAttribute('data-api') || node.getAttribute('data-endpoint') || ''))
+    } catch (error) { /* a document without these still answers the rest */ }
+    return { url: String(location.href), embedded: embedded, apis: apis.slice(0, 12), resources: resources, declared: declared }
+  }
   globalThis[KEY] = state
   return VERSION
 })()`
@@ -475,17 +558,49 @@ export function uploadScript(
     return JSON.stringify({ ok: true, name: blob.name, size: blob.size, files: node.files ? node.files.length : 0 })
   })()`
 }
+/**
+ * What an action changed on the page that the URL does not show: the title, visible alert regions
+ * and the dialogs the probe answered. Read before and after each action for the post-action line.
+ * It never installs the probe, so observing an action leaves the page as it was.
+ */
+const PULSE_SCRIPT = `(() => {
+  const probe = globalThis[${JSON.stringify(PROBE_KEY)}]
+  const alerts = []
+  try {
+    for (const node of Array.from(document.querySelectorAll('[role=alert], [role=alertdialog], [aria-live=assertive]')).slice(0, 20)) {
+      const text = String(node.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 160)
+      if (text !== '' && node.getClientRects().length > 0 && alerts.indexOf(text) === -1) alerts.push(text)
+      if (alerts.length >= 5) break
+    }
+  } catch (error) { /* a document without a body still has a title */ }
+  const dialogs = probe && Array.isArray(probe.dialogs)
+    ? probe.dialogs.slice(-5).map(entry => ({ at: entry.at, kind: entry.kind, message: String(entry.message).slice(0, 160), answered: entry.answered }))
+    : []
+  return JSON.stringify({ title: String(document.title || ''), alerts: alerts, dialogs: dialogs, probe: probe ? Number(probe.startedAt) || 0 : 0 })
+})()`
+
+/** A fetch from the page, so it carries the page's same-origin cookies. The body comes back as text. */
+function fetchScript(url: string, init: { readonly method?: string; readonly headers?: Readonly<Record<string, string>>; readonly body?: string }): string {
+  return `(async () => {
+    const response = await fetch(new URL(${JSON.stringify(url)}, document.baseURI).href, Object.assign({ credentials: 'same-origin' }, ${JSON.stringify(init)}))
+    const body = await response.text()
+    return JSON.stringify({ ok: response.ok, status: response.status, statusText: response.statusText, url: response.url, type: response.headers.get('content-type') || '', body: body })
+  })()`
+}
+
 /** Build a fixed page operation, rejecting unknown operations before any code runs. */
 export function pageOperationScript(request: BrowserPageOperationRequest): string {
   switch (request.operation) {
     case 'install': return PROBE_INSTALL_SCRIPT
     case 'url': return 'JSON.stringify(location.href)'
+    case 'pulse': return PULSE_SCRIPT
+    case 'fetch': return fetchScript(request.url, request.init)
     case 'text': return 'JSON.stringify((document.body ? document.body.innerText : "").indexOf(' + JSON.stringify(request.text) + ') !== -1)'
     case 'drag': return dragScript(request.from, request.to, request.steps)
     case 'upload': return uploadScript(request.target, request.file)
     case 'probe': {
       const methods: readonly BrowserProbeMethod[] = ['read', 'clear', 'settle', 'find', 'overlayAt', 'summary',
-        'findText', 'hoverAt', 'setDialogPolicy', 'dialogStatus', 'networkCursor']
+        'findText', 'hoverAt', 'setDialogPolicy', 'dialogStatus', 'networkCursor', 'dataSources']
       if (!methods.includes(request.method)) throw new Error('browser: unsupported fixed page operation')
       return probeCallScript(request.method, request.args)
     }

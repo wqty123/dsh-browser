@@ -161,6 +161,21 @@ return notAReturn
   assert.equal(second.output, '[6,30,"ok",3,true]')
 })
 
+test('repeated sleeps in a cell print one hint toward the wait helpers, and the count restarts each cell', async () => {
+  const { tools } = mount()
+  const code = tools.get('dsh_browser_code')
+  const exec = { agent: { id: 'sleep-hint-owner' } }
+  const quiet = await code.execute({ code: 'await sleep(1)\nawait sleep(1)\nprint("two")' }, exec)
+  assert.equal(quiet.output, 'two')
+  const loop = await code.execute({ code: 'for (let i = 0; i < 5; i++) await sleep(1)\nprint("five")' }, exec)
+  assert.equal(loop.ok, true, loop.output)
+  assert.equal(loop.output.match(/\[hint\] sleep\(\) called 3 times in this cell/g)?.length, 1, loop.output)
+  assert.match(loop.output, /wait_until\(expr\)/)
+  assert.match(loop.output, /five$/)
+  const again = await code.execute({ code: 'await sleep(1)\nprint("one")' }, exec)
+  assert.equal(again.output, 'one')
+})
+
 test('a cell past its deadline is killed, even a busy loop after await, and the REPL restarts', async () => {
   const { tools } = mount()
   const code = tools.get('dsh_browser_code')

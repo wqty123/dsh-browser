@@ -64,10 +64,11 @@ async function tabsOf(tool: CatalogTool, exec: never): Promise<readonly TabRow[]
  * The post-action line: where the browser is after an action, compared with before it. Browser Use
  * reports this after every step so the model never has to spend a turn asking what happened.
  */
-export function actionSummary(before: readonly TabRow[] | undefined, after: readonly TabRow[]): string {
+export function actionSummary(before: readonly TabRow[] | undefined, after: readonly TabRow[], page: { readonly before?: PagePulse; readonly after?: PagePulse } = {}): string {
   if (before === undefined) {
     const now = after.find(tab => tab.active)
-    return `\u2192 ${now === undefined ? 'no active tab' : `on ${now.url || 'about:blank'}`}${after.length > 1 ? ` (${after.length} tabs)` : ''}`
+    const head = `${now === undefined ? 'no active tab' : `on ${now.url || 'about:blank'}`}${after.length > 1 ? ` (${after.length} tabs)` : ''}`
+    return `\u2192 ${[head, ...pageChanges(page.before, page.after, true)].join('; ')}`
   }
   const known = new Map(before.map(tab => [tab.id, tab]))
   const still = new Set(after.map(tab => tab.id))
@@ -80,7 +81,31 @@ export function actionSummary(before: readonly TabRow[] | undefined, after: read
   else if (was?.id !== now.id) parts.push(`active tab ${now.id} ${now.url || 'about:blank'}`)
   else if (was.url !== now.url) parts.push(`navigated to ${now.url || 'about:blank'}`)
   else if (parts.length === 0) parts.push(`still on ${now.url || 'about:blank'}`)
-  return `\u2192 ${parts.join('; ')}`
+  const moved = now !== undefined && (was?.id !== now.id || was.url !== now.url)
+  return `\u2192 ${[...parts, ...pageChanges(page.before, page.after, moved)].join('; ')}`
+}
+
+/** What the page itself reports, read around an action: see the fixed `pulse` page operation. */
+export interface PagePulse {
+  readonly title: string
+  readonly alerts: readonly string[]
+  readonly dialogs: readonly { readonly at: number; readonly kind: string; readonly message: string; readonly answered?: string }[]
+  /** When the page's probe was installed, 0 without one: dialogs are only comparable within one probe. */
+  readonly probe: number
+}
+
+const quoted = (text: string, limit: number): string => JSON.stringify(text.length > limit ? `${text.slice(0, limit)}\u2026` : text)
+
+/** The title after a move or a retitle, alert regions that were not there before, and dialogs answered meanwhile. */
+function pageChanges(was: PagePulse | undefined, now: PagePulse | undefined, moved: boolean): string[] {
+  if (now === undefined) return []
+  const parts: string[] = []
+  if (now.title !== '' && (moved || was === undefined || was.title !== now.title)) parts.push(`title ${quoted(now.title, 80)}`)
+  const seen = new Set(was?.alerts ?? [])
+  for (const text of now.alerts.filter(text => !seen.has(text)).slice(0, 3)) parts.push(`alert ${quoted(text, 120)}`)
+  const since = was !== undefined && was.probe !== 0 && was.probe === now.probe ? Math.max(0, ...was.dialogs.map(row => row.at)) : 0
+  for (const row of now.dialogs.filter(row => row.at > since).slice(-3)) parts.push(`${row.kind}() ${quoted(row.message, 120)}${row.answered ? ` ${row.answered}` : ''}`)
+  return parts
 }
 
 interface TraceEntry { tool: string; status: 'ok' | 'error' | 'interrupted'; error?: string }
@@ -103,12 +128,14 @@ Browser helpers (pre-installed):
 - click(target), type(target, text, {submit}), fill_input(target, text) replaces a field's value, select(target, optionText), fill(fields, {submit}). target is visible text ('Sign in'), a CSS selector ('#email', 'button[type=submit]'), {text|css|xpath, index}, or {x, y}.
 - click_at_xy(x, y) sends real mouse events in viewport coordinates; type_text(text) inserts into the focused element; press_key('Enter'); scroll(dy) or scroll(x, y, dy).
 - read({format, selector, maxChars}) returns page text (markdown); snapshot() lists numbered interactive elements with labels and selectors; find(text); state().
-- wait_for_element(selector), wait_for_network_idle(), upload_file(selector, path), screenshot({fullPage, annotate}) (vision models see the image; annotate:true draws numbered boxes on interactive elements and lists them as {id, x, y, role, label}).
+- Waits return as soon as the condition holds and throw when it never does: wait_for_element(selector), wait_for_text(text), wait_for_gone(text), wait_until(jsExpression, {timeoutMs, intervalMs}) (returns the truthy value; the timeout error quotes the last result), wait_for_response(urlContains, trigger, {status, timeoutMs}) (watches from before trigger() runs, returns the response row), wait_for_network_idle(). Use them instead of sleep(ms), which is capped at 60 s and prints a hint when a cell keeps calling it.
+- Data first: inspect_data_sources() lists embedded state (__NEXT_DATA__, __INITIAL_STATE__, JSON/ld+json scripts) with keys and array paths, the JSON APIs the page called, data-like resources and declared endpoints. fetch_json(url, {method, headers, body}) fetches from the page with its cookies and returns parsed JSON; a non-2xx status throws with the status and the start of the body.
+- upload_file(selector, path), screenshot({fullPage, annotate}) (vision models see the image; annotate:true draws numbered boxes on interactive elements and lists them as {id, x, y, role, label}).
 - refs.capture({excerptText}), refs.list(), refs.reveal({referenceId}) manage browser references.
 - call(name, args) runs any other browser action and returns its structured result (download, console, network, wait_for_response, dialog, hover, drag, set_value, check, get_value, scrape, a11y, assert, do, ...); await help() lists them and help(name) describes one.
 - print()/log() print. A failing helper throws; catch it to try another way in the same cell.
 
-Prefer structure for discovery: snapshot() or js() that filters the DOM to what you need; avoid repeated full-page dumps. Read state, not just labels. Coordinates hit whatever is visible: inspect overlays and disabled controls first and never force a click through them. Element positions expire after navigation. Verify the actual outcome after every mutation: each action's printed result ends with a → line saying where the browser is now (URL change, new or closed tabs, active tab). Element lookups reach into open shadow roots and same-origin iframes; cross-origin iframes stay opaque.
+Before scraping a list, directory, paginated or lazy-loaded data, call inspect_data_sources(): when the page holds the data as JSON or calls an API, read that (with fetch_json, in parallel with Promise.all for pages) instead of walking the DOM, and compare the count you collected with the total the site states. Otherwise prefer structure for discovery: snapshot() or js() that filters the DOM to what you need; avoid repeated full-page dumps. Read state, not just labels. Coordinates hit whatever is visible: inspect overlays and disabled controls first and never force a click through them. Element positions expire after navigation. Verify the actual outcome after every mutation: each action's printed result ends with a → line saying where the browser is now (URL change, new or closed tabs, active tab) and what the page reported (its title after a change, new alert messages, dialogs answered). Element lookups reach into open shadow roots and same-origin iframes; cross-origin iframes stay opaque.
 
 Use js(...) for extraction: return exactly the fields you need as JSON. Use screenshots for visual questions, canvas and geometry.
 
@@ -233,7 +260,7 @@ function summarize(trace: readonly TraceEntry[]): string {
  * @param catalog - every browser tool by name, already wrapped with the takeover and restriction gates.
  * @returns the tool definition and a dispose that ends every REPL worker.
  */
-export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
+export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>, pulse?: (exec: never) => Promise<PagePulse | undefined>) {
   const workers = new Map<string, CellWorker>()
   const locks = new Map<string, Promise<unknown>>()
   const serialize = async <T>(key: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> => {
@@ -465,14 +492,16 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
                 // list_tabs never starts a browser, so reading it around an action has no side effects.
                 const summarized = !concurrencySafe(name, toolArgs) && !WATCHERS.has(target.name) && catalog.has(LIST_TABS)
                 const before = summarized ? await tabsOf(resolve(LIST_TABS), runContext) : undefined
+                const pageBefore = summarized ? await pulse?.(runContext) : undefined
                 const value = await target.execute(toolArgs as never, { ...exec, signal: controller.signal, ...armed !== undefined ? { armed } : {} } as never)
                 entry.status = 'ok'
                 const after = summarized ? await tabsOf(resolve(LIST_TABS), runContext) : undefined
+                const pageAfter = after !== undefined ? await pulse?.(runContext) : undefined
                 const blocks = (target.output?.render?.(toolArgs as never, value as never) ?? [{ type: 'text', text: format(value) }]) as readonly Block[]
                 for (const block of blocks) {
                   if (block.type === 'image' && block.attachment !== undefined && images.length < MAX_IMAGES) images.push(block.attachment as ImageAttachment)
                 }
-                const summary = after !== undefined ? actionSummary(before, after) : undefined
+                const summary = after !== undefined ? actionSummary(before, after, { ...pageBefore !== undefined ? { before: pageBefore } : {}, ...pageAfter !== undefined ? { after: pageAfter } : {} }) : undefined
                 const text = [...blocks.filter(block => block.type === 'text').map(block => block.text ?? ''), ...summary !== undefined ? [summary] : []].join('\n')
                 worker.send({ type: 'reply', id, value: structuredClone(value), text })
               } catch (error) {

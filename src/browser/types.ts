@@ -379,12 +379,14 @@ export type BrowserPageOperationRequest =
   | { readonly operation: 'probe'; readonly method: BrowserProbeMethod; readonly args?: readonly unknown[] }
   | { readonly operation: 'text'; readonly text: string }
   | { readonly operation: 'url' }
+  | { readonly operation: 'pulse' }
+  | { readonly operation: 'fetch'; readonly url: string; readonly init: { readonly method?: string; readonly headers?: Readonly<Record<string, string>>; readonly body?: string } }
   | { readonly operation: 'drag'; readonly from: { x: number; y: number }; readonly to: { x: number; y: number }; readonly steps: number }
   | { readonly operation: 'upload'; readonly target: { by: 'css' | 'text' | 'xpath'; value: string }; readonly file: { name: string; mime: string; base64: string } }
 
 /** Provider-owned probe operations; JavaScript properties such as constructor are excluded. */
 export type BrowserProbeMethod = 'read' | 'clear' | 'settle' | 'find' | 'overlayAt' | 'summary'
-  | 'findText' | 'hoverAt' | 'setDialogPolicy' | 'dialogStatus' | 'networkCursor'
+  | 'findText' | 'hoverAt' | 'setDialogPolicy' | 'dialogStatus' | 'networkCursor' | 'dataSources'
 
 /**
  * Result of an execute. Mirrors CDP `Runtime.evaluate` semantics: either a
