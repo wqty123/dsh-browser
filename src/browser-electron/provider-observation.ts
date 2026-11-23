@@ -648,7 +648,7 @@ export abstract class ProviderObservation extends ProviderNavigation {
       const { sliceMs, last } = pagePollSlice(deadline)
       const result = await withTimeout(
         handleSendEvaluate(tab.handle, script(sliceMs, last)),
-        sliceMs + TARGET_SCRIPT_GRACE_MS,
+        Math.max(sliceMs, deadline - Date.now()) + TARGET_SCRIPT_GRACE_MS,
         signal,
         `browser: scrape timed out after ${timeoutMs}ms`,
         timedOut => { this.interrupt(tab.handle, timedOut) },

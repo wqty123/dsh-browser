@@ -103,3 +103,28 @@ test('a target tool with a long budget locates in slices and reports the miss wi
   for (const ms of held) assert.ok(ms < bridgeLimit - TARGET_SCRIPT_GRACE_MS, `one evaluate held the page ${ms}ms`)
   await p.close(sid)
 })
+
+test('a slice queued behind other commands on the same page is not timed out before the caller budget', async t => {
+  mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+  t.after(() => mock.timers.reset())
+  const { host } = sidebar(() => [row('DeepSeek Harness')])
+  const createView = host.createView
+  host.createView = identity => {
+    const view = createView(identity)
+    const send = view.sendCommand
+    let queued = true
+    view.sendCommand = async (method, params) => {
+      if (method === 'Runtime.evaluate' && String(params.expression ?? '').includes('const itemSel') && queued) {
+        queued = false
+        await new Promise(resolve => setTimeout(resolve, PAGE_POLL_SLICE_MS + TARGET_SCRIPT_GRACE_MS + 500))
+      }
+      return await send(method, params)
+    }
+    return view
+  }
+  const p = new ElectronBrowserProvider(host)
+  const sid = await p.open()
+  const result = await p.scrape(sid, { item: '.result', fields: [{ name: 'title', selector: 'h3 a' }], timeoutMs: 15_000 })
+  assert.equal(result.count, 1)
+  await p.close(sid)
+})
