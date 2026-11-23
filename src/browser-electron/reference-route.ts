@@ -30,7 +30,6 @@ import { validateFrameSelector } from '../browser-reference/entry.ts'
 import { summarizeReference, type ReferenceSummary } from '../browser-reference/service.ts'
 import type { BrowserReferenceService } from '../browser-reference/service.ts'
 import type { DeliveryQueue } from '../browser-reference/delivery.ts'
-import type { createSubmissionReceipts } from '../browser-reference/submission-receipts.ts'
 import type { ReferenceExportFormat } from '../browser-reference/export.ts'
 import type { BrowserReferenceCarrier, BrowserReferenceEntry, BrowserReferenceOrigin, BrowserReferenceTarget } from '../browser-reference/types.ts'
 
@@ -94,7 +93,6 @@ export interface ReferenceRouteOptions {
   readonly carrier?: () => BrowserReferenceCarrier
   /** Durable hand-off queue between capture and the conversation draft. */
   readonly queue?: DeliveryQueue
-  readonly receipts?: ReturnType<typeof createSubmissionReceipts>
 }
 
 /** The handlers, one per registered exact path. */
@@ -430,7 +428,6 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
       replyJson(response, 400, { ok: false, error: 'invalid since' })
       return
     }
-    const unverified = options.receipts?.recover(sessionId)
     const includeConsumed = url.searchParams.get('includeConsumed') === '1'
     const snapshot = queue.list({ sessionId, includeConsumed, ...since > 0 ? { since } : {} })
     // The cursor must never hide work that is still PENDING, whatever includeConsumed says. The client
@@ -444,7 +441,6 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
     replyJson(response, 200, {
       ok: true,
       sequence: snapshot.sequence,
-      ...(unverified === undefined ? {} : { tracksSubmissions: true, unverified }),
       deliveries: pending.map(record => ({
         intentId: record.intentId,
         sessionId: record.sessionId,
@@ -476,21 +472,6 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
       body = await readJsonBody<Record<string, unknown>>(request)
     } catch (error) {
       replyJson(response, 400, { ok: false, error: `unreadable body: ${String(error)}` })
-      return
-    }
-    if (body.phase === 'submitting') {
-      const sessionId = stringOf(body.sessionId, 200)
-      const requestId = stringOf(body.requestId, 200)
-      const ids = body.intentIds
-      if (sessionId === undefined || requestId === undefined || !Array.isArray(ids) || !ids.every(id => typeof id === 'string')) {
-        replyJson(response, 400, { ok: false, error: 'invalid-submission' })
-        return
-      }
-      if (!options.receipts?.bind(sessionId, requestId, ids)) {
-        replyJson(response, 409, { ok: false, error: 'submission-not-bound' })
-        return
-      }
-      replyJson(response, 200, { ok: true, state: 'submitting' })
       return
     }
     let intentId = stringOf(body.intentId, 200)

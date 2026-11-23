@@ -121,7 +121,13 @@ export async function poll<T>(check: () => Promise<T | undefined>, budgetMs: num
     if (value !== undefined) return value
     const left = deadline - Date.now()
     if (left <= 0) return undefined
-    await pause(Math.min(intervalMs, left))
+    // Timers may fire a millisecond before `Date.now()` reaches the deadline; the pause that
+    // reaches it is the last one, so it is followed by exactly one final check.
+    if (left <= intervalMs) {
+      await pause(left)
+      return await check()
+    }
+    await pause(intervalMs)
   }
 }
 
