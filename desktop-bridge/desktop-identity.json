@@ -5,6 +5,10 @@
     "dsh-desktop"
   ],
   "mainEntry": "lib/main.js",
+  "unsupportedMainEntries": {
+    "out/main/index.js": "the electron-vite layout of a third-party DSH Desktop (dataelement/dsh-desktop, issue #62), which shares the package name but not the DeepSeek Harness Desktop shell the bridge patches"
+  },
+  "_unsupportedNote": "A recognized package name with one of these entries instead of mainEntry is refused with the reason given, so the user learns which Desktop they have rather than seeing a missing-file error.",
   "_layoutNote": "resources/app.asar wins over resources/app whenever it exists, so identity is read from the archive in that case and never from the sibling extraction, which the updater leaves behind and which may be a different build.",
   "layouts": [
     {

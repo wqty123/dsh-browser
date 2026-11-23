@@ -11,7 +11,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest line the host patch supports, and the newest DSH release.
+        dsh: ['0.2.2-rc.3', '0.2.3-alpha.2']
+    name: test (DSH ${{ matrix.dsh }})
     env:
+      DSH_VERSION: ${{ matrix.dsh }}
       # The build plugin (@local/tsdown-plugin-cordis) lives in the public dsh-plugin monorepo; it is
       # built from this commit in a throwaway workspace (tools/ci-workspace.mjs). No secrets involved.
       DSH_PLUGIN_REF: a48fa9ea05a3cd092dc588201f3579b3496350a9
@@ -33,7 +40,9 @@ jobs:
             packages/tooling/dsh-cordis-assets
       - uses: actions/setup-node@v5
         with:
-          node-version: 24
+          # DSH 0.2.3 requires Node ^24.22.3 || >=26.13.1.
+          node-version: 24.x
+          check-latest: true
       - run: corepack enable
       - run: echo "WORKSPACE=$RUNNER_TEMP/ws" >> "$GITHUB_ENV"
       - name: Assemble the build workspace

@@ -39,22 +39,15 @@ export function registerExitCleanup(cleanup: () => void): void {
  * @returns the configured surface, defaulting to "panel".
  */
 export function readSurface(): 'panel' | 'builtin' {
-  // Try every plausible location and take the first file that actually carries the key. The plugin's
-  // own settingsPath() is preferred, but a module instance can hold a stale home while another module in
-  // the same process holds the live one — which is exactly why channel read fine and surface did not.
+  // A host that already resolved the surface declares it; otherwise the plugin's own settings file under
+  // the live DSH_HOME decides. No machine-specific path is consulted.
   const declared = (globalThis as unknown as Record<string, unknown>).__dshBrowserSurface
   if (declared === 'panel' || declared === 'builtin') return declared
-  const candidates: string[] = []
-  try { candidates.push(settingsPath()) } catch { /* no module home */ }
-  candidates.push('D:/dsh-home/dsh-builtin-browser-host/settings.json')
-  for (const candidate of candidates) {
-    if (typeof candidate !== 'string' || candidate === '') continue
-    try {
-      const parsed = JSON.parse(readFileSync(candidate, 'utf8')) as { browser?: { surface?: unknown } }
-      const surface = parsed.browser?.surface
-      if (surface === 'builtin' || surface === 'panel') return surface
-    } catch { /* next candidate */ }
-  }
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { browser?: { surface?: unknown } }
+    const surface = parsed.browser?.surface
+    if (surface === 'builtin' || surface === 'panel') return surface
+  } catch { /* no settings yet */ }
   return 'panel'
 }
 

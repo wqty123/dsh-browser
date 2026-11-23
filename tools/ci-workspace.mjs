@@ -19,8 +19,16 @@ if (!pluginRepo || !workspace) {
 }
 
 const DSH_VERSION = process.env.DSH_VERSION ?? '0.2.2-rc.3'
-// Not versioned with the DSH packages: the ranges @deepseek-ai/dsh-tools@0.2.2-rc.3 itself declares.
-const OWN_RANGES = { '@deepseek-ai/cordis': '~4.1.0', '@deepseek-ai/schemastery': '~3.19.0' }
+// Not versioned with the DSH packages: the ranges @deepseek-ai/dsh-tools of each DSH line declares.
+const OWN_RANGES_BY_LINE = {
+  '0.2.2': { '@deepseek-ai/cordis': '~4.1.0', '@deepseek-ai/schemastery': '~3.19.0' },
+  '0.2.3': { '@deepseek-ai/cordis': '~4.2.0-alpha.1', '@deepseek-ai/schemastery': '~3.20.0-alpha.1' },
+}
+const OWN_RANGES = OWN_RANGES_BY_LINE[DSH_VERSION.split('-')[0]]
+if (!OWN_RANGES) {
+  console.error(`[ci-workspace] no cordis/schemastery ranges known for DSH ${DSH_VERSION}`)
+  process.exit(2)
+}
 
 const self = dirname(dirname(fileURLToPath(import.meta.url)))
 const readJson = path => JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, ''))

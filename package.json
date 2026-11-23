@@ -71,6 +71,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
+    "@deepseek-ai/dsh-error": "workspace:^",
     "@deepseek-ai/dsh-llm": "workspace:^",
     "@deepseek-ai/dsh-system-prompt": "workspace:^",
     "@deepseek-ai/dsh-tools": "workspace:^",
@@ -99,7 +100,8 @@
     "typescript": "^5.5.0"
   },
   "engines": {
-    "dsh": ">=0.1.1-rc.2 <0.3.0"
+    "dsh": ">=0.1.1-rc.2 <0.3.0",
+    "node": "^24.22.3 || >=26.13.1"
   },
   "dsh": {
     "desktop": {

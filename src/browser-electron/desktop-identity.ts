@@ -47,6 +47,8 @@ export interface DesktopLayout {
 interface IdentityRule {
   readonly packageNames: readonly string[]
   readonly mainEntry: string
+  /** Main entries of look-alike Desktops that are recognized only to be refused, with the reason. */
+  readonly unsupportedMainEntries?: Readonly<Record<string, string>>
   readonly layouts: readonly DesktopLayout[]
 }
 
@@ -59,6 +61,9 @@ interface IdentityRule {
 export const FALLBACK_RULE: IdentityRule = {
   packageNames: ['@deepseek-ai/dsh-desktop', 'dsh-desktop'],
   mainEntry: 'lib/main.js',
+  unsupportedMainEntries: {
+    'out/main/index.js': 'the electron-vite layout of a third-party DSH Desktop (dataelement/dsh-desktop, issue #62), which shares the package name but not the DeepSeek Harness Desktop shell the bridge patches',
+  },
   layouts: [
     { name: 'macos-bundle', marker: 'Contents/Info.plist', resources: 'Contents/Resources', executable: 'Contents/MacOS/DeepSeek Harness', cliLauncher: 'runtime/cli/bin/dsh' },
     { name: 'directory', resources: 'resources', executable: 'DeepSeek Harness.exe', cliLauncher: 'runtime/cli/bin/dsh.cmd' },
@@ -113,7 +118,14 @@ export function readIdentityRule(): IdentityRule | { readonly error: string } {
       || layouts[layouts.length - 1]?.marker !== undefined) {
       return { error: 'desktop-identity.json: layouts must be a non-empty array whose last entry has no marker' }
     }
-    return { packageNames: names, mainEntry: main, layouts }
+    const unsupported = raw.unsupportedMainEntries
+    if (unsupported !== undefined && (unsupported === null || typeof unsupported !== 'object' || Array.isArray(unsupported)
+      || Object.entries(unsupported).some(([entry, reason]) => entry === '' || !field(reason)))) {
+      return { error: 'desktop-identity.json: unsupportedMainEntries must map entry paths to reasons' }
+    }
+    return unsupported === undefined
+      ? { packageNames: names, mainEntry: main, layouts }
+      : { packageNames: names, mainEntry: main, unsupportedMainEntries: unsupported, layouts }
   } catch (error) {
     if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
       return FALLBACK_RULE
@@ -264,6 +276,7 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
   const layout: 'packed' | 'unpacked' = archivePresent ? 'packed' : 'unpacked'
   let manifestText: string | undefined
   let mainPresent: boolean
+  let hasEntry: (entry: string) => boolean
   if (archivePresent) {
     const parsed = readAsarHeader(archive)
     if ('error' in parsed) {
@@ -277,7 +290,8 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
     if (manifestText === undefined) {
       return { ok: false, reason: `${archive}: package.json is listed but its bytes cannot be read` }
     }
-    mainPresent = entryAt(parsed.header.files, rule.mainEntry) !== undefined
+    hasEntry = entry => entryAt(parsed.header.files, entry) !== undefined
+    mainPresent = hasEntry(rule.mainEntry)
   } else {
     const manifestPath = join(appDir, 'package.json')
     try {
@@ -286,7 +300,8 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
       console.error(`[dsh-browser] cannot read the package manifest at ${manifestPath}: ${String(error)}`)
       return { ok: false, reason: `${manifestPath} is missing; a directory without a package manifest is not a DSH Desktop install` }
     }
-    mainPresent = existsSync(join(appDir, ...rule.mainEntry.split('/')))
+    hasEntry = entry => existsSync(join(appDir, ...entry.split('/')))
+    mainPresent = hasEntry(rule.mainEntry)
   }
 
   let manifest: { name?: unknown; version?: unknown }
@@ -307,6 +322,10 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
   // The main entry is the file the installer patches and the shell runs; if it is not there, this
   // is not an install this plugin can reason about even though the manifest looks right.
   if (!mainPresent) {
+    const foreign = Object.entries(rule.unsupportedMainEntries ?? {}).find(([entry]) => hasEntry(entry))
+    if (foreign !== undefined) {
+      return { ok: false, reason: `${foreign[0]} instead of ${rule.mainEntry}: ${foreign[1]}; use DSH Web or DeepSeek Harness Desktop` }
+    }
     return { ok: false, reason: `${rule.mainEntry} is not present under ${archivePresent ? archive : appDir}` }
   }
 

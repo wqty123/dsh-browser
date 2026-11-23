@@ -2,6 +2,16 @@
 
 本文件记录各轮功能开发与问题修复(由仓库外独立文档迁移,随仓库管理)。
 
+## 未发布 — 适配 DSH 0.2.3-alpha.2
+
+- **CI 同时验证 DSH 0.2.2-rc.3 与 0.2.3-alpha.2。** 两条线分别使用各自的 Cordis / Schemastery 版本组装工作区。
+- **工具错误带稳定代码。** `dsh_browser_*` 失败时抛出 `HarnessError`（`@deepseek-ai/dsh-error`），DSH 在 `tool/result` 与 PTC 程序中都能读到 `{ name, code }`：人工接管等待为 `BROWSER_TAKEOVER_PENDING`，未知工具组为 `BROWSER_UNKNOWN_TOOL_GROUP`，已有代码（如 `BROWSER_BRIDGE_VERSION_MISMATCH`）保留，其余为 `BROWSER_TOOL_FAILED`；消息文本不变。
+- **载体设置只读当前 `DSH_HOME`。** 删除了写死的 `D:/dsh-home` 回退路径。
+- **Node 引擎声明为 `^24.22.3 || >=26.13.1`**，与 DSH 0.2.3 一致；`engines.dsh` 仍为 `>=0.1.1-rc.2 <0.3.0`。
+- **第三方 DSH Desktop（[#62](https://github.com/wqty123/dsh-browser/issues/62)）明确不支持。** `dataelement/dsh-desktop` 同样名为 `dsh-desktop`，但入口是 electron-vite 的 `out/main/index.js`，没有桥接所挂接的 `lib/main.js` 主进程。状态检查与安装器现在点名拒绝并说明原因，不改动任何文件；请使用 DSH Web 或 DeepSeek Harness Desktop。
+- **宿主补丁仍只覆盖 DSH 0.2.2-rc.3 / rc.5。** 在 0.2.3-alpha.2 上它报告 `unsupported version` 且不写任何文件，插件使用自身的侧栏载体；这是有意保留的行为，0.2.3 正式版发布后再按其 Desktop 字节制作补丁规格。
+- CSS 已按 DSH 客户端模块的样式元数据挂载（`data-plugin` / `data-plugin-css`），会话状态未使用 `useSessionStatus`，Node PTC 的持久 REPL 说明已与 0.2.2-rc.5 起的行为一致，这三项无需改动。
+
 ## 1.0.1（2026-11-23）
 
 ### 修复：Windows / Tauri 上插件启用后代码执行失败（[#71](https://github.com/wqty123/dsh-browser/issues/71)）

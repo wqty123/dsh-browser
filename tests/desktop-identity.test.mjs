@@ -285,3 +285,33 @@ test('an archive with no manifest inside is refused rather than assumed', () => 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('issue #62: the third-party out/main/index.js Desktop is named and refused, and nothing changes', () => {
+  // dataelement/dsh-desktop calls itself `dsh-desktop` (an accepted name) but is an electron-vite
+  // build whose entry is out/main/index.js; the bridge's main-process hook targets lib/main.js.
+  for (const packed of [true, false]) {
+    const root = sandbox.temp('dsh-install-issue62-')
+    try {
+      const manifest = JSON.stringify({ name: 'dsh-desktop', version: '0.12.1', main: './out/main/index.js' })
+      if (packed) {
+        writeAsar(join(root, 'resources', 'app.asar'), { 'package.json': manifest, 'out/main/index.js': 'console.log(1)\n' })
+      } else {
+        mkdirSync(join(root, 'resources', 'app', 'out', 'main'), { recursive: true })
+        writeFileSync(join(root, 'resources', 'app', 'package.json'), manifest)
+        writeFileSync(join(root, 'resources', 'app', 'out', 'main', 'index.js'), 'console.log(1)\n')
+      }
+      const before = snapshot(root)
+      const identity = readDesktopIdentity(root)
+      assert.equal(identity.ok, false)
+      assert.match(identity.reason, /out\/main\/index\.js instead of lib\/main\.js/)
+      assert.match(identity.reason, /issue #62/)
+
+      const result = run([root])
+      assert.equal(result.code, 1)
+      assert.match(result.out, /issue #62/, 'the installer gives the same reason')
+      assert.deepEqual(snapshot(root), before, 'byte-for-byte unchanged')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+})
