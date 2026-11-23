@@ -1,8 +1,40 @@
 import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { basename, dirname, join } from 'node:path'
 
 const STALE_GUARD_MS = 10_000
+/**
+ * How the OS identifies process `pid`'s start, as an opaque string; undefined when it cannot tell.
+ * Owner and checker derive it the same way from the same OS record, so clock or DST changes cancel out.
+ */
+export function processIdentity(pid: number): string | undefined {
+  try {
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] || undefined
+    }
+    const text = process.platform === 'win32'
+      ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()`],
+      { encoding: 'utf8', timeout: 10_000, windowsHide: true })
+      : execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000, env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' } })
+    return text.trim() || undefined
+  } catch {
+    return undefined
+  }
+}
+
+let ownIdentity: string | undefined
+
+/** A live PID is still the owner only if the OS gives it the start the owner recorded; Windows reuses PIDs quickly. */
+function ownerAlive(pid: number, identity: unknown): boolean {
+  try { process.kill(pid, 0) }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH' }
+  if (typeof identity !== 'string' || identity === '') return true
+  const actual = processIdentity(pid)
+  return actual === undefined || actual === identity
+}
 
 export interface ProfileLease {
   release(cleanup?: () => void): Promise<void>
@@ -34,6 +66,7 @@ export function acquireProfileLease(directory: string): ProfileLease {
   const file = join(root, '.dsh-browser-lease.json')
   const guard = join(dirname(root), `.${basename(root)}.dsh-browser-lease.guard`)
   const token = randomUUID()
+  const identity = ownIdentity ??= processIdentity(process.pid)
   const busy = (): Error => new Error(`dsh-builtin-browser: browser profile is leased or its ownership cannot be verified: ${root}`)
   const guarded = <T>(operation: () => T): T => {
     let acquired = false
@@ -75,14 +108,11 @@ export function acquireProfileLease(directory: string): ProfileLease {
     if (previous !== undefined) {
       const owner = previous as { pid?: unknown; token?: unknown } | null
       if (!owner || !Number.isSafeInteger(owner.pid) || Number(owner.pid) <= 0 || typeof owner.token !== 'string') throw busy()
-      try { process.kill(Number(owner.pid), 0); throw busy() }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw busy()
-      }
+      if (ownerAlive(Number(owner.pid), (owner as { identity?: unknown }).identity)) throw busy()
       unlinkSync(file)
     }
     const fd = openSync(file, 'wx', 0o600)
-    try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token })) }
+    try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token, ...(identity === undefined ? {} : { identity }) })) }
     finally { closeSync(fd) }
   })
   let released = false

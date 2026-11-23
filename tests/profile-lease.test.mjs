@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { acquireProfileLease } from '../lib/browser-electron/profile-lease.js'
+import { acquireProfileLease, processIdentity } from '../lib/browser-electron/profile-lease.js'
 
 test('one profile has one lease, released idempotently for the next owner', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-profile-lease-'))
@@ -35,6 +35,26 @@ test('a dead process lease can be reclaimed and cleanup remains exclusive', asyn
     })
     assert.equal(existsSync(dir), false)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a lease whose PID now belongs to a later process is reclaimed, the live owner is not', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-profile-reused-'))
+  const file = join(dir, '.dsh-browser-lease.json')
+  try {
+    writeFileSync(file, JSON.stringify({ pid: process.pid, token: 'reused-pid', identity: 'an-earlier-process' }))
+    const lease = acquireProfileLease(dir)
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).identity, processIdentity(process.pid))
+    await lease.release()
+    writeFileSync(file, JSON.stringify({ pid: process.pid, token: 'live-owner', identity: processIdentity(process.pid) }))
+    assert.throws(() => acquireProfileLease(dir), /profile is leased/)
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).token, 'live-owner')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('the OS identity of this process is stable across reads', () => {
+  const own = processIdentity(process.pid)
+  assert.ok(typeof own === 'string' && own !== '')
+  assert.equal(processIdentity(process.pid), own)
 })
 
 for (const directoryGuard of [false, true]) {
