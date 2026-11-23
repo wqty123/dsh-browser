@@ -442,6 +442,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private clientSuspect = false
   private child: ChildProcess | undefined
   private profileLease: ProfileLease | undefined
+  private profileLeasing: Promise<ProfileLease> | undefined
   private starting: Promise<CdpClient> | undefined
   private lastLaunchError: string | undefined
   private launchDiagnostic: SystemBrowserLaunchDiagnostic | undefined
@@ -695,7 +696,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    */
   private async start(): Promise<CdpClient> {
     const deadline = Date.now() + 30_000
-    this.profileLease ??= acquireProfileLease(this.profileDir)
+    if (this.profileLease === undefined) {
+      const lease = await (this.profileLeasing ??= acquireProfileLease(this.profileDir).finally(() => { this.profileLeasing = undefined }))
+      if (this.disposed) { await lease.release(); throw new Error('dsh-builtin-browser: the browser host was disposed while launching') }
+      this.profileLease = lease
+    }
     // Before spawning anything: is a browser for THIS profile already running? A DSH restart
     // leaves one behind, and launching into it is the failure reported as "exited immediately
     // after launch (exit code 0)" that required killing seven processes by hand.
