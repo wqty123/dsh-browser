@@ -680,7 +680,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // mistaken for a browser that answers.
       const info = await client.send('Browser.getVersion', {}, undefined, Math.max(1, deadline - Date.now())) as { product?: string }
       if (!isBrowserProduct(info?.product) || info.product !== version.Browser) throw new Error('browser did not acknowledge its identity')
-      client.headless = /^HeadlessChrome\//u.test(info.product)
+      client.headless = /^HeadlessChrome\//u.test(info.product ?? '')
       if (this.disposed) { client.close(); return undefined }
       await client.send('Target.setDiscoverTargets', { discover: true }, undefined, Math.max(1, deadline - Date.now()))
       if (this.disposed || Date.now() >= deadline) { client.close(); return undefined }
