@@ -71,6 +71,8 @@ export interface BrowserSettings {
      *     instead of `capturePage()`, so grabbing an image stops being a reason to show a window;
      *   - navigation and tab switching only change which view is visible INSIDE the window; a
      *     minimized window stays minimized;
+     *   - Installed Chrome / Edge opens its first window minimized; an explicit navigation or tab
+     *     selection restores that window once, and a window the user minimized stays minimized;
      *   - synthesized input still needs a display surface (Chromium drops `Input.*` for a view
      *     without one), so that one barrier may restore a minimized window — with
      *     `showInactive()`, which shows it without becoming the key window, and without
