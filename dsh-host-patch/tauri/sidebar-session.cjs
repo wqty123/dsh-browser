@@ -39,6 +39,20 @@ module.exports = ({ app, createHash, fs, path }) => {
       if (state.timer !== undefined) write(state)
     }
   }
+  // electron-rs is stopped by a kill (socket shutdown, then the Windows job object / child.kill),
+  // so will-quit rarely runs and Chromium's lazy localStorage commit is lost. Commit after the
+  // input and loads that change a sidebar page's storage instead.
+  const storageCommit = new WeakMap()
+  const commitSoon = target => {
+    clearTimeout(storageCommit.get(target))
+    storageCommit.set(target, setTimeout(() => flushStorage(target), 300))
+  }
+  app.on('web-contents-created', (_event, contents) => {
+    if (!states.has(contents.session)) return
+    const commit = () => commitSoon(contents.session)
+    contents.on('input-event', (_input, input) => { if (input.type === 'mouseUp' || input.type === 'keyUp') commit() })
+    for (const event of ['did-finish-load', 'did-navigate-in-page', 'destroyed']) contents.on(event, commit)
+  })
   app.on('will-quit', flushAll)
   process.on('exit', flushAll)
   const storage = target => target.storagePath ?? target.getStoragePath?.() ?? undefined
@@ -69,8 +83,6 @@ module.exports = ({ app, createHash, fs, path }) => {
         if (cookie.session !== true) target.cookies.flushStore().catch(() => {})
         schedule()
       })
-      // Chromium commits localStorage lazily; electron-rs can be stopped without will-quit.
-      setInterval(() => flushStorage(target), 1000).unref?.()
       state.ready = Promise.all(restored.map(cookie => target.cookies.set(cookie).catch(() => {}))).then(() => undefined)
       return state.ready
     },
