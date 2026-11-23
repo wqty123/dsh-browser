@@ -4,7 +4,6 @@ import { createServer, request as httpRequest } from 'node:http'
 import { once } from 'node:events'
 import { promises as dns } from 'node:dns'
 import { handleGuest, guestPath, rewriteDocument } from '../src/browser-electron/guest-route.ts'
-import { RELAXED_BROWSER_SANDBOX } from '../assets/browser-policy.mjs'
 import { GuestCookieJar } from '../src/browser-electron/guest-cookie-jar.ts'
 import { loadGuestCookies } from '../src/browser-electron/guest-cookie-store.ts'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -653,7 +652,7 @@ test('HTML sub-requests stay raw by explicit marker or fetch destination; framin
     assert.equal(result.headers['content-type'], 'text/html')
     assert.equal(result.body, '<a href="/raw">fragment</a>')
     assert.equal(result.headers['x-frame-options'], undefined)
-    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms allow-downloads [^;]*;/)
+    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms;/)
   }
 })
 
@@ -693,7 +692,7 @@ test('guest CSP permits proxied and data image/font resources without admitting 
     const [directive, ...sources] = value.trim().split(/\s+/u)
     return [directive, sources]
   }))
-  assert.deepEqual(csp.sandbox, RELAXED_BROWSER_SANDBOX.split(' '))
+  assert.deepEqual(csp.sandbox, ['allow-scripts', 'allow-forms'])
   for (const directive of ['img-src', 'font-src']) {
     assert.ok(csp[directive].includes('data:'))
     assert.ok(csp[directive].every(value => value === 'data:' || value === 'blob:' || value.endsWith('/dsh-builtin-browser/browser-view/isolated-guest')))
@@ -711,7 +710,7 @@ test('one authoritative guest policy permits data fonts for documents, subreques
     const result = await call(guestPath('https://ordinary.example' + path), { headers })
     assert.equal(result.status, 200)
     assert.match(result.headers['content-security-policy'], /(?:^|;)\s*font-src [^;]*\bdata:/u)
-    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms allow-downloads [^;]*;/u)
+    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms;/u)
     assert.doesNotMatch(result.headers['content-security-policy'], /font-src 'none'/u)
     assert.equal(result.headers['content-security-policy-report-only'], undefined)
     if (path.endsWith('doc')) {

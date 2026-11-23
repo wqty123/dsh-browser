@@ -5,7 +5,7 @@ import { once } from 'node:events'
 import { promises as dns } from 'node:dns'
 import { registerWebGuest } from '../src/web-guest.ts'
 import { guestPath } from '../src/browser-electron/guest-route.ts'
-import { RELAXED_BROWSER_SANDBOX } from '../assets/browser-policy.mjs'
+import { RELAXED_BROWSER_SANDBOX, WEB_BROWSER_SANDBOX } from '../assets/browser-policy.mjs'
 
 test('registered guest route commits the same data-font policy on HTML navigations and every response branch', async t => {
   const originalFetch = globalThis.fetch
@@ -69,6 +69,12 @@ test('registered guest route commits the same data-font policy on HTML navigatio
   assert.deepEqual(sandbox, RELAXED_BROWSER_SANDBOX.split(' '))
   for (const token of ['allow-same-origin', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-top-navigation'])
     assert.ok(!sandbox.includes(token), token)
+  const unframed = policy.replace(RELAXED_BROWSER_SANDBOX, WEB_BROWSER_SANDBOX)
+  for (const destination of ['document', undefined]) {
+    const headers = { accept: 'text/html', 'sec-fetch-mode': 'navigate', ...destination === undefined ? {} : { 'sec-fetch-dest': destination } }
+    const direct = await call(guestPath('https://ordinary.example/document'), { headers })
+    assert.equal(direct.headers['content-security-policy'], unframed, String(destination))
+  }
   for (const [path, options, status] of [
     ['/document', { method: 'POST', ...navigation }, 200],
     ['/document', { method: 'HEAD', ...navigation }, 200],
@@ -81,7 +87,7 @@ test('registered guest route commits the same data-font policy on HTML navigatio
   ]) {
     const result = await call(guestPath('https://ordinary.example' + path), options)
     assert.equal(result.status, status, path)
-    assert.equal(result.headers['content-security-policy'], policy, path)
+    assert.equal(result.headers['content-security-policy'], options.headers?.['sec-fetch-dest'] === 'iframe' ? policy : unframed, path)
     assert.equal(result.headers['content-security-policy-report-only'], undefined, path)
     assert.equal(result.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === 'content-security-policy').length, 1, path)
   }
