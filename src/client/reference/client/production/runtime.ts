@@ -39,12 +39,7 @@ import {
 } from './reference-card.ts'
 import { encodeBrowserRefUri, parseBrowserRefUri } from '../scheme.ts'
 import type { RevealStatus } from '../types.ts'
-import {
-  createSubmissionSeam,
-  type HostPromptContentPart,
-  type SubmissionSeam,
-} from './production-submission.ts'
-import { sourceMarker } from './source-marker.ts'
+import { composerReference } from './production-submission.ts'
 import {
   createProductionRevealer,
   type ProductionRevealer,
@@ -196,9 +191,6 @@ export interface ProductionRuntime {
   availability(): AvailabilityState
   /** All sessions' reflections, for reveal routing. */
   ownerFor(referenceId: string): RevealOwner | undefined
-  /** Ordered submission seam the host calls at service.ts:302. */
-  readonly submission: SubmissionSeam
-  projectContent(input: { uploaded: readonly HostPromptContentPart[]; text: string }): readonly HostPromptContentPart[]
   /** Remove a card for good: tombstoned locally and dropped on the plugin side. */
   removeCard(referenceId: string): Promise<void>
   /** Jump the sidebar browser back to a reference's原文 and highlight it. */
@@ -494,20 +486,26 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     const host = hostInputFor(sessionId)
     const title = delivery.snapshot.source.title
     const index = (draftStoreFor(sessionId).state().reflections ?? []).length
-    const marker = sourceMarker(delivery.referenceId, index - 1, title)
+    const reference = composerReference(toOrderedGroup(delivery.snapshot), {
+      index: index - 1, assets: assetStoreFor(sessionId), ...title === undefined ? {} : { title },
+    })
     // 插入需要编辑器里有光标：确认按钮是在侧栏 iframe 里点的，先聚焦编辑器。
     try { host.focusEditor?.() } catch { /* 没有编辑器就交给下面的失败路径 */ }
     const uri = encodeBrowserRefUri({ referenceId: delivery.referenceId })
+    let inserted = false
     try {
-      if (host.insertQuote?.(marker)) return true
-      if (host.insertReference?.({
-        source: 'browser-reference', ref: uri, label: title || '网页引用',
-        appearance: 'session', clipboardText: marker,
-      }, host.captureInsertion())) return true
-      return false
+      inserted = host.insertQuote?.(reference.text) === true
+        || host.insertReference?.({
+          source: 'browser-reference', ref: uri, label: title || '网页引用',
+          appearance: 'session', clipboardText: reference.text,
+        }, host.captureInsertion()) === true
     } catch {
       return false
     }
+    if (inserted && reference.images.length > 0) {
+      try { host.attachImages?.(reference.images) } catch { /* 图片附件是尽力而为：引文已带占位说明 */ }
+    }
+    return inserted
   }
 
   const processDelivery = async (delivery: DeliveryRecord, sessionId: string): Promise<ApplyOutcome> => {
@@ -757,61 +755,6 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
     return flushConsumptions()
   }
 
-  const tracksSubmissions = new Set<string>()
-  const submission = createSubmissionSeam({
-    bind: async (sessionId, hostRequestId, intentIds) => {
-      if (tracksSubmissions.has(sessionId)) await http.bindSubmission?.(sessionId, hostRequestId, intentIds)
-    },
-    groupsFor: sessionId => draftStoreFor(sessionId).state().groups,
-    submitted: consumeSubmitted,
-    assetsFor: sessionId => assetStoreFor(sessionId),
-    // Real page titles make the sent message's source link readable. ownerFor
-    // resolves draft, pendingArchive and sent reflections, so a link produced
-    // by this seam keeps its title even after the card has cleared.
-    sourceTitleFor: referenceId => ownerFor(referenceId)?.label,
-    commentsFor: sessionId => {
-      const notes = new Map<string, string>()
-      for (const reflection of draftStoreFor(sessionId).state().reflections) {
-        if (reflection.comment !== undefined && reflection.comment !== '') {
-          notes.set(reflection.referenceId, reflection.comment)
-        }
-      }
-      return notes
-    },
-    ...(options.textPosition === undefined ? {} : { textPosition: options.textPosition }),
-  })
-
-  // Idempotent retry hook for the host. `createSubmissionSeam.commit` consumes
-  // its per-send token, so a plain re-commit after a failed cleanup would be a
-  // no-op; this hook instead flushes any pending archive directly. It NEVER
-  // re-sends a message and NEVER re-ACKs. The assembly registers THIS SAME
-  // object as `browserReferenceSubmission`, so service.ts can reach it.
-  Object.assign(submission, {
-    prepare: async (sessionId: string): Promise<void> => {
-      sessionId = referenceOwnerKey(sessionId)
-      if (http.consume === undefined) return
-      const state = draftStoreFor(sessionId).state()
-      const visible = new Set(state.groups.map(group => group.referenceId))
-      if (visible.size === 0) return
-      // Reconcile just the cards the user can submit. New incoming captures
-      // and cursor advancement belong to the regular session poll.
-      const response = await http.deliveries(sessionId, state.since)
-      if (response.tracksSubmissions === true) tracksSubmissions.add(sessionId)
-      else tracksSubmissions.delete(sessionId)
-      if (response.unverified?.some(id => visible.has(id))) throw new Error('会话正在恢复，请稍后发送网页引用')
-      for (const delivery of response.deliveries) {
-        if (delivery.sessionId === sessionId && delivery.state === 'consumed' && visible.has(delivery.referenceId)) {
-          await processDelivery(delivery, sessionId)
-        }
-      }
-      publish()
-    },
-    retrySubmitted: (_sessionId: string, _requestId?: string): void => {
-      flushPendingArchives()
-      void flushConsumptions()
-    },
-  })
-
   const referenceDetail = (referenceId: string): (StoredReflection & { readonly sessionId: string; readonly card: CardViewModel }) | undefined => {
     draftStoreFor(current)
     for (const [sessionId, store] of stores) {
@@ -966,18 +909,11 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       const previous = lastDraft
       lastDraft = draft
       // 上游接受消息后会清空草稿：这一刻把本会话的引用全部退役，输入框里的胶囊随之消失。
-      // 之前没有任何人调用提交缝（上游补丁已删），所以发完消息输入框还留着上一次的胶囊。
       if (draft.trim() !== '' || previous.trim() === '') return
       const store = draftStoreFor(sessionId)
       const ids = store.state().groups.map(group => group.referenceId)
       if (ids.length === 0) return
-      try {
-        store.retire(ids)
-        store.flushPendingArchive()
-        for (const id of ids) { try { queue.markDeleted(id) } catch { /* 幂等 */ } }
-      } catch { /* 本地清理失败不该影响已发送的消息 */ }
-      markDirty()
-      publish()
+      void consumeSubmitted(sessionId, ids)
     },
     setSession(sessionId) {
       sessionId = referenceOwnerKey(sessionId)
@@ -1058,10 +994,6 @@ export function createProductionRuntime(options: ProductionRuntimeOptions): Prod
       return availabilityOf(poller.lastError)
     },
     ownerFor,
-    submission,
-    projectContent({ uploaded, text }) {
-      return submission.buildContent({ sessionId: current, uploaded, text })
-    },
     setComment(referenceId, comment) {
       if (disposed) return false
       for (const store of stores.values()) {

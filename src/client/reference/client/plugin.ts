@@ -25,6 +25,8 @@ import {
   type HostElementFactory,
 } from './production/assembly.ts'
 import type { HostInputFace } from './production/draft-adapter.ts'
+import type { ComposerImage } from './production/production-submission.ts'
+import { attachImages } from './production/composer-attachments.ts'
 import type { ProductionRuntime } from './production/runtime.ts'
 import type { ReferenceChipInsert } from './types.ts'
 
@@ -51,6 +53,7 @@ interface SlotInputActions {
    */
   insertReference?(ref: ReferenceChipInsert, span: CaretSpan): boolean
   insertQuote?(text: string, summary?: string): boolean
+  addAttachments?(ids: readonly string[]): boolean
 }
 
 /** Session-scope props the `conversation.input.dock` registration receives. */
@@ -133,6 +136,9 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
         // `occurrences` 增加，上游发送闸门不再判空——「只有引用也能发」由此成立，且不改上游。
         ...(typeof actions.insertQuote === 'function'
           ? { insertQuote: (text: string, summary?: string) => actions.insertQuote?.(text, summary) === true }
+          : {}),
+        ...(typeof actions.addAttachments === 'function'
+          ? { attachImages: (images: readonly ComposerImage[]) => attachImages(ctx, rawSession.trim(), images, actions) }
           : {}),
         ...(typeof actions.insertReference === 'function'
           ? { insertReference: (ref: ReferenceChipInsert, span: CaretSpan) => actions.insertReference?.(ref, span) === true }

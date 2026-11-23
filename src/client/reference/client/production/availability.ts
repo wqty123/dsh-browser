@@ -55,8 +55,6 @@ export function isDeliveriesResponse(value: unknown): value is DeliveriesRespons
   const record = value as Record<string, unknown>
   if (record.ok !== true || typeof record.sequence !== 'number' || !Number.isFinite(record.sequence)) return false
   if (!Array.isArray(record.deliveries)) return false
-  if (record.tracksSubmissions !== undefined && typeof record.tracksSubmissions !== 'boolean') return false
-  if (record.unverified !== undefined && (!Array.isArray(record.unverified) || !record.unverified.every(id => typeof id === 'string'))) return false
   for (const entry of record.deliveries as readonly unknown[]) {
     if (typeof entry !== 'object' || entry === null) return false
     const delivery = entry as Record<string, unknown>

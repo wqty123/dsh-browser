@@ -4,6 +4,7 @@
 
 ## 未发布 — 适配 DSH 0.2.3-alpha.2
 
+- **网页引用的内容真正送到模型。** 之前引用的正文、表格和图片只在 `browserReferenceSubmission` 提交缝里拼装，而 DSH 0.2.2-rc.5 与 0.2.3-alpha.2 的发送路径是 `[...附件, { type: 'text', text }]`，从不调用它，模型只收到一个 `<dsh-browser-reference …/>` 标记。现在提交缝已删除：引用确认时，正文与 Markdown 表格作为一段 `<dsh-browser-quote>…</dsh-browser-quote>` 引文连同来源标记插入输入框，随消息原样发送且只发送一次；图片经宿主自己的拖放路径（`conversation.createDrafts` + `inputActions.addAttachments`）放进输入框附件，引文中留有对应占位。已发送气泡仍只显示引用胶囊。卡片上的「引用评论」不再单独发送，补充说明直接写在输入框里。
 - **反爬拦截处理。** 拦截页识别收进一个分类器 `browser/anti-bot.ts`，页面内检测与 Web 代理共用：除 Cloudflare、reCAPTCHA、hCaptcha、Turnstile 外，还识别 PerimeterX「按住」、DataDome、滑块、百度安全验证、403/429 拒绝访问和 IP/网络封锁；只认可见的验证控件，登录页上的隐形 reCAPTCHA 不再被当成拦截。每个结果带 `recovery`（`takeover` 交给人工、`wait` 等待自动放行、`retry` 可重试、`environment` 环境限制）、建议和备用公开来源（站点 API、Bing / DuckDuckGo 搜索结果、Wayback Machine / archive.today 存档）。`dsh_browser_open` 遇到拒绝访问类拦截时暂停（默认 2.5 秒，`DSH_BROWSER_BLOCK_RETRY_MS` 可调）后在新会话中重试一次，人工验证和 IP 封锁从不重试；验证码一律不自动处理。
 - **去掉明显的自动化标记。** 启动参数加 `--disable-blink-features=AutomationControlled`，页面上的 `navigator.webdriver` 不再为 `true`；无头模式下插件自己创建的页面使用同版本的普通 `Chrome/` UA（去掉 `HeadlessChrome`），用户自己的标签页不改。有显示器时 `headless: auto` 仍使用可见窗口。
 - **Browser Use P0：动作后摘要。** `dsh_browser_code` 中每个动作（click、goto_url、type 等）的输出末尾多一行 `→`，说明动作后浏览器所处位置：导航到的 URL、新开或关闭的标签页、当前活动标签页；读取类调用不加。摘要通过 `list_tabs` 读取，它从不启动浏览器。

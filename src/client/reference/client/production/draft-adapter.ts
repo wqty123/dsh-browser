@@ -27,6 +27,7 @@ import {
   removeGroup,
 } from '../draft-reference.ts'
 import type { DeliveryFailure, DeliveryRecord, FrozenSnapshot } from './protocol.ts'
+import type { ComposerImage } from './production-submission.ts'
 
 export const DRAFT_STORE_PREFIX = 'dsh.browser-reference.draft.'
 
@@ -67,6 +68,8 @@ export interface HostInputFace {
   insertQuote?(text: string, summary?: string): boolean
   /** 把光标放回编辑器（确认按钮在侧栏里点击时焦点不在输入框）。 */
   focusEditor?(): void
+  /** Add captured images to the composer attachments, which the host sends ahead of the text. */
+  attachImages?(images: readonly ComposerImage[]): boolean
 }
 
 export interface PreservationSnapshot {

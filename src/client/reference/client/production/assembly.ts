@@ -9,11 +9,10 @@
  *   - the dock card into `conversation.input.overlay` (scope: session), i.e. the
  *     pill rail INSIDE the composer card, above the text surface,
  *   - the reply-side link into `conversation.user.text.node`,
- *   - the ordered submission seam exposed as `browserReferenceSubmission`,
  *   - cancellable polling started once and disposed through `ctx.effect`.
  *
  * React renders the dock and feedback through the host's shared platform
- * modules. The conversation service invokes the ordered submission hooks.
+ * modules. A reference reaches the model through the composer: its quote and its image attachments.
  *
  * @module dsh-browser-reference/production/assembly
  */
@@ -330,31 +329,6 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
     ...(config.scheduler === undefined ? {} : { scheduler: config.scheduler }),
     ...(config.textPosition === undefined ? {} : { textPosition: config.textPosition }),
   })
-
-  // Expose the ordered submission seam for the host's real send path. Cordis
-  // requires `provide()` before `set()` for a service name; a bare set throws
-  // "cannot set property without provide" and would leave R05 unwired.
-  // cordis: provide() DECLARES a service, set() assigns it. Passing the value to provide() only declared
-  // the name, so the conversation service's ctx.get('browserReferenceSubmission') returned undefined and
-  // every send ignored its references — the message went out with the typed text alone while the chips
-  // stayed in the composer.
-  if (typeof ctx.provide === 'function') {
-    ctx.provide('browserReferenceSubmission')
-    ctx.set?.('browserReferenceSubmission', runtime.submission)
-  } else {
-    ctx.set?.('browserReferenceSubmission', runtime.submission)
-  }
-  const disposeSubmission = undefined as unknown
-  // Cordis services are visible along a fiber's ancestor chain only; this plugin and the conversation
-  // service are siblings, so `ctx.get` from the sender could not see the seam and every send ignored its
-  // references. A global mirror is the same escape hatch this module already uses for the markdown
-  // renderer and the reply-link bridge.
-  const submissionHost = globalThis as unknown as Record<string, unknown>
-  submissionHost.__DSH_BROWSER_REF_SUBMISSION__ = runtime.submission
-  if (disposeSubmission !== undefined && typeof (disposeSubmission as { dispose?: unknown }).dispose === 'function') {
-    // Some cordis shapes return a disposer object rather than a function.
-    ctx.effect(() => () => { (disposeSubmission as { dispose: () => void }).dispose() }, 'ui-browser-reference: submission service')
-  }
 
   const cardComponent = createLiveCardDockComponent(runtime, elementFactory)
   const replyComponent = createReplyLinkComponent(runtime, elementFactory)
