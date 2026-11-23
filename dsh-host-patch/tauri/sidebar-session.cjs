@@ -1,6 +1,6 @@
 'use strict'
 // Embedded verbatim into DSH Tauri's Electron main (runtime/browser.cjs) by tools/generate-tauri-host-patch.mjs.
-// One persistent sidebar partition per owner profile, plus a checkpoint for the session cookies
+// One persistent sidebar partition per DSH home (as on rc.5), plus a checkpoint for the session cookies
 // Chromium drops at exit, so the sidebar keeps its logins across DSH Tauri restarts.
 module.exports = ({ app, createHash, fs, path }) => {
   const FILE = 'dsh-sidebar-session-cookies.json'
@@ -34,10 +34,10 @@ module.exports = ({ app, createHash, fs, path }) => {
   app.on('will-quit', flushAll)
   process.on('exit', flushAll)
   const storage = target => target.storagePath ?? target.getStoragePath?.() ?? undefined
+  const home = process.env.DSH_HOME || app.getPath('userData')
   return {
-    partition(owner) {
-      const base = storage(owner.contents.session) ?? app.getPath('userData')
-      return 'persist:dsh-sidebar-browser-' + createHash('sha256').update(base).digest('hex').slice(0, 32)
+    partition() {
+      return 'persist:dsh-sidebar-browser-' + createHash('sha256').update(home).digest('hex').slice(0, 32)
     },
     attach(target) {
       const existing = states.get(target)

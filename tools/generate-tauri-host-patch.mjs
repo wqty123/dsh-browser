@@ -39,7 +39,7 @@ export function tauriHostPatchSpec() {
         },
         {
           before: 'let i=this.partitions.get(r);if(!i){i=`electron-browser-`+(0,n.randomUUID)();',
-          after: 'let i=dshSidebarSession.partition(e);if(!this.partitions.has(i)){',
+          after: 'let i=dshSidebarSession.partition();if(!this.partitions.has(i)){',
         },
         {
           before: 'this.partitions.set(r,i)}let a=(0,n.randomUUID)();',

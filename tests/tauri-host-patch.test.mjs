@@ -83,9 +83,13 @@ function owner(profileStorage) {
   return Object.assign(new EventEmitter(), { id: 1, contents, trustedOrigin: 'http://127.0.0.1:4567', trustedNavigationPending: false })
 }
 
-async function boot(source, root, profile = 'profile-desktop-main') {
+async function boot(source, root, { profile = 'profile-desktop-main', home = path.join(root, 'dsh-home') } = {}) {
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
   const { electron, sessions } = fakeElectron(root)
-  const BrowserGuests = loadGuests(source, electron)
+  let BrowserGuests
+  try { BrowserGuests = loadGuests(source, electron) }
+  finally { if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous }
   const guests = new BrowserGuests({ send() {} })
   const host = owner(path.join(root, 'Partitions', profile))
   guests.bind(host)
@@ -109,7 +113,7 @@ test('unpatched DSH Tauri gives each workspace a fresh in-memory partition (the 
   assert.notEqual(restarted.guests.acquire(restarted.host, 'cwd:/project').partition, lease.partition)
 })
 
-test('patched: one persistent partition per owner profile, stable across restarts and workspaces', async t => {
+test('patched: one persistent partition per DSH home, stable across restarts, workspaces and windows', async t => {
   const root = temporary(t)
   const first = await boot(patched, root)
   const a = await first.guests.acquire(first.host, 'cwd:/project')
@@ -119,8 +123,10 @@ test('patched: one persistent partition per owner profile, stable across restart
   assert.notEqual(b.lease, a.lease)
   const restarted = await boot(patched, root)
   assert.equal((await restarted.guests.acquire(restarted.host, 'cwd:/project')).partition, a.partition)
-  const otherProfile = await boot(patched, root, 'profile-web-main')
-  assert.notEqual((await otherProfile.guests.acquire(otherProfile.host, 'cwd:/project')).partition, a.partition)
+  const otherWindow = await boot(patched, root, { profile: '64657368746f70-window-1-0123' })
+  assert.equal((await otherWindow.guests.acquire(otherWindow.host, 'cwd:/project')).partition, a.partition)
+  const otherHome = await boot(patched, root, { home: path.join(root, 'other-dsh-home') })
+  assert.notEqual((await otherHome.guests.acquire(otherHome.host, 'cwd:/project')).partition, a.partition)
   await assert.rejects(Promise.resolve().then(() => first.guests.acquire(first.host, '')), /invalid workspace/)
 })
 
