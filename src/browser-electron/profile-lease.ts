@@ -66,7 +66,7 @@ export function acquireProfileLease(directory: string): ProfileLease {
   const file = join(root, '.dsh-browser-lease.json')
   const guard = join(dirname(root), `.${basename(root)}.dsh-browser-lease.guard`)
   const token = randomUUID()
-  const identity = ownIdentity ??= processIdentity(process.pid) ?? ''
+  const identity = ownIdentity ??= processIdentity(process.pid)
   const busy = (): Error => new Error(`dsh-builtin-browser: browser profile is leased or its ownership cannot be verified: ${root}`)
   const guarded = <T>(operation: () => T): T => {
     let acquired = false
@@ -112,7 +112,7 @@ export function acquireProfileLease(directory: string): ProfileLease {
       unlinkSync(file)
     }
     const fd = openSync(file, 'wx', 0o600)
-    try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token, ...(identity === '' ? {} : { identity }) })) }
+    try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token, ...(identity === undefined ? {} : { identity }) })) }
     finally { closeSync(fd) }
   })
   let released = false
