@@ -7,6 +7,30 @@ import { BrowserError } from '../browser/types.ts'
 import { PROVIDER_TIMEOUTS, KEY_SPECS, BROWSER_KEY_NAMES, TARGET_SCRIPT_GRACE_MS, pagePollSlice, withTimeout, scriptPoint, handleSendEvaluate, type ElectronViewHandle, type Tab, type CdpMouseParams, type CdpInsertTextParams } from './provider-core.ts'
 import { ProviderObservation } from './provider-observation.ts'
 
+const FOCUSED_EDITABLE_SCRIPT = `(() => {
+  const NON_TEXT_INPUTS = ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']
+  let doc = document
+  let el = doc.activeElement
+  for (;;) {
+    if (el && el.shadowRoot && el.shadowRoot.activeElement) { el = el.shadowRoot.activeElement; continue }
+    if (el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME')) {
+      let inner = null
+      try { inner = el.contentDocument } catch {}
+      if (!inner) return { editable: true, active: el.tagName }
+      doc = inner
+      el = inner.activeElement
+      continue
+    }
+    break
+  }
+  const active = el ? el.tagName : 'nothing'
+  if (doc.designMode === 'on' || (el && el.isContentEditable)) return { editable: true, active }
+  if (el && el.tagName === 'TEXTAREA') return { editable: !el.readOnly && !el.disabled, active }
+  if (el && el.tagName === 'INPUT') return { editable: !el.readOnly && !el.disabled && !NON_TEXT_INPUTS.includes(String(el.type || '').toLowerCase()), active }
+  if (el && el.tagName.includes('-') && !el.shadowRoot) return { editable: true, active }
+  return { editable: false, active }
+})()`
+
 /** An in-page locate for one poll slice: `last` reports a miss, earlier slices answer `{ pending: true }`. */
 type TargetScript = (sliceMs: number, last: boolean) => string
 
@@ -301,6 +325,20 @@ export abstract class ProviderInteraction extends ProviderObservation {
     // refuses: the element was focused in the located view, and the text would have gone to
     // whichever page is now visible — possibly a password field there.
     if (hasTarget) this.assertSameView(session, locateHandle, handle)
+    // Electron guests (DSH Desktop and Tauri sidebar) crash their renderer when text is inserted
+    // with no editable element focused, and nothing would have been typed in any browser.
+    const focus = await withTimeout(
+      handleSendEvaluate(handle, FOCUSED_EDITABLE_SCRIPT, signal),
+      PROVIDER_TIMEOUTS.lookup,
+      signal,
+      `browser: type focus check timed out after ${PROVIDER_TIMEOUTS.lookup}ms`,
+    )
+    if (!focus.ok) throw new BrowserError(`browser: type failed: ${focus.exception}`, 'BROWSER_TYPE_FAILED')
+    const focused = focus.value as { editable?: unknown; active?: unknown } | null
+    if (focused?.editable !== true) {
+      const active = typeof focused?.active === 'string' ? `focus is on ${focused.active}` : 'nothing has focus'
+      throw new BrowserError(`browser: type needs a focused text field, and ${active}; pass a target, or tap the field first`, 'BROWSER_TYPE_NO_FOCUS')
+    }
     try {
       await withTimeout(
         handle.sendCommand('Input.insertText', { text } satisfies CdpInsertTextParams),

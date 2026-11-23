@@ -75,6 +75,7 @@ function makeHost(overrides = {}) {
             // Only the bare URL probe (currentUrl) is exact; bigger scripts
             // merely CONTAIN location.href and must reach the overrides.
             if (expr.trim() === 'location.href') return { result: { value: url } }
+            if (expr.includes('NON_TEXT_INPUTS')) return { result: { value: overrides.focused?.() ?? { editable: true, active: 'INPUT' } } }
             if (typeof overrides.evaluate === 'function') return overrides.evaluate(method, params)
             return { result: { value: { ok: true, content: 'x' } } }
           }
@@ -739,6 +740,32 @@ test('click/type with a target locate in-page first', async () => {
   // an empty insert when a target was present).
   assert.equal(host.events.insertText, 'hi', 'type with target still inserts the text')
   assert.deepEqual((await p.history(sid)).at(-1).params, { text: 'hi', target: { by: 'css', value: '#in' } })
+  await p.close(sid)
+})
+
+test('type refuses without inserting when nothing editable has focus', async () => {
+  const host = makeHost({ focused: () => ({ editable: false, active: 'BODY' }) })
+  const p = new ElectronBrowserProvider(host)
+  const sid = await p.open()
+  await assert.rejects(p.type(sid, { text: 'field' }), { code: 'BROWSER_TYPE_NO_FOCUS', message: /focus is on BODY; pass a target/u })
+  await assert.rejects(p.type(sid, { text: 'tomsmith', target: { by: 'css', value: '#go' } }), { code: 'BROWSER_TYPE_NO_FOCUS' })
+  assert.equal(host.events.insertText, '', 'no Input.insertText reached the page')
+  const script = host.events.evaluates.find(expr => expr.includes('NON_TEXT_INPUTS'))
+  const classify = (activeElement, designMode = 'off') => ({ ...vm.runInNewContext(script, { document: { activeElement, designMode } }) })
+  assert.deepEqual(classify({ tagName: 'BODY' }), { editable: false, active: 'BODY' })
+  assert.deepEqual(classify(null), { editable: false, active: 'nothing' })
+  assert.deepEqual(classify({ tagName: 'BUTTON' }), { editable: false, active: 'BUTTON' })
+  assert.deepEqual(classify({ tagName: 'INPUT', type: 'text' }), { editable: true, active: 'INPUT' })
+  assert.deepEqual(classify({ tagName: 'INPUT', type: 'checkbox' }), { editable: false, active: 'INPUT' })
+  assert.deepEqual(classify({ tagName: 'INPUT', type: 'text', readOnly: true }), { editable: false, active: 'INPUT' })
+  assert.deepEqual(classify({ tagName: 'TEXTAREA' }), { editable: true, active: 'TEXTAREA' })
+  assert.deepEqual(classify({ tagName: 'DIV', isContentEditable: true }), { editable: true, active: 'DIV' })
+  assert.deepEqual(classify({ tagName: 'BODY' }, 'on'), { editable: true, active: 'BODY' })
+  assert.deepEqual(classify({ tagName: 'X-EDITOR' }), { editable: true, active: 'X-EDITOR' }, 'a closed shadow root hides its focused field')
+  assert.deepEqual(classify({ tagName: 'X-BUTTON', shadowRoot: { activeElement: null } }), { editable: false, active: 'X-BUTTON' })
+  assert.deepEqual(classify({ tagName: 'X-FIELD', shadowRoot: { activeElement: { tagName: 'INPUT', type: 'email' } } }), { editable: true, active: 'INPUT' })
+  assert.deepEqual(classify({ tagName: 'IFRAME', contentDocument: { designMode: 'off', activeElement: { tagName: 'BODY' } } }), { editable: false, active: 'BODY' })
+  assert.deepEqual(classify({ tagName: 'IFRAME', contentDocument: null }), { editable: true, active: 'IFRAME' })
   await p.close(sid)
 })
 

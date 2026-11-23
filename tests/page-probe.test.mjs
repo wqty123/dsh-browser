@@ -200,6 +200,45 @@ test('overlayAt reports what covers a point, and the dismiss control when there 
   assert.equal(cover.dismiss.y, 212)
 })
 
+test('overlayAt does not take the found target own child, also in a shadow root, for an overlay', () => {
+  const element = (tagName, parentElement, extra = {}) => ({ tagName, innerText: 'Login', parentElement, getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 100, top: 200, width: 80, height: 24 }), querySelectorAll: () => [], ...extra })
+  const button = element('BUTTON', null)
+  const icon = element('I', button)
+  const page = makePage()
+  page.document.querySelector = () => button
+  page.document.querySelectorAll = () => [button]
+  page.document.elementFromPoint = () => icon
+  page.getComputedStyle = () => ({ position: 'static', zIndex: '0' })
+  vm.runInNewContext(PROBE_INSTALL_SCRIPT, page)
+  const hit = page.__dshProbe.find({ css: 'button[type=submit]' })
+  assert.deepEqual({ ...page.__dshProbe.overlayAt(hit.x, hit.y) }, { covers: null, dismiss: null })
+
+  const host = element('X-FORM', null)
+  const inner = element('SPAN', null, { parentNode: null })
+  const shadowButton = element('BUTTON', null, { parentNode: { host } })
+  inner.parentElement = shadowButton
+  host.shadowRoot = { elementFromPoint: () => inner }
+  page.document.elementFromPoint = () => host
+  page.__dshProbe.lastFound = shadowButton
+  assert.equal(page.__dshProbe.overlayAt(140, 212).covers, null, 'a hit inside the shadow tree of the target lands on it')
+
+  const panel = element('SECTION', null)
+  const modal = element('DIV', panel, { innerText: 'Dialog' })
+  const close = element('BUTTON', modal, { innerText: 'Close' })
+  modal.querySelectorAll = () => [close]
+  page.document.elementFromPoint = () => close
+  page.getComputedStyle = node => (node === modal ? { position: 'fixed', zIndex: '1000' } : { position: 'static', zIndex: '0' })
+  page.__dshProbe.lastFound = panel
+  assert.equal(page.__dshProbe.overlayAt(140, 212).dismiss.label, 'Close', 'a modal inside the target is still an overlay to dismiss')
+
+  const banner = element('DIV', null)
+  page.document.elementFromPoint = () => banner
+  page.__dshProbe.lastFound = button
+  page.getComputedStyle = () => ({ position: 'fixed', zIndex: '9999' })
+  assert.equal(page.__dshProbe.overlayAt(140, 212).covers, 'div "Login"', 'a real overlay is still reported')
+})
+
 test('a call on a page without the probe answers with an error instead of throwing', () => {
   const page = makePage()
   const value = vm.runInNewContext(probeCallScript('read', ['console', '', 5]), page)
