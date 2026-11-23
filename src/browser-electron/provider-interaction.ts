@@ -4,8 +4,11 @@ import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
 import { paintCursor, type CursorAction } from './virtual-cursor.ts'
 import type { BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserClickSequenceRequest, BrowserClickSequenceResult, BrowserElementTarget, BrowserPageOperationRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserTypeRequest, BrowserScrollRequest, BrowserKeyRequest } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
-import { PROVIDER_TIMEOUTS, KEY_SPECS, BROWSER_KEY_NAMES, TARGET_SCRIPT_GRACE_MS, withTimeout, scriptPoint, handleSendEvaluate, type ElectronViewHandle, type Tab, type CdpMouseParams, type CdpInsertTextParams } from './provider-core.ts'
+import { PROVIDER_TIMEOUTS, KEY_SPECS, BROWSER_KEY_NAMES, TARGET_SCRIPT_GRACE_MS, pagePollSlice, withTimeout, scriptPoint, handleSendEvaluate, type ElectronViewHandle, type Tab, type CdpMouseParams, type CdpInsertTextParams } from './provider-core.ts'
 import { ProviderObservation } from './provider-observation.ts'
+
+/** An in-page locate for one poll slice: `last` reports a miss, earlier slices answer `{ pending: true }`. */
+type TargetScript = (sliceMs: number, last: boolean) => string
 
 export abstract class ProviderInteraction extends ProviderObservation {
   /** Run a fixed browser operation; the request cannot contain a script. */
@@ -607,14 +610,16 @@ export abstract class ProviderInteraction extends ProviderObservation {
    * A selector that fails to PARSE is reported immediately instead of being
    * polled until the budget expires — see the comment in `match`.
    */
-  private buildTargetScript(spec: BrowserElementTarget, timeoutMs: number, body: string): string {
+  private buildTargetScript(spec: BrowserElementTarget, timeoutMs: number, body: string): TargetScript {
     // `by` defaults to css in-page; report the strategy that WAS used, or a
     // miss says only `{"value":"Learn more"}` and the caller cannot tell that a
     // plain label was queried as a CSS selector.
     const resolvedSpec = { ...spec, by: spec.by ?? 'css' }
-    return `(async () => {
+    return (sliceMs, last) => `(async () => {
       const spec = ${JSON.stringify(resolvedSpec)}
       const timeoutMs = ${String(timeoutMs)}
+      const sliceMs = ${String(sliceMs)}
+      const last = ${String(last)}
       const sleep = ms => new Promise(r => setTimeout(r, ms))
       const isVisible = el => el instanceof HTMLElement && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0)
       const ownText = el => Array.from(el.childNodes).filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent || '').join('').trim()
@@ -695,12 +700,13 @@ export abstract class ProviderInteraction extends ProviderObservation {
         }
         return els[matchIndex] ?? null
       }
-      const deadline = Date.now() + timeoutMs
+      const deadline = Date.now() + sliceMs
       let el = null
       for (;;) {
         // Only a parse error escapes the poll: see the comment in match() above.
         try { el = match() } catch (error) { return { ok: false, error: String((error && error.message) || error) } }
         if (el !== null) break
+        if (Date.now() >= deadline && !last) return { pending: true }
         if (Date.now() >= deadline) return { ok: false, error: 'element not found: ' + JSON.stringify(spec) + ' (looked for ' + timeoutMs + 'ms)' }
         await sleep(100)
       }
@@ -726,26 +732,28 @@ export abstract class ProviderInteraction extends ProviderObservation {
    */
   private async runTargetScript(
     tab: Tab,
-    script: string,
+    script: TargetScript,
     timeoutMs: number,
     signal: AbortSignal | undefined,
     errorCode: string,
     errorLabel: string,
   ): Promise<Record<string, unknown>> {
-    // The script polls for its whole `timeoutMs` and only then answers, so an
-    // outer budget of the same size fires at the same instant and wins: the
-    // caller saw `click timed out after 10000ms` while the page had already
-    // decided WHY (selector not found / malformed). Give the answer a chance to
-    // get back before the generic timeout replaces it.
-    const result = await withTimeout(
-      handleSendEvaluate(tab.handle, script),
-      timeoutMs + TARGET_SCRIPT_GRACE_MS,
-      signal,
-      `${errorLabel} timed out after ${timeoutMs}ms`,
-      timedOut => { this.interrupt(tab.handle, timedOut) },
-    )
-    if (!result.ok) throw new BrowserError(`${errorLabel} failed: ${result.exception}`, errorCode)
-    const value = result.value as { ok?: boolean; error?: string } | undefined
+    // Each slice polls in-page and answers only afterwards, so its outer budget must outlast it or
+    // the generic timeout hides the in-page reason (selector not found / malformed).
+    const deadline = Date.now() + timeoutMs
+    let value: { ok?: boolean; pending?: boolean; error?: string } | undefined
+    do {
+      const { sliceMs, last } = pagePollSlice(deadline)
+      const result = await withTimeout(
+        handleSendEvaluate(tab.handle, script(sliceMs, last)),
+        sliceMs + TARGET_SCRIPT_GRACE_MS,
+        signal,
+        `${errorLabel} timed out after ${timeoutMs}ms`,
+        timedOut => { this.interrupt(tab.handle, timedOut) },
+      )
+      if (!result.ok) throw new BrowserError(`${errorLabel} failed: ${result.exception}`, errorCode)
+      value = result.value as typeof value
+    } while (value?.pending === true)
     if (value?.ok !== true) throw new BrowserError(`${errorLabel} failed: ${value?.error ?? 'unknown'}`, errorCode)
     return value as Record<string, unknown>
   }
