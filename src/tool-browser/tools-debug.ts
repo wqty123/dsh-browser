@@ -15,6 +15,24 @@ import { formatSnapshot } from './tools-observation.ts'
  * @param scope - the apply's context, settings and per-apply state.
  * @returns the tool definitions, for the entry to register.
  */
+const DO_STEP_KINDS = ['open', 'tap', 'field', 'type', 'key', 'scroll', 'sleep_ms', 'wait_text', 'wait_gone', 'wait_url', 'wait_idle', 'wait_js', 'eval', 'check']
+const DO_STEP_SCHEMAS = [
+  { type: 'object', additionalProperties: false, properties: { open: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { tap: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { field: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { type: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { key: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { scroll: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { sleep_ms: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { wait_text: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { wait_gone: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { wait_url: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { wait_idle: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { wait_js: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { eval: { type: 'json', required: true } } },
+  { type: 'object', additionalProperties: false, properties: { check: { type: 'json', required: true } } },
+] as const
+
 export function debugTools(scope: ToolScope): ToolDefinition[] {
   const { ctx, state, takeovers, timeoutMs, maxWaitMs } = scope
   const tools: ToolDefinition[] = []
@@ -525,9 +543,9 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'dsh_browser_do',
-    description: 'Run several steps in ONE call and report one compact result: "click search, type a query, press Enter, wait for results" is one call instead of five. Steps run in order and stop at the first that cannot proceed. Each step is an object with exactly one key: open {url} | tap {target} | field {target, text} | type {text} | key {key} | scroll {deltaY} | sleep_ms {ms} | wait_text {text} | wait_gone {text} | wait_url {url} | wait_idle {} | wait_js {script, intervalMs?} | eval {script} | check {selector|text|url|js}. A tap whose target is covered by a cookie banner or modal dismisses it first. Waits know when the page has settled and return as soon as the condition holds.',
+    description: 'Run several steps in ONE call and report one compact result: "click search, type a query, press Enter, wait for results" is one call instead of five. Steps run in order and stop at the first that cannot proceed. Each step is an object with exactly one key: open {url} | tap {target} | field {target, text} | type {text} | key {key} | scroll {deltaY} | sleep_ms {ms} | wait_text {text} | wait_gone {text} | wait_url {url} | wait_idle {} | wait_js {script, intervalMs?} | eval {script} | check {selector|text|url|js}. A tap whose target is covered by a cookie banner or modal dismisses it first. Waits know when the page has settled and return as soon as the condition holds. A field step: {"field": {"target": {"by": "css", "value": "#username"}, "text": "tomsmith"}}. A tap step: {"tap": {"target": {"by": "css", "value": "button[type=submit]"}}}. The kind is the key, never a "type" value: "type" is the step that types text into the focused element.',
     parameters: {
-      steps: { type: 'array', items: { type: 'object', additionalProperties: true }, required: true, description: 'Steps, in order (max 40).' },
+      steps: { type: 'array', items: { oneOf: DO_STEP_SCHEMAS }, required: true, description: 'Steps, in order (max 40). Each step is an object whose only key is its kind.' },
       timeoutMs: { type: 'number', description: 'Budget for the whole batch (default 60000, capped by the tool timeout).' },
       autoDismiss: { type: 'boolean', description: 'Clear a covering banner before a tap (default true).' },
     },
@@ -576,7 +594,7 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
       // after the form had already been submitted and the message said nothing about it.
       let dispatched = false
       const dispatchable = new Set(['tap', 'key', 'eval'])
-      const kinds = ['open', 'tap', 'field', 'type', 'key', 'scroll', 'sleep_ms', 'wait_text', 'wait_gone', 'wait_url', 'wait_idle', 'wait_js', 'eval', 'check']
+      const kinds: readonly string[] = DO_STEP_KINDS
 
       /** Resolve a target: a string is visible text; an object passes through. */
       const asTarget = (value: unknown): { by: 'css' | 'text' | 'xpath'; value: string } | undefined => {
@@ -593,8 +611,8 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
 
       for (let index = 0; index < steps.length; index += 1) {
         const step = steps[index] ?? {}
-        const keys = Object.keys(step).filter(key => kinds.includes(key))
-        if (keys.length !== 1) {
+        const keys = Object.keys(step)
+        if (keys.length !== 1 || !kinds.includes(keys[0] as string)) {
           return { ok: false, completed: index, total: steps.length, stoppedAt: index + 1, reason: `step ${index + 1} must have exactly one of: ${kinds.join(', ')}`, log }
         }
         const kind = keys[0] as string
