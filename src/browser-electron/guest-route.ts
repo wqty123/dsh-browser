@@ -57,7 +57,7 @@ async function addressesFor(hostname: string): Promise<string[]> {
   return (await lookupAll(hostname)).map(record => record.address)
 }
 
-async function vettedAddress(url: URL, host: string, ownAddresses: readonly string[]): Promise<LookupAddress | undefined> {
+async function vettedAddress(url: URL, host: string, ownAddresses: readonly string[]): Promise<LookupAddress[] | undefined> {
   if (blockedTarget(url, host)) return undefined
   const records = await lookupAll(url.hostname)
   const hostUrl = host === '' ? undefined : new URL('http://' + host)
@@ -66,7 +66,7 @@ async function vettedAddress(url: URL, host: string, ownAddresses: readonly stri
     const literal = new URL('http://' + (address.includes(':') ? '[' + address + ']' : address))
     return isSelfTarget(literal) || hostAddresses.includes(address) || ownAddresses.includes(address)
   })
-  return unsafe ? undefined : records[0]
+  return unsafe ? undefined : records
 }
 
 async function blockedResolvedTarget(url: URL, host: string, ownAddresses: readonly string[]): Promise<boolean> {
@@ -75,13 +75,13 @@ async function blockedResolvedTarget(url: URL, host: string, ownAddresses: reado
 
 /** Connect to the address that was vetted, so a second DNS answer (rebinding) never picks the peer. */
 async function fetchVetted(url: URL, init: RequestInit, host: string, ownAddresses: readonly string[]): Promise<Response> {
-  const address = await vettedAddress(url, host, ownAddresses)
-  if (address === undefined) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
+  const addresses = await vettedAddress(url, host, ownAddresses)
+  if (addresses === undefined) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
   const dispatcher = new Agent({
     connect: {
       lookup: (_hostname: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
-        if (options.all === true) callback(null, [address])
-        else callback(null, address.address, address.family)
+        if (options.all === true) callback(null, addresses)
+        else callback(null, addresses[0]?.address, addresses[0]?.family)
       },
     } as never,
   })
