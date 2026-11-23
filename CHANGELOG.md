@@ -4,6 +4,9 @@
 
 ## 未发布 — 适配 DSH 0.2.3-alpha.2
 
+- **`dsh_browser_do` 的 tap 不再把按钮自己的子元素当成遮挡。** 可达性检查只比较 `elementFromPoint` 命中的元素描述，Heroku 登录按钮 `<button><i> Login</i></button>` 命中的是 `<i>`，于是报“被遮挡”。现在命中目标本身或其后代（含 open shadow root 内）都算落在目标上；目标内部的浮层（模态框）与真正的遮挡照旧按遮挡处理。
+- **`dsh_browser_do` 不再把 `{"type": "field", …}` 当成输入步骤。** 之前只数步骤里属于步骤种类的键，模型写的 `{"type":"field","selector":"#username","text":"tomsmith"}` 被当成 `type` 步骤，在没有焦点的页面上输入字面量 `field`；`{"type":"tap",…}` 同理。现在参数 schema 的每个步骤是只含一个种类键的 `oneOf`，描述里给出 field 与 tap 示例，含其它键的步骤在任何动作执行前就被拒绝。
+- **没有可编辑元素获得焦点时，输入直接报错而不再让页面崩溃。** Electron 访客页（DSH Desktop 与 DSH Tauri 侧栏）在无焦点时收到 `insertText`（原生或 CDP `Input.insertText`）会让渲染进程崩溃，DSH Tauri 随即关闭该页，页面显示「could not load」，标签页和浏览器句柄全部失效。现在 `type` 先确认焦点在文本框、文本域、可编辑元素或 `designMode` 文档上，否则返回 `BROWSER_TYPE_NO_FOCUS`，不发送任何输入。
 - **Web 代理与引用取图不再受 DNS 重绑定影响。** 之前先解析一次目标做本机/内网/DSH 主机检查，连接时 `fetch` 再自己解析一次，第二次的回答可以是回环或内网地址。现在 `handleGuest` 和 `fetchGuestResource` 每一跳都只连检查过的那个地址（undici `Agent` 的 `connect.lookup` 固定返回它，Host 与 SNI 不变）。
 - **Web 侧栏引用带图片不再失败。** 冻结快照只带图片 URL，服务端却用 CDP 浏览器会话下载/栅格化，而 iframe 侧栏没有会话，结果每次都是 422 `image-unavailable`。现在来自已登记 Web 来源的冻结快照，图片由服务端按 guest 代理同样的目标规则（禁本机/内网/DSH 主机，逐跳检查重定向）和 guest Cookie 取回，按 `source-image` 保存。
 - **带图片的网页引用不再在提交时断开。** 页面侧引用栏把整份冻结快照（图片内联）POST 到 `/dsh-builtin-browser/reference/capture`，快照本身允许到 `MAX_FROZEN_CAPTURE_CHARS`（400 万字符），但这条路由沿用了设置接口 64 KiB 的请求体上限，超出就销毁连接，浏览器只看到 `net::ERR_UNEXPECTED`（Tauri 实测 65,728 字节的标题+首段+信息框图片选择失败，纯文本成功）。capture 路由的上限现在由快照上限推出（每字符最多 3 字节 UTF-8，加 64 KiB 其余字段）；其它路由仍是 64 KiB。

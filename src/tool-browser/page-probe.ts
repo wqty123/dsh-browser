@@ -30,7 +30,7 @@ import type { BrowserPageOperationRequest, BrowserProbeMethod } from '../browser
 import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
 
 /** Bumped when the probe's shape changes; an older probe is replaced rather than trusted. */
-export const PROBE_VERSION = 7
+export const PROBE_VERSION = 8
 
 /** Where the probe keeps itself, and the only global it adds. */
 const PROBE_KEY = '__dshProbe'
@@ -210,7 +210,33 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
     if (scroll === true && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
     const rect = node.getBoundingClientRect()
     const offset = frameOffset(node)
+    state.lastFound = node
     return { x: Math.round(offset.x + rect.left + rect.width / 2), y: Math.round(offset.y + rect.top + rect.height / 2), w: Math.round(rect.width), h: Math.round(rect.height), described: describe(node) }
+  }
+
+  const composedParent = (node) => node.parentElement || (node.parentNode && node.parentNode.host) || null
+  const deepHit = (x, y) => {
+    let node = document.elementFromPoint(x, y)
+    for (let i = 0; node && node.shadowRoot && node.shadowRoot.elementFromPoint && i < 8; i += 1) {
+      const inner = node.shadowRoot.elementFromPoint(x, y)
+      if (!inner || inner === node) break
+      node = inner
+    }
+    return node
+  }
+  const floats = (node) => {
+    let style = null
+    try { style = getComputedStyle(node) } catch (error) { style = null }
+    return !!style && (style.position === 'fixed' || style.position === 'sticky' || Number(style.zIndex) >= 100)
+  }
+  // A click at the point lands on the target when what is there is the target or inside it (an icon or label in a
+  // button), unless a floating layer between them (a modal inside the target) is what takes the click.
+  const lands = (target, x, y) => {
+    for (let node = deepHit(x, y), depth = 0; node && depth < 64; node = composedParent(node), depth += 1) {
+      if (node === target) return true
+      if (floats(node)) return false
+    }
+    return false
   }
 
   const DISMISS = /(accept|agree|allow|continue|close|got it|dismiss|ok|agree|同意|接受|允许|继续|关闭|知道了|我知道了|我同意)/i
@@ -218,6 +244,7 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
   state.overlayAt = function (x, y) {
     const top = document.elementFromPoint(Number(x), Number(y))
     if (!top) return { covers: null, dismiss: null }
+    if (state.lastFound && lands(state.lastFound, Number(x), Number(y))) return { covers: null, dismiss: null }
     let node = top
     let depth = 0
     while (node && depth < 8) {
