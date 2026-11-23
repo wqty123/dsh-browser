@@ -4,6 +4,7 @@
 
 ## 未发布 — 适配 DSH 0.2.3-alpha.2
 
+- **Web 侧栏引用带图片不再失败。** 冻结快照只带图片 URL，服务端却用 CDP 浏览器会话下载/栅格化，而 iframe 侧栏没有会话，结果每次都是 422 `image-unavailable`。现在来自已登记 Web 来源的冻结快照，图片由服务端按 guest 代理同样的目标规则（禁本机/内网/DSH 主机，逐跳检查重定向）和 guest Cookie 取回，按 `source-image` 保存。
 - **带图片的网页引用不再在提交时断开。** 页面侧引用栏把整份冻结快照（图片内联）POST 到 `/dsh-builtin-browser/reference/capture`，快照本身允许到 `MAX_FROZEN_CAPTURE_CHARS`（400 万字符），但这条路由沿用了设置接口 64 KiB 的请求体上限，超出就销毁连接，浏览器只看到 `net::ERR_UNEXPECTED`（Tauri 实测 65,728 字节的标题+首段+信息框图片选择失败，纯文本成功）。capture 路由的上限现在由快照上限推出（每字符最多 3 字节 UTF-8，加 64 KiB 其余字段）；其它路由仍是 64 KiB。
 - **网页引用的内容真正送到模型。** 之前引用的正文、表格和图片只在 `browserReferenceSubmission` 提交缝里拼装，而 DSH 0.2.2-rc.5 与 0.2.3-alpha.2 的发送路径是 `[...附件, { type: 'text', text }]`，从不调用它，模型只收到一个 `<dsh-browser-reference …/>` 标记。现在提交缝已删除：引用确认时，正文与 Markdown 表格作为一段 `<dsh-browser-quote>…</dsh-browser-quote>` 引文连同来源标记插入输入框，随消息原样发送且只发送一次；图片经宿主自己的拖放路径（`conversation.createDrafts` + `inputActions.addAttachments`）放进输入框附件，引文中留有对应占位。已发送气泡仍只显示引用胶囊。卡片上的「引用评论」不再单独发送，补充说明直接写在输入框里。
 - **安静模式下 Installed Chrome / Edge 打开第一个页面不再抢焦点。** 浏览器以 `--no-startup-window` 启动，第一个页面会新建窗口；`Target.createTarget` 只带 `background: true` 时 Chromium 仍会激活这个新窗口并把它带到前台。安静模式现在同时传 `focus: false`，新窗口打开但不改变当前窗口焦点；已有窗口里的新标签页仍在后台打开。

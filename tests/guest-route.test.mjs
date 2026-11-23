@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createServer, request as httpRequest } from 'node:http'
 import { once } from 'node:events'
 import { promises as dns } from 'node:dns'
-import { handleGuest, guestPath, rewriteDocument } from '../src/browser-electron/guest-route.ts'
+import { handleGuest, guestPath, rewriteDocument, fetchGuestResource } from '../src/browser-electron/guest-route.ts'
 import { GuestCookieJar } from '../src/browser-electron/guest-cookie-jar.ts'
 import { loadGuestCookies } from '../src/browser-electron/guest-cookie-store.ts'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -844,4 +844,36 @@ test('srcset candidates decode entities before resolving and safely retain liter
   }
   assert.equal(rewriteDocument('<img srcset=/image?a=1&amp;b=2>', base), `<img srcset="${guestPath('https://ordinary.example/image?a=1&b=2')}">`)
   assert.equal(rewriteDocument('<img srcset="about:&quot;blank&quot;">', base), '<img srcset="about:&#34;blank&#34;">')
+})
+
+test('a server-side guest resource fetch keeps the proxy target rules', async () => {
+  for (const url of ['http://127.0.0.1:1/a.png', guestPath('http://localhost/a.png'), 'http://10.0.0.1/a.png', 'file:///etc/passwd',
+    'https://user:pw@example.com/a.png', '/relative.png']) {
+    await assert.rejects(fetchGuestResource(url, { maxBytes: 1024 }), /not allowed|must be absolute/u, url)
+  }
+})
+
+test('a target named like the DSH Host header is blocked by name, with or without a trailing dot', async () => {
+  const options = { headers: { host: 'client-only.example:3102', 'x-dsh-guest-sub': '1' } }
+  const count = forwarded.length
+  for (const target of ['https://client-only.example/a.png', 'https://CLIENT-ONLY.example./a.png']) {
+    assert.equal((await call(guestPath(target), options)).status, 403, target)
+  }
+  assert.equal(forwarded.length, count)
+})
+
+test('a bracketed IPv6 image URL is looked up unbracketed and loopback is refused as unsafe', async () => {
+  await assert.rejects(fetchGuestResource('http://[::1]/a.png', { maxBytes: 1024 }), /not allowed/u)
+  const mocked = dns.lookup
+  const names = []
+  dns.lookup = async (hostname, options) => { names.push(hostname); return [{ address: '::1', family: 6 }] }
+  try {
+    await assert.rejects(fetchGuestResource('http://[2606:4700::1]/a.png', { maxBytes: 1024 }), /not allowed/u)
+  } finally { dns.lookup = mocked }
+  assert.deepEqual(names, ['2606:4700::1'])
+})
+
+test('a server-side guest resource fetch refuses the DSH Host it was reached on', async () => {
+  await assert.rejects(fetchGuestResource('https://client-only.example/a.png', { dshHost: 'client-only.example:3102', maxBytes: 1024 }), /not allowed/u)
+  await assert.rejects(fetchGuestResource('https://dsh.example/a.png', { dshHost: 'DSH.example.:3180', maxBytes: 1024 }), /not allowed/u)
 })

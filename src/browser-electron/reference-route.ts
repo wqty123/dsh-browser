@@ -275,6 +275,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
       ...target !== undefined ? { target } : {},
       ...comment !== undefined ? { comment } : {},
       ...frozenCapture !== undefined ? { frozenCapture } : {},
+      ...typeof request.headers.host === 'string' ? { dshHost: request.headers.host } : {},
     })
     if (outcome.reference === undefined) {
       replyJson(response, 422, { ok: false, failures: outcome.failures })
