@@ -47,6 +47,10 @@ export class PreferredBrowserViewHost implements ElectronBrowserViewHost {
       ? this.fallback.connectionStatus?.().connected === true : this.extension.connectedView(id))
   }
 
+  windowMinimizedByQuiet(scope: BrowserSessionId): boolean {
+    return this.decisions.get(scope)?.windowMinimizedByQuiet?.(scope) === true
+  }
+
   private route(scope: BrowserSessionId): Promise<ElectronBrowserViewHost> {
     if (this.released) return Promise.reject(new Error('browser carrier was released'))
     let route = this.routes.get(scope)

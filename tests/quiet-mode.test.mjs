@@ -214,6 +214,7 @@ test('only a person selecting the tab restores the window quiet mode minimized, 
   host.showView(view, 'view', { quiet: true, select: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false, 'a quiet operation or an agent selection leaves it minimized')
+  assert.equal(host.windowMinimizedByQuiet(), true, 'a takeover notice must point the person at the taskbar')
   host.showView(view, 'view', { quiet: true, select: true, user: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   const restores = browser.commands.filter(c => c.method === 'Browser.setWindowBounds')
@@ -221,6 +222,7 @@ test('only a person selecting the tab restores the window quiet mode minimized, 
   const restoreAt = browser.commands.findIndex(c => c.method === 'Browser.setWindowBounds')
   assert.deepEqual(browser.commands.slice(restoreAt + 1).filter(c => c.method === 'Page.bringToFront').length, 1,
     'the selected tab, created in the background, becomes the visible one')
+  assert.equal(host.windowMinimizedByQuiet(), false)
   host.showView(view, 'view', { quiet: true, select: true, user: true })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(browser.commands.filter(c => c.method === 'Browser.setWindowBounds').length, 1,

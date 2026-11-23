@@ -9,6 +9,7 @@ import { clearLastOpen, getLastOpen } from '../browser-electron/open-slot.ts'
 import { assertAllowed, agentOf, taskKey, ensureSession, type ToolScope, type ToolDefinition } from './state.ts'
 import { pageValue, pageOperationValue, installProbe, probe, probeLive, pause, poll, type ProbeRow, runChecks } from './probe-client.ts'
 import { formatSnapshot } from './tools-observation.ts'
+import { MINIMIZED_TAKEOVER_NOTE } from './takeover.ts'
 
 /**
  * Define this module's tools for one apply.
@@ -44,7 +45,8 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
       const navigationUrl = open?.owner === owner && Date.now() - open.at < 10000 ? open.url : undefined
       const page = await takeovers.adopt(owner, exec.signal, navigationUrl)
       if (navigationUrl !== undefined && getLastOpen()?.owner === owner) clearLastOpen(open!.at)
-      return takeovers.run(page, args.reason.trim(), args.instructions, exec.signal, async (pending): Promise<{ outcome: TakeoverOutcome; page: TakeoverSummary }> => {
+      const instructions = page.minimized === true ? [args.instructions, MINIMIZED_TAKEOVER_NOTE].filter(Boolean).join('\n') : args.instructions
+      return takeovers.run(page, args.reason.trim(), instructions, exec.signal, async (pending): Promise<{ outcome: TakeoverOutcome; page: TakeoverSummary }> => {
         const approval = ctx.get('approval' as never) as unknown as { request(request: {
           agent: ToolRunContext['agent']; toolName: string; reason: string; displayReason: { en: string; zh: string };
           callId: ToolRunContext['callId']; signal: AbortSignal;

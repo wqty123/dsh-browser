@@ -1516,6 +1516,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   /** Windows quiet mode minimized itself; a window the user minimized is not listed. */
   private readonly quietMinimized = new Set<number>()
 
+  windowMinimizedByQuiet(): boolean { return this.quietMinimized.size > 0 }
+
   private async rememberQuietWindow(client: CdpClient, targetId: string): Promise<void> {
     try {
       const found = await client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown } | undefined
