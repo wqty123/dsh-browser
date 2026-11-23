@@ -44,7 +44,7 @@ async function capturedArgs(headlessMode) {
   return seen[0] ?? []
 }
 
-test('the launch keeps a minimized quiet window rendering at full speed', async () => {
+test('the launch keeps an off-screen quiet window rendering at full speed', async () => {
   const args = await capturedArgs('windowed')
   for (const flag of ['--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling']) {
     assert.ok(args.includes(flag), flag + ' must be present: ' + JSON.stringify(args))

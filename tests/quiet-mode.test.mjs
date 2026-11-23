@@ -179,89 +179,126 @@ async function firstPageParams(t, quiet, options) {
   return browser.commands.filter(command => command.method === 'Target.createTarget').map(command => command.params)
 }
 
-const minimizedWindow = message => message.method === 'Browser.getWindowForTarget'
-  ? { result: { windowId: 7, bounds: { windowState: 'minimized' } } }
-  : message.method === 'Browser.setWindowBounds' ? { result: {} } : undefined
+const PARK_LEFT = 30000
+/** A fake Chromium whose quiet window sits where it was created, on a display of 1600x1160 at the origin. */
+const parkedBrowser = (overrides = {}) => {
+  const state = { left: PARK_LEFT, top: 0, width: 1280, height: 800, hidden: false, ...overrides }
+  return {
+    state,
+    respond: message => {
+      if (message.method === 'Browser.getWindowForTarget') return { result: { windowId: 7, bounds: { left: state.left, top: state.top, width: state.width, height: state.height, windowState: 'normal' } } }
+      if (message.method === 'Browser.setWindowBounds') { Object.assign(state, message.params.bounds); return { result: {} } }
+      if (message.method === 'Runtime.evaluate' && String(message.params?.expression).includes('screen.availLeft')) {
+        return { result: { result: { type: 'object', value: { sl: 0, st: 0, sw: 1600, sh: 1160, x: state.left, y: state.top, ow: state.width, oh: state.height, hidden: state.hidden } } } }
+      }
+      return undefined
+    },
+  }
+}
+const moves = browser => browser.commands.filter(c => c.method === 'Browser.setWindowBounds').map(c => c.params)
+const settle = () => new Promise(resolve => setTimeout(resolve, 50))
 
 test('quiet mode opens the first Installed Chrome page without focusing its new window', async t => {
   // The launch has no startup window, so this page creates the window. `background` alone left
   // Chromium free to activate that window; `focus: false` is what keeps window focus where it was.
-  const [params] = await firstPageParams(t, true)
+  const [params] = await firstPageParams(t, true, parkedBrowser())
   assert.equal(params.focus, false)
   assert.equal(params.background, true)
 })
 
-test('quiet mode opens the first Installed Chrome window minimized, so it does not cover the screen', async t => {
-  const [params] = await firstPageParams(t, true)
-  assert.equal(params.windowState, 'minimized')
+test('quiet mode creates the first Installed Chrome window off-screen in the normal state, so rAF keeps running', async t => {
+  const fake = parkedBrowser()
+  const { browser } = await quietHost(t, true, fake)
+  const [params] = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
+  assert.equal(params.newWindow, true)
+  assert.equal(params.left, PARK_LEFT)
+  assert.equal('windowState' in params, false, 'a minimized window is hidden to its pages and stops rAF')
+  assert.deepEqual(moves(browser), [], 'created where it belongs, it never flashes on-screen')
 })
 
-test('a Chromium that rejects windowState still gets its quiet first page, unfocused', async t => {
-  const calls = await firstPageParams(t, true, {
-    respond: message => message.method === 'Target.createTarget' && message.params?.windowState !== undefined
-      ? { error: { message: 'Invalid parameters' } }
-      : undefined,
-  })
-  assert.equal(calls.length, 2)
-  assert.equal(calls[0].windowState, 'minimized')
-  assert.deepEqual(calls[1], { url: 'about:blank', background: true, focus: false })
+test('a Chromium that rejects window bounds gets its quiet first page, then the window moves off-screen', async t => {
+  const fake = parkedBrowser({ left: 10, top: 10 })
+  const respond = message => message.method === 'Target.createTarget' && message.params?.left !== undefined
+    ? { error: { message: 'Invalid parameters' } } : fake.respond(message)
+  const { browser } = await quietHost(t, true, { respond })
+  const created = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
+  assert.deepEqual(created[1], { url: 'about:blank', background: true, focus: false })
+  assert.deepEqual(moves(browser)[0], { windowId: 7, bounds: { left: PARK_LEFT, top: 0, width: 1280, height: 800 } })
 })
 
-test('only a person selecting the tab restores the window quiet mode minimized, once, showing the selected tab', async t => {
-  const { browser, host, view } = await quietHost(t, true, { respond: minimizedWindow })
+test('a parked window a display still overlaps is moved past that display', async t => {
+  const fake = parkedBrowser({ left: 1000 })
+  const respond = message => message.method === 'Browser.getWindowForTarget' && fake.state.left === 1000
+    ? { result: { windowId: 7, bounds: { left: PARK_LEFT, top: 0, windowState: 'normal' } } } : fake.respond(message)
+  const { browser } = await quietHost(t, true, { respond })
+  assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 1800, top: 0 } }])
+})
+
+test('only a person selecting the tab reveals the parked window, once, without moving it again', async t => {
+  const fake = parkedBrowser()
+  const { browser, host, view } = await quietHost(t, true, fake)
   await host.presentView(view, 'view', { quiet: true })
   host.showView(view, 'view', { quiet: true })
   host.showView(view, 'view', { quiet: true, select: true })
-  await new Promise(resolve => setTimeout(resolve, 50))
-  assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false, 'a quiet operation or an agent selection leaves it minimized')
-  assert.equal(await host.windowMinimizedByQuiet(view), true, 'a takeover notice must point the person at the taskbar')
+  await settle()
+  assert.deepEqual(moves(browser), [], 'a quiet operation or an agent selection leaves it off-screen')
   host.showView(view, 'view', { quiet: true, select: true, user: true })
-  await new Promise(resolve => setTimeout(resolve, 50))
-  const restores = browser.commands.filter(c => c.method === 'Browser.setWindowBounds')
-  assert.deepEqual(restores.map(c => c.params), [{ windowId: 7, bounds: { windowState: 'normal' } }])
-  const restoreAt = browser.commands.findIndex(c => c.method === 'Browser.setWindowBounds')
-  assert.deepEqual(browser.commands.slice(restoreAt + 1).filter(c => c.method === 'Page.bringToFront').length, 1,
+  await settle()
+  assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 40, top: 40 } }])
+  const revealAt = browser.commands.findIndex(c => c.method === 'Browser.setWindowBounds')
+  assert.equal(browser.commands.slice(revealAt + 1).filter(c => c.method === 'Page.bringToFront').length, 1,
     'the selected tab, created in the background, becomes the visible one')
-  assert.equal(await host.windowMinimizedByQuiet(view), false)
   host.showView(view, 'view', { quiet: true, select: true, user: true })
-  await new Promise(resolve => setTimeout(resolve, 50))
-  assert.equal(browser.commands.filter(c => c.method === 'Browser.setWindowBounds').length, 1,
-    'once restored, the window belongs to the user: minimizing it again keeps it minimized')
+  await settle()
+  assert.equal(moves(browser).length, 1, 'once revealed, the window is the person\'s')
+})
+
+test('a takeover reveals the parked window without bringing a visible page to the front', async t => {
+  const fake = parkedBrowser({ height: 1400 })
+  const { browser, host, view } = await quietHost(t, true, fake)
+  assert.equal(await host.revealQuietWindow(view), true)
+  assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 40, top: 40 } }, { windowId: 7, bounds: { width: 1280, height: 1120 } }],
+    'moved onto the primary display and fitted to it')
+  assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false, 'nothing activates the window')
+  assert.equal(await host.revealQuietWindow(view), false, 'only once')
+})
+
+test('a takeover on a page hidden behind another tab brings that page to the front', async t => {
+  const fake = parkedBrowser({ hidden: true })
+  const { browser, host, view } = await quietHost(t, true, fake)
+  assert.equal(await host.revealQuietWindow(view), true)
+  assert.equal(browser.commands.filter(c => c.method === 'Page.bringToFront').length, 1)
 })
 
 test('with quiet mode off, the first page keeps the default foreground creation', async t => {
   const [params] = await firstPageParams(t, false)
   assert.equal('focus' in params, false)
   assert.equal('background' in params, false)
-  assert.equal('windowState' in params, false)
+  assert.equal('newWindow' in params, false)
+  assert.equal('left' in params, false)
 })
 
-test('selecting a later tab in the window quiet mode minimized restores that window', async t => {
-  const { browser, host } = await quietHost(t, true, { respond: minimizedWindow })
+test('selecting a later tab in the parked window reveals that window', async t => {
+  const fake = parkedBrowser()
+  const { browser, host } = await quietHost(t, true, fake)
   const second = host.createView(tabWireId({ owner: 'task-a', session: 'main', tab: 'second' }))
   await second.sendCommand('Runtime.evaluate', { expression: '1' })
   const created = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
-  assert.equal('windowState' in created[1], false, 'a tab joining the window does not minimize it again')
+  assert.equal('left' in created[1], false, 'a tab joining the window does not park it again')
   host.showView(second, 'second', { quiet: true, select: true, user: true })
-  await new Promise(resolve => setTimeout(resolve, 50))
-  assert.deepEqual(browser.commands.filter(c => c.method === 'Browser.setWindowBounds').map(c => c.params),
-    [{ windowId: 7, bounds: { windowState: 'normal' } }])
+  await settle()
+  assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 40, top: 40 } }])
 })
 
-test('a window quiet mode did not minimize stays minimized when a quiet tab in it is selected', async t => {
-  const { browser, host } = await quietHost(t, true, {
-    respond: message => message.method === 'Target.createTarget' && message.params?.windowState !== undefined
-      ? { error: { message: 'Invalid parameters' } }
-      : minimizedWindow(message),
+test('a quiet tab in a window quiet mode did not park is never moved', async t => {
+  const fake = parkedBrowser()
+  const { browser, host, view } = await quietHost(t, true, {
+    respond: message => message.method === 'Target.getTargets' ? { result: { targetInfos: [{ type: 'page', targetId: 'mine' }] } } : fake.respond(message),
   })
-  const second = host.createView(tabWireId({ owner: 'task-a', session: 'main', tab: 'second' }))
-  await second.sendCommand('Runtime.evaluate', { expression: '1' })
-  const created = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
-  assert.equal(created.length, 3, 'the first page fell back once; the second joined its window')
-  host.showView(second, 'second', { quiet: true, select: true, user: true })
-  await new Promise(resolve => setTimeout(resolve, 50))
-  assert.equal(browser.commands.some(c => c.method === 'Browser.setWindowBounds'), false,
-    'the user may have minimized that window; selecting its tab leaves it minimized')
+  host.showView(view, 'view', { quiet: true, select: true, user: true })
+  assert.equal(await host.revealQuietWindow(view), false)
+  await settle()
+  assert.deepEqual(moves(browser), [], 'the person\'s own window stays where they put it')
 })
 
 test('in quiet mode an agent tab switch never asks to restore the window; a person selecting the tab does', async () => {
@@ -277,25 +314,10 @@ test('in quiet mode an agent tab switch never asks to restore the window; a pers
   assert.deepEqual(host.seen.showView.at(-1), { quiet: true, select: true, user: true }, 'a tab click in the panel is the person selecting it')
 })
 
-test('a quiet window the person restored from the taskbar is no longer reported as minimized', async t => {
-  let windowState = 'minimized'
-  const { host, view } = await quietHost(t, true, {
-    respond: message => message.method === 'Browser.getWindowForTarget' ? { result: { windowId: 7, bounds: { windowState } } } : undefined,
-  })
-  await host.presentView(view, 'view', { quiet: true })
-  assert.equal(await host.windowMinimizedByQuiet(view), true)
-  windowState = 'normal'
-  assert.equal(await host.windowMinimizedByQuiet(view), false)
-  windowState = 'minimized'
-  assert.equal(await host.windowMinimizedByQuiet(view), false, 'minimized again by the person, quiet mode no longer reports it')
-})
-
-test('asking whether a closed quiet tab is minimized never opens a replacement page', async t => {
-  const { browser, host, view } = await quietHost(t, true, { respond: minimizedWindow })
-  await host.presentView(view, 'view', { quiet: true })
-  assert.equal(await host.windowMinimizedByQuiet(view), true)
+test('revealing a closed quiet tab never opens a replacement page', async t => {
+  const { browser, host, view } = await quietHost(t, true, parkedBrowser())
   host.destroyView(view)
   const before = browser.commands.length
-  assert.equal(await host.windowMinimizedByQuiet(view), false)
+  assert.equal(await host.revealQuietWindow(view), false)
   assert.deepEqual(browser.commands.slice(before).filter(c => /^Target.(createTarget|attachToTarget)$/u.test(c.method)), [])
 })

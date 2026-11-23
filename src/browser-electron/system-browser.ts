@@ -286,6 +286,23 @@ export function searchSummary(
 }
 
 /** One CDP connection to a browser-level WebSocket, with flattened sessions. */
+/** Where quiet mode first parks its window: far past any ordinary display layout, then checked against the page's own screen. */
+const QUIET_PARK = { left: 30000, top: 0, width: 1280, height: 800 } as const
+const QUIET_PARK_GAP = 200
+const QUIET_REVEAL_INSET = 40
+
+interface WindowGeometry { readonly sl: number; readonly st: number; readonly sw: number; readonly sh: number; readonly x: number; readonly y: number; readonly ow: number; readonly oh: number; readonly hidden: boolean }
+
+/** The display the page's window is on (or nearest to), the window's outer rectangle, and whether the page is hidden. */
+async function windowGeometry(client: CdpClient, sessionId: string): Promise<WindowGeometry | undefined> {
+  const out = await client.send('Runtime.evaluate', {
+    expression: '({ sl: screen.availLeft, st: screen.availTop, sw: screen.availWidth, sh: screen.availHeight, x: screenX, y: screenY, ow: outerWidth, oh: outerHeight, hidden: document.visibilityState === "hidden" })',
+    returnByValue: true,
+  }, sessionId) as { result?: { value?: WindowGeometry } } | undefined
+  const g = out?.result?.value
+  return g !== undefined && [g.sl, g.st, g.sw, g.sh, g.x, g.y, g.ow, g.oh].every(n => typeof n === 'number') ? g : undefined
+}
+
 class CdpClient {
   private nextId = 1
   private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
@@ -734,8 +751,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // page, windowed or not, which bot walls read as "a script, not a person" — even while the
       // person is the one browsing. Chrome's own switch turns that marker off; nothing else changes.
       '--disable-blink-features=AutomationControlled',
-      // Quiet mode opens its first window minimized; without these Chromium pauses rAF, clamps
-      // timers and stalls screenshots for a window nobody can see. Passed always: quiet is a live setting.
+      // Quiet mode parks its first window off-screen; without these Windows occlusion tracking marks
+      // it hidden, pausing rAF, clamping timers and stalling screenshots. Passed always: quiet is a live setting.
       '--disable-backgrounding-occluded-windows',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -1225,7 +1242,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
 
   /** Nothing to show: the browser owns its own windows. */
   showView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean; readonly user?: boolean }): void {
-    if (options?.user === true && (options.quiet === true || this.isQuiet())) void this.restoreQuietWindow(handle)
+    if (options?.user === true && (options.quiet === true || this.isQuiet())) void this.revealQuietWindow(handle, { select: true })
   }
 
   /**
@@ -1246,7 +1263,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    */
   async presentView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean; readonly user?: boolean }): Promise<void> {
     if (options?.quiet === true || this.isQuiet()) {
-      if (options?.user === true) await this.restoreQuietWindow(handle)
+      if (options?.user === true) await this.revealQuietWindow(handle, { select: true })
       return
     }
     try {
@@ -1396,6 +1413,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       const sessionId = attached?.sessionId
       if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
       if (adopted !== undefined) this.rememberTarget(client, targetId, viewId)
+      await this.clearDisplays(client, sessionId, targetId)
       await this.presentAsChrome(client, sessionId)
       // The session id is what page commands ride; the target id is what closes it.
       this.sessions.set(sessionId, targetId)
@@ -1483,77 +1501,104 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   /** Create one page, refusing to go on without an id. */
   private async createTarget(client: CdpClient, viewId: string): Promise<string> {
     const quiet = this.isQuiet()
-    const { created, minimized } = quiet
+    const { created, parked } = quiet
       ? await this.createQuietTarget(client)
-      : { created: await client.send('Target.createTarget', { url: 'about:blank' }), minimized: false }
+      : { created: await client.send('Target.createTarget', { url: 'about:blank' }), parked: false }
     const targetId = (created as { targetId?: string } | undefined)?.targetId
     if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')
     this.rememberTarget(client, targetId, viewId)
-    if (minimized) await this.rememberQuietWindow(client, targetId)
+    if (parked) await this.parkQuietWindow(client, targetId)
     return targetId
   }
 
   /**
    * `background` only keeps the user's tab active inside an existing window; the first page after
-   * `--no-startup-window` opens a new one. `focus: false` keeps keyboard focus where it was, and
-   * `windowState: 'minimized'` keeps that window from covering the screen. Chromium that predates
-   * `windowState` rejects the call, so it is retried without it. Only a page that opens a new window
-   * is minimized by this; a tab joining an existing window leaves that window as the user has it.
+   * `--no-startup-window` opens a new one. `focus: false` keeps keyboard focus where it was, and the
+   * window is created off-screen in the normal state: a minimized window is hidden to the page, so
+   * rAF stops and rAF-driven pages never render. A Chromium that rejects the bounds gets the page
+   * without them and the window is moved off-screen right after. A tab joining an existing window
+   * leaves that window where the user has it.
    */
-  private async createQuietTarget(client: CdpClient): Promise<{ readonly created: unknown; readonly minimized: boolean }> {
+  private async createQuietTarget(client: CdpClient): Promise<{ readonly created: unknown; readonly parked: boolean }> {
     const params = { url: 'about:blank', background: true, focus: false }
     const listed = await client.send('Target.getTargets') as { targetInfos?: Array<{ type?: string }> } | undefined
     if (listed?.targetInfos?.some(entry => entry.type === 'page') === true) {
-      return { created: await client.send('Target.createTarget', params), minimized: false }
+      return { created: await client.send('Target.createTarget', params), parked: false }
     }
     try {
-      return { created: await client.send('Target.createTarget', { ...params, windowState: 'minimized' }), minimized: true }
+      return { created: await client.send('Target.createTarget', { ...params, newWindow: true, ...QUIET_PARK }), parked: true }
     } catch {
-      return { created: await client.send('Target.createTarget', params), minimized: false }
+      return { created: await client.send('Target.createTarget', params), parked: true }
     }
   }
 
-  /** Windows quiet mode minimized itself; a window the user minimized is not listed. */
-  private readonly quietMinimized = new Set<number>()
+  /** Windows quiet mode parked off-screen; a window quiet mode has revealed is not listed. */
+  private readonly quietParked = new Set<number>()
+  /** Pages whose window was just parked, until their session checks the window is clear of every display. */
+  private readonly parkedTargets = new Map<string, number>()
 
-  async windowMinimizedByQuiet(handle: ElectronViewHandle): Promise<boolean> {
+  private async parkQuietWindow(client: CdpClient, targetId: string): Promise<void> {
+    try {
+      const found = await client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown; bounds?: { left?: unknown; top?: unknown } } | undefined
+      if (typeof found?.windowId !== 'number') return
+      if (found.bounds?.left !== QUIET_PARK.left || found.bounds?.top !== QUIET_PARK.top) {
+        await client.send('Browser.setWindowBounds', { windowId: found.windowId, bounds: { ...QUIET_PARK } })
+      }
+      this.quietParked.add(found.windowId)
+      this.parkedTargets.set(targetId, found.windowId)
+    } catch {
+      // Without its id the window cannot be moved or revealed later, so it stays where Chromium put it.
+    }
+  }
+
+  /**
+   * Move a parked window past any display it still overlaps. The page's `screen` is the display
+   * the window overlaps most (or the nearest one), so stepping past it until no display claims the
+   * window clears the union of all displays, wherever the provisional position landed.
+   */
+  private async clearDisplays(client: CdpClient, sessionId: string, targetId: string): Promise<void> {
+    const windowId = this.parkedTargets.get(targetId)
+    if (windowId === undefined) return
+    this.parkedTargets.delete(targetId)
+    try {
+      for (let step = 0; step < 8; step++) {
+        const g = await windowGeometry(client, sessionId)
+        if (g === undefined) return
+        const overlaps = g.x < g.sl + g.sw && g.x + g.ow > g.sl && g.y < g.st + g.sh && g.y + g.oh > g.st
+        if (!overlaps) return
+        await client.send('Browser.setWindowBounds', { windowId, bounds: { left: g.sl + g.sw + QUIET_PARK_GAP, top: g.st } })
+      }
+    } catch {
+      // A page that cannot report its geometry keeps the provisional position.
+    }
+  }
+
+  /**
+   * Move a window quiet mode parked onto the primary display (it holds the origin), sized to fit,
+   * without activating it. Quiet tabs open in the background, so the window may be showing an
+   * earlier tab: on a person's own selection, or when the page is hidden behind another tab, it is
+   * brought to the front. From then on the window is the person's and quiet mode never moves it.
+   * @returns whether a parked window was moved.
+   */
+  async revealQuietWindow(handle: ElectronViewHandle, options?: { readonly select?: boolean }): Promise<boolean> {
     const view = this.views.get(handle.id)
     const targetId = view === undefined ? undefined : this.sessions.get(view.session)
-    if (this.quietMinimized.size === 0 || view === undefined || targetId === undefined) return false
+    if (this.quietParked.size === 0 || view === undefined || targetId === undefined) return false
     try {
       // Asked of the browser by target id: the view's own command path would replace a closed page with a blank one.
-      const found = await view.client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown; bounds?: { windowState?: unknown } } | undefined
-      if (typeof found?.windowId !== 'number' || !this.quietMinimized.has(found.windowId)) return false
-      if (found.bounds?.windowState === 'minimized') return true
-      // The person restored it from the taskbar: from now on the window is theirs.
-      this.quietMinimized.delete(found.windowId)
-      return false
-    } catch {
-      return false
-    }
-  }
-
-  private async rememberQuietWindow(client: CdpClient, targetId: string): Promise<void> {
-    try {
-      const found = await client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown } | undefined
-      if (typeof found?.windowId === 'number') this.quietMinimized.add(found.windowId)
-    } catch {
-      // Without its id the window cannot be told apart from one the user minimized, so it stays as it is.
-    }
-  }
-
-  /** A person's own selection shows a window quiet mode minimized, with the selected tab active in it. Agent navigation never does. */
-  private async restoreQuietWindow(handle: ElectronViewHandle): Promise<void> {
-    if (this.quietMinimized.size === 0) return
-    try {
-      const found = await handle.sendCommand('Browser.getWindowForTarget') as { windowId?: unknown; bounds?: { windowState?: unknown } }
-      if (typeof found?.windowId !== 'number' || !this.quietMinimized.delete(found.windowId)) return
-      if (found.bounds?.windowState !== 'minimized') return
-      await handle.sendCommand('Browser.setWindowBounds', { windowId: found.windowId, bounds: { windowState: 'normal' } })
-      // A quiet tab was created in the background, so the restored window would show its previous tab.
-      await handle.sendCommand('Page.bringToFront')
+      const found = await view.client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown } | undefined
+      if (typeof found?.windowId !== 'number' || !this.quietParked.delete(found.windowId)) return false
+      await view.client.send('Browser.setWindowBounds', { windowId: found.windowId, bounds: { left: QUIET_REVEAL_INSET, top: QUIET_REVEAL_INSET } })
+      const g = await windowGeometry(view.client, view.session)
+      if (g !== undefined && (g.ow > g.sw - QUIET_REVEAL_INSET || g.oh > g.sh - QUIET_REVEAL_INSET)) {
+        await view.client.send('Browser.setWindowBounds', { windowId: found.windowId, bounds: {
+          width: Math.min(g.ow, g.sw - QUIET_REVEAL_INSET), height: Math.min(g.oh, g.sh - QUIET_REVEAL_INSET) } })
+      }
+      if (options?.select === true || g?.hidden === true) await view.client.send('Page.bringToFront', {}, view.session)
+      return true
     } catch {
       // The page went away; the command that selected it reports that itself.
+      return false
     }
   }
 

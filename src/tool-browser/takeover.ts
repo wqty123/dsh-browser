@@ -9,11 +9,9 @@ import { sameOrigin } from '../browser-electron/settings-route.ts'
 import { referenceOwnerKey } from '../reference-owner.ts'
 import { TAKEOVER_ROUTE, TAKEOVER_TOOL, type TakeoverDecision, type TakeoverNotice, type TakeoverSummary } from '../takeover-protocol.ts'
 
-export const MINIMIZED_TAKEOVER_NOTE = 'The browser window is minimized in the taskbar: open it from there. 浏览器窗口已最小化在任务栏，请从任务栏打开。'
-
 interface Page {
   readonly connected?: () => boolean
-  readonly minimized?: () => Promise<boolean>
+  readonly reveal?: () => Promise<boolean>
   readonly owner: string
   readonly tabId: string
   readonly pageId: string

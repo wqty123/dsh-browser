@@ -194,18 +194,16 @@ test('a turn stopped during the post-approval snapshot still returns cancelled',
   assert.equal(host.native[0].answerable, false)
 })
 
-test('a takeover on a quiet-minimized personal browser window tells the person to open it from the taskbar', async t => {
-  for (const minimized of [true, false]) {
-    const browser = { bindPanelPage: async () => { throw new Error('page closed') } }
-    const remove = registerCarrierTakeover(browser, owner => [{ session: 'browser-1', owner, tabId: 'tab-1', pageId: 'tab-1',
-      url: 'https://example.test/login', connected: () => true, minimized: async () => minimized }])
-    const host = takeoverHost(browser)
-    t.after(() => { host.dispose(); remove() })
-    const result = host.tools.get(TAKEOVER_TOOL).execute({ reason: 'Login' }, host.exec)
-    await until(() => host.native.length === 1)
-    const { displayReason } = host.native[0].request
-    assert.equal(/taskbar/u.test(displayReason.en) && /任务栏/u.test(displayReason.zh), minimized)
-    host.native[0].answer('allowed-once')
-    assert.equal((await result).outcome, 'done')
-  }
+test('a takeover reveals a quiet-parked personal browser window before asking the person', async t => {
+  const browser = { bindPanelPage: async () => { throw new Error('page closed') } }
+  const revealed = []
+  const remove = registerCarrierTakeover(browser, owner => [{ session: 'browser-1', owner, tabId: 'tab-1', pageId: 'tab-1',
+    url: 'https://example.test/login', connected: () => true, reveal: async () => { revealed.push(Date.now()); return true } }])
+  const host = takeoverHost(browser)
+  t.after(() => { host.dispose(); remove() })
+  const result = host.tools.get(TAKEOVER_TOOL).execute({ reason: 'Login' }, host.exec)
+  await until(() => host.native.length === 1)
+  assert.equal(revealed.length, 1, 'the window is on the screen when the notice appears')
+  host.native[0].answer('allowed-once')
+  assert.equal((await result).outcome, 'done')
 })

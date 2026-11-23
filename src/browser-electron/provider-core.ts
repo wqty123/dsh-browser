@@ -33,8 +33,8 @@ export interface ElectronBrowserViewHost {
   readonly referenceOverlayOwner?: 'client'
   referenceOverlayOwnerFor?(scope: BrowserSessionId): 'client' | undefined
   retireSession?(scope: BrowserSessionId): Promise<void>
-  /** Whether the view's window is still the one quiet mode minimized, so a person asked to act must open it from the taskbar. */
-  windowMinimizedByQuiet?(handle: ElectronViewHandle): Promise<boolean>
+  /** Move the view's window onto the screen if quiet mode parked it off-screen, without activating it; whether it moved. */
+  revealQuietWindow?(handle: ElectronViewHandle, options?: { readonly select?: boolean }): Promise<boolean>
   /**
    * Create a new browser view and return a handle to its webContents-like
    * surface. The host owns windowing (adding the view to the window, sizing,
@@ -587,7 +587,7 @@ export interface PresentOptions {
   readonly quiet?: boolean
   /** Explicit navigation or tab selection may change the task's sidebar tab without OS activation. */
   readonly select?: boolean
-  /** A person's own selection, not the agent's: only this may restore a window quiet mode minimized. */
+  /** A person's own selection, not the agent's: only this may reveal a window quiet mode parked off-screen. */
   readonly user?: boolean
 }
 
