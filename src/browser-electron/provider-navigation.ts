@@ -101,7 +101,8 @@ export abstract class ProviderNavigation extends ProviderTabs {
         timedOut => {
           if (tab.navigation !== navigation) return
           if (timedOut) this.interrupt(handle, timedOut)
-          else void handle.sendCommand('Page.stopLoading').catch(() => {})
+          // Never initialize a guest just to stop it: a cancelled first sidebar load must not reopen the sidebar.
+          else void handle.sendCommand('Page.stopLoading', undefined, { present: false, initialize: false }).catch(() => {})
         },
       )
       // Page.navigate resolves even when the navigation fails; surface the
