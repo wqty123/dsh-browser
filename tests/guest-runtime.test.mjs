@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { guestRuntimeScript } from '../src/browser-electron/guest-runtime.ts'
-import { guestPath, relayTag } from '../src/browser-electron/guest-route.ts'
+import { GUEST_ROUTE, guestPath, relayTag } from '../src/browser-electron/guest-route.ts'
 
 function page(storage, storageAvailable = true) {
   const requests = [], navigations = [], listeners = new Map(), observers = []
@@ -110,6 +110,14 @@ test('navigation metadata echoes the parent load identity without inventing comp
   assert.equal(sent.at(-1).url, 'https://ordinary.example/next')
   receive(2)
   assert.equal(sent.at(-1).loadId, 2)
+})
+
+test('a page that derives its own URL from location.pathname addresses the real document, not the proxy route', () => {
+  const { context } = page()
+  const leaf = GUEST_ROUTE.split('/').pop()
+  assert.equal(context.__dshGuestToProxy(leaf), guestPath('https://ordinary.example/dir/page'))
+  assert.equal(context.__dshGuestToProxy('./' + leaf + '?n=1#top'), guestPath('https://ordinary.example/dir/page?n=1#top'))
+  assert.equal(context.__dshGuestToProxy(leaf + '/x'), guestPath('https://ordinary.example/dir/' + leaf + '/x'))
 })
 
 test('fetch handles string, URL and Request inputs, preserving POST body and adding the subrequest marker', async () => {
