@@ -51,7 +51,9 @@ export const ANNOTATE_SCRIPT = `(async () => {${DEEP_DOM_SOURCE}
       .map(id => { const n = root.getElementById ? root.getElementById(id) : null; return n ? n.textContent : '' }).join(' ')
     let text = el.getAttribute('aria-label') || byIds
     if (!text && el.labels && el.labels.length) text = el.labels[0].textContent
-    if (!text) text = el.innerText || el.value || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || ''
+    // A field's value is what the user typed (possibly a password), never its label; only button inputs name themselves by value.
+    const buttonValue = el.tagName === 'INPUT' && /^(submit|button|reset)$/i.test(el.getAttribute('type') || '') ? el.value : ''
+    if (!text) text = el.innerText || buttonValue || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || ''
     return String(text).replace(/\\s+/g, ' ').trim().slice(0, 80)
   }
   const offsetOf = (el) => {
