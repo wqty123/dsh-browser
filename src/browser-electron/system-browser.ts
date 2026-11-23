@@ -290,6 +290,8 @@ class CdpClient {
   private nextId = 1
   private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
   private readonly ready: Promise<void>
+  readonly destroyedTargets = new Set<string>()
+  headless = false
 
   /**
    * @param url - the browser's `webSocketDebuggerUrl`.
@@ -385,9 +387,12 @@ class CdpClient {
 
   /** Route one CDP message to its waiter. */
   private onMessage(raw: string): void {
-    let message: { id?: number; result?: unknown; error?: { message?: string } }
+    let message: { id?: number; method?: string; params?: { targetId?: unknown }; result?: unknown; error?: { message?: string } }
     try { message = JSON.parse(raw) } catch { return }
-    if (message.id === undefined) return
+    if (message.id === undefined) {
+      if (message.method === 'Target.targetDestroyed' && typeof message.params?.targetId === 'string') this.destroyedTargets.add(message.params.targetId)
+      return
+    }
     const entry = this.pending.get(message.id)
     if (entry === undefined) return
     this.pending.delete(message.id)
@@ -525,7 +530,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   connectedView(id: string): boolean {
-    return this.views.has(id) && this.connectionStatus().connected
+    const view = this.views.get(id), target = view === undefined ? undefined : this.sessions.get(view.session)
+    return view !== undefined && target !== undefined && view.client === this.client && !view.client.headless
+      && !view.client.destroyedTargets.has(target) && this.connectionStatus().connected
   }
 
   /** Which product this host would drive (for diagnostics). */
@@ -673,6 +680,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // mistaken for a browser that answers.
       const info = await client.send('Browser.getVersion', {}, undefined, Math.max(1, deadline - Date.now())) as { product?: string }
       if (!isBrowserProduct(info?.product) || info.product !== version.Browser) throw new Error('browser did not acknowledge its identity')
+      client.headless = /^HeadlessChrome\//u.test(info.product)
       if (this.disposed) { client.close(); return undefined }
       await client.send('Target.setDiscoverTargets', { discover: true }, undefined, Math.max(1, deadline - Date.now()))
       if (this.disposed || Date.now() >= deadline) { client.close(); return undefined }
@@ -979,6 +987,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
                 } catch { /* An unidentified endpoint is borrowed, never owned. */ }
               }
               if (this.disposed) { client.close(); break }
+              client.headless = launch.headless
               this.client = client
               this.plainUserAgent = undefined
               return client

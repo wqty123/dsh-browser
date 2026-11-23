@@ -104,3 +104,49 @@ test('a refused attach does not block the next task or permanently claim the bla
     rmSync(folder, { recursive: true, force: true })
   }
 })
+
+test("takeover offers the agent's own tab before a page the reference scanner adopted for the same conversation", () => {
+  const folder = mkdtempSync(join(tmpdir(), 'dsh-takeover-reference-'))
+  const host = new SystemBrowserViewHost({ kind: 'chrome', path: 'unused' }, folder, [], undefined, () => { throw new Error('unexpected launch') })
+  const provider = new ElectronBrowserProvider(host, { history: { enabled: false } })
+  const session = (id, tab) => ({ id, label: 'owner', tabs: [{ id: tab, url: `https://${tab}.test/` }], activeIndex: 0, history: [], nextSeq: 1 })
+  try {
+    provider.sessions.set('agent', session('agent', 'agent-tab'))
+    provider.sessions.set('reference', session('reference', 'reference-tab'))
+    provider.referenceSession = 'reference'
+    assert.deepEqual(provider.takeoverTargets('owner').map(target => target.tabId), ['agent-tab'])
+    provider.sessions.delete('agent')
+    assert.deepEqual(provider.takeoverTargets('owner').map(target => target.tabId), ['reference-tab'])
+  } finally {
+    host.dispose()
+    rmSync(folder, { recursive: true, force: true })
+  }
+})
+
+for (const browserName of ['Chrome/156', 'HeadlessChrome/156']) {
+  test(`a managed tab counts as connected for takeover only while ${browserName} shows it`, async () => {
+    const folder = mkdtempSync(join(tmpdir(), 'dsh-connected-view-'))
+    const browser = createFakeBrowser({ browserName, blanks: ['startup-blank'] })
+    await browser.listen()
+    writeFileSync(join(folder, 'DevToolsActivePort'), String(browser.port) + '\n')
+    const host = new SystemBrowserViewHost({ kind: 'chrome', path: 'never-spawned' }, folder)
+    const views = []
+    const createView = host.createView.bind(host)
+    host.createView = identity => { const view = createView(identity); views.push(view); return view }
+    const provider = new ElectronBrowserProvider(host, { history: { enabled: false } })
+    try {
+      const session = await provider.open('owner')
+      await provider.execute(session, { script: '1' })
+      const id = views.at(-1).id
+      if (browserName.startsWith('Headless')) { assert.equal(host.connectedView(id), false); return }
+      assert.equal(host.connectedView(id), true)
+      browser.destroyTarget(browser.attached.at(-1))
+      for (let i = 0; i < 50 && host.connectedView(id); i++) await new Promise(resolve => setTimeout(resolve, 20))
+      assert.equal(host.connectedView(id), false)
+    } finally {
+      host.dispose()
+      await browser.kill()
+      rmSync(folder, { recursive: true, force: true })
+    }
+  })
+}
