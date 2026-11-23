@@ -12,6 +12,8 @@ import { DesktopBridgeViewHost } from '../lib/browser-electron/desktop-bridge-ho
 import { SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
 import { ExtensionBrowserViewHost } from '../lib/browser-electron/extension-browser.js'
 import { PreferredBrowserViewHost } from '../lib/browser-electron/preferred-browser.js'
+import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
+import { carrierTakeoverTarget, hasCarrierTakeover } from '../lib/browser/takeover-target.js'
 import { nativeRegistration } from '../lib/browser-electron/extension-setup.js'
 
 class Sidebar {
@@ -87,7 +89,7 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
   })
   apply(ctx, {})
   return {
-    get current() { return current }, get panelFactory() { return panelFactory }, registered, dispose,
+    get current() { return current }, get panelFactory() { return panelFactory }, browser: ctx.browser, registered, dispose,
     failNextRegistration() { failRegistration = true },
     async status() {
       let body
@@ -172,6 +174,16 @@ test('the installed runtime route reads the selected system carrier connection a
   assert.equal((await h.status()).controlledProfile, 'plugin')
   assert.ok(h.current instanceof PreferredBrowserViewHost)
   assert.equal((await h.panelFactory()).host, h.current, 'Web panel operations use the selected extension, not iframe/desktop discovery')
+})
+
+test('the default plugin-profile Installed Chrome offers its own tab for takeover and still allows the sidebar', async t => {
+  const target = { session: testScope('owner'), owner: 'owner', tabId: 'carrier-tab', pageId: 'carrier-tab', url: 'https://carrier.test/' }
+  t.mock.method(ElectronBrowserProvider.prototype, 'takeoverTargets', () => [target])
+  t.mock.method(SystemBrowserViewHost.prototype, 'connectedView', id => id === 'carrier-tab')
+  const h = harness(t, 'chrome')
+  assert.ok(h.current instanceof SystemBrowserViewHost)
+  assert.equal(carrierTakeoverTarget(h.browser, 'owner')?.tabId, 'carrier-tab')
+  assert.equal(hasCarrierTakeover(h.browser), false)
 })
 
 test('extension status reports a connected personal profile or the managed CDP fallback', async t => {

@@ -125,6 +125,18 @@ test('a selected but empty or disconnected extension never adopts an older sideb
   remove(); takeovers.dispose()
 })
 
+test('a launched plugin-profile carrier hands over its own tab first and falls back to the sidebar without one', async () => {
+  const browser = {}, takeovers = new BrowserTakeovers(), session = testScope('owner')
+  let targets = [{ session, owner: 'owner', tabId: 'carrier-tab', pageId: 'carrier-tab', url: 'https://carrier.test/', connected: () => true }]
+  const remove = registerCarrierTakeover(browser, () => targets, { exclusive: false })
+  takeovers.attachBrowser(browser)
+  takeovers.exchange({ operation: 'register', owner: 'owner', tabId: 'sidebar', pageId: 'sidebar', url: 'https://sidebar.test/', active: true })
+  assert.equal((await takeovers.adopt('owner', new AbortController().signal)).pageId, 'carrier-tab')
+  targets = []
+  assert.equal((await takeovers.adopt('owner', new AbortController().signal)).pageId, 'sidebar')
+  remove(); takeovers.dispose()
+})
+
 test('dispose waits for detach and an in-flight create; it never closes tabs or the browser', async () => {
   let release
   const paused = new Promise(resolve => { release = resolve })
