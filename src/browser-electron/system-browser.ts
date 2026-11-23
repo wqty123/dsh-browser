@@ -429,7 +429,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    */
   private client: CdpClient | undefined
   /** Whether the running browser was launched headless, so its pages get a plain Chrome user agent. */
-  private launchedHeadless = false
   /** The browser's user agent without the `HeadlessChrome` token, read once per connection. */
   private plainUserAgent: Promise<string | undefined> | undefined
   /**
@@ -755,7 +754,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // normally through `Target.createTarget`.
       '--no-startup-window',
     ]
-    this.launchedHeadless = launch.headless
     if (launch.headless) {
       process.stderr.write(`[dsh-browser] launching headless (${launch.why}); `
         + 'the browser has no window but every tool works the same\n')
@@ -1400,17 +1398,17 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /**
-   * Give a page this plugin created in a headless browser the same user agent the browser has
-   * with a window. Headless Chrome announces itself as `HeadlessChrome/<version>`, which sites
+   * Give a page this plugin created in a headless browser (launched or adopted) the same user agent
+   * the browser has with a window. Headless Chrome announces itself as `HeadlessChrome/<version>`, which sites
    * refuse outright; it is the same engine and version, so the windowed string is the truthful one.
    * A person's own tab ({@link adoptPage}) and a windowed browser are left exactly as they are.
    * @param client - the connected browser.
    * @param sessionId - the page's CDP session.
    */
   private async presentAsChrome(client: CdpClient, sessionId: string): Promise<void> {
-    if (!this.launchedHeadless) return
     this.plainUserAgent ??= (client.send('Browser.getVersion', {}) as Promise<{ userAgent?: string }>)
-      .then(info => typeof info?.userAgent === 'string' ? info.userAgent.replace(/HeadlessChrome\//u, 'Chrome/') : undefined, () => undefined)
+      .then(info => typeof info?.userAgent === 'string' && info.userAgent.includes('HeadlessChrome/')
+        ? info.userAgent.replace(/HeadlessChrome\//u, 'Chrome/') : undefined, () => undefined)
     const userAgent = await this.plainUserAgent
     if (userAgent === undefined) return
     await client.send('Emulation.setUserAgentOverride', { userAgent }, sessionId).catch(() => {})
