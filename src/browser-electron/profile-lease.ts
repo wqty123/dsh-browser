@@ -4,38 +4,34 @@ import { execFileSync } from 'node:child_process'
 import { basename, dirname, join } from 'node:path'
 
 const STALE_GUARD_MS = 10_000
-const START_SLACK_MS = 5_000
-
-/** When the OS says process `pid` started, in epoch ms; undefined when it cannot tell. */
-export function processStartMs(pid: number): number | undefined {
+/**
+ * How the OS identifies process `pid`'s start, as an opaque string; undefined when it cannot tell.
+ * Owner and checker derive it the same way from the same OS record, so clock or DST changes cancel out.
+ */
+export function processIdentity(pid: number): string | undefined {
   try {
     if (process.platform === 'linux') {
       const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-      const ticks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19])
-      const boot = Number(/^btime (\d+)$/mu.exec(readFileSync('/proc/stat', 'utf8'))?.[1])
-      const hz = Number(execFileSync('getconf', ['CLK_TCK'], { encoding: 'utf8', timeout: 2000 }).trim())
-      const at = boot * 1000 + ticks / hz * 1000
-      return Number.isFinite(at) && hz > 0 ? at : undefined
+      return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] || undefined
     }
     const text = process.platform === 'win32'
       ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`],
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()`],
       { encoding: 'utf8', timeout: 10_000, windowsHide: true })
       : execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 })
-    const at = Date.parse(text.trim())
-    return Number.isFinite(at) ? at : undefined
+    return text.trim() || undefined
   } catch {
     return undefined
   }
 }
 
-/** A live PID is still the owner only if it started when the owner did; Windows reuses PIDs quickly. */
-function ownerAlive(pid: number, started: unknown): boolean {
+/** A live PID is still the owner only if the OS gives it the start the owner recorded; Windows reuses PIDs quickly. */
+function ownerAlive(pid: number, identity: unknown): boolean {
   try { process.kill(pid, 0) }
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH' }
-  if (typeof started !== 'number' || !Number.isFinite(started)) return true
-  const actual = processStartMs(pid)
-  return actual === undefined || Math.abs(actual - started) <= START_SLACK_MS
+  if (typeof identity !== 'string' || identity === '') return true
+  const actual = processIdentity(pid)
+  return actual === undefined || actual === identity
 }
 
 export interface ProfileLease {
@@ -109,11 +105,11 @@ export function acquireProfileLease(directory: string): ProfileLease {
     if (previous !== undefined) {
       const owner = previous as { pid?: unknown; token?: unknown } | null
       if (!owner || !Number.isSafeInteger(owner.pid) || Number(owner.pid) <= 0 || typeof owner.token !== 'string') throw busy()
-      if (ownerAlive(Number(owner.pid), (owner as { started?: unknown }).started)) throw busy()
+      if (ownerAlive(Number(owner.pid), (owner as { identity?: unknown }).identity)) throw busy()
       unlinkSync(file)
     }
     const fd = openSync(file, 'wx', 0o600)
-    try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token, started: Math.round(Date.now() - process.uptime() * 1000) })) }
+    try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token, identity: processIdentity(process.pid) })) }
     finally { closeSync(fd) }
   })
   let released = false
