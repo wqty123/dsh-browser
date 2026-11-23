@@ -280,6 +280,7 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
       method: { type: 'string', description: 'HTTP method (default GET).' },
       headers: { type: 'object', additionalProperties: true, description: 'Request headers, as string values.' },
       body: { type: 'string', description: 'Request body (e.g. JSON.stringify(payload)).' },
+      maxChars: { type: 'number', description: 'Maximum characters of the body shown (default 50000); the returned value always holds the whole body.' },
     },
     output: {
       schema: {
@@ -292,9 +293,11 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
           body: { type: 'string', required: true },
         },
       },
-      render: (_args, value) => {
+      render: (args, value) => {
         const body = String(value.body)
-        return [{ type: 'text', text: `${String(value.status)} ${String(value.url)} (${String(value.bytes)} bytes)\n${body.length > 2_000 ? `${body.slice(0, 2_000)}…` : body}` }]
+        const limit = args.maxChars ?? 50_000
+        const shown = body.length > limit ? `${body.slice(0, limit)}\n(body truncated at ${limit} of ${body.length} characters — raise maxChars)` : body
+        return [{ type: 'text', text: `${String(value.status)} ${String(value.url)} (${String(value.bytes)} bytes)\n${shown}` }]
       },
     },
     timeoutMs,
