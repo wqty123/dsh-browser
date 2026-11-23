@@ -195,6 +195,77 @@ test('a cell cancelled mid-execution returns everything already printed', async 
   assert.doesNotMatch(result.output, /never/)
 })
 
+test('read-only calls overlap at most 10 at a time, and actions wait for them and hold back later reads', async () => {
+  let active = 0
+  let peak = 0
+  const order = []
+  const { run } = mount({
+    content: async () => { active++; peak = Math.max(peak, active); await new Promise(r => setTimeout(r, 20)); active--; order.push('read'); return { content: 'x', truncated: false } },
+    click: async () => { order.push(`click@${active}`); await new Promise(r => setTimeout(r, 20)); order.push('clicked'); return { clicked: true } },
+  })
+  const value = await run(`
+    await tools.dsh_browser_open({ url: 'https://example.test/', surface: 'builtin' })
+    const reads = Array.from({ length: 15 }, () => tools.dsh_browser_content({ format: 'markdown' }))
+    const click = tools.dsh_browser_click({ target: { by: 'css', value: '#go' } })
+    const after = tools.dsh_browser_content({ format: 'markdown' })
+    await Promise.all([...reads, click, after])
+  `)
+  assert.equal(value.ok, true, value.output)
+  assert.equal(peak, 10)
+  assert.deepEqual(order.slice(15), ['click@0', 'clicked', 'read'])
+  assert.equal(value.calls, 18)
+  assert.ok(value.trace.every(entry => entry.status === 'ok'))
+})
+
+test('a failing helper throws ToolCallError with the tool name and error code', async () => {
+  const { run } = mount({ click: async () => { throw Object.assign(new Error('element not found'), { code: 'BROWSER_TARGET_NOT_FOUND' }) } })
+  await run(`await call('open', { url: 'https://example.test/', surface: 'builtin' })`)
+  const caught = await run(`let seen
+try { await click('#missing') } catch (e) { seen = [e instanceof ToolCallError, e.toolName, e.code].join(' ') }
+seen`)
+  assert.equal(caught.output, 'true dsh_browser_click BROWSER_TARGET_NOT_FOUND')
+  const thrown = await run(`await tools.dsh_browser_click({ target: { by: 'css', value: '#missing' } })`)
+  assert.equal(thrown.ok, false)
+  assert.match(thrown.output, /Error: ToolCallError \(dsh_browser_click\): .*element not found/)
+  assert.deepEqual(thrown.trace.map(entry => [entry.tool, entry.status]), [['dsh_browser_click', 'error']])
+})
+
+test('a cell past its deadline keeps its output and reports the calls it completed', async () => {
+  const { tools } = mount()
+  const value = await tools.get('dsh_browser_code').execute({
+    code: `await call('open', { url: 'https://example.test/', surface: 'builtin' }); print('opened'); await click('Go'); await sleep(5000)`,
+    timeoutMs: 1000,
+  }, { agent: { id: 'deadline-trace-owner' } })
+  assert.equal(value.ok, false)
+  assert.match(value.output, /opened\nError: cell exceeded its 1000ms deadline/)
+  assert.match(value.output, /Calls this cell made: open ok, click ok\.$/)
+  assert.deepEqual(value.trace.map(entry => [entry.tool, entry.status]), [['dsh_browser_open', 'ok'], ['dsh_browser_click', 'ok']])
+})
+
+test('a cancelled cell waits for its in-flight action and survives DSH replacing the aborted content', async () => {
+  let clickDone = false
+  const { tools } = mount({ click: async () => { await new Promise(r => setTimeout(r, 300)); clickDone = true; return { clicked: true } } })
+  const code = tools.get('dsh_browser_code')
+  const execBase = { agent: { id: 'cancel-trace-owner' } }
+  assert.equal((await code.execute({ code: `await call('open', { url: 'https://example.test/', surface: 'builtin' })` }, execBase)).ok, true)
+  const controller = new AbortController()
+  const exec = { ...execBase, callId: 'call-cancelled', signal: controller.signal }
+  const running = code.execute({ code: `print('before-click'); await click('Go'); print('never')` }, exec)
+  await new Promise(done => setTimeout(done, 120))
+  controller.abort()
+  const result = await running
+  assert.equal(clickDone, true, 'the cell returned only after its action settled')
+  assert.deepEqual(result.trace.map(entry => [entry.tool, entry.status]), [['dsh_browser_click', 'ok']])
+  assert.doesNotMatch(result.output, /never/)
+  // DSH turns a cancelled call's content into "tool call aborted"; the finalizer restores the cell's own.
+  const aborted = { isError: true, content: [{ type: 'text', text: 'Error: tool call aborted' }] }
+  const content = code.finalizeContent(exec, aborted)
+  assert.match(content[0].text, /before-click\nError: cell cancelled; the REPL was restarted/)
+  assert.match(content[0].text, /Calls this cell made: click ok\./)
+  assert.equal(code.finalizeContent(exec, aborted), undefined)
+  assert.equal(code.finalizeContent({ callId: 'call-finished' }, aborted), undefined)
+})
+
 test('concurrent cells for the same task run serially without hanging', async () => {
   const { tools } = mount()
   const code = tools.get('dsh_browser_code')
