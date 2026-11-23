@@ -38,7 +38,7 @@ const [content, match] = await Promise.all([
 print({ content, match })
 ```
 
-`tools.dsh_browser_<name>(args)` 返回该工具的 JSON 结果，失败抛出带工具名的 `ToolCallError`。也可用 `await help()` 查看 `goto_url`、`js`、`scroll(dy)` / `scroll(x, y, dy)` 等快捷函数。同一权限、接管阻断和会话约束适用；代码工具不会替你取得 Web guest 的 CDP 能力。
+`tools.dsh_browser_<name>(args)` 返回该工具的 JSON 结果。它和 `click`、`goto_url` 等快捷函数失败时都抛出 `ToolCallError`，带 `toolName` 与错误代码 `code`。互不依赖的只读调用最多 10 个并行；改变页面状态的调用按发出顺序逐个执行，之后的调用等它完成。单元超时或被取消时，已打印的输出照常返回，并附上本单元已发出的调用及其结果（`ok`、`error` 或 `interrupted`）；被中断的动作可能已经生效，重试前先核对页面。也可用 `await help()` 查看 `goto_url`、`js`、`scroll(dy)` / `scroll(x, y, dy)` 等快捷函数。同一权限、接管阻断和会话约束适用；代码工具不会替你取得 Web guest 的 CDP 能力。
 
 ## 请求人工接管
 

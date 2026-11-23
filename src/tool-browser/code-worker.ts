@@ -8,7 +8,7 @@
 import { Script, createContext, runInContext } from 'node:vm'
 import { inspect } from 'node:util'
 
-type Reply = { readonly type: 'reply'; readonly id: number; readonly value?: unknown; readonly text?: string; readonly error?: string }
+type Reply = { readonly type: 'reply'; readonly id: number; readonly value?: unknown; readonly text?: string; readonly error?: string; readonly code?: string }
 type Run = { readonly type: 'run'; readonly code: string }
 
 const send = (message: unknown): void => { process.send?.(message) }
@@ -23,29 +23,32 @@ function format(value: unknown): string {
 }
 const log = (...values: unknown[]): void => { send({ type: 'log', text: values.map(format).join(' ') }) }
 
+/** A failed browser tool call (a helper or `tools.*`), named after the tool, like DSH run_code's ToolCallError. */
+class ToolCallError extends Error {
+  readonly toolName: string
+  readonly code: string | undefined
+  constructor(toolName: string, message: string, code?: string) {
+    super(message)
+    this.name = 'ToolCallError'
+    this.toolName = toolName
+    this.code = code
+  }
+}
+
 async function ask(name: string, args: Record<string, unknown> = {}): Promise<Reply> {
   const id = ++seq
   const reply = await new Promise<Reply>(resolve => { pending.set(id, { resolve }); send({ type: 'call', id, name, args }) })
-  if (reply.error !== undefined) throw new Error(reply.error)
+  if (reply.error !== undefined) {
+    if (name.startsWith('__')) throw new Error(reply.error)
+    throw new ToolCallError(name.startsWith('dsh_browser_') ? name : `dsh_browser_${name}`, reply.error, reply.code)
+  }
   return reply
 }
 const value = async (name: string, args?: Record<string, unknown>): Promise<unknown> => (await ask(name, args)).value
 
-/** A failed `tools.*` call, named after the tool, like DSH run_code's ToolCallError. */
-class ToolCallError extends Error {
-  readonly toolName: string
-  constructor(toolName: string, message: string) {
-    super(message)
-    this.name = 'ToolCallError'
-    this.toolName = toolName
-  }
-}
-
 /** DSH run_code-style bindings: `await tools.dsh_browser_snapshot({})` resolves to the tool's JSON value. */
 const tools: Record<string, (args?: Record<string, unknown>) => Promise<unknown>> = new Proxy(Object.create(null), {
-  get: (_target, name) => typeof name !== 'string' || name === 'then' ? undefined : async (args: Record<string, unknown> = {}) => {
-    try { return (await ask(name, args)).value } catch (error) { throw new ToolCallError(name, error instanceof Error ? error.message : String(error)) }
-  },
+  get: (_target, name) => typeof name !== 'string' || name === 'then' ? undefined : (args: Record<string, unknown> = {}) => value(name, args),
 })
 const text = async (name: string, args?: Record<string, unknown>): Promise<string> => (await ask(name, args)).text ?? ''
 
@@ -614,6 +617,13 @@ async function js(script: string): Promise<unknown> {
   return out.value === undefined ? undefined : JSON.parse(out.value)
 }
 
+/** How a cell's uncaught error reads in the output: a tool failure names its tool. */
+function describe(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  if (error instanceof ToolCallError) return `ToolCallError (${error.toolName}): ${error.message}`
+  return `${error.name === 'Error' ? '' : `${error.name}: `}${error.message}`
+}
+
 const context = createContext({ ...helpers, open: helpers.goto_url, press: helpers.press_key, tools, ToolCallError })
 
 process.on('message', (message: Reply | Run) => {
@@ -630,7 +640,7 @@ process.on('message', (message: Reply | Run) => {
         if (result !== undefined) log(result)
         send({ type: 'done', ok: true })
       } catch (error) {
-        send({ type: 'done', ok: false, error: error instanceof Error ? `${error.name === 'Error' ? '' : `${error.name}: `}${error.message}` : String(error) })
+        send({ type: 'done', ok: false, error: describe(error) })
       }
     })()
   }

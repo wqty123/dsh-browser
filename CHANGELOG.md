@@ -4,6 +4,8 @@
 
 ## 未发布 — 适配 DSH 0.2.3-alpha.2
 
+- **`dsh_browser_code` 超时或取消后保留已打印输出与已完成调用。** 之前 DSH 会把被取消调用的返回内容替换成 `tool call aborted`，已打印的输出因此丢失；现在由 `finalizeContent` 写回本单元的输出。单元停止时会先等仍在执行的调用结束（最多 5 秒），输出末尾和结构化结果的 `trace` 中列出每个调用的结果（`ok`、`error`、`interrupted`），避免与下一单元重叠，也便于判断哪些动作已经发生。
+- **快捷函数失败也抛出 `ToolCallError`。** `click`、`goto_url` 等与 `tools.*` 一样带 `toolName` 和 `code`。
 - **CI 同时验证 DSH 0.2.2-rc.3 与 0.2.3-alpha.2。** 两条线分别使用各自的 Cordis / Schemastery 版本组装工作区。
 - **工具错误带稳定代码。** `dsh_browser_*` 失败时抛出 `HarnessError`（`@deepseek-ai/dsh-error`），DSH 在 `tool/result` 与 PTC 程序中都能读到 `{ name, code }`：人工接管等待为 `BROWSER_TAKEOVER_PENDING`，未知工具组为 `BROWSER_UNKNOWN_TOOL_GROUP`，已有代码（如 `BROWSER_BRIDGE_VERSION_MISMATCH`）保留，其余为 `BROWSER_TOOL_FAILED`；消息文本不变。
 - **载体设置只读当前 `DSH_HOME`。** 删除了写死的 `D:/dsh-home` 回退路径。
