@@ -1,0 +1,35 @@
+{
+  "host": "electron-rs",
+  "identifiers": [
+    "dsh-tauri"
+  ],
+  "version": "tauri",
+  "revision": 1,
+  "targets": [
+    {
+      "id": "browser",
+      "release": "0.33.0",
+      "file": "runtime/browser.cjs",
+      "sha256": "f037c5fad7e438a983bd6a81340a29b3f0b6d6e40327a13de9edfdd75ba4e179",
+      "marker": "/* dsh-host-patch: tauri sidebar session r1 */",
+      "edits": [
+        {
+          "before": "let t=require(\"electron\"),n=require(\"node:crypto\");",
+          "after": "let t=require(\"electron\"),n=require(\"node:crypto\");/* dsh-host-patch: tauri sidebar session r1 */const dshSidebarSession=(({ app, createHash, fs, path }) => {\n  const FILE = 'dsh-sidebar-session-cookies.json'\n  const states = new Map()\n  const keyOf = cookie => JSON.stringify([cookie.name, cookie.domain ?? '', cookie.path ?? '/'])\n  const urlOf = cookie => {\n    const host = (cookie.domain ?? '').replace(/^\\./, '')\n    return `http${cookie.secure ? 's' : ''}://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}${cookie.path ?? '/'}`\n  }\n  const record = cookie => ({\n    url: urlOf(cookie), name: cookie.name, value: cookie.value,\n    ...cookie.hostOnly ? {} : { domain: cookie.domain },\n    path: cookie.path ?? '/', secure: cookie.secure === true, httpOnly: cookie.httpOnly === true,\n    ...typeof cookie.sameSite === 'string' ? { sameSite: cookie.sameSite } : {},\n  })\n  const valid = value => value !== null && typeof value === 'object' && typeof value.url === 'string'\n    && typeof value.name === 'string' && typeof value.value === 'string' && value.expirationDate === undefined\n  const write = state => {\n    clearTimeout(state.timer)\n    state.timer = undefined\n    const temporary = `${state.file}.${process.pid}.tmp`\n    try {\n      fs.writeFileSync(temporary, JSON.stringify([...state.cookies.values()]), { mode: 0o600 })\n      fs.renameSync(temporary, state.file)\n    } catch (error) {\n      try { fs.rmSync(temporary, { force: true }) } catch {}\n      console.error('dsh sidebar session cookie checkpoint failed', error)\n    }\n  }\n  const flushAll = () => { for (const state of states.values()) if (state.timer !== undefined) write(state) }\n  app.on('will-quit', flushAll)\n  process.on('exit', flushAll)\n  const storage = target => target.storagePath ?? target.getStoragePath?.() ?? undefined\n  return {\n    partition(owner) {\n      const base = storage(owner.contents.session) ?? app.getPath('userData')\n      return 'persist:dsh-sidebar-browser-' + createHash('sha256').update(base).digest('hex').slice(0, 32)\n    },\n    attach(target) {\n      const existing = states.get(target)\n      if (existing !== undefined) return existing.ready\n      const directory = storage(target)\n      if (directory === undefined) throw new Error('browser guest: persistent sidebar storage is unavailable')\n      const state = { file: path.join(directory, FILE), cookies: new Map(), timer: undefined, ready: Promise.resolve() }\n      states.set(target, state)\n      let saved = []\n      try { saved = JSON.parse(fs.readFileSync(state.file, 'utf8')) } catch {}\n      const restored = Array.isArray(saved) ? saved.filter(valid) : []\n      for (const cookie of restored) state.cookies.set(keyOf({ ...cookie, domain: cookie.domain ?? new URL(cookie.url).hostname }), cookie)\n      const schedule = () => {\n        clearTimeout(state.timer)\n        state.timer = setTimeout(() => write(state), 200)\n      }\n      target.cookies.on('changed', (_event, cookie, _cause, removed) => {\n        const key = keyOf(cookie)\n        if (removed || cookie.session !== true) state.cookies.delete(key)\n        else state.cookies.set(key, record(cookie))\n        if (cookie.session !== true) target.cookies.flushStore().catch(() => {})\n        schedule()\n      })\n      state.ready = Promise.all(restored.map(cookie => target.cookies.set(cookie).catch(() => {}))).then(() => undefined)\n      return state.ready\n    },\n  }\n})({app:t.app,createHash:n.createHash,fs:require(\"node:fs\"),path:require(\"node:path\")});"
+        },
+        {
+          "before": "acquire(e,r){if(this.owner(e),",
+          "after": "async acquire(e,r){if(this.owner(e),"
+        },
+        {
+          "before": "let i=this.partitions.get(r);if(!i){i=`electron-browser-`+(0,n.randomUUID)();",
+          "after": "let i=dshSidebarSession.partition(e);if(!this.partitions.has(i)){"
+        },
+        {
+          "before": "this.partitions.set(r,i)}let a=(0,n.randomUUID)();",
+          "after": "this.partitions.set(i,i)}if(await dshSidebarSession.attach(t.session.fromPartition(i)),this.owner(e),e.trustedNavigationPending)throw Error(`browser guest: trusted navigation pending`);let a=(0,n.randomUUID)();"
+        }
+      ]
+    }
+  ]
+}

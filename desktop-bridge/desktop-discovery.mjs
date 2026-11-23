@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-export function registeredInstallLocations(platform = process.platform, query = execFileSync) {
+export function registeredInstallLocations(platform = process.platform, query = execFileSync, displayName = 'DeepSeek Harness') {
   if (platform !== 'win32') return []
   const roots = [
     'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
@@ -12,11 +12,12 @@ export function registeredInstallLocations(platform = process.platform, query = 
   const locations = []
   for (const root of roots) {
     try {
-      const output = query('reg', ['query', root, '/s', '/f', 'DeepSeek Harness', '/t', 'REG_SZ'],
+      const output = query('reg', ['query', root, '/s', '/f', displayName, '/t', 'REG_SZ'],
         { encoding: 'utf8', stdio: 'pipe', timeout: 15_000, windowsHide: true })
       for (const line of output.split(/\r?\n/)) {
         const match = /^\s+InstallLocation\s+REG_SZ\s+(.+?)\s*$/.exec(line)
-        if (match !== null && match[1] !== '') locations.push(match[1])
+        const location = match?.[1]?.replace(/^"(.*)"$/, '$1')
+        if (location !== undefined && location !== '') locations.push(location)
       }
     } catch {}
   }

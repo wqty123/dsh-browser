@@ -4,6 +4,7 @@
 
 ## 未发布 — 适配 DSH 0.2.3-alpha.2
 
+- **DSH Tauri 侧栏登录在重启后保留。** DSH Tauri 不运行 DeepSeek Harness Desktop 的 `lib/main.js`，主进程是 electron-rs，侧栏页面拿到的是内存分区 `electron-browser-<uuid>`，重启后 Cookie 和 localStorage 全部丢失；插件也因此报告「DSH Desktop not found」。现在插件按 `runtime/<平台>/electron-rs.json` 的 `dsh-tauri` 标识识别 DSH Tauri（优先识别承载当前进程的那一个），设置页显示「DSH Tauri 侧栏补丁」，一键把宿主补丁 `dsh-host-patch/tauri.json` 应用到 `runtime/browser.cjs`（按 v0.33.0 原文件的 sha256 匹配，可恢复）：侧栏改用按宿主配置隔离的持久分区，并把 Chromium 退出时丢弃的会话 Cookie 存档、在下次发放侧栏页面前恢复。重启 DSH Tauri 后生效。Electron DSH Desktop rc.3 / rc.5 的补丁与桥接不变。
 - **反爬拦截处理。** 拦截页识别收进一个分类器 `browser/anti-bot.ts`，页面内检测与 Web 代理共用：除 Cloudflare、reCAPTCHA、hCaptcha、Turnstile 外，还识别 PerimeterX「按住」、DataDome、滑块、百度安全验证、403/429 拒绝访问和 IP/网络封锁；只认可见的验证控件，登录页上的隐形 reCAPTCHA 不再被当成拦截。每个结果带 `recovery`（`takeover` 交给人工、`wait` 等待自动放行、`retry` 可重试、`environment` 环境限制）、建议和备用公开来源（站点 API、Bing / DuckDuckGo 搜索结果、Wayback Machine / archive.today 存档）。`dsh_browser_open` 遇到拒绝访问类拦截时暂停（默认 2.5 秒，`DSH_BROWSER_BLOCK_RETRY_MS` 可调）后在新会话中重试一次，人工验证和 IP 封锁从不重试；验证码一律不自动处理。
 - **去掉明显的自动化标记。** 启动参数加 `--disable-blink-features=AutomationControlled`，页面上的 `navigator.webdriver` 不再为 `true`；无头模式下插件自己创建的页面使用同版本的普通 `Chrome/` UA（去掉 `HeadlessChrome`），用户自己的标签页不改。有显示器时 `headless: auto` 仍使用可见窗口。
 - **Browser Use P0：动作后摘要。** `dsh_browser_code` 中每个动作（click、goto_url、type 等）的输出末尾多一行 `→`，说明动作后浏览器所处位置：导航到的 URL、新开或关闭的标签页、当前活动标签页；读取类调用不加。摘要通过 `list_tabs` 读取，它从不启动浏览器。
