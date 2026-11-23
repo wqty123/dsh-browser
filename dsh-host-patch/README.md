@@ -10,6 +10,10 @@ All source patches are losslessly compressed. `sources/series.json` pins each re
 
 Regenerate directly from the pinned DSH Git histories with `DSH_SOURCE_ROOT=<git-checkout> node tools/generate-host-patch-sources.mjs`. Run `node tests/run.mjs tests/host-patch-source-series.test.mjs` to check every complete series using `git apply --cached --check` and compare its final tree to the source-build tree. Compressed test fixtures retain each complete base index plus the original blobs touched by the patches; untouched blobs need not be duplicated to reproduce their exact Git tree identities. These fixtures require no network or external DSH checkout.
 
+## DSH Tauri
+
+DSH Tauri (`dsh-tauri/deepseek-harness-desktop`) runs its own electron-rs main process, not DeepSeek Harness Desktop's `lib/main.js`, so none of the rc.3/rc.5 targets exist there. Its sidebar guests used an in-memory `electron-browser-<uuid>` partition and lost every login at restart. `tauri.json` patches `runtime/<platform>-<arch>/runtime/browser.cjs`, a runtime directory identified by its `electron-rs.json` identifier `dsh-tauri`; each target is selected by the sha256 of the pristine file (v0.33.0), since the runtime carries no version. The patch gives every sidebar guest one `persist:dsh-sidebar-browser-<hash>` partition per DSH home (`DSH_HOME`, else Electron's user-data directory), as rc.5 does, and checkpoints the unpartitioned session cookies Chromium drops at exit (`dsh-sidebar-session-cookies.json` in that partition), restoring them before the next guest is leased. The embedded code is `tauri/sidebar-session.cjs`; regenerate the spec with `node tools/generate-tauri-host-patch.mjs` (a test fails when it is stale). Apply and restore it from the plugin settings while DSH Tauri runs, then restart DSH Tauri; a Tauri update replaces the runtime and needs the patch again.
+
 ## Standalone CLI (including Web)
 
 Run the dependency-free applier using a package's real directory, not the profile directory:

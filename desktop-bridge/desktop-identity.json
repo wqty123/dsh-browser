@@ -25,5 +25,13 @@
       "cliLauncher": "runtime/cli/bin/dsh.cmd"
     }
   ],
+  "tauri": {
+    "identifiers": ["dsh-tauri"],
+    "metadata": "electron-rs.json",
+    "runtimeRoots": ["runtime", "Contents/Resources/runtime"],
+    "installNames": ["DSH Tauri", "DSH Tauri.app"],
+    "registryName": "DSH Tauri"
+  },
+  "_tauriNote": "DSH Tauri (dsh-tauri/deepseek-harness-desktop) runs its own electron-rs main process instead of lib/main.js. Its runtime directory (runtime/<platform>-<arch>) holds electron-rs.json, whose identifier is the proof; the sidebar host patch targets runtime/browser.cjs there by exact sha256 (dsh-host-patch/tauri.json).",
   "_layoutsNote": "Where an install keeps its resources and executable. The first layout whose marker exists under the install root applies; the last one has no marker and is the default. A macOS .app bundle keeps resources in Contents/Resources; Windows keeps them in resources/ beside the .exe."
 }

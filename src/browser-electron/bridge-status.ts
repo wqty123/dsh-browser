@@ -21,7 +21,8 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
 import { desktopPaths, readDesktopIdentity } from './desktop-identity.ts'
-import { classifyDesktopShell, noDesktopShell, type DesktopShellReport } from './desktop-shell.ts'
+import { classifyDesktopShell, noDesktopShell, tauriShell, type DesktopShellReport } from './desktop-shell.ts'
+import { findTauriRuntime, runningTauriRuntime, tauriHostPatchStatus } from './tauri-host.ts'
 import { MAIN_EXTENSION_UNSUPPORTED, type MainExtensionStatus } from './profile-extension.ts'
 import { BRIDGE_VERSION_MESSAGE } from '../bridge-compatibility.ts'
 import { conventionalInstallRoots, registeredInstallLocations } from '../../desktop-bridge/desktop-discovery.mjs'
@@ -58,9 +59,10 @@ export function findDesktopInstall(
 /**
  * Classify the desktop shell on this machine.
  *
- * Walks the same candidates as {@link findDesktopInstall}; a verified official install wins, else the
- * first recognised DSH-named shell (third-party or unsupported) is reported, so the settings page can
- * say what it found instead of "no install" — and never offer to patch it.
+ * The DSH Tauri hosting this process wins; then a verified official install found by the same walk as
+ * {@link findDesktopInstall}; then an installed DSH Tauri; else the first recognised DSH-named shell
+ * (third-party or unsupported) is reported, so the settings page can say what it found instead of
+ * "no install" — and never offer to patch it.
  * @param options - discovery overrides and the browser to recommend when the sidebar is unavailable.
  * @returns the structured report.
  */
@@ -70,13 +72,19 @@ export function detectDesktopShell(options: {
   readonly conventions?: () => readonly string[]
   readonly preferredBrowser?: string
   readonly platform?: NodeJS.Platform
+  readonly execPath?: string
+  readonly tauriRegistry?: () => readonly string[]
 } = {}): DesktopShellReport {
+  const running = runningTauriRuntime(options.execPath)
+  if (running !== undefined) return tauriShell(running, tauriHostPatchStatus(running.runtime))
   let recognised: DesktopShellReport | undefined
   for (const candidate of desktopInstallCandidates(options.localAppData, options.registry, options.conventions)) {
     const report = classifyDesktopShell(candidate, readDesktopIdentity(candidate), options)
     if (report.kind === 'official-supported') return report
     if (report.kind !== 'none' && recognised === undefined) recognised = report
   }
+  const tauri = findTauriRuntime({ execPath: options.execPath, localAppData: options.localAppData, registry: options.tauriRegistry ?? options.registry })
+  if (tauri !== undefined) return tauriShell(tauri, tauriHostPatchStatus(tauri.runtime))
   return recognised ?? noDesktopShell(options)
 }
 

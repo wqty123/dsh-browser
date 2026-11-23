@@ -44,6 +44,7 @@ import { GUEST_ROUTE, handleGuest } from './guest-route.ts'
 import { resolveSessionHandle, sessionWireId } from '../browser/handles.ts'
 import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.ts'
 import { detectDesktopShell, findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
+import { runningTauriRuntime } from './tauri-host.ts'
 import { readHostExtensionStatus } from './profile-extension.ts'
 import { readBridgeEndpoint } from './bridge-endpoint.ts'
 import { runBridgeAction } from './bridge-install.ts'
@@ -683,6 +684,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         const hostPatchMaintenance = createHostPatchMaintenance({
           modules: () => servedClientModules(ctx.get('clientModules')),
           desktop: () => process.versions.electron !== undefined,
+          tauri: () => runningTauriRuntime()?.runtime,
         })
         host.effect(() => host.webServer.register({
           kind: 'exact', path: HOST_PATCH_ROUTE,
