@@ -87,6 +87,17 @@ export interface DesktopIdentity {
 export interface IdentityRefusal {
   readonly ok: false
   readonly reason: string
+  /**
+   * Set once the manifest has named a DSH Desktop package: `third-party-shell` for a layout the rule
+   * attributes to another shell, `official-unsupported` for an official package without the patched entry.
+   */
+  readonly shell?: 'third-party-shell' | 'official-unsupported'
+  /** The manifest version, when the refusal came after reading it. */
+  readonly version?: string
+}
+
+function versionOf(manifest: { version?: unknown }): { version?: string } {
+  return typeof manifest.version === 'string' ? { version: manifest.version } : {}
 }
 
 /**
@@ -324,9 +335,9 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
   if (!mainPresent) {
     const foreign = Object.entries(rule.unsupportedMainEntries ?? {}).find(([entry]) => hasEntry(entry))
     if (foreign !== undefined) {
-      return { ok: false, reason: `${foreign[0]} instead of ${rule.mainEntry}: ${foreign[1]}; use DSH Web or DeepSeek Harness Desktop` }
+      return { ok: false, shell: 'third-party-shell', ...versionOf(manifest), reason: `${foreign[0]} instead of ${rule.mainEntry}: ${foreign[1]}; use DSH Web or DeepSeek Harness Desktop` }
     }
-    return { ok: false, reason: `${rule.mainEntry} is not present under ${archivePresent ? archive : appDir}` }
+    return { ok: false, shell: 'official-unsupported', ...versionOf(manifest), reason: `${rule.mainEntry} is not present under ${archivePresent ? archive : appDir}` }
   }
 
   return {

@@ -43,7 +43,7 @@ import { getLastOpen } from './open-slot.ts'
 import { GUEST_ROUTE, handleGuest } from './guest-route.ts'
 import { resolveSessionHandle, sessionWireId } from '../browser/handles.ts'
 import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.ts'
-import { findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
+import { detectDesktopShell, findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
 import { readHostExtensionStatus } from './profile-extension.ts'
 import { readBridgeEndpoint } from './bridge-endpoint.ts'
 import { runBridgeAction } from './bridge-install.ts'
@@ -639,8 +639,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }
     const root = findDesktopInstall()
     if (root === undefined) {
-      // Nothing to patch: say so instead of running an installer against a guess.
-      replyJson(response, 409, { ok: false, error: 'no DSH Desktop install was found on this machine' })
+      // Nothing to patch: say so instead of running an installer against a guess. A third-party
+      // shell is named as such so the refusal is not mistaken for a missing install.
+      const shell = detectDesktopShell({ preferredBrowser: settings.get().browser.channel })
+      replyJson(response, 409, { ok: false, error: shell.kind === 'none' ? 'no DSH Desktop install was found on this machine' : `not patchable: ${shell.reason}`, shell })
       return
     }
     if (bridgeActionRunning) {
@@ -696,7 +698,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           commit: async id => { await commitAutomaticMaintenance(id) },
           start: async (action, options) => {
             const root = findDesktopInstall()
-            if (root === undefined) throw new Error('no verified DSH Desktop installation was found')
+            if (root === undefined) throw new Error(`no verified DSH Desktop installation was found: ${detectDesktopShell().reason}`)
             return await runWithManualBridgePreference('install', patch => settings.update(patch),
               async () => await startAutomaticMaintenance(action, root, options))
           },
@@ -709,7 +711,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           kind: 'exact',
           path: BRIDGE_STATUS_ROUTE,
           handler: authenticated(ctx, async (request, response) => handleBridgeStatus(request, response, undefined,
-            await readHostExtensionStatus(dshHome()))),
+            await readHostExtensionStatus(dshHome()), undefined, undefined, settings.get().browser.channel)),
         }, 'dsh-builtin-browser: bridge status'))
         // The panel prepares a launcher without changing the running Desktop. Direct local
         // maintenance remains available once Desktop has exited.
@@ -766,6 +768,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           hasBinary: hasElectronRuntime,
           provision: provisionSnapshot,
           bridgeError: () => DesktopBridgeViewHost.compatibilityError(),
+          shell: () => detectDesktopShell({ preferredBrowser: settings.get().browser.channel }),
           bridge: () => {
             const root = findDesktopInstall()
             return root === undefined ? undefined : readBridgeStatus(root, mainExtension)
