@@ -18,7 +18,7 @@ export interface ServedClientModules {
 }
 
 interface PatchState extends HostPatchResult {
-  readonly surface: 'web' | 'desktop'
+  readonly surface: 'web' | 'desktop' | 'tauri'
   readonly canInstall: boolean
   readonly canRestore: boolean
   readonly restartRequired: boolean
@@ -49,6 +49,8 @@ export function servedSidebarPackage(modules: ServedClientModules | undefined): 
 export function createHostPatchMaintenance(deps: {
   readonly modules: () => ServedClientModules | undefined
   readonly desktop: () => boolean
+  /** The electron-rs runtime directory of the DSH Tauri hosting this process, if any. */
+  readonly tauri?: () => string | undefined
 }): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
   let running = false
   return async (request, response) => {
@@ -56,13 +58,16 @@ export function createHostPatchMaintenance(deps: {
     if (!sameOrigin(request, request.method === 'POST') || !isDirectLoopback(request)) {
       replyJson(response, 403, { ok: false, error: 'same-origin-local-request-required' }); return
     }
-    if (deps.desktop()) {
+    const tauri = deps.tauri?.()
+    if (tauri === undefined && deps.desktop()) {
       replyJson(response, request.method === 'GET' ? 200 : 409, { ok: request.method === 'GET', hostPatch: { surface: 'desktop', status: 'absent', canInstall: false, canRestore: false,
         restartRequired: false, reason: 'Use Desktop bridge maintenance to change host files after Desktop exits.' } }); return
     }
     let directory: string
     const modules = deps.modules()
-    try { directory = servedSidebarPackage(modules) }
+    const surface = tauri === undefined ? 'web' : 'tauri'
+    const target = tauri === undefined ? 'lib/client.js' : 'runtime/browser.cjs'
+    try { directory = tauri ?? servedSidebarPackage(modules) }
     catch (error) {
       replyJson(response, request.method === 'GET' ? 200 : 409, { ok: request.method === 'GET', hostPatch: {
         surface: 'web', status: 'anchors mismatch', canInstall: false, canRestore: false, restartRequired: false, reason: String(error),
@@ -74,14 +79,14 @@ export function createHostPatchMaintenance(deps: {
       let writable = true
       let reason = result.reason
       try {
-        for (const path of [join(directory, 'lib'), join(directory, 'lib/client.js')]) {
+        for (const path of [dirname(join(directory, target)), join(directory, target)]) {
           if ((statSync(path).mode & 0o222) === 0) throw new Error('read-only permissions')
           accessSync(path, constants.W_OK)
         }
-      } catch (error) { writable = false; reason = 'The served sidebar package is not writable: ' + String(error) }
-      return { ...result, ...(reason === undefined ? {} : { reason }), surface: 'web',
+      } catch (error) { writable = false; reason = `The ${surface === 'web' ? 'served sidebar package' : 'DSH Tauri runtime'} is not writable: ` + String(error) }
+      return { ...result, ...(reason === undefined ? {} : { reason }), surface,
         canInstall: writable && result.status === 'absent',
-        canRestore: writable && result.status === 'applied' && existsSync(join(directory, 'lib/client.js.before-dsh-host-patch')),
+        canRestore: writable && result.status === 'applied' && existsSync(join(directory, `${target}.before-dsh-host-patch`)),
         restartRequired: false }
     }
     if (request.method === 'GET') { replyJson(response, 200, { ok: true, hostPatch: read() }); return }
@@ -102,7 +107,7 @@ export function createHostPatchMaintenance(deps: {
       const ok = result.status === (action === 'install' ? 'applied' : 'absent')
       let restartRequired = ok && result.changed === true
       let reason = result.reason
-      if (restartRequired && typeof modules?.rebuilt === 'function') {
+      if (restartRequired && surface === 'web' && typeof modules?.rebuilt === 'function') {
         try { modules.rebuilt(sidebar); restartRequired = false }
         catch (error) { reason = 'Files changed, but DSH could not refresh its bundle cache: ' + String(error) }
       }
