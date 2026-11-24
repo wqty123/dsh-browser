@@ -87,10 +87,10 @@ export const TOOL_GROUPS: Readonly<Record<string, readonly string[]>> = {
  * description, runtime CHALLENGE banners, and SKILL.md so unrelated conversations do not pay for
  * a long global manual or inherit cross-plugin behavior rules.
  */
-const CORE_PROMPT = 'Use dsh_browser_* tools to drive the built-in browser (per-task isolated sessions). For multi-step or multi-page work, batch calls in dsh_browser_code (or run_code when PTC is active) and load extra groups on demand with dsh_browser_load_tools; follow any CHALLENGE banner recovery advice.'
+const CORE_PROMPT = 'Use dsh_browser_* tools to drive the built-in browser (per-task isolated sessions). Batch fixed steps with dsh_browser_do, or loops/branching/parallel reads with dsh_browser_code (or run_code under PTC); load extra groups via dsh_browser_load_tools and follow any CHALLENGE banner.'
 
 /** Minimal static routing hint for the `tools` surface. */
-const TOOLS_PROMPT = 'Use dsh_browser_* tools to drive the built-in browser (per-task isolated sessions). Prefer dsh_browser_a11y or dsh_browser_snapshot to locate targets, dsh_browser_do for multi-step runs, and follow any CHALLENGE banner recovery advice.'
+const TOOLS_PROMPT = 'Use dsh_browser_* tools to drive the built-in browser (per-task isolated sessions). Prefer dsh_browser_a11y or dsh_browser_snapshot to locate targets, dsh_browser_fill for forms, dsh_browser_scrape for lists, dsh_browser_do for multi-step runs, and dsh_browser_assert or dsh_browser_console/network to verify; follow any CHALLENGE banner.'
 
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
