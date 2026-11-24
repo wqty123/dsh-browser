@@ -104,7 +104,7 @@ const defaultLauncher: BrowserLauncher = (path, args) =>
   spawn(path, [...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: false })
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
+import type { CommandOptions, ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
 import type { CarrierPage } from '../browser/types.ts'
 import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserSessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 
@@ -1043,18 +1043,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /**
-   * Every page the browser currently holds, including ones this plugin did not create.
-   *
-   * Chrome and Edge own their own page creation. A click on a link that opens a new page — or any
-   * `window.open` — produces a page the provider never asked for, and nothing reports it back.
-   * Those pages are real: they hold memory and stay until something closes them. Measured on a real
-   * window: four pages present while `dsh_browser_list_tabs` reported one.
-   *
-   * Discovery is enabled before the connection is published, so
-   * `Target.getTargets` also lists pages that existed before this client connected.
-   * @returns the browser's pages, or an empty list when it cannot answer.
-   */
-  /**
    * Every page the browser holds that THIS HOST did not open.
    *
    * Chrome and Edge own their own page creation. A click on a link that opens a new page — or any
@@ -1081,9 +1069,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // check the reference-bar pump called listPages on every tick, whose
     // ensureClient() launched Edge on its own within seconds of the plugin
     // loading — measured with no open/navigate call at all.
-    if (options.requireRunning === true && !this.started) return []
+    const liveClient = this.client
+    if (options.requireRunning === true && (this.disposed || liveClient === undefined || !liveClient.isAlive())) return []
     try {
-      const client = await this.ensureClient()
+      const client = options.requireRunning === true && liveClient !== undefined ? liveClient : await this.ensureClient()
       const listed = await client.send('Target.getTargets', {}) as {
         targetInfos?: Array<{ targetId?: string; type?: string; url?: string; title?: string }>
       }
@@ -1132,43 +1121,49 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // This is the real browser, not Electron: CDP's JPEG encoder works here, so the
       // provider may pass format and quality through instead of falling back to PNG.
       supportsCdpJpeg: true,
-      sendCommand: async (method: string, params?: Record<string, unknown>) => {
+      sendCommand: async (method: string, params?: Record<string, unknown>, options?: CommandOptions) => {
       if (method === 'Browser.close' || method === 'Target.closeTarget' || method === 'Page.close') {
         throw new Error('dsh-builtin-browser: use explicit tab close; browser-wide and unowned-tab closes are not allowed')
       }
-      // A command that never answered is the only signal that a client has wedged — the
-      // socket can stay OPEN while nothing comes back, which is the form the reporter saw with
-      // a live, healthy-looking Edge. Dropping the client here means the next call starts a new
-      // browser rather than hanging again, and the error names the cause instead of a timeout.
-      const client = await this.ensureClient()
+      // Background probes (reference bar pump, readiness checks) pass initialize: false and
+      // must never relaunch a killed browser or recreate a tab the user closed (issue #105).
+      const initialize = options?.initialize !== false
+      let client: CdpClient
+      if (initialize) {
+        client = await this.ensureClient()
+      } else {
+        const liveClient = this.client
+        if (this.disposed || liveClient === undefined || !liveClient.isAlive()) {
+          throw new Error('dsh-builtin-browser: browser is not running')
+        }
+        client = liveClient
+      }
       const cachedView = this.views.get(viewId)
+      if (cachedView !== undefined && cachedView.client === client) {
+        const cachedTarget = this.sessions.get(cachedView.session)
+        if (cachedTarget !== undefined && client.destroyedTargets.has(cachedTarget)) {
+          this.views.delete(viewId)
+          this.sessions.delete(cachedView.session)
+          if (!initialize) throw new Error('dsh-builtin-browser: target was closed')
+        }
+      }
       // A session belongs to the browser that issued it. Clearing the cache whenever a client is
       // dropped covers the ordinary case, but not this one: another call can be inside
       // ensureSession() holding the OLD client while this one discards it and clears, and that
       // call's `views.set` then lands afterwards — re-adding an entry naming a browser that is
       // gone. The identity check is what refuses it, and it costs a comparison rather than the
       // round trip that validating every cached session against the browser would cost.
-      //
-      // (Not covered by the tests: the race needs two interleaved commands, and the suite's fake
-      // browser is synchronous enough that they never interleave. Verified by mutation instead —
-      // removing this check alone leaves every case green, which is why the comment says what it
-      // protects rather than claiming a case proves it.)
-      const session = cachedView !== undefined && cachedView.client === client
-        ? cachedView.session
+      const liveView = this.views.get(viewId)
+      if (!initialize && (liveView === undefined || liveView.client !== client)) {
+        throw new Error('dsh-builtin-browser: view has no live page')
+      }
+      const session = liveView !== undefined && liveView.client === client
+        ? liveView.session
         : await this.ensureSession(viewId)
       /**
        * Send one page command, rebuilding the attach once if the browser no longer knows the
-       * session.
-       *
-       * "Session with given id not found" means the session id is stale, and the causes differ:
-       * a replaced client (handled where the client is dropped), a target the browser destroyed,
-       * or a detach the page performed on itself. What they share is that the id is worthless and
-       * the VIEW is fine, so the right answer is one fresh attach — not an error to the caller and
-       * not a new page. Measured while solving a sudoku on a canvas page: after a tab switch every
-       * command failed with this text and nothing in the plugin ever recovered it.
-       *
-       * Retried exactly once: a failure that survives a fresh attach is not a stale id, and
-       * repeating it would turn an error into a loop.
+       * session. Never rebuilds a target that was destroyed or closed by the user, and never
+       * initializes a new page when `initialize: false` (issue #105).
        */
       const sendWithAttach = async (target: string): Promise<Record<string, unknown>> => {
         try {
@@ -1180,7 +1175,18 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
           // Drop the dead attach so `ensureSession` builds a new one instead of returning the same id.
           const stale = this.views.get(viewId)
           if (stale !== undefined) this.views.delete(viewId)
+          const deadTarget = this.sessions.get(target)
           this.sessions.delete(target)
+          if (!initialize) throw error
+          if (deadTarget !== undefined) {
+            if (client.destroyedTargets.has(deadTarget)) throw error
+            const alive = await client.send('Target.getTargets', {})
+              .then(listed => Array.isArray((listed as { targetInfos?: unknown }).targetInfos)
+                ? (listed as { targetInfos: Array<{ targetId?: unknown }> }).targetInfos.some(entry => entry.targetId === deadTarget)
+                : true)
+              .catch(() => true)
+            if (!alive) throw error
+          }
           const rebuilt = await this.ensureSession(viewId)
           const retried = await client.send(method, params, rebuilt)
           return (retried ?? {}) as Record<string, unknown>
