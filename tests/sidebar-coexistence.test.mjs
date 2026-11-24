@@ -1,6 +1,7 @@
 // Issue #107: dsh-builtin-browser's client entry must coexist with DSH's built-in
 // @deepseek-ai/dsh-client-ui-sidebar-browser without colliding on locale namespace
-// ("sidebarBrowser"/zh), sidebarRightTabs id/band, keyed slot keys, or "browser.new" shortcut.
+// ("sidebarBrowser"/zh), sidebarRightTabs id/band, keyed slot keys, context menus,
+// or shortcut commands ("browser.new", "browser.address").
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
@@ -8,28 +9,80 @@ import { clientBundle } from './helpers/client-build.mjs'
 
 function loadBuiltClientPlugin() {
   const source = clientBundle()
-  const styles = []
   const storage = new Map()
-  const createStyleNode = () => ({
-    attrs: {},
+  const timers = new Set()
+  const intervals = new Set()
+
+  const createNode = (tag = 'div') => ({
+    tagName: String(tag).toUpperCase(),
+    id: '',
+    className: '',
     textContent: '',
+    innerHTML: '',
+    hidden: false,
+    title: '',
+    value: '',
+    dataset: {},
+    attrs: {},
+    style: {},
+    children: [],
+    firstChild: null,
     setAttribute(name, value) { this.attrs[name] = String(value) },
     getAttribute(name) { return this.attrs[name] ?? null },
+    removeAttribute(name) { delete this.attrs[name] },
+    appendChild(child) {
+      this.children.push(child)
+      this.firstChild = this.children[0] ?? null
+      return child
+    },
+    append(...nodes) { for (const node of nodes) this.appendChild(node) },
+    insertBefore(child, before) {
+      const at = this.children.indexOf(before)
+      if (at === -1) this.children.unshift(child)
+      else this.children.splice(at, 0, child)
+      this.firstChild = this.children[0] ?? null
+      return child
+    },
+    removeChild(child) {
+      const at = this.children.indexOf(child)
+      if (at !== -1) this.children.splice(at, 1)
+      this.firstChild = this.children[0] ?? null
+      return child
+    },
     remove() {},
+    addEventListener() {},
+    removeEventListener() {},
+    querySelector: () => null,
+    querySelectorAll: () => [],
   })
+
+  const head = createNode('head')
+  const body = createNode('body')
+  const documentElement = createNode('html')
+
   const sandbox = {
     console,
     URL,
     AbortController,
     AbortSignal,
     crypto,
-    setTimeout,
-    clearTimeout,
-    setInterval,
-    clearInterval,
+    setTimeout: (fn, ms, ...args) => {
+      const handle = setTimeout(fn, ms, ...args)
+      handle.unref?.()
+      timers.add(handle)
+      return handle
+    },
+    clearTimeout: handle => { timers.delete(handle); clearTimeout(handle) },
+    setInterval: (fn, ms, ...args) => {
+      const handle = setInterval(fn, ms, ...args)
+      handle.unref?.()
+      intervals.add(handle)
+      return handle
+    },
+    clearInterval: handle => { intervals.delete(handle); clearInterval(handle) },
     queueMicrotask,
-    fetch: async () => ({ ok: false }),
-    location: { href: 'http://127.0.0.1:3080/', origin: 'http://127.0.0.1:3080', replace() {} },
+    fetch: async () => ({ ok: false, status: 404, json: async () => ({}) }),
+    location: { href: 'http://127.0.0.1:3080/', origin: 'http://127.0.0.1:3080', search: '', replace() {} },
     sessionStorage: {
       getItem: key => storage.get(key) ?? null,
       setItem: (key, value) => { storage.set(key, String(value)) },
@@ -37,13 +90,12 @@ function loadBuiltClientPlugin() {
     },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     document: {
-      createElement: () => createStyleNode(),
-      head: {
-        appendChild: node => { styles.push(node); return node },
-        append: (...nodes) => { styles.push(...nodes) },
-        querySelector: () => null,
-        querySelectorAll: () => [],
-      },
+      head,
+      body,
+      documentElement,
+      visibilityState: 'visible',
+      createElement: tag => createNode(tag),
+      getElementById: () => null,
       querySelector: () => null,
       querySelectorAll: () => [],
       addEventListener() {},
@@ -61,14 +113,7 @@ function loadBuiltClientPlugin() {
   vm.runInNewContext(source, sandbox, { filename: 'dist/client.cjs' })
   assert.equal(typeof factory, 'function', 'dist/client.cjs registers a ModuleLoader factory')
 
-  const chainable = new Proxy(function stub() { return chainable }, {
-    get(_target, prop) {
-      if (prop === Symbol.toPrimitive) return () => ''
-      if (prop === 'then') return undefined
-      return chainable
-    },
-    apply() { return chainable },
-  })
+  const noopComponent = () => null
   const createSnapshotStore = initial => {
     let value = initial
     const listeners = new Set()
@@ -78,21 +123,73 @@ function loadBuiltClientPlugin() {
       subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener) } },
     }
   }
-  const externals = {
-    '@deepseek-ai/dsh-client-store': { createSnapshotStore, defineStore: spec => spec },
-    zod: { z: chainable },
+  const reactStub = {
+    __esModule: true,
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}],
+    useEffect() {},
+    useLayoutEffect() {},
+    useRef: initial => ({ current: initial }),
+    useCallback: fn => fn,
+    useMemo: fn => fn(),
+    useId: () => 'test-id',
+    useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
+    Fragment: Symbol.for('react.fragment'),
   }
-  const plugin = factory(id => externals[id] ?? chainable)
+  const primitivesStub = {
+    __esModule: true,
+    Button: noopComponent,
+    Input: noopComponent,
+    LinkIconRegular: noopComponent,
+    Menu: noopComponent,
+    Modal: noopComponent,
+    Tooltip: noopComponent,
+    GuideArtworkBrowser: noopComponent,
+    IconChevronDownOutlineRegular: noopComponent,
+    IconChevronLeftOutlineRegular: noopComponent,
+    IconChevronRightOutlineRegular: noopComponent,
+    IconEditOutlineRegular: noopComponent,
+    IconGlobeOutlineRegular: noopComponent,
+    IconLinkOutlineRegular: noopComponent,
+    IconPlusOutlineRegular: noopComponent,
+    IconRefreshOutlineRegular: noopComponent,
+    IconRightUpOutlineRegular: noopComponent,
+    IconTrashOutlineRegular: noopComponent,
+    SHIELD_OUTLINE_PATH: '',
+    ICON_REGULAR_STROKE: 1.5,
+  }
+  const externals = {
+    react: reactStub,
+    'react/jsx-runtime': { jsx: () => null, jsxs: () => null, Fragment: reactStub.Fragment },
+    'react-dom': {},
+    'react-dom/client': { createRoot: () => ({ render() {}, unmount() {} }) },
+    '@deepseek-ai/dsh-client-store': { createSnapshotStore, defineStore: spec => spec },
+    '@deepseek-ai/dsh-client-ui-primitives': primitivesStub,
+  }
+  const plugin = factory(id => {
+    if (id in externals) return externals[id]
+    throw new Error(`Unexpected external in dist/client.cjs: ${id}`)
+  })
   assert.equal(typeof plugin.apply, 'function')
-  return { plugin, createSnapshotStore }
+  return {
+    plugin,
+    createSnapshotStore,
+    cleanupTimers() {
+      for (const handle of timers) clearTimeout(handle)
+      for (const handle of intervals) clearInterval(handle)
+      timers.clear()
+      intervals.clear()
+    },
+  }
 }
 
-/** Strict host stub reproducing DSH's locale, tab-registry, shortcut and keyed-slot collision rules. */
+/** Strict host stub reproducing DSH's locale, tab-registry, shortcut, context-menu and keyed-slot collision rules. */
 function makeStrictHost(createSnapshotStore, { withBuiltInSidebarBrowser = false } = {}) {
   const dicts = new Map()
   const tabsById = new Set()
   const tabsByKind = new Map()
   const shortcuts = new Map()
+  const contextMenus = new Map()
   const keyedSlots = new Map()
   const disposers = []
 
@@ -162,8 +259,25 @@ function makeStrictHost(createSnapshotStore, { withBuiltInSidebarBrowser = false
     },
   }
 
+  const contextMenusService = {
+    register(entry) {
+      if (contextMenus.has(entry.id)) throw new Error(`Duplicate context menu: ${entry.id}`)
+      contextMenus.set(entry.id, entry)
+      return () => { if (contextMenus.get(entry.id) === entry) contextMenus.delete(entry.id) }
+    },
+  }
+
   const slots = {
-    inject(_name, run) { return run() },
+    inject(_name, run) {
+      const result = run()
+      if (typeof result === 'function') return result
+      if (result !== null && result !== undefined && typeof result[Symbol.iterator] === 'function') {
+        const cleanups = []
+        for (const item of result) if (typeof item === 'function') cleanups.push(item)
+        return () => { for (const fn of cleanups.reverse()) fn() }
+      }
+      return () => {}
+    },
     register(spec, component) {
       if (spec.key !== undefined) {
         const slotKey = `${spec.name}::${spec.key}`
@@ -184,6 +298,9 @@ function makeStrictHost(createSnapshotStore, { withBuiltInSidebarBrowser = false
       title: () => 'Browser',
     })
     shortcutsService.register({ id: 'browser.new', defaults: {}, regions: ['page'], modals: [], resolve: () => ({ status: 'pass' }) })
+    shortcutsService.register({ id: 'browser.address', defaults: {}, regions: ['page'], modals: [], resolve: () => ({ status: 'pass' }) })
+    contextMenusService.register({ id: 'sidebar-browser.shortcut', target: 'shortcut', order: 20, resolve: () => [] })
+    contextMenusService.register({ id: 'sidebar-browser.tab.shortcut', target: 'tab', order: 90, resolve: () => [] })
     slots.register({ name: 'sidebar.right.pane.tab', key: '@deepseek-ai/dsh-client-ui-sidebar-browser', locale: 'sidebarBrowser' }, () => null)
     slots.register({ name: 'sidebar.right.pane.tab.title', key: '@deepseek-ai/dsh-client-ui-sidebar-browser' }, () => null)
   }
@@ -200,7 +317,7 @@ function makeStrictHost(createSnapshotStore, { withBuiltInSidebarBrowser = false
       focus() {},
     },
     shortcuts: shortcutsService,
-    contextMenus: { register: () => () => {} },
+    contextMenus: contextMenusService,
     configForms: {
       get: () => ({
         getSnapshot: () => ({ status: 'ready', value: undefined, revision: 0 }),
@@ -231,15 +348,16 @@ function makeStrictHost(createSnapshotStore, { withBuiltInSidebarBrowser = false
     dicts,
     sidebarRightTabs,
     shortcuts,
+    contextMenus,
     keyedSlots,
     dispose: () => { for (const fn of disposers.splice(0).reverse()) fn() },
   }
 }
 
 test('issue #107: client plugin coexists cleanly when DSH built-in ui-sidebar-browser is also active', t => {
-  const { plugin, createSnapshotStore } = loadBuiltClientPlugin()
+  const { plugin, createSnapshotStore, cleanupTimers } = loadBuiltClientPlugin()
   const host = makeStrictHost(createSnapshotStore, { withBuiltInSidebarBrowser: true })
-  t.after(() => host.dispose())
+  t.after(() => { host.dispose(); cleanupTimers() })
 
   assert.doesNotThrow(() => plugin.apply(host.ctx))
 
@@ -256,7 +374,9 @@ test('issue #107: client plugin coexists cleanly when DSH built-in ui-sidebar-br
   assert.ok(host.keyedSlots.has('sidebar.right.pane.tab.title::dsh-builtin-browser'))
 
   assert.ok(host.shortcuts.has('browser.new'), 'built-in browser.new shortcut remains registered')
-  assert.ok(host.shortcuts.has('browser.address'), 'plugin-owned browser.address shortcut is registered')
+  assert.ok(host.shortcuts.has('browser.address'), 'browser.address shortcut remains registered')
+  assert.ok(host.contextMenus.has('dsh-builtin-browser.shortcut'), 'plugin owns its shortcut context menu id')
+  assert.ok(host.contextMenus.has('dsh-builtin-browser.tab.shortcut'), 'plugin owns its tab context menu id')
 
   // Unloading our plugin cleanly restores DSH's built-in browser tab.
   host.dispose()
@@ -264,9 +384,9 @@ test('issue #107: client plugin coexists cleanly when DSH built-in ui-sidebar-br
 })
 
 test('client plugin registers browser.new and browser.address when built-in ui-sidebar-browser is disabled', t => {
-  const { plugin, createSnapshotStore } = loadBuiltClientPlugin()
+  const { plugin, createSnapshotStore, cleanupTimers } = loadBuiltClientPlugin()
   const host = makeStrictHost(createSnapshotStore, { withBuiltInSidebarBrowser: false })
-  t.after(() => host.dispose())
+  t.after(() => { host.dispose(); cleanupTimers() })
 
   assert.doesNotThrow(() => plugin.apply(host.ctx))
   assert.equal(host.sidebarRightTabs.get('browser').id, 'dsh-builtin-browser')
