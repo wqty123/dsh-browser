@@ -55,9 +55,9 @@ export function registeredInstallLocations(platform = process.platform, query = 
       } catch {}
     }
   }
-  // `reg query ... /s /f <name>` only prints lines whose key/value matches `<name>`; when an app is
-  // installed to a custom path (e.g. `D:\Apps\Custom`), `DisplayName` matches while `InstallLocation`
-  // is omitted. Follow up on each matched uninstall key to read its `InstallLocation` directly.
+  // `reg query ... /s /f <name>` only prints lines whose key or value contains `<name>`; when an app
+  // is installed to a custom directory whose path does not include `<name>`, `DisplayName` matches
+  // while `InstallLocation` is omitted. Follow up on each matched uninstall key to read it directly.
   let lookups = 0
   for (const key of pendingKeys) {
     if (lookups >= MAX_SUBKEY_LOOKUPS) break
