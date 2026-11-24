@@ -24,6 +24,7 @@ function withTempHome(t, settings) {
     writeFileSync(join(home, 'dsh-builtin-browser-host', 'settings.json'), JSON.stringify(settings))
   }
   t.after(() => {
+    clearLastOpen()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     if (previousSurface === undefined) delete globalThis.__dshBrowserSurface
@@ -59,8 +60,7 @@ test('Web dsh_browser_open with channel=chrome drives the system browser instead
     browser: { channel: 'chrome', headless: 'auto', systemProfile: 'plugin' },
     ui: { quiet: false, autoExpandOnce: false },
   })
-  const priorOpen = getLastOpen()
-  if (priorOpen !== undefined) clearLastOpen(priorOpen.at)
+  clearLastOpen()
 
   const calls = []
   let url = ''
@@ -112,7 +112,7 @@ test('Web dsh_browser_open with channel=chrome drives the system browser instead
   assert.equal(getLastOpen(), undefined, 'must not echo an iframe open request to the Web sidebar')
 
   const state = await tools.get('dsh_browser_state').execute({}, exec)
-  assert.equal(state.title, '百度一下，你就知道')
+  assert.equal(state.summary.title, '百度一下，你就知道')
 
   // An explicit per-call surface: 'panel' still reaches the panel path.
   const explicitPanel = await tools.get('dsh_browser_open').execute({ url: 'https://example.com/', surface: 'panel' }, exec)
