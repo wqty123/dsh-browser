@@ -8,6 +8,8 @@ export interface CarrierTakeoverTarget {
   readonly tabId: string
   readonly pageId: string
   readonly url: string
+  /** `until` aborts when the takeover ends. */
+  readonly reveal?: (until?: AbortSignal) => Promise<boolean>
   readonly connected: () => boolean
   /** When this target belongs to the owner but cannot be handed to a human (e.g. headless), explain why instead of falling back. */
   readonly unavailableReason?: () => string | undefined

@@ -98,6 +98,8 @@ function createFakeBrowser(options = {}) {
   function handleCommand(message, state) {
     if (message.id === undefined) return undefined
     commands.push(message)
+    const answered = options.respond?.(message)
+    if (answered !== undefined) return { id: message.id, sessionId: message.sessionId, ...answered }
     if (message.method === 'SystemInfo.getProcessInfo') {
       return { id: message.id, result: { processInfo: options.browserPid ? [{ type: 'browser', id: options.browserPid }] : [] } }
     }
@@ -180,6 +182,10 @@ function createFakeBrowser(options = {}) {
     dropConnections() {
       for (const socket of sockets) socket.destroy()
       sockets.clear()
+    },
+    /** Send a CDP event to every connected client. */
+    emit(method, params) {
+      for (const socket of sockets) socket.write(encodeFrame(JSON.stringify({ method, params })))
     },
     /** Kill it the way a closed window ends: sockets drop, the port stops answering. */
     async kill() {

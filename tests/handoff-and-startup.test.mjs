@@ -21,7 +21,7 @@ function fakeChild() {
 }
 
 /** The arguments a launch would use, captured without running a browser. */
-async function capturedArgs(headlessMode) {
+async function capturedArgs(headlessMode, quiet = false) {
   const { SystemBrowserViewHost } = await import('../lib/browser-electron/system-browser.js')
   const seen = []
   const profile = mkdtempSync(join(tmpdir(), 'dsh-startup-args-'))
@@ -32,6 +32,7 @@ async function capturedArgs(headlessMode) {
     undefined,
     (_path, args) => { seen.push(args); return fakeChild() },
     headlessMode,
+    () => quiet,
   )
   try {
     await host.createView().sendCommand('Runtime.evaluate', { expression: '1' })
@@ -43,6 +44,23 @@ async function capturedArgs(headlessMode) {
   }
   return seen[0] ?? []
 }
+
+test('the launch keeps an off-screen quiet window rendering at full speed', async () => {
+  const args = await capturedArgs('windowed')
+  for (const flag of ['--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling']) {
+    assert.ok(args.includes(flag), flag + ' must be present: ' + JSON.stringify(args))
+  }
+})
+
+test('a quiet launch places new windows off-screen before Chromium shows them', async () => {
+  const args = await capturedArgs('windowed', true)
+  assert.ok(args.includes('--window-position=10000,0'), JSON.stringify(args))
+  assert.ok(args.includes('--window-size=1280,800'), JSON.stringify(args))
+  for (const [mode, quiet] of [['windowed', false], ['headless', true]]) {
+    const other = await capturedArgs(mode, quiet)
+    assert.ok(!other.some(arg => arg.startsWith('--window-position') || arg.startsWith('--window-size')), mode + ' ' + JSON.stringify(other))
+  }
+})
 
 test('the launch asks for no startup window, so no tab appears that we never created', async () => {
   const args = await capturedArgs('windowed')
