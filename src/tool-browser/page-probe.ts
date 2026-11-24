@@ -30,7 +30,7 @@ import type { BrowserPageOperationRequest, BrowserProbeMethod } from '../browser
 import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
 
 /** Bumped when the probe's shape changes; an older probe is replaced rather than trusted. */
-export const PROBE_VERSION = 8
+export const PROBE_VERSION = 9
 
 /** Where the probe keeps itself, and the only global it adds. */
 const PROBE_KEY = '__dshProbe'
@@ -46,10 +46,11 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
     let x = 0, y = 0
     let doc = node && node.ownerDocument
     while (doc && doc.defaultView && doc.defaultView.frameElement) {
-      const r = doc.defaultView.frameElement.getBoundingClientRect()
-      x += r.left
-      y += r.top
-      doc = doc.defaultView.frameElement.ownerDocument
+      const frame = doc.defaultView.frameElement
+      const r = frame.getBoundingClientRect()
+      x += r.left + (Number(frame.clientLeft) || 0)
+      y += r.top + (Number(frame.clientTop) || 0)
+      doc = frame.ownerDocument
     }
     return { x: x, y: y }
   }
@@ -214,25 +215,57 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
     return { x: Math.round(offset.x + rect.left + rect.width / 2), y: Math.round(offset.y + rect.top + rect.height / 2), w: Math.round(rect.width), h: Math.round(rect.height), described: describe(node) }
   }
 
-  const composedParent = (node) => node.parentElement || (node.parentNode && node.parentNode.host) || null
+  const composedParent = (node) => {
+    if (node.parentElement) return node.parentElement
+    if (node.parentNode && node.parentNode.host) return node.parentNode.host
+    const doc = node.ownerDocument
+    if (doc && (node === doc.documentElement || node.parentNode === doc)) {
+      const frame = doc.defaultView && doc.defaultView.frameElement
+      if (frame && frame !== node) return frame
+    }
+    return null
+  }
   const deepHit = (x, y) => {
-    let node = document.elementFromPoint(x, y)
-    for (let i = 0; node && node.shadowRoot && node.shadowRoot.elementFromPoint && i < 8; i += 1) {
-      const inner = node.shadowRoot.elementFromPoint(x, y)
-      if (!inner || inner === node) break
-      node = inner
+    let cx = x, cy = y
+    let node = document.elementFromPoint(cx, cy)
+    for (let i = 0; node && i < 16; i += 1) {
+      if (node.shadowRoot && typeof node.shadowRoot.elementFromPoint === 'function') {
+        const inner = node.shadowRoot.elementFromPoint(cx, cy)
+        if (!inner || inner === node) break
+        node = inner
+        continue
+      }
+      if (node.tagName === 'IFRAME' || node.tagName === 'FRAME') {
+        let doc = null
+        try { doc = node.contentDocument } catch (error) { doc = null }
+        if (!doc || typeof doc.elementFromPoint !== 'function') break
+        const r = node.getBoundingClientRect()
+        cx = cx - r.left - (Number(node.clientLeft) || 0)
+        cy = cy - r.top - (Number(node.clientTop) || 0)
+        const inner = doc.elementFromPoint(cx, cy)
+        if (!inner || inner === node) break
+        node = inner
+        continue
+      }
+      break
     }
     return node
   }
+  const computedStyle = (node) => {
+    try {
+      const win = node && node.ownerDocument && node.ownerDocument.defaultView
+      return (win && typeof win.getComputedStyle === 'function' ? win.getComputedStyle : getComputedStyle)(node)
+    } catch (error) { return null }
+  }
   const floats = (node) => {
-    let style = null
-    try { style = getComputedStyle(node) } catch (error) { style = null }
+    const style = computedStyle(node)
     return !!style && (style.position === 'fixed' || style.position === 'sticky' || Number(style.zIndex) >= 100)
   }
   // A click at the point lands on the target when what is there is the target or inside it (an icon or label in a
-  // button), unless a floating layer between them (a modal inside the target) is what takes the click.
-  const lands = (target, x, y) => {
-    for (let node = deepHit(x, y), depth = 0; node && depth < 64; node = composedParent(node), depth += 1) {
+  // button, including inside open shadow roots and same-origin iframes), unless a floating layer between them
+  // (a modal inside the target) is what takes the click.
+  const lands = (target, hit) => {
+    for (let node = hit, depth = 0; node && depth < 64; node = composedParent(node), depth += 1) {
       if (node === target) return true
       if (floats(node)) return false
     }
@@ -242,27 +275,26 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
   const DISMISS = /(accept|agree|allow|continue|close|got it|dismiss|ok|agree|同意|接受|允许|继续|关闭|知道了|我知道了|我同意)/i
 
   state.overlayAt = function (x, y) {
-    const top = document.elementFromPoint(Number(x), Number(y))
+    const px = Number(x), py = Number(y)
+    const top = deepHit(px, py)
     if (!top) return { covers: null, dismiss: null }
-    if (state.lastFound && lands(state.lastFound, Number(x), Number(y))) return { covers: null, dismiss: null }
+    if (state.lastFound && lands(state.lastFound, top)) return { covers: null, dismiss: null }
     let node = top
     let depth = 0
-    while (node && depth < 8) {
-      let style = null
-      try { style = getComputedStyle(node) } catch (error) { style = null }
-      const floating = style && (style.position === 'fixed' || style.position === 'sticky' || Number(style.zIndex) >= 100)
-      if (floating) {
-        const buttons = node.querySelectorAll('button, [role=button], a')
+    while (node && depth < 16) {
+      if (floats(node)) {
+        const buttons = node.querySelectorAll ? node.querySelectorAll('button, [role=button], a') : []
         for (let i = 0; i < buttons.length && i < 60; i += 1) {
           const label = ((buttons[i].innerText || '') + ' ' + (buttons[i].getAttribute('aria-label') || '')).trim()
           if (DISMISS.test(label)) {
             const rect = buttons[i].getBoundingClientRect()
-            return { covers: describe(top), dismiss: { label: short(label, 40), x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) } }
+            const offset = frameOffset(buttons[i])
+            return { covers: describe(top), dismiss: { label: short(label, 40), x: Math.round(offset.x + rect.left + rect.width / 2), y: Math.round(offset.y + rect.top + rect.height / 2) } }
           }
         }
         return { covers: describe(top), dismiss: null }
       }
-      node = node.parentElement
+      node = composedParent(node)
       depth += 1
     }
     return { covers: describe(top), dismiss: null }
