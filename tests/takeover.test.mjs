@@ -139,7 +139,8 @@ for (const mode of ['button-done', 'button-skip', 'card-done', 'card-skip', 'abo
     } else assert.equal(value.page.fresh, false)
     const after = await post({ operation: 'poll', lease, url: registration.url, active: true })
     assert.equal(after.notice, undefined)
-    assert.equal(host.sections.some(section => /Never attempt automatic CAPTCHA or slider solving/.test(section.text)), true)
+    assert.equal(host.sections.some(section => section.name === 'tool:browser-human-takeover'), false, 'takeover guidance stays scoped to the takeover tool and challenge banners')
+    assert.match(tool.description, /Never solve CAPTCHAs automatically/u)
   })
 }
 

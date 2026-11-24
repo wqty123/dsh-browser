@@ -82,8 +82,15 @@ export const TOOL_GROUPS: Readonly<Record<string, readonly string[]>> = {
   more: [],
 }
 
-/** Guide for the `core` surface. Static, so the prompt prefix caches. */
-const CORE_PROMPT = 'Operate the built-in browser with the dsh_browser_* tools. Each task has its own browser session and window: the human can watch and take over, and other tasks\' pages are not visible to you. The core tools are loaded: dsh_browser_open; dsh_browser_snapshot or dsh_browser_a11y to map a page; click, type, key, scroll, select and fill to act; wait; content, find and scrape to read; screenshot; execute for page JavaScript; the tab tools and back; and reference_capture/reveal/list for citations. Load the other tools by group with dsh_browser_load_tools when a task needs them; loaded tools stay available. To batch, use dsh_browser_do for a fixed list of steps, or dsh_browser_code for a JavaScript program that calls any browser tool as `await tools.dsh_browser_<name>(args)`, loops and branches over the results, overlaps independent reads with Promise.all and prints only what you need. Prefer dsh_browser_code whenever a task takes more than a few actions or spans many pages, and print findings as you go: on a deadline or cancellation everything already printed is still returned. When run_code is available, call the same tools from run_code instead. A blocked page (403, access denied, bot wall) is not the end of the task. Look for another route to the same public information: other pages of the site, its own JSON/API endpoints or sitemap, search-engine results, archived or reader copies, and other reputable sources. Keep each value tied to the source it came from. Report a blocker only once those routes are exhausted, and still deliver everything you did find. A CHALLENGE banner (or dsh_browser_challenge) names the block, its recovery and fallback routes (site API, search results, archives): on recovery=takeover (CAPTCHA, slider or other human verification) never retry or solve it, call dsh_browser_request_takeover; on wait, wait and re-check; on retry, the open already retried once after a pause, so use the fallbacks; on environment (an IP/network block) do not retry, use the fallbacks and report the block.'
+/**
+ * Minimal static routing hint for the `core` surface. Detailed tool guidance lives in each tool's
+ * description, runtime CHALLENGE banners, and SKILL.md so unrelated conversations do not pay for
+ * a long global manual or inherit cross-plugin behavior rules.
+ */
+const CORE_PROMPT = 'Use dsh_browser_* tools to drive the built-in browser (per-task isolated sessions). For multi-step or multi-page work, batch calls in dsh_browser_code (or run_code when PTC is active) and load extra groups on demand with dsh_browser_load_tools; follow any CHALLENGE banner recovery advice.'
+
+/** Minimal static routing hint for the `tools` surface. */
+const TOOLS_PROMPT = 'Use dsh_browser_* tools to drive the built-in browser (per-task isolated sessions). Prefer dsh_browser_a11y or dsh_browser_snapshot to locate targets, dsh_browser_do for multi-step runs, and follow any CHALLENGE banner recovery advice.'
 
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
@@ -103,12 +110,6 @@ export function apply(ctx: Context, config: Config = {}): void {
   state.configRestrictedTo = config.allowedActions !== undefined ? [...config.allowedActions] : undefined
 
   ctx.systemPrompt.section({
-    name: 'tool:browser-human-takeover',
-    order: 152,
-    text: 'For CAPTCHAs, sliders, logins, two-factor authentication (2FA), and payments, call dsh_browser_request_takeover with a clear reason and any instructions. Never attempt automatic CAPTCHA or slider solving. Wait for the human, then re-read the fresh page summary and inspect the page before continuing. A skipped or cancelled takeover is not successful completion; do not bypass it or retry protected actions automatically.',
-  })
-
-  ctx.systemPrompt.section({
     name: 'tool:dsh-browser-reference-presentation',
     order: 151,
     text: 'Browser references are already displayed as interactive capsules. The capsules provide source navigation. Do not repeat browser-reference markers, dsh-browser-ref: URIs, source URLs, or source/citation links in replies; answer using the quoted content instead.',
@@ -123,7 +124,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       ? CODE_PROMPT
       : surface === 'core'
       ? CORE_PROMPT
-      : 'Use dsh_browser_* tools to operate the built-in browser. Each task has its own session and window (real toolbar): the human can watch and take over, and other tasks\' pages are not visible to you. Map a page with dsh_browser_a11y (semantic roles/names/states) or dsh_browser_snapshot (numbered elements), then drive it: dsh_browser_click/dsh_browser_type take a target {by: css|text|xpath, value}, or coordinates from dsh_browser_screenshot. Prefer dsh_browser_fill (batch) or dsh_browser_set_value/check/select/clear for forms; verify with dsh_browser_get_value. Use dsh_browser_scrape (not hand-written dsh_browser_execute) for list pages; dsh_browser_wait after slow navigation. Use dsh_browser_do for a run of steps, dsh_browser_assert to check results, and dsh_browser_console/network when the screen is unclear. Say what you are doing on the page. On a CAPTCHA (dsh_browser_challenge), stop retrying and ask the human to solve it in the browser window, then re-check.',
+      : TOOLS_PROMPT,
   })
 
   /**

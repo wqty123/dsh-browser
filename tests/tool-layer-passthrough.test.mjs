@@ -93,9 +93,23 @@ test('the prompt section coexists with another browser plugin in either registra
     }
     apply(ctx, { surface: 'tools' })
     if (!siblingFirst) ctx.systemPrompt.section({ name: 'tool:browser' })
-    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:browser-human-takeover', 'tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
+    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
     assert.ok(tools.has('dsh_browser_open'), 'tool registration completes')
   }
+})
+
+test('default core system prompt stays minimal and omits global takeover rules', () => {
+  const { ctx, tools } = makeContext()
+  const sections = []
+  ctx.systemPrompt.section = section => { sections.push(section) }
+  apply(ctx, {})
+  assert.deepEqual(sections.map(s => s.name).sort(), ['tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
+  const guide = sections.find(s => s.name === 'tool:dsh-builtin-browser')
+  assert.ok(guide.text.length < 400, `core routing guide should stay compact (got ${guide.text.length} chars)`)
+  assert.match(guide.text, /dsh_browser_code/)
+  assert.match(guide.text, /dsh_browser_load_tools/)
+  assert.equal(sections.some(s => /Never attempt automatic CAPTCHA/i.test(s.text)), false, 'takeover guidance must not leak globally')
+  assert.match(tools.get('dsh_browser_request_takeover').description, /CAPTCHA/i, 'takeover guidance lives on the takeover tool')
 })
 
 test('reference guidance distinguishes tool-only capture storage from chat capsules', () => {
