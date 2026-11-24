@@ -13,11 +13,10 @@ import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ImageBlock } from '@deepseek-ai/dsh-llm'
+import { CODE_TOOL_DEFAULT_TIMEOUT_MS as DEFAULT_TIMEOUT_MS, CODE_TOOL_MAX_TIMEOUT_MS as MAX_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 
 export const CODE_TOOL = 'dsh_browser_code'
 const PREFIX = 'dsh_browser_'
-const DEFAULT_TIMEOUT_MS = 120_000
-const MAX_TIMEOUT_MS = 600_000
 /** Per-cell output cap, as Browser Use 1.0's MAX_OUTPUT_CHARS. */
 const MAX_OUTPUT_CHARS = 12_000
 const MAX_IMAGES = 4
@@ -29,6 +28,10 @@ const WATCHERS: ReadonlySet<string> = new Set(['dsh_browser_wait_for_response', 
 const ARMING: ReadonlySet<string> = new Set(['dsh_browser_wait_for_response'])
 /** An idle REPL worker is ended after this long; DSH does not tell the plugin when a task ends. */
 const IDLE_MS = 15 * 60_000
+/** How long a stopped cell waits for its in-flight tool calls to settle before reporting them as interrupted. */
+const DRAIN_MS = 5_000
+/** Cancelled cells whose partial output waits for DSH's content finalizer. */
+const MAX_PENDING_PARTIALS = 32
 
 /** The slice of a registered tool definition the code tool dispatches to. */
 export interface CatalogTool {
@@ -41,6 +44,71 @@ export interface CatalogTool {
 
 interface Block { readonly type: string; readonly text?: string; readonly attachment?: unknown }
 interface ImageAttachment { attachmentId: string; mediaType: string; bytes: number; width: number; height: number }
+/** One browser tool call a cell started: `interrupted` means it was still running when the cell stopped. */
+const TABS = '__tabs'
+const LIST_TABS = 'dsh_browser_list_tabs'
+
+/** One tab as dsh_browser_list_tabs reports it. */
+export interface TabRow { readonly id: string; readonly url: string; readonly active: boolean }
+
+async function tabsOf(tool: CatalogTool, exec: never): Promise<readonly TabRow[] | undefined> {
+  try {
+    const value = await tool.execute({} as never, exec) as { tabs?: readonly TabRow[] }
+    return Array.isArray(value?.tabs) ? value.tabs : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The post-action line: where the browser is after an action, compared with before it. Browser Use
+ * reports this after every step so the model never has to spend a turn asking what happened.
+ */
+export function actionSummary(before: readonly TabRow[] | undefined, after: readonly TabRow[], page: { readonly before?: PagePulse; readonly after?: PagePulse } = {}): string {
+  if (before === undefined) {
+    const now = after.find(tab => tab.active)
+    const head = `${now === undefined ? 'no active tab' : `on ${now.url || 'about:blank'}`}${after.length > 1 ? ` (${after.length} tabs)` : ''}`
+    return `\u2192 ${[head, ...pageChanges(page.before, page.after, true)].join('; ')}`
+  }
+  const known = new Map(before.map(tab => [tab.id, tab]))
+  const still = new Set(after.map(tab => tab.id))
+  const parts: string[] = []
+  for (const tab of after) if (!known.has(tab.id)) parts.push(`new tab ${tab.id} ${tab.url || 'about:blank'}`)
+  for (const tab of before) if (!still.has(tab.id)) parts.push(`closed tab ${tab.id}`)
+  const was = before.find(tab => tab.active)
+  const now = after.find(tab => tab.active)
+  if (now === undefined) parts.push('no active tab')
+  else if (was?.id !== now.id) parts.push(`active tab ${now.id} ${now.url || 'about:blank'}`)
+  else if (was.url !== now.url) parts.push(`navigated to ${now.url || 'about:blank'}`)
+  else if (parts.length === 0) parts.push(`still on ${now.url || 'about:blank'}`)
+  const moved = now !== undefined && (was?.id !== now.id || was.url !== now.url)
+  return `\u2192 ${[...parts, ...pageChanges(page.before, page.after, moved)].join('; ')}`
+}
+
+/** What the page itself reports, read around an action: see the fixed `pulse` page operation. */
+export interface PagePulse {
+  readonly title: string
+  readonly alerts: readonly string[]
+  readonly dialogs: readonly { readonly at: number; readonly kind: string; readonly message: string; readonly answered?: string }[]
+  /** When the page's probe was installed, 0 without one: dialogs are only comparable within one probe. */
+  readonly probe: number
+}
+
+const quoted = (text: string, limit: number): string => JSON.stringify(text.length > limit ? `${text.slice(0, limit)}\u2026` : text)
+
+/** The title after a move or a retitle, alert regions that were not there before, and dialogs answered meanwhile. */
+function pageChanges(was: PagePulse | undefined, now: PagePulse | undefined, moved: boolean): string[] {
+  if (now === undefined) return []
+  const parts: string[] = []
+  if (now.title !== '' && (moved || was === undefined || was.title !== now.title)) parts.push(`title ${quoted(now.title, 80)}`)
+  const seen = new Set(was?.alerts ?? [])
+  for (const text of now.alerts.filter(text => !seen.has(text)).slice(0, 3)) parts.push(`alert ${quoted(text, 120)}`)
+  const since = was !== undefined && was.probe !== 0 && was.probe === now.probe ? Math.max(0, ...was.dialogs.map(row => row.at)) : 0
+  for (const row of now.dialogs.filter(row => row.at > since).slice(-3)) parts.push(`${row.kind}() ${quoted(row.message, 120)}${row.answered ? ` ${row.answered}` : ''}`)
+  return parts
+}
+
+interface TraceEntry { tool: string; status: 'ok' | 'error' | 'interrupted'; error?: string }
 type WorkerMessage =
   | { readonly type: 'ready' }
   | { readonly type: 'log'; readonly text: string }
@@ -51,21 +119,23 @@ type WorkerMessage =
  * The guide for the code surface: Browser Use 1.0's system prompt (browser_use/agent/prompt.py),
  * rewritten for JavaScript cells and the dsh helpers. It is static so the prompt prefix caches.
  */
-export const CODE_PROMPT = `Operate the built-in browser with dsh_browser_code. It runs JavaScript in a persistent REPL: top-level const/let/var, functions and classes survive calls, and the last expression is printed. Browser helpers are async: always await them. Every browser tool is also bound as await tools.dsh_browser_<name>(args), with the same arguments as the tool, resolving to its JSON value and throwing ToolCallError (with toolName) on failure. Independent read-only calls may overlap under Promise.all; actions run one at a time, in the order you issued them. Print findings as you go: when a cell hits its deadline or is cancelled, everything already printed is still returned. Batch a whole run of steps (navigate, act, wait, extract, decide) into one call instead of one call per action, and write a small helper when it earns its keep. Each task has its own session and window: the human can watch and take over, and other tasks' pages are not visible to you.
+export const CODE_PROMPT = `Operate the built-in browser with dsh_browser_code. It runs JavaScript in a persistent REPL: top-level const/let/var, functions and classes survive calls, and the last expression is printed. Browser helpers are async: always await them. Every browser tool is also bound as await tools.dsh_browser_<name>(args), with the same arguments as the tool, resolving to its JSON value; a failed helper or tools.* call throws ToolCallError (with toolName and code). Independent read-only calls may overlap under Promise.all; actions run one at a time, in the order you issued them. Print findings as you go: when a cell hits its deadline or is cancelled, everything already printed is still returned, with the list of calls the cell made and which of them were interrupted. Batch a whole run of steps (navigate, act, wait, extract, decide) into one call instead of one call per action, and write a small helper when it earns its keep. Each task has its own session and window: the human can watch and take over, and other tasks' pages are not visible to you.
 
 Browser helpers (pre-installed):
 - goto_url(url), new_tab(url), wait_for_load(), page_info() -> {url,title,w,h,sx,sy,pw,ph}, back(), forward(), refresh().
-- list_tabs(), switch_tab(tabId), close_tab(tabId).
+- list_tabs(), switch_tab(tabId), close_tab(tabId). wait_for_new_tab(triggerFn?, timeoutMs?) runs triggerFn (e.g. () => click('Open report')) and resolves to the tab {id,url,active} it opened; with_tab(tabId, fn) runs fn with that tab active, then switches back.
 - js(expression) runs in the page and returns the value as data (objects, arrays, exact strings); \`return\` works for multi-statement scripts.
 - click(target), type(target, text, {submit}), fill_input(target, text) replaces a field's value, select(target, optionText), fill(fields, {submit}). target is visible text ('Sign in'), a CSS selector ('#email', 'button[type=submit]'), {text|css|xpath, index}, or {x, y}.
 - click_at_xy(x, y) sends real mouse events in viewport coordinates; type_text(text) inserts into the focused element; press_key('Enter'); scroll(dy) or scroll(x, y, dy).
 - read({format, selector, maxChars}) returns page text (markdown); snapshot() lists numbered interactive elements with labels and selectors; find(text); state().
-- wait_for_element(selector), wait_for_network_idle(), upload_file(selector, path), screenshot({fullPage}) (vision models see the image).
+- Waits return as soon as the condition holds and throw when it never does: wait_for_element(selector), wait_for_text(text), wait_for_gone(text), wait_until(jsExpression, {timeoutMs, intervalMs}) (returns the truthy value; the timeout error quotes the last result), wait_for_response(urlContains, trigger, {status, timeoutMs}) (watches from before trigger() runs, returns the response row), wait_for_network_idle(). Use them instead of sleep(ms), which is capped at 60 s and prints a hint when a cell keeps calling it.
+- Data first: inspect_data_sources() lists embedded state (__NEXT_DATA__, __INITIAL_STATE__, JSON/ld+json scripts) with keys and array paths, the JSON APIs the page called, data-like resources and declared endpoints. fetch_json(url, {method, headers, body}) fetches from the page with its cookies and returns parsed JSON; a non-2xx status throws with the status and the start of the body.
+- upload_file(selector, path), screenshot({fullPage, annotate}) (vision models see the image; annotate:true draws numbered boxes on interactive elements and lists them as {id, x, y, role, label}).
 - refs.capture({excerptText}), refs.list(), refs.reveal({referenceId}) manage browser references.
 - call(name, args) runs any other browser action and returns its structured result (download, console, network, wait_for_response, dialog, hover, drag, set_value, check, get_value, scrape, a11y, assert, do, ...); await help() lists them and help(name) describes one.
 - print()/log() print. A failing helper throws; catch it to try another way in the same cell.
 
-Prefer structure for discovery: snapshot() or js() that filters the DOM to what you need; avoid repeated full-page dumps. Read state, not just labels. Coordinates hit whatever is visible: inspect overlays and disabled controls first and never force a click through them. Element positions expire after navigation. Verify the actual outcome after every mutation.
+Before scraping a list, directory, paginated or lazy-loaded data, call inspect_data_sources(): when the page holds the data as JSON or calls an API, read that (with fetch_json, in parallel with Promise.all for pages) instead of walking the DOM, and compare the count you collected with the total the site states. Otherwise prefer structure for discovery: snapshot() or js() that filters the DOM to what you need; avoid repeated full-page dumps. Read state, not just labels. Coordinates hit whatever is visible: inspect overlays and disabled controls first and never force a click through them. Element positions expire after navigation. Verify the actual outcome after every mutation: each action's printed result ends with a → line saying where the browser is now (URL change, new or closed tabs, active tab) and what the page reported (its title after a change, new alert messages, dialogs answered). Element lookups reach into open shadow roots and same-origin iframes; cross-origin iframes stay opaque.
 
 Use js(...) for extraction: return exactly the fields you need as JSON. Use screenshots for visual questions, canvas and geometry.
 
@@ -165,12 +235,32 @@ function permissionArgs(paths: readonly string[]): string[] {
   return flag === undefined ? [] : [flag, ...paths.map(path => `--allow-fs-read=${path}`)]
 }
 
+interface CellResult { output: string; ok: boolean; calls: number; trace: TraceEntry[]; images: ImageAttachment[] }
+
+function render(value: { readonly output: string; readonly images: readonly ImageAttachment[] }) {
+  return [
+    { type: 'text' as const, text: value.output },
+    ...value.images.map(attachment => ({ type: 'image' as const, attachment: attachment as ImageBlock['attachment'] })),
+  ]
+}
+
+/** The calls a failed cell made, so the model knows which actions already happened before it retries. */
+function summarize(trace: readonly TraceEntry[]): string {
+  const shown = trace.slice(-20)
+  const parts = shown.map(entry => `${entry.tool.slice(PREFIX.length)} ${entry.status}${entry.error === undefined ? '' : ` (${entry.error.slice(0, 120)})`}`)
+  const head = trace.length > shown.length ? `${trace.length - shown.length} earlier, then ` : ''
+  const interrupted = trace.some(entry => entry.status === 'interrupted')
+    ? '; an interrupted action may still have taken effect, so check the page before repeating it'
+    : ''
+  return `Calls this cell made: ${head}${parts.join(', ')}${interrupted}.`
+}
+
 /**
  * Build the code tool over a catalog of registered browser tools.
  * @param catalog - every browser tool by name, already wrapped with the takeover and restriction gates.
  * @returns the tool definition and a dispose that ends every REPL worker.
  */
-export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
+export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>, pulse?: (exec: never) => Promise<PagePulse | undefined>) {
   const workers = new Map<string, CellWorker>()
   const locks = new Map<string, Promise<unknown>>()
   const serialize = async <T>(key: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> => {
@@ -213,6 +303,18 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
     return tool
   }
 
+  // DSH replaces a cancelled call's returned content with "tool call aborted"; finalizeContent puts
+  // the cell's printed output and call trace back, keyed by the call that was cancelled.
+  const partials = new Map<string, ReturnType<typeof render>>()
+  const keepPartial = (callId: string | undefined, value: CellResult): void => {
+    if (callId === undefined) return
+    partials.set(callId, render(value))
+    for (const stale of partials.keys()) {
+      if (partials.size <= MAX_PENDING_PARTIALS) break
+      partials.delete(stale)
+    }
+  }
+
   const tool = defineTool({
     name: CODE_TOOL,
     description: DESCRIPTION,
@@ -228,6 +330,19 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
           output: { type: 'string', required: true },
           ok: { type: 'boolean', required: true },
           calls: { type: 'number', required: true },
+          trace: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                tool: { type: 'string', required: true },
+                status: { type: 'string', required: true },
+                error: { type: 'string' },
+              },
+            },
+          },
           images: {
             type: 'array',
             required: true,
@@ -245,13 +360,16 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
           },
         },
       },
-      render: (_args, value) => [
-        { type: 'text', text: value.output },
-        ...value.images.map(attachment => ({ type: 'image' as const, attachment: attachment as ImageBlock['attachment'] })),
-      ],
+      render: (_args, value) => render(value),
     },
     timeoutMs: MAX_TIMEOUT_MS,
     isConcurrencySafe: () => false,
+    finalizeContent(exec, result) {
+      const content = partials.get(exec.callId)
+      if (content === undefined) return undefined
+      partials.delete(exec.callId)
+      return result.isError === true ? content as never : undefined
+    },
     async execute(args, exec: ToolRunContext) {
       exec.signal?.throwIfAborted()
       if (typeof args.code !== 'string' || args.code.trim() === '') throw new Error('code must be a non-empty JavaScript cell')
@@ -262,7 +380,8 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
         const controller = new AbortController()
         const lines: string[] = []
         const images: ImageAttachment[] = []
-        let calls = 0
+        const trace: TraceEntry[] = []
+        const running = new Set<Promise<void>>()
         let ok = true
         let started = false
         // Same scheduling as DSH run_code: concurrency-safe calls overlap (bounded), an action waits
@@ -344,13 +463,15 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
               else if (message.type === 'call') {
                 const { id, name, args: toolArgs } = message
                 if (name === '__help') void dispatch(id, name, toolArgs)
+                else if (name === TABS) schedule(true, false, () => dispatch(id, name, toolArgs))
                 else {
                   const full = name.startsWith(PREFIX) ? name : PREFIX + name
                   schedule(concurrencySafe(name, toolArgs), ARMING.has(full) ? 'arming' : WATCHERS.has(full), armed => dispatch(id, name, toolArgs, armed))
                 }
               }
             }
-            const dispatch = async (id: number, name: string, toolArgs: Record<string, unknown>, armed?: () => void) => {
+            const perform = async (id: number, name: string, toolArgs: Record<string, unknown>, armed?: () => void): Promise<void> => {
+              let entry: TraceEntry | undefined
               try {
                 if (name === '__help') {
                   const value = typeof toolArgs.name === 'string'
@@ -360,18 +481,41 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
                   return
                 }
                 controller.signal.throwIfAborted()
+                const runContext = { ...exec, signal: controller.signal } as never
+                if (name === TABS) {
+                  worker.send({ type: 'reply', id, value: structuredClone(await resolve(LIST_TABS).execute({} as never, runContext)) })
+                  return
+                }
                 const target = resolve(name)
-                calls++
+                entry = { tool: target.name, status: 'interrupted' }
+                trace.push(entry)
+                // list_tabs never starts a browser, so reading it around an action has no side effects.
+                const summarized = !concurrencySafe(name, toolArgs) && !WATCHERS.has(target.name) && catalog.has(LIST_TABS)
+                const before = summarized ? await tabsOf(resolve(LIST_TABS), runContext) : undefined
+                const pageBefore = summarized ? await pulse?.(runContext) : undefined
                 const value = await target.execute(toolArgs as never, { ...exec, signal: controller.signal, ...armed !== undefined ? { armed } : {} } as never)
+                entry.status = 'ok'
+                const after = summarized ? await tabsOf(resolve(LIST_TABS), runContext) : undefined
+                const pageAfter = after !== undefined ? await pulse?.(runContext) : undefined
                 const blocks = (target.output?.render?.(toolArgs as never, value as never) ?? [{ type: 'text', text: format(value) }]) as readonly Block[]
                 for (const block of blocks) {
                   if (block.type === 'image' && block.attachment !== undefined && images.length < MAX_IMAGES) images.push(block.attachment as ImageAttachment)
                 }
-                const text = blocks.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n')
+                const summary = after !== undefined ? actionSummary(before, after, { ...pageBefore !== undefined ? { before: pageBefore } : {}, ...pageAfter !== undefined ? { after: pageAfter } : {} }) : undefined
+                const text = [...blocks.filter(block => block.type === 'text').map(block => block.text ?? ''), ...summary !== undefined ? [summary] : []].join('\n')
                 worker.send({ type: 'reply', id, value: structuredClone(value), text })
               } catch (error) {
-                worker.send({ type: 'reply', id, error: error instanceof Error ? error.message : String(error) })
+                const message = error instanceof Error ? error.message : String(error)
+                if (entry !== undefined) Object.assign(entry, { status: 'error', error: message })
+                const code = (error as { code?: unknown } | undefined)?.code
+                worker.send({ type: 'reply', id, error: message, ...typeof code === 'string' ? { code } : {} })
               }
+            }
+            const dispatch = (id: number, name: string, toolArgs: Record<string, unknown>, armed?: () => void): Promise<void> => {
+              const call = perform(id, name, toolArgs, armed)
+              running.add(call)
+              void call.finally(() => running.delete(call))
+              return call
             }
             if (!worker.send({ type: 'run', code: args.code })) {
               forget()
@@ -381,6 +525,13 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
           if (!outcome.ok) {
             ok = false
             lines.push(`Error: ${outcome.error ?? 'cell failed'}`)
+          }
+          // Calls the cell left running (it stopped, or did not await them) must not overlap the next cell.
+          if (running.size > 0) {
+            controller.abort(new Error(ok ? 'the cell ended before this call finished' : 'cell stopped'))
+            let timer: ReturnType<typeof setTimeout> | undefined
+            await Promise.race([Promise.allSettled([...running]), new Promise(go => { timer = setTimeout(go, DRAIN_MS) })])
+            clearTimeout(timer)
           }
         } catch (error) {
           if (!started && exec.signal?.aborted === true) throw error
@@ -393,7 +544,10 @@ export function createCodeTool(catalog: ReadonlyMap<string, CatalogTool>) {
         let output = lines.join('\n')
         if (output === '') output = ok ? '(no output; end the cell with an expression or print() what you need)' : 'Error'
         if (output.length > MAX_OUTPUT_CHARS) output = `${output.slice(0, MAX_OUTPUT_CHARS)}\n[output truncated at ${MAX_OUTPUT_CHARS} chars; print less or slice it]`
-        return { output, ok, calls, images }
+        if (!ok && trace.length > 0) output += `\n${summarize(trace)}`
+        const result: CellResult = { output, ok, calls: trace.length, trace: trace.map(entry => ({ ...entry })), images }
+        if (exec.signal?.aborted === true) keepPartial(exec.callId, result)
+        return result
       })
     },
   })

@@ -1,3 +1,6 @@
+/** Plugin-owned locale namespace so DSH's built-in `sidebarBrowser` namespace never collides (issue #107). */
+export const SIDEBAR_BROWSER_LOCALE_NS = 'dshBuiltinBrowser.sidebar' as const
+
 /** Locale-owned Browser tab copy. */
 export const zh = {
   'type.label': '浏览器',
@@ -215,8 +218,8 @@ export const en = {
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** Sidebar Browser labels, navigation controls, and failures. */
-    sidebarBrowser: SidebarBrowserKey
+    /** Sidebar Browser labels, navigation controls, and failures (plugin-owned namespace). */
+    'dshBuiltinBrowser.sidebar': SidebarBrowserKey
   }
 }
 
@@ -451,7 +454,7 @@ export const fr = {
   external: 'Ouvrir dans le navigateur système',
   'sandbox.disable': 'Désactiver les restrictions du bac à sable',
   'sandbox.enable': 'Restaurer les restrictions du bac à sable',
-  'sandbox.warning': "Les restrictions du bac à sable sont désactivées ; la page peut naviguer dans l'application de niveau supérieur et utiliser les téléchargements, les boîtes de dialogue modales et les verrous de saisie.",
+  'sandbox.warning': "Les restrictions du bac à sable sont désactivées ; la page peut naviguer dans l'application de niveau supérieur et utiliser les téléchargements, les boîtes de dialogue modales et les verrous de saisie.",
   start: 'Entrez une adresse HTTP(S) pour commencer la navigation',
   loading: 'Ouverture…',
   'restore.previous': 'Déjà ouvert',
@@ -461,8 +464,8 @@ export const fr = {
   'error.protocol': "Seules les adresses HTTP et HTTPS sont prises en charge ; utilisez l'aperçu du document pour les fichiers locaux.",
   'error.credentials': "Les adresses ne peuvent pas contenir de nom d'utilisateur ou de mot de passe.",
   'error.application-origin': "Le navigateur intégré ne peut pas ouvrir l'application DSH elle-même.",
-  'load.failed': "La page n'a pas pu se charger ; rechargez-le ou ouvrez-le dans le navigateur système.",
-  'load.failed.detail': 'Échec du chargement de la page ({code}) : {description}',
+  'load.failed': "La page n'a pas pu se charger ; rechargez-le ou ouvrez-le dans le navigateur système.",
+  'load.failed.detail': 'Échec du chargement de la page ({code}) : {description}',
   'init.failed.occurrence-aborted': 'The tab was closed; initialization was cancelled.',
   'init.failed.controller-missing': 'The browser controller was not created; retry or reopen the tab.',
   'init.failed.workspace-unavailable': 'The browser storage workspace is unavailable; retry once it is ready.',
@@ -471,7 +474,7 @@ export const fr = {
   'init.failed.navigation-failed': 'The page failed to load; reload or open it in the system browser.',
   'init.failed.navigation-rejected': 'The address was rejected; correct it and retry.',
   'init.failed.timeout': 'Page initialization timed out; try again.',
-  'address.unknown': 'La page parcourue ; cet opérateur ne peut pas lire sa nouvelle URL.',
+  'address.unknown': 'La page parcourue ; cet opérateur ne peut pas lire sa nouvelle URL.',
   'address.openHint': 'Ouvrir {url}',
   'address.searchHint': 'Rechercher « {query} » avec {engine}',
   'address.searchThis': 'Rechercher ceci',

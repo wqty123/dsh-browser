@@ -1,8 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { extractPackedPackage, packInvocation, stagePackage } from './fixtures/packed-package.mjs'
 
 test('pack lifecycle writes are isolated from the checkout and other pack runs', t => {
@@ -13,9 +13,10 @@ test('pack lifecycle writes are isolated from the checkout and other pack runs',
   const manifest = JSON.stringify({ name: 'fixture', publishConfig: { exports: { '.': './lib/index.js', './client': './dist/client.cjs' } } })
   writeFileSync(join(source, 'package.json'), manifest)
   for (const directory of ['node_modules', '.git', 'lib', 'dist', 'src', 'scripts', 'assets']) writeFileSync(join(source, directory, 'sentinel'), directory)
+  mkdirSync(join(source, 'node_modules', 'tool'))
   const first = stagePackage(source, join(root, 'first'))
   const second = stagePackage(source, join(root, 'second'))
-  assert.equal(realpathSync(join(first, 'node_modules')), realpathSync(join(source, 'node_modules')))
+  assert.equal(realpathSync(join(first, 'node_modules', 'tool')), realpathSync(join(source, 'node_modules', 'tool')))
   for (const directory of ['.git', 'lib', 'dist']) assert.equal(existsSync(join(first, directory)), false)
   for (const directory of ['src', 'scripts', 'assets']) {
     assert.equal(readFileSync(join(first, directory, 'sentinel'), 'utf8'), directory)
@@ -30,6 +31,32 @@ test('pack lifecycle writes are isolated from the checkout and other pack runs',
   assert.equal(readFileSync(join(second, 'package.json'), 'utf8'), manifest)
   assert.equal(readFileSync(join(source, 'dist', 'sentinel'), 'utf8'), 'dist')
   assert.equal(existsSync(join(second, 'dist')), false)
+})
+
+test('pack staging resolves pnpm relative package links on every OS', t => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-pack-links-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const source = join(root, 'workspace', 'packages', 'web', 'plugin')
+  const store = join(root, 'workspace', 'node_modules', '.pnpm')
+  const install = (name, file) => {
+    const real = join(store, `${name.replace('/', '+')}@1.0.0`, 'node_modules', name)
+    mkdirSync(join(real, 'bin'), { recursive: true })
+    writeFileSync(join(real, 'bin', file), name)
+    const link = join(source, 'node_modules', name)
+    mkdirSync(dirname(link), { recursive: true })
+    symlinkSync(relative(dirname(link), real), link, 'dir')
+  }
+  mkdirSync(join(source, 'src'), { recursive: true })
+  writeFileSync(join(source, 'package.json'), '{"name":"plugin"}')
+  try { install('typescript', 'tsc') } catch (error) {
+    if (error.code === 'EPERM') return t.skip('relative symlinks need symlink privilege here')
+    throw error
+  }
+  install('@scope/tool', 'run')
+  writeFileSync(join(source, 'node_modules', '.modules.yaml'), '')
+  const staging = stagePackage(source, join(root, 'staging'))
+  assert.equal(readFileSync(join(staging, 'node_modules', 'typescript', 'bin', 'tsc'), 'utf8'), 'typescript')
+  assert.equal(readFileSync(join(staging, 'node_modules', '@scope', 'tool', 'bin', 'run'), 'utf8'), '@scope/tool')
 })
 
 test('pack staging refuses a missing source instead of building against the checkout', t => {

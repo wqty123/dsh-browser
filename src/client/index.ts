@@ -25,9 +25,10 @@ import { createNativePage } from './electron/NativeViewPage.ts'
 import { NativeChildPresentation } from './electron/NativeChildPresentation.ts'
 import type { DesktopBrowserBridge, SidebarNativeSlot } from '../types.ts'
 import { browserWorkspace } from './electron/workspace.ts'
+import { desktopBrowserBridge, nativeChildTabs, nativeViews } from '../compat/host-features.ts'
 import type { BrowserPageFactory } from './browser/BrowserPage.ts'
 import { BROWSER_ID, BROWSER_KIND, browserDefinition } from './definition.tsx'
-import { en, ja, es, fr, de, ru, pt, zh } from './locales.ts'
+import { en, ja, es, fr, de, ru, pt, zh, SIDEBAR_BROWSER_LOCALE_NS } from './locales.ts'
 import { createBrowserStore } from './browser/store.ts'
 import { StartPageBinding } from './startpage/binding.ts'
 import { openShortcutTarget } from './shortcut-open.ts'
@@ -85,6 +86,19 @@ type SidebarHostExtensions = {
   openReservedTab?: (session: BrowserBodyProps['sessionId'], kind: string, tab: TabId) => boolean
 }
 
+function registerShortcutIfAbsent(
+  register: () => () => void,
+): () => void {
+  try {
+    return register()
+  } catch (error) {
+    // When DSH's built-in ui-sidebar-browser is also enabled (issue #107), it already registers
+    // built-in shortcut commands; skip cleanly rather than aborting plugin apply.
+    if (/Duplicate shortcut command|Conflicting shortcut defaults/i.test(String(error))) return () => {}
+    throw error
+  }
+}
+
 /**
  * 客户端产物是宿主启动时合成的整包脚本，URL 里的 rev 在启动那一刻固定：产物更新后浏览器仍按旧
  * URL 命中缓存，于是「改了代码界面不变」。这里轮询宿主暴露的产物指纹，一旦变化就带新参数重载本页
@@ -124,10 +138,10 @@ export function apply(ctx: Context): void {
   // 再装设置页分节：旧插件的设置面板（宿主 /dsh-builtin-browser/settings 的 UI）。
   applySettingsSection(ctx)
 
-  const namespace = 'sidebarBrowser'
+  const namespace = SIDEBAR_BROWSER_LOCALE_NS
   const t = ctx.locale.bind(namespace)
   ctx.inject(['shortcuts'], (ctx) => {
-    ctx.effect(() => ctx.shortcuts.register({
+    ctx.effect(() => registerShortcutIfAbsent(() => ctx.shortcuts.register({
       id: 'browser.new' as ShortcutCommandId, label: () => t('guide.title'), aliases: ['browser', 'new browser tab'],
       defaults: {
         'desktop:macos': { code: 'KeyT', modifiers: ['primary'] },
@@ -145,7 +159,7 @@ export function apply(ctx: Context): void {
         return { status: 'handled', run: () => { ctx.sidebarRight.openTabFromTarget('browser', target) } }
       },
       /* jscpd:ignore-end */
-    }), 'ui-sidebar-browser: shortcut')
+    })), 'ui-sidebar-browser: shortcut')
   })
   const store = createBrowserStore()
   const startPage = new StartPageBinding()
@@ -160,7 +174,7 @@ export function apply(ctx: Context): void {
   }, (sessionId, tabId) => controllers.get(sessionId as BrowserBodyProps['sessionId'])?.currentPage(tabId),
   (sessionId, tabId, url) => controllers.get(sessionId as BrowserBodyProps['sessionId'])?.loadUrl(tabId, url).ok === true))
   ctx.inject(['shortcuts'], (scope) => {
-    scope.effect(() => scope.shortcuts.register({
+    scope.effect(() => registerShortcutIfAbsent(() => scope.shortcuts.register({
       id: 'browser.address' as ShortcutCommandId, label: () => t('address.focus'), aliases: ['address bar', 'focus address'],
       defaults: {
         'desktop:macos': { code: 'KeyL', modifiers: ['primary'] },
@@ -178,11 +192,11 @@ export function apply(ctx: Context): void {
         }
         return { status: 'handled', run: () => { face.focusAddress(target.tabId!) } }
       },
-    }), 'ui-sidebar-browser: address shortcut')
+    })), 'ui-sidebar-browser: address shortcut')
   })
   ctx.inject(['contextMenus'], (scope) => {
     scope.effect(() => scope.contextMenus.register({
-      id: 'sidebar-browser.shortcut', target: 'shortcut', order: 20,
+      id: 'dsh-builtin-browser.shortcut', target: 'shortcut', order: 20,
       resolve: ({ sessionId, tabId, url }) => [
         {
           id: 'open', label: t('startpage.open'),
@@ -201,7 +215,7 @@ export function apply(ctx: Context): void {
       ],
     }), 'ui-sidebar-browser: shortcut menu')
     scope.effect(() => scope.contextMenus.register({
-      id: 'sidebar-browser.tab.shortcut', target: 'tab', order: 90,
+      id: 'dsh-builtin-browser.tab.shortcut', target: 'tab', order: 90,
       resolve: (target) => {
         if (target.tab.kind !== BROWSER_KIND) return []
         const face = controllers.get(target.sessionId)
@@ -230,10 +244,7 @@ export function apply(ctx: Context): void {
     }, 'ui-sidebar-browser: start-page preferences')
   })
   const openTabs = ctx.sidebarRight.openTabs
-  const carrier = (globalThis as typeof globalThis & {
-    dshDesktop?: { readonly protocolVersion: number; readonly browser?: DesktopBrowserBridge }
-  }).dshDesktop
-  const desktop = carrier?.protocolVersion === 1 ? carrier.browser : undefined
+  const desktop = desktopBrowserBridge()
   ctx.effect(() => ctx.locale.register(namespace, { zh, en, ja, es, fr, de, ru, pt }), 'ui-sidebar-browser.copy')
   ctx.effect(() => ctx.sidebarRightTabs.register({ ...browserDefinition(t), keepMounted: desktop !== undefined }), 'ui-sidebar-browser.type')
   const installFrames = (scope: Context, factory: (sessionId: BrowserBodyProps['sessionId']) => BrowserPageFactory): void => {
@@ -266,15 +277,15 @@ export function apply(ctx: Context): void {
   }
   else ctx.inject(['workspaces'], (scope) => {
     installFrames(scope, sessionId => {
-      const childApi = desktop.childTabs
+      const childApi = nativeChildTabs(desktop)
       const sidebar = scope.sidebarRight as typeof scope.sidebarRight & SidebarHostExtensions
-      const children = childApi?.protocolVersion === 2 && sidebar.openReservedTab !== undefined ? new NativeChildPresentation(childApi, sessionId,
+      const children = childApi !== undefined && sidebar.openReservedTab !== undefined ? new NativeChildPresentation(childApi, sessionId,
         tab => sidebar.openReservedTab?.(sessionId, BROWSER_KIND, tab) === true,
         tab => { sidebar.closeIn(sessionId, tab) }) : undefined
       return options => {
-        const native = desktop.nativeViews
+        const native = nativeViews(desktop)
         const workspace = (signal: AbortSignal): Promise<string> => browserWorkspace(scope.workspaces.list, sessionId, signal)
-        if (native?.protocolVersion === 1) {
+        if (native !== undefined) {
           const sidebar = scope.sidebarRight as typeof scope.sidebarRight & {
             nativeSlot?: (session: typeof sessionId, tab: TabId, address: string, viewport: string, signal: AbortSignal) => Promise<SidebarNativeSlot>
           }

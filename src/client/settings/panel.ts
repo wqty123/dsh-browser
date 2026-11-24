@@ -1,6 +1,7 @@
 import { zh, en } from '../../../assets/browser-panel-locales.mjs'
 import { REFERENCE_REVEAL_ROUTE, REFERENCE_INSERT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE, BRIDGE_STATUS_ROUTE, RUNTIME_STATUS_ROUTE, RUNTIME_PROVISION_ROUTE } from '../../../assets/browser-policy.mjs'
 import { SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../../assets/browser-policy.mjs'
+import { nativeViews } from '../../compat/host-features.ts'
 /**
  * 设置面板（客户端半）：从旧插件的 ModuleLoader bundle 机械移植而来，内部实现未改一行。
  *
@@ -573,7 +574,7 @@ const react = require("react")
           if (response.status === 404) return
           const data = await response.json()
           if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
-          if (alive.current && data.hostPatch?.surface === "web") setState(data.hostPatch)
+          if (alive.current && (data.hostPatch?.surface === "web" || data.hostPatch?.surface === "tauri")) setState(data.hostPatch)
         }).catch(failure => { if (alive.current) setError(String(failure)) })
       return () => { alive.current = false }
     }, [])
@@ -589,7 +590,7 @@ const react = require("react")
         const data = await response.json()
         if (alive.current && data.hostPatch) setState(data.hostPatch)
         if (!response.ok || data.ok !== true) throw new Error(data.error || data.hostPatch?.reason || `HTTP ${response.status}`)
-        const noticeKey = data.hostPatch.restartRequired ? "hostPatch.restart" : "hostPatch.reload"
+        const noticeKey = data.hostPatch.surface === "tauri" ? "hostPatch.restartTauri" : data.hostPatch.restartRequired ? "hostPatch.restart" : "hostPatch.reload"
         publishHostPatchNotice(noticeKey)
         if (alive.current) setNotice(noticeKey)
       } catch (failure) { if (alive.current) setError(String(failure)) }
@@ -597,7 +598,7 @@ const react = require("react")
     }
     if (state === null && error === "") return null
     return h("div", { key: "web-host-patch", style: styles.group }, [
-      h("p", { key: "state", role: "status" }, t("readiness.hostPatch") + (state ? ": " + t("readiness.hostPatch." + state.status.replaceAll(" ", "-")) : "")),
+      h("p", { key: "state", role: "status" }, t(state?.surface === "tauri" ? "readiness.hostPatch.tauri" : "readiness.hostPatch") + (state ? ": " + t((state.surface === "tauri" && state.status === "applied" ? "readiness.hostPatch.tauri." : "readiness.hostPatch.") + state.status.replaceAll(" ", "-")) : "")),
       state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
       h("div", { key: "buttons", style: styles.row }, [
         h("button", { key: "install", type: "button", style: styles.button, disabled: busy || !state?.canInstall, onClick: () => change("install") }, t(busy ? "hostPatch.working" : "hostPatch.install")),
@@ -799,11 +800,17 @@ const react = require("react")
     const systemLabel = runtime.systemBrowser?.checked === true
       ? t(runtime.systemBrowser.present ? "readiness.status.systemReady" : "readiness.status.systemMissing").replace("{browser}", systemName)
       : t("readiness.status.checkPending")
+    // A third-party desktop shell is never patched (issue #62): no bridge controls, and the system
+    // browser is recommended first because it works from this page right now.
+    const thirdPartyShell = runtime.shell?.kind === "third-party-shell"
+    const shellBrowserName = runtime.shell?.recommendedCarrier === "edge" ? "Edge" : "Chrome"
     const extensionDisconnected = runtime.extension?.state === 'not-connected' || runtime.extension?.state === 'extension-missing'
     const stateLabel = resolvedCarrier === "extension" ? extensionDisconnected ? t('extension.notConnected') : runtime.extension?.detail ?? t("readiness.state.blocked")
       : resolvedCarrier === "system" || resolvedCarrier === "cdp" ? systemLabel
       : resolvedCarrier === "sidebar"
-        ? t(runtime.bridge.state === "installed"
+        ? thirdPartyShell ? t("readiness.status.thirdPartyShell")
+        : runtime.shell?.kind === "tauri" ? t(runtime.shell.hostPatch?.status === "applied" ? "readiness.status.tauriReady" : "readiness.status.tauriPatchMissing")
+        : t(runtime.bridge.state === "installed"
           ? runtime.bridge.running === true ? "readiness.status.bridgeReady"
             : runtime.bridge.running === false ? "readiness.status.bridgeStopped" : "readiness.status.bridgeInstalled"
           : runtime.bridge.state === "stale" ? "readiness.status.bridgeStale"
@@ -821,7 +828,7 @@ const react = require("react")
       finally { setBusy(false); void read() }
     }
     const extensionButton = h("button", { key: "install-extension", type: "button", style: styles.button, disabled: controlsBusy, onClick: extensionAction }, t('extension.button'))
-    const canManageBridge = runtime.bridge.present === true && runtime.bridge.state !== "absent"
+    const canManageBridge = runtime.shell?.patchable !== false && runtime.bridge.present === true && runtime.bridge.state !== "absent"
     const extensionUnsupported = runtime.bridge.code === "DESKTOP_MAIN_EXTENSION_UNSUPPORTED"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
     const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
@@ -851,6 +858,10 @@ const react = require("react")
           extensionButton,
         ]),
         h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
+      ]) : null,
+      thirdPartyShell ? h("div", { key: "third-party-shell", role: "status" }, [
+        h("p", { key: "use-browser", style: styles.hint }, t("readiness.shell.thirdParty.useBrowser").replaceAll("{browser}", shellBrowserName)),
+        h("p", { key: "official", style: styles.hint }, t("readiness.shell.thirdParty.official")),
       ]) : null,
       !canManageBridge ? extensionButton : null,
       extensionMessage ? h('p', { key: 'extension-message', role: 'status', style: styles.hint }, extensionMessage) : null,
@@ -1381,6 +1392,13 @@ const react = require("react")
   }
 
   /**
+   * DSH 0.2.2-rc.3 has no `data-sidebar-right-session` markers, so its tab strip is found by its
+   * CSS Modules class. This is the only class-name lookup: every shell with the markers takes
+   * `panelRootsFor` instead.
+   */
+  const LEGACY_TAB_STRIP_SELECTOR = "[class*=_tabStrip]"
+
+  /**
    * This conversation's own sidebar strip, or null when the shell has not mounted it.
    *
    * Its presence is the precondition `openTabIn` needs: it is minted together with the
@@ -1389,7 +1407,7 @@ const react = require("react")
    * the caller can report, instead of a page that never appears.
    */
   function tabStripFor(sessionId) {
-    for (const strip of Array.from(document.querySelectorAll("[class*=_tabStrip]"))) {
+    for (const strip of Array.from(document.querySelectorAll(LEGACY_TAB_STRIP_SELECTOR))) {
       if (sessionIdOfElement(strip) === sessionId) return strip
     }
     return null
@@ -1434,7 +1452,7 @@ const react = require("react")
     // still reached.
     let node = strip
     while (node !== null && node !== undefined && node !== document.body) {
-      const foreign = Array.from(node.querySelectorAll("[class*=_tabStrip]"))
+      const foreign = Array.from(node.querySelectorAll(LEGACY_TAB_STRIP_SELECTOR))
         .some(el => sessionIdOfElement(el) !== sessionId)
       if (foreign) break
       const found = Array.from(node.querySelectorAll("webview")).filter(view => {
@@ -1451,7 +1469,7 @@ const react = require("react")
   function guestStateFor(sessionId, tabId, initializationReader) {
     const roots = panelRootsFor(sessionId)
     if (roots === undefined ? tabStripFor(sessionId) === null : roots.length === 0) return { panel: false, guestId: null, url: "" }
-    if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof tabId === "string") {
+    if (nativeViews() !== undefined && typeof tabId === "string") {
       const page = initializationReader?.current({ sessionId, tabId })
       return { panel: true, guestId: page?.guestId ?? null, url: page?.url ?? "", ...page?.generation === undefined ? {} : { nativeState: page } }
     }
@@ -1822,7 +1840,7 @@ const react = require("react")
         return { ok: false, code: "BROWSER_GUEST_CLOSED", reason: "the native tab for this browser view was closed; close or reset the view before retrying", panel: true, guestId: null }
       }
       const guests = guestsInPanel(sessionId)
-      const hasNativeGuest = globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1 && typeof guestId === "string"
+      const hasNativeGuest = nativeViews() !== undefined && typeof guestId === "string"
       const hasCachedGuest = (Number.isInteger(guestId) && guestId > 0) || hasNativeGuest
       if (binding === undefined && hasNativeGuest) {
         const cached = browsers.find(tab => initializationReader?.current({ sessionId, tabId: tab.id })?.guestId === guestId)
@@ -1858,7 +1876,7 @@ const react = require("react")
         try { globalThis.__dshSidebarSessionId = sessionId } catch { /* non-writable global */ }
         const before = new Set(tabs.map(tab => tab.id))
         try {
-          if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1
+          if (nativeViews() !== undefined
             && typeof sidebarRight.openReservedTab === "function") {
             const id = globalThis.crypto.randomUUID()
             if (!sidebarRight.openReservedTab(sessionId, "browser", id)) return { ok: false, reason: "the shell refused this browser tab reservation" }
@@ -1959,7 +1977,7 @@ const react = require("react")
         const transaction = { controller, transactionId: options.transactionId }
         let placed
         const closeNative = () => {
-          if (globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion !== 1 || typeof placed?.tabId !== "string") return
+          if (nativeViews() === undefined || typeof placed?.tabId !== "string") return
           sidebarRight.closeIn?.(sessionId, placed.tabId)
           if (pendingTabs.get(key)?.id === placed.tabId) pendingTabs.delete(key)
         }
@@ -1973,7 +1991,7 @@ const react = require("react")
           if (controller.signal.aborted) { closeNative(); controller.signal.throwIfAborted() }
           if (!answer.ok) return answer
           const rendererNavigation = url !== "" && (answer.created || answer.navigating)
-          if (!rendererNavigation && answer.guestId !== null) return globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1
+          if (!rendererNavigation && answer.guestId !== null) return nativeViews() !== undefined
             ? { ...answer, nativeState: reader.current({ sessionId, tabId: answer.tabId }) } : answer
           if (typeof answer.tabId !== "string") return refuse("panel-initialization-failed", "the shell did not acknowledge its native tab identity")
           const receipt = await reader.wait({ sessionId, tabId: answer.tabId, url }, controller.signal)
@@ -2095,7 +2113,7 @@ const react = require("react")
           // causes — the shell has mounted no sidebar for this conversation (nothing this side can
           // do), or it writes its session id somewhere this lookup does not read (fixable) — and a
           // refusal that says only "not mounted" cannot tell them apart.
-          const strips = Array.from(document.querySelectorAll("[class*=_tabStrip]"))
+          const strips = Array.from(document.querySelectorAll(LEGACY_TAB_STRIP_SELECTOR))
           return {
             ok: false,
             reason: "this conversation's sidebar is not mounted, so a panel cannot be opened in it",
@@ -2151,7 +2169,7 @@ const react = require("react")
       closePanelGuest(sessionId, guestId) {
         const refuse = reason => ({ ok: false, reason, closed: 0 })
         if (typeof sessionId !== "string" || !/^session-/.test(sessionId)) return refuse("a conversation id is required")
-        if (typeof guestId === "string" && globalThis.dshDesktop?.browser?.nativeViews?.protocolVersion === 1) {
+        if (typeof guestId === "string" && nativeViews() !== undefined) {
           const tabs = sidebarRight.tabsIn(sessionId)
           const tab = tabs.find(tab => tab.kind === "browser" && initializationReader?.current({ sessionId, tabId: tab.id })?.guestId === guestId)
           if (tab === undefined || typeof sidebarRight.closeIn !== "function") return refuse("the native guest does not belong to this conversation")

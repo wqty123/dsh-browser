@@ -1,62 +1,13 @@
 import { DEFAULT_OPERATION_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 import type { BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserContentRequest, BrowserContentResult, BrowserScrapeRequest, BrowserScrapeResult, BrowserSessionId, BrowserSnapshotResult, BrowserWaitRequest, BrowserWaitResult } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
-import { PROVIDER_TIMEOUTS, TARGET_SCRIPT_GRACE_MS, delay, withTimeout, handleSendEvaluate } from './provider-core.ts'
+import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
+import { challengeDetectSource } from '../browser/anti-bot.ts'
+import { PROVIDER_TIMEOUTS, TARGET_SCRIPT_GRACE_MS, delay, pagePollSlice, withTimeout, handleSendEvaluate } from './provider-core.ts'
 import { ProviderNavigation } from './provider-navigation.ts'
 
-/**
- * Page-context human-verification (CAPTCHA / bot-detection) detection. Runs
- * inside the page; returns `{ blocked, kind?, reason? }`. Marker-based and
- * best-effort: checks for Cloudflare's interstitial, hCaptcha, reCAPTCHA,
- * Turnstile, and generic challenge wording.
- */
-const CHALLENGE_DETECT_EXPRESSION = `(() => {
-  const title = (document.title || '').trim()
-  const bodyText = (document.body && document.body.innerText || '').slice(0, 4000)
-  // Challenge widgets often live in same-origin iframes or shadow roots;
-  // scan those too (cross-origin frames stay opaque).
-  let extraText = ''
-  try {
-    const seen = new Set()
-    const scan = (doc) => {
-      if (seen.has(doc)) return
-      seen.add(doc)
-      for (const el of doc.querySelectorAll('*')) {
-        if (el.shadowRoot) {
-          extraText += (el.shadowRoot.textContent || '').slice(0, 2000)
-          scan(el.shadowRoot)
-        }
-        if (el.tagName === 'IFRAME') {
-          try {
-            const d = el.contentDocument
-            if (d) {
-              extraText += ((d.body && d.body.innerText) || '').slice(0, 2000)
-              scan(d)
-            }
-          } catch { /* cross-origin */ }
-        }
-      }
-    }
-    scan(document)
-  } catch { /* never fail the challenge check */ }
-  const lower = (title + '\\n' + bodyText + '\\n' + extraText).toLowerCase()
-  const frameSrcs = [...document.querySelectorAll('iframe')].map(f => f.src || '').join(' ')
-  const framesLower = frameSrcs.toLowerCase()
-  const hasCfInterstitial = /just a moment|checking your browser|attention required|cf_chl/i.test(lower)
-    || !!document.querySelector('#challenge-running, #challenge-stage, #cf-chl-container')
-  const hasHCaptcha = !!window.hcaptcha || !!document.querySelector('.h-captcha') || /hcaptcha\\.com/i.test(framesLower)
-  const hasRecaptcha = !!window.grecaptcha || !!document.querySelector('.g-recaptcha') || /recaptcha\\/api|google\\.com\\/recaptcha/i.test(framesLower)
-  const hasTurnstile = !!window.turnstile || /challenges\\.cloudflare\\.com/i.test(framesLower) || /turnstile|challenge-platform/i.test(lower)
-  const verifyWording = /verify you are human|verify you are not a robot|\\u4eba\\u673a\\u9a8c\\u8bc1|\\u5b89\\u5168\\u9a8c\\u8bc1|enable javascript and cookies|\\u8bf7.*\\u9a8c\\u8bc1/i.test(lower)
-  if (hasCfInterstitial) return { blocked: true, kind: 'cloudflare', reason: 'Cloudflare "Just a moment" interstitial' }
-  if (hasHCaptcha) return { blocked: true, kind: 'hcaptcha', reason: 'hCaptcha verification' }
-  if (hasRecaptcha) return { blocked: true, kind: 'recaptcha', reason: 'Google reCAPTCHA verification' }
-  if (hasTurnstile) return { blocked: true, kind: 'turnstile', reason: 'Cloudflare Turnstile verification' }
-  if (verifyWording && /challenge|captcha|verification|security check|access denied|blocked|\\u9a8c\\u8bc1/i.test(lower)) {
-    return { blocked: true, kind: 'generic', reason: 'Human-verification challenge' }
-  }
-  return { blocked: false }
-})()`
+/** Page-context block / human-verification detection; the classifier lives in `browser/anti-bot.ts`. */
+const CHALLENGE_DETECT_EXPRESSION = challengeDetectSource()
 
 /** Cap on content returned by a snapshot fetch to keep the wire bounded. */
 const SNAPSHOT_LABEL_MAX = 120
@@ -77,16 +28,10 @@ export abstract class ProviderObservation extends ProviderNavigation {
     const url = request.url ?? ''
     const selector = request.selector ?? ''
     const checkLoaded = request.loaded !== false
-    const expression = `(() => {
+    const expression = `(() => {${DEEP_DOM_SOURCE}
       const wantUrl = ${JSON.stringify(url)}
       const wantSelector = ${JSON.stringify(selector)}
-      const inDoc = (doc, sel) => {
-        if (doc.querySelector(sel)) return true
-        for (const el of doc.querySelectorAll('iframe')) {
-          try { const d = el.contentDocument; if (d && inDoc(d, sel)) return true } catch { /* cross-origin */ }
-        }
-        return false
-      }
+      const inDoc = (_doc, sel) => { try { return __dshQuery(sel) !== null } catch { return false } }
       const href = location.href
       // Exact match wins; otherwise prefix-match within the SAME origin only,
       // so wantUrl "https://a.com" never matches a cross-origin page whose
@@ -528,7 +473,13 @@ export abstract class ProviderObservation extends ProviderNavigation {
       throw new BrowserError(`browser: challenge detection failed: ${result.exception}`, 'BROWSER_CHALLENGE_DETECT_FAILED')
     }
     const value = result.value as BrowserChallenge
-    return { blocked: value.blocked === true, kind: value.kind, reason: value.reason }
+    return {
+      blocked: value.blocked === true,
+      kind: value.kind,
+      reason: value.reason,
+      ...value.recovery !== undefined ? { recovery: value.recovery } : {},
+      ...typeof value.status === 'number' ? { status: value.status } : {},
+    }
   }
 
   /** Fetch page content in a requested format. */
@@ -547,8 +498,8 @@ export abstract class ProviderObservation extends ProviderNavigation {
     const maxChars = request.maxChars
       ?? this.contentMaxChars
       ?? (format === 'html' || format === 'json' ? 50_000 : 20_000)
-    const script = `(() => {
-      const root = ${selector === '' ? 'document.body' : `document.querySelector(${JSON.stringify(selector)})`}
+    const script = `(() => {${DEEP_DOM_SOURCE}
+      const root = ${selector === '' ? 'document.body' : `__dshQuery(${JSON.stringify(selector)})`}
       if (!root) return { ok: false, reason: 'selector not found' }
       const fmt = ${JSON.stringify(format)}
       // Both walkers pierce shadow roots and same-origin iframes (cross-origin
@@ -651,24 +602,25 @@ export abstract class ProviderObservation extends ProviderNavigation {
     const tab = this.activeTab(s)
     signal?.throwIfAborted()
     const timeoutMs = request.timeoutMs ?? PROVIDER_TIMEOUTS.interaction
-    const script = `(async () => {
+    const script = (sliceMs: number, last: boolean): string => `(async () => {${DEEP_DOM_SOURCE}
       const itemSel = ${JSON.stringify(request.item)}
       const fields = ${JSON.stringify(request.fields)}
-      const timeoutMs = ${String(timeoutMs)}
+      const sliceMs = ${String(sliceMs)}
+      const last = ${String(last)}
       const sleep = ms => new Promise(r => setTimeout(r, ms))
       const parseField = f => {
         const m = /^(.*)@([A-Za-z][A-Za-z0-9_-]*)$/.exec(f.selector.trim())
         if (m) return { base: m[1].trim(), attr: m[2] }
         return { base: f.selector, attr: null }
       }
-      const deadline = Date.now() + timeoutMs
+      const deadline = Date.now() + sliceMs
       let items = []
       for (;;) {
         // Immediate, like match() above: an unparseable selector can never match.
-        try { items = Array.from(document.querySelectorAll(itemSel)) }
+        try { items = __dshQueryAll(itemSel) }
         catch (error) { return { ok: false, error: 'invalid CSS selector ' + JSON.stringify(itemSel) + ' (' + String((error && error.message) || error) + ')' } }
         if (items.length > 0) break
-        if (Date.now() >= deadline) return { ok: false, error: 'no elements matched: ' + itemSel }
+        if (Date.now() >= deadline) return last ? { ok: false, error: 'no elements matched: ' + itemSel } : { pending: true }
         await sleep(100)
       }
       const out = []
@@ -681,7 +633,7 @@ export abstract class ProviderObservation extends ProviderNavigation {
           if (!el) { row[f.name] = null; continue }
           if (attr !== null) {
             const v = el.getAttribute(attr)
-            row[f.name] = attr === 'href' && el.tagName === 'A' && v ? new URL(v, location.href).href : v
+            row[f.name] = attr === 'href' && el.tagName === 'A' && v ? new URL(v, el.baseURI).href : v
             continue
           }
           row[f.name] = (el.textContent || '').trim()
@@ -690,15 +642,20 @@ export abstract class ProviderObservation extends ProviderNavigation {
       }
       return { ok: true, count: out.length, items: out }
     })()`
-    const result = await withTimeout(
-      handleSendEvaluate(tab.handle, script),
-      timeoutMs + TARGET_SCRIPT_GRACE_MS,
-      signal,
-      `browser: scrape timed out after ${timeoutMs}ms`,
-      timedOut => { this.interrupt(tab.handle, timedOut) },
-    )
-    if (!result.ok) throw new BrowserError(`browser: scrape evaluation failed: ${result.exception}`, 'BROWSER_SCRAPE_FAILED')
-    const value = result.value as { ok?: boolean; error?: string; count?: number; items?: Record<string, string | null>[] }
+    const deadline = Date.now() + timeoutMs
+    let value: { ok?: boolean; pending?: boolean; error?: string; count?: number; items?: Record<string, string | null>[] }
+    do {
+      const { sliceMs, last } = pagePollSlice(deadline)
+      const result = await withTimeout(
+        handleSendEvaluate(tab.handle, script(sliceMs, last)),
+        Math.max(sliceMs, deadline - Date.now()) + TARGET_SCRIPT_GRACE_MS,
+        signal,
+        `browser: scrape timed out after ${timeoutMs}ms`,
+        timedOut => { this.interrupt(tab.handle, timedOut) },
+      )
+      if (!result.ok) throw new BrowserError(`browser: scrape evaluation failed: ${result.exception}`, 'BROWSER_SCRAPE_FAILED')
+      value = result.value as typeof value
+    } while (value?.pending === true)
     if (value.ok !== true) throw new BrowserError(`browser: scrape failed: ${value.error ?? 'unknown'}`, 'BROWSER_SCRAPE_FAILED')
     const items = value.items ?? []
     this.record(s, 'scrape', { item: request.item, fields: request.fields.map(f => f.name) }, true, { result: `${items.length} items` })

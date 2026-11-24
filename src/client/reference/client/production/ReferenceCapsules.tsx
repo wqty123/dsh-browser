@@ -242,7 +242,7 @@ export function ReferenceCapsules({ sessionId, cards, actions, labels, notice, r
         <span className={css.badge} aria-hidden>{card.index}</span>
         <span className={css.label}>{card.excerpt || card.source.title || card.source.host}</span>
         {/* 这个位置原来是装饰性灰点：直接换成可点的删除键（交叉线由 CSS 画，避免字形缺失渲染成圆点）。 */}
-        {!readOnly && <span
+        {!readOnly && actions.onRemove !== undefined && <span
           role="button"
           tabIndex={0}
           className={css.chipRemove}
@@ -307,8 +307,8 @@ export function ReferenceCapsules({ sessionId, cards, actions, labels, notice, r
                   ? undefined
                   : { id: active.referenceId, value: active.comment ?? '' })
               }}><IconEditOutlineRegular size={14} /></button></Tooltip>
-            <Tooltip label={labels.remove} portal><button type="button" aria-label={labels.remove} className={css.icon}
-              onClick={() => { close(); actions.onRemove?.(active.referenceId) }}><IconTrashOutlineRegular size={14} /></button></Tooltip>
+            {actions.onRemove !== undefined && <Tooltip label={labels.remove} portal><button type="button" aria-label={labels.remove} className={css.icon}
+              onClick={() => { close(); actions.onRemove?.(active.referenceId) }}><IconTrashOutlineRegular size={14} /></button></Tooltip>}
           </div>}
         </div>
         <div className={css.parts}>{active.parts.map((part, index) => <Part key={`${part.kind}:${index}`} part={part} labels={labels} />)}</div>

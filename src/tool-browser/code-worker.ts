@@ -8,7 +8,7 @@
 import { Script, createContext, runInContext } from 'node:vm'
 import { inspect } from 'node:util'
 
-type Reply = { readonly type: 'reply'; readonly id: number; readonly value?: unknown; readonly text?: string; readonly error?: string }
+type Reply = { readonly type: 'reply'; readonly id: number; readonly value?: unknown; readonly text?: string; readonly error?: string; readonly code?: string }
 type Run = { readonly type: 'run'; readonly code: string }
 
 const send = (message: unknown): void => { process.send?.(message) }
@@ -23,30 +23,40 @@ function format(value: unknown): string {
 }
 const log = (...values: unknown[]): void => { send({ type: 'log', text: values.map(format).join(' ') }) }
 
+const SLEEP_HINT_AFTER = 3
+const SLEEP_HINT = `[hint] sleep() called ${SLEEP_HINT_AFTER} times in this cell; wait on the condition instead: wait_for_element, wait_for_text, wait_for_gone, wait_until(expr) or wait_for_response(url, trigger).`
+let sleepsThisCell = 0
+
+/** A failed browser tool call (a helper or `tools.*`), named after the tool, like DSH run_code's ToolCallError. */
+class ToolCallError extends Error {
+  readonly toolName: string
+  readonly code: string | undefined
+  constructor(toolName: string, message: string, code?: string) {
+    super(message)
+    this.name = 'ToolCallError'
+    this.toolName = toolName
+    this.code = code
+  }
+}
+
 async function ask(name: string, args: Record<string, unknown> = {}): Promise<Reply> {
   const id = ++seq
   const reply = await new Promise<Reply>(resolve => { pending.set(id, { resolve }); send({ type: 'call', id, name, args }) })
-  if (reply.error !== undefined) throw new Error(reply.error)
+  if (reply.error !== undefined) {
+    if (name.startsWith('__')) throw new Error(reply.error)
+    throw new ToolCallError(name.startsWith('dsh_browser_') ? name : `dsh_browser_${name}`, reply.error, reply.code)
+  }
   return reply
 }
 const value = async (name: string, args?: Record<string, unknown>): Promise<unknown> => (await ask(name, args)).value
 
-/** A failed `tools.*` call, named after the tool, like DSH run_code's ToolCallError. */
-class ToolCallError extends Error {
-  readonly toolName: string
-  constructor(toolName: string, message: string) {
-    super(message)
-    this.name = 'ToolCallError'
-    this.toolName = toolName
-  }
-}
-
 /** DSH run_code-style bindings: `await tools.dsh_browser_snapshot({})` resolves to the tool's JSON value. */
 const tools: Record<string, (args?: Record<string, unknown>) => Promise<unknown>> = new Proxy(Object.create(null), {
-  get: (_target, name) => typeof name !== 'string' || name === 'then' ? undefined : async (args: Record<string, unknown> = {}) => {
-    try { return (await ask(name, args)).value } catch (error) { throw new ToolCallError(name, error instanceof Error ? error.message : String(error)) }
-  },
+  get: (_target, name) => typeof name !== 'string' || name === 'then' ? undefined : (args: Record<string, unknown> = {}) => value(name, args),
 })
+interface TabRow { readonly id: string; readonly url: string; readonly active: boolean }
+/** The task's tabs, read without a trace entry (wait_for_new_tab polls this). */
+const tabs = async (): Promise<readonly TabRow[]> => ((await value('__tabs')) as { tabs?: readonly TabRow[] }).tabs ?? []
 const text = async (name: string, args?: Record<string, unknown>): Promise<string> => (await ask(name, args)).text ?? ''
 
 export type Target = string | { css?: string; text?: string; xpath?: string; by?: string; value?: string; index?: number; x?: number; y?: number }
@@ -525,6 +535,29 @@ const helpers = {
   list_tabs: () => value('list_tabs'),
   switch_tab: (tabId: string) => text('switch_tab', { tabId }),
   close_tab: (tabId: string) => text('close_tab', { tabId }),
+  wait_for_new_tab: async (trigger?: (() => unknown) | number, timeoutMs?: number): Promise<TabRow> => {
+    const budget = typeof trigger === 'number' ? trigger : timeoutMs ?? 10_000
+    const known = new Set((await tabs()).map(tab => tab.id))
+    if (typeof trigger === 'function') await trigger()
+    const deadline = Date.now() + Math.min(Math.max(Number(budget) || 0, 0), 600_000)
+    for (;;) {
+      const fresh = (await tabs()).filter(tab => !known.has(tab.id))
+      if (fresh.length > 0) return fresh[fresh.length - 1]!
+      if (Date.now() >= deadline) throw new Error(`no new tab opened within ${budget}ms`)
+      await new Promise<void>(done => setTimeout(done, 150))
+    }
+  },
+  with_tab: async <T>(tabId: string, fn: () => T | Promise<T>): Promise<T> => {
+    if (typeof fn !== 'function') throw new TypeError('with_tab(tabId, fn) needs a function')
+    const previous = (await tabs()).find(tab => tab.active)?.id
+    if (previous !== tabId) await text('switch_tab', { tabId })
+    try {
+      return await fn()
+    } finally {
+      const now = await tabs()
+      if (previous !== undefined && now.find(tab => tab.active)?.id !== previous && now.some(tab => tab.id === previous)) await text('switch_tab', { tabId: previous })
+    }
+  },
   js: (script: string) => js(script),
   click_at_xy: (x: number, y: number) => text('click', { x, y }),
   type_text: (input: string) => text('type', { text: input }),
@@ -565,6 +598,42 @@ const helpers = {
     if (!out.ok) throw new Error(`wait_for_network_idle: ${out.reason ?? 'not idle'}`)
     return true
   },
+  // Deterministic waits: each returns as soon as its condition holds and throws when it never does.
+  wait_for_text: async (needle: string, timeoutMs?: number) => { await doStep('wait_for_text', { wait_text: { text: needle } }, timeoutMs); return true },
+  wait_for_gone: async (needle: string, timeoutMs?: number) => { await doStep('wait_for_gone', { wait_gone: { text: needle } }, timeoutMs); return true },
+  wait_until: async (expression: string, opts: { timeoutMs?: number; intervalMs?: number } = {}): Promise<unknown> => {
+    if (typeof expression !== 'string') throw new Error('wait_until(expression): pass page JavaScript as a string, e.g. wait_until("document.querySelectorAll(\'.row\').length >= 20")')
+    const out = await doStep('wait_until', { wait_js: { script: pageScript(expression), ...opts.intervalMs !== undefined ? { intervalMs: opts.intervalMs } : {} } }, opts.timeoutMs ?? 10_000)
+    const raw = out.log.at(-1)?.value
+    return raw === undefined ? true : JSON.parse(raw)
+  },
+  wait_for_response: async (urlContains: string, trigger?: (() => unknown) | { status?: number; timeoutMs?: number }, opts: { status?: number; timeoutMs?: number } = {}): Promise<unknown> => {
+    if (typeof trigger === 'object' && trigger !== null) { opts = trigger; trigger = undefined }
+    // Sent before the trigger runs: the scheduler holds the trigger until the watcher has its cursor.
+    const pending = value('wait_for_response', { urlContains, ...opts })
+    pending.catch(() => undefined)
+    if (typeof trigger === 'function') await trigger()
+    const out = await pending as { matched: boolean; reason: string; entry?: unknown }
+    if (!out.matched) throw new Error(`wait_for_response: ${out.reason}`)
+    return out.entry
+  },
+  // Data first: what the page already holds, and its JSON APIs read with the page's own cookies.
+  inspect_data_sources: () => value('data_sources'),
+  fetch_json: async (url: string, init: { method?: string; headers?: Record<string, string>; body?: unknown } = {}): Promise<unknown> => {
+    const headers = { ...init.headers }
+    let body = init.body
+    if (body !== undefined && typeof body !== 'string') {
+      body = JSON.stringify(body)
+      if (!Object.keys(headers).some(key => key.toLowerCase() === 'content-type')) headers['content-type'] = 'application/json'
+    }
+    const out = await value('fetch_json', {
+      url,
+      ...init.method !== undefined ? { method: init.method } : {},
+      ...Object.keys(headers).length > 0 ? { headers } : {},
+      ...body !== undefined ? { body } : {},
+    }) as { body: string }
+    return JSON.parse(out.body)
+  },
   upload_file: (selector: string, path: string) => text('upload', { target: { by: 'css', value: selector }, path }),
   // Semantic helpers over the dsh tools.
   click: (target: Target) => text('click', targetArgs(target)),
@@ -602,16 +671,32 @@ const helpers = {
   },
   call: (name: string, args: Record<string, unknown> = {}) => value(name, args),
   help: (name?: string) => value('__help', name === undefined ? {} : { name }),
-  sleep: (ms: number) => new Promise<void>(done => setTimeout(done, Math.min(Math.max(Number(ms) || 0, 0), 60_000))),
+  sleep: (ms: number) => {
+    if (++sleepsThisCell === SLEEP_HINT_AFTER) log(SLEEP_HINT)
+    return new Promise<void>(done => setTimeout(done, Math.min(Math.max(Number(ms) || 0, 0), 60_000)))
+  },
   print: log,
   log,
   console: { log, info: log, warn: log, error: log, debug: log },
+}
+
+async function doStep(label: string, step: Record<string, unknown>, timeoutMs?: number): Promise<{ log: { value?: string }[] }> {
+  const out = await value('do', { steps: [step], ...timeoutMs !== undefined ? { timeoutMs } : {} }) as { ok: boolean; reason?: string; log: { value?: string }[] }
+  if (!out.ok) throw new Error(`${label}: ${out.reason ?? 'condition never held'}`)
+  return out
 }
 
 async function js(script: string): Promise<unknown> {
   const out = await value('execute', { script: pageScript(script) }) as { ok: boolean; value?: string; exception?: string }
   if (!out.ok) throw new Error(`js: ${out.exception ?? 'page script failed'}`)
   return out.value === undefined ? undefined : JSON.parse(out.value)
+}
+
+/** How a cell's uncaught error reads in the output: a tool failure names its tool. */
+function describe(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  if (error instanceof ToolCallError) return `ToolCallError (${error.toolName}): ${error.message}`
+  return `${error.name === 'Error' ? '' : `${error.name}: `}${error.message}`
 }
 
 const context = createContext({ ...helpers, open: helpers.goto_url, press: helpers.press_key, tools, ToolCallError })
@@ -624,13 +709,14 @@ process.on('message', (message: Reply | Run) => {
     return
   }
   if (message.type === 'run') {
+    sleepsThisCell = 0
     void (async () => {
       try {
         const result = await (runInContext(`(async () => {\n${prepare(message.code)}\n})()`, context, { filename: 'cell.js' }) as Promise<unknown>)
         if (result !== undefined) log(result)
         send({ type: 'done', ok: true })
       } catch (error) {
-        send({ type: 'done', ok: false, error: error instanceof Error ? `${error.name === 'Error' ? '' : `${error.name}: `}${error.message}` : String(error) })
+        send({ type: 'done', ok: false, error: describe(error) })
       }
     })()
   }

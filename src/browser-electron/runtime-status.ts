@@ -21,6 +21,7 @@
  * @module dsh-browser/browser-electron/runtime-status
  */
 import type { BridgeStatus } from './bridge-status.ts'
+import type { DesktopShellReport } from './desktop-shell.ts'
 import type { BridgeEndpointState } from './bridge-endpoint.ts'
 import type { ProvisionSnapshot } from './electron-provision.ts'
 import type { ExtensionConnectionStatus } from '../../native-host/client.mjs'
@@ -99,6 +100,8 @@ export interface RuntimeStatusReport {
   readonly executable?: string
   readonly electron: ElectronReadiness
   readonly bridge: BridgeReadiness
+  /** The desktop shell found on this machine; only a patchable one gets bridge install / repair. */
+  readonly shell?: DesktopShellReport
   /** Whether "Prepare the bundled browser" is worth offering (it is not while one is running). */
   readonly canProvision: boolean
 }
@@ -118,6 +121,8 @@ export interface RuntimeStatusDeps {
   /** The desktop install's bridge state, or undefined when there is no desktop install. */
   readonly bridge: () => BridgeStatus | undefined
   readonly bridgeError?: () => string | undefined
+  /** The desktop shell classification; omitted by hosts that only report the bridge. */
+  readonly shell?: () => DesktopShellReport
   /** The endpoint the shell publishes while it runs; undefined when nothing published one. */
   readonly endpoint: () => BridgeEndpointState | undefined
   /** The launch path's filesystem-only browser discovery; defaults to the production reader. */
@@ -192,7 +197,10 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
 
   // The sidebar needs BOTH halves: our patch inside the shell it will be driven through, and that
   // shell actually running. Either one alone is the false green this report exists to prevent.
-  const sidebarReady = bridge.state === 'installed' && bridge.running
+  // On DSH Tauri the patch is the host patch, which starts the same bridge inside electron-rs.
+  const shell = deps.shell?.()
+  const sidebarReady = bridge.running && (bridge.state === 'installed'
+    || (shell?.kind === 'tauri' && shell.running === true && shell.hostPatch?.status === 'applied'))
 
   const selected = preferExtension ? deps.selectedCarrier?.() ?? (extension?.connected ? 'extension' : 'cdp') : undefined
   const checkSystemBrowser = carrier === 'system' || selected === 'cdp'
@@ -237,6 +245,7 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
     ...resolvedCarrier === 'system' && detected !== undefined ? { executable: detected.path } : {},
     electron,
     bridge,
+    ...shell === undefined ? {} : { shell },
     canProvision: false,
   }
 }

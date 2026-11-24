@@ -3,11 +3,14 @@
  * @module dsh-browser/tool-browser/tools-observation
  */
 
+import { annotationLines, clearAnnotations, drawAnnotations, type ScreenshotAnnotation } from './screenshot-annotations.ts'
 import type { ImageBlock } from '@deepseek-ai/dsh-llm'
 import { SCREENSHOT_MAX_WIDTH, SCREENSHOT_MAX_HEIGHT, screenshotDimension, screenshotBytes, screenshotVisionEnabled, saveScreenshotImage } from './screenshot-image.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { CHALLENGE_SCHEMA, challengeBanner, reportChallenge, type ChallengeReport } from './block-recovery.ts'
 import { NODE_ITEM_SCHEMA, projectElement, projectNode } from './element-fields.ts'
-import { assertAllowed, agentOf, taskKey, ensureSession, type ToolScope, type ToolDefinition } from './state.ts'
+import { assertCapability } from '../browser/types.ts'
+import { assertAllowed, agentOf, taskKey, ensureSession, carrierCapabilities, type ToolScope, type ToolDefinition } from './state.ts'
 import { installProbe, probe, type ProbeRow } from './probe-client.ts'
 
 /**
@@ -26,7 +29,7 @@ export function formatSnapshot(snapshot: {
   title?: string
   elements: readonly { ref: number; kind: string; label: string; x: number; y: number; frame?: boolean; selector?: string }[]
   truncated?: boolean
-  challenge?: { blocked: boolean; kind?: string; reason?: string }
+  challenge?: ChallengeReport
   blank?: boolean
   note?: string
   canvas?: boolean
@@ -45,9 +48,7 @@ export function formatSnapshot(snapshot: {
         + 'A DOM snapshot cannot describe it; use `dsh_browser_screenshot` and coordinate clicks.'
       : lines.length > 0 ? lines.join('\n') : '(no interactive elements found)'
   const tail = snapshot.truncated === true ? '\n(snapshot truncated)' : ''
-  const banner = snapshot.challenge?.blocked === true
-    ? `\n\nCHALLENGE: ${snapshot.challenge.reason ?? 'human-verification'}. Do NOT keep retrying — ask the human to complete it in the shared browser window, then re-snapshot.`
-    : ''
+  const banner = challengeBanner(snapshot.challenge)
   return `${header}\n\n${body}${tail}${banner}`
 }
 
@@ -96,15 +97,7 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
               },
             },
           },
-          challenge: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              blocked: { type: 'boolean', required: true },
-              kind: { type: 'string' },
-              reason: { type: 'string' },
-            },
-          },
+          challenge: CHALLENGE_SCHEMA,
         },
       },
       render: (args, value) => [{ type: 'text', text: formatSnapshot(value, { coords: args.coords === true }) }],
@@ -122,7 +115,7 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
         ...snapshot.title !== undefined ? { title: snapshot.title } : {},
         elements: snapshot.elements.map(el => projectElement(el)),
         truncated: snapshot.truncated,
-        ...snapshot.challenge !== undefined ? { challenge: snapshot.challenge } : {},
+        ...snapshot.challenge !== undefined ? { challenge: reportChallenge(snapshot.challenge, snapshot.url) } : {},
       }
     },
   }))
@@ -215,24 +208,13 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'dsh_browser_challenge',
-    description: 'Check whether a human-verification challenge (CAPTCHA / bot detection: Cloudflare "Just a moment", reCAPTCHA, hCaptcha, Turnstile) is blocking the current page. When blocked, do NOT keep retrying automated steps — ask the human to complete the verification in the shared browser window, then re-check with dsh_browser_snapshot.',
+    description: 'Check whether the current page is a bot wall: a human verification (CAPTCHA, slider, press-and-hold, Cloudflare Turnstile), a "Just a moment" interstitial, an access-denied/429 refusal, or a network (IP) block. Returns the kind, what to do (recovery: takeover | wait | retry | environment) and public fallback routes (site API, search results, archives). Never solve or retry a human verification: call dsh_browser_request_takeover.',
     parameters: {},
     output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          blocked: { type: 'boolean', required: true },
-          kind: { type: 'string' },
-          reason: { type: 'string' },
-          hint: { type: 'string' },
-        },
-      },
+      schema: CHALLENGE_SCHEMA,
       render: (_args, value) => [{
         type: 'text',
-        text: value.blocked
-          ? `Challenge detected: ${value.reason ?? value.kind ?? 'human-verification'}. ${value.hint ?? ''}`
-          : 'No human-verification challenge detected.',
+        text: value.blocked ? challengeBanner(value).trimStart() : 'No challenge or block detected.',
       }],
     },
     timeoutMs,
@@ -242,14 +224,8 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
       if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const challenge = await browser.detectChallenge(session, exec.signal)
-      return {
-        blocked: challenge.blocked,
-        ...challenge.kind !== undefined ? { kind: challenge.kind } : {},
-        ...challenge.reason !== undefined ? { reason: challenge.reason } : {},
-        hint: challenge.blocked
-          ? 'Ask the human to complete the verification in the shared browser window (the page is visible to them), then re-check with dsh_browser_snapshot.'
-          : '',
-      }
+      const tabs = await browser.listTabs(session).catch(() => [])
+      return reportChallenge(challenge, tabs.find(tab => tab.active)?.url ?? '')
     },
   }))
 
@@ -350,6 +326,7 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
       quality: { type: 'number', description: 'JPEG quality 1-100 (default 80); ignored for PNG.' },
       maxWidth: { type: 'number', description: 'Downscale to fit within this width (aspect preserved).' },
       maxHeight: { type: 'number', description: 'Downscale to fit within this height (aspect preserved).' },
+      annotate: { type: 'boolean', description: 'Draw numbered boxes on the visible interactive elements (open shadow roots and same-origin iframes included) for this capture only, and return them as elements: [{ id, x, y, role, label }] with x/y the centre in viewport CSS pixels (what click {x, y} takes). Viewport only; not with fullPage.' },
     },
     output: {
       schema: {
@@ -370,10 +347,24 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
           width: { type: 'number', description: 'Pixel width of the returned image, when the capture was measured (present with maxWidth/maxHeight).' },
           height: { type: 'number', description: 'Pixel height of the returned image, when the capture was measured.' },
           path: { type: 'string', description: 'The file path the screenshot was saved to, when savePath was given.' },
+          elements: {
+            type: 'array',
+            description: 'The numbered elements drawn on an annotated screenshot.',
+            items: {
+              type: 'object', additionalProperties: false,
+              properties: {
+                id: { type: 'number', required: true },
+                x: { type: 'number', required: true },
+                y: { type: 'number', required: true },
+                role: { type: 'string', required: true },
+                label: { type: 'string', required: true },
+              },
+            },
+          },
         },
       },
       render: (_args, value) => [
-        { type: 'text', text: `Screenshot captured (${Math.round(value.bytes / 1024)} KiB${value.width !== undefined && value.height !== undefined ? `, ${value.width}x${value.height}` : ''})${value.path !== undefined ? ` saved to ${value.path}` : ''}.` },
+        { type: 'text', text: [`Screenshot captured (${Math.round(value.bytes / 1024)} KiB${value.width !== undefined && value.height !== undefined ? `, ${value.width}x${value.height}` : ''})${value.path !== undefined ? ` saved to ${value.path}` : ''}.`, ...value.elements === undefined ? [] : [`${value.elements.length} annotated element(s):`, ...annotationLines(value.elements as ScreenshotAnnotation[])]].join('\n') },
         ...value.attachment === undefined ? [] : [{ type: 'image' as const, attachment: value.attachment as ImageBlock['attachment'] }],
       ],
     },
@@ -385,13 +376,14 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
       const key = taskKey(exec)
       await state.pendingPanelOpens.get(key)
       const existing = state.sessionsByTask.get(key)
-      if (state.panelUrlByTask.has(key) && (existing === undefined || !browser.exists(existing))) {
-        throw new Error('Web 侧栏暂不支持截图：iframe 无法被网页静默截图 (panel surface unavailable). Use the CDP-backed DSH desktop sidebar with a connected desktop bridge for screenshots.')
-      }
+      assertCapability(carrierCapabilities(browser, state, key), 'screenshot',
+        'Web 侧栏暂不支持截图：iframe 无法被网页静默截图 (panel surface unavailable). Use the CDP-backed DSH desktop sidebar with a connected desktop bridge for screenshots.')
+      if (args.annotate === true && args.fullPage === true) throw new Error('annotate marks the viewport; drop fullPage or annotate')
       const session = await ensureSession(browser, state, taskKey(exec), agentOf(exec))
       const vision = await screenshotVisionEnabled(ctx, exec, exec.signal)
       const maxWidth = screenshotDimension(args.maxWidth, SCREENSHOT_MAX_WIDTH)
       const maxHeight = screenshotDimension(args.maxHeight, SCREENSHOT_MAX_HEIGHT)
+      const elements = args.annotate === true ? await drawAnnotations(browser, session, exec.signal) : undefined
       const shot = await browser.screenshot(session, {
         ...args.fullPage === true ? { fullPage: true } : {},
         ...args.savePath !== undefined ? { savePath: args.savePath } : {},
@@ -399,7 +391,7 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
         ...args.quality !== undefined ? { quality: args.quality } : {},
         maxWidth,
         maxHeight,
-      }, exec.signal)
+      }, exec.signal).finally(() => elements !== undefined ? clearAnnotations(browser, session) : undefined)
       exec.signal?.throwIfAborted()
       const image = screenshotBytes(shot.dataUrl)
       const attachment = vision ? await saveScreenshotImage(ctx, image, maxWidth, maxHeight) : undefined
@@ -410,13 +402,14 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
         ...shot.path !== undefined ? { path: shot.path } : {},
         ...shot.width !== undefined ? { width: shot.width } : {},
         ...shot.height !== undefined ? { height: shot.height } : {},
+        ...elements !== undefined ? { elements: elements.map(row => ({ ...row })) } : {},
       }
     },
   }))
 
   tools.push(defineTool({
     name: 'dsh_browser_find',
-    description: 'Find text on the page (the Ctrl+F equivalent) and get its position, so you can scroll to it or click near it without reading the whole page first. Returns up to 5 hits (all:true for up to 50), each with the surrounding snippet and the viewport point. Text inside shadow roots and iframes is not searched.',
+    description: 'Find text on the page (the Ctrl+F equivalent) and get its position, so you can scroll to it or click near it without reading the whole page first. Returns up to 5 hits (all:true for up to 50), each with the surrounding snippet and the viewport point. Searches open shadow roots and same-origin iframes too; cross-origin frames stay opaque.',
     parameters: {
       text: { type: 'string', required: true, description: 'Text to look for (case-insensitive).' },
       all: { type: 'boolean', description: 'Return up to 50 hits instead of 5.' },

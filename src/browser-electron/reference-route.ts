@@ -27,10 +27,10 @@ import { replyJson } from './json-reply.ts'
 import { sameOrigin } from './settings-route.ts'
 import { importReferenceBundle } from '../browser-reference/import.ts'
 import { validateFrameSelector } from '../browser-reference/entry.ts'
+import { MAX_FROZEN_CAPTURE_CHARS } from '../browser-reference/page-script.ts'
 import { summarizeReference, type ReferenceSummary } from '../browser-reference/service.ts'
 import type { BrowserReferenceService } from '../browser-reference/service.ts'
 import type { DeliveryQueue } from '../browser-reference/delivery.ts'
-import type { createSubmissionReceipts } from '../browser-reference/submission-receipts.ts'
 import type { ReferenceExportFormat } from '../browser-reference/export.ts'
 import type { BrowserReferenceCarrier, BrowserReferenceEntry, BrowserReferenceOrigin, BrowserReferenceTarget } from '../browser-reference/types.ts'
 
@@ -94,7 +94,6 @@ export interface ReferenceRouteOptions {
   readonly carrier?: () => BrowserReferenceCarrier
   /** Durable hand-off queue between capture and the conversation draft. */
   readonly queue?: DeliveryQueue
-  readonly receipts?: ReturnType<typeof createSubmissionReceipts>
 }
 
 /** The handlers, one per registered exact path. */
@@ -124,6 +123,13 @@ function requireRead(request: IncomingMessage, response: ServerResponse): boolea
   if (request.method !== 'GET') { replyJson(response, 405, { ok: false, error: 'method-not-allowed' }); return false }
   return true
 }
+
+/**
+ * The page-side bar posts its whole frozen capture, images inlined, and that capture is bounded by
+ * `MAX_FROZEN_CAPTURE_CHARS`. JSON keeps non-ASCII raw, so a character can take three UTF-8 bytes;
+ * the other fields are short and bounded on their own.
+ */
+const MAX_CAPTURE_BODY_BYTES = MAX_FROZEN_CAPTURE_CHARS * 3 + 64 * 1024
 
 /** Build every reference handler over one service. */
 export function createReferenceRouteHandlers(options: ReferenceRouteOptions): ReferenceRouteHandlers {
@@ -184,7 +190,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
     if (!requireWrite(request, response)) return
     let body: Record<string, unknown>
     try {
-      body = await readJsonBody<Record<string, unknown>>(request)
+      body = await readJsonBody<Record<string, unknown>>(request, MAX_CAPTURE_BODY_BYTES)
     } catch (error) {
       replyJson(response, 400, { ok: false, error: `unreadable body: ${String(error)}` })
       return
@@ -269,6 +275,7 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
       ...target !== undefined ? { target } : {},
       ...comment !== undefined ? { comment } : {},
       ...frozenCapture !== undefined ? { frozenCapture } : {},
+      ...typeof request.headers.host === 'string' ? { dshHost: request.headers.host } : {},
     })
     if (outcome.reference === undefined) {
       replyJson(response, 422, { ok: false, failures: outcome.failures })
@@ -430,7 +437,6 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
       replyJson(response, 400, { ok: false, error: 'invalid since' })
       return
     }
-    const unverified = options.receipts?.recover(sessionId)
     const includeConsumed = url.searchParams.get('includeConsumed') === '1'
     const snapshot = queue.list({ sessionId, includeConsumed, ...since > 0 ? { since } : {} })
     // The cursor must never hide work that is still PENDING, whatever includeConsumed says. The client
@@ -444,7 +450,6 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
     replyJson(response, 200, {
       ok: true,
       sequence: snapshot.sequence,
-      ...(unverified === undefined ? {} : { tracksSubmissions: true, unverified }),
       deliveries: pending.map(record => ({
         intentId: record.intentId,
         sessionId: record.sessionId,
@@ -476,21 +481,6 @@ export function createReferenceRouteHandlers(options: ReferenceRouteOptions): Re
       body = await readJsonBody<Record<string, unknown>>(request)
     } catch (error) {
       replyJson(response, 400, { ok: false, error: `unreadable body: ${String(error)}` })
-      return
-    }
-    if (body.phase === 'submitting') {
-      const sessionId = stringOf(body.sessionId, 200)
-      const requestId = stringOf(body.requestId, 200)
-      const ids = body.intentIds
-      if (sessionId === undefined || requestId === undefined || !Array.isArray(ids) || !ids.every(id => typeof id === 'string')) {
-        replyJson(response, 400, { ok: false, error: 'invalid-submission' })
-        return
-      }
-      if (!options.receipts?.bind(sessionId, requestId, ids)) {
-        replyJson(response, 409, { ok: false, error: 'submission-not-bound' })
-        return
-      }
-      replyJson(response, 200, { ok: true, state: 'submitting' })
       return
     }
     let intentId = stringOf(body.intentId, 200)

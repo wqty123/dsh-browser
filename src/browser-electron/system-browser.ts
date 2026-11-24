@@ -290,6 +290,8 @@ class CdpClient {
   private nextId = 1
   private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
   private readonly ready: Promise<void>
+  readonly destroyedTargets = new Set<string>()
+  headless = false
 
   /**
    * @param url - the browser's `webSocketDebuggerUrl`.
@@ -385,9 +387,12 @@ class CdpClient {
 
   /** Route one CDP message to its waiter. */
   private onMessage(raw: string): void {
-    let message: { id?: number; result?: unknown; error?: { message?: string } }
+    let message: { id?: number; method?: string; params?: { targetId?: unknown }; result?: unknown; error?: { message?: string } }
     try { message = JSON.parse(raw) } catch { return }
-    if (message.id === undefined) return
+    if (message.id === undefined) {
+      if (message.method === 'Target.targetDestroyed' && typeof message.params?.targetId === 'string') this.destroyedTargets.add(message.params.targetId)
+      return
+    }
     const entry = this.pending.get(message.id)
     if (entry === undefined) return
     this.pending.delete(message.id)
@@ -428,6 +433,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * spawned when a view is actually needed.
    */
   private client: CdpClient | undefined
+  /** Whether the running browser was launched headless, so its pages get a plain Chrome user agent. */
+  /** The browser's user agent without the `HeadlessChrome` token, read once per connection. */
+  private plainUserAgent: Promise<string | undefined> | undefined
   /**
    * Set when a command went unanswered rather than being refused.
    *
@@ -439,6 +447,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private clientSuspect = false
   private child: ChildProcess | undefined
   private profileLease: ProfileLease | undefined
+  private profileLeasing: Promise<ProfileLease> | undefined
   private starting: Promise<CdpClient> | undefined
   private lastLaunchError: string | undefined
   private launchDiagnostic: SystemBrowserLaunchDiagnostic | undefined
@@ -518,6 +527,12 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         ...this.launchDiagnostic, devToolsActivePortPresent: existsSync(join(this.profileDir, 'DevToolsActivePort')),
       } },
     }
+  }
+
+  connectedView(id: string): boolean {
+    const view = this.views.get(id), target = view === undefined ? undefined : this.sessions.get(view.session)
+    return view !== undefined && target !== undefined && view.client === this.client && !view.client.headless
+      && !view.client.destroyedTargets.has(target) && this.connectionStatus().connected
   }
 
   /** Which product this host would drive (for diagnostics). */
@@ -665,10 +680,12 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // mistaken for a browser that answers.
       const info = await client.send('Browser.getVersion', {}, undefined, Math.max(1, deadline - Date.now())) as { product?: string }
       if (!isBrowserProduct(info?.product) || info.product !== version.Browser) throw new Error('browser did not acknowledge its identity')
+      client.headless = /^HeadlessChrome\//u.test(info.product ?? '')
       if (this.disposed) { client.close(); return undefined }
       await client.send('Target.setDiscoverTargets', { discover: true }, undefined, Math.max(1, deadline - Date.now()))
       if (this.disposed || Date.now() >= deadline) { client.close(); return undefined }
       this.client = client
+      this.plainUserAgent = undefined
       return client
     } catch (error) {
       client?.close()
@@ -691,7 +708,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    */
   private async start(): Promise<CdpClient> {
     const deadline = Date.now() + 30_000
-    this.profileLease ??= acquireProfileLease(this.profileDir)
+    if (this.profileLease === undefined) {
+      const lease = await (this.profileLeasing ??= acquireProfileLease(this.profileDir).finally(() => { this.profileLeasing = undefined }))
+      if (this.disposed) { await lease.release(); throw new Error('dsh-builtin-browser: the browser host was disposed while launching') }
+      this.profileLease = lease
+    }
     // Before spawning anything: is a browser for THIS profile already running? A DSH restart
     // leaves one behind, and launching into it is the failure reported as "exited immediately
     // after launch (exit code 0)" that required killing seven processes by hand.
@@ -726,6 +747,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       '--disable-features=Translate,MediaRouter',
       '--disable-session-crashed-bubble',
       '--hide-crash-restore-bubble',
+      // The remote-debugging port this plugin drives makes Chrome set `navigator.webdriver` on every
+      // page, windowed or not, which bot walls read as "a script, not a person" — even while the
+      // person is the one browsing. Chrome's own switch turns that marker off; nothing else changes.
+      '--disable-blink-features=AutomationControlled',
       // Headless only where there is nothing to draw on. `--headless=new` rather than the legacy
       // flag: the new mode behaves like a windowed browser, which matters because every command
       // here was written and measured against one — including CDP input, which Chromium silently
@@ -962,7 +987,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
                 } catch { /* An unidentified endpoint is borrowed, never owned. */ }
               }
               if (this.disposed) { client.close(); break }
+              client.headless = launch.headless
               this.client = client
+              this.plainUserAgent = undefined
               return client
             }
         } catch (error) {
@@ -1377,6 +1404,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       const sessionId = attached?.sessionId
       if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
       if (adopted !== undefined) this.rememberTarget(client, targetId, viewId)
+      await this.presentAsChrome(client, sessionId)
       // The session id is what page commands ride; the target id is what closes it.
       this.sessions.set(sessionId, targetId)
       this.views.set(viewId, { session: sessionId, client })
@@ -1385,6 +1413,23 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       release()
       if (this.targetBuilds.get(client) === building) this.targetBuilds.delete(client)
     }
+  }
+
+  /**
+   * Give a page this plugin created in a headless browser (launched or adopted) the same user agent
+   * the browser has with a window. Headless Chrome announces itself as `HeadlessChrome/<version>`, which sites
+   * refuse outright; it is the same engine and version, so the windowed string is the truthful one.
+   * A person's own tab ({@link adoptPage}) and a windowed browser are left exactly as they are.
+   * @param client - the connected browser.
+   * @param sessionId - the page's CDP session.
+   */
+  private async presentAsChrome(client: CdpClient, sessionId: string): Promise<void> {
+    this.plainUserAgent ??= (client.send('Browser.getVersion', {}) as Promise<{ userAgent?: string }>)
+      .then(info => typeof info?.userAgent === 'string' && info.userAgent.includes('HeadlessChrome/')
+        ? info.userAgent.replace(/HeadlessChrome\//u, 'Chrome/') : undefined, () => undefined)
+    const userAgent = await this.plainUserAgent
+    if (userAgent === undefined) return
+    await client.send('Emulation.setUserAgentOverride', { userAgent }, sessionId).catch(() => {})
   }
 
   /**
@@ -1447,7 +1492,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private async createTarget(client: CdpClient, viewId: string): Promise<string> {
     const created = await client.send('Target.createTarget', {
       url: 'about:blank',
-      ...this.isQuiet() ? { background: true } : {},
+      // `background` only keeps the user's tab active inside an existing window. The first page after
+      // `--no-startup-window` opens a new window, which Chromium activates unless `focus: false`.
+      ...this.isQuiet() ? { background: true, focus: false } : {},
     }) as { targetId?: string }
     const targetId = created?.targetId
     if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')

@@ -56,7 +56,6 @@ export interface ReferenceHttpClient {
   ack(request: AckRequest): Promise<AckResponse>
   /** Persist an accepted message's consumption independently of browser storage. */
   consume?(sessionId: string, intentId: string): Promise<void>
-  bindSubmission?(sessionId: string, requestId: string, intentIds: readonly string[]): Promise<void>
   remove(intentId: string): Promise<RemoveResponse>
   reveal(referenceId: string, partId?: string, navigate?: boolean, sourcePageId?: string): Promise<RevealResultWire>
   exportBundle(format: ExportFormat, sessionId: string): Promise<Uint8Array>
@@ -147,10 +146,6 @@ export function createReferenceHttpClient(options: HttpClientOptions): Reference
     async consume(sessionId, intentId) {
       const result = await writeJson(`${base}${ROUTES.ack}`, { phase: 'consumed', sessionId, intentId }) as { state?: unknown }
       if (result.state !== 'consumed') throw new Error('reference consumption was not persisted')
-    },
-    async bindSubmission(sessionId, requestId, intentIds) {
-      const result = await writeJson(`${base}${ROUTES.ack}`, { phase: 'submitting', sessionId, requestId, intentIds }) as { state?: unknown }
-      if (result.state !== 'submitting') throw new Error('reference submission was not recorded')
     },
     async remove(intentId) {
       return await writeJson(`${base}${ROUTES.remove}`, { intentId }) as RemoveResponse

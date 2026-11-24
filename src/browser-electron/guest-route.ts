@@ -1,5 +1,5 @@
 import { hostMessages } from '../../assets/browser-messages.mjs'
-import { GUEST_ROUTE } from '../../assets/browser-policy.mjs'
+import { GUEST_ROUTE, RELAXED_BROWSER_SANDBOX, WEB_BROWSER_SANDBOX } from '../../assets/browser-policy.mjs'
 /**
  * Web guests execute in CSP-sandboxed opaque origins, including direct document loads.
  * Only this proxy prefix is available to guest network requests. App storage, APIs,
@@ -7,9 +7,12 @@ import { GUEST_ROUTE } from '../../assets/browser-policy.mjs'
  * @module dsh-builtin-browser/browser-electron/guest-route
  */
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
-import { promises as dns } from 'node:dns'
+import { promises as dns, type LookupAddress } from 'node:dns'
+import { Agent } from 'undici'
+import { networkInterfaces } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { guestRuntimeScript } from './guest-runtime.ts'
+import { blockRetryDelayMs, classifyBlock } from '../browser/anti-bot.ts'
 import type { GuestCookieJar } from './guest-cookie-jar.ts'
 import { localGuestCookies } from './guest-cookie-store.ts'
 import { rewriteCss } from './guest-css.ts'
@@ -40,6 +43,54 @@ function isSelfTarget(url: URL): boolean {
 }
 
 export { GUEST_ROUTE }
+
+function blockedTarget(url: URL, host: string): boolean {
+  return !/^https?:$/u.test(url.protocol) || url.username !== '' || url.password !== ''
+    || isSelfTarget(url) || url.hostname.toLowerCase().replace(/\.$/u, '') === host
+}
+
+async function lookupAll(hostname: string): Promise<LookupAddress[]> {
+  return await dns.lookup(hostname.replace(/^\[|\]$/gu, ''), { all: true })
+}
+
+async function addressesFor(hostname: string): Promise<string[]> {
+  return (await lookupAll(hostname)).map(record => record.address)
+}
+
+async function vettedAddress(url: URL, host: string, ownAddresses: readonly string[]): Promise<LookupAddress[] | undefined> {
+  if (blockedTarget(url, host)) return undefined
+  const records = await lookupAll(url.hostname)
+  const hostUrl = host === '' ? undefined : new URL('http://' + host)
+  const hostAddresses = hostUrl === undefined || isSelfTarget(hostUrl) ? [] : await addressesFor(host).catch(() => [])
+  const unsafe = records.length === 0 || records.some(({ address }) => {
+    const literal = new URL('http://' + (address.includes(':') ? '[' + address + ']' : address))
+    return isSelfTarget(literal) || hostAddresses.includes(address) || ownAddresses.includes(address)
+  })
+  return unsafe ? undefined : records
+}
+
+async function blockedResolvedTarget(url: URL, host: string, ownAddresses: readonly string[]): Promise<boolean> {
+  return await vettedAddress(url, host, ownAddresses) === undefined
+}
+
+/** Connect to the address that was vetted, so a second DNS answer (rebinding) never picks the peer. */
+async function fetchVetted(url: URL, init: RequestInit, host: string, ownAddresses: readonly string[]): Promise<Response> {
+  const addresses = await vettedAddress(url, host, ownAddresses)
+  if (addresses === undefined) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
+  const dispatcher = new Agent({
+    connect: {
+      lookup: (_hostname: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
+        if (options.all === true) callback(null, addresses)
+        else callback(null, addresses[0]?.address, addresses[0]?.family)
+      },
+    } as never,
+  })
+  try {
+    return await fetch(url, { ...init, dispatcher } as RequestInit)
+  } finally {
+    void dispatcher.close()
+  }
+}
 
 class UnsafeGuestTargetError extends Error {}
 
@@ -94,6 +145,22 @@ const SAFE_REQUEST_HEADERS = new Set([
   'x-csrf-token', 'x-xsrf-token', 'range', 'if-range',
   'if-none-match', 'if-modified-since', 'cache-control',
 ])
+
+function guestReferer(page: URL, target: URL, policy: string): string | undefined {
+  const sameOrigin = page.origin === target.origin
+  const downgrade = page.protocol === 'https:' && target.protocol === 'http:'
+  const origin = page.origin + '/'
+  switch (policy) {
+    case 'no-referrer': return undefined
+    case 'unsafe-url': return page.href
+    case 'origin': return origin
+    case 'same-origin': return sameOrigin ? page.href : undefined
+    case 'strict-origin': return downgrade ? undefined : origin
+    case 'origin-when-cross-origin': return sameOrigin ? page.href : origin
+    case 'no-referrer-when-downgrade': return downgrade ? undefined : page.href
+    default: return downgrade ? undefined : sameOrigin ? page.href : origin
+  }
+}
 
 function siteHeader(name: string): boolean {
   return /^[!#$%&'*+.^_`|~\da-z-]+$/u.test(name)
@@ -243,9 +310,9 @@ export function relayTag(_sessionId: string): string {
   </script>`
 }
 
-function guestPolicy(authority: string): string {
+function guestPolicy(authority: string, framed: boolean): string {
   const sources = ['http:', 'https:'].map(protocol => new URL(protocol + '//' + authority).origin + GUEST_ROUTE).join(' ')
-  return "sandbox allow-scripts allow-forms; default-src " + sources
+  return "sandbox " + (framed ? RELAXED_BROWSER_SANDBOX : WEB_BROWSER_SANDBOX) + "; default-src " + sources
     + "; script-src " + sources + " 'unsafe-inline' 'unsafe-eval'; style-src " + sources
     + " 'unsafe-inline'; img-src " + sources + " data: blob:; font-src " + sources + " data:; connect-src " + sources
     + "; frame-src " + sources + "; form-action " + sources
@@ -268,7 +335,7 @@ export async function handleGuest(
     response.end('guest proxy: invalid host')
     return
   }
-  const policy = guestPolicy(authority)
+  const policy = guestPolicy(authority, request.headers['sec-fetch-dest'] === 'iframe')
   const writeHead = (status: number, headers: OutgoingHttpHeaders = {}): void => {
     response.writeHead(status, { ...headers, 'content-security-policy': policy })
   }
@@ -279,7 +346,7 @@ export async function handleGuest(
     const requested = String(request.headers['access-control-request-headers'] ?? '').toLowerCase().split(',').map(name => name.trim())
     writeHead(204, {
       'access-control-allow-methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
-      'access-control-allow-headers': [...new Set([...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub', 'x-dsh-guest-headers', ...requested.filter(siteHeader)])].join(', '),
+      'access-control-allow-headers': [...new Set([...SAFE_REQUEST_HEADERS, 'x-dsh-guest-sub', 'x-dsh-guest-headers', 'x-dsh-guest-referer', 'x-dsh-guest-referrer-policy', ...requested.filter(siteHeader)])].join(', '),
     })
     response.end()
     return
@@ -294,26 +361,11 @@ export async function handleGuest(
   }
   let host = ''
   try { host = new URL('http://' + (request.headers.host ?? '')).hostname.toLowerCase().replace(/\.$/u, '') } catch {}
-  const blocked = (url: URL): boolean => {
-    return !/^https?:$/u.test(url.protocol) || url.username !== '' || url.password !== ''
-      || isSelfTarget(url) || url.hostname.toLowerCase().replace(/\.$/u, '') === host
-  }
-  const addressesFor = async (hostname: string): Promise<string[]> =>
-    (await dns.lookup(hostname.replace(/^\[|\]$/gu, ''), { all: true })).map(record => record.address)
-  const blockedResolved = async (url: URL): Promise<boolean> => {
-    if (blocked(url)) return true
-    const addresses = await addressesFor(url.hostname)
-    const hostUrl = host === '' ? undefined : new URL('http://' + host)
-    const hostAddresses = hostUrl === undefined || isSelfTarget(hostUrl) ? [] : await addressesFor(host).catch(() => [])
-    return addresses.length === 0 || addresses.some(address => {
-      const literal = new URL('http://' + (address.includes(':') ? '[' + address + ']' : address))
-      return isSelfTarget(literal) || hostAddresses.includes(address) || address === request.socket.localAddress
-    })
-  }
-  const fetchTarget = async (url: URL, options: RequestInit): Promise<Response> => {
-    if (await blockedResolved(url)) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
-    return fetch(url, options)
-  }
+  const blocked = (url: URL): boolean => blockedTarget(url, host)
+  const blockedResolved = (url: URL): Promise<boolean> =>
+    blockedResolvedTarget(url, host, request.socket.localAddress === undefined ? [] : [request.socket.localAddress])
+  const fetchTarget = (url: URL, options: RequestInit): Promise<Response> =>
+    fetchVetted(url, options, host, request.socket.localAddress === undefined ? [] : [request.socket.localAddress])
   if (blocked(target)) {
     writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
     response.end('guest proxy: local and DSH host targets are not allowed')
@@ -398,6 +450,18 @@ export async function handleGuest(
       }
     } catch {}
   }
+  const pageReferer = request.headers['x-dsh-guest-referer']
+  if (subRequest && !headers.has('referer') && typeof pageReferer === 'string') {
+    try {
+      const page = new URL(pageReferer)
+      page.hash = ''
+      page.username = ''
+      page.password = ''
+      const policy = request.headers['x-dsh-guest-referrer-policy']
+      const value = blocked(page) ? undefined : guestReferer(page, target, typeof policy === 'string' ? policy : '')
+      if (value !== undefined) headers.set('referer', value)
+    } catch {}
+  }
   let cookieJar: GuestCookieJar
   try { cookieJar = cookies ?? localGuestCookies() } catch {
     writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
@@ -470,15 +534,17 @@ export async function handleGuest(
     }
     upstream = await fetchTarget(target, { method, headers, body: body as BodyInit | undefined, redirect: 'manual' })
     cookieJar.setCookies(target, upstream.headers.getSetCookie?.() ?? [])
-    // 反爬挑战识别 + 一次重试：站点（百度 `/s?wd=…`）在没有「先访问过站点」的痕迹时回「安全验证」。
-    // 罐子里可能已经带着上次挑战页的 Cookie，所以这里不看有没有 Cookie，而是看**内容**：
-    // 命中挑战就先取站点根补一次 Cookie，带上根的 Referer 重试一次。仍失败就把挑战页交给上层。
-    const looksLikeChallenge = /安全验证|wappass|cf-browser-verification|Just a moment/iu
+    // 反爬拦截识别 + 一次重试（分类器与页面内检测共用 `browser/anti-bot.ts`）：站点（百度 `/s?wd=…`）在没有
+    // 「先访问过站点」的痕迹时回「安全验证」。罐子里可能已经带着上次挑战页的 Cookie，所以看**内容**而不看有没有 Cookie。
+    // 只对「可重试」类（拒绝访问 / 429 / 空 403）与需人工验证类做一次放慢节奏的重试：先停一下，取站点根补 Cookie、
+    // 带上根的 Referer 再请求一次。仍失败就把原页交给上层（页内检测会给出接管或换路的建议）；网络（IP）封锁不重试。
     if (safeNavigation && target.pathname !== '/' && /^text\/html/iu.test(upstream.headers.get('content-type') ?? '')
       && Number(upstream.headers.get('content-length') ?? '0') <= MAX_REWRITE_BYTES) {
       const probe = await upstream.clone().text()
-      if (looksLikeChallenge.test(probe)) {
+      const verdict = classifyBlock({ status: upstream.status, text: probe.slice(0, 64 * 1024) })
+      if (verdict.blocked && verdict.recovery !== 'environment') {
         try {
+          await new Promise(resolve => setTimeout(resolve, blockRetryDelayMs()))
           await warmRoot()
           const retried = await fetchTarget(target, { method, headers, redirect: 'manual' })
           await upstream.body?.cancel()
@@ -548,7 +614,7 @@ export async function handleGuest(
     const storageConfig = (destination === 'iframe' || destination === 'document') && request.headers['sec-fetch-mode'] === 'navigate'
       && /^[\w:-]{16,128}$/u.test(context)
       ? { token: (storage ?? localGuestStorage()).issue(target.origin, context), context, cookies: cookieJar.getDocumentCookie(target) } : undefined
-    const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig) + '</script>'
+    const runtime = '<script data-dsh-guest-runtime="1">' + guestRuntimeScript(target.href, storageConfig, upstream.headers.get('referrer-policy') ?? '') + '</script>'
     let body = rewriteDocument(raw, target)
     if (/<head\b[^>]*>/iu.test(body)) body = body.replace(/<head\b[^>]*>/iu, match => match + runtime)
     else if (/<html\b[^>]*>/iu.test(body)) body = body.replace(/<html\b[^>]*>/iu, match => match + '<head>' + runtime + '</head>')
@@ -565,4 +631,67 @@ export async function handleGuest(
   } catch (error) {
     failUpstream('response', error)
   }
+}
+
+function realGuestUrl(raw: string): URL {
+  const parsed = new URL(raw, 'http://guest.invalid')
+  const inner = parsed.pathname === GUEST_ROUTE ? guestTarget(parsed.pathname + parsed.search) : undefined
+  if (inner !== undefined) return inner
+  if (parsed.origin === 'http://guest.invalid') throw new UnsafeGuestTargetError('a guest resource URL must be absolute')
+  return parsed
+}
+
+/**
+ * Fetch one resource a guest page loaded, on the server and under the proxy's own target rules.
+ * The Web sidebar's guest is an iframe with no browser session, so this is the only way a frozen
+ * quote can get an image's bytes. It sends what the proxy sent when the page loaded the image:
+ * guest documents are no-referrer, so no referer and the cookie jar's unscoped cookies, and it
+ * keeps the cookies each redirect hop sets.
+ */
+export async function fetchGuestResource(raw: string, options: {
+  readonly dshHost?: string
+  readonly maxBytes: number
+  readonly signal?: AbortSignal
+  readonly cookies?: GuestCookieJar
+}): Promise<Buffer> {
+  const own = Object.values(networkInterfaces()).flatMap(list => (list ?? []).map(entry => entry.address))
+  let host = ''
+  try { host = options.dshHost === undefined ? '' : new URL('http://' + options.dshHost).hostname.toLowerCase().replace(/[.]$/u, '') } catch {}
+  let url = realGuestUrl(raw)
+  let jar: GuestCookieJar | undefined
+  try { jar = options.cookies ?? localGuestCookies() } catch { jar = undefined }
+  for (let hop = 0; hop <= 5; hop++) {
+    const headers = new Headers({
+      'user-agent': DESKTOP_UA, accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8', 'accept-encoding': 'identity',
+    })
+    const cookie = jar?.getCookieHeader(url)
+    if (cookie !== undefined && cookie !== '') headers.set('cookie', cookie)
+    const response = await fetchVetted(url, { headers, redirect: 'manual', ...options.signal === undefined ? {} : { signal: options.signal } }, host, own)
+    jar?.setCookies(url, response.headers.getSetCookie?.() ?? [])
+    const location = response.headers.get('location')
+    if (response.status >= 300 && response.status < 400 && location !== null) {
+      await response.body?.cancel()
+      url = new URL(location, url)
+      continue
+    }
+    if (!response.ok) {
+      await response.body?.cancel()
+      throw new Error('guest resource answered ' + response.status)
+    }
+    const chunks: Uint8Array[] = []
+    let size = 0
+    const reader = response.body?.getReader()
+    while (reader !== undefined) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > options.maxBytes) {
+        await reader.cancel()
+        throw new Error('guest resource exceeds ' + options.maxBytes + ' bytes')
+      }
+      chunks.push(value)
+    }
+    return Buffer.concat(chunks)
+  }
+  throw new Error('guest resource redirected too many times')
 }

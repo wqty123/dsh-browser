@@ -67,7 +67,8 @@
     "dsh-browser-install-electron": "scripts/install-electron.mjs"
   },
   "dependencies": {
-    "katex": "0.16.25"
+    "katex": "0.16.25",
+    "undici": "7.30.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
@@ -100,7 +101,7 @@
     "typescript": "^5.5.0"
   },
   "engines": {
-    "dsh": ">=0.1.1-rc.2 <0.3.0",
+    "dsh": ">=0.2.2-rc.3 <0.3.0",
     "node": "^24.22.3 || >=26.13.1"
   },
   "dsh": {

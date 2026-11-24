@@ -379,12 +379,14 @@ export type BrowserPageOperationRequest =
   | { readonly operation: 'probe'; readonly method: BrowserProbeMethod; readonly args?: readonly unknown[] }
   | { readonly operation: 'text'; readonly text: string }
   | { readonly operation: 'url' }
+  | { readonly operation: 'pulse' }
+  | { readonly operation: 'fetch'; readonly url: string; readonly init: { readonly method?: string; readonly headers?: Readonly<Record<string, string>>; readonly body?: string } }
   | { readonly operation: 'drag'; readonly from: { x: number; y: number }; readonly to: { x: number; y: number }; readonly steps: number }
   | { readonly operation: 'upload'; readonly target: { by: 'css' | 'text' | 'xpath'; value: string }; readonly file: { name: string; mime: string; base64: string } }
 
 /** Provider-owned probe operations; JavaScript properties such as constructor are excluded. */
 export type BrowserProbeMethod = 'read' | 'clear' | 'settle' | 'find' | 'overlayAt' | 'summary'
-  | 'findText' | 'hoverAt' | 'setDialogPolicy' | 'dialogStatus' | 'networkCursor'
+  | 'findText' | 'hoverAt' | 'setDialogPolicy' | 'dialogStatus' | 'networkCursor' | 'dataSources'
 
 /**
  * Result of an execute. Mirrors CDP `Runtime.evaluate` semantics: either a
@@ -529,10 +531,14 @@ export interface BrowserA11yResult {
 export interface BrowserChallenge {
   /** Whether a challenge currently blocks the page. */
   readonly blocked: boolean
-  /** Machine-readable kind: cloudflare | hcaptcha | recaptcha | turnstile | generic. */
+  /** Machine-readable kind, e.g. cloudflare | hcaptcha | recaptcha | turnstile | slider | access-denied | ip-block. */
   readonly kind?: string
   /** Short human-readable description, e.g. 'Cloudflare "Just a moment" interstitial'. */
   readonly reason?: string
+  /** What to do about it: takeover (human verification), wait, retry, or environment (network refused). */
+  readonly recovery?: 'takeover' | 'wait' | 'retry' | 'environment'
+  /** HTTP status of the main document, when known. */
+  readonly status?: number
 }
 
 /**
@@ -815,3 +821,50 @@ export interface BrowserHistoryEntry {
  * own (e.g. `BROWSER_CDP_ATTACH_FAILED`).
  */
 export class BrowserError extends HarnessError {}
+
+/** What a browser carrier can do for a tool call; tools ask for one capability instead of naming carriers. */
+export interface CarrierCapabilities {
+  /** A live Chrome DevTools Protocol session drives the page. */
+  readonly cdp: boolean
+  readonly liveSnapshot: boolean
+  readonly interaction: boolean
+  readonly screenshot: boolean
+  readonly nativeTabs: boolean
+  readonly backgroundRender: boolean
+  readonly takeover: boolean
+  readonly referenceCapture: boolean
+}
+
+export type CarrierCapability = keyof CarrierCapabilities
+
+/** A CDP-backed page: the plugin browser, an attached system browser or the desktop sidebar. */
+export const CDP_CARRIER_CAPABILITIES: CarrierCapabilities = Object.freeze({
+  cdp: true, liveSnapshot: true, interaction: true, screenshot: true,
+  nativeTabs: true, backgroundRender: true, takeover: true, referenceCapture: true,
+})
+
+/** The Web sidebar's iframe: it can be navigated, nothing else. */
+export const WEB_PANEL_CAPABILITIES: CarrierCapabilities = Object.freeze({
+  cdp: false, liveSnapshot: false, interaction: false, screenshot: false,
+  nativeTabs: false, backgroundRender: false, takeover: false, referenceCapture: false,
+})
+
+/** A tool needed a capability the current carrier lacks. */
+export class CarrierCapabilityError extends BrowserError {
+  readonly capability: CarrierCapability
+  constructor(capability: CarrierCapability, message: string) {
+    super(message, 'BROWSER_CARRIER_CAPABILITY_UNAVAILABLE')
+    this.name = 'CarrierCapabilityError'
+    this.capability = capability
+  }
+}
+
+/**
+ * Refuse an operation the carrier cannot perform.
+ * @param capabilities - the current carrier's capabilities.
+ * @param required - the one capability the operation needs.
+ * @param guidance - the refusal the model sees: what is missing and which carrier to switch to.
+ */
+export function assertCapability(capabilities: CarrierCapabilities, required: CarrierCapability, guidance: string): void {
+  if (!capabilities[required]) throw new CarrierCapabilityError(required, guidance)
+}

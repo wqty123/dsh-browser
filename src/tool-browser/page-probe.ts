@@ -27,9 +27,10 @@
  */
 
 import type { BrowserPageOperationRequest, BrowserProbeMethod } from '../browser/types.ts'
+import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
 
 /** Bumped when the probe's shape changes; an older probe is replaced rather than trusted. */
-export const PROBE_VERSION = 5
+export const PROBE_VERSION = 9
 
 /** Where the probe keeps itself, and the only global it adds. */
 const PROBE_KEY = '__dshProbe'
@@ -40,7 +41,19 @@ const PROBE_KEY = '__dshProbe'
  * Written as a string because it runs in the page, not here. Keep it dependency-free and ES5-safe:
  * a page may be older than the harness.
  */
-export const PROBE_INSTALL_SCRIPT = `(() => {
+export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
+  const frameOffset = (node) => {
+    let x = 0, y = 0
+    let doc = node && node.ownerDocument
+    while (doc && doc.defaultView && doc.defaultView.frameElement) {
+      const frame = doc.defaultView.frameElement
+      const r = frame.getBoundingClientRect()
+      x += r.left + (Number(frame.clientLeft) || 0)
+      y += r.top + (Number(frame.clientTop) || 0)
+      doc = frame.ownerDocument
+    }
+    return { x: x, y: y }
+  }
   const KEY = ${JSON.stringify(PROBE_KEY)}
   const VERSION = ${PROBE_VERSION}
   const previous = globalThis[KEY]
@@ -93,12 +106,12 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
       const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase()
       const started = Date.now()
       state.pending += 1
-      const settle = (status) => {
+      const settle = (status, type) => {
         state.pending = Math.max(0, state.pending - 1)
-        note({ at: started, kind: 'fetch', method: method, url: short(url, 300), status: status, ms: Date.now() - started })
+        note({ at: started, kind: 'fetch', method: method, url: short(url, 300), status: status, type: short(type || '', 80), ms: Date.now() - started })
       }
       return nativeFetch.apply(this, arguments).then(
-        (response) => { settle(response.status); return response },
+        (response) => { let type = ''; try { type = response.headers.get('content-type') || '' } catch (error) { /* opaque */ } settle(response.status, type); return response },
         (error) => { settle(0); throw error },
       )
     })
@@ -117,7 +130,9 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
       state.pending += 1
       const done = () => {
         state.pending = Math.max(0, state.pending - 1)
-        note({ at: meta.at, kind: 'xhr', method: meta.method, url: short(meta.url, 300), status: this.status || 0, ms: Date.now() - meta.at })
+        let type = ''
+        try { type = this.getResponseHeader('content-type') || '' } catch (error) { /* not readable */ }
+        note({ at: meta.at, kind: 'xhr', method: meta.method, url: short(meta.url, 300), status: this.status || 0, type: short(type, 80), ms: Date.now() - meta.at })
         this.removeEventListener('loadend', done)
       }
       this.addEventListener('loadend', done)
@@ -181,11 +196,11 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
     if (!target) return null
     let node = null
     try {
-      if (target.css) node = document.querySelector(String(target.css))
+      if (target.css) node = __dshQuery(String(target.css))
       else if (target.xpath) node = document.evaluate(String(target.xpath), document, null, 9, null).singleNodeValue
       else if (target.text) {
         const wanted = String(target.text).trim().toLowerCase()
-        const nodes = document.querySelectorAll('button, a, [role=button], input, label, [role=tab], [role=option], [role=link]')
+        const nodes = __dshQueryAll('button, a, [role=button], input, label, [role=tab], [role=option], [role=link]')
         for (let i = 0; i < nodes.length; i += 1) {
           const value = ((nodes[i].innerText || nodes[i].getAttribute('aria-label') || nodes[i].value || '') + '').trim().toLowerCase()
           if (value && value.indexOf(wanted) !== -1) { node = nodes[i]; break }
@@ -195,32 +210,91 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
     if (!node) return null
     if (scroll === true && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
     const rect = node.getBoundingClientRect()
-    return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2), w: Math.round(rect.width), h: Math.round(rect.height), described: describe(node) }
+    const offset = frameOffset(node)
+    state.lastFound = node
+    return { x: Math.round(offset.x + rect.left + rect.width / 2), y: Math.round(offset.y + rect.top + rect.height / 2), w: Math.round(rect.width), h: Math.round(rect.height), described: describe(node) }
+  }
+
+  const composedParent = (node) => {
+    if (node.parentElement) return node.parentElement
+    if (node.parentNode && node.parentNode.host) return node.parentNode.host
+    const doc = node.ownerDocument
+    if (doc && (node === doc.documentElement || node.parentNode === doc)) {
+      const frame = doc.defaultView && doc.defaultView.frameElement
+      if (frame && frame !== node) return frame
+    }
+    return null
+  }
+  const deepHit = (x, y) => {
+    let cx = x, cy = y
+    let node = document.elementFromPoint(cx, cy)
+    for (let i = 0; node && i < 16; i += 1) {
+      if (node.shadowRoot && typeof node.shadowRoot.elementFromPoint === 'function') {
+        const inner = node.shadowRoot.elementFromPoint(cx, cy)
+        if (!inner || inner === node) break
+        node = inner
+        continue
+      }
+      if (node.tagName === 'IFRAME' || node.tagName === 'FRAME') {
+        let doc = null
+        try { doc = node.contentDocument } catch (error) { doc = null }
+        if (!doc || typeof doc.elementFromPoint !== 'function') break
+        const r = node.getBoundingClientRect()
+        cx = cx - r.left - (Number(node.clientLeft) || 0)
+        cy = cy - r.top - (Number(node.clientTop) || 0)
+        const inner = doc.elementFromPoint(cx, cy)
+        if (!inner || inner === node) break
+        node = inner
+        continue
+      }
+      break
+    }
+    return node
+  }
+  const computedStyle = (node) => {
+    try {
+      const win = node && node.ownerDocument && node.ownerDocument.defaultView
+      return (win && typeof win.getComputedStyle === 'function' ? win.getComputedStyle : getComputedStyle)(node)
+    } catch (error) { return null }
+  }
+  const floats = (node) => {
+    const style = computedStyle(node)
+    return !!style && (style.position === 'fixed' || style.position === 'sticky' || Number(style.zIndex) >= 100)
+  }
+  // A click at the point lands on the target when what is there is the target or inside it (an icon or label in a
+  // button, including inside open shadow roots and same-origin iframes), unless a floating layer between them
+  // (a modal inside the target) is what takes the click.
+  const lands = (target, hit) => {
+    for (let node = hit, depth = 0; node && depth < 64; node = composedParent(node), depth += 1) {
+      if (node === target) return true
+      if (floats(node)) return false
+    }
+    return false
   }
 
   const DISMISS = /(accept|agree|allow|continue|close|got it|dismiss|ok|agree|同意|接受|允许|继续|关闭|知道了|我知道了|我同意)/i
 
   state.overlayAt = function (x, y) {
-    const top = document.elementFromPoint(Number(x), Number(y))
+    const px = Number(x), py = Number(y)
+    const top = deepHit(px, py)
     if (!top) return { covers: null, dismiss: null }
+    if (state.lastFound && lands(state.lastFound, top)) return { covers: null, dismiss: null }
     let node = top
     let depth = 0
-    while (node && depth < 8) {
-      let style = null
-      try { style = getComputedStyle(node) } catch (error) { style = null }
-      const floating = style && (style.position === 'fixed' || style.position === 'sticky' || Number(style.zIndex) >= 100)
-      if (floating) {
-        const buttons = node.querySelectorAll('button, [role=button], a')
+    while (node && depth < 16) {
+      if (floats(node)) {
+        const buttons = node.querySelectorAll ? node.querySelectorAll('button, [role=button], a') : []
         for (let i = 0; i < buttons.length && i < 60; i += 1) {
           const label = ((buttons[i].innerText || '') + ' ' + (buttons[i].getAttribute('aria-label') || '')).trim()
           if (DISMISS.test(label)) {
             const rect = buttons[i].getBoundingClientRect()
-            return { covers: describe(top), dismiss: { label: short(label, 40), x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) } }
+            const offset = frameOffset(buttons[i])
+            return { covers: describe(top), dismiss: { label: short(label, 40), x: Math.round(offset.x + rect.left + rect.width / 2), y: Math.round(offset.y + rect.top + rect.height / 2) } }
           }
         }
         return { covers: describe(top), dismiss: null }
       }
-      node = node.parentElement
+      node = composedParent(node)
       depth += 1
     }
     return { covers: describe(top), dismiss: null }
@@ -268,28 +342,35 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
     const out = []
     if (needle === '') return out
     const wanted = needle.toLowerCase()
-    const root = document.body || document.documentElement
-    if (!root || typeof document.createTreeWalker !== 'function') return out
-    const walker = document.createTreeWalker(root, 4, null) // 4 = SHOW_TEXT
+    const roots = __dshRoots()
+    for (let r = 0; r < roots.length; r += 1) {
+    const scope = roots[r]
+    const owner = scope.ownerDocument || scope
+    const root = scope.nodeType === 9 ? (scope.body || scope.documentElement) : scope
+    if (!root || typeof owner.createTreeWalker !== 'function') continue
+    const walker = owner.createTreeWalker(root, 4, null) // 4 = SHOW_TEXT
     let node = walker.nextNode()
     while (node) {
-      const value = node.nodeValue || ''
+      const parent = node.parentElement
+      const value = parent && /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(parent.tagName) ? '' : node.nodeValue || ''
       let at = value.toLowerCase().indexOf(wanted)
       while (at !== -1) {
-        const range = document.createRange()
+        const range = owner.createRange()
         range.setStart(node, at)
         range.setEnd(node, at + needle.length)
         const rect = range.getBoundingClientRect()
+        const offset = frameOffset(node)
         out.push({
           text: short(value.slice(Math.max(0, at - 20), at + needle.length + 20).replace(/\\s+/g, ' ').trim(), 80),
-          x: Math.round(rect.left + rect.width / 2),
-          y: Math.round(rect.top + rect.height / 2),
+          x: Math.round(offset.x + rect.left + rect.width / 2),
+          y: Math.round(offset.y + rect.top + rect.height / 2),
           host: node.parentElement ? describe(node.parentElement) : 'text',
         })
         if (out.length >= (all ? 50 : 5)) return out
         at = value.toLowerCase().indexOf(wanted, at + 1)
       }
       node = walker.nextNode()
+    }
     }
     return out
   }
@@ -333,6 +414,87 @@ export const PROBE_INSTALL_SCRIPT = `(() => {
       selection: short(globalThis.getSelection ? String(globalThis.getSelection()) : '', 120),
       text: short(String(body || '').replace(/\\s+/g, ' ').trim(), 400),
     }
+  }
+  // Where a page keeps its data before it becomes DOM: embedded state, the JSON APIs it called,
+  // resources it fetched before the probe existed, and endpoints it declares. Shapes only, never
+  // bodies, so the answer stays around 1-2 KB.
+  state.dataSources = function () {
+    const DATA_URL = /[.]json([?#]|$)|[/]api[/]|graphql|[/](locations?|stores?|search|query|products?|items?|listings?)([/?#.]|$)/i
+    const bytes = (text) => { try { return new Blob([text]).size } catch (error) { return String(text).length } }
+    const shape = (value) => {
+      const keys = value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value).slice(0, 12) : []
+      const arrays = []
+      const seen = new Set()
+      const walk = (node, path, depth) => {
+        if (!node || typeof node !== 'object' || seen.has(node) || depth > 6 || seen.size > 2000) return
+        seen.add(node)
+        if (Array.isArray(node)) {
+          if (node.length >= 3) arrays.push({ path: path || '(root)', length: node.length })
+          walk(node[0], path + '[0]', depth + 1)
+          return
+        }
+        for (const key of Object.keys(node).slice(0, 60)) walk(node[key], path ? path + '.' + key : key, depth + 1)
+      }
+      walk(value, '', 0)
+      arrays.sort((a, b) => b.length - a.length)
+      return { keys: keys, arrays: arrays.slice(0, 5) }
+    }
+    const embedded = []
+    const counts = {}
+    const scripts = Array.from(document.querySelectorAll('script#__NEXT_DATA__, script#__NUXT_DATA__, script[type="application/json"], script[type="application/ld+json"]'))
+    for (const node of scripts) {
+      const type = node.type || 'text/javascript'
+      const index = counts[type] = (counts[type] === undefined ? 0 : counts[type] + 1)
+      const text = node.textContent || ''
+      if (text.trim().length < 2 || embedded.length >= 8) continue
+      let parsed
+      try { parsed = JSON.parse(text) } catch (error) { parsed = undefined }
+      const name = node.id ? '#' + node.id : 'script[type="' + type + '"][' + index + ']'
+      embedded.push(Object.assign({ name: short(name, 80), bytes: bytes(text) }, parsed === undefined ? { parsed: false } : shape(parsed)))
+    }
+    for (const key of ['__NEXT_DATA__', '__NUXT__', '__INITIAL_STATE__', '__PRELOADED_STATE__', '__APOLLO_STATE__', '__remixContext']) {
+      let value
+      try { value = globalThis[key] } catch (error) { value = undefined }
+      if (value === undefined || value === null || typeof value !== 'object' || embedded.length >= 10) continue
+      let size = 0
+      try { size = bytes(JSON.stringify(value)) } catch (error) { size = 0 }
+      embedded.push(Object.assign({ name: 'window.' + key, bytes: size }, shape(value)))
+    }
+    const apis = []
+    const called = new Map()
+    for (const row of state.network) {
+      if ((row.kind !== 'fetch' && row.kind !== 'xhr') || !(row.status > 0)) continue
+      const id = row.method + ' ' + String(row.url).split('?')[0]
+      const json = /json/i.test(String(row.type || ''))
+      const hit = called.get(id)
+      if (hit) { hit.calls += 1; hit.url = row.url; hit.status = row.status; continue }
+      const entry = { method: row.method, url: row.url, status: row.status, type: short(String(row.type || '').split(';')[0], 40), calls: 1, json: json }
+      called.set(id, entry)
+      apis.push(entry)
+    }
+    apis.sort((a, b) => Number(b.json) - Number(a.json) || Number(DATA_URL.test(b.url)) - Number(DATA_URL.test(a.url)))
+    const known = new Set(apis.map(entry => String(entry.url).split('?')[0]))
+    const resources = []
+    let timings = []
+    try { timings = performance.getEntriesByType('resource') } catch (error) { timings = [] }
+    for (const entry of timings) {
+      const url = String(entry.name || '')
+      const initiator = String(entry.initiatorType || '')
+      if (initiator !== 'fetch' && initiator !== 'xmlhttprequest' && !DATA_URL.test(url)) continue
+      if (/^(script|css|img|link|image)$/.test(initiator) && !/[.]json([?#]|$)/i.test(url)) continue
+      const base = url.split('?')[0]
+      if (url.length > 2048 || known.has(base)) continue
+      known.add(base)
+      resources.push({ url: url, initiator: initiator, bytes: entry.transferSize || entry.encodedBodySize || 0 })
+      if (resources.length >= 12) break
+    }
+    const declared = []
+    const declare = (from, url) => { if (url && url.length <= 2048 && declared.length < 10 && !declared.some(entry => entry.url === url)) declared.push({ from: from, url: url }) }
+    try {
+      for (const link of Array.from(document.querySelectorAll('link[rel~="preload"][as="fetch"], link[rel~="prefetch"][as="fetch"]'))) declare('link[rel=' + link.rel + ']', link.href)
+      for (const node of Array.from(document.querySelectorAll('[data-api], [data-endpoint]')).slice(0, 20)) declare(node.hasAttribute('data-api') ? 'data-api' : 'data-endpoint', String(node.getAttribute('data-api') || node.getAttribute('data-endpoint') || ''))
+    } catch (error) { /* a document without these still answers the rest */ }
+    return { url: String(location.href), embedded: embedded, apis: apis.slice(0, 12), resources: resources, declared: declared }
   }
   globalThis[KEY] = state
   return VERSION
@@ -426,13 +588,13 @@ export function uploadScript(
   file: { readonly name: string; readonly mime: string; readonly base64: string },
 ): string {
   const spec = JSON.stringify({ target, file })
-  return `(() => {
+  return `(() => {${DEEP_DOM_SOURCE}
     const spec = ${spec}
     const probe = globalThis[${JSON.stringify(PROBE_KEY)}]
     const where = probe ? probe.find(spec.target) : null
     let node = null
     try {
-      if (spec.target.by === 'css') node = document.querySelector(spec.target.value)
+      if (spec.target.by === 'css') node = __dshQuery(spec.target.value)
       else if (spec.target.by === 'xpath') node = document.evaluate(spec.target.value, document, null, 9, null).singleNodeValue
       else if (where) node = document.elementFromPoint(where.x, where.y)
     } catch (error) { node = null }
@@ -455,17 +617,49 @@ export function uploadScript(
     return JSON.stringify({ ok: true, name: blob.name, size: blob.size, files: node.files ? node.files.length : 0 })
   })()`
 }
+/**
+ * What an action changed on the page that the URL does not show: the title, visible alert regions
+ * and the dialogs the probe answered. Read before and after each action for the post-action line.
+ * It never installs the probe, so observing an action leaves the page as it was.
+ */
+const PULSE_SCRIPT = `(() => {
+  const probe = globalThis[${JSON.stringify(PROBE_KEY)}]
+  const alerts = []
+  try {
+    for (const node of Array.from(document.querySelectorAll('[role=alert], [role=alertdialog], [aria-live=assertive]')).slice(0, 20)) {
+      const text = String(node.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 160)
+      if (text !== '' && node.getClientRects().length > 0 && alerts.indexOf(text) === -1) alerts.push(text)
+      if (alerts.length >= 5) break
+    }
+  } catch (error) { /* a document without a body still has a title */ }
+  const dialogs = probe && Array.isArray(probe.dialogs)
+    ? probe.dialogs.slice(-5).map(entry => ({ at: entry.at, kind: entry.kind, message: String(entry.message).slice(0, 160), answered: entry.answered }))
+    : []
+  return JSON.stringify({ title: String(document.title || ''), alerts: alerts, dialogs: dialogs, probe: probe ? Number(probe.startedAt) || 0 : 0 })
+})()`
+
+/** A fetch from the page, so it carries the page's same-origin cookies. The body comes back as text. */
+function fetchScript(url: string, init: { readonly method?: string; readonly headers?: Readonly<Record<string, string>>; readonly body?: string }): string {
+  return `(async () => {
+    const response = await fetch(new URL(${JSON.stringify(url)}, document.baseURI).href, Object.assign({ credentials: 'same-origin' }, ${JSON.stringify(init)}))
+    const body = await response.text()
+    return JSON.stringify({ ok: response.ok, status: response.status, statusText: response.statusText, url: response.url, type: response.headers.get('content-type') || '', body: body })
+  })()`
+}
+
 /** Build a fixed page operation, rejecting unknown operations before any code runs. */
 export function pageOperationScript(request: BrowserPageOperationRequest): string {
   switch (request.operation) {
     case 'install': return PROBE_INSTALL_SCRIPT
     case 'url': return 'JSON.stringify(location.href)'
+    case 'pulse': return PULSE_SCRIPT
+    case 'fetch': return fetchScript(request.url, request.init)
     case 'text': return 'JSON.stringify((document.body ? document.body.innerText : "").indexOf(' + JSON.stringify(request.text) + ') !== -1)'
     case 'drag': return dragScript(request.from, request.to, request.steps)
     case 'upload': return uploadScript(request.target, request.file)
     case 'probe': {
       const methods: readonly BrowserProbeMethod[] = ['read', 'clear', 'settle', 'find', 'overlayAt', 'summary',
-        'findText', 'hoverAt', 'setDialogPolicy', 'dialogStatus', 'networkCursor']
+        'findText', 'hoverAt', 'setDialogPolicy', 'dialogStatus', 'networkCursor', 'dataSources']
       if (!methods.includes(request.method)) throw new Error('browser: unsupported fixed page operation')
       return probeCallScript(request.method, request.args)
     }

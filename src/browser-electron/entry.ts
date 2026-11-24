@@ -43,7 +43,8 @@ import { getLastOpen } from './open-slot.ts'
 import { GUEST_ROUTE, handleGuest } from './guest-route.ts'
 import { resolveSessionHandle, sessionWireId } from '../browser/handles.ts'
 import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.ts'
-import { findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
+import { detectDesktopShell, findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
+import { publishTauriDesktopMain, runningTauriRuntime } from './tauri-host.ts'
 import { readHostExtensionStatus } from './profile-extension.ts'
 import { readBridgeEndpoint } from './bridge-endpoint.ts'
 import { runBridgeAction } from './bridge-install.ts'
@@ -61,7 +62,6 @@ import { createShortcutStore, type ShortcutSettings } from './startpage-shortcut
 import { createReferenceService, setReferenceCaptureActionHandler } from '../browser-reference/service.ts'
 import { WEB_SOURCE_ROUTE } from '../reference-source.ts'
 import { createDeliveryQueue, resolveReferenceOwner, type DeliveryQueue } from '../browser-reference/delivery.ts'
-import { createSubmissionReceipts, type ReceiptSession } from '../browser-reference/submission-receipts.ts'
 import type { BrowserReference, BrowserReferenceCarrier } from '../browser-reference/types.ts'
 import {
   createReferenceRouteHandlers,
@@ -200,9 +200,12 @@ function readSessionId(ctx: unknown): string | undefined {
 
 /** Register the Electron browser provider with `ctx.browser`. */
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
+  if (runningTauriRuntime() !== undefined) {
+    try { publishTauriDesktopMain() } catch (error) { ctx.logger?.warn?.(`dsh-builtin-browser: cannot name the sidebar bridge to DSH Tauri: ${String(error)}`) }
+  }
   // Which session is this process serving?
   //
-  // The desktop shell keeps ONE sidebar per conversation — measured: two `[class*=_tabStrip]`
+  // The desktop shell keeps ONE sidebar per conversation — measured: two sidebar tab-strip
   // containers sat in the DOM at once, each carrying its own session id on the React fiber, and
   // the invisible one's webview was unloaded. So the bridge CAN tell which sidebar belongs to
   // whom; what it lacked was the other half, this process's own identity. Without it, the bridge
@@ -402,6 +405,11 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
         })))
         void host.refreshStatus()
+      } else if (host instanceof SystemBrowserViewHost) {
+        const provider = referenceProvider!
+        unregisterTakeover = registerCarrierTakeover(ctx.browser, owner => provider.takeoverTargets(owner).map(target => ({
+          ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
+        })), { exclusive: false })
       }
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
       // A borrowed carrier can lose the process behind it, and this is the only notification that
@@ -488,7 +496,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       // Same profile root as settings-store, history-store and desktop-bridge-host: the
       // `?.dsh` component used to be missing HERE only, so a desktop launched from a
       // shortcut (no DSH_HOME in the environment) put its browser profile in
-      // `C:\Users\<user>\dsh-builtin-browser-host\` while its settings and history lived in
+      // `%USERPROFILE%\dsh-builtin-browser-host\` while its settings and history lived in
       // `~/.dsh/dsh-builtin-browser-host/` — two half-profiles that never met, and a
       // settings panel whose switches appeared not to apply.
       const home = dshHome()
@@ -639,8 +647,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }
     const root = findDesktopInstall()
     if (root === undefined) {
-      // Nothing to patch: say so instead of running an installer against a guess.
-      replyJson(response, 409, { ok: false, error: 'no DSH Desktop install was found on this machine' })
+      // Nothing to patch: say so instead of running an installer against a guess. A third-party
+      // shell is named as such so the refusal is not mistaken for a missing install.
+      const shell = detectDesktopShell({ preferredBrowser: settings.get().browser.channel })
+      replyJson(response, 409, { ok: false, error: shell.kind === 'none' ? 'no DSH Desktop install was found on this machine' : `not patchable: ${shell.reason}`, shell })
       return
     }
     if (bridgeActionRunning) {
@@ -682,6 +692,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         const hostPatchMaintenance = createHostPatchMaintenance({
           modules: () => servedClientModules(ctx.get('clientModules')),
           desktop: () => process.versions.electron !== undefined,
+          tauri: () => runningTauriRuntime()?.runtime,
         })
         host.effect(() => host.webServer.register({
           kind: 'exact', path: HOST_PATCH_ROUTE,
@@ -696,7 +707,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           commit: async id => { await commitAutomaticMaintenance(id) },
           start: async (action, options) => {
             const root = findDesktopInstall()
-            if (root === undefined) throw new Error('no verified DSH Desktop installation was found')
+            if (root === undefined) throw new Error(`no verified DSH Desktop installation was found: ${detectDesktopShell().reason}`)
             return await runWithManualBridgePreference('install', patch => settings.update(patch),
               async () => await startAutomaticMaintenance(action, root, options))
           },
@@ -709,7 +720,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           kind: 'exact',
           path: BRIDGE_STATUS_ROUTE,
           handler: authenticated(ctx, async (request, response) => handleBridgeStatus(request, response, undefined,
-            await readHostExtensionStatus(dshHome()))),
+            await readHostExtensionStatus(dshHome()), undefined, undefined, settings.get().browser.channel)),
         }, 'dsh-builtin-browser: bridge status'))
         // The panel prepares a launcher without changing the running Desktop. Direct local
         // maintenance remains available once Desktop has exited.
@@ -766,6 +777,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           hasBinary: hasElectronRuntime,
           provision: provisionSnapshot,
           bridgeError: () => DesktopBridgeViewHost.compatibilityError(),
+          shell: () => detectDesktopShell({ preferredBrowser: settings.get().browser.channel }),
           bridge: () => {
             const root = findDesktopInstall()
             return root === undefined ? undefined : readBridgeStatus(root, mainExtension)
@@ -872,7 +884,6 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     service: ReturnType<typeof createReferenceService>,
     carrier: () => BrowserReferenceCarrier,
     queue: DeliveryQueue,
-    receipts: ReturnType<typeof createSubmissionReceipts>,
   ): void {
     const injectRoutes = (ctx as unknown as {
       inject?: (deps: readonly string[], callback: (host: WebServerHost) => void) => void
@@ -880,7 +891,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     if (typeof injectRoutes !== 'function') return
     try {
       injectRoutes(['webServer'], (host) => {
-        const handlers = createReferenceRouteHandlers({ service, carrier, queue, receipts })
+        const handlers = createReferenceRouteHandlers({ service, carrier, queue })
         const routes: readonly (readonly [string, (request: IncomingMessage, response: ServerResponse) => void | Promise<void>, string])[] = [
           [CLIENT_VERSION_ROUTE, (_request, response) => {
             // 客户端产物的版本指纹：内容变了，浏览器就应换到新 bundle。
@@ -983,15 +994,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * restarted without asking the browser for anything (§12.2).
    */
   const deliveryQueue = createDeliveryQueue()
-  const receipts = createSubmissionReceipts(deliveryQueue, id => {
-    const sessions = ctx.get('sessions') as { get(sessionId: string): ReceiptSession | undefined } | undefined
-    return sessions?.get(id)
-  })
-  ctx.on?.('session/event', (session, event) => {
-    try { receipts.observe(session.id, event as Parameters<typeof receipts.observe>[1]) }
-    catch (error) { ctx.logger?.warn?.(`dsh-builtin-browser: reference receipt pending: ${String(error)}`) }
-  }, { global: true })
-  installReferenceRoutes(ctx, referenceService, referenceCarrier, deliveryQueue, receipts)
+  installReferenceRoutes(ctx, referenceService, referenceCarrier, deliveryQueue)
   installShortcutRoutes(ctx)
 
   /** Short, stable, non-sensitive codes for the page notice when an enqueue fails. */

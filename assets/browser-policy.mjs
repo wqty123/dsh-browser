@@ -10,6 +10,12 @@ export const EXTENSION_READY_TIMEOUT_MS = 2500
 export const EXTENSION_PROBE_TIMEOUT_MS = 1500
 export const NATIVE_REGISTRATION_TIMEOUT_MS = 60_000
 export const NATIVE_REGISTRATION_MAX_BUFFER = 1024 * 1024
+export const TOOL_DEFAULT_TIMEOUT_MS = 60_000
+export const TOOL_WAIT_RESERVE_MS = 5_000
+export const TOOL_WAIT_MIN_MS = 250
+export const MAX_FILL_FIELDS = 200
+export const CODE_TOOL_DEFAULT_TIMEOUT_MS = 120_000
+export const CODE_TOOL_MAX_TIMEOUT_MS = 600_000
 export const extensionPageUrl = browser => `${browser}://extensions`
 export const cdpVersionUrl = port => `http://${LOOPBACK_IPV4}:${port}/json/version`
 export const folderOpener = platform => platform === 'win32' ? 'explorer.exe' : platform === 'darwin' ? 'open' : 'xdg-open'
@@ -30,6 +36,8 @@ export const PREVIEW_ROUTE = '/dsh-builtin-browser/browser-view/frame'
 export const PREVIEW_SESSIONS_ROUTE = '/dsh-builtin-browser/browser-view/sessions'
 export const BRIDGE_STATUS_ROUTE = '/dsh-builtin-browser/bridge-status'
 export const GUEST_ROUTE = '/dsh-builtin-browser/browser-view/isolated-guest'
+export const WEB_BROWSER_SANDBOX = 'allow-scripts allow-forms'
+export const RELAXED_BROWSER_SANDBOX = `${WEB_BROWSER_SANDBOX} allow-downloads allow-modals allow-pointer-lock allow-orientation-lock allow-presentation allow-storage-access-by-user-activation`
 export const RUNTIME_STATUS_ROUTE = '/dsh-builtin-browser/runtime-status'
 export const RUNTIME_PROVISION_ROUTE = '/dsh-builtin-browser/runtime-provision'
 export const SHORTCUTS_ROUTE = '/dsh-builtin-browser/shortcuts'

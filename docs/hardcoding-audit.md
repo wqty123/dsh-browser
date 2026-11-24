@@ -45,15 +45,35 @@ intervals, and guest/host UI timing and size thresholds. Some embedded toolbar a
 page-script labels and technical error strings still live with their generators;
 moving those safely requires preserving serialized-script scope and locale input.
 
-### `src/tool-browser/index.ts` — PR #66, deliberately not edited
+### `src/tool-browser`
 
-- `localSettingsPath()` still adds `D:/dsh-home/dsh-builtin-browser-host/settings.json`.
-- Tool help includes the example host `http://127.0.0.1:3080/`.
-- Tool timeout default, wait-budget reserve/minimum, fill-field cap and per-tool
-  timeout/limit help remain inline; they should use the relevant domain policy.
-- Tool descriptions and result annotations remain English literals.
-- Settings/open-request/reference endpoint strings should import their canonical
-  contract rather than duplicate paths. Coordinate this with the PR #66 owner.
+- Tool timeout default, wait-budget reserve/minimum, fill-field cap and the
+  `dsh_browser_code` cell deadlines live in `assets/browser-policy.mjs`.
+- Tool help names the DSH host as `http://127.0.0.1:<port>/`; the port is the one
+  `dsh web` prints, never a fixed example.
+- Carrier limits are a capability check: `CarrierCapabilities` and
+  `assertCapability` in `src/browser/types.ts`, resolved per task by
+  `carrierCapabilities()` in `src/tool-browser/state.ts`. A refusal is a
+  `BROWSER_CARRIER_CAPABILITY_UNAVAILABLE` `BrowserError` that names the carrier to
+  switch to.
+- Still open: tool descriptions and result annotations are English literals, and
+  settings/open-request/reference endpoint strings should import their canonical
+  contract rather than duplicate paths.
+
+### Client bundle
+
+The root `client.js` snapshot is gone. Client tests read the built
+`dist/client.cjs` through `tests/helpers/client-build.mjs`, so they exercise what
+DSH loads; run `node scripts/build.mjs` first.
+
+### Static guard
+
+`tests/no-hardcoding-guard.test.mjs` rejects drive-letter paths, CSS Modules class
+names and DSH version branches in shipped code. Its allowlist holds exact lines
+only: the DSH 0.2.2-rc.3 tab-strip fallback (`LEGACY_TAB_STRIP_SELECTOR` in the
+settings panel, and the same lookup in the deployed desktop bridge). Every shell
+with `data-sidebar-right-session` markers takes the marker path first. Host-patch
+specs match exact versions as data, which the guard does not flag.
 
 ## Windows launcher regression
 

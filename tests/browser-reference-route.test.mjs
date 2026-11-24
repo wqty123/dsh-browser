@@ -145,6 +145,29 @@ test('frozen page-overlay captures belong to the sidebar, not the selected exter
   assert.equal(captures.at(-1).carrier, 'edge')
 })
 
+test('a frozen capture over 64 KiB with inlined images is accepted, and only an oversized body is refused', async () => {
+  const captures = []
+  const handlers = createReferenceRouteHandlers({
+    service: service({ capture: async input => { captures.push(input); return { reference, failures: [] } } }),
+  })
+  const image = 'data:image/png;base64,' + 'A'.repeat(300 * 1024)
+  const capture = { ok: true, title: '数独', events: [{ type: 'text', text: '标题与首段' }, { type: 'image', src: image }] }
+  const body = JSON.stringify({ sessionId: 'owner', entry: 'page-overlay', capture })
+  assert.ok(Buffer.byteLength(body) > 64 * 1024)
+  const reply = response()
+  await handlers.capture(request({ method: 'POST', headers: SAME_ORIGIN, body }), reply)
+  assert.equal(reply.state.status, 200)
+  assert.equal(captures.at(-1).frozenCapture.events[1].src, image, 'the image reaches the service whole')
+
+  const oversized = response()
+  await handlers.capture(request({ method: 'POST', headers: SAME_ORIGIN, body: JSON.stringify({
+    sessionId: 'owner', entry: 'page-overlay', capture: { ok: true, events: [{ type: 'text', text: 'x'.repeat(13 * 1024 * 1024) }] },
+  }) }), oversized)
+  assert.equal(oversized.state.status, 400)
+  assert.match(oversized.state.payload.error, /exceeds/u)
+  assert.equal(captures.length, 1)
+})
+
 test('a committed capture answers with the summary and any partial failures', async () => {
   const handlers = createReferenceRouteHandlers({
     service: service({ capture: async () => ({ reference, failures: [{ kind: 'image', reason: 'image-unavailable' }] }) }),
@@ -293,7 +316,6 @@ test('a malformed or documentation-only package is a 400 with a readable reason'
 // --- delivery routes: session scoping and the remove tombstone -----------------
 
 import { createDeliveryQueue } from '../lib/browser-reference/delivery.js'
-import { createSubmissionReceipts } from '../lib/browser-reference/submission-receipts.js'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -306,50 +328,6 @@ function tempQueue() {
 function ownedReference(referenceId, sessionId) {
   return { ...reference, referenceId, owner: { ...reference.owner, sessionId } }
 }
-
-test('the accepted Session request retires only its bound references across Host and client restarts', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-ref-accepted-'))
-  const rpc = 'ab536ce4-8fd1-4070-a3ca-2ac9302b250a'
-  const events = []
-  let live = { events }
-  const start = () => {
-    const queue = createDeliveryQueue({ path: join(root, 'deliveries.jsonl') })
-    const receipts = createSubmissionReceipts(queue, () => live, join(root, 'receipts'))
-    return { queue, receipts, handlers: createReferenceRouteHandlers({ service: service(), queue, receipts }) }
-  }
-  let host = start()
-  host.queue.prepare(ownedReference('ref-bound', 'owner'))
-  host.queue.prepare(ownedReference('ref-stays', 'owner'))
-  const bind = async (sessionId, ids) => {
-    const result = response()
-    await host.handlers.ack(request({ method: 'POST', headers: SAME_ORIGIN,
-      body: JSON.stringify({ phase: 'submitting', requestId: rpc, sessionId, intentIds: ids }) }), result)
-    return result.state.status
-  }
-  assert.equal(await bind('wrong', ['ref-bound']), 409)
-  assert.equal(await bind('owner', ['ref-bound']), 200)
-  assert.equal(await bind('owner', ['ref-stays']), 409)
-  const event = { type: 'agent/inbox/spliced', data: { inserted: [{ source: { kind: 'user', rpcId: rpc } }] } }
-  host.receipts.observe('wrong', event)
-  assert.equal(host.queue.get('ref-bound').state, 'prepared')
-  host.queue.dispose()
-  events.push(event)
-  live = undefined
-  host = start()
-  const read = async () => {
-    const reply = response()
-    await host.handlers.deliveries(request({ url: '/?sessionId=owner&includeConsumed=1' }), reply)
-    return reply.state.payload
-  }
-  assert.deepEqual((await read()).unverified, ['ref-bound'])
-  live = { events }
-  const recovered = await read()
-  assert.deepEqual(recovered.unverified, [])
-  assert.equal(recovered.deliveries.find(d => d.referenceId === 'ref-bound').state, 'consumed')
-  assert.equal(recovered.deliveries.find(d => d.referenceId === 'ref-stays').state, 'prepared')
-  assert.equal((await read()).sequence, recovered.sequence)
-  host.queue.dispose()
-})
 
 test('deliveries refuses to answer without a session id', async () => {
   // Answering an unscoped poll would hand every conversation's records to the

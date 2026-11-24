@@ -1,6 +1,3 @@
-import { zh, en } from '../assets/browser-panel-locales.mjs'
-import * as browserPolicy from '../assets/browser-policy.mjs'
-import { extensionMessages } from '../assets/browser-messages.mjs'
 // The settings panel, actually executed.
 //
 // The bundle is a ModuleLoader entry that reaches for `react`, `ctx.slots` and `ctx.locale`
@@ -21,17 +18,14 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import { stripTypeScriptTypes } from 'node:module'
+import { clientBundle, settingsPanelBundle } from './helpers/client-build.mjs'
 
 const initializationSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/browser/initialization.ts', import.meta.url), 'utf8'))
 const { createBrowserInitializationJournal, createBrowserInitializationReader } = await import(`data:text/javascript;base64,${Buffer.from(initializationSource).toString('base64')}`)
 
 const { DEFAULT_SETTINGS } = await import('../lib/browser-electron/settings-store.js')
 
-const panelSource = stripTypeScriptTypes(readFileSync(new URL('../src/client/settings/panel.ts', import.meta.url), 'utf8')).replace(/^export /gm, '').replace(/^import[^\n]+\n/gm, '')
-const SOURCE = `window.__ModuleLoader__.load({ factory(require) {
-  const { ${Object.keys(browserPolicy).join(', ')} } = ${JSON.stringify(browserPolicy)};\n  const extensionMessages = ${JSON.stringify(extensionMessages)};\n  const zh = ${JSON.stringify(zh)}; const en = ${JSON.stringify(en)};\n  ${panelSource}
-  return loadSettingsPanel(require);
-} })`
+const SOURCE = settingsPanelBundle()
 const ROUTE = '/dsh-builtin-browser/settings'
 
 /**
@@ -131,7 +125,7 @@ let activeDocument = makeDocument()
 let activeSandbox = null
 
 /** Load the bundle the way the host's ModuleLoader does, and return its factory. */
-function bundleFactory(timers, production = false) {
+function bundleFactory(timers) {
   let factory
   const sandbox = {
     window: { __ModuleLoader__: { load: (spec) => { factory = spec.factory } } },
@@ -158,7 +152,7 @@ function bundleFactory(timers, production = false) {
     },
   }
   activeSandbox = sandbox
-  vm.runInNewContext(production ? SOURCE : readFileSync(new URL('../client.js', import.meta.url), 'utf8'), sandbox, { filename: 'client.js' })
+  vm.runInNewContext(SOURCE, sandbox, { filename: 'dist/client.cjs' })
   assert.ok(typeof factory === 'function', 'the bundle registered a factory')
   return factory
 }
@@ -270,7 +264,7 @@ async function mount(options = {}) {
   if (options.document !== undefined) activeDocument = options.document
   if (options.fetch !== undefined) activeFetch = options.fetch
   const host = makeHost(settings)
-  const exports = bundleFactory(options.timers, options.production)(host.requireFn)
+  const exports = bundleFactory(options.timers)(host.requireFn)
 
   let registration
   // The bundle now registers TWO slots: the settings section and the on-demand
@@ -338,28 +332,29 @@ test('the bundle loads and registers the settings section', async () => {
   assert.equal(registration.spec.locale, 'settings.dsh-builtin-browser')
 })
 
-test('explicit and automatic system browsers expose profile and window controls', async () => {
-  for (const channel of ['chrome', 'edge', 'auto']) {
+test('explicit system browsers expose profile and window controls', async () => {
+  for (const channel of ['chrome', 'edge']) {
     const mounted = await mount({ settings: { ...DEFAULT_SETTINGS, browser: { channel, headless: 'headless' } } })
     const controls = elements(mounted.tree)
     assert.equal(controls.find(node => node.props?.labelKey === 'browser.profile')?.props.checked, DEFAULT_SETTINGS.cookies.persist, `${channel}: sign-in persistence remains configurable`)
     assert.equal(controls.find(node => node.props?.label === 'browser.headless')?.props.value, 'headless', `${channel}: window mode remains configurable`)
   }
-  for (const channel of ['bundled', 'sidebar']) {
+  // `auto` resolves to the sidebar carrier, which owns its profile and window.
+  for (const channel of ['auto', 'bundled', 'sidebar']) {
     const mounted = await mount({ settings: { ...DEFAULT_SETTINGS, browser: { channel, headless: 'headless' } } })
     assert.equal(elements(mounted.tree).some(node => node.props?.labelKey === 'browser.profile' || node.props?.label === 'browser.headless'), false, `${channel}: carrier-owned profile and window controls are omitted`)
   }
 })
 
-test('automatic browser profile and window changes save their existing settings fields', async () => {
-  const settings = { ...DEFAULT_SETTINGS, browser: { channel: 'auto', headless: 'auto' } }
+test('system browser profile and window changes save their existing settings fields', async () => {
+  const settings = { ...DEFAULT_SETTINGS, browser: { channel: 'chrome', headless: 'auto' } }
   for (const [name, find, value, expected] of [
     ['profile', node => node.props?.labelKey === 'browser.profile', false, { cookies: { persist: false } }],
     ['window mode', node => node.props?.label === 'browser.headless', 'headless', { browser: { headless: 'headless' } }],
   ]) {
     const mounted = await mount({ settings })
     const control = elements(mounted.tree).find(find)
-    assert.ok(control, `${name} is reachable for automatic browser selection`)
+    assert.ok(control, `${name} is reachable for a system browser`)
     control.props.onChange(value)
     await tick()
     const writes = mounted.host.calls.filter(call => call.init?.method === 'PUT')
@@ -730,10 +725,9 @@ test('a bound start-page tab refuses an unaccepted shell navigation', async () =
   }
 })
 
-test('a binding whose tab is gone from the session is replaced instead of refused', async () => {
-  // DSH 0.2.2-rc.3 replaced every tab on restart, and `navigateTabIn` answers false for a tab id that
-  // is no longer in the session's layout. Treating that as "this shell cannot do it" is what made the
-  // start page — and the reference capture that rides on it — look broken after the upgrade.
+test('a binding whose native tab is gone is reported, not silently replaced', async () => {
+  // After a restart the bound native tab is gone. The panel reports the closed tab instead of opening
+  // a second one behind the binding; the readiness transaction owns recovery.
   let tabs = []
   let opened = 0
   const service = {
@@ -742,21 +736,17 @@ test('a binding whose tab is gone from the session is replaced instead of refuse
       opened++
       tabs = [{ id: `tab:browser-${opened}`, kind: 'browser', contentId: String(options?.params?.url ?? '') }]
     },
-    // The shell refuses to re-aim anything: every navigate is answered false.
     navigateTabIn: () => false,
   }
   const { panel } = await mount({ sidebarRight: service, document: documentWith(makeStrip('session-a')) })
   assert.equal(panel.openPanel('session-a', 'https://example.com/', { viewId: 'view-1' }).ok, true)
   assert.equal(opened, 1)
 
-  // The restart: the bound tab is gone, so the only tab the shell lists is a different one.
   tabs = [{ id: 'tab:after-restart', kind: 'browser', contentId: 'sidebar://browser/9' }]
-  const recovered = panel.openPanel('session-a', 'https://example.com/next', { viewId: 'view-1' })
-  assert.equal(recovered.ok, true, 'a stale binding is repaired, not reported as a broken shell')
-  assert.equal(recovered.created, true)
-  assert.equal(opened, 2, 'exactly one replacement tab')
-  assert.equal(tabs.length, 1, 'and the replacement carries the requested address')
-  assert.equal(tabs[0].contentId, 'https://example.com/next')
+  const refused = panel.openPanel('session-a', 'https://example.com/next', { viewId: 'view-1' })
+  assert.equal(refused.ok, false)
+  assert.match(refused.reason, /native tab for this browser view was closed/)
+  assert.equal(opened, 1, 'no replacement tab is opened behind the binding')
 })
 
 test('the walk up stops at this conversation, never reaching the shell root', async () => {
@@ -1402,7 +1392,7 @@ function transactionFixture() {
 
 test('one first-panel transaction awaits mount and the exact guest acknowledgement', async () => {
   const f = transactionFixture()
-  const { panel } = await mount({ production: true, render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
+  const { panel } = await mount({ render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
   let settled = false
   const pending = panel.initializePanel('session-a', 'https://page.example/', { viewId: 'v', deadline: Date.now() + 1000 })
     .then(value => { settled = true; return value })
@@ -1427,7 +1417,7 @@ test('one first-panel transaction awaits mount and the exact guest acknowledgeme
 for (const mode of ['timeout', 'failed', 'missing-identity', 'foreign-identity', 'superseded']) {
   test(`first-panel initialization refuses ${mode} without a substitute page`, async () => {
     const f = transactionFixture()
-    const { panel } = await mount({ production: true, render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
+    const { panel } = await mount({ render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
     const pending = panel.initializePanel('session-a', 'https://page.example/', { viewId: 'v', deadline: Date.now() + (mode === 'timeout' ? 30 : 1000) })
     const tab = f.tabs[0], page = f.pages.get(tab.id)
     if (mode === 'failed') f.journal.fail(tab.id, 'navigation-failed')
@@ -1454,7 +1444,7 @@ test('a successor cancels the pending transaction and keeps the same native tab'
     f.journal.begin({ sessionId: owner, tabId, occurrenceId: 'mount-1', navigationRevision: 2, url: page.url })
     return true
   }
-  const { panel } = await mount({ production: true, render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
+  const { panel } = await mount({ render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
   const first = panel.initializePanel('session-a', 'https://first.example/', { viewId: 'v', deadline: Date.now() + 1000 })
   const next = panel.initializePanel('session-a', 'https://second.example/', { viewId: 'v', deadline: Date.now() + 1000 })
   const page = f.pages.get(f.tabs[0].id)
@@ -1472,7 +1462,7 @@ test('a successor cancels the pending transaction and keeps the same native tab'
 
 test('cancellation removes the subscription without replacing or publishing the pending guest', async () => {
   const f = transactionFixture()
-  const { panel } = await mount({ production: true, render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
+  const { panel } = await mount({ render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader })
   const pending = panel.initializePanel('session-a', 'https://page.example/', { viewId: 'v', transactionId: 'one', deadline: Date.now() + 1000 })
   assert.equal(panel.cancelPanelInitialization('session-other', 'v', 'one'), false)
   assert.equal(panel.cancelPanelInitialization('session-a', 'v', 'old'), false)
@@ -1484,7 +1474,7 @@ test('cancellation removes the subscription without replacing or publishing the 
 
 test('an initialization for an undisplayed conversation never changes the selected Session', async () => {
   const f = transactionFixture(), switched = []
-  const { panel } = await mount({ production: true, render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader, uiWorkspace: { openSession: id => switched.push(id) } })
+  const { panel } = await mount({ render: false, sidebarRight: f.service, document: f.fixture.document, initializationReader: f.reader, uiWorkspace: { openSession: id => switched.push(id) } })
   const result = await panel.initializePanel('session-other', 'https://page.example/', { viewId: 'v', deadline: Date.now() + 1000 })
   assert.equal(result.code, 'panel-not-displayed')
   assert.deepEqual(switched, [])
@@ -1618,7 +1608,7 @@ test('a logical view cannot claim a guest already bound to another view', async 
 
 test('a missing cached guest is refused instead of replacing the page', async () => {
   const fixture = managedSidebar({ existing: [{ id: 'human-page', guestId: 11, url: 'https://human.example/' }] })
-  const { panel } = await mount({ production: true, sidebarRight: fixture.service, document: fixture.fixture.document })
+  const { panel } = await mount({ sidebarRight: fixture.service, document: fixture.fixture.document })
   const result = panel.openPanel('session-a', 'https://replacement.example/', { viewId: 'lost-view', guestId: 88 })
   assert.equal(result.ok, false)
   assert.equal(result.code, 'BROWSER_GUEST_CLOSED')
@@ -1645,7 +1635,7 @@ test('a pending native tab remains bound while its guest attaches and the reques
 
 test('a closed native tab fails without replacing either logical view', async () => {
   const fixture = managedSidebar()
-  const { panel } = await mount({ production: true, sidebarRight: fixture.service, document: fixture.fixture.document })
+  const { panel } = await mount({ sidebarRight: fixture.service, document: fixture.fixture.document })
   const first = panel.openPanel('session-a', 'https://first.example/', { viewId: 'view-a' })
   const second = panel.openPanel('session-a', 'https://second.example/', { viewId: 'view-b' })
   const closed = fixture.pages.get(first.tabId)
@@ -1845,7 +1835,7 @@ test('the panel labels are translated, not left as keys', async () => {
 })
 
 test('the panel paints with a token the shipped theme defines', () => {
-  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const source = clientBundle()
   // The *usage* must be gone; the name may still appear in the comment that explains why.
   assert.equal(source.includes('var(--dsw-alias-bg-elevated'), false,
     'that token does not exist in the theme this ships against, so its fallback was the only thing seen')
@@ -1861,7 +1851,7 @@ test('the panel paints with a token the shipped theme defines', () => {
 // ---------------------------------------------------------------------------
 
 test('the panel sits above its button instead of on top of it', () => {
-  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const source = clientBundle()
   const panel = /\.dsh-bw-watch-panel \{[^}]*\}/.exec(source)
   assert.ok(panel !== null, 'the panel rule exists')
   assert.match(panel[0], /bottom: calc\(100% \+ \d+px\)/,
@@ -1870,7 +1860,7 @@ test('the panel sits above its button instead of on top of it', () => {
 })
 
 test('the close control is visible, and the overlay stays under host dialogs', () => {
-  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const source = clientBundle()
   const close = /\.dsh-bw-watch-close \{[^}]*\}/.exec(source)
   assert.ok(close !== null)
   assert.match(close[0], /border: 1px solid/, 'it has an edge: a 16px glyph at 70% opacity was invisible')
@@ -1886,7 +1876,7 @@ test('the close control is visible, and the overlay stays under host dialogs', (
 })
 
 test('the hidden attribute actually hides the preview image', () => {
-  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const source = clientBundle()
   assert.match(source, /\.dsh-bw-watch-img\[hidden\] \{ display: none; \}/,
     'an author display rule needs its own [hidden] rule to honour the attribute')
   // And the script still uses the attribute, which is what the rule makes effective.
@@ -1998,7 +1988,7 @@ function readinessFetch({ runtime, status = 200, calls = [] } = {}) {
   }
 }
 
-/** The section, taken from the module the bundle exports (see the seam comment in client.js). */
+/** The section, taken from the module the bundle exports (see the seam comment in src/client/settings/panel.ts). */
 function readinessComponent(exports) {
   const component = exports.__readinessSection
   assert.equal(typeof component, 'function', 'the readiness section is exported for this harness')
@@ -2244,7 +2234,7 @@ test(`an incompatible bridge displays its reinstall error outside collapsed diag
   const runtime = bridgeRuntime('stale')
   runtime.bridge.detail = message
   const fetchMock = readinessFetch({ runtime })
-  const mounted = await mount({ production: true, fetch: fetchMock, render: false })
+  const mounted = await mount({ fetch: fetchMock, render: false })
   const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
   const alert = elements(tree).find(node => node.props.key === 'bridge-compatibility-error')
   assert.equal(alert.props.role, 'alert')
@@ -2258,7 +2248,7 @@ test('bridge maintenance names its automatic restart and retains the diagnostic 
   const runtime = bridgeRuntime('installed')
   runtime.bridge.command = 'node "C:/Plugin/desktop-bridge/install.mjs" "C:/DSH Desktop"'
   const fetchMock = readinessFetch({ runtime })
-  const mounted = await mount({ production: true, fetch: fetchMock, render: false, locale: locale.api })
+  const mounted = await mount({ fetch: fetchMock, render: false, locale: locale.api })
   const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
   const zh = textOf(tree).join(' | ')
   assert.match(zh, /点击后将正常退出并重启 DSH/, 'the explicit action names the desktop restart')
@@ -2279,7 +2269,7 @@ for (const [state, label] of [
   test(`bridge ${state} offers its action outside folded diagnostics`, async () => {
     const calls = []
     const fetchMock = readinessFetch({ runtime: bridgeRuntime(state), calls })
-    const mounted = await mount({ fetch: fetchMock, render: false, production: true })
+    const mounted = await mount({ fetch: fetchMock, render: false })
     const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
     const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
     const diagnostics = elements(tree).find(node => node.type === 'details' && node.props.key === 'diagnostics')
@@ -2298,7 +2288,7 @@ for (const [state, label] of [
 test('bridge management requires a detected desktop installation', async () => {
   for (const runtime of [bridgeRuntime('absent', false), bridgeRuntime('missing', false), bridgeRuntime('absent', true)]) {
     const fetchMock = readinessFetch({ runtime })
-    const mounted = await mount({ production: true, fetch: fetchMock, render: false })
+    const mounted = await mount({ fetch: fetchMock, render: false })
     const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
     assert.equal(elements(tree).some(node => node.props.key === 'bridge-controls'), false)
     assert.equal(bridgeButton(tree, 'readiness.bridge.uninstall'), undefined)
@@ -2362,7 +2352,7 @@ test('production settings reads host status even when the bridge endpoint is mis
     runtime.bridge.command = 'node legacy-injector.mjs'
     fixture.setRuntime(runtime)
     const calls = []
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(), timers: maintenanceTimers() })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(), timers: maintenanceTimers() })
     activeSandbox.window.dshDesktop = { mainExtensions: { async status(name) {
       calls.push(name); return { state, version: '0.7.42', ...(state === 'failed' ? { code: 'EXTENSION_START_FAILED' } : {}) }
     } } }
@@ -2384,7 +2374,7 @@ test('production unsupported settings reports the capability code and offers the
   delete runtime.bridge.mainExtension
   fixture.setRuntime(runtime)
   const locale = lazyLocale()
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, locale: locale.api, document: maintenanceDocument(), timers: maintenanceTimers() })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, locale: locale.api, document: maintenanceDocument(), timers: maintenanceTimers() })
   const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
   assert.match(textOf(tree).join(' '), /DESKTOP_MAIN_EXTENSION_UNSUPPORTED/)
   const install = elements(tree).find(node => node.props.key === 'reinstall')
@@ -2397,7 +2387,7 @@ test('production unsupported settings reports the capability code and offers the
 test('English reinstall requests preserve the selected progress locale', async () => {
   const fixture = maintenanceFixture({ state: 'installed' }), locale = lazyLocale()
   locale.setLocale('en')
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, locale: locale.api, document: maintenanceDocument(), timers: maintenanceTimers() })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, locale: locale.api, document: maintenanceDocument(), timers: maintenanceTimers() })
   const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
   await elements(tree).find(node => node.props.key === 'reinstall').props.onClick()
   const post = fixture.calls.find(call => call.init.method === 'POST')
@@ -2407,7 +2397,7 @@ test('English reinstall requests preserve the selected progress locale', async (
 test('production settings exposes exactly one fixed reinstall control in every bridge state', async () => {
   for (const state of ['missing', 'stale', 'installed']) {
     const fixture = maintenanceFixture({ state })
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(), timers: maintenanceTimers() })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(), timers: maintenanceTimers() })
     const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
     const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
     assert.equal(elements(controls).filter(node => node.type === 'button' && node.props.key === 'reinstall').length, 1)
@@ -2425,7 +2415,7 @@ for (const [action, state, label, success] of [
 ]) {
   test(`automatic bridge ${action} arms the new endpoint before opening the official menu and waits for completion`, async () => {
     const fixture = maintenanceFixture({ state }), clicks = [], timers = maintenanceTimers()
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
     const Component = readinessComponent(mounted.exports)
     const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
     await bridgeButton(tree, label).props.onClick()
@@ -2455,7 +2445,7 @@ test('an in-flight handoff ignores duplicate clicks and disables concurrent cont
   let complete
   const response = new Promise(resolve => { complete = resolve })
   const fixture = maintenanceFixture({ state: 'installed', post: () => response }), clicks = [], timers = maintenanceTimers()
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
   const Component = readinessComponent(mounted.exports)
   const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
   const install = bridgeButton(tree, 'readiness.bridge.reinstall')
@@ -2491,7 +2481,7 @@ for (const { name, snapshot, documentLanguage, switchLanguage, expected } of [
     document.documentElement.lang = documentLanguage
     if (snapshot !== undefined) locale.setLocale(snapshot)
     else delete locale.api.getSnapshot
-    const mounted = await mount({ production: true, fetch: fixture.fetchMock, render: false, document, locale: locale.api, timers: maintenanceTimers() })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document, locale: locale.api, timers: maintenanceTimers() })
     const Component = readinessComponent(mounted.exports)
     const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
     if (switchLanguage) locale.setLocale(switchLanguage)
@@ -2502,7 +2492,7 @@ for (const { name, snapshot, documentLanguage, switchLanguage, expected } of [
 }
 test('a Desktop preload object can arm maintenance without a custom menu', async () => {
   const fixture = maintenanceFixture(), timers = maintenanceTimers()
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: makeDocument(), timers })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: makeDocument(), timers })
   activeSandbox.dshDesktop = {}
   const Component = readinessComponent(mounted.exports)
   const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
@@ -2512,7 +2502,7 @@ test('a Desktop preload object can arm maintenance without a custom menu', async
 
 for (const desktop of [undefined, null]) test(`remote or unsupported surfaces cannot arm bridge maintenance (dshDesktop=${desktop})`, async () => {
   const fixture = maintenanceFixture(), timers = maintenanceTimers()
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: makeDocument(), timers })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: makeDocument(), timers })
   activeSandbox.dshDesktop = desktop
   const Component = readinessComponent(mounted.exports)
   const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
@@ -2535,7 +2525,7 @@ for (const [name, response, reason] of [
       if (!response) throw Error(reason)
       return { ...response, json: async () => response.data }
     } }), clicks = [], timers = maintenanceTimers()
-    const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
     const Component = readinessComponent(mounted.exports)
     const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
     await bridgeButton(tree, 'readiness.bridge.reinstall').props.onClick()
@@ -2551,7 +2541,7 @@ for (const [name, response, reason] of [
 test('a remounted panel resumes an active job and keeps polling through the restart disconnect', async () => {
   const job = { id: 'resumed', action: 'reinstall', phase: 'installing' }
   const fixture = maintenanceFixture({ initialJob: job }), timers = maintenanceTimers(), clicks = []
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
   const Component = readinessComponent(mounted.exports)
   const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
   assert.ok(textOf(tree).includes('readiness.bridge.phase.installing'))
@@ -2575,7 +2565,7 @@ test('a remounted panel resumes an active job and keeps polling through the rest
 test('a fresh panel recovers a completed job without rearming maintenance', async () => {
   const fixture = maintenanceFixture({ state: 'installed', initialJob: { id: 'completed-before-mount', action: 'reinstall', phase: 'completed', ok: true, restarted: true } })
   const timers = maintenanceTimers(), clicks = []
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers, production: true })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
   const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
   assert.ok(textOf(tree).includes('readiness.bridge.installedDone'))
   assert.equal(bridgeButton(tree, 'readiness.bridge.reinstall').props.disabled, false)
@@ -2590,7 +2580,7 @@ for (const phase of ['failed', 'cancelled']) {
   test(`a ${phase} job exposes details only in diagnostics and enables retry`, async () => {
     const detail = 'worker diagnostic '.repeat(150)
     const fixture = maintenanceFixture({ initialJob: { id: 'finished', action: 'reinstall', phase, error: detail, output: 'worker output' } }), timers = maintenanceTimers()
-    const mounted = await mount({ production: true, fetch: fixture.fetchMock, render: false, document: maintenanceDocument(), timers })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(), timers })
     const Component = readinessComponent(mounted.exports)
     const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
     const alert = elements(tree).find(node => node.props.key === 'bridge-job-error')
@@ -2609,7 +2599,7 @@ for (const { name, error, output, expected } of [
 ]) {
   test(`maintenance diagnostics retain ${name} without duplicate output`, async () => {
     const fixture = maintenanceFixture({ initialJob: { id: 'diagnostic', action: 'reinstall', phase: 'failed', error, output } })
-    const mounted = await mount({ production: true, fetch: fixture.fetchMock, render: false, document: maintenanceDocument(), timers: maintenanceTimers() })
+    const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(), timers: maintenanceTimers() })
     const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
     const detail = elements(tree).find(node => node.props.key === 'bridge-job-detail')
     assert.deepEqual(textOf(detail), [expected])
@@ -2619,7 +2609,7 @@ for (const { name, error, output, expected } of [
 
 test('an idle settings panel reads maintenance once without polling or opening the menu', async () => {
   const fixture = maintenanceFixture(), timers = maintenanceTimers(), clicks = []
-  const mounted = await mount({ fetch: fixture.fetchMock, render: false, production: true, document: maintenanceDocument(clicks), timers })
+  const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: maintenanceDocument(clicks), timers })
   await renderPanel(readinessComponent(mounted.exports), mounted.host, fixture.fetchMock)
   assert.equal(fixture.calls.filter(call => call.path.endsWith('/bridge-maintenance')).length, 1)
   assert.equal(timers.pending.size, 0)
@@ -2697,4 +2687,21 @@ test('a failed reference load keeps the records section and a working retry', as
   const recovered = await renderPanel(Component, mounted.host, fetchMock)
   assert.equal(elements(recovered).some(node => node.props.role === 'alert'), false)
   assert.ok(textOf(recovered).join(' ').includes('暂无网页引用'))
+})
+
+test('a third-party desktop shell hides bridge install / repair and recommends the system browser first', async () => {
+  const locale = lazyLocale()
+  const runtime = bridgeRuntime('missing', true)
+  runtime.shell = { kind: 'third-party-shell', patchable: false, reason: 'out/main/index.js instead of lib/main.js', recommendedCarrier: 'edge', version: '0.14.0' }
+  const fetchMock = readinessFetch({ runtime })
+  const mounted = await mount({ production: true, fetch: fetchMock, render: false, locale: locale.api })
+  const tree = await renderPanel(readinessComponent(mounted.exports), mounted.host, fetchMock)
+  assert.equal(elements(tree).some(node => node.props.key === 'bridge-controls'), false, 'no install or repair for a shell the bridge never patches')
+  assert.equal(bridgeButton(tree, 'readiness.bridge.reinstall'), undefined)
+  const guidance = elements(tree).find(node => node.props.key === 'third-party-shell')
+  assert.ok(guidance)
+  const [first, second] = textOf(guidance)
+  assert.match(first, /本机 Edge/, 'the system browser usable right now comes first')
+  assert.match(second, /官方 DeepSeek Harness Desktop 或 DSH Web/, 'the native sidebar follows')
+  assert.match(textOf(tree).join(' | '), /第三方 Desktop 外壳/)
 })

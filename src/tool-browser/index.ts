@@ -13,15 +13,18 @@ import { BrowserTakeovers, installTakeovers } from './takeover.ts'
 import { TAKEOVER_TOOL } from '../takeover-protocol.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { BrowserToolError, toBrowserToolError } from './errors.ts'
-import { CODE_PROMPT, CODE_TOOL, createCodeTool, type CatalogTool } from './code-tool.ts'
+import { CODE_PROMPT, CODE_TOOL, createCodeTool, type CatalogTool, type PagePulse } from './code-tool.ts'
+import { pageOperationValue } from './probe-client.ts'
 import { SettingsStore } from '../browser-electron/settings-store.ts'
 import { browserSessionHandle, resolveTabHandle } from '../browser/handles.ts'
 import { readSurface, createState, liveStates, READ_ONLY_TOOLS, taskKey, type ToolScope, maxWaitFor, MAX_FILL_FIELDS, REGISTRATION_ORDER } from './state.ts'
 import { navigationTools } from './tools-navigation.ts'
+import { TOOL_DEFAULT_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 import { observationTools } from './tools-observation.ts'
 import { interactionTools } from './tools-interaction.ts'
 import { debugTools } from './tools-debug.ts'
 import { referenceTools } from './tools-reference.ts'
+import { ptcRuntimeActive, registerTool } from '../compat/host-features.ts'
 
 export { READ_ONLY_TOOLS, internals } from './state.ts'
 
@@ -74,17 +77,17 @@ export const CORE_TOOLS: ReadonlySet<string> = new Set([
 export const TOOL_GROUPS: Readonly<Record<string, readonly string[]>> = {
   forms: ['dsh_browser_check', 'dsh_browser_clear', 'dsh_browser_set_value', 'dsh_browser_get_value', 'dsh_browser_upload', 'dsh_browser_drag', 'dsh_browser_hover', 'dsh_browser_dialog', 'dsh_browser_click_sequence'],
   navigation: ['dsh_browser_forward', 'dsh_browser_refresh', 'dsh_browser_history', 'dsh_browser_replay', 'dsh_browser_visited', 'dsh_browser_download'],
-  debug: ['dsh_browser_console', 'dsh_browser_network', 'dsh_browser_wait_for_response', 'dsh_browser_assert', 'dsh_browser_doctor'],
+  debug: ['dsh_browser_console', 'dsh_browser_network', 'dsh_browser_wait_for_response', 'dsh_browser_data_sources', 'dsh_browser_fetch_json', 'dsh_browser_assert', 'dsh_browser_doctor'],
   session: ['dsh_browser_session', 'dsh_browser_reset', 'dsh_browser_reset_session', 'dsh_browser_restrict', 'dsh_browser_auth', 'dsh_browser_shortcuts'],
   more: [],
 }
 
 /** Guide for the `core` surface. Static, so the prompt prefix caches. */
-const CORE_PROMPT = 'Operate the built-in browser with the dsh_browser_* tools. Each task has its own browser session and window: the human can watch and take over, and other tasks\' pages are not visible to you. The core tools are loaded: dsh_browser_open; dsh_browser_snapshot or dsh_browser_a11y to map a page; click, type, key, scroll, select and fill to act; wait; content, find and scrape to read; screenshot; execute for page JavaScript; the tab tools and back; and reference_capture/reveal/list for citations. Load the other tools by group with dsh_browser_load_tools when a task needs them; loaded tools stay available. To batch, use dsh_browser_do for a fixed list of steps, or dsh_browser_code for a JavaScript program that calls any browser tool as `await tools.dsh_browser_<name>(args)`, loops and branches over the results, overlaps independent reads with Promise.all and prints only what you need. Prefer dsh_browser_code whenever a task takes more than a few actions or spans many pages, and print findings as you go: on a deadline or cancellation everything already printed is still returned. When run_code is available, call the same tools from run_code instead. A blocked page (403, access denied, bot wall) is not the end of the task. Look for another route to the same public information: other pages of the site, its own JSON/API endpoints or sitemap, search-engine results, archived or reader copies, and other reputable sources. Keep each value tied to the source it came from. Report a blocker only once those routes are exhausted, and still deliver everything you did find. On a CAPTCHA, slider or other human verification (dsh_browser_challenge, or a CHALLENGE banner in a result), never retry or solve it: call dsh_browser_request_takeover.'
+const CORE_PROMPT = 'Operate the built-in browser with the dsh_browser_* tools. Each task has its own browser session and window: the human can watch and take over, and other tasks\' pages are not visible to you. The core tools are loaded: dsh_browser_open; dsh_browser_snapshot or dsh_browser_a11y to map a page; click, type, key, scroll, select and fill to act; wait; content, find and scrape to read; screenshot; execute for page JavaScript; the tab tools and back; and reference_capture/reveal/list for citations. Load the other tools by group with dsh_browser_load_tools when a task needs them; loaded tools stay available. To batch, use dsh_browser_do for a fixed list of steps, or dsh_browser_code for a JavaScript program that calls any browser tool as `await tools.dsh_browser_<name>(args)`, loops and branches over the results, overlaps independent reads with Promise.all and prints only what you need. Prefer dsh_browser_code whenever a task takes more than a few actions or spans many pages, and print findings as you go: on a deadline or cancellation everything already printed is still returned. When run_code is available, call the same tools from run_code instead. A blocked page (403, access denied, bot wall) is not the end of the task. Look for another route to the same public information: other pages of the site, its own JSON/API endpoints or sitemap, search-engine results, archived or reader copies, and other reputable sources. Keep each value tied to the source it came from. Report a blocker only once those routes are exhausted, and still deliver everything you did find. A CHALLENGE banner (or dsh_browser_challenge) names the block, its recovery and fallback routes (site API, search results, archives): on recovery=takeover (CAPTCHA, slider or other human verification) never retry or solve it, call dsh_browser_request_takeover; on wait, wait and re-check; on retry, the open already retried once after a pause, so use the fallbacks; on environment (an IP/network block) do not retry, use the fallbacks and report the block.'
 
 /** Register all browser tools with `ctx.tools`. */
 export function apply(ctx: Context, config: Config = {}): void {
-  const timeoutMs = config.timeoutMs ?? 60_000
+  const timeoutMs = config.timeoutMs ?? TOOL_DEFAULT_TIMEOUT_MS
   const surface = config.surface ?? 'core'
   const maxWaitMs = maxWaitFor(timeoutMs)
   const maxFillFields = MAX_FILL_FIELDS
@@ -188,16 +191,30 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (definition !== undefined) registerSafely(definition)
   }
 
-  // Under DSH's PTC executor run_code already batches every tool, so the code tool steps aside.
-  const ptcMode = (): boolean => {
-    try { return (ctx as { get?: (name: string) => unknown }).get?.('ptcRuntime') !== undefined } catch { return false }
-  }
   if (surface !== 'tools') {
     try {
-      const code = createCodeTool(catalog)
-      // Registration options (`when`) arrived with DSH 0.2.2; older registries ignore them.
-      // On the code surface it is the only browser tool, so it stays even under PTC.
-      ;(ctx.tools.register as (tool: unknown, options?: { when: () => boolean }) => unknown)(code.tool, surface === 'core' ? { when: () => !ptcMode() } : undefined)
+      // Reads the page the action left behind without starting a session or installing the probe.
+      const pulse = async (exec: never): Promise<PagePulse | undefined> => {
+        const browser = ctx.get('browser')
+        const session = state.sessionsByTask.get(taskKey(exec))
+        if (browser === undefined || session === undefined) return undefined
+        try {
+          const raw = JSON.parse(await pageOperationValue(browser, session, { operation: 'pulse' }, (exec as { signal?: AbortSignal }).signal)) as Partial<PagePulse> | null
+          if (typeof raw?.title !== 'string') return undefined
+          return {
+            title: raw.title,
+            alerts: Array.isArray(raw.alerts) ? raw.alerts.filter(text => typeof text === 'string') : [],
+            dialogs: Array.isArray(raw.dialogs) ? raw.dialogs.filter(row => typeof row?.at === 'number' && typeof row.kind === 'string') : [],
+            probe: Number(raw.probe) || 0,
+          }
+        } catch {
+          return undefined
+        }
+      }
+      const code = createCodeTool(catalog, pulse)
+      // On the code surface it is the only browser tool, so it stays even under PTC; on `core`,
+      // DSH's PTC run_code already batches every tool, so the code tool steps aside.
+      registerTool(ctx.tools, code.tool, surface === 'core' ? (context?: { readonly agent?: unknown }) => !ptcRuntimeActive(ctx, context) : undefined)
       ctx.effect(() => code.dispose)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-builtin-browser: could not register ${CODE_TOOL} (${String(error)}).`)

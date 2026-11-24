@@ -6,16 +6,16 @@
 //   4. stop() only flipped a shared boolean, so a request already in flight painted a stale
 //      frame after a reopen and scheduled a SECOND screenshot loop; two quick clicks did the same.
 //
-// This loads the real client.js into a VM with a minimal DOM and a deferred fetch transport.
+// This loads the built settings panel (dist/client.cjs) into a VM with a minimal DOM and a deferred fetch transport.
 // The transport never runs a timer, so "one loop" is countable as the number of pending
 // timeouts, and frames are resolved by hand to control exactly when an old request returns.
 // It does NOT claim a native Desktop / LAN viewing E2E; that belongs to the integration run.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
+import { settingsPanelBundle } from './helpers/client-build.mjs'
 
-const SOURCE = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+const SOURCE = settingsPanelBundle()
 const FIRST = 'browser:first-created'
 const LATEST = 'browser:current-conversation'
 
@@ -111,7 +111,7 @@ function makeFixture(sessions = [FIRST, LATEST]) {
     setTimeout: fn => { const id = ++timerSerial; timers.set(id, fn); return id },
     clearTimeout: id => timers.delete(id),
   }
-  vm.runInNewContext(SOURCE, sandbox, { filename: 'client.js' })
+  vm.runInNewContext(SOURCE, sandbox, { filename: 'dist/client.cjs' })
   assert.equal(typeof factory, 'function', 'the bundle registered its ModuleLoader factory')
   const exports = factory(id => { if (id === 'react') return {}; throw new Error(`unexpected require: ${id}`) })
   exports.apply({
