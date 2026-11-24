@@ -125,7 +125,7 @@ export class IframeImpl implements BrowserFrame {
   goForward(): void {
     if (this.disposed) return
     if (this.navigation.canGoForward) { this.load(this.navigation.forward()); return }
-    if (this.presentation.historyStep(1)) this.frameHistoryForward = false
+    if (this.presentation.historyStep(1)) this.frameHistoryForward = this.presentation.canGoForward?.() ?? false
     this.publish()
   }
   /** Reload the last application-known address. */
@@ -165,7 +165,7 @@ export class IframeImpl implements BrowserFrame {
       : this.carrier.getSnapshot().stage === 'ready' ? 'observed' : 'requested',
       loading: state.navigation.status === 'loading' && this.error === undefined,
       canGoBack: this.navigation.canGoBack || this.presentation.historyDepth() > 1,
-      canGoForward: this.navigation.canGoForward || this.frameHistoryForward,
+      canGoForward: this.navigation.canGoForward || (this.presentation.canGoForward?.() ?? this.frameHistoryForward),
       error: this.error, sandboxEnabled: this.sandboxed }
   }
 
