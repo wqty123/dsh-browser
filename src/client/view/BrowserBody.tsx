@@ -12,6 +12,7 @@ import {
   ICON_REGULAR_STROKE,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
+import type { SIDEBAR_BROWSER_LOCALE_NS } from '../locales.ts'
 import type { BrowserInjected } from '../browser/BrowserController.ts'
 import type { BrowserInitFailure } from '../browser/initialization.ts'
 import { emptyBrowserFrame } from '../browser/BrowserFrame.ts'
@@ -43,7 +44,7 @@ function SandboxPolicyIcon({ sandboxed }: { readonly sandboxed: boolean }): Reac
 /** Browser body props assembled by the tab seat. */
 export type BrowserBodyProps = PropsRuntime<'sidebar.right.pane.tab'>
   & PropsStore<BrowserStore>
-  & PropsLocale<'sidebarBrowser'>
+  & PropsLocale<typeof SIDEBAR_BROWSER_LOCALE_NS>
   & InjectFace<BrowserInjected>
 
 function useBrowserDraft(url: string | undefined, revision: number): readonly [string, (value: string) => void, () => void] {
