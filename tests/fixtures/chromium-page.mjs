@@ -14,7 +14,7 @@ export async function chromiumPage(t) {
   let socket
   t.after(async () => {
     socket?.close(); chrome.kill(); await exited
-    rmSync(profile, { recursive: true, force: true })
+    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   })
   const endpoint = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Chromium debugging endpoint unavailable')), 10000)

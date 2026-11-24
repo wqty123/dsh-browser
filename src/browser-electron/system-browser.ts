@@ -31,6 +31,7 @@ import { readFileSync, rmSync, statSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { acquireProfileLease, type ProfileLease } from './profile-lease.ts'
+import { watchForeground, type ForegroundEvent, type ForegroundWatch, type ForegroundWatcher } from './foreground-watch.ts'
 import { BrowserProcessOwnership, type ProcessOwnershipOptions } from './process-ownership.ts'
 // Type-only: settings-store imports BrowserChannel from here, so a value import would be a cycle.
 // `hasDisplay` lives here instead of there for the same reason — it is a runtime function.
@@ -104,7 +105,7 @@ const defaultLauncher: BrowserLauncher = (path, args) =>
   spawn(path, [...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: false })
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import type { CommandOptions, ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
+import type { CommandOptions, ElectronBrowserViewHost, ElectronViewHandle, QuietRevealOptions } from './provider.ts'
 import type { CarrierPage } from '../browser/types.ts'
 import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserSessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 
@@ -285,6 +286,32 @@ export function searchSummary(
   return [...onPath, ...located]
 }
 
+/**
+ * Where quiet mode first parks its window: past ordinary displays while staying under Win32's
+ * 16-bit signed coordinate ceiling (32767 physical pixels) even at 125%-300% DPI scaling. Any
+ * ultra-wide multi-monitor overlap is pushed further out by {@link clearDisplays}.
+ */
+const QUIET_PARK = { left: 10000, top: 0, width: 1280, height: 800 } as const
+const QUIET_PARK_GAP = 200
+const QUIET_PARK_LEFT_TOLERANCE = 2000
+const QUIET_PARK_TOP_TOLERANCE = 256
+const QUIET_REVEAL_INSET = 40
+const QUIET_FRONT_SLACK = 16
+
+interface QuietFront { readonly client: CdpClient; readonly session: string; readonly targetId: string }
+
+interface WindowGeometry { readonly sl: number; readonly st: number; readonly sw: number; readonly sh: number; readonly x: number; readonly y: number; readonly ow: number; readonly oh: number; readonly hidden: boolean }
+
+/** The display the page's window is on (or nearest to), the window's outer rectangle, and whether the page is hidden. */
+async function windowGeometry(client: CdpClient, sessionId: string): Promise<WindowGeometry | undefined> {
+  const out = await client.send('Runtime.evaluate', {
+    expression: '({ sl: screen.availLeft, st: screen.availTop, sw: screen.availWidth, sh: screen.availHeight, x: screenX, y: screenY, ow: outerWidth, oh: outerHeight, hidden: document.visibilityState === "hidden" })',
+    returnByValue: true,
+  }, sessionId) as { result?: { value?: WindowGeometry } } | undefined
+  const g = out?.result?.value
+  return g !== undefined && [g.sl, g.st, g.sw, g.sh, g.x, g.y, g.ow, g.oh].every(n => typeof n === 'number') ? g : undefined
+}
+
 /** One CDP connection to a browser-level WebSocket, with flattened sessions. */
 class CdpClient {
   private nextId = 1
@@ -386,11 +413,18 @@ class CdpClient {
   }
 
   /** Route one CDP message to its waiter. */
+  private readonly eventListeners = new Set<(method: string, params: unknown) => void>()
+
+  /** Receive the browser's own CDP events (those without a command id). */
+  onEvent(listener: (method: string, params: unknown) => void): void { this.eventListeners.add(listener) }
+
   private onMessage(raw: string): void {
-    let message: { id?: number; method?: string; params?: { targetId?: unknown }; result?: unknown; error?: { message?: string } }
+    let message: { id?: number; method?: string; params?: unknown; result?: unknown; error?: { message?: string } }
     try { message = JSON.parse(raw) } catch { return }
     if (message.id === undefined) {
-      if (message.method === 'Target.targetDestroyed' && typeof message.params?.targetId === 'string') this.destroyedTargets.add(message.params.targetId)
+      const targetId = message.method === 'Target.targetDestroyed' ? (message.params as { targetId?: unknown } | undefined)?.targetId : undefined
+      if (typeof targetId === 'string') this.destroyedTargets.add(targetId)
+      if (typeof message.method === 'string') for (const listener of this.eventListeners) listener(message.method, message.params)
       return
     }
     const entry = this.pending.get(message.id)
@@ -446,6 +480,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    */
   private clientSuspect = false
   private child: ChildProcess | undefined
+  private launchParked = false
   private profileLease: ProfileLease | undefined
   private profileLeasing: Promise<ProfileLease> | undefined
   private starting: Promise<CdpClient> | undefined
@@ -535,6 +570,21 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       && !view.client.destroyedTargets.has(target) && this.connectionStatus().connected
   }
 
+  /**
+   * Whether this view is live on the current connection but sits inside a headless browser, so there is
+   * no window a person could be handed. Mirrors {@link connectedView}, which requires the opposite.
+   *
+   * Takeover has to tell these apart instead of falling back to the sidebar: a headless session that
+   * silently produced a sidebar tab left the person acting on an unrelated page (issue #103).
+   * @param id - the view to classify.
+   * @returns true when the view is alive and headless.
+   */
+  headlessView(id: string): boolean {
+    const view = this.views.get(id), target = view === undefined ? undefined : this.sessions.get(view.session)
+    return view !== undefined && target !== undefined && view.client === this.client && view.client.headless
+      && !view.client.destroyedTargets.has(target) && this.connectionStatus().connected
+  }
+
   /** Which product this host would drive (for diagnostics). */
   get kind(): DetectedBrowser['kind'] {
     return this.browser.kind
@@ -590,6 +640,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private forgetBrowserState(): void {
     this.views.clear()
     this.sessions.clear()
+    this.quietParked.clear()
+    this.parkedTargets.clear()
+    this.quietFront = undefined
+    this.quietRevealed.clear()
+    this.stopForeground()
   }
 
   private async ensureClient(): Promise<CdpClient> {
@@ -684,7 +739,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       if (this.disposed) { client.close(); return undefined }
       await client.send('Target.setDiscoverTargets', { discover: true }, undefined, Math.max(1, deadline - Date.now()))
       if (this.disposed || Date.now() >= deadline) { client.close(); return undefined }
+      this.launchParked = false
       this.client = client
+      this.placeOpenedWindows(client)
       this.plainUserAgent = undefined
       return client
     } catch (error) {
@@ -751,6 +808,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // page, windowed or not, which bot walls read as "a script, not a person" — even while the
       // person is the one browsing. Chrome's own switch turns that marker off; nothing else changes.
       '--disable-blink-features=AutomationControlled',
+      // Quiet mode parks its first window off-screen; without these Windows occlusion tracking marks
+      // it hidden, pausing rAF, clamping timers and stalling screenshots. Passed always: quiet is a live setting.
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
       // Headless only where there is nothing to draw on. `--headless=new` rather than the legacy
       // flag: the new mode behaves like a windowed browser, which matters because every command
       // here was written and measured against one — including CDP input, which Chromium silently
@@ -771,6 +833,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // normally through `Target.createTarget`.
       '--no-startup-window',
     ]
+    // Chromium shows a new window at its default spot and only then applies Target.createTarget's
+    // left/top, so a quiet first window flashed on-screen; the launch position is applied before show.
+    this.launchParked = !launch.headless && this.isQuiet()
+    if (this.launchParked) args.push(`--window-position=${QUIET_PARK.left},${QUIET_PARK.top}`, `--window-size=${QUIET_PARK.width},${QUIET_PARK.height}`)
     if (launch.headless) {
       process.stderr.write(`[dsh-browser] launching headless (${launch.why}); `
         + 'the browser has no window but every tool works the same\n')
@@ -989,6 +1055,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
               if (this.disposed) { client.close(); break }
               client.headless = launch.headless
               this.client = client
+              this.placeOpenedWindows(client)
               this.plainUserAgent = undefined
               return client
             }
@@ -1195,30 +1262,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       try {
         return await sendWithAttach(session)
         } catch (error) {
-          // A CDP protocol error means the browser ANSWERED and refused this one command, so the
-          // connection is healthy and must be kept. Deciding by the error TEXT misfires both
-          // ways: the inner timeout rejects with "… timed out", so a slow but healthy page read
-          // as a dead browser, the client was dropped, and the next call's start() killed the
-          // running child — the human's tabs and half-filled forms gone, which is worse than the
-          // bug that change was fixing. The browser's own free text is interpolated into
-          // protocol errors too, so any message containing those words misfired the same way.
-          // Unanswered versus refused. 'timed out' is the inner client's own budget expiring,
-          // which says the page was slow, not that the browser died — so it only marks the client
-          // for a probe. Being wrong here costs a two-second check; being wrong about the
-          // browser being dead cost the user their open tabs.
           if (error instanceof Error && /timed out/.test(error.message)) this.clientSuspect = true
           if (!client.isAlive()) {
-            // Only THIS call's client. Under concurrency the field may already hold a
-            // connection another call just published, and closing that would kill a healthy one.
             if (this.client === client) {
               this.client = undefined
-              // This is the third of the three paths that discard a client, and it was the one
-              // that did not retire what the client had issued. A view holding a session id
-              // from the dead browser kept handing it to the replacement, which had never heard
-              // of it: every page command then failed with "Session with given id not found"
-              // and no later call could clear it, because the cached session was returned
-              // unconditionally. Gated on the same identity check as the field itself, so a
-              // concurrent call that just published a healthy client does not lose its maps.
               this.forgetBrowserState()
             }
             client.close()
@@ -1243,26 +1290,23 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /** Nothing to show: the browser owns its own windows. */
-  showView(): void {}
+  showView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean; readonly user?: boolean }): void {
+    if (options?.user === true && (options.quiet === true || this.isQuiet())) void this.revealQuietWindow(handle, { select: true })
+  }
 
   /**
    * Bring the target's page to the front, then report success.
-   *
-   * The comment on `focus` below used to say this was impossible — that raising the page needs
-   * `Page.bringToFront` on a target session, which is a view-level concern the host cannot
-   * reach. The handle this method is handed IS that view, and it can send commands, so the
-   * capability was here all along; it just was not used. Without it `presentView` was an empty
-   * async method, so the provider's whole presentation barrier — the one that stops
-   * `Input.*` from being silently dropped for a view with no display surface, and reports
-   * `BROWSER_VIEW_NOT_PRESENTED` when it cannot present — never ran on this carrier.
    *
    * A failure is swallowed rather than propagated: a real Chrome window that refuses to come
    * forward is not a reason to refuse the click that follows. The barrier exists to order the
    * two, and the order is honoured either way.
    * @param handle - the view to present.
    */
-  async presentView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean }): Promise<void> {
-    if (options?.quiet === true || this.isQuiet()) return
+  async presentView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean; readonly user?: boolean }): Promise<void> {
+    if (options?.quiet === true || this.isQuiet()) {
+      if (options?.user === true) await this.revealQuietWindow(handle, { select: true })
+      return
+    }
     try {
       await handle.sendCommand('Page.bringToFront')
     } catch {
@@ -1271,19 +1315,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-
-
   /**
    * Best effort at bringing the browser's window forward.
-   *
-   * The browser is a separate application, so there is no view to raise. What this can
-   * actually do is ask its process to continue from a stopped state — which is a no-op on
-   * Windows, where `SIGCONT` is not a supported signal and the call throws. It is kept
-   * because it costs nothing and does help on POSIX (a process stopped with SIGSTOP
-   * resumes), but it must not be read as a promise that the window comes to the front;
-   * importantly, it does NOT raise a window that is merely behind another. Raising the
-   * page properly would need `Page.bringToFront` on a specific target session, which is a
-   * view-level concern and not available to the host.
    */
   async focus(): Promise<void> {
     if (this.child && await this.ownership.verify(this.child)) {
@@ -1291,16 +1324,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-
-
   /**
    * Close the browser we launched, if we ever launched one.
-   *
-   * The user's own windows belong to a different process and are never touched. A
-   * host whose browser was never started (the common case when nobody used the
-   * browser) simply tears down its bookkeeping.
    */
   dispose(): void {
+    this.stopForeground()
     if (this.disposed) return
     this.disposed = true
     const client = this.client
@@ -1319,20 +1347,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       finally { client.close() }
     }
     void disconnect()
-    // Both the browser we launched and anything that ignored an earlier kill. They hold this
-    // profile, so leaving them running means the next launch contends with a browser nobody owns.
     const doomed = [this.child, ...this.stubborn.splice(0)].filter(
       (entry): entry is ChildProcess => entry !== undefined,
     )
     this.child = undefined
     for (const dying of doomed) {
-      /**
-       * A bounded reprieve, then the kill we used to do immediately.
-       *
-       * The timer is unref'd so it never holds the process open: a DSH shutdown that is itself
-       * ending does not wait for this, and the browser — having been asked to close — generally
-       * gets there on its own. If it does not, the kill still lands while the process lives.
-       */
       const force = (): void => { void this.stopChild(dying) }
       const timer = setTimeout(force, CLOSE_GRACE_MS)
       timer.unref?.()
@@ -1350,7 +1369,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         this.profileLease = undefined
       })().catch(error => process.stderr.write(`[dsh-browser] profile release failed: ${String(error)}\n`))
     }
-    // Saved processes retain the profile until their exit events arrive.
     const live = doomed.filter(child => child.exitCode === null && child.signalCode === null)
     if (live.length > 0) {
       const remaining = new Set(live)
@@ -1367,16 +1385,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
 
   /**
    * The flattened session for a view, creating its page on first use.
-   *
-   * No cache check here: the only caller has already established that the cached session does
-   * not belong to the client it is about to use. Re-checking would mean either a round trip or
-   * a second copy of that rule.
    */
   private async ensureSession(viewId: string): Promise<string> {
-    // One target per view, even when two commands arrive together. The two CDP round trips
-    // below are awaits, so without this a second caller entering during the first's flight saw
-    // no session in `views` and created its own target — leaving an orphan page that nothing
-    // closes, because only the last id survives in the map.
     const inFlight = this.sessionBuilding.get(viewId)
     if (inFlight !== undefined) return await inFlight
     const building = this.buildSession(viewId).finally(() => {
@@ -1389,29 +1399,20 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   /** Create and attach the target for one view. Serialised by {@link ensureSession}. */
   private async buildSession(viewId: string): Promise<string> {
     const client = await this.ensureClient()
-    // Different views can initialise concurrently. Selecting an unclaimed page and attaching
-    // it must be one transaction, including when the page is created by a preceding view.
     const previous = this.targetBuilds.get(client) ?? Promise.resolve()
     let release!: () => void
     const building = new Promise<void>(resolve => { release = resolve })
     this.targetBuilds.set(client, building)
     await previous
     try {
-      // Adopt a blank page the browser opened on its own before creating another one.
-      //
-      // Chrome starts with more than one page when handed a URL on top of its own start page, so
-      // creating a target here discarded the original and left it behind as a tab that is not in
-      // the plugin's tab model — invisible to `dsh_browser_list_tabs`, and therefore unclosable
-      // through the tools. Taking the blank instead makes the page the browser already opened the
-      // one the caller gets.
       const adopted = await this.adoptBlankTarget(client)
       const targetId = adopted ?? await this.createTarget(client, viewId)
       const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
       const sessionId = attached?.sessionId
       if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
       if (adopted !== undefined) this.rememberTarget(client, targetId, viewId)
+      await this.clearDisplays(client, sessionId, targetId)
       await this.presentAsChrome(client, sessionId)
-      // The session id is what page commands ride; the target id is what closes it.
       this.sessions.set(sessionId, targetId)
       this.views.set(viewId, { session: sessionId, client })
       return sessionId
@@ -1421,14 +1422,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-  /**
-   * Give a page this plugin created in a headless browser (launched or adopted) the same user agent
-   * the browser has with a window. Headless Chrome announces itself as `HeadlessChrome/<version>`, which sites
-   * refuse outright; it is the same engine and version, so the windowed string is the truthful one.
-   * A person's own tab ({@link adoptPage}) and a windowed browser are left exactly as they are.
-   * @param client - the connected browser.
-   * @param sessionId - the page's CDP session.
-   */
   private async presentAsChrome(client: CdpClient, sessionId: string): Promise<void> {
     this.plainUserAgent ??= (client.send('Browser.getVersion', {}) as Promise<{ userAgent?: string }>)
       .then(info => typeof info?.userAgent === 'string' && info.userAgent.includes('HeadlessChrome/')
@@ -1438,21 +1431,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     await client.send('Emulation.setUserAgentOverride', { userAgent }, sessionId).catch(() => {})
   }
 
-  /**
-   * Take over a page the browser already has, so a person's own tab becomes one this plugin drives.
-   *
-   * Reported as a defect: opening a window by hand, navigating it, and then asking a tool to read it
-   * produced a SECOND page, because the only tab the provider knew about was one it created itself.
-   * The page the human was looking at was listed by `dsh_browser_list_tabs` (under `page:`) and
-   * could be closed, but not read or driven — the opposite of what "the page you are looking at"
-   * means.
-   *
-   * Attaching is all it takes: a CDP session is not exclusive, so the browser's own tab becomes a
-   * target this plugin has a session on. The page is not moved, reloaded or focused, and its
-   * existing session (logins, scroll position, form state) is untouched.
-   * @param targetId - the carrier's page id, which for this carrier IS the CDP target id.
-   * @returns a handle for that page, in the same shape {@link createView} returns.
-   */
   async adoptPage(identity: BrowserTabWireId, scope = sessionWireId(readTabHandle(identity))): Promise<ElectronViewHandle> {
     const tab = resolveTabHandle(resolveSessionHandle(scope), identity).tab
     if (!tab.startsWith('page:')) throw new Error('dsh-builtin-browser: invalid carrier page handle')
@@ -1464,21 +1442,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     if (typeof sessionId !== 'string') {
       throw new Error(`dsh-builtin-browser: could not attach to the existing page ${targetId}`)
     }
-    // Point the view `createView` just made at the page that already exists, instead of the one it
-    // would otherwise build on first use.
     this.sessions.set(sessionId, targetId)
     this.views.set(handle.id, { session: sessionId, client })
     return handle
   }
 
-  /**
-   * Take an unclaimed blank page, if the browser has one to spare.
-   *
-   * "Unclaimed" is what matters: a blank page the plugin is already driving belongs to a view, and
-   * handing the same target to a second view would make two views share one page.
-   * @param client - the connected browser.
-   * @returns the target id to reuse, or undefined when a new page has to be created.
-   */
   private async adoptBlankTarget(client: CdpClient): Promise<string | undefined> {
     const listed = await client.send('Target.getTargets', {}) as {
       targetInfos?: Array<{ targetId?: string; type?: string; url?: string }>
@@ -1495,17 +1463,296 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /** Create one page, refusing to go on without an id. */
-  private async createTarget(client: CdpClient, viewId: string): Promise<string> {
-    const created = await client.send('Target.createTarget', {
-      url: 'about:blank',
-      // `background` only keeps the user's tab active inside an existing window. The first page after
-      // `--no-startup-window` opens a new window, which Chromium activates unless `focus: false`.
-      ...this.isQuiet() ? { background: true, focus: false } : {},
-    }) as { targetId?: string }
-    const targetId = created?.targetId
+  private createTarget(client: CdpClient, viewId: string): Promise<string> {
+    const run = this.createTargetNow(client, viewId)
+    this.creating = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  private creating: Promise<void> = Promise.resolve()
+
+  /**
+   * A quiet launch makes Chromium open every new window off-screen, so a window a person or a page
+   * opens (Ctrl+N, a popup) is brought on-screen, unless it is a popup of a window still parked.
+   */
+  private placeOpenedWindows(client: CdpClient): void {
+    client.onEvent((method, params) => {
+      if (method !== 'Target.targetCreated' || !this.launchParked) return
+      const info = (params as { targetInfo?: { targetId?: unknown; type?: unknown; openerId?: unknown } } | undefined)?.targetInfo
+      if (info?.type === 'page' && typeof info.targetId === 'string') void this.placeOpenedWindow(client, info.targetId, info.openerId)
+    })
+  }
+
+  private async placeOpenedWindow(client: CdpClient, targetId: string, openerId: unknown): Promise<void> {
+    try {
+      for (let pending = this.creating; ; pending = this.creating) {
+        await pending
+        if (pending === this.creating) break
+      }
+      if (this.createdTargets.get(client)?.has(targetId) === true) return
+      const windowOf = async (id: string) => (await client.send('Browser.getWindowForTarget', { targetId: id }) as { windowId?: unknown; bounds?: { left?: unknown; top?: unknown } } | undefined)
+      const found = await windowOf(targetId)
+      const left = found?.bounds?.left
+      const top = found?.bounds?.top
+      // Allow tolerance for DPI rounding or Windows clamping when matching the parked launch spot.
+      const nearParked = typeof left === 'number' && left >= QUIET_PARK.left - QUIET_PARK_LEFT_TOLERANCE
+        && (typeof top !== 'number' || Math.abs(top - QUIET_PARK.top) <= QUIET_PARK_TOP_TOLERANCE)
+      if (typeof found?.windowId !== 'number' || !nearParked || this.quietParked.has(found.windowId)) return
+      if (typeof openerId === 'string' && openerId !== '') {
+        const opener = await windowOf(openerId).catch(() => undefined)
+        if (typeof opener?.windowId === 'number' && this.quietParked.has(opener.windowId)) {
+          this.quietParked.add(found.windowId)
+          this.watchQuietFocus(client)
+          return
+        }
+      }
+      await this.moveOnScreen(client, found.windowId)
+    } catch {
+      // A window that closed or a browser that went away needs no placing.
+    }
+  }
+
+  private async createTargetNow(client: CdpClient, viewId: string): Promise<string> {
+    const quiet = this.isQuiet()
+    const { created, parked } = quiet
+      ? await this.createQuietTarget(client)
+      : { created: await this.createPlainTarget(client), parked: false }
+    const targetId = (created as { targetId?: string } | undefined)?.targetId
     if (typeof targetId !== 'string' || targetId === '') throw new Error('dsh-builtin-browser: the browser did not create a page')
     this.rememberTarget(client, targetId, viewId)
+    if (parked) await this.parkQuietWindow(client, targetId)
     return targetId
+  }
+
+  /**
+   * `background` only keeps the user's tab active inside an existing window; the first page after
+   * `--no-startup-window` opens a new one. `focus: false` keeps keyboard focus where it was, and the
+   * window is created off-screen in the normal state: a minimized window is hidden to the page, so
+   * rAF stops and rAF-driven pages never render. A Chromium that rejects the bounds gets the page
+   * without them and the window is moved off-screen right after. A tab joining an existing window
+   * leaves that window where the user has it.
+   */
+  private async createQuietTarget(client: CdpClient): Promise<{ readonly created: unknown; readonly parked: boolean }> {
+    const params = { url: 'about:blank', background: true, focus: false }
+    const listed = await client.send('Target.getTargets') as { targetInfos?: Array<{ type?: string }> } | undefined
+    if (listed?.targetInfos?.some(entry => entry.type === 'page') === true) {
+      return { created: await client.send('Target.createTarget', params), parked: false }
+    }
+    try {
+      return { created: await client.send('Target.createTarget', { ...params, newWindow: true, ...QUIET_PARK }), parked: true }
+    } catch {
+      return { created: await client.send('Target.createTarget', params), parked: true }
+    }
+  }
+
+  /** A browser launched while quiet opens new windows off-screen, so a first window after quiet is turned off is placed on-screen. */
+  private async createPlainTarget(client: CdpClient): Promise<unknown> {
+    const params = { url: 'about:blank' }
+    if (!this.launchParked) return client.send('Target.createTarget', params)
+    const listed = await client.send('Target.getTargets') as { targetInfos?: Array<{ type?: string }> } | undefined
+    if (listed?.targetInfos?.some(entry => entry.type === 'page') === true) return client.send('Target.createTarget', params)
+    try {
+      return await client.send('Target.createTarget', { ...params, newWindow: true, left: QUIET_REVEAL_INSET, top: QUIET_REVEAL_INSET })
+    } catch {
+      const created = await client.send('Target.createTarget', params)
+      const targetId = (created as { targetId?: string } | undefined)?.targetId
+      if (typeof targetId === 'string' && targetId !== '') {
+        const found = await client.send('Browser.getWindowForTarget', { targetId }).catch(() => undefined) as { windowId?: unknown } | undefined
+        if (typeof found?.windowId === 'number') await this.moveOnScreen(client, found.windowId).catch(() => undefined)
+      }
+      return created
+    }
+  }
+
+  /** Windows quiet mode parked off-screen; a window quiet mode has revealed is not listed. */
+  private readonly quietParked = new Set<number>()
+  /** Pages whose window was just parked, until their session checks the window is clear of every display. */
+  private readonly parkedTargets = new Map<string, number>()
+
+  private async parkQuietWindow(client: CdpClient, targetId: string): Promise<void> {
+    try {
+      const found = await client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown; bounds?: { left?: unknown; top?: unknown } } | undefined
+      if (typeof found?.windowId !== 'number') return
+      if (found.bounds?.left !== QUIET_PARK.left || found.bounds?.top !== QUIET_PARK.top) {
+        await client.send('Browser.setWindowBounds', { windowId: found.windowId, bounds: { ...QUIET_PARK } })
+      }
+      this.quietParked.add(found.windowId)
+      this.parkedTargets.set(targetId, found.windowId)
+      this.watchQuietFocus(client)
+    } catch {
+      // Without its id the window cannot be moved or revealed later, so it stays where Chromium put it.
+    }
+  }
+
+  /**
+   * Move a parked window past any display it still overlaps. The page's `screen` is the display
+   * the window overlaps most (or the nearest one), so stepping past it until no display claims the
+   * window clears the union of all displays, wherever the provisional position landed.
+   */
+  private async clearDisplays(client: CdpClient, sessionId: string, targetId: string): Promise<void> {
+    const windowId = this.parkedTargets.get(targetId)
+    if (windowId === undefined) return
+    this.parkedTargets.delete(targetId)
+    try {
+      for (let step = 0; step < 8; step++) {
+        const g = await windowGeometry(client, sessionId)
+        if (g === undefined) return
+        const overlaps = g.x < g.sl + g.sw && g.x + g.ow > g.sl && g.y < g.st + g.sh && g.y + g.oh > g.st
+        if (!overlaps) return
+        await client.send('Browser.setWindowBounds', { windowId, bounds: { left: g.sl + g.sw + QUIET_PARK_GAP, top: g.st } })
+      }
+    } catch {
+      // A page that cannot report its geometry keeps the provisional position.
+    }
+  }
+
+  private foreground: ForegroundWatch | undefined
+  private foregroundStarting = false
+  private foregroundFailed = false
+  /** A takeover page hidden behind another tab, brought to the front once the person activates its revealed window. */
+  private quietFront: QuietFront | undefined
+  /** Windows quiet mode parked and has since put on-screen. */
+  private readonly quietRevealed = new Set<number>()
+  /** The real watcher exists on Windows only; tests replace it. */
+  watchForeground: ForegroundWatcher = watchForeground
+
+  private quietWatched(): boolean { return this.quietParked.size > 0 || this.quietFront !== undefined }
+
+  /**
+   * A CDP click focuses the page, not the window, but Chrome activates its window for a tab the click
+   * opens; the watcher gives that foreground back. Our Chrome in the foreground off every display
+   * otherwise means a person activated the parked window from the taskbar or Alt-Tab. Asked of the OS,
+   * it works with no view attached (after a reset).
+   */
+  private watchQuietFocus(client: CdpClient): void {
+    if (this.foreground !== undefined || this.foregroundStarting) return
+    this.foregroundStarting = true
+    void (async () => {
+      try {
+        const info = await client.send('SystemInfo.getProcessInfo', {}, undefined, 1000) as { processInfo?: Array<{ type?: string; id?: number }> } | undefined
+        const pid = info?.processInfo?.find(entry => entry.type === 'browser')?.id
+        if (typeof pid !== 'number' || this.disposed || !this.quietWatched()) return this.sendQuietFront()
+        const watch = this.watchForeground(event => { if (event.pid === pid) void this.onForeground(client, event) }, reason => {
+          if (!this.foregroundFailed) {
+            this.foregroundFailed = true
+            console.warn(`[dsh-browser] quiet window: cannot watch the foreground window (${reason}); the panel and takeovers still bring it on-screen`)
+          }
+          if (this.foreground === watch) this.foreground = undefined
+          this.sendQuietFront()
+        }, pid)
+        this.foreground = watch
+        if (watch === undefined) this.sendQuietFront()
+      } catch {
+        // Without the browser's process id, the panel and a takeover still reveal the window.
+        this.sendQuietFront()
+      } finally {
+        this.foregroundStarting = false
+      }
+    })()
+  }
+
+  private async onForeground(client: CdpClient, event: ForegroundEvent): Promise<void> {
+    if (event.yielded === true) return
+    if (event.offscreen) {
+      for (const windowId of [...this.quietParked]) {
+        this.quietParked.delete(windowId)
+        this.quietRevealed.add(windowId)
+        await this.moveOnScreen(client, windowId, await this.sessionInWindow(client, windowId)).catch(() => undefined)
+      }
+    } else if (this.quietFront !== undefined && await this.isFrontWindow(this.quietFront, event)) {
+      const front = this.quietFront
+      this.quietFront = undefined
+      await front.client.send('Page.bringToFront', {}, front.session).catch(() => undefined)
+    }
+    if (!this.quietWatched()) this.stopForeground()
+  }
+
+  /** A page attached in the window, to measure the display it lands on. */
+  private async sessionInWindow(client: CdpClient, windowId: number): Promise<string | undefined> {
+    for (const view of [...this.views.values()]) {
+      const targetId = this.sessions.get(view.session)
+      if (targetId === undefined || view.client !== client) continue
+      const found = await client.send('Browser.getWindowForTarget', { targetId }).catch(() => undefined) as { windowId?: unknown } | undefined
+      if (found?.windowId === windowId) return view.session
+    }
+    return undefined
+  }
+
+  /** The watcher names the process, not the window: only the takeover's own window, where it now is, counts. */
+  private async isFrontWindow(front: QuietFront, event: ForegroundEvent): Promise<boolean> {
+    if (event.left === undefined || event.top === undefined) return false
+    try {
+      const found = await front.client.send('Browser.getWindowForTarget', { targetId: front.targetId }) as { bounds?: { left?: unknown; top?: unknown } } | undefined
+      const left = found?.bounds?.left
+      const top = found?.bounds?.top
+      return typeof left === 'number' && typeof top === 'number' &&
+        Math.abs(left - event.left) <= QUIET_FRONT_SLACK && Math.abs(top - event.top) <= QUIET_FRONT_SLACK
+    } catch {
+      return false
+    }
+  }
+
+  /** Nothing can tell when the person activates the window, so a waiting hidden page comes to the front now. */
+  private sendQuietFront(): void {
+    const front = this.quietFront
+    this.quietFront = undefined
+    if (front !== undefined) void front.client.send('Page.bringToFront', {}, front.session).catch(() => undefined)
+  }
+
+  private stopForeground(): void {
+    this.foreground?.stop()
+    this.foreground = undefined
+  }
+
+  /** Move a window onto the primary display (it holds the origin), sized to fit when its page can say so, without activating it. */
+  private async moveOnScreen(client: CdpClient, windowId: number, session?: string): Promise<WindowGeometry | undefined> {
+    await client.send('Browser.setWindowBounds', { windowId, bounds: { left: QUIET_REVEAL_INSET, top: QUIET_REVEAL_INSET } })
+    const g = session === undefined ? undefined : await windowGeometry(client, session)
+    if (g !== undefined && (g.ow > g.sw - QUIET_REVEAL_INSET || g.oh > g.sh - QUIET_REVEAL_INSET)) {
+      await client.send('Browser.setWindowBounds', { windowId, bounds: {
+        width: Math.min(g.ow, g.sw - QUIET_REVEAL_INSET), height: Math.min(g.oh, g.sh - QUIET_REVEAL_INSET) } })
+    }
+    return g
+  }
+
+  /**
+   * Move a window quiet mode parked onto the primary display. Quiet tabs open in the background, so
+   * the window may be showing an earlier tab: a person's own selection brings the page to the front.
+   * `Page.bringToFront` activates the window, so for a takeover of a hidden page it waits until the
+   * person activates the revealed window (where nothing watches the foreground, it is sent at once).
+   * From then on the window is the person's and quiet mode never moves it.
+   * @returns whether a parked window was moved.
+   */
+  async revealQuietWindow(handle: ElectronViewHandle, options?: QuietRevealOptions): Promise<boolean> {
+    const view = this.views.get(handle.id)
+    const targetId = view === undefined ? undefined : this.sessions.get(view.session)
+    if ((this.quietParked.size === 0 && this.quietRevealed.size === 0) || view === undefined || targetId === undefined) return false
+    try {
+      // Asked of the browser by target id: the view's own command path would replace a closed page with a blank one.
+      const found = await view.client.send('Browser.getWindowForTarget', { targetId }) as { windowId?: unknown } | undefined
+      if (typeof found?.windowId !== 'number') return false
+      const parked = this.quietParked.delete(found.windowId)
+      if (!parked && !this.quietRevealed.has(found.windowId)) return false
+      // A window already revealed (a skipped takeover, retried) stays where the person has it; only its tab is selected.
+      const g = parked ? await this.moveOnScreen(view.client, found.windowId, view.session) : await windowGeometry(view.client, view.session)
+      this.quietRevealed.add(found.windowId)
+      if (options?.select === true) await view.client.send('Page.bringToFront', {}, view.session)
+      else if (g?.hidden === true) {
+        const front = { client: view.client, session: view.session, targetId }
+        this.quietFront = front
+        options?.until?.addEventListener('abort', () => {
+          if (this.quietFront !== front) return
+          this.quietFront = undefined
+          if (!this.quietWatched()) this.stopForeground()
+        }, { once: true })
+        this.watchQuietFocus(view.client)
+      }
+      if (!this.quietWatched()) this.stopForeground()
+      return parked
+    } catch {
+      // The page went away; the command that selected it reports that itself.
+      return false
+    }
   }
 
   private rememberTarget(client: CdpClient, targetId: string, viewId: string): void {

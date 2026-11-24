@@ -8,7 +8,11 @@ export interface CarrierTakeoverTarget {
   readonly tabId: string
   readonly pageId: string
   readonly url: string
+  /** `until` aborts when the takeover ends. */
+  readonly reveal?: (until?: AbortSignal) => Promise<boolean>
   readonly connected: () => boolean
+  /** When this target belongs to the owner but cannot be handed to a human (e.g. headless), explain why instead of falling back. */
+  readonly unavailableReason?: () => string | undefined
 }
 
 const sources = new WeakMap<object, { readonly list: (owner: string) => readonly CarrierTakeoverTarget[]; readonly exclusive: boolean }>()
@@ -30,8 +34,12 @@ export function registerCarrierTakeover(browser: object, list: (owner: string) =
 
 export function carrierTakeoverTarget(browser: object | undefined, owner: string, pageId?: string): CarrierTakeoverTarget | undefined {
   if (!browser) return undefined
-  const candidates = sources.get(browserIdentity(browser))?.list(referenceOwnerKey(owner)).filter(target => referenceOwnerKey(target.owner) === referenceOwnerKey(owner)
-    && target.connected() && (pageId === undefined || target.pageId === pageId)) ?? []
+  const owned = sources.get(browserIdentity(browser))?.list(referenceOwnerKey(owner)).filter(target => referenceOwnerKey(target.owner) === referenceOwnerKey(owner)
+    && (pageId === undefined || target.pageId === pageId)) ?? []
+  const candidates = owned.filter(target => target.connected())
   if (candidates.length > 1) throw new Error('Select one browser session in this conversation before requesting takeover.')
-  return candidates[0]
+  if (candidates[0] !== undefined) return candidates[0]
+  const blocked = owned.map(target => target.unavailableReason?.()).find(reason => typeof reason === 'string' && reason !== '')
+  if (blocked !== undefined) throw new Error(blocked)
+  return undefined
 }

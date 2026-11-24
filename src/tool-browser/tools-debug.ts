@@ -62,6 +62,8 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
       const navigationUrl = open?.owner === owner && Date.now() - open.at < 10000 ? open.url : undefined
       const page = await takeovers.adopt(owner, exec.signal, navigationUrl)
       if (navigationUrl !== undefined && getLastOpen()?.owner === owner) clearLastOpen(open!.at)
+      const takeoverEnded = new AbortController()
+      await page.reveal?.(takeoverEnded.signal).catch(() => false)
       return takeovers.run(page, args.reason.trim(), args.instructions, exec.signal, async (pending): Promise<{ outcome: TakeoverOutcome; page: TakeoverSummary }> => {
         const approval = ctx.get('approval' as never) as unknown as { request(request: {
           agent: ToolRunContext['agent']; toolName: string; reason: string; displayReason: { en: string; zh: string };
@@ -101,7 +103,7 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
           }
         } catch (error) { fresh = unavailable(error) }
         return { outcome: exec.signal.aborted ? 'cancelled' : outcome, page: fresh }
-      })
+      }).finally(() => takeoverEnded.abort())
     },
   }))
 

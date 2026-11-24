@@ -308,7 +308,10 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
     try {
       manifestText = readFileSync(manifestPath, 'utf8')
     } catch (error) {
-      console.error(`[dsh-browser] cannot read the package manifest at ${manifestPath}: ${String(error)}`)
+      // Candidate probe directories routinely do not contain resources/app/package.json (issue #106).
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.error(`[dsh-browser] cannot read the package manifest at ${manifestPath}: ${String(error)}`)
+      }
       return { ok: false, reason: `${manifestPath} is missing; a directory without a package manifest is not a DSH Desktop install` }
     }
     hasEntry = entry => existsSync(join(appDir, ...entry.split('/')))

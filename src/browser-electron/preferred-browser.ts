@@ -1,7 +1,7 @@
 import { EXTENSION_READY_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 import { ExtensionBrowserViewHost } from './extension-browser.ts'
 import type { NativeBrowserClient } from '../../native-host/client.mjs'
-import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
+import type { ElectronBrowserViewHost, ElectronViewHandle, QuietRevealOptions } from './provider.ts'
 import { readTabHandle, sessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 import type { BrowserSessionId } from '../browser/types.ts'
 
@@ -45,6 +45,11 @@ export class PreferredBrowserViewHost implements ElectronBrowserViewHost {
     const view = this.mapped.get(id)
     return !!view && !view.dead && (this.decisions.get(sessionWireId(readTabHandle(id))) === this.fallback
       ? this.fallback.connectionStatus?.().connected === true : this.extension.connectedView(id))
+  }
+
+  async revealQuietWindow(handle: ElectronViewHandle, options?: QuietRevealOptions): Promise<boolean> {
+    const real = await this.mapped.get(handle.id)?.real?.catch(() => undefined)
+    return await real?.host.revealQuietWindow?.(real.handle, options) === true
   }
 
   private route(scope: BrowserSessionId): Promise<ElectronBrowserViewHost> {

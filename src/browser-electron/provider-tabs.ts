@@ -191,7 +191,8 @@ export abstract class ProviderTabs extends ProviderCore {
   }
 
   /** Switch to a tab by id, making its view visible. */
-  async switchTab(session: BrowserSessionId, tabId: BrowserTabWireId): Promise<void> {
+  async switchTab(session: BrowserSessionId, tabId: BrowserTabWireId, options?: { readonly user?: boolean }): Promise<void> {
+    const user = options?.user === true
     const s = this.session(session)
     // A page the carrier owns. Before this, switching to one threw "not open in this session" —
     // while `dsh_browser_list_tabs` was happily listing it, so the two tools disagreed and the
@@ -200,9 +201,9 @@ export abstract class ProviderTabs extends ProviderCore {
     if (carrierId !== undefined) {
       const existing = s.tabs.findIndex(tab => tab.id === tabId)
       if (existing !== -1) {
-        await this.host.presentView?.(s.tabs[existing]!.handle, s.label, { quiet: this.isQuiet(), select: true })
+        await this.host.presentView?.(s.tabs[existing]!.handle, s.label, { quiet: this.isQuiet(), select: true, ...user ? { user } : {} })
         s.activeIndex = existing
-        this.showActive(s, true)
+        this.showActive(s, true, user)
         return
       }
       const id = carrierId
@@ -222,10 +223,10 @@ export abstract class ProviderTabs extends ProviderCore {
         const url = page?.url || await this.currentUrl(handle)
         if (url === '') throw new BrowserError('browser: the adopted page did not report its document URL', 'BROWSER_TAB_NOT_FOUND')
         const tab: Tab = { id: tabId, handle, url }
-        await this.host.presentView?.(handle, s.label, { quiet: this.isQuiet(), select: true })
+        await this.host.presentView?.(handle, s.label, { quiet: this.isQuiet(), select: true, ...user ? { user } : {} })
         s.tabs.push(tab)
         s.activeIndex = s.tabs.length - 1
-        this.showActive(s, true)
+        this.showActive(s, true, user)
       } catch (error) {
         this.host.destroyView(handle, { keepPage: true })
         throw error
@@ -234,7 +235,7 @@ export abstract class ProviderTabs extends ProviderCore {
     }
     const found = this.locateTab(session, tabId)
     found.s.activeIndex = found.index
-    this.showActive(found.s, true)
+    this.showActive(found.s, true, user)
   }
 
   /** Close one tab; closing the active tab activates the next. */

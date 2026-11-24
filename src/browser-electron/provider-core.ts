@@ -24,6 +24,9 @@ export const PROVIDER_TIMEOUTS = Object.freeze({
 /** Stable provider id registered with `ctx.browser`. */
 export const ELECTRON_BROWSER_PROVIDER_ID = 'electron'
 
+/** `until`: a hidden page waiting for the person's activation to come to the front stops waiting when this aborts (the takeover ended). */
+export interface QuietRevealOptions { readonly select?: boolean; readonly until?: AbortSignal }
+
 /**
  * The minimal Electron surface this provider needs. Implemented by the
  * desktop shell with a real `WebContentsView`; a fake implements it in tests.
@@ -33,6 +36,8 @@ export interface ElectronBrowserViewHost {
   readonly referenceOverlayOwner?: 'client'
   referenceOverlayOwnerFor?(scope: BrowserSessionId): 'client' | undefined
   retireSession?(scope: BrowserSessionId): Promise<void>
+  /** Move the view's window onto the screen if quiet mode parked it off-screen, without activating it; whether it moved. */
+  revealQuietWindow?(handle: ElectronViewHandle, options?: QuietRevealOptions): Promise<boolean>
   /**
    * Create a new browser view and return a handle to its webContents-like
    * surface. The host owns windowing (adding the view to the window, sizing,
@@ -585,6 +590,8 @@ export interface PresentOptions {
   readonly quiet?: boolean
   /** Explicit navigation or tab selection may change the task's sidebar tab without OS activation. */
   readonly select?: boolean
+  /** A person's own selection, not the agent's: only this may reveal a window quiet mode parked off-screen. */
+  readonly user?: boolean
 }
 
 /**
@@ -1092,6 +1099,6 @@ export abstract class ProviderCore {
   protected abstract handleViewClosed(windowId: string): Promise<void>
   protected abstract handleUserAction(action: BrowserUserAction, propagate?: boolean): Promise<void>
   protected abstract isQuiet(): boolean
-  protected abstract showActive(s: Session, select?: boolean): void
+  protected abstract showActive(s: Session, select?: boolean, user?: boolean): void
   protected abstract currentUrl(handle: ElectronViewHandle): Promise<string>
 }

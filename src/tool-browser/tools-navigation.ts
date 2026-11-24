@@ -249,10 +249,12 @@ export function navigationTools(scope: ToolScope): ToolDefinition[] {
         if (!/exited immediately after launch \(exit code 0\)/u.test(message)) throw error
         return { url: args.url, carrier: 'launched-user-profile', title: '', elements: [], truncated: false }
       }
-      // Hand the page to the Web sidebar as well. The desktop shell is told through the bridge; the Web
-      // shell has no such channel, so the client polls this slot and places the tab itself. Written in the
-      // TOOL (not a provider) on purpose: every open passes through here whatever serves it.
-      try { setLastOpen(args.url, Date.now()) } catch { /* best effort */ }
+      // Hand the page to the Web sidebar as well, except when the user explicitly selected an
+      // installed Chrome/Edge channel (issue #106: do not double-open the page in the sidebar).
+      const selectedChannel = scope.settingsStore.get().browser.channel
+      if (selectedChannel !== 'chrome' && selectedChannel !== 'edge') {
+        try { setLastOpen(args.url, Date.now()) } catch { /* best effort */ }
+      }
       let snapshot: Awaited<ReturnType<typeof browser.snapshot>>
       try {
         snapshot = await browser.snapshot(session, exec.signal)
