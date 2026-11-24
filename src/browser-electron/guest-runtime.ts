@@ -153,12 +153,17 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
   }; });
   for (const name of ['pushState', 'replaceState']) attempt(() => {
     const original = history[name];
+    const reason = name === 'pushState' ? 'push' : 'replace';
     history[name] = function(state, title, url) {
-      if (url == null) return original.call(this, state, title, url);
+      if (url == null) {
+        const result = original.call(this, state, title, url);
+        if (name === 'pushState') report(reason);
+        return result;
+      }
       const next = attempt(() => realURL(url));
       const result = original.call(this, state, title, toProxy(url));
       if (next && /^https?:$/.test(next.protocol)) real = next.href;
-      report();
+      report(reason);
       return result;
     };
   });
@@ -166,13 +171,29 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
   const documentId = String(Date.now()) + ':' + String(Math.random());
   let referenceRequestId = 0;
   const reference = ${guestReferenceHandlerScript()};
-  const report = () => attempt(() => parent.postMessage({ type: 'dsh.browser.guest.navigation', url: real, depth: history.length, loadId, documentId, ready: document.readyState !== 'loading' }, '*'));
+  const navType = () => {
+    const entry = attempt(() => performance.getEntriesByType && performance.getEntriesByType('navigation')[0]);
+    return entry && typeof entry.type === 'string' ? entry.type : undefined;
+  };
+  const report = (reason) => attempt(() => {
+    const navigationType = navType();
+    parent.postMessage({
+      type: 'dsh.browser.guest.navigation',
+      url: real,
+      depth: history.length,
+      loadId,
+      documentId,
+      ready: document.readyState !== 'loading',
+      ...(typeof reason === 'string' && reason ? { reason } : {}),
+      ...(navigationType ? { navigationType } : {}),
+    }, '*');
+  });
   attempt(() => window.addEventListener('message', event => {
     if (event.source !== parent || !event.data) return;
     if (event.data.type === 'dsh.browser.guest.navigation.request') {
       if (!Number.isSafeInteger(event.data.loadId) || event.data.loadId <= 0) return;
       loadId = event.data.loadId;
-      report();
+      report('sync');
     } else if (event.data.type === 'dsh.browser.guest.reference.request') {
       const data = event.data;
       if (event.origin !== location.origin || data.loadId !== loadId || loadId === undefined || data.documentId !== documentId
@@ -200,11 +221,12 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
       else if (event.data.delta === 1) history.forward();
     }
   }));
-  attempt(() => window.addEventListener('DOMContentLoaded', report));
+  attempt(() => window.addEventListener('DOMContentLoaded', () => report('ready')));
+  attempt(() => window.addEventListener('pageshow', event => { if (event && event.persisted) report('pageshow'); }));
   attempt(() => window.addEventListener('popstate', () => {
     const next = attempt(() => realURL(location.href));
     if (next) real = next.href;
-    report();
+    report('pop');
   }));
   attempt(() => {
     const proxyResource = value => {
