@@ -28,9 +28,10 @@ test('the DSH range is declared where DSH reads it', () => {
   assert.ok(manifest.engines.dsh.trim() !== '', 'and it is not empty')
 })
 
-test('engines.dsh covers every release the peers claimed', () => {
-  // Workspace resolution is a build concern; the documented runtime contract lives in engines.dsh.
-  assert.equal(manifest.engines.dsh, '>=0.1.1-rc.2 <0.3.0', 'the documented supported releases remain compatible')
+test('engines.dsh aligns with the published 0.2.2-rc.3+ peer baseline', () => {
+  // 1.0.x imports @deepseek-ai/dsh-error and publishes workspace:^ peers resolved against 0.2.2-rc.3+,
+  // so engines.dsh must declare the same floor instead of claiming compatibility with older rc.1/0.1 hosts.
+  assert.equal(manifest.engines.dsh, '>=0.2.2-rc.3 <0.3.0', 'engines.dsh matches the supported DSH 0.2.2-rc.3+ baseline')
   const ranges = new Set(dshPeerRanges())
   assert.ok(ranges.size > 0, 'the peer fallback ranges exist')
   for (const range of ranges) {
@@ -60,13 +61,13 @@ test('DSH itself agrees, when the checkout is available', async () => {
   }
   const { evaluatePluginCompatibility } = await import(`file:///${checker}`)
 
-  // Supported: the version this was verified on, and the two earlier ones the docs record.
-  for (const supported of ['0.2.2-rc.3', '0.2.1-rc.5', '0.2.1-rc.1', '0.2.0-rc.2', '0.1.1-rc.2']) {
+  // Supported: the 0.2.2-rc.3+ line and 0.2.3-alpha.2 verified in CI.
+  for (const supported of ['0.2.2-rc.3', '0.2.2-rc.5', '0.2.3-alpha.2']) {
     assert.equal(evaluatePluginCompatibility(manifest, {}, supported), undefined,
       `${supported} must be accepted`)
   }
-  // Outside the declared range, in both directions.
-  for (const unsupported of ['0.3.0', '0.1.0-rc.8']) {
+  // Outside the declared range, in both directions (including older 0.2.2-rc.1 hosts without @deepseek-ai/dsh-error).
+  for (const unsupported of ['0.3.0', '0.2.2-rc.1', '0.1.0-rc.8']) {
     const verdict = evaluatePluginCompatibility(manifest, {}, unsupported)
     assert.notEqual(verdict, undefined, `${unsupported} must be refused`)
     assert.deepEqual(verdict.requirements, { 'engines.dsh': manifest.engines.dsh },

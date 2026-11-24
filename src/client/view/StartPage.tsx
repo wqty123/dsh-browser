@@ -10,6 +10,7 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ContextMenuBindings } from '@deepseek-ai/dsh-client-ui-context-menu/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
+import type { SIDEBAR_BROWSER_LOCALE_NS } from '../locales.ts'
 import type { BrowserStartPageInjected } from '../startpage/binding.ts'
 import type { StartPageSnapshot, StartPageWriteResult } from '../startpage/controller.ts'
 import type { SearchEngineDraft, ShortcutDraft, StartPageEngineView, StartPageFailure, StartPageShortcutView } from '../startpage/model.ts'
@@ -17,7 +18,7 @@ import { MAX_ENGINE_EXTRA_PARAMETERS } from '../startpage/model.ts'
 import type { BrowserShortcut } from '../../startpage-settings.ts'
 import css from './Browser.module.css'
 
-type Translate = TranslateNS<'sidebarBrowser'>
+type Translate = TranslateNS<typeof SIDEBAR_BROWSER_LOCALE_NS>
 
 const UNDO_MS = 8000
 

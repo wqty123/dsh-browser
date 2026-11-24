@@ -107,7 +107,7 @@ async function boot(pluginSource: string) {
   document.body.append(panel)
   registrations.find(entry => entry.name === 'rightbar').inject().mountNativeOwner('session-packaged', panel.id)
   load(pluginSource).apply(ctx)
-  const body = registrations.find(entry => entry.name === 'sidebar.right.pane.tab' && entry.key === '@deepseek-ai/dsh-client-ui-sidebar-browser')
+  const body = registrations.find(entry => entry.name === 'sidebar.right.pane.tab' && entry.key === 'dsh-builtin-browser')
   const browser = body.inject('session-packaged', body.store.create('session-packaged').actions)
   const mounted = new Map<string, { abort: AbortController; revision: number }>()
   const render = () => {

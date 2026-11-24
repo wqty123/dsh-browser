@@ -66,16 +66,23 @@ export interface ProfileLease {
   release(cleanup?: () => void): Promise<void>
 }
 
-function isStaleGuard(guardPath: string, leasePath: string): boolean {
+async function isStaleGuard(guardPath: string, leasePath: string): Promise<boolean> {
   try {
-    const ownerPath = statSync(guardPath).isDirectory() ? leasePath : guardPath
-    const raw = JSON.parse(readFileSync(ownerPath, 'utf8')) as { pid?: unknown } | null
+    const isDir = statSync(guardPath).isDirectory()
+    const ownerPath = isDir ? leasePath : guardPath
+    const rawText = readFileSync(ownerPath, 'utf8')
+    const raw = JSON.parse(rawText) as { pid?: unknown; pipe?: unknown; identity?: unknown } | null
     if (raw && Number.isSafeInteger(raw.pid) && Number(raw.pid) > 0) {
-      try { process.kill(Number(raw.pid), 0) }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true
+      if (await ownerAlive(raw)) return false
+      // Re-verify the guard has not already been released or replaced by a live successor
+      // while we were probing its owner's liveness.
+      try {
+        const after = statSync(guardPath)
+        if (isDir) return after.isDirectory()
+        return !after.isDirectory() && readFileSync(guardPath, 'utf8') === rawText
+      } catch {
+        return false
       }
-      return false
     }
   } catch { /* fall through to mtime check */ }
   try {
@@ -97,16 +104,32 @@ export async function acquireProfileLease(directory: string): Promise<ProfileLea
   const busy = (): Error => new Error(`dsh-builtin-browser: browser profile is leased or its ownership cannot be verified: ${root}`)
   const guarded = async <T>(operation: () => T | Promise<T>): Promise<T> => {
     let acquired = false
+    let guardPipe: { readonly name: string; readonly server: Server } | undefined
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let fd: number | undefined
       try {
         fd = openSync(guard, 'wx', 0o600)
-        writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }))
+        const guardToken = randomUUID()
+        if (process.platform === 'win32') guardPipe = await openOwnerPipe(root, `guard-${guardToken}`)
+        writeFileSync(fd, JSON.stringify({
+          pid: process.pid,
+          at: Date.now(),
+          token: guardToken,
+          ...(identity === undefined ? {} : { identity }),
+          ...(guardPipe === undefined ? {} : { pipe: guardPipe.name }),
+        }))
         acquired = true
         break
       } catch (error) {
+        if (fd !== undefined) {
+          try { closeSync(fd) } catch {}
+          fd = undefined
+          try { unlinkSync(guard) } catch {}
+        }
+        guardPipe?.server.close()
+        guardPipe = undefined
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw busy()
-        if (attempt === 0 && isStaleGuard(guard, file)) {
+        if (attempt === 0 && await isStaleGuard(guard, file)) {
           try {
             if (statSync(guard).isDirectory()) rmdirSync(guard)
             else unlinkSync(guard)
@@ -118,10 +141,19 @@ export async function acquireProfileLease(directory: string): Promise<ProfileLea
         if (fd !== undefined) { try { closeSync(fd) } catch {} }
       }
     }
-    if (!acquired) throw busy()
+    if (!acquired) {
+      guardPipe?.server.close()
+      throw busy()
+    }
     try { return await operation() } finally {
-      try { unlinkSync(guard) } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      try {
+        // Unlink before closing the liveness pipe so another contender probing the pipe
+        // never sees a still-present guard file after a normal release.
+        try { unlinkSync(guard) } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      } finally {
+        guardPipe?.server.close()
       }
     }
   }
