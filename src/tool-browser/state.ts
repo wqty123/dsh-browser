@@ -36,19 +36,25 @@ export function registerExitCleanup(cleanup: () => void): void {
  * Which surface an open should use.
  *
  * "panel"  - place the page in the DSH sidebar and open nothing else (the normal Web behaviour).
- * "builtin"- drive the plugin's own browser; needed when the thing under test IS DSH.
+ * "builtin"- drive the plugin's own browser or the explicitly selected installed Chrome/Edge.
  * @returns the configured surface, defaulting to "panel".
  */
 export function readSurface(): 'panel' | 'builtin' {
   // A host that already resolved the surface declares it; otherwise the plugin's own settings file under
   // the live DSH_HOME decides. No machine-specific path is consulted.
   const declared = (globalThis as unknown as Record<string, unknown>).__dshBrowserSurface
-  if (declared === 'panel' || declared === 'builtin') return declared
+  if (declared === 'builtin') return 'builtin'
   try {
-    const parsed = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { browser?: { surface?: unknown } }
+    const raw = readFileSync(settingsPath(), 'utf8').replace(/^\uFEFF/u, '')
+    const parsed = JSON.parse(raw) as { browser?: { surface?: unknown; channel?: unknown } }
     const surface = parsed.browser?.surface
     if (surface === 'builtin' || surface === 'panel') return surface
+    // Issue #106: an explicit installed browser channel (chrome / edge) must launch and drive that
+    // browser carrier rather than falling into the Web iframe / Desktop sidebar panel by default.
+    const channel = parsed.browser?.channel
+    if (channel === 'chrome' || channel === 'edge') return 'builtin'
   } catch { /* no settings yet */ }
+  if (declared === 'panel') return 'panel'
   return 'panel'
 }
 

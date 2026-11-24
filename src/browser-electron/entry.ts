@@ -103,8 +103,8 @@ function overlayTag(): string {
 /**
  * The surface this host would use for an open, echoed to the client.
  *
- * The client must not place a tab when the host is in "builtin" mode, or when it is an older build that
- * always opens its own browser: that combination is the double-open.
+ * The client must not place a tab when the host is in "builtin" mode, or when an installed
+ * Chrome/Edge channel is selected (issue #106): that combination is the double-open.
  * @returns "panel" or "builtin".
  */
 function readSurfaceForRoute(): 'panel' | 'builtin' {
@@ -113,8 +113,10 @@ function readSurfaceForRoute(): 'panel' | 'builtin' {
     // for the plugin's own module graph.
     const fs = (process as unknown as { getBuiltinModule?: (id: string) => { readFileSync: (p: string, e: string) => string } }).getBuiltinModule?.('fs')
     if (fs === undefined) return 'panel'
-    const parsed = JSON.parse(fs.readFileSync(settingsPath(), 'utf8')) as { browser?: { surface?: unknown } }
-    return parsed.browser?.surface === 'builtin' ? 'builtin' : 'panel'
+    const parsed = JSON.parse(fs.readFileSync(settingsPath(), 'utf8').replace(/^\uFEFF/u, '')) as { browser?: { surface?: unknown; channel?: unknown } }
+    if (parsed.browser?.surface === 'builtin') return 'builtin'
+    if (parsed.browser?.surface === 'panel') return 'panel'
+    return parsed.browser?.channel === 'chrome' || parsed.browser?.channel === 'edge' ? 'builtin' : 'panel'
   } catch { return 'panel' }
 }
 
@@ -592,7 +594,14 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       }
       const last = getLastOpen()
       const fresh = last !== undefined && Date.now() - last.at <= OPEN_REQUEST_TTL_MS ? last : undefined
-      replyJson(response, 200, { ok: true, surface: readSurfaceForRoute(), open: isPreferredCarrier(adoptedCarrier) ? null : fresh ?? null })
+      const selectedChannel = settings.get().browser.channel
+      const usesExternalBrowser = isPreferredCarrier(adoptedCarrier)
+        || adoptedCarrier instanceof SystemBrowserViewHost
+        || adoptedCarrier instanceof MissingSystemBrowserHost
+        || selectedChannel === 'chrome'
+        || selectedChannel === 'edge'
+      const surface = usesExternalBrowser ? 'builtin' : readSurfaceForRoute()
+      replyJson(response, 200, { ok: true, surface, open: usesExternalBrowser ? null : fresh ?? null })
     }),
   }, 'dsh-builtin-browser: open request slot'))
   // guest 代理由根行注册（见 src/web-guest.ts）：web 上 Electron 行可能被关闭。
