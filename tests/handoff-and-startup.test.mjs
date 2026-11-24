@@ -54,7 +54,7 @@ test('the launch keeps an off-screen quiet window rendering at full speed', asyn
 
 test('a quiet launch places new windows off-screen before Chromium shows them', async () => {
   const args = await capturedArgs('windowed', true)
-  assert.ok(args.includes('--window-position=30000,0'), JSON.stringify(args))
+  assert.ok(args.includes('--window-position=10000,0'), JSON.stringify(args))
   assert.ok(args.includes('--window-size=1280,800'), JSON.stringify(args))
   for (const [mode, quiet] of [['windowed', false], ['headless', true]]) {
     const other = await capturedArgs(mode, quiet)

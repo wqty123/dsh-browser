@@ -16,10 +16,12 @@ export interface ForegroundWatch { stop(): void }
 export type ForegroundWatcher = (onChange: (event: ForegroundEvent) => void, onFail: (reason: string) => void, browserPid?: number) => ForegroundWatch | undefined
 
 const POLL_MS = 500
+const PARENT_CHECK_MS = 4000
 
 /*
  * A foreground hook reports each activation within a millisecond; the poll only catches the
- * foreground window moving on or off the displays, and the parent exiting.
+ * foreground window moving on or off the displays, and a Stopwatch checks parent liveness
+ * every 4 s regardless of foreground event frequency.
  */
 const script = (parent: number, browserPid: number): string => [
   `$parent = ${parent}; $browser = ${browserPid}`,
@@ -51,31 +53,41 @@ const script = (parent: number, browserPid: number): string => [
   '  static uint LastInput() { var i = new InputInfo(); i.Size = 8; GetLastInputInfo(ref i); return i.Time; }',
   '  static Hook keep; static string last = ""; static uint input, prevPid, browser; static IntPtr prev;',
   '  static void Sample() {',
-  '    uint before = LastInput(), p; IntPtr h = GetForegroundWindow(); uint thread = GetWindowThreadProcessId(h, out p);',
+  '    uint before = LastInput(), p; IntPtr h = GetForegroundWindow();',
+  // Transient null foreground (lock screen, UAC, window switch): keep prev intact instead of clearing it.
+  '    if (h == IntPtr.Zero) { input = before; return; }',
+  '    uint thread = GetWindowThreadProcessId(h, out p);',
   '    Rect r; GetWindowRect(h, out r);',
   // Physical pixels from GetWindowRect, so dividing by the window DPI gives DIPs at any scaling.
   '    int off = IsIconic(h) || r.Right <= r.Left || MonitorFromRect(ref r, 0) != IntPtr.Zero ? 0 : 1;',
   '    uint dpi = GetDpiForWindow(h); if (dpi == 0) dpi = 96;',
   '    string line = p + " " + off + " " + Math.Round(r.Left * 96.0 / dpi) + " " + Math.Round(r.Top * 96.0 / dpi);',
   // Chrome activates its own window for a tab a click opens; with no input since before the last read, no person did it.
+  // Always mark yielded even if SetForegroundWindow(prev) fails (e.g. elevated prev window under UIPI),
+  // and keep prev/prevPid unchanged so follow-up samples before focus settles cannot bypass the guard.
+  '    bool yielded = false;',
   '    if (p == browser && off == 1 && prevPid != browser && prev != IntPtr.Zero && LastInput() == input) {',
+  '      yielded = true; line += " 1";',
   '      uint me = GetCurrentThreadId(); AttachThreadInput(me, thread, true);',
-  '      if (SetForegroundWindow(prev)) line += " 1";',
+  '      SetForegroundWindow(prev);',
   '      AttachThreadInput(me, thread, false);',
   '    }',
   '    if (line != last) { Console.Out.WriteLine(line); Console.Out.Flush(); last = line; }',
-  '    prev = h; prevPid = p; input = before;',
+  '    if (!yielded) { prev = h; prevPid = p; }',
+  '    input = before;',
   '  }',
   '  public static void Run(int parent, uint browserPid) {',
   '    browser = browserPid; input = LastInput(); keep = (a, e, h, o, c, t, time) => Sample();',
   '    SetWinEventHook(3, 3, IntPtr.Zero, keep, 0, 0, 0);',
+  '    var parentClock = Stopwatch.StartNew();',
   '    Sample(); Msg m;',
-  '    for (int tick = 1; ; tick++) {',
-  `      if (MsgWaitForMultipleObjects(0, null, false, ${POLL_MS}, 0x4FF) == 0x102) {`,
-  '        Sample();',
-  '        if (tick % 8 == 0) { try { Process.GetProcessById(parent).Dispose(); } catch (ArgumentException) { return; } }',
-  '      }',
+  '    for (;;) {',
+  `      if (MsgWaitForMultipleObjects(0, null, false, ${POLL_MS}, 0x4FF) == 0x102) Sample();`,
   '      while (PeekMessage(out m, IntPtr.Zero, 0, 0, 1)) { TranslateMessage(ref m); DispatchMessage(ref m); }',
+  `      if (parentClock.ElapsedMilliseconds >= ${PARENT_CHECK_MS}) {`,
+  '        parentClock.Restart();',
+  '        try { Process.GetProcessById(parent).Dispose(); } catch (ArgumentException) { return; }',
+  '      }',
   '    }',
   '  }',
   '}',

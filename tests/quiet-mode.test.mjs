@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 
 import { DEFAULT_SETTINGS } from '../lib/browser-electron/settings-store.js'
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SystemBrowserViewHost } from '../lib/browser-electron/system-browser.js'
@@ -181,7 +181,7 @@ async function firstPageParams(t, quiet, options) {
   return browser.commands.filter(command => command.method === 'Target.createTarget').map(command => command.params)
 }
 
-const PARK_LEFT = 30000
+const PARK_LEFT = 10000
 /** A fake Chromium whose quiet window sits where it was created, on a display of 1600x1160 at the origin. */
 const parkedBrowser = (overrides = {}) => {
   const state = { left: PARK_LEFT, top: 0, width: 1280, height: 800, hidden: false, ...overrides }
@@ -317,16 +317,32 @@ test('a taskbar activation of the parked window brings it on-screen, also after 
   }
 })
 
+test('a later takeover on a hidden tab still brings it to the front after a taskbar activation revealed the window', async t => {
+  const w = fakeWatch()
+  const { browser, host, view } = await quietHost(t, true, { ...parkedBrowser({ hidden: true }), watch: w.watch })
+  await until(() => w.emit !== undefined)
+  w.emit({ pid: 4242, offscreen: true, left: PARK_LEFT, top: 0 })
+  await until(() => moves(browser).length > 0)
+  assert.equal(w.stopped, 1)
+  assert.equal(await host.revealQuietWindow(view), false, 'window already on-screen, so it is not moved again')
+  assert.equal(moves(browser).length, 1)
+  await until(() => w.started === 2)
+  assert.equal(browser.commands.some(c => c.method === 'Page.bringToFront'), false)
+  w.emit({ pid: 4242, offscreen: false, left: 40, top: 40 })
+  await until(() => browser.commands.some(c => c.method === 'Page.bringToFront'))
+  assert.equal(browser.commands.filter(c => c.method === 'Page.bringToFront').length, 1)
+})
+
 test('a parked window Chrome activated itself for a tab the agent opened stays parked; the next person activation reveals it', async t => {
   const w = fakeWatch()
   const { browser } = await quietHost(t, true, { ...parkedBrowser(), watch: w.watch })
   await until(() => w.emit !== undefined)
   assert.equal(w.browserPid, 4242, 'the watcher hands the foreground back only from our browser')
-  w.emit({ pid: 4242, offscreen: true, left: 30000, top: 0, yielded: true })
+  w.emit({ pid: 4242, offscreen: true, left: PARK_LEFT, top: 0, yielded: true })
   await settle()
   assert.deepEqual(moves(browser), [])
   assert.equal(w.stopped, 0, 'still waiting for the person')
-  w.emit({ pid: 4242, offscreen: true, left: 30000, top: 0 })
+  w.emit({ pid: 4242, offscreen: true, left: PARK_LEFT, top: 0 })
   await until(() => moves(browser).length > 0)
   assert.deepEqual(moves(browser)[0], { windowId: 7, bounds: { left: 40, top: 40 } })
 })
@@ -406,20 +422,29 @@ test('a taskbar activation fits the revealed window to the display when a page i
   const w = fakeWatch()
   const { browser } = await quietHost(t, true, { ...parkedBrowser({ width: 1900, height: 1300 }), watch: w.watch })
   await until(() => w.emit !== undefined)
-  w.emit({ pid: 4242, offscreen: true, left: 30000, top: 0 })
+  w.emit({ pid: 4242, offscreen: true, left: PARK_LEFT, top: 0 })
   await until(() => moves(browser).length > 1)
   assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 40, top: 40 } }, { windowId: 7, bounds: { width: 1560, height: 1120 } }])
 })
 
 test('the watcher output carries the window corner when it has one', () => {
   assert.deepEqual(parseForegroundLine('4242 0 -8 33'), { pid: 4242, offscreen: false, left: -8, top: 33 })
-  assert.deepEqual(parseForegroundLine('4242 1 30000 0 1'), { pid: 4242, offscreen: true, left: 30000, top: 0, yielded: true })
+  assert.deepEqual(parseForegroundLine('4242 1 10000 0 1'), { pid: 4242, offscreen: true, left: 10000, top: 0, yielded: true })
 })
 
 test('the watcher output is parsed line by line', () => {
   assert.deepEqual(parseForegroundLine('4242 1\r'), { pid: 4242, offscreen: true })
   assert.deepEqual(parseForegroundLine('17 0'), { pid: 17, offscreen: false })
   assert.equal(parseForegroundLine('garbage'), undefined)
+})
+
+test('foreground watcher guards null foreground, failed focus yield, and Stopwatch parent checks', () => {
+  const src = readFileSync(new URL('../src/browser-electron/foreground-watch.ts', import.meta.url), 'utf8')
+  assert.match(src, /if \(h == IntPtr\.Zero\) \{ input = before; return; \}/, 'null foreground preserves prev')
+  assert.match(src, /yielded = true; line \+= " 1";/, 'no-input offscreen Chrome activation is always marked yielded')
+  assert.match(src, /if \(!yielded\) \{ prev = h; prevPid = p; \}/, 'yielded activation never overwrites prev')
+  assert.match(src, /Stopwatch\.StartNew\(\)/, 'uses .NET Framework 4.x compatible Stopwatch for parent check')
+  assert.doesNotMatch(src, /TickCount64/, 'avoids .NET Core only TickCount64 in Windows PowerShell 5.1')
 })
 
 test('with nothing watching the foreground, a takeover on a page hidden behind another tab brings it to the front', async t => {
@@ -457,6 +482,17 @@ test('quiet turned off after a quiet launch opens the first window on-screen, no
   assert.equal(params.top, 40)
   assert.equal('focus' in params, false)
   assert.equal('background' in params, false)
+})
+
+test('quiet turned off after a quiet launch still moves the first window on-screen when Chromium rejects createTarget bounds', async t => {
+  let quiet = true
+  const fake = parkedBrowser({ left: PARK_LEFT, top: 0 })
+  const respond = message => message.method === 'Target.createTarget' && message.params?.left !== undefined
+    ? { error: { message: 'Invalid parameters' } } : fake.respond(message)
+  const { browser } = await quietHost(t, () => quiet, { launched: () => { quiet = false }, respond })
+  const created = browser.commands.filter(c => c.method === 'Target.createTarget').map(c => c.params)
+  assert.deepEqual(created[1], { url: 'about:blank' })
+  assert.deepEqual(moves(browser), [{ windowId: 7, bounds: { left: 40, top: 40 } }])
 })
 
 test('with quiet mode off, the first page keeps the default foreground creation', async t => {
@@ -511,14 +547,19 @@ test('revealing a closed quiet tab never opens a replacement page', async t => {
   assert.deepEqual(browser.commands.slice(before).filter(c => /^Target.(createTarget|attachToTarget)$/u.test(c.method)), [])
 })
 
-test('after a quiet launch, a window Chrome opens itself is brought on-screen unless its opener is parked', async t => {
+test('after a quiet launch, a window Chrome opens itself is brought on-screen unless its opener is parked (including DPI-rounded bounds)', async t => {
   const fake = parkedBrowser()
   const own = fake.respond
-  const opened = { left: PARK_LEFT, top: 0 }
   fake.respond = message => {
     const id = message.params?.targetId
-    if (message.method === 'Browser.getWindowForTarget' && (id === 'manual' || id === 'popup')) {
-      return { result: { windowId: id === 'manual' ? 9 : 11, bounds: { ...opened, width: 1280, height: 800, windowState: 'normal' } } }
+    if (message.method === 'Browser.getWindowForTarget' && id === 'manual') {
+      return { result: { windowId: 9, bounds: { left: PARK_LEFT, top: 0, width: 1280, height: 800, windowState: 'normal' } } }
+    }
+    if (message.method === 'Browser.getWindowForTarget' && id === 'manual-dpi') {
+      return { result: { windowId: 10, bounds: { left: PARK_LEFT - 12, top: 8, width: 1280, height: 800, windowState: 'normal' } } }
+    }
+    if (message.method === 'Browser.getWindowForTarget' && id === 'popup') {
+      return { result: { windowId: 11, bounds: { left: PARK_LEFT, top: 0, width: 1280, height: 800, windowState: 'normal' } } }
     }
     return own(message)
   }
@@ -527,6 +568,10 @@ test('after a quiet launch, a window Chrome opens itself is brought on-screen un
   browser.emit('Target.targetCreated', { targetInfo: { targetId: ownPage, type: 'page' } })
   browser.emit('Target.targetCreated', { targetInfo: { targetId: 'popup', type: 'page', openerId: ownPage } })
   browser.emit('Target.targetCreated', { targetInfo: { targetId: 'manual', type: 'page' } })
+  browser.emit('Target.targetCreated', { targetInfo: { targetId: 'manual-dpi', type: 'page' } })
   await settle()
-  assert.deepEqual(moves(browser).filter(m => m.windowId !== 7), [{ windowId: 9, bounds: { left: 40, top: 40 } }])
+  assert.deepEqual(moves(browser).filter(m => m.windowId !== 7), [
+    { windowId: 9, bounds: { left: 40, top: 40 } },
+    { windowId: 10, bounds: { left: 40, top: 40 } },
+  ])
 })
