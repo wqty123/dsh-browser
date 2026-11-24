@@ -44,11 +44,6 @@ export function readSurface(): 'panel' | 'builtin' {
   // the live DSH_HOME decides. No machine-specific path is consulted.
   const declared = (globalThis as unknown as Record<string, unknown>).__dshBrowserSurface
   if (declared === 'builtin') return 'builtin'
-  // A declared `panel` is the shell saying where it renders this conversation, and it outranks the
-  // settings file: the desktop shell has no Web sidebar tab to fall back to, so letting a `channel`
-  // of chrome/edge win here would open an external browser window in a shell that asked for neither.
-  // The channel only decides the surface when the host declared nothing.
-  if (declared === 'panel') return 'panel'
   try {
     const raw = readFileSync(settingsPath(), 'utf8').replace(/^\uFEFF/u, '')
     const parsed = JSON.parse(raw) as { browser?: { surface?: unknown; channel?: unknown } }
@@ -59,6 +54,7 @@ export function readSurface(): 'panel' | 'builtin' {
     const channel = parsed.browser?.channel
     if (channel === 'chrome' || channel === 'edge') return 'builtin'
   } catch { /* no settings yet */ }
+  if (declared === 'panel') return 'panel'
   return 'panel'
 }
 
