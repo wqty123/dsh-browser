@@ -535,6 +535,21 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       && !view.client.destroyedTargets.has(target) && this.connectionStatus().connected
   }
 
+  /**
+   * Whether this view is live on the current connection but sits inside a headless browser, so there is
+   * no window a person could be handed. Mirrors {@link connectedView}, which requires the opposite.
+   *
+   * Takeover has to tell these apart instead of falling back to the sidebar: a headless session that
+   * silently produced a sidebar tab left the person acting on an unrelated page (issue #103).
+   * @param id - the view to classify.
+   * @returns true when the view is alive and headless.
+   */
+  headlessView(id: string): boolean {
+    const view = this.views.get(id), target = view === undefined ? undefined : this.sessions.get(view.session)
+    return view !== undefined && target !== undefined && view.client === this.client && view.client.headless
+      && !view.client.destroyedTargets.has(target) && this.connectionStatus().connected
+  }
+
   /** Which product this host would drive (for diagnostics). */
   get kind(): DetectedBrowser['kind'] {
     return this.browser.kind

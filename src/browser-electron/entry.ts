@@ -411,6 +411,12 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         const provider = referenceProvider!
         unregisterTakeover = registerCarrierTakeover(ctx.browser, owner => provider.takeoverTargets(owner).map(target => ({
           ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
+          // A headless session is alive but has no window to hand over. Saying why beats falling back:
+          // a silent sidebar tab made the person act on an unrelated page (issue #103), and a bare
+          // "no target" made the caller retry a takeover that cannot succeed (issue #115).
+          unavailableReason: () => adoptedCarrier === host && host.headlessView(target.tabId)
+            ? 'Browser takeover needs a visible window, but this Chrome/Edge session is running headless. Launch it with a window (browser.headless = windowed) and retry.'
+            : undefined,
         })), { exclusive: false })
       }
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
