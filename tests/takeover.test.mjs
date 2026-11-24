@@ -127,7 +127,9 @@ for (const mode of ['button-done', 'button-skip', 'card-done', 'card-skip', 'abo
     else card.answer(mode === 'unavailable' ? 'unavailable' : mode.endsWith('done') ? 'allowed-once' : 'rejected')
     const value = await result
     assert.deepEqual(await repeated, value)
-    assert.equal(value.outcome, mode === 'abort' || mode === 'unavailable' ? 'cancelled' : mode.endsWith('done') ? 'done' : 'skipped')
+    // `unavailable` is reported as itself, not folded into `cancelled`: nobody declined, this host
+    // simply had no channel to reach them, and the model needs to tell those two apart.
+    assert.equal(value.outcome, mode === 'abort' ? 'cancelled' : mode === 'unavailable' ? 'unavailable' : mode.endsWith('done') ? 'done' : 'skipped')
     assert.equal(card.answerable, false, 'losing native card was withdrawn after the authoritative answer')
     assert.equal(card.request.signal.aborted, true)
     assert.equal(host.audit.at(-1).outcome, mode === 'abort' ? 'cancelled' : mode === 'unavailable' ? 'unavailable' : mode.endsWith('done') ? 'allowed-once' : 'rejected')

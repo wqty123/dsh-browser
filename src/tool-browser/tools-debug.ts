@@ -39,13 +39,13 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'dsh_browser_request_takeover',
-    description: 'Hand the selected visible sidebar browser tab in this conversation to the human for a CAPTCHA/slider, login, 2FA or payment. Works on the Web iframe without CDP, including user-opened tabs: adopts the selected tab for this request only, without granting agent control. Never solve CAPTCHAs automatically. Requires an active turn; waits for the sidebar connection and the native card or sidebar Confirm/Skip. Repeated calls on the same tab share one request. Returns done/skipped/cancelled plus a fresh page summary; inspect it before resuming. Never treat skipped/cancelled as success.',
+    description: 'Hand the selected visible sidebar browser tab in this conversation to the human for a CAPTCHA/slider, login, 2FA or payment. Works on the Web iframe without CDP, including user-opened tabs: adopts the selected tab for this request only, without granting agent control. Never solve CAPTCHAs automatically. Requires an active turn; waits for the sidebar connection and the native card or sidebar Confirm/Skip. Repeated calls on the same tab share one request. Returns done/skipped/cancelled/unavailable plus a fresh page summary; inspect it before resuming. Never treat skipped/cancelled as success. unavailable means this host cannot reach a person at all: take the CHALLENGE banner fallback routes and report the block instead of retrying takeover or solving it yourself.',
     parameters: {
       reason: { type: 'string', required: true, description: 'Why the human must take over (1–1000 characters).' },
       instructions: { type: 'string', description: 'Optional concise instructions for the human (up to 2000 characters).' },
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: {
-      outcome: { type: 'string', required: true, enum: ['done', 'skipped', 'cancelled'] },
+      outcome: { type: 'string', required: true, enum: ['done', 'skipped', 'cancelled', 'unavailable'] },
       page: { type: 'object', required: true, additionalProperties: false, properties: {
         url: { type: 'string', required: true }, title: { type: 'string', required: true },
         snapshotHint: { type: 'string', required: true }, fresh: { type: 'boolean', required: true },
@@ -77,7 +77,14 @@ export function debugTools(scope: ToolScope): ToolDefinition[] {
               zh: `请接管浏览器：${pending.reason}（完成后点「允许一次」或侧栏「确认完成」）${pending.instructions ? '\n' + pending.instructions : ''}`,
             }, signal: pending.controller.signal })
         } finally { pending.controller.abort() }
-        const outcome = decision === 'allowed-once' ? 'done' : decision === 'rejected' ? 'skipped' : 'cancelled'
+        // `unavailable` stays its own outcome: it says this host cannot reach a person at all (no
+        // approval service and no sidebar card), which is not a decision anyone made. It used to
+        // collapse into `cancelled`, and because the guidance forbids solving a challenge alone,
+        // the only reachable answer became "not success" — a dead end rather than a result.
+        const outcome: TakeoverOutcome = decision === 'allowed-once' ? 'done'
+          : decision === 'rejected' ? 'skipped'
+            : decision === 'unavailable' ? 'unavailable'
+              : 'cancelled'
         const unavailable = (error: unknown): TakeoverSummary => ({ url: page.url, title: '', snapshotHint: `Live page summary unavailable: ${String(error).slice(0, 300)}. Re-read the page before continuing.`, fresh: false })
         if (exec.signal.aborted) return { outcome: 'cancelled', page: unavailable('turn stopped') }
         pending.phase = 'summary'
