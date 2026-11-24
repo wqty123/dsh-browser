@@ -93,8 +93,39 @@ test('the prompt section coexists with another browser plugin in either registra
     }
     apply(ctx, { surface: 'tools' })
     if (!siblingFirst) ctx.systemPrompt.section({ name: 'tool:browser' })
-    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:browser-human-takeover', 'tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
+    assert.deepEqual([...sections].sort(), ['tool:browser', 'tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
     assert.ok(tools.has('dsh_browser_open'), 'tool registration completes')
+  }
+})
+
+test('default core and tools system prompts stay minimal while tool descriptions retain key behaviours', () => {
+  const { ctx, tools } = makeContext()
+  const sections = []
+  ctx.systemPrompt.section = section => { sections.push(section) }
+  apply(ctx, {})
+  assert.deepEqual(sections.map(s => s.name).sort(), ['tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
+  const guide = sections.find(s => s.name === 'tool:dsh-builtin-browser')
+  assert.ok(guide.text.length < 400, `core routing guide should stay compact (got ${guide.text.length} chars)`)
+  assert.match(guide.text, /dsh_browser_do/)
+  assert.match(guide.text, /dsh_browser_code/)
+  assert.match(guide.text, /dsh_browser_load_tools/)
+  assert.equal(sections.some(s => /Never attempt automatic CAPTCHA/i.test(s.text)), false, 'takeover guidance must not leak globally')
+  assert.match(tools.get('dsh_browser_request_takeover').description, /CAPTCHA/i, 'takeover guidance lives on the takeover tool')
+  // Key behaviours moved out of global systemPrompt must live on the tools that own them.
+  assert.match(tools.get('dsh_browser_code').description, /already printed/i, 'code tool keeps partial-output guidance')
+  assert.match(tools.get('dsh_browser_do').description, /cancelled or timed-out run still reports/i, 'do tool keeps partial-step guidance')
+  assert.match(tools.get('dsh_browser_challenge').description, /sitemap/i, 'challenge tool keeps fallback-route guidance')
+  assert.match(tools.get('dsh_browser_challenge').description, /tied to its source/i, 'challenge tool keeps source-attribution guidance')
+  assert.match(tools.get('dsh_browser_open').description, /CHALLENGE banner.*sitemap/i, 'open tool points blocked pages to fallback routes')
+
+  const toolsCtx = makeContext()
+  const toolsSections = []
+  toolsCtx.ctx.systemPrompt.section = section => { toolsSections.push(section) }
+  apply(toolsCtx.ctx, { surface: 'tools' })
+  const toolsGuide = toolsSections.find(s => s.name === 'tool:dsh-builtin-browser')
+  assert.ok(toolsGuide.text.length < 400, `tools routing guide should stay compact (got ${toolsGuide.text.length} chars)`)
+  for (const name of ['dsh_browser_fill', 'dsh_browser_scrape', 'dsh_browser_do', 'dsh_browser_assert']) {
+    assert.ok(toolsGuide.text.includes(name), `tools routing guide retains ${name}`)
   }
 })
 

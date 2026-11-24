@@ -93,7 +93,8 @@ test('the code surface keeps only the code tool plus human takeover', () => {
   assert.doesNotMatch(tools.get('dsh_browser_code').description, /\d{4}-\d{2}-\d{2}/, 'static description keeps the prompt prefix cacheable')
   const guide = sections.find(section => section.name === 'tool:dsh-builtin-browser')
   assert.match(guide.text, /dsh_browser_code/)
-  assert.ok(sections.some(section => section.name === 'tool:browser-human-takeover'))
+  assert.equal(sections.some(section => section.name === 'tool:browser-human-takeover'), false, 'takeover rules stay on the tool description and challenge banners, not global systemPrompt')
+  assert.match(tools.get('dsh_browser_request_takeover').description, /CAPTCHA/i)
   assert.ok(sections.some(section => section.name === 'tool:dsh-browser-reference-presentation'))
 })
 
