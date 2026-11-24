@@ -69,9 +69,6 @@ function harness(t, channel, discover = () => new Promise(() => {})) {
     effect(fn) { const dispose = fn(); if (dispose) disposers.push(dispose) },
     logger: { info() {}, warn() {} },
     inject(_deps, callback) { callback({ effect(fn) { fn() }, webServer: {
-      // The plugin registers more than one exact route now (settings, and the live-view frame
-      // endpoint), so a single `handler` variable meant the second registration silently replaced
-      // the first. Keyed by path, the settings request keeps reaching the settings handler.
       register(route) {
         routes.set(route.path, route.handler)
         if (route.path === '/dsh-builtin-browser/settings') handler = route.handler
@@ -184,6 +181,16 @@ test('the default plugin-profile Installed Chrome offers its own tab for takeove
   assert.ok(h.current instanceof SystemBrowserViewHost)
   assert.equal(carrierTakeoverTarget(h.browser, 'owner')?.tabId, 'carrier-tab')
   assert.equal(hasCarrierTakeover(h.browser), false)
+})
+
+test('a headless Installed Chrome tab refuses takeover explicitly instead of falling back to the sidebar', async t => {
+  const target = { session: testScope('owner'), owner: 'owner', tabId: 'headless-tab', pageId: 'headless-tab', url: 'https://carrier.test/' }
+  t.mock.method(ElectronBrowserProvider.prototype, 'takeoverTargets', () => [target])
+  t.mock.method(SystemBrowserViewHost.prototype, 'connectedView', () => false)
+  t.mock.method(SystemBrowserViewHost.prototype, 'headlessView', id => id === 'headless-tab')
+  const h = harness(t, 'chrome')
+  assert.ok(h.current instanceof SystemBrowserViewHost)
+  assert.throws(() => carrierTakeoverTarget(h.browser, 'owner'), /running headless/i)
 })
 
 test('extension status reports a connected personal profile or the managed CDP fallback', async t => {

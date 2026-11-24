@@ -535,6 +535,13 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       && !view.client.destroyedTargets.has(target) && this.connectionStatus().connected
   }
 
+  /** Whether this view is live on the current connection, but inside a headless browser with no window to take over. */
+  headlessView(id: string): boolean {
+    const view = this.views.get(id), target = view === undefined ? undefined : this.sessions.get(view.session)
+    return view !== undefined && target !== undefined && view.client === this.client && view.client.headless
+      && !view.client.destroyedTargets.has(target) && this.connectionStatus().connected
+  }
+
   /** Which product this host would drive (for diagnostics). */
   get kind(): DetectedBrowser['kind'] {
     return this.browser.kind
@@ -1043,18 +1050,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /**
-   * Every page the browser currently holds, including ones this plugin did not create.
-   *
-   * Chrome and Edge own their own page creation. A click on a link that opens a new page — or any
-   * `window.open` — produces a page the provider never asked for, and nothing reports it back.
-   * Those pages are real: they hold memory and stay until something closes them. Measured on a real
-   * window: four pages present while `dsh_browser_list_tabs` reported one.
-   *
-   * Discovery is enabled before the connection is published, so
-   * `Target.getTargets` also lists pages that existed before this client connected.
-   * @returns the browser's pages, or an empty list when it cannot answer.
-   */
-  /**
    * Every page the browser holds that THIS HOST did not open.
    *
    * Chrome and Edge own their own page creation. A click on a link that opens a new page — or any
@@ -1142,34 +1137,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       // browser rather than hanging again, and the error names the cause instead of a timeout.
       const client = await this.ensureClient()
       const cachedView = this.views.get(viewId)
-      // A session belongs to the browser that issued it. Clearing the cache whenever a client is
-      // dropped covers the ordinary case, but not this one: another call can be inside
-      // ensureSession() holding the OLD client while this one discards it and clears, and that
-      // call's `views.set` then lands afterwards — re-adding an entry naming a browser that is
-      // gone. The identity check is what refuses it, and it costs a comparison rather than the
-      // round trip that validating every cached session against the browser would cost.
-      //
-      // (Not covered by the tests: the race needs two interleaved commands, and the suite's fake
-      // browser is synchronous enough that they never interleave. Verified by mutation instead —
-      // removing this check alone leaves every case green, which is why the comment says what it
-      // protects rather than claiming a case proves it.)
       const session = cachedView !== undefined && cachedView.client === client
         ? cachedView.session
         : await this.ensureSession(viewId)
-      /**
-       * Send one page command, rebuilding the attach once if the browser no longer knows the
-       * session.
-       *
-       * "Session with given id not found" means the session id is stale, and the causes differ:
-       * a replaced client (handled where the client is dropped), a target the browser destroyed,
-       * or a detach the page performed on itself. What they share is that the id is worthless and
-       * the VIEW is fine, so the right answer is one fresh attach — not an error to the caller and
-       * not a new page. Measured while solving a sudoku on a canvas page: after a tab switch every
-       * command failed with this text and nothing in the plugin ever recovered it.
-       *
-       * Retried exactly once: a failure that survives a fresh attach is not a stale id, and
-       * repeating it would turn an error into a loop.
-       */
       const sendWithAttach = async (target: string): Promise<Record<string, unknown>> => {
         try {
           const result = await client.send(method, params, target)
@@ -1189,30 +1159,10 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       try {
         return await sendWithAttach(session)
         } catch (error) {
-          // A CDP protocol error means the browser ANSWERED and refused this one command, so the
-          // connection is healthy and must be kept. Deciding by the error TEXT misfires both
-          // ways: the inner timeout rejects with "… timed out", so a slow but healthy page read
-          // as a dead browser, the client was dropped, and the next call's start() killed the
-          // running child — the human's tabs and half-filled forms gone, which is worse than the
-          // bug that change was fixing. The browser's own free text is interpolated into
-          // protocol errors too, so any message containing those words misfired the same way.
-          // Unanswered versus refused. 'timed out' is the inner client's own budget expiring,
-          // which says the page was slow, not that the browser died — so it only marks the client
-          // for a probe. Being wrong here costs a two-second check; being wrong about the
-          // browser being dead cost the user their open tabs.
           if (error instanceof Error && /timed out/.test(error.message)) this.clientSuspect = true
           if (!client.isAlive()) {
-            // Only THIS call's client. Under concurrency the field may already hold a
-            // connection another call just published, and closing that would kill a healthy one.
             if (this.client === client) {
               this.client = undefined
-              // This is the third of the three paths that discard a client, and it was the one
-              // that did not retire what the client had issued. A view holding a session id
-              // from the dead browser kept handing it to the replacement, which had never heard
-              // of it: every page command then failed with "Session with given id not found"
-              // and no later call could clear it, because the cached session was returned
-              // unconditionally. Gated on the same identity check as the field itself, so a
-              // concurrent call that just published a healthy client does not lose its maps.
               this.forgetBrowserState()
             }
             client.close()
@@ -1239,22 +1189,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   /** Nothing to show: the browser owns its own windows. */
   showView(): void {}
 
-  /**
-   * Bring the target's page to the front, then report success.
-   *
-   * The comment on `focus` below used to say this was impossible — that raising the page needs
-   * `Page.bringToFront` on a target session, which is a view-level concern the host cannot
-   * reach. The handle this method is handed IS that view, and it can send commands, so the
-   * capability was here all along; it just was not used. Without it `presentView` was an empty
-   * async method, so the provider's whole presentation barrier — the one that stops
-   * `Input.*` from being silently dropped for a view with no display surface, and reports
-   * `BROWSER_VIEW_NOT_PRESENTED` when it cannot present — never ran on this carrier.
-   *
-   * A failure is swallowed rather than propagated: a real Chrome window that refuses to come
-   * forward is not a reason to refuse the click that follows. The barrier exists to order the
-   * two, and the order is honoured either way.
-   * @param handle - the view to present.
-   */
   async presentView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean }): Promise<void> {
     if (options?.quiet === true || this.isQuiet()) return
     try {
@@ -1265,35 +1199,12 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-
-
-  /**
-   * Best effort at bringing the browser's window forward.
-   *
-   * The browser is a separate application, so there is no view to raise. What this can
-   * actually do is ask its process to continue from a stopped state — which is a no-op on
-   * Windows, where `SIGCONT` is not a supported signal and the call throws. It is kept
-   * because it costs nothing and does help on POSIX (a process stopped with SIGSTOP
-   * resumes), but it must not be read as a promise that the window comes to the front;
-   * importantly, it does NOT raise a window that is merely behind another. Raising the
-   * page properly would need `Page.bringToFront` on a specific target session, which is a
-   * view-level concern and not available to the host.
-   */
   async focus(): Promise<void> {
     if (this.child && await this.ownership.verify(this.child)) {
       try { this.child.kill('SIGCONT') } catch { /* Windows has no SIGCONT. */ }
     }
   }
 
-
-
-  /**
-   * Close the browser we launched, if we ever launched one.
-   *
-   * The user's own windows belong to a different process and are never touched. A
-   * host whose browser was never started (the common case when nobody used the
-   * browser) simply tears down its bookkeeping.
-   */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
@@ -1313,20 +1224,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       finally { client.close() }
     }
     void disconnect()
-    // Both the browser we launched and anything that ignored an earlier kill. They hold this
-    // profile, so leaving them running means the next launch contends with a browser nobody owns.
     const doomed = [this.child, ...this.stubborn.splice(0)].filter(
       (entry): entry is ChildProcess => entry !== undefined,
     )
     this.child = undefined
     for (const dying of doomed) {
-      /**
-       * A bounded reprieve, then the kill we used to do immediately.
-       *
-       * The timer is unref'd so it never holds the process open: a DSH shutdown that is itself
-       * ending does not wait for this, and the browser — having been asked to close — generally
-       * gets there on its own. If it does not, the kill still lands while the process lives.
-       */
       const force = (): void => { void this.stopChild(dying) }
       const timer = setTimeout(force, CLOSE_GRACE_MS)
       timer.unref?.()
@@ -1344,7 +1246,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         this.profileLease = undefined
       })().catch(error => process.stderr.write(`[dsh-browser] profile release failed: ${String(error)}\n`))
     }
-    // Saved processes retain the profile until their exit events arrive.
     const live = doomed.filter(child => child.exitCode === null && child.signalCode === null)
     if (live.length > 0) {
       const remaining = new Set(live)
@@ -1359,18 +1260,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-  /**
-   * The flattened session for a view, creating its page on first use.
-   *
-   * No cache check here: the only caller has already established that the cached session does
-   * not belong to the client it is about to use. Re-checking would mean either a round trip or
-   * a second copy of that rule.
-   */
   private async ensureSession(viewId: string): Promise<string> {
-    // One target per view, even when two commands arrive together. The two CDP round trips
-    // below are awaits, so without this a second caller entering during the first's flight saw
-    // no session in `views` and created its own target — leaving an orphan page that nothing
-    // closes, because only the last id survives in the map.
     const inFlight = this.sessionBuilding.get(viewId)
     if (inFlight !== undefined) return await inFlight
     const building = this.buildSession(viewId).finally(() => {
@@ -1380,24 +1270,14 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     return await building
   }
 
-  /** Create and attach the target for one view. Serialised by {@link ensureSession}. */
   private async buildSession(viewId: string): Promise<string> {
     const client = await this.ensureClient()
-    // Different views can initialise concurrently. Selecting an unclaimed page and attaching
-    // it must be one transaction, including when the page is created by a preceding view.
     const previous = this.targetBuilds.get(client) ?? Promise.resolve()
     let release!: () => void
     const building = new Promise<void>(resolve => { release = resolve })
     this.targetBuilds.set(client, building)
     await previous
     try {
-      // Adopt a blank page the browser opened on its own before creating another one.
-      //
-      // Chrome starts with more than one page when handed a URL on top of its own start page, so
-      // creating a target here discarded the original and left it behind as a tab that is not in
-      // the plugin's tab model — invisible to `dsh_browser_list_tabs`, and therefore unclosable
-      // through the tools. Taking the blank instead makes the page the browser already opened the
-      // one the caller gets.
       const adopted = await this.adoptBlankTarget(client)
       const targetId = adopted ?? await this.createTarget(client, viewId)
       const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
@@ -1405,7 +1285,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
       if (adopted !== undefined) this.rememberTarget(client, targetId, viewId)
       await this.presentAsChrome(client, sessionId)
-      // The session id is what page commands ride; the target id is what closes it.
       this.sessions.set(sessionId, targetId)
       this.views.set(viewId, { session: sessionId, client })
       return sessionId
@@ -1415,14 +1294,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     }
   }
 
-  /**
-   * Give a page this plugin created in a headless browser (launched or adopted) the same user agent
-   * the browser has with a window. Headless Chrome announces itself as `HeadlessChrome/<version>`, which sites
-   * refuse outright; it is the same engine and version, so the windowed string is the truthful one.
-   * A person's own tab ({@link adoptPage}) and a windowed browser are left exactly as they are.
-   * @param client - the connected browser.
-   * @param sessionId - the page's CDP session.
-   */
   private async presentAsChrome(client: CdpClient, sessionId: string): Promise<void> {
     this.plainUserAgent ??= (client.send('Browser.getVersion', {}) as Promise<{ userAgent?: string }>)
       .then(info => typeof info?.userAgent === 'string' && info.userAgent.includes('HeadlessChrome/')
@@ -1432,21 +1303,6 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     await client.send('Emulation.setUserAgentOverride', { userAgent }, sessionId).catch(() => {})
   }
 
-  /**
-   * Take over a page the browser already has, so a person's own tab becomes one this plugin drives.
-   *
-   * Reported as a defect: opening a window by hand, navigating it, and then asking a tool to read it
-   * produced a SECOND page, because the only tab the provider knew about was one it created itself.
-   * The page the human was looking at was listed by `dsh_browser_list_tabs` (under `page:`) and
-   * could be closed, but not read or driven — the opposite of what "the page you are looking at"
-   * means.
-   *
-   * Attaching is all it takes: a CDP session is not exclusive, so the browser's own tab becomes a
-   * target this plugin has a session on. The page is not moved, reloaded or focused, and its
-   * existing session (logins, scroll position, form state) is untouched.
-   * @param targetId - the carrier's page id, which for this carrier IS the CDP target id.
-   * @returns a handle for that page, in the same shape {@link createView} returns.
-   */
   async adoptPage(identity: BrowserTabWireId, scope = sessionWireId(readTabHandle(identity))): Promise<ElectronViewHandle> {
     const tab = resolveTabHandle(resolveSessionHandle(scope), identity).tab
     if (!tab.startsWith('page:')) throw new Error('dsh-builtin-browser: invalid carrier page handle')
@@ -1458,21 +1314,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     if (typeof sessionId !== 'string') {
       throw new Error(`dsh-builtin-browser: could not attach to the existing page ${targetId}`)
     }
-    // Point the view `createView` just made at the page that already exists, instead of the one it
-    // would otherwise build on first use.
     this.sessions.set(sessionId, targetId)
     this.views.set(handle.id, { session: sessionId, client })
     return handle
   }
 
-  /**
-   * Take an unclaimed blank page, if the browser has one to spare.
-   *
-   * "Unclaimed" is what matters: a blank page the plugin is already driving belongs to a view, and
-   * handing the same target to a second view would make two views share one page.
-   * @param client - the connected browser.
-   * @returns the target id to reuse, or undefined when a new page has to be created.
-   */
   private async adoptBlankTarget(client: CdpClient): Promise<string | undefined> {
     const listed = await client.send('Target.getTargets', {}) as {
       targetInfos?: Array<{ targetId?: string; type?: string; url?: string }>
@@ -1488,12 +1334,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     return undefined
   }
 
-  /** Create one page, refusing to go on without an id. */
   private async createTarget(client: CdpClient, viewId: string): Promise<string> {
     const created = await client.send('Target.createTarget', {
       url: 'about:blank',
-      // `background` only keeps the user's tab active inside an existing window. The first page after
-      // `--no-startup-window` opens a new window, which Chromium activates unless `focus: false`.
       ...this.isQuiet() ? { background: true, focus: false } : {},
     }) as { targetId?: string }
     const targetId = created?.targetId
@@ -1508,26 +1351,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     targets.set(targetId, viewId as BrowserTabWireId)
   }
 
-  /** Views whose session is being created right now, so a second caller waits for the first. */
   private readonly sessionBuilding = new Map<string, Promise<string>>()
-
-  /** Serialises page selection/creation and attachment for each browser connection. */
   private readonly targetBuilds = new WeakMap<CdpClient, Promise<void>>()
-
-  /** sessionId -> targetId, so a destroyed view can close the right page. */
   private readonly sessions = new Map<string, string>()
 }
 
-/**
- * Probe for a browser the human already has open with a debugging port.
- *
- * Chromium exposes CDP only when it was STARTED with --remote-debugging-port, so an already-running Edge
- * cannot be attached unless it was launched that way. Attaching is therefore opt-in: this probe answers
- * "is there something to attach to right now", and the caller decides whether to use it.
- * @param port - the debugging port to try (default 9222).
- * @param timeoutMs - how long to wait for the endpoint.
- * @returns the browser banner when an endpoint answers, undefined otherwise.
- */
 export async function probeAttach(port: number = CDP_DEFAULT_ATTACH_PORT, timeoutMs: number = CDP_ATTACH_PROBE_TIMEOUT_MS): Promise<string | undefined> {
   const controller = new AbortController()
   const timer = setTimeout(() => { controller.abort() }, timeoutMs)

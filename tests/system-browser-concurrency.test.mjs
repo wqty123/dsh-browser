@@ -138,8 +138,16 @@ for (const browserName of ['Chrome/156', 'HeadlessChrome/156']) {
       const session = await provider.open('owner')
       await provider.execute(session, { script: '1' })
       const id = views.at(-1).id
-      if (browserName.startsWith('Headless')) { assert.equal(host.connectedView(id), false); return }
+      if (browserName.startsWith('Headless')) {
+        assert.equal(host.connectedView(id), false)
+        assert.equal(host.headlessView(id), true)
+        browser.destroyTarget(browser.attached.at(-1))
+        for (let i = 0; i < 50 && host.headlessView(id); i++) await new Promise(resolve => setTimeout(resolve, 20))
+        assert.equal(host.headlessView(id), false)
+        return
+      }
       assert.equal(host.connectedView(id), true)
+      assert.equal(host.headlessView(id), false)
       browser.destroyTarget(browser.attached.at(-1))
       for (let i = 0; i < 50 && host.connectedView(id); i++) await new Promise(resolve => setTimeout(resolve, 20))
       assert.equal(host.connectedView(id), false)

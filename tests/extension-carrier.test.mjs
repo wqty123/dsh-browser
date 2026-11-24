@@ -132,6 +132,8 @@ test('a launched plugin-profile carrier hands over its own tab first and falls b
   takeovers.attachBrowser(browser)
   takeovers.exchange({ operation: 'register', owner: 'owner', tabId: 'sidebar', pageId: 'sidebar', url: 'https://sidebar.test/', active: true })
   assert.equal((await takeovers.adopt('owner', new AbortController().signal)).pageId, 'carrier-tab')
+  targets = [{ session, owner: 'owner', tabId: 'headless-tab', pageId: 'headless-tab', url: 'https://carrier.test/', connected: () => false, unavailableReason: () => 'headless browser cannot be taken over' }]
+  await assert.rejects(takeovers.adopt('owner', new AbortController().signal), /headless browser cannot be taken over/)
   targets = []
   assert.equal((await takeovers.adopt('owner', new AbortController().signal)).pageId, 'sidebar')
   remove(); takeovers.dispose()
