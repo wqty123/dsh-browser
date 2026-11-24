@@ -187,18 +187,47 @@ test('empty and throwing discovery sources do not escape or prevent the next sou
   assert.equal(withEnv(base, {}, () => findDesktopInstall(undefined, denied, () => [root])), root)
 })
 
-test('registry parsing accepts only InstallLocation and tolerates inaccessible keys', () => {
+test('registry parsing accepts only InstallLocation, searches both DeepSeek Harness and DSH Desktop, and deduplicates results', () => {
   const calls = []
   const query = (command, args, options) => {
     calls.push({ command, args, options })
     if (calls.length === 1) throw Error('denied')
     return '    DisplayName    REG_SZ    DeepSeek Harness\r\n    InstallLocation    REG_SZ    E:\\Apps\\DeepSeek Harness  \r\n'
   }
-  assert.deepEqual(registeredInstallLocations('win32', query), ['E:\\Apps\\DeepSeek Harness', 'E:\\Apps\\DeepSeek Harness'])
-  assert.equal(calls.length, 3)
+  assert.deepEqual(registeredInstallLocations('win32', query), ['E:\\Apps\\DeepSeek Harness'])
+  assert.equal(calls.length, 6)
+  assert.deepEqual([...new Set(calls.map(call => call.args[4]))], ['DeepSeek Harness', 'DSH Desktop'])
   assert.ok(calls.every(call => call.command === 'reg' && call.options.windowsHide && call.options.timeout === 15000))
   assert.deepEqual(registeredInstallLocations('linux', () => { throw Error('must not query') }), [])
   assert.deepEqual(registeredInstallLocations('win32', () => ''), [])
+})
+
+test('registry discovery follows up matched Uninstall subkeys to read InstallLocation when /s /f omits it', () => {
+  const calls = []
+  const query = (command, args) => {
+    calls.push({ command, args })
+    if (args[2] === '/s') {
+      if (args[4] === 'DeepSeek Harness' && args[1].startsWith('HKCU')) {
+        return '\r\nHKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{guid-1}\r\n    DisplayName    REG_SZ    DeepSeek Harness\r\n\r\nEnd of search: 1 match(es) found.\r\n'
+      }
+      if (args[4] === 'DSH Desktop' && args[1].startsWith('HKLM\\SOFTWARE\\Microsoft')) {
+        return '\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\io.dsh.desktop\r\n    DisplayName    REG_SZ    DSH Desktop 0.14.0\r\n'
+      }
+      return ''
+    }
+    if (args[2] === '/v' && args[3] === 'InstallLocation') {
+      if (args[1].endsWith('{guid-1}')) {
+        return '\r\n' + args[1] + '\r\n    InstallLocation    REG_SZ    D:\\CustomDir\\Harness\r\n'
+      }
+      if (args[1].endsWith('io.dsh.desktop')) {
+        return '\r\n' + args[1] + '\r\n    InstallLocation    REG_EXPAND_SZ    "D:\\DSH\\DSH Desktop"\r\n'
+      }
+    }
+    return ''
+  }
+  assert.deepEqual(registeredInstallLocations('win32', query), ['D:\\CustomDir\\Harness', 'D:\\DSH\\DSH Desktop'])
+  const followups = calls.filter(call => call.args[2] === '/v' && call.args[3] === 'InstallLocation')
+  assert.equal(followups.length, 2)
 })
 
 test('platform conventions retain bundle roots and Linux system and per-user locations', () => {
