@@ -901,6 +901,7 @@ export abstract class ProviderCore {
    *
    * Bounded on purpose: the pump runs on a timer, and an unresponsive renderer
    * would otherwise hold the whole tick (and every later one) forever.
+   * Never initializes or launches a closed tab/browser (issue #105).
    * @param tab - the tab to evaluate in.
    * @param expression - the JS expression.
    * @param timeoutMs - how long to wait before treating the page as not answering.
@@ -909,7 +910,7 @@ export abstract class ProviderCore {
     const raw = await withTimeout(
       tab.handle.sendCommand('Runtime.evaluate', {
         expression, returnByValue: true, awaitPromise: true,
-      }),
+      }, { present: false, initialize: false }),
       timeoutMs,
       undefined,
       `browser: reference probe timed out after ${timeoutMs}ms`,
