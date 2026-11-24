@@ -28,7 +28,7 @@ import { browserWorkspace } from './electron/workspace.ts'
 import { desktopBrowserBridge, nativeChildTabs, nativeViews } from '../compat/host-features.ts'
 import type { BrowserPageFactory } from './browser/BrowserPage.ts'
 import { BROWSER_ID, BROWSER_KIND, browserDefinition } from './definition.tsx'
-import { en, ja, es, fr, de, ru, pt, zh } from './locales.ts'
+import { en, ja, es, fr, de, ru, pt, zh, SIDEBAR_BROWSER_LOCALE_NS } from './locales.ts'
 import { createBrowserStore } from './browser/store.ts'
 import { StartPageBinding } from './startpage/binding.ts'
 import { openShortcutTarget } from './shortcut-open.ts'
@@ -125,28 +125,37 @@ export function apply(ctx: Context): void {
   // 再装设置页分节：旧插件的设置面板（宿主 /dsh-builtin-browser/settings 的 UI）。
   applySettingsSection(ctx)
 
-  const namespace = 'sidebarBrowser'
+  const namespace = SIDEBAR_BROWSER_LOCALE_NS
   const t = ctx.locale.bind(namespace)
   ctx.inject(['shortcuts'], (ctx) => {
-    ctx.effect(() => ctx.shortcuts.register({
-      id: 'browser.new' as ShortcutCommandId, label: () => t('guide.title'), aliases: ['browser', 'new browser tab'],
-      defaults: {
-        'desktop:macos': { code: 'KeyT', modifiers: ['primary'] },
-        'desktop:windows': { code: 'KeyT', modifiers: ['primary'] },
-        'desktop:linux': { code: 'KeyT', modifiers: ['primary'] },
-        'web:macos': { code: 'KeyT', modifiers: ['primary', 'alt'] },
-        'web:windows': { code: 'KeyT', modifiers: ['primary', 'alt'] },
-      },
-      // Each tab plugin owns its command's availability, localized refusal, and tab kind.
-      /* jscpd:ignore-start */
-      regions: ['page', 'editable', 'terminal'], modals: [],
-      resolve: ({ target: element }) => {
-        const target = ctx.sidebarRight.commandTarget(element)
-        if (target === undefined) return { status: 'blocked', reason: t('shortcut.noSession') }
-        return { status: 'handled', run: () => { ctx.sidebarRight.openTabFromTarget('browser', target) } }
-      },
-      /* jscpd:ignore-end */
-    }), 'ui-sidebar-browser: shortcut')
+    ctx.effect(() => {
+      try {
+        return ctx.shortcuts.register({
+          id: 'browser.new' as ShortcutCommandId, label: () => t('guide.title'), aliases: ['browser', 'new browser tab'],
+          defaults: {
+            'desktop:macos': { code: 'KeyT', modifiers: ['primary'] },
+            'desktop:windows': { code: 'KeyT', modifiers: ['primary'] },
+            'desktop:linux': { code: 'KeyT', modifiers: ['primary'] },
+            'web:macos': { code: 'KeyT', modifiers: ['primary', 'alt'] },
+            'web:windows': { code: 'KeyT', modifiers: ['primary', 'alt'] },
+          },
+          // Each tab plugin owns its command's availability, localized refusal, and tab kind.
+          /* jscpd:ignore-start */
+          regions: ['page', 'editable', 'terminal'], modals: [],
+          resolve: ({ target: element }) => {
+            const target = ctx.sidebarRight.commandTarget(element)
+            if (target === undefined) return { status: 'blocked', reason: t('shortcut.noSession') }
+            return { status: 'handled', run: () => { ctx.sidebarRight.openTabFromTarget('browser', target) } }
+          },
+          /* jscpd:ignore-end */
+        })
+      } catch (error) {
+        // When DSH's built-in ui-sidebar-browser is also enabled (issue #107), it already registers
+        // `browser.new` targeting kind `'browser'`, which routes to our extension-band definition.
+        if (/Duplicate shortcut command|Conflicting shortcut defaults/i.test(String(error))) return () => {}
+        throw error
+      }
+    }, 'ui-sidebar-browser: shortcut')
   })
   const store = createBrowserStore()
   const startPage = new StartPageBinding()
