@@ -105,11 +105,17 @@ test('default core system prompt stays minimal and omits global takeover rules',
   apply(ctx, {})
   assert.deepEqual(sections.map(s => s.name).sort(), ['tool:dsh-browser-reference-presentation', 'tool:dsh-builtin-browser'])
   const guide = sections.find(s => s.name === 'tool:dsh-builtin-browser')
-  assert.ok(guide.text.length < 400, `core routing guide should stay compact (got ${guide.text.length} chars)`)
+  // A budget, not a target: the guide is ~290 chars, and the headroom leaves room for a necessary
+  // one-sentence addition without reopening the door to the full manual this PR removed.
+  assert.ok(guide.text.length < 520, `core routing guide should stay compact (got ${guide.text.length} chars)`)
   assert.match(guide.text, /dsh_browser_code/)
   assert.match(guide.text, /dsh_browser_load_tools/)
   assert.equal(sections.some(s => /Never attempt automatic CAPTCHA/i.test(s.text)), false, 'takeover guidance must not leak globally')
   assert.match(tools.get('dsh_browser_request_takeover').description, /CAPTCHA/i, 'takeover guidance lives on the takeover tool')
+  // The two behaviours the slimmed guide used to carry must survive on the tools that need them.
+  assert.match(tools.get('dsh_browser_challenge').description, /sitemap/i, 'a plain 403 still names the fallback routes')
+  assert.match(tools.get('dsh_browser_do').description, /cancelled or times out still reports/i, 'partial results survive cancellation')
+  assert.match(tools.get('dsh_browser_code').description, /already printed/i, 'partial output survives cancellation')
 })
 
 test('reference guidance distinguishes tool-only capture storage from chat capsules', () => {
