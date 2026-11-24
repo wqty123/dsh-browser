@@ -5,6 +5,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { pageOperationScript } from './page-probe.ts'
+import { CURSOR_ID } from '../browser-electron/virtual-cursor.ts'
 import type { BrowserSessionId, BrowserPageOperationRequest, BrowserProbeMethod } from '../browser/types.ts'
 
 export const effectProperties = {
@@ -17,14 +18,17 @@ export async function pageFingerprint(browser: NonNullable<Context['browser']>, 
     const result = await browser.execute(session, {
       script: `(() => {
         const a = document.activeElement
+        const b = document.body
+        const c = typeof document.getElementById === 'function' ? document.getElementById(${JSON.stringify(CURSOR_ID)}) : null
+        const own = b && c && c.parentNode === b ? c : null
         return JSON.stringify([
           location.href, document.title,
           a ? [a.tagName, a.id || a.getAttribute('name') || a.className || '',
             typeof a.value === 'string' ? a.value.length : null, a.checked, a.selectedIndex,
             a.selectionStart, a.selectionEnd, a.scrollLeft, a.scrollTop] : null,
           window.scrollX, window.scrollY,
-          document.body ? document.body.childElementCount : 0,
-          document.body ? document.body.innerHTML.length : 0,
+          b ? b.childElementCount - (own ? 1 : 0) : 0,
+          b ? b.innerHTML.length - (own ? own.outerHTML.length : 0) : 0,
         ])
       })()`,
     })

@@ -2,6 +2,7 @@
 // the provider paints at, and the switch that turns it off.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import vm from 'node:vm'
 
 import { cursorScript, forgetCursor, paintCursor } from '../lib/browser-electron/virtual-cursor.js'
 import { DEFAULT_SETTINGS } from '../lib/browser-electron/settings-store.js'
@@ -55,6 +56,68 @@ test('the overlay script is idempotent: it reuses the existing node', () => {
   const script = cursorScript(1, 2, 'move')
   assert.ok(script.includes('getElementById'), 'looks for an existing node first')
   assert.ok(script.includes('if (!root)'), 'only creates when missing')
+})
+
+test('the overlay uses a closed shadow root and moves an inner stage without mutating the host node', () => {
+  const nodes = new Map()
+  let shadowMode
+  const animations = []
+  const stage = { style: { transform: '' } }
+  const ripple = { animate: (frames, opts) => { animations.push(['ripple', frames, opts]) } }
+  const bubble = { textContent: '', style: {}, animate: (frames, opts) => { animations.push(['bubble', frames, opts]) } }
+  const shadow = {
+    innerHTML: '',
+    querySelector: selector => {
+      if (selector === '[data-dsh-role="stage"]') return stage
+      if (selector === '[data-dsh-role="ripple"]') return ripple
+      if (selector === '[data-dsh-role="bubble"]') return bubble
+      return null
+    },
+  }
+  const hostStyleWrites = []
+  const makeElement = () => {
+    let cssText = ''
+    const element = {
+      id: '',
+      innerHTML: '',
+      shadowRoot: null,
+      attrs: {},
+      style: {
+        get cssText() { return cssText },
+        set cssText(value) { cssText = value; hostStyleWrites.push(['cssText', value]) },
+        set transform(value) { hostStyleWrites.push(['transform', value]) },
+      },
+      setAttribute(name, value) { this.attrs[name] = value },
+      attachShadow(init) {
+        shadowMode = init.mode
+        if (init.mode === 'open') this.shadowRoot = shadow
+        return shadow
+      },
+    }
+    return element
+  }
+  const document = {
+    body: { appendChild(node) { nodes.set(node.id, node); return node } },
+    getElementById: id => nodes.get(id) ?? null,
+    createElement: () => makeElement(),
+  }
+  const ctx = vm.createContext({ document })
+
+  vm.runInContext(cursorScript(40, 50, 'click', 'click'), ctx)
+  const root = nodes.get('__dsh_agent_cursor__')
+  assert.ok(root, 'host node is appended to body')
+  assert.equal(shadowMode, 'closed', 'closed shadow root keeps deep-DOM walkers out of cursor markup')
+  assert.equal(root.shadowRoot, null, 'open shadowRoot is not exposed to markdown/findText/anti-bot walkers')
+  assert.equal(root.innerHTML, '', 'light DOM of host stays empty')
+  assert.equal(stage.style.transform, 'translate(40px, 50px)')
+  assert.equal(bubble.textContent, 'click')
+
+  const writesAfterCreate = hostStyleWrites.length
+  vm.runInContext(cursorScript(90, 120, 'click', 'type'), ctx)
+  assert.equal(hostStyleWrites.length, writesAfterCreate, 'moving the pointer never mutates host style attributes')
+  assert.equal(stage.style.transform, 'translate(90px, 120px)')
+  assert.equal(bubble.textContent, 'type')
+  assert.equal(animations.filter(([kind]) => kind === 'ripple').length, 2)
 })
 
 test('a click paints the cursor at the located element center', async () => {
@@ -118,4 +181,23 @@ test('an unchanged position is not repainted, and a new document resets that', (
   forgetCursor(handle)
   paintCursor(handle, 10, 20, 'move', evaluate)
   assert.equal(painted.length, 4, 'after a navigation the pointer is drawn again')
+})
+
+test('the pointer overlay changes neither the page fingerprint nor its text in real Chromium', {
+  skip: !process.env.DSH_TEST_CHROME && 'set DSH_TEST_CHROME to a Chromium executable',
+}, async t => {
+  const { chromiumPage } = await import('./fixtures/chromium-page.mjs')
+  const { pageFingerprint } = await import('../lib/tool-browser/probe-client.js')
+  const chrome = await chromiumPage(t)
+  await chrome.evaluate(`document.body.innerHTML = '<form><input name="a"><button>Submit order</button></form>'; true`)
+  const browser = { execute: async (_session, { script }) => ({ ok: true, value: await chrome.evaluate(script) }) }
+  const before = await pageFingerprint(browser, 's')
+  await chrome.evaluate(cursorScript(40, 50, 'click', 'click'))
+  await chrome.evaluate(`(() => { window.__cursorMut = 0; new MutationObserver(records => { window.__cursorMut += records.length }).observe(document.documentElement, { subtree: true, childList: true, attributes: true }); return true })()`)
+  await chrome.evaluate(cursorScript(90, 120, 'click', 'type'))
+  assert.equal(await pageFingerprint(browser, 's'), before)
+  assert.equal(await chrome.evaluate('document.body.innerText.trim()'), 'Submit order')
+  assert.equal(await chrome.evaluate(`document.getElementById('__dsh_agent_cursor__').shadowRoot`), null, 'closed shadow root is invisible to deep-DOM walkers')
+  assert.equal(await chrome.evaluate(`document.getElementById('__dsh_agent_cursor__')[Symbol.for('__dsh_agent_cursor_shadow__')].querySelector('[data-dsh-role="bubble"]').textContent`), 'type')
+  assert.equal(await chrome.evaluate('window.__cursorMut'), 0, 'subsequent cursor moves trigger zero top-document mutations')
 })
