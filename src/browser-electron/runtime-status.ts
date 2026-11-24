@@ -197,7 +197,10 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
 
   // The sidebar needs BOTH halves: our patch inside the shell it will be driven through, and that
   // shell actually running. Either one alone is the false green this report exists to prevent.
-  const sidebarReady = bridge.state === 'installed' && bridge.running
+  // On DSH Tauri the patch is the host patch, which starts the same bridge inside electron-rs.
+  const shell = deps.shell?.()
+  const sidebarReady = bridge.running && (bridge.state === 'installed'
+    || (shell?.kind === 'tauri' && shell.running === true && shell.hostPatch?.status === 'applied'))
 
   const selected = preferExtension ? deps.selectedCarrier?.() ?? (extension?.connected ? 'extension' : 'cdp') : undefined
   const checkSystemBrowser = carrier === 'system' || selected === 'cdp'
@@ -242,7 +245,7 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
     ...resolvedCarrier === 'system' && detected !== undefined ? { executable: detected.path } : {},
     electron,
     bridge,
-    ...deps.shell === undefined ? {} : { shell: deps.shell() },
+    ...shell === undefined ? {} : { shell },
     canProvision: false,
   }
 }

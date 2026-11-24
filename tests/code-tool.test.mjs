@@ -28,7 +28,7 @@ function mount(overrides = {}, config = {}, services = {}) {
     ...overrides,
   }
   apply({
-    tools: { register: (tool, opts) => { tools.set(tool.name, tool); if (opts) options.set(tool.name, opts) } },
+    tools: { ...services.tools, register: (tool, opts) => { tools.set(tool.name, tool); if (opts) options.set(tool.name, opts) } },
     systemPrompt: { section: section => { sections.push(section) } },
     effect: fn => { disposers.push(fn()) },
     get: name => name === 'browser' ? browser : services[name],
@@ -55,6 +55,17 @@ test('the default surface is the core tools, the loader and the code tool', asyn
 test('the code tool steps aside when DSH runs in PTC mode', () => {
   assert.equal(mount().options.get('dsh_browser_code').when(), true)
   assert.equal(mount({}, {}, { ptcRuntime: {} }).options.get('dsh_browser_code').when(), false)
+})
+
+test('the code tool stays in standard mode when the PTC runtime is mounted but the agent runs the native executor', () => {
+  const ptc = { describe: () => ({ schemas: [], knownNames: ['run_code'] }) }
+  const native = { describe: tools => ({ schemas: tools }) }
+  const ptcAgent = {}
+  const tools = { selectExecutor: agent => agent === ptcAgent ? ptc : native }
+  const when = mount({}, {}, { ptcRuntime: {}, tools }).options.get('dsh_browser_code').when
+  assert.equal(when({ agent: {} }), true)
+  assert.equal(when({ agent: ptcAgent }), false)
+  assert.equal(mount({}, {}, { ptcRuntime: {}, tools: { selectExecutor: () => { throw new Error('unavailable') } } }).options.get('dsh_browser_code').when({ agent: {} }), true)
 })
 
 test('tools.* bindings return JSON values, overlap safe reads and keep actions in order', async () => {
@@ -159,6 +170,21 @@ return notAReturn
   const second = await run('[twice(3), firstItem + secondItem, heading, count, tpl.includes("return notAReturn")]')
   assert.equal(second.ok, true, second.output)
   assert.equal(second.output, '[6,30,"ok",3,true]')
+})
+
+test('repeated sleeps in a cell print one hint toward the wait helpers, and the count restarts each cell', async () => {
+  const { tools } = mount()
+  const code = tools.get('dsh_browser_code')
+  const exec = { agent: { id: 'sleep-hint-owner' } }
+  const quiet = await code.execute({ code: 'await sleep(1)\nawait sleep(1)\nprint("two")' }, exec)
+  assert.equal(quiet.output, 'two')
+  const loop = await code.execute({ code: 'for (let i = 0; i < 5; i++) await sleep(1)\nprint("five")' }, exec)
+  assert.equal(loop.ok, true, loop.output)
+  assert.equal(loop.output.match(/\[hint\] sleep\(\) called 3 times in this cell/g)?.length, 1, loop.output)
+  assert.match(loop.output, /wait_until\(expr\)/)
+  assert.match(loop.output, /five$/)
+  const again = await code.execute({ code: 'await sleep(1)\nprint("one")' }, exec)
+  assert.equal(again.output, 'one')
 })
 
 test('a cell past its deadline is killed, even a busy loop after await, and the REPL restarts', async () => {

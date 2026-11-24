@@ -2,9 +2,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { guestRuntimeScript } from '../src/browser-electron/guest-runtime.ts'
-import { guestPath, relayTag } from '../src/browser-electron/guest-route.ts'
+import { GUEST_ROUTE, guestPath, relayTag } from '../src/browser-electron/guest-route.ts'
 
-function page(storage, storageAvailable = true) {
+function page(storage, storageAvailable = true, referrerPolicy) {
   const requests = [], navigations = [], listeners = new Map(), observers = []
   class Element {
     nodeType = 1
@@ -50,7 +50,7 @@ function page(storage, storageAvailable = true) {
   context.window = context
   if (!storageAvailable) delete context.Storage
   vm.createContext(context)
-  vm.runInContext(guestRuntimeScript('https://ordinary.example/dir/page', storage), context)
+  vm.runInContext(guestRuntimeScript('https://ordinary.example/dir/page', storage, referrerPolicy), context)
   return { context, requests, navigations, listeners, Element, Form, XHR, observers }
 }
 
@@ -112,6 +112,14 @@ test('navigation metadata echoes the parent load identity without inventing comp
   assert.equal(sent.at(-1).loadId, 2)
 })
 
+test('a page that derives its own URL from location.pathname addresses the real document, not the proxy route', () => {
+  const { context } = page()
+  const leaf = GUEST_ROUTE.split('/').pop()
+  assert.equal(context.__dshGuestToProxy(leaf), guestPath('https://ordinary.example/dir/page'))
+  assert.equal(context.__dshGuestToProxy('./' + leaf + '?n=1#top'), guestPath('https://ordinary.example/dir/page?n=1#top'))
+  assert.equal(context.__dshGuestToProxy(leaf + '/x'), guestPath('https://ordinary.example/dir/' + leaf + '/x'))
+})
+
 test('fetch handles string, URL and Request inputs, preserving POST body and adding the subrequest marker', async () => {
   const { context, requests } = page()
   await context.fetch('/api', { method: 'POST', body: 'a=1', headers: { 'content-type': 'text/plain' } })
@@ -126,6 +134,34 @@ test('fetch handles string, URL and Request inputs, preserving POST body and add
   assert.equal(await requests[2].input.text(), 'body')
   assert.equal(requests[2].init.headers.get('authorization'), 'Bearer site')
   for (const { init } of requests) assert.equal(init.headers.get('x-dsh-guest-sub'), '1')
+  for (const { init } of requests) assert.match(init.headers.get('x-dsh-guest-referer'), /^https:\/\/[^/]+\.example\//u)
+  await context.fetch('/api', { referrerPolicy: 'no-referrer' })
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'no-referrer')
+  assert.equal(requests[0].init.headers.get('x-dsh-guest-referrer-policy'), null)
+  await context.fetch('/api', { referrer: '' })
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'no-referrer')
+  await context.fetch(new Request('https://ordinary.example/api', { referrer: '' }), { referrer: 'https://ordinary.example/' })
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), null)
+  await context.fetch(new Request('https://ordinary.example/api', { referrerPolicy: 'origin' }), { referrer: 'https://ordinary.example/' })
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), null)
+  await context.fetch(new Request('https://ordinary.example/api', { referrerPolicy: 'origin' }))
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'origin')
+  await context.fetch('/api', Object.create({ referrer: '' }))
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'no-referrer')
+  await context.fetch(new Request('https://ordinary.example/api', { referrerPolicy: 'unsafe-url' }), { signal: undefined })
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'unsafe-url')
+})
+
+test("the document's upstream Referrer-Policy header governs sub-request referers unless the request overrides it", async () => {
+  const { context, requests } = page(undefined, true, 'unsafe-url, same-origin')
+  await context.fetch('/api')
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'same-origin')
+  await context.fetch('/api', { referrerPolicy: 'origin' })
+  assert.equal(requests.at(-1).init.headers.get('x-dsh-guest-referrer-policy'), 'origin')
+})
+
+test('an upstream Referrer-Policy value cannot close the runtime script', () => {
+  assert.doesNotMatch(guestRuntimeScript('https://ordinary.example/', undefined, '</script><script>alert(1)</script>'), /<\/script>/iu)
 })
 
 test('query-only, fragment-only and empty URLs resolve against the real page, including after history changes', () => {
@@ -147,6 +183,7 @@ test('XHR and beacon stay in the proxy; window.open never impersonates a child b
   assert.equal(xhr.args[1], guestPath('https://ordinary.example/api'))
   assert.equal(xhr.args[2], false)
   assert.equal(xhr.headers.get('x-dsh-guest-sub'), '1')
+  assert.match(xhr.headers.get('x-dsh-guest-referer'), /^https:\/\/[^/]+\.example\//u)
   xhr.setRequestHeader('X-Site-Config', 'page-value')
   xhr.withCredentials = true
   xhr.send('payload')
@@ -156,6 +193,7 @@ test('XHR and beacon stay in the proxy; window.open never impersonates a child b
   assert.equal(context.navigator.sendBeacon('/metrics', 'payload'), true)
   assert.equal(requests[0].input, guestPath('https://ordinary.example/metrics'))
   assert.equal(requests[0].init.headers['x-dsh-guest-sub'], '1')
+  assert.match(requests[0].init.headers['x-dsh-guest-referer'], /^https:\/\/[^/]+\.example\//u)
   assert.equal(requests[0].init.body, 'payload')
   assert.throws(() => context.open('next', '_blank'), error => error.name === 'NotSupportedError' && error.code === 'BROWSER_NATIVE_CHILD_UNAVAILABLE')
   assert.deepEqual(navigations, [])

@@ -114,13 +114,20 @@ export async function pause(ms: number): Promise<void> {
 }
 
 /** Poll until the callback returns something, or the budget runs out. */
-export async function poll<T>(check: () => Promise<T | undefined>, budgetMs: number): Promise<T | undefined> {
+export async function poll<T>(check: () => Promise<T | undefined>, budgetMs: number, intervalMs = 200): Promise<T | undefined> {
   const deadline = Date.now() + budgetMs
   for (;;) {
     const value = await check()
     if (value !== undefined) return value
-    if (Date.now() >= deadline) return undefined
-    await pause(200)
+    const left = deadline - Date.now()
+    if (left <= 0) return undefined
+    // Timers may fire a millisecond before `Date.now()` reaches the deadline; the pause that
+    // reaches it is the last one, so it is followed by exactly one final check.
+    if (left <= intervalMs) {
+      await pause(left)
+      return await check()
+    }
+    await pause(intervalMs)
   }
 }
 

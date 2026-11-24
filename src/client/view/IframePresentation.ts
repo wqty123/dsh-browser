@@ -1,9 +1,10 @@
 /// <reference path="../css-modules.d.ts" />
-import { GUEST_ROUTE } from '../../../assets/browser-policy.mjs'
+import { GUEST_ROUTE, RELAXED_BROWSER_SANDBOX, WEB_BROWSER_SANDBOX } from '../../../assets/browser-policy.mjs'
 /** Iframe DOM and revision-tagged load observations. */
 import type { BrowserTarget } from '../browser/url.ts'
 import type { BrowserPresentation } from './BrowserPresentation.ts'
 import css from './Browser.module.css'
+import { GuestFrameHistory } from '../browser/frame-history.ts'
 import { registerIframePage, registerIframeReference, type GuestReferenceCommand } from '../browser/iframe-reference.ts'
 import { connectWebReferenceSource } from '../browser/web-reference-source.ts'
 import { registerTakeoverSummary } from '../browser/takeover-channel.ts'
@@ -31,10 +32,6 @@ function capturedSourceUrl(value: unknown): unknown {
   } catch { /* Invalid source URLs remain subject to capture validation. */ }
   return value
 }
-
-/** Opaque guest documents cannot access the application's origin or open native windows. */
-export const WEB_BROWSER_SANDBOX = 'allow-scripts allow-forms'
-const RELAXED_BROWSER_SANDBOX = `${WEB_BROWSER_SANDBOX} allow-downloads allow-modals allow-pointer-lock allow-orientation-lock allow-presentation allow-storage-access-by-user-activation`
 
 interface IframeDocument {
   readonly target: BrowserTarget
@@ -72,7 +69,7 @@ export class IframePresentation implements BrowserPresentation {
   private element: HTMLIFrameElement | undefined
   private document: IframeDocument | undefined
   private rendered = false
-  private depth = 1
+  private readonly frameHistory = new GuestFrameHistory()
   private loadId: number | undefined
   private documentId: string | undefined
   private loadedId: number | undefined
@@ -128,6 +125,7 @@ export class IframePresentation implements BrowserPresentation {
     if (data.documentId !== this.documentId) {
       const nativeLoaded = this.documentId === undefined && this.nativeLoadId === this.loadId
       this.invalidateGuest()
+      this.frameHistory.noteDocumentChange()
       this.loadId = ++this.nextLoadId
       this.documentId = data.documentId
       if (nativeLoaded) this.nativeLoadId = this.loadId
@@ -143,7 +141,11 @@ export class IframePresentation implements BrowserPresentation {
     clearTimeout(this.identityTimer)
     this.identityTimer = undefined
     this.identityRetried = false
-    this.depth = Number.isSafeInteger(data.depth) && data.depth > 0 ? data.depth : 1
+    this.frameHistory.record({
+      depth: Number.isSafeInteger(data.depth) && data.depth > 0 ? data.depth : 1,
+      reason: typeof data.reason === 'string' ? data.reason : undefined,
+      navigationType: typeof data.navigationType === 'string' ? data.navigationType : undefined,
+    })
     if (data.ready === true) this.markLoaded()
     this.observedUrl = data.url
     this.events.observed(this.document.revision, data.url)
@@ -225,19 +227,25 @@ export class IframePresentation implements BrowserPresentation {
 
   /** Request history movement in the guest without reading its cross-origin window. */
   historyStep(delta: number): boolean {
+    if (!this.frameHistory.canStep(delta)) return false
     const win = this.element?.contentWindow
     if (win === undefined || win === null) return false
     try {
       win.postMessage({ type: 'dsh.browser.guest.history', delta: delta < 0 ? -1 : 1 }, '*')
-      return true
     } catch {
       return false
     }
+    return this.frameHistory.step(delta)
   }
 
-  /** History depth reported by the guest. */
+  /** Entries this guest iframe itself added, counting the current one; the joint session history is excluded. */
   historyDepth(): number {
-    return this.depth
+    return this.frameHistory.depth()
+  }
+
+  /** Whether the guest iframe has a forward entry of its own. */
+  canGoForward(): boolean {
+    return this.frameHistory.canGoForward()
   }
 
   /** @param viewportId - mounted placeholder. @returns removes only the iframe presentation. */
@@ -335,7 +343,7 @@ export class IframePresentation implements BrowserPresentation {
     element.addEventListener('error', () => {
       if (this.element === element) { this.invalidateGuest(); this.events.failed(current.revision) }
     })
-    this.depth = 1
+    this.frameHistory.reset(history.length)
     this.loadId = ++this.nextLoadId
     this.element = element
     this.rendered = true

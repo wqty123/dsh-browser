@@ -17,6 +17,19 @@ test('PTC mode is the presence of the ptcRuntime service, and a throwing lookup 
   assert.equal(ptcRuntimeActive({ get: () => { throw new Error('no service') } }), false)
 })
 
+test('with a scoped executor registry, PTC mode is the agent selecting an executor that exposes run_code', () => {
+  const get = name => name === 'ptcRuntime' ? {} : undefined
+  const ptc = { describe: () => ({ schemas: [], knownNames: ['run_code'] }) }
+  const native = { describe: tools => ({ schemas: tools }) }
+  const ptcAgent = {}
+  const tools = { selectExecutor: agent => agent === ptcAgent ? ptc : native }
+  assert.equal(ptcRuntimeActive({ get, tools }, { agent: ptcAgent }), true)
+  assert.equal(ptcRuntimeActive({ get, tools }, { agent: {} }), false)
+  assert.equal(ptcRuntimeActive({ get, tools }), false)
+  assert.equal(ptcRuntimeActive({ get: () => undefined, tools }, { agent: ptcAgent }), false)
+  assert.equal(ptcRuntimeActive({ get, tools: { selectExecutor: () => { throw new Error('unavailable') } } }, { agent: {} }), false)
+})
+
 test('`when` is passed only when given, and an older registry that ignores it still registers', () => {
   const calls = []
   const registry = { register(tool, options) { calls.push([tool, options, this === registry]); return 'disposer' } }

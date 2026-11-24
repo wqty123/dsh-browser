@@ -166,8 +166,6 @@ export interface DeliveryRecord {
 }
 
 export interface DeliveriesResponse {
-  readonly tracksSubmissions?: boolean
-  readonly unverified?: readonly string[]
   readonly ok: true
   readonly sequence: number
   readonly deliveries: readonly DeliveryRecord[]

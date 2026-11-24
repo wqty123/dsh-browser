@@ -8,11 +8,12 @@
  * @module dsh-browser/browser-electron/desktop-shell
  */
 import type { DesktopIdentity, IdentityRefusal } from './desktop-identity.ts'
+import type { TauriHostPatch, TauriRuntime } from './tauri-host.ts'
 
-export type DesktopShellKind = 'official-supported' | 'official-unsupported' | 'third-party-shell' | 'none'
+export type DesktopShellKind = 'official-supported' | 'tauri' | 'official-unsupported' | 'third-party-shell' | 'none'
 export type RecommendedCarrier = 'sidebar' | 'chrome' | 'edge'
 
-/** One desktop shell, classified. Only `official-supported` is ever `patchable`. */
+/** One desktop shell, classified. `official-supported` takes the bridge; `tauri` takes only its sidebar host patch. */
 export interface DesktopShellReport {
   readonly kind: DesktopShellKind
   readonly patchable: boolean
@@ -20,6 +21,10 @@ export interface DesktopShellReport {
   readonly recommendedCarrier: RecommendedCarrier
   readonly root?: string
   readonly version?: string
+  /** DSH Tauri only: its electron-rs runtime directory, whether it hosts this process, and its host patch. */
+  readonly runtime?: string
+  readonly running?: boolean
+  readonly hostPatch?: TauriHostPatch
 }
 
 interface CarrierHints {
@@ -71,5 +76,25 @@ export function noDesktopShell(hints: CarrierHints = {}): DesktopShellReport {
     patchable: false,
     reason: 'no DSH Desktop install found in the usual roots, at DSH_DESKTOP_PATH or DSH_DESKTOP_APP, in the uninstall registry, or at this platform\'s conventional locations',
     recommendedCarrier: systemCarrier(hints),
+  }
+}
+
+/**
+ * The report for DSH Tauri. Its sidebar is driven through its own `dshDesktop.browser`; what the
+ * plugin patches is only the sidebar partition (`dsh-host-patch/tauri.json`), never the bridge.
+ * @param runtime - the Tauri runtime.
+ * @param hostPatch - the runtime's host patch state.
+ * @returns a `tauri` report, patchable when the patch can be applied or is applied.
+ */
+export function tauriShell(runtime: TauriRuntime, hostPatch: TauriHostPatch): DesktopShellReport {
+  return {
+    kind: 'tauri',
+    patchable: hostPatch.status === 'absent' || hostPatch.status === 'applied',
+    reason: `DSH Tauri at ${runtime.root ?? runtime.runtime}; sidebar host patch ${hostPatch.status}${hostPatch.reason === undefined ? '' : `: ${hostPatch.reason}`}`,
+    recommendedCarrier: 'sidebar',
+    ...runtime.root === undefined ? {} : { root: runtime.root },
+    runtime: runtime.runtime,
+    running: runtime.running,
+    hostPatch,
   }
 }

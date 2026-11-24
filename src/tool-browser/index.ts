@@ -13,7 +13,8 @@ import { BrowserTakeovers, installTakeovers } from './takeover.ts'
 import { TAKEOVER_TOOL } from '../takeover-protocol.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { BrowserToolError, toBrowserToolError } from './errors.ts'
-import { CODE_PROMPT, CODE_TOOL, createCodeTool, type CatalogTool } from './code-tool.ts'
+import { CODE_PROMPT, CODE_TOOL, createCodeTool, type CatalogTool, type PagePulse } from './code-tool.ts'
+import { pageOperationValue } from './probe-client.ts'
 import { SettingsStore } from '../browser-electron/settings-store.ts'
 import { browserSessionHandle, resolveTabHandle } from '../browser/handles.ts'
 import { readSurface, createState, liveStates, READ_ONLY_TOOLS, taskKey, type ToolScope, maxWaitFor, MAX_FILL_FIELDS, REGISTRATION_ORDER } from './state.ts'
@@ -76,7 +77,7 @@ export const CORE_TOOLS: ReadonlySet<string> = new Set([
 export const TOOL_GROUPS: Readonly<Record<string, readonly string[]>> = {
   forms: ['dsh_browser_check', 'dsh_browser_clear', 'dsh_browser_set_value', 'dsh_browser_get_value', 'dsh_browser_upload', 'dsh_browser_drag', 'dsh_browser_hover', 'dsh_browser_dialog', 'dsh_browser_click_sequence'],
   navigation: ['dsh_browser_forward', 'dsh_browser_refresh', 'dsh_browser_history', 'dsh_browser_replay', 'dsh_browser_visited', 'dsh_browser_download'],
-  debug: ['dsh_browser_console', 'dsh_browser_network', 'dsh_browser_wait_for_response', 'dsh_browser_assert', 'dsh_browser_doctor'],
+  debug: ['dsh_browser_console', 'dsh_browser_network', 'dsh_browser_wait_for_response', 'dsh_browser_data_sources', 'dsh_browser_fetch_json', 'dsh_browser_assert', 'dsh_browser_doctor'],
   session: ['dsh_browser_session', 'dsh_browser_reset', 'dsh_browser_reset_session', 'dsh_browser_restrict', 'dsh_browser_auth', 'dsh_browser_shortcuts'],
   more: [],
 }
@@ -192,10 +193,28 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   if (surface !== 'tools') {
     try {
-      const code = createCodeTool(catalog)
+      // Reads the page the action left behind without starting a session or installing the probe.
+      const pulse = async (exec: never): Promise<PagePulse | undefined> => {
+        const browser = ctx.get('browser')
+        const session = state.sessionsByTask.get(taskKey(exec))
+        if (browser === undefined || session === undefined) return undefined
+        try {
+          const raw = JSON.parse(await pageOperationValue(browser, session, { operation: 'pulse' }, (exec as { signal?: AbortSignal }).signal)) as Partial<PagePulse> | null
+          if (typeof raw?.title !== 'string') return undefined
+          return {
+            title: raw.title,
+            alerts: Array.isArray(raw.alerts) ? raw.alerts.filter(text => typeof text === 'string') : [],
+            dialogs: Array.isArray(raw.dialogs) ? raw.dialogs.filter(row => typeof row?.at === 'number' && typeof row.kind === 'string') : [],
+            probe: Number(raw.probe) || 0,
+          }
+        } catch {
+          return undefined
+        }
+      }
+      const code = createCodeTool(catalog, pulse)
       // On the code surface it is the only browser tool, so it stays even under PTC; on `core`,
       // DSH's PTC run_code already batches every tool, so the code tool steps aside.
-      registerTool(ctx.tools, code.tool, surface === 'core' ? () => !ptcRuntimeActive(ctx) : undefined)
+      registerTool(ctx.tools, code.tool, surface === 'core' ? (context?: { readonly agent?: unknown }) => !ptcRuntimeActive(ctx, context) : undefined)
       ctx.effect(() => code.dispose)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-builtin-browser: could not register ${CODE_TOOL} (${String(error)}).`)

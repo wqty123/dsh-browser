@@ -574,7 +574,7 @@ const react = require("react")
           if (response.status === 404) return
           const data = await response.json()
           if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
-          if (alive.current && data.hostPatch?.surface === "web") setState(data.hostPatch)
+          if (alive.current && (data.hostPatch?.surface === "web" || data.hostPatch?.surface === "tauri")) setState(data.hostPatch)
         }).catch(failure => { if (alive.current) setError(String(failure)) })
       return () => { alive.current = false }
     }, [])
@@ -590,7 +590,7 @@ const react = require("react")
         const data = await response.json()
         if (alive.current && data.hostPatch) setState(data.hostPatch)
         if (!response.ok || data.ok !== true) throw new Error(data.error || data.hostPatch?.reason || `HTTP ${response.status}`)
-        const noticeKey = data.hostPatch.restartRequired ? "hostPatch.restart" : "hostPatch.reload"
+        const noticeKey = data.hostPatch.surface === "tauri" ? "hostPatch.restartTauri" : data.hostPatch.restartRequired ? "hostPatch.restart" : "hostPatch.reload"
         publishHostPatchNotice(noticeKey)
         if (alive.current) setNotice(noticeKey)
       } catch (failure) { if (alive.current) setError(String(failure)) }
@@ -598,7 +598,7 @@ const react = require("react")
     }
     if (state === null && error === "") return null
     return h("div", { key: "web-host-patch", style: styles.group }, [
-      h("p", { key: "state", role: "status" }, t("readiness.hostPatch") + (state ? ": " + t("readiness.hostPatch." + state.status.replaceAll(" ", "-")) : "")),
+      h("p", { key: "state", role: "status" }, t(state?.surface === "tauri" ? "readiness.hostPatch.tauri" : "readiness.hostPatch") + (state ? ": " + t((state.surface === "tauri" && state.status === "applied" ? "readiness.hostPatch.tauri." : "readiness.hostPatch.") + state.status.replaceAll(" ", "-")) : "")),
       state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
       h("div", { key: "buttons", style: styles.row }, [
         h("button", { key: "install", type: "button", style: styles.button, disabled: busy || !state?.canInstall, onClick: () => change("install") }, t(busy ? "hostPatch.working" : "hostPatch.install")),
@@ -809,6 +809,7 @@ const react = require("react")
       : resolvedCarrier === "system" || resolvedCarrier === "cdp" ? systemLabel
       : resolvedCarrier === "sidebar"
         ? thirdPartyShell ? t("readiness.status.thirdPartyShell")
+        : runtime.shell?.kind === "tauri" ? t(runtime.shell.hostPatch?.status === "applied" ? "readiness.status.tauriReady" : "readiness.status.tauriPatchMissing")
         : t(runtime.bridge.state === "installed"
           ? runtime.bridge.running === true ? "readiness.status.bridgeReady"
             : runtime.bridge.running === false ? "readiness.status.bridgeStopped" : "readiness.status.bridgeInstalled"

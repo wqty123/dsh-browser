@@ -28,7 +28,7 @@ async function mount(browser, extra = {}) {
   apply(ctx, { surface: 'tools' })
   const exec = { signal: new AbortController().signal, agent: { id: 'boundary-task', session: { header: { cwd: workspace } } } }
   await tools.get('dsh_browser_open').execute({ url: 'https://fixture.test/page', surface: 'builtin' }, exec)
-  return { run: (name, args) => tools.get('dsh_browser_' + name).execute(args, exec) }
+  return { run: (name, args) => tools.get('dsh_browser_' + name).execute(args, exec), tool: name => tools.get('dsh_browser_' + name) }
 }
 
 test('upload uses the task workspace and rejects an external junction and oversized file before page execution', async t => {
@@ -107,6 +107,36 @@ test('response waits reject previous completions and accept a request completed 
   assert.equal((await waiting).entry.status, 201)
   await pending
   page.fetch = original
+})
+
+test('batch refuses a step with any key outside the step kinds before anything runs', async () => {
+  const calls = []
+  const browser = {
+    open: async () => 'browser:shape', exists: () => true,
+    click: async () => calls.push('tap'), setValue: async () => calls.push('field'), type: async (_s, request) => calls.push('type ' + request.text),
+    pageOperation: async () => ({ ok: true, value: 3 }),
+  }
+  const { run, tool } = await mount(browser)
+  calls.length = 0
+  const misshapen = [
+    { type: 'field', selector: '#username', text: 'tomsmith' },
+    { type: 'tap', target: { by: 'css', value: 'button[type=submit]' } },
+    { tap: { target: { by: 'css', value: '#go' } }, note: 'extra key' },
+    {},
+  ]
+  for (const step of misshapen) {
+    await assert.rejects(run('do', { steps: [{ open: 'https://fixture.test/page' }, step] }), /steps/u)
+  }
+  assert.deepEqual(calls, [])
+  const items = tool('do').parameters.properties.steps.items
+  assert.deepEqual(items.oneOf.map(branch => Object.keys(branch.properties)[0]), ['open', 'tap', 'field', 'type', 'key', 'scroll', 'sleep_ms', 'wait_text', 'wait_gone', 'wait_url', 'wait_idle', 'wait_js', 'eval', 'check'])
+  for (const branch of items.oneOf) {
+    assert.equal(branch.additionalProperties, false)
+    assert.deepEqual(branch.required, Object.keys(branch.properties))
+    assert.equal(Object.keys(branch.properties).length, 1)
+  }
+  assert.match(tool('do').description, /\{"field": \{"target"/u)
+  assert.match(tool('do').description, /\{"tap": \{"target"/u)
 })
 
 test('batch accepts the documented object forms and the existing shorthand', async () => {

@@ -200,6 +200,153 @@ test('overlayAt reports what covers a point, and the dismiss control when there 
   assert.equal(cover.dismiss.y, 212)
 })
 
+test('overlayAt does not take the found target own child, also in a shadow root, for an overlay', () => {
+  const element = (tagName, parentElement, extra = {}) => ({ tagName, innerText: 'Login', parentElement, getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 100, top: 200, width: 80, height: 24 }), querySelectorAll: () => [], ...extra })
+  const button = element('BUTTON', null)
+  const icon = element('I', button)
+  const page = makePage()
+  page.document.querySelector = () => button
+  page.document.querySelectorAll = () => [button]
+  page.document.elementFromPoint = () => icon
+  page.getComputedStyle = () => ({ position: 'static', zIndex: '0' })
+  vm.runInNewContext(PROBE_INSTALL_SCRIPT, page)
+  const hit = page.__dshProbe.find({ css: 'button[type=submit]' })
+  assert.deepEqual({ ...page.__dshProbe.overlayAt(hit.x, hit.y) }, { covers: null, dismiss: null })
+
+  const host = element('X-FORM', null)
+  const inner = element('SPAN', null, { parentNode: null })
+  const shadowButton = element('BUTTON', null, { parentNode: { host } })
+  inner.parentElement = shadowButton
+  host.shadowRoot = { elementFromPoint: () => inner }
+  page.document.elementFromPoint = () => host
+  page.__dshProbe.lastFound = shadowButton
+  assert.equal(page.__dshProbe.overlayAt(140, 212).covers, null, 'a hit inside the shadow tree of the target lands on it')
+
+  const panel = element('SECTION', null)
+  const modal = element('DIV', panel, { innerText: 'Dialog' })
+  const close = element('BUTTON', modal, { innerText: 'Close' })
+  modal.querySelectorAll = () => [close]
+  page.document.elementFromPoint = () => close
+  page.getComputedStyle = node => (node === modal ? { position: 'fixed', zIndex: '1000' } : { position: 'static', zIndex: '0' })
+  page.__dshProbe.lastFound = panel
+  assert.equal(page.__dshProbe.overlayAt(140, 212).dismiss.label, 'Close', 'a modal inside the target is still an overlay to dismiss')
+
+  const banner = element('DIV', null)
+  page.document.elementFromPoint = () => banner
+  page.__dshProbe.lastFound = button
+  page.getComputedStyle = () => ({ position: 'fixed', zIndex: '9999' })
+  assert.equal(page.__dshProbe.overlayAt(140, 212).covers, 'div "Login"', 'a real overlay is still reported')
+})
+
+test('overlayAt descends into same-origin iframes (and nested shadow roots) with offset translation', () => {
+  const page = makePage()
+  const iframeDoc = {
+    defaultView: null,
+    documentElement: null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    elementFromPoint: () => null,
+  }
+  const iframe = {
+    tagName: 'IFRAME',
+    innerText: '',
+    clientLeft: 2,
+    clientTop: 3,
+    ownerDocument: page.document,
+    contentDocument: iframeDoc,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 100, top: 50, width: 400, height: 300 }),
+    querySelectorAll: () => [],
+    parentElement: null,
+  }
+  iframeDoc.defaultView = {
+    frameElement: iframe,
+    getComputedStyle: node => (node === modal ? { position: 'fixed', zIndex: '500' } : { position: 'static', zIndex: '0' }),
+  }
+
+  const button = {
+    tagName: 'BUTTON',
+    innerText: 'Submit',
+    ownerDocument: iframeDoc,
+    parentElement: null,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 20, top: 40, width: 80, height: 20 }),
+    querySelectorAll: () => [],
+  }
+  const icon = {
+    tagName: 'I',
+    innerText: '',
+    ownerDocument: iframeDoc,
+    parentElement: button,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 30, top: 45, width: 10, height: 10 }),
+    querySelectorAll: () => [],
+  }
+  const modal = {
+    tagName: 'DIV',
+    innerText: 'Cookie dialog',
+    ownerDocument: iframeDoc,
+    parentElement: null,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 300, height: 200 }),
+    querySelectorAll: () => [dismissBtn],
+  }
+  const dismissBtn = {
+    tagName: 'BUTTON',
+    innerText: 'Accept',
+    ownerDocument: iframeDoc,
+    parentElement: modal,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 40, top: 60, width: 60, height: 20 }),
+    querySelectorAll: () => [],
+  }
+
+  const seenCoords = []
+  iframeDoc.querySelector = selector => (selector === '#inside' ? button : null)
+  iframeDoc.querySelectorAll = () => [button]
+  iframeDoc.elementFromPoint = (x, y) => {
+    seenCoords.push([x, y])
+    return icon
+  }
+  page.document.querySelector = () => null
+  page.document.querySelectorAll = selector => (selector === '*' ? [iframe] : [])
+  page.document.elementFromPoint = () => iframe
+  page.getComputedStyle = () => ({ position: 'static', zIndex: '0' })
+
+  vm.runInNewContext(PROBE_INSTALL_SCRIPT, page)
+  const hit = page.__dshProbe.find({ css: '#inside' })
+  // frameOffset = (100+2, 50+3) = (102, 53); button center = (20+40, 40+10) = (60, 50) -> (162, 103)
+  assert.equal(hit.x, 162)
+  assert.equal(hit.y, 103)
+  assert.deepEqual({ ...page.__dshProbe.overlayAt(hit.x, hit.y) }, { covers: null, dismiss: null }, 'child inside same-origin iframe target is not an overlay')
+  assert.deepEqual(seenCoords.at(-1), [60, 50], 'iframe elementFromPoint received iframe-local coordinates')
+
+  // Real modal inside the same-origin iframe: must be reported with top-viewport dismiss coordinates.
+  iframeDoc.elementFromPoint = () => modal
+  const blocked = page.__dshProbe.overlayAt(hit.x, hit.y)
+  assert.equal(blocked.covers, 'div "Cookie dialog"')
+  assert.equal(blocked.dismiss.label, 'Accept')
+  // dismiss center in iframe = (40+30, 60+10) = (70, 70); plus frameOffset (102, 53) = (172, 123)
+  assert.equal(blocked.dismiss.x, 172)
+  assert.equal(blocked.dismiss.y, 123)
+
+  // Cross-origin iframe whose contentDocument throws SecurityError must degrade cleanly without throwing.
+  const crossOriginFrame = {
+    tagName: 'IFRAME',
+    innerText: '',
+    get contentDocument() { throw new Error('SecurityError: blocked cross-origin frame') },
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 200, height: 200 }),
+    querySelectorAll: () => [],
+    parentElement: null,
+  }
+  page.document.elementFromPoint = () => crossOriginFrame
+  const opaque = page.__dshProbe.overlayAt(100, 100)
+  assert.equal(opaque.covers, 'iframe')
+  assert.equal(opaque.dismiss, null)
+})
+
 test('a call on a page without the probe answers with an error instead of throwing', () => {
   const page = makePage()
   const value = vm.runInNewContext(probeCallScript('read', ['console', '', 5]), page)

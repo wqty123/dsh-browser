@@ -5,11 +5,12 @@ import { fileURLToPath } from 'node:url'
 import { gunzipSync } from 'node:zlib'
 import { stripLegacyBridge } from './legacy-bridge.mjs'
 
-const specs = ['rc3', 'rc5'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8')))
+const specs = ['rc3', 'rc5', 'tauri'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8')))
 const previousSpecs = ['rc3', 'rc5'].flatMap(name => [8, 7, 6, 5, 4, 3, 2, 1].map(revision =>
   JSON.parse(revision >= 3
     ? gunzipSync(fs.readFileSync(new URL(`./${name}-revision${revision}.json.gz`, import.meta.url))).toString('utf8')
     : fs.readFileSync(new URL(`./${name}-revision${revision}.json`, import.meta.url), 'utf8'))))
+  .concat(JSON.parse(fs.readFileSync(new URL('./tauri-revision1.json', import.meta.url), 'utf8')))
 const suffix = '.before-dsh-host-patch'
 const digest = value => createHash('sha256').update(value).digest('hex')
 
@@ -54,20 +55,53 @@ function patchSource(text, target, path, io) {
   return pristine
 }
 
+function unsupported(message) {
+  const error = new Error(message)
+  error.status = 'unsupported version'
+  return error
+}
+
+/**
+ * An electron-rs runtime directory (DSH Tauri) is identified by its electron-rs.json identifier and
+ * each target by the sha256 of its pristine bytes, since the runtime files carry no version.
+ */
+function electronRsTargets(root, io) {
+  const metadata = JSON.parse(io.readFileSync(join(root, 'electron-rs.json'), 'utf8'))
+  const spec = specs.find(item => item.host === 'electron-rs' && item.identifiers.includes(metadata.identifier))
+  if (!spec) throw new Error(`unsupported electron-rs runtime: ${String(metadata.identifier)}`)
+  const files = [...new Set(spec.targets.map(item => item.file))]
+  const targets = files.map(file => {
+    const path = join(root, file)
+    const backup = path + suffix
+    const pristine = io.existsSync(backup) ? io.readFileSync(backup, 'utf8') : io.existsSync(path) ? io.readFileSync(path, 'utf8') : undefined
+    const candidates = spec.targets.filter(item => item.file === file)
+    const target = pristine === undefined ? undefined
+      : candidates.find(item => item.sha256 === digest(pristine)) ?? candidates.find(item => pristine.includes(item.marker))
+    if (target === undefined) {
+      throw unsupported(`unsupported DSH Tauri runtime: ${file} ${pristine === undefined ? 'is missing' : `sha256 ${digest(pristine)}`} (supported releases: ${candidates.map(item => item.release).join(', ')})`)
+    }
+    return target
+  })
+  return { version: spec.version, targets }
+}
+
+function packageTargets(root, io) {
+  if (!io.existsSync(join(root, 'package.json')) && io.existsSync(join(root, 'electron-rs.json'))) return electronRsTargets(root, io)
+  const manifest = JSON.parse(io.readFileSync(join(root, 'package.json'), 'utf8'))
+  const packageSpecs = specs.filter(item => item.host === undefined)
+  const spec = packageSpecs.find(item => item.version === manifest.version)
+  if (!spec) throw unsupported(`unsupported DSH version: ${String(manifest.version)} (supported: ${packageSpecs.map(item => item.version).join(', ')})`)
+  const targets = spec.targets.filter(item => item.packageName === manifest.name)
+  if (targets.length === 0) throw new Error(`unsupported package: ${String(manifest.name)}`)
+  return { version: spec.version, targets }
+}
+
 function plan(packages, restoring, io) {
   const directories = typeof packages === 'string' ? [packages] : packages
   if (!Array.isArray(directories) || directories.length === 0) throw new Error('at least one package directory is required')
   const entries = directories.flatMap(directory => {
     const root = io.realpathSync(directory)
-    const manifest = JSON.parse(io.readFileSync(join(root, 'package.json'), 'utf8'))
-    const spec = specs.find(item => item.version === manifest.version)
-    if (!spec) {
-      const error = new Error(`unsupported DSH version: ${String(manifest.version)} (supported: ${specs.map(item => item.version).join(', ')})`)
-      error.status = 'unsupported version'
-      throw error
-    }
-    const targets = spec.targets.filter(item => item.packageName === manifest.name)
-    if (targets.length === 0) throw new Error(`unsupported package: ${String(manifest.name)}`)
+    const { version, targets } = packageTargets(root, io)
     return targets.map(target => {
       const path = join(root, target.file)
       const real = io.realpathSync(path)
@@ -87,14 +121,14 @@ function plan(packages, restoring, io) {
         if (restoring && original === undefined) throw new Error('no backup for this already patched host')
         return { path, backup, text, output: restoring ? original : text, applied, held, mode: io.statSync(path).mode }
       }
-      const previousTarget = previousSpecs.filter(item => item.version === manifest.version).flatMap(item => item.targets)
+      const previousTarget = previousSpecs.filter(item => item.version === version).flatMap(item => item.targets)
         .find(item => item.id === target.id && item.marker !== target.marker && text.includes(item.marker))
       const previous = previousTarget !== undefined && text.includes(previousTarget.marker)
       if (previous) {
         if (original === undefined) throw new Error('no backup for the previous host patch revision')
         if (patchText(patchSource(original, previousTarget, path, io), previousTarget) !== text) throw new Error('previous patch revision differs from its recorded backup; refusing to overwrite other edits')
         return { path, backup, text, output: restoring ? original : patchText(patchSource(original, target, path, io), target),
-          applied: false, previous: true, held, mode: io.statSync(path).mode }
+          applied: false, previous: version === 'tauri' ? 'tauri' : 'electron', held, mode: io.statSync(path).mode }
       }
       if (restoring) {
         if (original !== undefined && original !== text) throw new Error('file changed after restore or Desktop update')
@@ -115,7 +149,9 @@ function inspect(packages, restoring, io) {
   try {
     const entries = plan(packages, restoring, io)
     return { status: entries.every(entry => entry.applied) ? 'applied' : 'absent',
-      ...(entries.some(entry => entry.previous) ? { reason: 'host patch revision 1 or 2 or 3 or 4 or 5 or 6 or 7 or 8; explicit bootstrap upgrade to revision 9 required' } : {}), entries }
+      ...(entries.some(entry => entry.previous) ? { reason: entries.some(entry => entry.previous === 'tauri')
+        ? 'host patch revision 1; explicit bootstrap upgrade to revision 2 required'
+        : 'host patch revision 1 or 2 or 3 or 4 or 5 or 6 or 7 or 8; explicit bootstrap upgrade to revision 9 required' } : {}), entries }
   } catch (error) {
     return { status: error.status ?? 'anchors mismatch', reason: String(error.message ?? error) }
   }

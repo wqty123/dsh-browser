@@ -44,6 +44,7 @@ import { GUEST_ROUTE, handleGuest } from './guest-route.ts'
 import { resolveSessionHandle, sessionWireId } from '../browser/handles.ts'
 import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.ts'
 import { detectDesktopShell, findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
+import { publishTauriDesktopMain, runningTauriRuntime } from './tauri-host.ts'
 import { readHostExtensionStatus } from './profile-extension.ts'
 import { readBridgeEndpoint } from './bridge-endpoint.ts'
 import { runBridgeAction } from './bridge-install.ts'
@@ -61,7 +62,6 @@ import { createShortcutStore, type ShortcutSettings } from './startpage-shortcut
 import { createReferenceService, setReferenceCaptureActionHandler } from '../browser-reference/service.ts'
 import { WEB_SOURCE_ROUTE } from '../reference-source.ts'
 import { createDeliveryQueue, resolveReferenceOwner, type DeliveryQueue } from '../browser-reference/delivery.ts'
-import { createSubmissionReceipts, type ReceiptSession } from '../browser-reference/submission-receipts.ts'
 import type { BrowserReference, BrowserReferenceCarrier } from '../browser-reference/types.ts'
 import {
   createReferenceRouteHandlers,
@@ -200,6 +200,9 @@ function readSessionId(ctx: unknown): string | undefined {
 
 /** Register the Electron browser provider with `ctx.browser`. */
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
+  if (runningTauriRuntime() !== undefined) {
+    try { publishTauriDesktopMain() } catch (error) { ctx.logger?.warn?.(`dsh-builtin-browser: cannot name the sidebar bridge to DSH Tauri: ${String(error)}`) }
+  }
   // Which session is this process serving?
   //
   // The desktop shell keeps ONE sidebar per conversation — measured: two sidebar tab-strip
@@ -402,6 +405,11 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
         })))
         void host.refreshStatus()
+      } else if (host instanceof SystemBrowserViewHost) {
+        const provider = referenceProvider!
+        unregisterTakeover = registerCarrierTakeover(ctx.browser, owner => provider.takeoverTargets(owner).map(target => ({
+          ...target, connected: () => adoptedCarrier === host && host.connectedView(target.tabId),
+        })), { exclusive: false })
       }
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
       // A borrowed carrier can lose the process behind it, and this is the only notification that
@@ -684,6 +692,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         const hostPatchMaintenance = createHostPatchMaintenance({
           modules: () => servedClientModules(ctx.get('clientModules')),
           desktop: () => process.versions.electron !== undefined,
+          tauri: () => runningTauriRuntime()?.runtime,
         })
         host.effect(() => host.webServer.register({
           kind: 'exact', path: HOST_PATCH_ROUTE,
@@ -875,7 +884,6 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     service: ReturnType<typeof createReferenceService>,
     carrier: () => BrowserReferenceCarrier,
     queue: DeliveryQueue,
-    receipts: ReturnType<typeof createSubmissionReceipts>,
   ): void {
     const injectRoutes = (ctx as unknown as {
       inject?: (deps: readonly string[], callback: (host: WebServerHost) => void) => void
@@ -883,7 +891,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     if (typeof injectRoutes !== 'function') return
     try {
       injectRoutes(['webServer'], (host) => {
-        const handlers = createReferenceRouteHandlers({ service, carrier, queue, receipts })
+        const handlers = createReferenceRouteHandlers({ service, carrier, queue })
         const routes: readonly (readonly [string, (request: IncomingMessage, response: ServerResponse) => void | Promise<void>, string])[] = [
           [CLIENT_VERSION_ROUTE, (_request, response) => {
             // 客户端产物的版本指纹：内容变了，浏览器就应换到新 bundle。
@@ -986,15 +994,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * restarted without asking the browser for anything (§12.2).
    */
   const deliveryQueue = createDeliveryQueue()
-  const receipts = createSubmissionReceipts(deliveryQueue, id => {
-    const sessions = ctx.get('sessions') as { get(sessionId: string): ReceiptSession | undefined } | undefined
-    return sessions?.get(id)
-  })
-  ctx.on?.('session/event', (session, event) => {
-    try { receipts.observe(session.id, event as Parameters<typeof receipts.observe>[1]) }
-    catch (error) { ctx.logger?.warn?.(`dsh-builtin-browser: reference receipt pending: ${String(error)}`) }
-  }, { global: true })
-  installReferenceRoutes(ctx, referenceService, referenceCarrier, deliveryQueue, receipts)
+  installReferenceRoutes(ctx, referenceService, referenceCarrier, deliveryQueue)
   installShortcutRoutes(ctx)
 
   /** Short, stable, non-sensitive codes for the page notice when an enqueue fails. */

@@ -1,6 +1,6 @@
 /** Browser-source markers are parsed by the host text registry, preserving React-owned nodes. */
 import type { UserTextRule } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { readSourceMarker, readSubmissionQuote } from './source-marker.ts'
+import { readComposerQuote, readSourceMarker, readSubmissionQuote } from './source-marker.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
   interface UserTextDataMap {
@@ -31,6 +31,15 @@ export function createBrowserSourceRule(
     order: -20,
     match(text, from) {
       const marker = readSourceMarker(text, from)
+      const composed = readComposerQuote(text, from)
+      if (composed !== undefined && (marker === undefined || composed.start <= marker.start)) {
+        if (hasDetail !== undefined && !hasDetail(composed.marker.referenceId)) {
+          return { id: 'text', start: composed.start, end: composed.markerLine,
+            data: { text: text.slice(composed.start, composed.markerLine), display: composed.body } }
+        }
+        return { id: 'browser-ref', start: composed.start, end: composed.end,
+          data: { uri: composed.marker.uri, label: composed.marker.label } }
+      }
       const quote = readSubmissionQuote(text, from)
       if (quote !== undefined && (marker === undefined || quote.start < marker.start)) {
         let display = ''

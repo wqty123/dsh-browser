@@ -144,6 +144,8 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'dsh_browser_assert', 'dsh_browser_doctor', 'dsh_browser_help',
   // Reading the page's own digest and searching its text: observation like the rest.
   'dsh_browser_find', 'dsh_browser_state',
+  // Where the page keeps its data: shapes of what the page already holds, never a request.
+  'dsh_browser_data_sources',
   // References read the page the human already has open and write only this plugin's own store;
   // restricting an agent's actions must not stop it from recording what it was told to read.
   'dsh_browser_reference_capture', 'dsh_browser_reference_reveal', 'dsh_browser_reference_list',
@@ -346,7 +348,7 @@ export const REGISTRATION_ORDER: readonly string[] = [
   'dsh_browser_network', 'dsh_browser_dialog', 'dsh_browser_wait_for_response', 'dsh_browser_assert',
   'dsh_browser_drag', 'dsh_browser_doctor', 'dsh_browser_help', 'dsh_browser_do', 'dsh_browser_upload',
   'dsh_browser_hover', 'dsh_browser_find', 'dsh_browser_state', 'dsh_browser_reference_capture',
-  'dsh_browser_reference_reveal', 'dsh_browser_reference_list',
+  'dsh_browser_reference_reveal', 'dsh_browser_reference_list', 'dsh_browser_data_sources', 'dsh_browser_fetch_json',
 ]
 
 /** Test hook: inspect and reset session mappings across every live plugin apply. */

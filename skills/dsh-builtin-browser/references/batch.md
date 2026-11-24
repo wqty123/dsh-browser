@@ -48,6 +48,21 @@ await tools.dsh_browser_click({ target: { by: 'css', value: 'button[type=submit]
 print(await response)
 ```
 
+The REPL helper does the same in one call: `wait_for_response(urlContains, trigger, opts)`
+starts watching before it calls `trigger()` and returns the matching response row:
+
+```js
+const saved = await wait_for_response('/api/profile', () => click('Save'), { status: 200 })
+await wait_for_text('Profile saved')
+```
+
+When the condition is page state rather than text or a response, poll an expression instead of
+sleeping; the timeout error quotes the last value it saw:
+
+```js
+const count = await wait_until(`document.querySelectorAll('.result').length >= 20 && document.querySelectorAll('.result').length`, { timeoutMs: 8000 })
+```
+
 Adapt the URL and selector to the current page. The scheduler arms the response
 wait before it lets the action run. Issue unrelated reads in parallel, not competing
 mutations. A timeout or cancellation does not undo actions that already ran.

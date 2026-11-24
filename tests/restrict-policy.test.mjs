@@ -14,9 +14,9 @@ import { READ_ONLY_TOOLS } from '../lib/tool-browser/index.js'
 const REGISTERED = [
   'dsh_browser_a11y', 'dsh_browser_assert', 'dsh_browser_auth', 'dsh_browser_back', 'dsh_browser_challenge',
   'dsh_browser_check', 'dsh_browser_clear', 'dsh_browser_click', 'dsh_browser_close_tab',
-  'dsh_browser_console', 'dsh_browser_content', 'dsh_browser_dialog', 'dsh_browser_do',
+  'dsh_browser_console', 'dsh_browser_content', 'dsh_browser_data_sources', 'dsh_browser_dialog', 'dsh_browser_do',
   'dsh_browser_doctor', 'dsh_browser_download', 'dsh_browser_drag', 'dsh_browser_execute',
-  'dsh_browser_fill', 'dsh_browser_find', 'dsh_browser_forward', 'dsh_browser_get_value',
+  'dsh_browser_fetch_json', 'dsh_browser_fill', 'dsh_browser_find', 'dsh_browser_forward', 'dsh_browser_get_value',
   'dsh_browser_help', 'dsh_browser_hover',
   'dsh_browser_history', 'dsh_browser_key', 'dsh_browser_list_tabs', 'dsh_browser_network',
   'dsh_browser_open', 'dsh_browser_reference_capture', 'dsh_browser_reference_list',

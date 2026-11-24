@@ -49,15 +49,37 @@ export function readSourceMarker(text: string, from: number) {
   return undefined
 }
 
-/** Attached markers are editor tokens; submission projects their groups once. */
-export function composerText(text: string, attachedIds: ReadonlySet<string>): string {
-  let output = ''
-  let from = 0
-  for (let marker = readSourceMarker(text, from); marker !== undefined; marker = readSourceMarker(text, from)) {
-    output += text.slice(from, marker.start)
-    if (!attachedIds.has(marker.referenceId) || marker.partId !== undefined) output += text.slice(marker.start, marker.end)
-    else output = output.replace(/(^|\n)> $/u, '$1')
-    from = marker.end
+const COMPOSER_OPEN = '<dsh-browser-quote>'
+const COMPOSER_CLOSE = '</dsh-browser-quote>'
+const QUOTE_PREFIX = /^ {0,3}>[ \t]?/u
+
+/** The editor quote for one reference: its projected body framed by tags, then its source marker. */
+export function composerQuote(body: string, marker: string): string {
+  const normalized = body.replace(/\r\n?/gu, '\n').replace(/\n+$/u, '')
+  return `${COMPOSER_OPEN}\n${normalized}\n${COMPOSER_CLOSE}\n${marker}`
+}
+
+/**
+ * Find a composer quote in sent text. The host prefixes every quoted line with `> `, so the frame
+ * lines, the body lines and the marker line are matched with or without that prefix.
+ */
+export function readComposerQuote(text: string, from: number) {
+  const open = /(^|\n)( {0,3}>[ \t]?)?<dsh-browser-quote>\n/gu
+  open.lastIndex = Math.max(0, from - 1)
+  for (let match = open.exec(text); match !== null; match = open.exec(text)) {
+    const start = match.index + match[1]!.length
+    const bodyStart = open.lastIndex
+    open.lastIndex = bodyStart - 1
+    if (start < from) continue
+    const close = /\n( {0,3}>[ \t]?)?<\/dsh-browser-quote>\n/gu
+    close.lastIndex = bodyStart - 1
+    const closed = close.exec(text)
+    if (closed === null) return undefined
+    const marker = readSourceMarker(text, close.lastIndex)
+    if (marker === undefined || !/^( {0,3}>[ \t]?)?$/u.test(text.slice(close.lastIndex, marker.start))) continue
+    const body = text.slice(bodyStart, closed.index).split('\n').map(line => line.replace(QUOTE_PREFIX, '')).join('\n')
+    const markerLine = text.lastIndexOf('\n', marker.start - 1) + 1
+    return { start, end: marker.end, markerLine, body, marker }
   }
-  return output + text.slice(from)
+  return undefined
 }
