@@ -115,6 +115,39 @@ test('the OS identity of this process is stable across reads, and Windows uses n
 })
 
 for (const directoryGuard of [false, true]) {
+  test(`a guard whose PID was reused by a later process is reclaimed, a verified live guard is preserved (directory=${directoryGuard})`, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-profile-guard-reused-'))
+    const file = join(dir, '.dsh-browser-lease.json')
+    const guard = join(dirname(dir), `.${basename(dir)}.dsh-browser-lease.guard`)
+    try {
+      const reused = JSON.stringify({ ...reusedLease(), at: Date.now() })
+      if (directoryGuard) {
+        mkdirSync(guard)
+        writeFileSync(file, reused)
+      } else {
+        writeFileSync(guard, reused)
+      }
+      const lease = await acquireProfileLease(dir)
+      await lease.release()
+      assert.equal(existsSync(guard), false)
+
+      const live = JSON.stringify({ ...(await liveLease(t)), at: Date.now() })
+      if (directoryGuard) {
+        mkdirSync(guard)
+        writeFileSync(file, live)
+      } else {
+        writeFileSync(guard, live)
+      }
+      await assert.rejects(() => acquireProfileLease(dir), /profile is leased/)
+      assert.equal(existsSync(guard), true)
+    } finally {
+      rmSync(guard, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}
+
+for (const directoryGuard of [false, true]) {
   for (const alive of [false, true]) test(`guard recovery preserves live owners (directory=${directoryGuard}, alive=${alive})`, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-profile-guard-'))
     const guard = join(dirname(dir), `.${basename(dir)}.dsh-browser-lease.guard`)
