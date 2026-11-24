@@ -208,7 +208,7 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'dsh_browser_challenge',
-    description: 'Check whether the current page is a bot wall: a human verification (CAPTCHA, slider, press-and-hold, Cloudflare Turnstile), a "Just a moment" interstitial, an access-denied/429 refusal, or a network (IP) block. Returns the kind, what to do (recovery: takeover | wait | retry | environment) and public fallback routes (site API, search results, archives). Never solve or retry a human verification: call dsh_browser_request_takeover. A plain 403/access-denied is not a challenge: try the site\'s own JSON/API, its sitemap, search results, or an archived/reader copy before reporting a blocker, keep every value tied to the source it came from, and report the block only once those routes are exhausted.',
+    description: 'Check whether the current page is a bot wall: a human verification (CAPTCHA, slider, press-and-hold, Cloudflare Turnstile), a "Just a moment" interstitial, an access-denied/429 refusal, or a network (IP) block. Returns the kind, what to do (recovery: takeover | wait | retry | environment) and public fallback routes (site API, search results, archives). Never solve or retry a human verification: call dsh_browser_request_takeover.',
     parameters: {},
     output: {
       schema: CHALLENGE_SCHEMA,
