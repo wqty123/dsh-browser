@@ -8,7 +8,7 @@ import { GUEST_ROUTE, RELAXED_BROWSER_SANDBOX, WEB_BROWSER_SANDBOX } from '../..
  */
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import { promises as dns, type LookupAddress } from 'node:dns'
-import { Agent } from 'undici'
+import { Agent, fetch as undiciFetch } from 'undici'
 import { networkInterfaces } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { guestRuntimeScript } from './guest-runtime.ts'
@@ -17,6 +17,9 @@ import type { GuestCookieJar } from './guest-cookie-jar.ts'
 import { localGuestCookies } from './guest-cookie-store.ts'
 import { rewriteCss } from './guest-css.ts'
 import { GuestStorage, localGuestStorage } from './guest-storage.ts'
+
+/** Captured at load time so production uses undici's matching fetch while tests mocking globalThis.fetch still work. */
+const defaultGlobalFetch = globalThis.fetch
 
 /** Prefix every proxied document and subresource lives under. */
 
@@ -73,22 +76,38 @@ async function blockedResolvedTarget(url: URL, host: string, ownAddresses: reado
   return await vettedAddress(url, host, ownAddresses) === undefined
 }
 
-/** Connect to the address that was vetted, so a second DNS answer (rebinding) never picks the peer. */
+/**
+ * Connect to the address that was vetted, so a second DNS answer (rebinding) never picks the peer.
+ *
+ * Uses `undici`'s own `fetch` alongside its `Agent` so the dispatcher protocol stays paired across
+ * Node major versions (e.g. Node 24 vs Node 26+). When a test replaces `globalThis.fetch`, defer
+ * to that mock without injecting an external `undici` dispatcher into it.
+ */
 async function fetchVetted(url: URL, init: RequestInit, host: string, ownAddresses: readonly string[]): Promise<Response> {
   const addresses = await vettedAddress(url, host, ownAddresses)
   if (addresses === undefined) throw new UnsafeGuestTargetError('local and DSH host targets are not allowed')
+  if (globalThis.fetch !== defaultGlobalFetch) {
+    return await globalThis.fetch(url, init)
+  }
   const dispatcher = new Agent({
     connect: {
-      lookup: (_hostname: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
-        if (options.all === true) callback(null, addresses)
-        else callback(null, addresses[0]?.address, addresses[0]?.family)
+      lookup: (_hostname: string, options: unknown, callback?: (...args: unknown[]) => void) => {
+        const done = typeof options === 'function' ? options as (...args: unknown[]) => void : callback!
+        const all = typeof options === 'object' && options !== null && (options as { all?: boolean }).all === true
+        if (all) done(null, addresses.map(record => ({ ...record })))
+        else done(null, addresses[0]?.address, addresses[0]?.family)
       },
     } as never,
   })
+  const headers = init.headers === undefined ? undefined : Array.from(new Headers(init.headers))
   try {
-    return await fetch(url, { ...init, dispatcher } as RequestInit)
+    return await undiciFetch(url, {
+      ...init,
+      ...(headers === undefined ? {} : { headers }),
+      dispatcher,
+    } as Parameters<typeof undiciFetch>[1]) as unknown as Response
   } finally {
-    void dispatcher.close()
+    void dispatcher.close().catch(() => {})
   }
 }
 

@@ -4,6 +4,7 @@ import dns from 'node:dns'
 import { createServer, request as httpRequest } from 'node:http'
 import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
+import { Agent } from 'undici'
 import { fetchGuestResource, guestPath, handleGuest } from '../src/browser-electron/guest-route.ts'
 import { GuestCookieJar } from '../src/browser-electron/guest-cookie-jar.ts'
 
@@ -48,4 +49,36 @@ test('a guest request whose name rebinds to loopback after the check never reach
   client.destroy()
   assert.ok(target.checks.includes('rebind.test'))
   assert.equal(target.hits(), 0)
+})
+
+test('dispatcher.close() rejection never causes an unhandled rejection or masks the fetch error', async t => {
+  const target = await rebinding(t)
+  const unhandled = []
+  const onUnhandled = reason => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  t.mock.method(Agent.prototype, 'close', () => Promise.reject(new Error('synthetic close failure')))
+  t.after(() => { process.off('unhandledRejection', onUnhandled) })
+
+  await assert.rejects(
+    fetchGuestResource(target.url, { maxBytes: 1024, signal: AbortSignal.timeout(300) }),
+    error => !/synthetic close failure/.test(String(error)),
+  )
+  await delay(50)
+  assert.deepEqual(unhandled, [], 'close rejection must be caught internally')
+})
+
+test('overridden globalThis.fetch in tests receives clean init without an external undici dispatcher', async t => {
+  const promised = dns.promises.lookup
+  const originalFetch = globalThis.fetch
+  const seen = []
+  dns.promises.lookup = async () => [{ address: '93.184.216.34', family: 4 }]
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), hasDispatcher: 'dispatcher' in (init ?? {}) })
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200 })
+  }
+  t.after(() => { dns.promises.lookup = promised; globalThis.fetch = originalFetch })
+
+  const bytes = await fetchGuestResource('https://example.test/img.png', { maxBytes: 1024 })
+  assert.deepEqual([...bytes], [1, 2, 3])
+  assert.deepEqual(seen, [{ url: 'https://example.test/img.png', hasDispatcher: false }])
 })
