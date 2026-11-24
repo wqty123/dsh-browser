@@ -12,6 +12,10 @@
  *   `<style>` element would be subject to the page's `style-src` CSP, an
  *   injected script is not. Injected page feedback must never be silently
  *   dropped by a strict CSP.
+ * - The overlay mounts inside a closed shadow root (keyed via a Symbol on the
+ *   host node) and translates an inner stage wrapper so neither `innerText`,
+ *   deep-DOM shadow-root walkers (`content(markdown)`, `findText`, `anti-bot`),
+ *   nor top-document attribute `MutationObserver`s (`wait_idle`) observe it.
  * - Every call is best-effort: feedback is never allowed to fail an operation.
  * @module dsh-browser/browser-electron/virtual-cursor
  */
@@ -64,23 +68,28 @@ export function cursorNeedsPaint<TView>(handle: TView, x: number, y: number, act
 export function cursorScript(x: number, y: number, action: CursorAction, label?: string): string {
   return `(() => {
   const id = ${JSON.stringify(CURSOR_ID)}
+  const key = Symbol.for('__dsh_agent_cursor_shadow__')
   let root = document.getElementById(id)
   if (!root) {
     root = document.createElement('div')
     root.id = id
     root.setAttribute('aria-hidden', 'true')
-    root.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;pointer-events:none;transition:transform 190ms cubic-bezier(.22,.85,.24,1);will-change:transform'
+    root.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;pointer-events:none'
     const svg = '<svg width="22" height="22" viewBox="0 0 22 22" style="position:absolute;left:-2px;top:-2px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45))">'
       + '<path d="M4 2 L4 18 L8.4 13.8 L11.2 19.6 L13.8 18.4 L11 12.8 L17 12.6 Z" fill="#ffffff" stroke="#111111" stroke-width="1.4" stroke-linejoin="round"/></svg>'
     const ripple = '<span data-dsh-role="ripple" style="position:absolute;left:0;top:0;width:34px;height:34px;margin:-17px 0 0 -17px;border-radius:50%;border:2px solid rgba(64,160,255,.9);opacity:0"></span>'
     // The bubble sits below-right of the pointer tip and is capped in width so a long
     // label cannot cover the page it is describing.
     const bubble = '<span data-dsh-role="bubble" style="position:absolute;left:18px;top:16px;max-width:280px;padding:3px 8px;border-radius:5px;background:rgba(17,17,17,.92);color:#fff;font:12px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:0;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>'
-    root.attachShadow({ mode: 'open' }).innerHTML = svg + ripple + bubble
+    const stage = '<div data-dsh-role="stage" style="position:fixed;left:0;top:0;width:0;height:0;pointer-events:none;transition:transform 190ms cubic-bezier(.22,.85,.24,1);will-change:transform">' + svg + ripple + bubble + '</div>'
+    const parts = typeof root.attachShadow === 'function' ? root.attachShadow({ mode: 'closed' }) : root
+    parts.innerHTML = stage
+    root[key] = parts
     ;(document.body || document.documentElement).appendChild(root)
   }
-  const parts = root.shadowRoot || root
-  root.style.transform = 'translate(${x}px, ${y}px)'
+  const parts = root[key] || root
+  const stage = parts.querySelector('[data-dsh-role="stage"]') || root
+  stage.style.transform = 'translate(${x}px, ${y}px)'
   ${action === 'click' ? `const ripple = parts.querySelector('[data-dsh-role="ripple"]')
   if (ripple && typeof ripple.animate === 'function') {
     ripple.animate(
