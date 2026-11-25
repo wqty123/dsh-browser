@@ -14,17 +14,17 @@ test('BrowserRuntime optionally registers with ctx.browserUse when present and r
     },
   })
   const fiber = ctx.plugin(BrowserRuntime)
-  await ctx.start()
+  await ctx.lifecycle?.flush?.()
   assert.deepEqual(events, [['register', 'dsh-builtin-browser']])
   await fiber.dispose()
   assert.deepEqual(events, [['register', 'dsh-builtin-browser'], ['dispose', 'dsh-builtin-browser']])
-  await ctx.stop()
+  await ctx.fiber.dispose()
 })
 
 test('BrowserRuntime starts cleanly when ctx.browserUse is absent', async () => {
   const ctx = new Context()
   ctx.plugin(BrowserRuntime)
-  await ctx.start()
+  await ctx.lifecycle?.flush?.()
   assert.ok(ctx.get('browser') instanceof BrowserRuntime)
-  await ctx.stop()
+  await ctx.fiber.dispose()
 })
