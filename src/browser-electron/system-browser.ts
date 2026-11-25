@@ -110,7 +110,7 @@ import type { CarrierPage } from '../browser/types.ts'
 import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserSessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 
 /** Which browser the user asked for. */
-export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'electron' | 'auto' | 'sidebar'
+export type BrowserChannel = 'bundled' | 'electron' | 'chrome' | 'edge' | 'auto' | 'sidebar'
 
 /** A resolved browser installation. */
 export interface DetectedBrowser {
@@ -239,7 +239,7 @@ function findOnPath(names: readonly string[], env: NodeJS.ProcessEnv, platform: 
  * environment override, then PATH, then the platform's conventional install
  * locations. PATH comes before the fixed paths because it is what actually reflects
  * how the browser was installed.
- * @param channel - the configured choice; `bundled` never resolves to a system browser.
+ * @param channel - the configured choice; `bundled` / `electron` never resolve to a system browser.
  * @param env - environment lookup, injected so tests need no real machine.
  * @param platform - the platform to use conventions for; injected for the same reason.
  * @returns the detected browser, or undefined when the choice is unavailable.

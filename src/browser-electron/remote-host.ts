@@ -53,8 +53,9 @@ const MAX_RPC_BUFFER_BYTES = 512 * 1024 * 1024
  * Locate a SPAWNABLE Electron binary — one that runs a script given as an
  * argument, i.e. a BARE electron, never a packaged app executable:
  *   0. ELECTRON_PATH (explicit override — user intent beats auto-discovery),
- *   1. the plugin's managed Electron runtime directory under `$DSH_HOME`,
- *   2. the plugin's own electron package (a real dependency since 0.1.18),
+ *   1. the plugin-managed runtime directory (`$DSH_HOME/dsh-builtin-browser-host/electron-runtime`),
+ *      isolated from DSH profile node_modules so upgrades never wipe it,
+ *   2. the plugin's own electron package (or a prior install's node_modules / pnpm store),
  *      found by a pure filesystem walk — never require(), whose semantics
  *      differ inside an Electron main process (there it is the built-in API
  *      module, not the npm package) and which would trigger electron 44+'s
@@ -82,7 +83,7 @@ interface ElectronPathInputs {
   readonly inElectron: boolean
   /** process.execPath (candidate for in-process host reuse). */
   readonly execPath: string
-  /** The plugin's managed runtime directory probe. */
+  /** The plugin-managed runtime probe (`$DSH_HOME/dsh-builtin-browser-host/electron-runtime`). */
   readonly managed?: () => string | undefined
   /** The plugin's own electron package probe (bundled). */
   readonly bundled: () => string | undefined
@@ -93,21 +94,17 @@ interface ElectronPathInputs {
 }
 
 /**
- * Plugin-owned Electron runtime prefix (`$DSH_HOME/dsh-builtin-browser-host/electron-runtime`),
- * kept outside DSH profile `node_modules` so plugin reinstalls never sweep it away.
+ * Plugin-owned runtime root (`$DSH_HOME/dsh-builtin-browser-host/electron-runtime`).
+ * Lives outside DSH profile `node_modules` so plugin upgrades do not delete it
+ * as unreferenced residue and pnpm never blocks its postinstall.
  */
-export function managedElectronDir(): string {
-  return join(dshHome(), BROWSER_PROFILE_DIR, 'electron-runtime')
-}
-
-/** Package root (`.../electron-runtime/node_modules/electron`) inside the managed runtime prefix. */
-export function managedElectronPackageDir(): string {
-  return join(managedElectronDir(), 'node_modules', 'electron')
+export function managedElectronDir(home: string = dshHome()): string {
+  return join(home, BROWSER_PROFILE_DIR, 'electron-runtime')
 }
 
 function managedElectronBinary(): string | undefined {
-  const pkgRoot = managedElectronPackageDir()
-  return existsSync(join(pkgRoot, 'package.json')) ? electronDistExe(pkgRoot) : undefined
+  const pkgRoot = join(managedElectronDir(), 'node_modules', 'electron')
+  return electronDistExe(pkgRoot)
 }
 
 function resolveElectronPath(): string {
@@ -134,7 +131,7 @@ function resolveElectronPathImpl(inputs: ElectronPathInputs): string {
   //    package) — auto-discovery is a fallback, not an override.
   const override = inputs.override
   if (typeof override === 'string' && override.length > 0 && existsSync(override)) return override
-  // 1. Plugin-managed runtime directory under $DSH_HOME (provisioned on demand).
+  // 1. Plugin-managed standalone runtime (on-demand download target).
   const managed = inputs.managed?.()
   if (managed !== undefined) return managed
   // 2. The plugin's own electron package (filesystem probe). Never require():
@@ -166,13 +163,10 @@ function resolveElectronPathImpl(inputs: ElectronPathInputs): string {
   if (hostExe !== undefined) return hostExe
   throw new Error(
     'dsh-builtin-browser: cannot locate a spawnable Electron binary. ' +
-    'The electron package is not bundled as an install-time dependency ' +
-    '(issue #41: an install-time download made default profiles refuse the plugin). When the standalone ' +
-    'Electron channel is selected, open Settings → Browser → Readiness and click "Prepare the bundled ' +
-    'browser" to download it once (or run `npx --no dsh-browser-install-electron`), then retry. ' +
-    'Alternatively set ELECTRON_PATH to an electron executable. Note: the host\'s own ' +
-    'executable cannot be reused when it is a packaged Electron app (e.g. DSH Desktop.exe) — only a real ' +
-    'electron binary can be spawned.',
+    'Select "Standalone Electron window" in Settings → Browser and click "Prepare the bundled browser" ' +
+    '(or run `npx --no dsh-browser-install-electron`) to download it once into your DSH data directory, ' +
+    'or set ELECTRON_PATH to an existing electron executable. Note: a packaged Electron app executable ' +
+    '(e.g. DSH Desktop.exe) cannot be reused — only a bare electron binary can be spawned.',
   )
 }
 
@@ -922,7 +916,6 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
    * on a cooldown heals it by itself while keeping the scan off the hot path.
    */
   available(): boolean {
-    if (this.disposed) return false
     if (this.electronAvailable === true) return true
     if (Date.now() < this.nextProbeAt) return false
     this.nextProbeAt = Date.now() + PROBE_RETRY_MS
@@ -939,9 +932,13 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     return this.electronAvailable
   }
 
-  /** Clear a negative probe cache after an on-demand runtime installation finishes. */
+  /**
+   * Retire a negative binary-probe cache immediately after on-demand provisioning
+   * finishes so the very next call sees the new binary without waiting out the
+   * cooldown or restarting DSH.
+   */
   refreshAvailability(): void {
-    if (this.electronAvailable !== true) {
+    if (this.electronAvailable === false) {
       this.electronAvailable = undefined
       this.nextProbeAt = 0
     }
@@ -1258,7 +1255,8 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
    *  - showing a view that does not exist yet is a no-op in the child, so the
    *    view must be materialized first (a fresh tab's createView races the
    *    provider's showActive);
-   *  - a view whose renderer was replaced by a navigation is \"already\n   *    visible\" and therefore skipped by the child's flicker-avoidance fast
+   *  - a view whose renderer was replaced by a navigation is "already
+   *    visible" and therefore skipped by the child's flicker-avoidance fast
    *    path, leaving the new renderer without a surface.
    *
    * The barrier ping is meaningful because the child handles messages strictly

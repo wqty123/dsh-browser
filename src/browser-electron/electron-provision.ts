@@ -1,15 +1,16 @@
-/** Prepare an external or plugin-managed Electron runtime on demand, never at install time. */
+/** Prepare an Electron runtime in the plugin-owned runtime directory (or an explicit external package), never the plugin dependency closure. */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 
-import { internals, managedElectronDir, managedElectronPackageDir } from './remote-host.ts'
+import { internals, managedElectronDir } from './remote-host.ts'
 
 /** How long a background provision may run before it is abandoned. */
 export const PROVISION_TIMEOUT_MS = 180_000
 
-/** Default Electron release installed when the user triggers on-demand provisioning. */
-export const MANAGED_ELECTRON_VERSION = '44.0.0'
+/** Default Electron package version fetched into the managed runtime directory when none is already installed. */
+export const MANAGED_ELECTRON_VERSION = '44.10.0'
 
 /** What happened, in terms a log line can carry. */
 export interface ProvisionResult {
@@ -65,10 +66,13 @@ function record(result: ProvisionResult): ProvisionResult {
 export interface ProvisionDeps {
   /** Whether a spawnable binary already exists. */
   readonly hasBinary: () => boolean
-  /** The installed electron package's own installer script, or undefined when it is not there. */
+  /** The electron package's own installer script, or undefined when it is not there yet. */
   readonly installerScript: () => string | undefined
-  /** Prepare the electron npm wrapper package inside the managed directory when missing. */
-  readonly preparePackage?: (signal?: AbortSignal) => Promise<string | undefined>
+  /**
+   * Optional bootstrap step when `installerScript()` is not on disk yet (e.g. fetching the lightweight
+   * `electron` npm wrapper package into `$DSH_HOME/dsh-builtin-browser-host/electron-runtime`).
+   */
+  readonly bootstrapPackage?: (signal?: AbortSignal) => Promise<{ ok: boolean; detail?: string }>
   /** Runs the installer; resolves to an exit code, or rejects/returns null on failure. */
   readonly run: (script: string, signal?: AbortSignal) => Promise<{ code: number | null; detail?: string }>
   /** Where the outcome goes. */
@@ -96,108 +100,95 @@ export function hasElectronRuntime(): boolean {
   }
 }
 
-function validElectronPackageDir(directory: string | undefined): string | undefined {
-  if (!directory || !isAbsolute(directory)) return undefined
+/** Resolve the target `electron` package directory: explicit external override, else plugin-managed runtime dir. */
+function targetPackageDir(): string | undefined {
+  const override = process.env.DSH_BROWSER_ELECTRON_PACKAGE
+  if (override !== undefined) {
+    if (!override || !isAbsolute(override)) return undefined
+    return override
+  }
+  return join(managedElectronDir(), 'node_modules', 'electron')
+}
+
+/**
+ * @returns the electron package's `install.js` path when present and valid, or undefined.
+ */
+function electronInstallerScript(): string | undefined {
   try {
+    const directory = targetPackageDir()
+    if (!directory) return undefined
     const metadata = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8')) as { name?: unknown }
-    return metadata.name === 'electron' ? directory : undefined
+    if (metadata.name !== 'electron') return undefined
+    const script = join(directory, 'install.js')
+    return existsSync(script) ? script : undefined
   } catch {
     return undefined
   }
 }
 
-/**
- * @returns the selected external package installer or an already-staged managed installer.
- */
-function electronInstallerScript(): string | undefined {
-  const explicit = process.env.DSH_BROWSER_ELECTRON_PACKAGE
-  if (explicit !== undefined && explicit !== '') {
-    const dir = validElectronPackageDir(explicit)
-    if (dir === undefined) return undefined
-    const script = join(dir, 'install.js')
-    return existsSync(script) ? script : undefined
-  }
-  const managed = validElectronPackageDir(managedElectronPackageDir())
-  if (managed === undefined) return undefined
-  const script = join(managed, 'install.js')
-  return existsSync(script) ? script : undefined
-}
-
 /** The Electron version the installed package asks for, for a log line that names the download. */
 function electronVersion(): string {
-  const candidates = [process.env.DSH_BROWSER_ELECTRON_PACKAGE, managedElectronPackageDir()]
-  for (const directory of candidates) {
-    if (!directory || !isAbsolute(directory)) continue
-    try {
-      const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8')) as { version?: unknown }
-      if (typeof manifest.version === 'string') return manifest.version
-    } catch {
-      // try next candidate
-    }
+  try {
+    const directory = targetPackageDir()
+    if (!directory) return MANAGED_ELECTRON_VERSION
+    const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8')) as { version?: unknown }
+    return typeof manifest.version === 'string' ? manifest.version : MANAGED_ELECTRON_VERSION
+  } catch {
+    return MANAGED_ELECTRON_VERSION
   }
-  return process.env.DSH_BROWSER_ELECTRON_VERSION || MANAGED_ELECTRON_VERSION
-}
-
-function spawnBounded(
-  command: string,
-  args: readonly string[],
-  signal?: AbortSignal,
-): Promise<{ code: number | null; detail?: string }> {
-  return new Promise<{ code: number | null; detail?: string }>(resolve => {
-    const child = spawn(command, [...args], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-      stdio: ['ignore', 'ignore', 'pipe'],
-      windowsHide: true,
-    })
-    let stderr = ''
-    child.stderr?.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-2048) })
-    let failure: string | undefined
-    const abort = (): void => { child.kill('SIGKILL') }
-    signal?.addEventListener('abort', abort, { once: true })
-    if (signal?.aborted) abort()
-    child.once('error', error => { failure = String(error) })
-    child.once('close', code => {
-      signal?.removeEventListener('abort', abort)
-      const tail = stderr.trim().split(/\r?\n/).slice(-4).join(' | ')
-      resolve({ code, detail: failure ?? (code !== 0 && tail !== '' ? tail : undefined) })
-    })
-  })
 }
 
 /**
- * Fetch the lightweight `electron` wrapper package into `$DSH_HOME/dsh-builtin-browser-host/electron-runtime`
- * with `--ignore-scripts` and swap it in atomically, so `install.js` can then download the binary.
+ * Fetch the lightweight `electron` npm wrapper (`--ignore-scripts`, ~100 KB) into the managed runtime
+ * directory so its `install.js` can subsequently download the platform binary with full mirror/proxy support.
  */
-async function stageManagedElectronPackage(signal?: AbortSignal): Promise<string | undefined> {
-  if (process.env.DSH_BROWSER_ELECTRON_PACKAGE !== undefined && process.env.DSH_BROWSER_ELECTRON_PACKAGE !== '') {
-    return undefined
+async function bootstrapManagedPackage(signal?: AbortSignal): Promise<{ ok: boolean; detail?: string }> {
+  if (process.env.DSH_BROWSER_ELECTRON_PACKAGE !== undefined) {
+    return { ok: false, detail: 'DSH_BROWSER_ELECTRON_PACKAGE is set; provide an existing absolute electron package directory' }
   }
-  const existing = electronInstallerScript()
-  if (existing !== undefined) return existing
-  const targetRoot = managedElectronDir()
-  const parentDir = join(targetRoot, '..')
-  mkdirSync(parentDir, { recursive: true })
-  const stageDir = mkdtempSync(join(parentDir, 'electron-runtime-stage-'))
-  const version = process.env.DSH_BROWSER_ELECTRON_VERSION || MANAGED_ELECTRON_VERSION
+  const runtimeDir = managedElectronDir()
+  const targetPkg = join(runtimeDir, 'node_modules', 'electron')
+  if (existsSync(join(targetPkg, 'install.js'))) return { ok: true }
+  mkdirSync(runtimeDir, { recursive: true })
+  const stagingDir = join(runtimeDir, `.staging-${process.pid}-${randomUUID()}`)
+  mkdirSync(stagingDir, { recursive: true })
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  const spec = `electron@${process.env.DSH_BROWSER_ELECTRON_VERSION || MANAGED_ELECTRON_VERSION}`
   try {
-    const outcome = await spawnBounded(
-      npm,
-      ['install', '--no-save', '--no-audit', '--no-fund', '--ignore-scripts', '--prefix', stageDir, `electron@${version}`],
-      signal,
-    )
+    const outcome = await new Promise<{ code: number | null; detail?: string }>(resolve => {
+      const child = spawn(npm, ['install', '--no-save', '--no-package-lock', '--ignore-scripts', '--prefix', stagingDir, spec], {
+        env: { ...process.env, ELECTRON_SKIP_BINARY_DOWNLOAD: '1' },
+        stdio: ['ignore', 'ignore', 'pipe'],
+        shell: process.platform === 'win32',
+        windowsHide: true,
+      })
+      let stderr = ''
+      child.stderr?.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-2048) })
+      let failure: string | undefined
+      const abort = (): void => { try { child.kill('SIGKILL') } catch {} }
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) abort()
+      child.once('error', error => { failure = String(error) })
+      child.once('close', code => {
+        signal?.removeEventListener('abort', abort)
+        resolve({ code, detail: failure ?? (stderr.trim() || undefined) })
+      })
+    })
     if (outcome.code !== 0) {
-      throw new Error(outcome.detail ?? `npm install electron@${version} exited ${String(outcome.code)}`)
+      return { ok: false, detail: outcome.detail ?? `npm install ${spec} exited ${String(outcome.code)}` }
     }
-    const stagedScript = join(stageDir, 'node_modules', 'electron', 'install.js')
-    if (!existsSync(stagedScript)) {
-      throw new Error(`staged electron@${version} package is missing install.js`)
+    const stagedPkg = join(stagingDir, 'node_modules', 'electron')
+    if (!existsSync(join(stagedPkg, 'install.js'))) {
+      return { ok: false, detail: `downloaded ${spec} package is missing install.js` }
     }
-    rmSync(targetRoot, { recursive: true, force: true })
-    renameSync(stageDir, targetRoot)
-    return join(managedElectronPackageDir(), 'install.js')
+    mkdirSync(join(runtimeDir, 'node_modules'), { recursive: true })
+    rmSync(targetPkg, { recursive: true, force: true })
+    renameSync(stagedPkg, targetPkg)
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, detail: String(error) }
   } finally {
-    rmSync(stageDir, { recursive: true, force: true })
+    rmSync(stagingDir, { recursive: true, force: true })
   }
 }
 
@@ -208,10 +199,27 @@ export function defaultDeps(log: (message: string) => void = () => {}): Provisio
   return {
     hasBinary: hasElectronRuntime,
     installerScript: electronInstallerScript,
-    preparePackage: stageManagedElectronPackage,
+    bootstrapPackage: bootstrapManagedPackage,
     run: (script, signal) => {
       if (runningInstaller !== undefined) return runningInstaller
-      const run = spawnBounded(process.execPath, [script], signal)
+      const run = new Promise<{ code: number | null; detail?: string }>(resolve => {
+        const child = spawn(process.execPath, [script], {
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+          stdio: ['ignore', 'ignore', 'pipe'],
+          windowsHide: true,
+        })
+        let stderr = ''
+        child.stderr?.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-2048) })
+        let failure: string | undefined
+        const abort = (): void => { child.kill('SIGKILL') }
+        signal?.addEventListener('abort', abort, { once: true })
+        if (signal?.aborted) abort()
+        child.once('error', error => { failure = String(error) })
+        child.once('close', code => {
+          signal?.removeEventListener('abort', abort)
+          resolve({ code, detail: failure ?? (stderr.trim() || undefined) })
+        })
+      })
       runningInstaller = run
       const clear = (): void => { if (runningInstaller === run) runningInstaller = undefined }
       void run.then(clear, clear)
@@ -262,17 +270,21 @@ export async function ensureElectronRuntime(deps: ProvisionDeps = defaultDeps())
   })
   let outcome: { code: number | null; detail?: string }
   try {
-    let script = deps.installerScript()
-    if (script === undefined && deps.preparePackage !== undefined) {
-      script = await Promise.race([
-        deps.preparePackage(controller.signal),
-        timeout.then(t => { throw new Error(t.detail) }),
-      ])
-    }
-    if (script === undefined) {
-      return record({ status: 'failed', detail: 'the installed electron package has no install.js; reinstall the plugin in this profile' })
-    }
-    outcome = await Promise.race([deps.run(script, controller.signal), timeout])
+    outcome = await Promise.race([
+      (async (): Promise<{ code: number | null; detail?: string }> => {
+        let script = deps.installerScript()
+        if (script === undefined && deps.bootstrapPackage !== undefined) {
+          const boot = await deps.bootstrapPackage(controller.signal)
+          if (!boot.ok) return { code: 1, detail: boot.detail ?? 'could not fetch electron package' }
+          script = deps.installerScript()
+        }
+        if (script === undefined) {
+          return { code: 1, detail: 'the installed electron package has no install.js; retry from Settings → Browser → Readiness or run `npx --no dsh-browser-install-electron`' }
+        }
+        return await deps.run(script, controller.signal)
+      })(),
+      timeout,
+    ])
   } catch (error) {
     return record({ status: 'failed', detail: `the download failed: ${String(error)}` })
   } finally {
