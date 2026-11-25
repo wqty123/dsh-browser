@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import { pairedRoute } from '../lib/browser-electron/authenticated-route.js'
 import { handlePreviewFrame, handlePreviewSessions, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from '../lib/browser-electron/preview-route.js'
 
-async function serve(connection, run) {
+async function serve(connection, run, getPeer) {
   const calls = { capture: 0, list: 0 }
   const browser = {
     exists: session => session === 'visible-session',
@@ -12,11 +12,14 @@ async function serve(connection, run) {
     async capturePassive() { calls.capture++; return { dataUrl: 'data:image/png;base64,aW1hZ2U=' } },
   }
   const settings = { get: () => ({ remoteView: { enabled: true } }) }
-  const server = createServer(pairedRoute(connection, (request, response) => {
+  const route = pairedRoute(connection, (request, response) => {
     return request.url.startsWith(PREVIEW_SESSIONS_ROUTE)
       ? handlePreviewSessions(request, response, settings, browser)
       : handlePreviewFrame(request, response, settings, browser)
-  }))
+  })
+  const server = createServer((request, response) => (
+    getPeer === undefined ? route(request, response) : route(request, response, getPeer())
+  ))
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   try {
     await run('http://127.0.0.1:' + server.address().port, calls)
@@ -90,4 +93,25 @@ test('preview preserves the host trust fence and does not probe an empty session
     assert.equal((await response.json()).error, 'session-required')
     assert.deepEqual(calls, { capture: 0, list: 0 })
   })
+})
+
+test('preview admits DSH 0.2.3 live peer without legacy requestRejection and rejects aborted peer with 401', async () => {
+  const controller = new AbortController()
+  const peer = { signal: controller.signal }
+  await serve(() => ({}), async (base, calls) => {
+    const headers = { origin: base }
+    const list = await fetch(base + PREVIEW_SESSIONS_ROUTE, { headers })
+    assert.equal(list.status, 200)
+    assert.deepEqual((await list.json()).sessions, ['visible-session'])
+    const frame = await fetch(base + PREVIEW_ROUTE + '?session=visible-session', { headers })
+    assert.equal(frame.status, 200)
+    assert.equal(await frame.text(), 'image')
+    controller.abort()
+    for (const path of [PREVIEW_SESSIONS_ROUTE, PREVIEW_ROUTE + '?session=visible-session']) {
+      const denied = await fetch(base + path, { headers })
+      assert.equal(denied.status, 401)
+      assert.deepEqual(await denied.json(), { error: 'unauthorized' })
+    }
+    assert.deepEqual(calls, { capture: 1, list: 1 })
+  }, () => peer)
 })

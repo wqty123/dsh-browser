@@ -18,6 +18,7 @@ test('registered guest route commits the same data-font policy on HTML navigatio
   assert.equal(routes.length, 1)
   const route = routes[0]
   assert.equal(route.kind, 'exact')
+  assert.equal(route.auth, 'anonymous')
   dns.lookup = async hostname => [{ address: hostname === 'dsh.example' ? '93.184.216.35' : '93.184.216.34', family: 4 }]
   const font = 'data:application/font-woff;charset=utf-8;base64,d09GRgABAAAAAA=='
   const html = `<html><head><meta http-equiv="Content-Security-Policy" content="font-src 'none'"><style>@font-face{font-family:embedded;src:url(${font})}</style></head><body>font</body></html>`

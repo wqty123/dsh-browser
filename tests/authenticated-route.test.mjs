@@ -1,10 +1,22 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { authenticatedRoute, isDirectLoopback } from '../lib/browser-electron/authenticated-route.js'
+import { authenticatedRoute, pairedRoute, isDirectLoopback } from '../lib/browser-electron/authenticated-route.js'
 
 async function withServer(connection, handler, run) {
   const server = createServer(authenticatedRoute(connection, handler))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const base = 'http://127.0.0.1:' + server.address().port
+  try {
+    await run(base)
+  } finally {
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(resolve))
+  }
+}
+
+async function withPeerServer(route, peer, run) {
+  const server = createServer((request, response) => route(request, response, peer))
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const base = 'http://127.0.0.1:' + server.address().port
   try {
@@ -96,6 +108,48 @@ test('the host owns an authentication redirect or denial response', async () => 
     assert.equal(response.headers.get('location'), '/')
     await response.text()
   })
+})
+
+test('DSH 0.2.3 host-admitted live peer bypasses legacy connection lookup on authenticatedRoute and pairedRoute', async () => {
+  for (const wrap of [authenticatedRoute, pairedRoute]) {
+    const controller = new AbortController()
+    const peer = { signal: controller.signal }
+    let receivedPeer
+    let legacyLookups = 0
+    const route = wrap(
+      () => { legacyLookups++; return undefined },
+      (_request, response, admitted) => {
+        receivedPeer = admitted
+        response.writeHead(200)
+        response.end('ok')
+      },
+    )
+    await withPeerServer(route, peer, async base => {
+      const response = await fetch(base + '/settings')
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), 'ok')
+    })
+    assert.equal(receivedPeer, peer)
+    assert.equal(legacyLookups, 0)
+  }
+})
+
+test('DSH 0.2.3 aborted peer returns 401 without calling handler or legacy connection', async () => {
+  for (const wrap of [authenticatedRoute, pairedRoute]) {
+    const controller = new AbortController()
+    controller.abort()
+    let calls = 0
+    const route = wrap(
+      () => { assert.fail('must not fall back to legacy connection when peer is supplied') },
+      () => { calls++; assert.fail('must not invoke handler for aborted peer') },
+    )
+    await withPeerServer(route, { signal: controller.signal }, async base => {
+      const response = await fetch(base + '/settings')
+      assert.equal(response.status, 401)
+      assert.deepEqual(await response.json(), { error: 'unauthorized' })
+    })
+    assert.equal(calls, 0)
+  }
 })
 
 test('machine-wide bridge changes require a direct loopback request', () => {

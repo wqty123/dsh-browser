@@ -564,6 +564,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: PREVIEW_ROUTE,
+          auth: 'required',
           handler: paired(ctx, (request, response) => handlePreviewFrame(request, response, settings, browser)),
         }, 'dsh-builtin-browser: live view frame'))
         // The Web sidebar's iframe has no handle into a cross-origin guest, so the guest is served
@@ -574,6 +575,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   host.effect(() => host.webServer.register({
     kind: 'exact',
     path: SURFACE_DECL_ROUTE,
+    auth: 'required',
     handler: authenticated(ctx, (request, response) => {
       readJsonBody(request).then((body) => {
         const surface = body !== null && typeof body === 'object' && (body as { surface?: unknown }).surface
@@ -588,6 +590,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   host.effect(() => host.webServer.register({
     kind: 'exact',
     path: OPEN_REQUEST_ROUTE,
+    auth: 'required',
     handler: authenticated(ctx, (request, response) => {
       // 这条记录**不能被第一个轮询到的客户端消费掉**：同一进程里可能有多个 DSH 窗口/标签页
       // （人手一个、自动化又一个），先问的那个把记录清空后，另一个窗口就再也看不到这次 open，
@@ -615,6 +618,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: PREVIEW_SESSIONS_ROUTE,
+          auth: 'required',
           handler: paired(ctx, (request, response) => handlePreviewSessions(request, response, settings, browser)),
         }, 'dsh-builtin-browser: live view sessions'))      })
     } catch {
@@ -710,7 +714,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           tauri: () => runningTauriRuntime()?.runtime,
         })
         host.effect(() => host.webServer.register({
-          kind: 'exact', path: HOST_PATCH_ROUTE,
+          kind: 'exact', path: HOST_PATCH_ROUTE, auth: 'required',
           handler: authenticated(ctx, hostPatchMaintenance),
         }, 'dsh-builtin-browser: Web host patch maintenance'))
         const automaticMaintenance = createAutomaticMaintenanceHandler({
@@ -728,12 +732,13 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           },
         })
         host.effect(() => host.webServer.register({
-          kind: 'exact', path: AUTOMATIC_MAINTENANCE_ROUTE,
+          kind: 'exact', path: AUTOMATIC_MAINTENANCE_ROUTE, auth: 'required',
           handler: authenticated(ctx, automaticMaintenance),
         }, 'dsh-builtin-browser: explicit automatic bridge maintenance'))
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: BRIDGE_STATUS_ROUTE,
+          auth: 'required',
           handler: authenticated(ctx, async (request, response) => handleBridgeStatus(request, response, undefined,
             await readHostExtensionStatus(dshHome()), undefined, undefined, settings.get().browser.channel)),
         }, 'dsh-builtin-browser: bridge status'))
@@ -742,6 +747,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: BRIDGE_ACTION_ROUTE,
+          auth: 'required',
           handler: authenticated(ctx, (request, response) => handleBridgeAction(request, response)),
         }, 'dsh-builtin-browser: bridge action'))
       })
@@ -815,7 +821,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     }
     try {
       injectRuntime(['webServer'], (host) => {
-        host.effect(() => host.webServer.register({ kind: 'exact', path: EXTENSION_INSTALL_ROUTE, handler: authenticated(ctx, async (request, response) => {
+        host.effect(() => host.webServer.register({ kind: 'exact', path: EXTENSION_INSTALL_ROUTE, auth: 'required', handler: authenticated(ctx, async (request, response) => {
           if (request.method !== 'POST') { response.writeHead(405); response.end(); return }
           if (!sameOrigin(request, true)) { response.writeHead(403); response.end(); return }
           try {
@@ -829,6 +835,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: RUNTIME_STATUS_ROUTE,
+          auth: 'required',
           handler: authenticated(ctx, async (request, response) => {
             if (request.method === 'GET' && isPreferredCarrier(adoptedCarrier)) await adoptedCarrier.refreshStatus()
             await handleRuntimeStatus(request, response, deps)
@@ -837,6 +844,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: RUNTIME_PROVISION_ROUTE,
+          auth: 'required',
           handler: authenticated(ctx, (request, response) => handleRuntimeProvision(request, response, deps)),
         }, 'dsh-builtin-browser: runtime provision'))
       })
@@ -873,6 +881,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           scope.effect(() => scope.webServer.register({
             kind: 'exact',
             path,
+            auth: 'required',
             handler: authenticated(host, handler),
           }, label))
         }
@@ -936,12 +945,14 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           host.effect(() => host.webServer.register({
             kind: 'exact',
             path,
+            auth: 'required',
             handler: authenticated(ctx, handler),
           }, label))
         }
         host.effect(() => host.webServer.register({
           kind: 'exact',
           path: REFERENCE_STATUS_ROUTE,
+          auth: 'required',
           handler: authenticated(ctx, (request, response) => {
             if (request.method !== 'GET') { replyJson(response, 405, { ok: false, error: 'method-not-allowed' }); return }
             replyJson(response, 200, { ok: true, entry: referenceProvider?.referenceStatus() ?? null })
@@ -1223,7 +1234,8 @@ interface WebServerHost {
       spec: {
         readonly kind: 'exact'
         readonly path: string
-        readonly handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>
+        readonly auth?: 'anonymous' | 'required' | 'deny'
+        readonly handler: BrowserHttpHandler
       },
       label?: string,
     ): () => void
@@ -1253,6 +1265,7 @@ function installSettingsRoute(
       host.effect(() => host.webServer.register({
         kind: 'exact',
         path: SETTINGS_ROUTE,
+        auth: 'required',
         handler: authenticated(ctx, (request, response) => handleSettingsRequest(request, response, settings, onChannelChange)),
       }, 'dsh-builtin-browser: settings'))
     })

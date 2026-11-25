@@ -192,8 +192,8 @@ export function installTakeovers(ctx: Context, takeovers: BrowserTakeovers): voi
   ctx.on?.('approval/request' as never, ((request: { toolName: string; signal?: AbortSignal }, next: () => Promise<TakeoverDecision>) => takeovers.listen(request, next)) as never, { prepend: true })
   ctx.effect(() => () => { takeovers.dispose() })
   ctx.inject?.(['webServer'] as never, (host: Context) => {
-    const server = host.get('webServer' as never) as unknown as { register(spec: { kind: 'exact'; path: string; handler: BrowserHttpHandler }): () => void }
-    host.effect(() => server.register({ kind: 'exact', path: TAKEOVER_ROUTE, handler: pairedRoute(
+    const server = host.get('webServer' as never) as unknown as { register(spec: { kind: 'exact'; path: string; auth?: 'anonymous' | 'required' | 'deny'; handler: BrowserHttpHandler }): () => void }
+    host.effect(() => server.register({ kind: 'exact', path: TAKEOVER_ROUTE, auth: 'required', handler: pairedRoute(
       () => ctx.get('connection' as never) as unknown as BrowserPairingConnection | undefined, takeovers.handler) }))
   })
 }
