@@ -34,13 +34,13 @@ function withTempHome(t, settings) {
   return home
 }
 
-test('readSurface resolves explicit chrome/edge channels to builtin even when Web declared panel', t => {
+test('readSurface resolves explicit chrome/edge/electron channels to builtin even when Web declared panel', t => {
   const home = withTempHome(t)
   assert.equal(readSurface(), 'panel', 'default without settings stays panel')
   mkdirSync(join(home, 'dsh-builtin-browser-host'), { recursive: true })
   const file = join(home, 'dsh-builtin-browser-host', 'settings.json')
 
-  for (const channel of ['chrome', 'edge']) {
+  for (const channel of ['chrome', 'edge', 'electron']) {
     writeFileSync(file, JSON.stringify({ browser: { channel, systemProfile: 'plugin' } }))
     assert.equal(readSurface(), 'builtin', `${channel} defaults to builtin`)
     globalThis.__dshBrowserSurface = 'panel'

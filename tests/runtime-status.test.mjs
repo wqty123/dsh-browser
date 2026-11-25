@@ -120,6 +120,28 @@ test('a failed preparation remains diagnostic and never offers a standalone runt
   assert.match(status.electron.detail, /fetch failed/)
 })
 
+test('standalone electron channel exposes on-demand provisioning when binary is missing, and becomes ready once present', () => {
+  const missing = report('electron', { binary: false, provisioning: provision('idle') })
+  assert.equal(missing.carrier, 'bundled')
+  assert.equal(missing.resolvedCarrier, 'bundled')
+  assert.equal(missing.readiness, 'blocked')
+  assert.equal(missing.canProvision, true, 'explicit standalone electron channel offers on-demand download')
+  assert.equal(missing.systemBrowser.checked, false)
+
+  const downloading = report('electron', { binary: false, provisioning: provision('preparing', 'downloading Electron 44.10.0') })
+  assert.equal(downloading.readiness, 'blocked')
+  assert.equal(downloading.canProvision, false, 'cannot start a duplicate download while preparing')
+
+  const failed = report('electron', { binary: false, provisioning: provision('failed', 'fetch failed') })
+  assert.equal(failed.readiness, 'blocked')
+  assert.equal(failed.canProvision, true, 'failed download can be retried')
+
+  const ready = report('electron', { binary: true, provisioning: provision('idle') })
+  assert.equal(ready.readiness, 'ready')
+  assert.equal(ready.canProvision, false)
+  assert.equal(ready.electron.state, 'present')
+})
+
 test('the sidebar carrier is ready when the bridge is installed AND the shell is running', () => {
   const status = report('sidebar', {
     bridgeReader: bridge('installed', 'node install.mjs "C:/app" --restart'),
@@ -244,13 +266,13 @@ test('automatic does not adopt an uninstalled bridge even if its published endpo
 })
 
 test('sidebar and bundled choices do not scan unrelated system browsers', () => {
-  for (const channel of ['sidebar', 'bundled', 'auto']) {
+  for (const channel of ['sidebar', 'bundled', 'auto', 'electron']) {
     const status = report(channel, {
       browserReader: () => { throw new Error('system detection must not run for this channel') },
     })
     assert.equal(status.systemBrowser.checked, false)
     assert.equal(status.systemBrowser.present, false)
-    assert.equal(status.resolvedCarrier, 'sidebar')
+    assert.equal(status.resolvedCarrier, channel === 'electron' ? 'bundled' : 'sidebar')
   }
 })
 

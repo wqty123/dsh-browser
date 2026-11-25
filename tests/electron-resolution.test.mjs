@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { internals } from '../lib/browser-electron/remote-host.js'
+import { internals, managedElectronDir } from '../lib/browser-electron/remote-host.js'
 
 /**
  * Regression for issue #6: resolveElectronPath() used to hand back the host's
@@ -76,7 +76,7 @@ test('electron package resolution recognizes the macOS Electron.app layout', () 
   }
 })
 
-test('resolveElectronPath order: override > bundled > anchors > bare host > ancestry, packaged host skipped', () => {
+test('resolveElectronPath order: override > managed > bundled > anchors > bare host > ancestry, packaged host skipped', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-browser-resolve-'))
   try {
     // A fake BARE electron (resources/electron.asar, no app.asar) — the exe
@@ -95,6 +95,7 @@ test('resolveElectronPath order: override > bundled > anchors > bare host > ance
       override: undefined,
       inElectron: false,
       execPath: packagedExe,
+      managed: () => undefined,
       bundled: () => undefined,
       anchored: () => undefined,
       ancestry: () => undefined,
@@ -102,18 +103,40 @@ test('resolveElectronPath order: override > bundled > anchors > bare host > ance
     })
 
     // 0. A valid override (a file that exists) beats every auto-discovery.
-    assert.equal(impl({ override: process.execPath, bundled: () => 'bundled-exe' }), process.execPath)
-    // 1. Bundled package wins when no override.
+    assert.equal(impl({ override: process.execPath, managed: () => 'managed-exe', bundled: () => 'bundled-exe' }), process.execPath)
+    // 1. Plugin-managed runtime wins over bundled/anchors when no override.
+    assert.equal(impl({ managed: () => 'managed-exe', bundled: () => 'bundled-exe' }), 'managed-exe')
+    // 2. Bundled package (existing user install) wins when no managed runtime.
     assert.equal(impl({ bundled: () => 'bundled-exe' }), 'bundled-exe')
-    // 2. Anchors beat host reuse.
+    // 3. Anchors beat host reuse.
     assert.equal(impl({ inElectron: true, execPath: bareExe, anchored: () => 'anchored-exe' }), 'anchored-exe')
-    // 3. In-process host reuse only for a BARE electron.
+    // 4. In-process host reuse only for a BARE electron.
     assert.equal(impl({ inElectron: true, execPath: bareExe }), bareExe)
-    // 4. A PACKAGED host is skipped -> falls through to ancestry.
+    // 5. A PACKAGED host is skipped -> falls through to ancestry.
     assert.equal(impl({ inElectron: true, execPath: packagedExe, ancestry: () => 'ancestor-exe' }), 'ancestor-exe')
-    // 5. Not in electron + packaged execPath + no ancestry -> nothing left.
+    // 6. Not in electron + packaged execPath + no ancestry -> nothing left.
     assert.throws(() => impl({}), /cannot locate/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('managedElectronBinary resolves an Electron executable inside DSH_HOME/dsh-builtin-browser-host/electron-runtime', t => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-managed-electron-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  assert.equal(managedElectronDir(home), join(home, 'dsh-builtin-browser-host', 'electron-runtime'))
+  assert.equal(internals.managedElectronBinary(), undefined)
+  const exe = process.platform === 'darwin'
+    ? join(home, 'dsh-builtin-browser-host', 'electron-runtime', 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron')
+    : join(home, 'dsh-builtin-browser-host', 'electron-runtime', 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron')
+  mkdirSync(join(exe, '..'), { recursive: true })
+  writeFileSync(exe, 'x')
+  assert.equal(internals.managedElectronBinary(), exe)
 })
