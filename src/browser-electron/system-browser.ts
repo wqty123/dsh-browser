@@ -1240,7 +1240,15 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           if (!/Session with given id not found|No session with given id/i.test(message)) throw error
-          // If a concurrent call already re-attached this view on the same client, use that session.
+          // If another concurrent call already started or finished reattaching this view, join it
+          // instead of falling through to ensureSession() and spawning an orphan about:blank tab.
+          const inFlight = this.sessionBuilding.get(viewId)
+          if (inFlight !== undefined) {
+            if (!initialize) throw error
+            const joined = await inFlight
+            const retried = await client.send(method, params, joined)
+            return (retried ?? {}) as Record<string, unknown>
+          }
           const current = this.views.get(viewId)
           if (current !== undefined && current.client === client && current.session !== target) {
             const retried = await client.send(method, params, current.session)
@@ -1255,14 +1263,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
           if (!initialize) throw error
           if (deadTarget !== undefined) {
             if (client.destroyedTargets.has(deadTarget)) throw error
-            const alive = await client.send('Target.getTargets', {})
-              .then(listed => Array.isArray((listed as { targetInfos?: unknown }).targetInfos)
-                ? (listed as { targetInfos: Array<{ targetId?: unknown }> }).targetInfos.some(entry => entry.targetId === deadTarget)
-                : true)
-              .catch(() => true)
-            if (!alive) throw error
-            // The page target is still alive: re-attach to IT rather than calling ensureSession(),
-            // which would adopt or create a fresh about:blank tab and orphan the user's page.
+            // Register the reattach transaction synchronously before any await so concurrent
+            // callers hitting the same stale session join it instead of spawning about:blank.
             const rebuilt = await this.reattachTarget(client, viewId, deadTarget)
             const retried = await client.send(method, params, rebuilt)
             return (retried ?? {}) as Record<string, unknown>
@@ -1397,8 +1399,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   }
 
   /**
-   * Re-attach an existing live target whose CDP session id became stale, sharing one in-flight
-   * attach across concurrent callers for the same view and never creating a replacement blank page.
+   * Verify an existing target is still alive and re-attach to it, sharing one in-flight transaction
+   * across concurrent callers for the same view and never creating a replacement blank page.
    */
   private async reattachTarget(client: CdpClient, viewId: string, targetId: string): Promise<string> {
     const existing = this.views.get(viewId)
@@ -1406,6 +1408,17 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     const inFlight = this.sessionBuilding.get(viewId)
     if (inFlight !== undefined) return await inFlight
     const building = (async (): Promise<string> => {
+      if (client.destroyedTargets.has(targetId)) {
+        throw new Error('dsh-builtin-browser: CDP error: Session with given id not found.')
+      }
+      const alive = await client.send('Target.getTargets', {})
+        .then(listed => Array.isArray((listed as { targetInfos?: unknown }).targetInfos)
+          ? (listed as { targetInfos: Array<{ targetId?: unknown }> }).targetInfos.some(entry => entry.targetId === targetId)
+          : true)
+        .catch(() => true)
+      if (!alive) {
+        throw new Error('dsh-builtin-browser: CDP error: Session with given id not found.')
+      }
       const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
       const sessionId = attached?.sessionId
       if (typeof sessionId !== 'string') {
