@@ -3,11 +3,11 @@
  *
  * WHY THIS EXISTS
  * Installing this plugin made the browser work with no setup, and that property got silently
- * weaker as the carriers were added: the bundled carrier downloads a ~100 MB Electron runtime on
- * first need (issue #41 — the download had to leave `postinstall`), so on a fresh install the first
- * browser call can arrive while that download is still running, and the only trace anywhere in the
+ * weaker as the carriers were added: the standalone Electron runtime downloads on first need
+ * (issue #41 — the download had to leave `postinstall`), so on a fresh install the first browser
+ * call can arrive before or while that download is running, and the only trace anywhere in the
  * product was a log line the settings panel cannot read. A user who saw "cannot locate a spawnable
- * Electron binary" had no way to learn that the plugin was already fetching one, and no button to
+ * Electron binary" had no way to learn that they could prepare it from the panel, and no button to
  * retry it once it failed.
  *
  * So the readiness of each part is computed ONCE here, in a pure function over injectable readers:
@@ -15,9 +15,9 @@
  * or the file system.
  *
  * Everything here is a cheap environment check. The launch path's own binary probes resolve the
- * bundled runtime and installed system browsers; bridge readers inspect the installation and its
- * published endpoint. Available files establish availability, while browser calls establish whether
- * a particular page can be driven. Nothing spawns anything.
+ * bundled/managed runtime and installed system browsers; bridge readers inspect the installation
+ * and its published endpoint. Available files establish availability, while browser calls establish
+ * whether a particular page can be driven. Nothing spawns anything.
  * @module dsh-browser/browser-electron/runtime-status
  */
 import type { BridgeStatus } from './bridge-status.ts'
@@ -143,8 +143,9 @@ function carrierOf(channel: BrowserChannel): CarrierKind {
  * Assemble the report.
  *
  * The `readiness` field is per carrier on purpose: "the browser is ready" is not a property of this
- * plugin, it is a property of the carrier the user chose. A bundled carrier with a finished download
- * is ready; the sidebar carrier with no bridge is not, however healthy the bundled runtime is.
+ * plugin, it is a property of the carrier the user chose. A standalone Electron carrier with a
+ * finished download is ready; the sidebar carrier with no bridge is not, however healthy the
+ * Electron runtime is.
  * @param deps - the readers; every one of them is a cheap, side-effect-free read.
  * @returns the report the panel renders.
  */
@@ -220,12 +221,12 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
 
   let readiness: Readiness
   let resolvedCarrier: RuntimeStatusReport['resolvedCarrier']
-  if (carrier === 'bundled') {
-    resolvedCarrier = 'bundled'
-    readiness = runnable ? 'ready' : 'blocked'
-  } else if (carrier === 'sidebar') {
+  if (carrier === 'sidebar') {
     resolvedCarrier = 'sidebar'
     readiness = sidebarReady ? 'ready' : 'blocked'
+  } else if (carrier === 'bundled') {
+    resolvedCarrier = 'bundled'
+    readiness = runnable ? 'ready' : 'blocked'
   } else if (selected === 'cdp') {
     resolvedCarrier = 'cdp'
     readiness = detected !== undefined && connection?.connected === true ? 'ready' : 'blocked'

@@ -36,7 +36,7 @@ export function registerExitCleanup(cleanup: () => void): void {
  * Which surface an open should use.
  *
  * "panel"  - place the page in the DSH sidebar and open nothing else (the normal Web behaviour).
- * "builtin"- drive the plugin's own browser or the explicitly selected installed Chrome/Edge.
+ * "builtin"- drive the plugin's own Electron browser or the explicitly selected installed Chrome/Edge.
  * @returns the configured surface, defaulting to "panel".
  */
 export function readSurface(): 'panel' | 'builtin' {
@@ -49,9 +49,9 @@ export function readSurface(): 'panel' | 'builtin' {
     const parsed = JSON.parse(raw) as { browser?: { surface?: unknown; channel?: unknown } }
     const surface = parsed.browser?.surface
     if (surface === 'builtin' || surface === 'panel') return surface
-    // Issue #106 & standalone Electron channel: an explicit external/standalone browser channel
-    // (chrome / edge / electron) must launch and drive that browser carrier rather than falling
-    // into the Web iframe / Desktop sidebar panel by default.
+    // Issue #106 & Scheme C: an explicit installed browser channel (chrome / edge) or standalone
+    // Electron channel (electron) must drive that browser carrier rather than falling into the
+    // Web iframe / Desktop sidebar panel by default.
     const channel = parsed.browser?.channel
     if (channel === 'chrome' || channel === 'edge' || channel === 'electron') return 'builtin'
   } catch { /* no settings yet */ }

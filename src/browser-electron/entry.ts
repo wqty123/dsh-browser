@@ -5,8 +5,8 @@ import { BROWSER_PROFILE_DIR, SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '..
  * `BrowserProvider` with `ctx.browser`. The provider needs a view host (real
  * Electron `WebContentsView` objects). When a desktop shell supplies
  * `ctx.electronViewHost`, that host is used (embedded, human-machine shared
- * view). Otherwise it requires a reconnectable sidebar carrier unless the user
- * explicitly selects the standalone Electron window, Chrome, or Edge.
+ * view). Otherwise it requires a reconnectable sidebar carrier, or an
+ * explicitly selected installed browser / standalone Electron window.
  * @module dsh-browser/browser-electron
  */
 
@@ -105,7 +105,7 @@ function overlayTag(): string {
  * The surface this host would use for an open, echoed to the client.
  *
  * The client must not place a tab when the host is in "builtin" mode, or when an installed
- * Chrome/Edge/standalone Electron channel is selected (issue #106): that combination is the double-open.
+ * Chrome/Edge or standalone Electron channel is selected (issue #106): that combination is the double-open.
  * @returns "panel" or "builtin".
  */
 function readSurfaceForRoute(): 'panel' | 'builtin' {
@@ -117,8 +117,7 @@ function readSurfaceForRoute(): 'panel' | 'builtin' {
     const parsed = JSON.parse(fs.readFileSync(settingsPath(), 'utf8').replace(/^\uFEFF/u, '')) as { browser?: { surface?: unknown; channel?: unknown } }
     if (parsed.browser?.surface === 'builtin') return 'builtin'
     if (parsed.browser?.surface === 'panel') return 'panel'
-    const channel = parsed.browser?.channel
-    return channel === 'chrome' || channel === 'edge' || channel === 'electron' ? 'builtin' : 'panel'
+    return parsed.browser?.channel === 'chrome' || parsed.browser?.channel === 'edge' || parsed.browser?.channel === 'electron' ? 'builtin' : 'panel'
   } catch { return 'panel' }
 }
 
@@ -426,7 +425,11 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           ...target,
           connected: () => adoptedCarrier === host && host.available(),
           reveal: async () => {
-            await host.presentView({ id: target.tabId, sendCommand: async () => ({}) }, target.owner, { quiet: false })
+            const session = provider.watchableSessions().find(id => id === target.session)
+            if (session !== undefined) {
+              const tab = provider.sessions.get(session)?.tabs[provider.sessions.get(session)?.activeIndex ?? 0]
+              if (tab !== undefined) host.showView(tab.handle, owner, { quiet: false })
+            }
             return true
           },
         })), { exclusive: false })
@@ -496,15 +499,14 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // spawns a browser window. (An earlier version launched it here, which meant a
   // browser appeared the moment the plugin loaded — reported and fixed.)
   const channel = settings.get().browser.channel
-  // Explicit standalone Electron window: spawns the plugin's own Electron child
-  // on first use (never on construction), reusing any pre-existing Electron binary
-  // on disk or one provisioned on demand from Settings → Browser → Readiness.
   if (channel === 'electron') {
     const profileRoot = join(dshHome(), BROWSER_PROFILE_DIR)
     adoptLegacyProfileRoot(profileRoot)
     ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = 'standalone-electron'
-    const standalone = new RemoteElectronViewHost(defaultHostMainPath())
-    adopt(standalone, 'will drive the standalone Electron window (on-demand runtime)', choice)
+    if (!(adoptedCarrier instanceof RemoteElectronViewHost)) {
+      adopt(new RemoteElectronViewHost(defaultHostMainPath()),
+        'will drive the standalone Electron browser window (on-demand runtime)', choice)
+    }
     return
   }
   // Naming a browser is a decision about which one to use, so it also decides whether the
@@ -811,7 +813,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           } : undefined,
           selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
             : adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.activeCarrier()
-            : adoptedCarrier instanceof ExtensionBrowserViewHost ? 'extension' : adoptedCarrier instanceof SystemBrowserViewHost ? 'system' : 'bundled',
+            : adoptedCarrier instanceof ExtensionBrowserViewHost ? 'extension'
+            : adoptedCarrier instanceof SystemBrowserViewHost ? 'system'
+            : adoptedCarrier instanceof RemoteElectronViewHost ? 'bundled'
+            : 'bundled',
           fallbackReason: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallbackReason : undefined,
           systemConnection: () => adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.fallback.connectionStatus?.() : adoptedCarrier instanceof SystemBrowserViewHost ? adoptedCarrier.connectionStatus() : undefined,
           hasBinary: hasElectronRuntime,
