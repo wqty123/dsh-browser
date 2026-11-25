@@ -910,12 +910,18 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
         const routes: readonly (readonly [string, (request: IncomingMessage, response: ServerResponse) => void | Promise<void>, string])[] = [
           [CLIENT_VERSION_ROUTE, (_request, response) => {
             // 客户端产物的版本指纹：内容变了，浏览器就应换到新 bundle。
-            const clientPath = fileURLToPath(new URL('../../dist/client.cjs', import.meta.url))
+            const candidates = [
+              fileURLToPath(new URL('../client.js', import.meta.url)),
+              fileURLToPath(new URL('../../lib/client.js', import.meta.url)),
+            ]
             let version = "unknown"
-            try {
-              const stat = statSync(clientPath)
-              version = `${Math.round(stat.mtimeMs)}-${stat.size}`
-            } catch { /* 读不到就返回 unknown：客户端不会重载 */ }
+            for (const clientPath of candidates) {
+              try {
+                const stat = statSync(clientPath)
+                version = `${Math.round(stat.mtimeMs)}-${stat.size}`
+                break
+              } catch { /* 读不到就试下一个候选路径 */ }
+            }
             response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
             response.end(JSON.stringify({ ok: true, version }))
           }, 'dsh-builtin-browser: client version'],
