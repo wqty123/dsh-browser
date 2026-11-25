@@ -1201,17 +1201,53 @@ interface PreviewBrowser {
   watchableSessions?(): readonly string[]
 }
 
+/**
+ * The context whose `connection` resolution may reach `connection.authentication`.
+ *
+ * DSH >= 0.2.3 moved the session check behind `connection.admit()`, and that method reads
+ * `connection.authentication` through the CALLING context: cordis refuses the property for a
+ * context that never injected it (`cannot get property "connection.authentication" without
+ * inject`). The plugin's own inject list cannot carry the name — cordis turns a declared inject
+ * into a hard dependency, so naming a service that older hosts do not provide would stop the
+ * plugin from loading at all. `ctx.inject` is the non-blocking form: the callback receives a
+ * context that has the service, and simply never runs on a host without it.
+ */
+const admissionContexts = new WeakMap<Context, () => Context>()
+
+function admissionContext(ctx: Context): () => Context {
+  const cached = admissionContexts.get(ctx)
+  if (cached !== undefined) return cached
+  let injected: Context | undefined
+  const resolve = (): Context => injected ?? ctx
+  const register = (ctx as unknown as {
+    inject?: (deps: readonly string[], callback: (inner: Context) => void) => void
+  }).inject
+  if (typeof register === 'function') {
+    try {
+      register.call(ctx, ['connection.authentication'], (inner) => {
+        injected = inner
+      })
+    } catch {
+      // No inject helper on this surface: the plugin's own context stays in use.
+    }
+  }
+  admissionContexts.set(ctx, resolve)
+  return resolve
+}
+
 /** Bind the host's signed browser-session authentication to a plugin route. */
 function authenticated(ctx: Context, handler: BrowserHttpHandler): BrowserHttpHandler {
+  const admitted = admissionContext(ctx)
   return authenticatedRoute(() => {
-    const surface = ctx as unknown as { get(name: string): BrowserConnection | undefined }
+    const surface = admitted() as unknown as { get(name: string): BrowserConnection | undefined }
     return surface.get('connection')
   }, handler)
 }
 
 function paired(ctx: Context, handler: BrowserHttpHandler): BrowserHttpHandler {
+  const admitted = admissionContext(ctx)
   return pairedRoute(() => {
-    const surface = ctx as unknown as { get(name: string): BrowserPairingConnection | undefined }
+    const surface = admitted() as unknown as { get(name: string): BrowserPairingConnection | undefined }
     return surface.get('connection')
   }, handler)
 }

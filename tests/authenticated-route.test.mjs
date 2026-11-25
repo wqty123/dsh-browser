@@ -109,3 +109,47 @@ test('machine-wide bridge changes require a direct loopback request', () => {
   assert.equal(isDirectLoopback(request('192.168.1.20')), false)
   assert.equal(isDirectLoopback(request(undefined)), false)
 })
+
+test('a DSH 0.2.3 host is asked to admit through connection.admit()', async () => {
+  let writes = 0
+  await withServer(() => ({ admit: () => ({ peer: { id: 'peer' } }) }), (_request, response) => {
+    writes++
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ ok: true }))
+  }, async base => {
+    const response = await fetch(base + '/settings', { headers: { cookie: 'dsh_session=signed-test-cookie' } })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { ok: true })
+  })
+  assert.equal(writes, 1, 'an admitted request reaches the handler')
+})
+
+test('a host admission rejection completes the response and skips the handler', async () => {
+  const cases = [
+    [401, { error: 'unauthorized' }],
+    [403, { error: 'forbidden' }],
+    [503, { error: 'browser-auth-unavailable' }],
+  ]
+  for (const [rejection, body] of cases) {
+    await withServer(() => ({ admit: () => ({ rejection }) }), () => assert.fail('must not run when the host rejects'), async base => {
+      const response = await fetch(base + '/settings')
+      assert.equal(response.status, rejection)
+      assert.deepEqual(await response.json(), body)
+    })
+  }
+})
+
+test('an admission entry that throws keeps the route failing closed', async () => {
+  // `admit` reads `connection.authentication` through the calling context, so a context that did
+  // not inject it throws instead of refusing: `cannot get property "connection.authentication"
+  // without inject`. That is not an admission, and these routes must never run on it.
+  await withServer(() => ({
+    admit() {
+      throw new Error('cannot get property "connection.authentication" without inject')
+    },
+  }), () => assert.fail('must not run without an admission answer'), async base => {
+    const response = await fetch(base)
+    assert.equal(response.status, 503)
+    assert.deepEqual(await response.json(), { error: 'browser-auth-unavailable' })
+  })
+})
