@@ -132,10 +132,10 @@ export function forgetCursor<TView>(handle: TView): void {
 /**
  * Draw (or move) the pointer overlay on one view's page.
  *
- * Fire-and-forget: a page that is mid-navigation, cross-origin-blocked, or
- * otherwise unable to answer must not turn a successful operation into a
- * failure, and the navigation that just committed may still be replacing the
- * document this call would have painted into.
+ * Best-effort: a page that is mid-navigation, cross-origin-blocked, or otherwise
+ * unable to answer must not turn a successful operation into a failure. Returns
+ * a settled promise so callers like click() can optionally wait briefly for the
+ * paint before dispatching mouse events without racing the press/release pair.
  * @param handle - the view to paint into.
  * @param x - viewport x in CSS pixels.
  * @param y - viewport y in CSS pixels.
@@ -151,12 +151,12 @@ export function paintCursor<TView>(
   evaluate: (handle: TView, expression: string) => Promise<unknown>,
   label?: string,
   force = false,
-): void {
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return
+): Promise<void> {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return Promise.resolve()
   const roundedX = Math.round(x)
   const roundedY = Math.round(y)
-  if (!cursorNeedsPaint(handle, roundedX, roundedY, action, force)) return
+  if (!cursorNeedsPaint(handle, roundedX, roundedY, action, force)) return Promise.resolve()
   const key = handle as unknown as object
   if (key !== null && typeof key === 'object') lastPlaced.set(key, { x: roundedX, y: roundedY, action })
-  void evaluate(handle, cursorScript(roundedX, roundedY, action, label)).catch(() => {})
+  return Promise.resolve(evaluate(handle, cursorScript(roundedX, roundedY, action, label))).then(() => undefined, () => undefined)
 }

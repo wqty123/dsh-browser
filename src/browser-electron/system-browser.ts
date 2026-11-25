@@ -1229,8 +1229,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         : await this.ensureSession(viewId)
       /**
        * Send one page command, rebuilding the attach once if the browser no longer knows the
-       * session. Never rebuilds a target that was destroyed or closed by the user, and never
-       * initializes a new page when `initialize: false` (issue #105).
+       * session. Re-attaches to the original live target instead of spawning a blank page,
+       * never rebuilds a target that was destroyed or closed by the user, and never initializes
+       * a new page when `initialize: false` (issue #105).
        */
       const sendWithAttach = async (target: string): Promise<Record<string, unknown>> => {
         try {
@@ -1239,9 +1240,16 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           if (!/Session with given id not found|No session with given id/i.test(message)) throw error
-          // Drop the dead attach so `ensureSession` builds a new one instead of returning the same id.
-          const stale = this.views.get(viewId)
-          if (stale !== undefined) this.views.delete(viewId)
+          // If a concurrent call already re-attached this view on the same client, use that session.
+          const current = this.views.get(viewId)
+          if (current !== undefined && current.client === client && current.session !== target) {
+            const retried = await client.send(method, params, current.session)
+            return (retried ?? {}) as Record<string, unknown>
+          }
+          // Drop only the stale mapping for this exact client+session.
+          if (current !== undefined && current.client === client && current.session === target) {
+            this.views.delete(viewId)
+          }
           const deadTarget = this.sessions.get(target)
           this.sessions.delete(target)
           if (!initialize) throw error
@@ -1253,6 +1261,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
                 : true)
               .catch(() => true)
             if (!alive) throw error
+            // The page target is still alive: re-attach to IT rather than calling ensureSession(),
+            // which would adopt or create a fresh about:blank tab and orphan the user's page.
+            const rebuilt = await this.reattachTarget(client, viewId, deadTarget)
+            const retried = await client.send(method, params, rebuilt)
+            return (retried ?? {}) as Record<string, unknown>
           }
           const rebuilt = await this.ensureSession(viewId)
           const retried = await client.send(method, params, rebuilt)
@@ -1381,6 +1394,32 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     } else {
       cleanup()
     }
+  }
+
+  /**
+   * Re-attach an existing live target whose CDP session id became stale, sharing one in-flight
+   * attach across concurrent callers for the same view and never creating a replacement blank page.
+   */
+  private async reattachTarget(client: CdpClient, viewId: string, targetId: string): Promise<string> {
+    const existing = this.views.get(viewId)
+    if (existing !== undefined && existing.client === client) return existing.session
+    const inFlight = this.sessionBuilding.get(viewId)
+    if (inFlight !== undefined) return await inFlight
+    const building = (async (): Promise<string> => {
+      const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
+      const sessionId = attached?.sessionId
+      if (typeof sessionId !== 'string') {
+        throw new Error(`dsh-builtin-browser: could not reattach to existing page ${targetId}`)
+      }
+      await this.presentAsChrome(client, sessionId)
+      this.sessions.set(sessionId, targetId)
+      this.views.set(viewId, { session: sessionId, client })
+      return sessionId
+    })().finally(() => {
+      this.sessionBuilding.delete(viewId)
+    })
+    this.sessionBuilding.set(viewId, building)
+    return await building
   }
 
   /**

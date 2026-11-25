@@ -124,11 +124,39 @@ export abstract class ProviderInteraction extends ProviderObservation {
     let y = 0
     if ('target' in request) {
       // Semantic targeting (②): locate the element in-page, scroll it into
-      // view, and click its center — no coordinate guessing needed.
+      // view, wait for the compositor to commit any scroll offset so CDP
+      // hit-testing matches the scrolled layout, and return top-viewport center.
       const locateMs = PROVIDER_TIMEOUTS.lookup
       const body = `
+        const absRect = node => {
+          const r = node.getBoundingClientRect()
+          let ax = r.x, ay = r.y
+          let d = node.ownerDocument
+          while (d && d.defaultView && d.defaultView.frameElement) {
+            const fr = d.defaultView.frameElement.getBoundingClientRect()
+            ax += fr.x; ay += fr.y
+            d = d.defaultView.frameElement.ownerDocument
+          }
+          return { x: ax, y: ay, width: r.width, height: r.height }
+        }
+        const before = absRect(el)
         el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' })
-        const r = el.getBoundingClientRect()
+        const moved = absRect(el)
+        const needsFrame = Math.abs(moved.x - before.x) > 0.5 || Math.abs(moved.y - before.y) > 0.5
+          || before.y < 0 || before.y + before.height > innerHeight
+          || before.x < 0 || before.x + before.width > innerWidth
+        if (needsFrame) {
+          const nextFrame = () => new Promise(resolve => {
+            if (typeof requestAnimationFrame !== 'function') { setTimeout(resolve, 16); return }
+            let done = false
+            const finish = () => { if (!done) { done = true; resolve() } }
+            const timer = setTimeout(finish, 50)
+            requestAnimationFrame(() => { clearTimeout(timer); finish() })
+          })
+          await nextFrame()
+          await nextFrame()
+        }
+        const r = absRect(el)
         return { ok: true, x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
       `
       const script = this.buildTargetScript(request.target, locateMs, body)
@@ -167,6 +195,10 @@ export abstract class ProviderInteraction extends ProviderObservation {
         signal,
         `browser: click ${label} timed out after ${timeoutMs}ms`,
       )
+    // Paint the synthetic pointer before dispatching the mouse sequence so the
+    // overlay evaluation never interleaves between mouseMoved, mousePressed, and
+    // mouseReleased or races a form-submit navigation triggered by the click.
+    await this.showCursorSettled(handle, x, y, 'click', 'click', true)
     // Chromium routes a synthesized `mousePressed` to the widget's *current*
     // hover target rather than hit-testing the coordinates, and a real pointer
     // click is always preceded by movement. A view that has never received a
@@ -179,11 +211,6 @@ export abstract class ProviderInteraction extends ProviderObservation {
     } catch (error) {
       throw new BrowserError(`browser: click failed: ${String(error)}`, 'BROWSER_CLICK_FAILED', { cause: error })
     }
-    // Paint before the press so the ripple is already on screen when the click
-    // lands — the cursor exists to show the human WHERE the agent acts.
-    // Name the operation in the overlay: the pointer is the "agent is driving this
-    // tab" signal, so the bubble is what lets a human follow along without the log.
-    this.showCursor(handle, x, y, 'click', 'click', true)
     const release = (): void => {
       // Back to the handle the PRESS may have landed on, deliberately not to the currently
       // active tab: this only runs after a failed press/release, and re-targeting a
@@ -982,8 +1009,26 @@ export abstract class ProviderInteraction extends ProviderObservation {
    * @param force - paint even when the pointer is already there (a click ripple must
    *   always play; a bare move need not repeat).
    */
-  private showCursor(handle: ElectronViewHandle, x: number, y: number, action: CursorAction, label?: string, force = false): void {
+  private showCursor(handle: ElectronViewHandle, x: number, y: number, action: CursorAction, label?: string, force = false): Promise<void> {
+    if (this.settingsSource !== undefined && !this.settingsSource().ui.virtualCursor) return Promise.resolve()
+    return paintCursor(handle, x, y, action, (target, expression) => handleSendEvaluate(target, expression), label, force)
+  }
+
+  /** Best-effort bounded wait for the click cursor paint before pointer dispatch. */
+  private async showCursorSettled(handle: ElectronViewHandle, x: number, y: number, action: CursorAction, label?: string, force = false): Promise<void> {
     if (this.settingsSource !== undefined && !this.settingsSource().ui.virtualCursor) return
-    paintCursor(handle, x, y, action, (target, expression) => handleSendEvaluate(target, expression), label, force)
+    const pending = this.showCursor(handle, x, y, action, label, force)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        pending,
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, 250)
+          timer.unref?.()
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
   }
 }

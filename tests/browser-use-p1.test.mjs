@@ -35,6 +35,33 @@ JSON.parse(await js('document.getElementById("echo").textContent'))`))
     plan: 'pro', notes: 'line one\r\nline two', nick: 'ALLY', terms: 'yes' }])
 })
 
+test('long form below the fold: clicking Submit order posts the form and keeps the tab intact', { skip, timeout: 60000 }, async t => {
+  const site = await fixtureSite(t)
+  const { run } = await codeBrowser(t)
+  const done = ok(await run(`await goto_url(${JSON.stringify(site.url('/long-form'))})
+await fill([
+  { name: 'custname', value: 'Bob' },
+  { name: 'custtel', value: '555-0100' },
+  { name: 'custemail', value: 'bob@example.test' },
+  { name: 'size', kind: 'radio', value: 'large' },
+  { name: 'topping', kind: 'checkbox', value: 'true' },
+  { name: 'comments', kind: 'textarea', value: 'Ring bell' },
+])
+await click('Submit order')
+await wait_for_text('bob@example.test')
+const tabs = await list_tabs()
+const body = JSON.parse(await js('document.body.innerText'))
+JSON.stringify({ tabCount: tabs.length, url: tabs[0]?.url, form: body.form })`))
+  const summary = JSON.parse(done.output.trim().split('\n').at(-1))
+  assert.equal(summary.tabCount, 1, 'no stray about:blank tab created on submit')
+  assert.equal(summary.url, site.url('/long-form'))
+  assert.equal(site.state.forms.length, 1, 'clicking Submit order posted to the server')
+  assert.deepEqual(summary.form, {
+    custname: 'Bob', custtel: '555-0100', custemail: 'bob@example.test',
+    size: 'large', topping: 'bacon', comments: 'Ring bell',
+  })
+})
+
 test('pagination: follows Next until it disappears, and a Load more feed until it is exhausted', { skip, timeout: 60000 }, async t => {
   const site = await fixtureSite(t)
   const { run } = await codeBrowser(t)
