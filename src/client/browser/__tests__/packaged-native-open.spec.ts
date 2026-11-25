@@ -21,16 +21,17 @@ const external = new Map<string, unknown>([
 ])
 
 function load(source: string) {
-  let factory: ((require: (id: string) => unknown) => any) | undefined
+  let registered: { factory?: (require: (id: string) => unknown) => any; meta?: () => { stylesheets?: Record<string, { text: (context: { asset: (url: string) => string }) => string }> } } | undefined
   const previous = (window as any).__ModuleLoader__
-  ;(window as any).__ModuleLoader__ = { load: (entry: any) => { factory = entry.factory } }
+  ;(window as any).__ModuleLoader__ = { load: (entry: any) => { registered = entry } }
   try { vm.runInThisContext(source, { filename: 'packaged-client.js' }) }
   finally { (window as any).__ModuleLoader__ = previous }
-  if (factory === undefined) throw new Error('Client bundle did not register a factory')
-  return factory(id => {
+  if (typeof registered?.factory !== 'function') throw new Error('Client bundle did not register a factory')
+  const exports = registered.factory(id => {
     if (!external.has(id)) throw new Error(`Unprovided client external: ${id}`)
     return external.get(id)
   })
+  return { exports, meta: registered.meta }
 }
 
 afterEach(() => {
@@ -98,7 +99,7 @@ async function boot(pluginSource: string) {
       }
     }
   }
-  const host = load(gunzipSync(readFileSync(resolve(root, 'tests/fixtures/dsh-host-patch/client.after.js.gz'))).toString())
+  const host = load(gunzipSync(readFileSync(resolve(root, 'tests/fixtures/dsh-host-patch/client.after.js.gz'))).toString()).exports
   host.apply(ctx)
   const seat = registrations.find(entry => entry.name === 'rightbar.session')
   const surface = seat.store.create('session-packaged')
@@ -106,7 +107,8 @@ async function boot(pluginSource: string) {
   const panel = document.createElement('div'); panel.id = 'native-root'; panel.dataset.sidebarRightSession = 'session-packaged'
   document.body.append(panel)
   registrations.find(entry => entry.name === 'rightbar').inject().mountNativeOwner('session-packaged', panel.id)
-  load(pluginSource).apply(ctx)
+  const plugin = load(pluginSource)
+  plugin.exports.apply(ctx)
   const body = registrations.find(entry => entry.name === 'sidebar.right.pane.tab' && entry.key === 'dsh-builtin-browser')
   const browser = body.inject('session-packaged', body.store.create('session-packaged').actions)
   const mounted = new Map<string, { abort: AbortController; revision: number }>()
@@ -131,7 +133,7 @@ async function boot(pluginSource: string) {
   }
   const stop = surface.subscribe(() => queueMicrotask(render))
   return {
-    ctx, native, browser, api: (globalThis as any).__dshBuiltinBrowser, render,
+    ctx, native, browser, pluginMeta: plugin.meta, api: (globalThis as any).__dshBuiltinBrowser, render,
     async dispose() {
       stop(); for (const { abort } of mounted.values()) abort.abort()
       await browser.dispose()
@@ -143,19 +145,22 @@ async function boot(pluginSource: string) {
 
 function pluginBundle() {
   const archive = process.env.DSH_BROWSER_TEST_ARCHIVE
-  return archive === undefined ? readFileSync(resolve(root, 'dist/client.cjs'), 'utf8')
-    : execFileSync('tar', ['-xOf', archive, 'package/dist/client.cjs'], { encoding: 'utf8', maxBuffer: 4_000_000 })
+  return archive === undefined ? readFileSync(resolve(root, 'lib/client.js'), 'utf8')
+    : execFileSync('tar', ['-xOf', archive, 'package/lib/client.js'], { encoding: 'utf8', maxBuffer: 4_000_000 })
 }
 
 it('opens native documents through the shipped plugin and rc.3 sidebar bundles, including retries and independent views', async () => {
   const h = await boot(pluginBundle())
   try {
     expect(h.ctx.sidebarRightTabs.get('browser').multiple).toBe(false)
-    const styles = Array.from(document.head.querySelectorAll('style[data-plugin="dsh-builtin-browser"]'))
-    expect(styles.map(style => style.getAttribute('data-plugin-css'))).toEqual(expect.arrayContaining([
-      'dsh-builtin-browser/Browser.module.css', 'dsh-builtin-browser/ReferenceDock.module.css',
+    expect(document.head.querySelectorAll('style[data-plugin="dsh-builtin-browser"]')).toHaveLength(0)
+    const stylesheets = h.pluginMeta?.().stylesheets ?? {}
+    expect(Object.keys(stylesheets)).toEqual(expect.arrayContaining([
+      'src/client/view/Browser.module.css',
+      'src/client/reference/client/production/ReferenceDock.module.css',
     ]))
-    expect(styles.map(style => style.textContent).join('\n')).toMatch(/height:38px/)
+    const cssText = Object.values(stylesheets).map(sheet => sheet.text({ asset: url => url })).join('\n')
+    expect(cssText).toMatch(/height:38px/)
     const results = []
     for (const [viewId, url] of [['first', 'https://example.test/one'], ['first', 'https://example.test/one'], ['retry', 'https://example.test/two']]) {
       const result = await h.api.initializePanel('session-packaged', url, { viewId, deadline: Date.now() + 1500 })

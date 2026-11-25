@@ -18,7 +18,6 @@
   },
   "files": [
     "lib",
-    "dist",
     "src",
     "scripts",
     "tools/accept-desktop.mjs",
@@ -54,7 +53,7 @@
       "./browser-electron": "./lib/browser-electron/entry.js",
       "./tool-browser": "./lib/tool-browser/index.js",
       "./startpage": "./lib/startpage.js",
-      "./client": "./dist/client.cjs",
+      "./client": "./lib/client.js",
       "./cordis.patch.yml": "./cordis.patch.yml",
       "./package.json": "./package.json"
     }
@@ -96,12 +95,13 @@
     "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-settings": "workspace:^",
     "@types/node": "^22.0.0",
+    "lightningcss": "^1.32.0",
     "react-dom": "^18.2.0",
     "tldts": "6.1.86",
     "typescript": "^5.5.0"
   },
   "engines": {
-    "dsh": ">=0.2.2-rc.3 <0.3.0",
+    "dsh": ">=0.2.3-alpha.2 <0.3.0",
     "node": "^24.22.3 || >=26.13.1"
   },
   "dsh": {
@@ -114,11 +114,13 @@
     "client": {
       "platform": "web",
       "inject": [
+        "@deepseek-ai/dsh-api-workspace-controller",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-shortcuts",
         "@deepseek-ai/dsh-client-ui-context-menu",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-sidebar-right",
         "@deepseek-ai/dsh-client-ui-slots"

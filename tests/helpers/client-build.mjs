@@ -1,17 +1,17 @@
-// The client half as it ships: `dist/client.cjs`, produced by `node scripts/build.mjs`.
+// The client half as it ships: `lib/client.js`, produced by `node scripts/build.mjs`.
 //
 // Tests read the built bundle instead of a checked-in copy, so they cannot drift from what DSH loads.
 // The bundler keeps one `// <source path>` comment ahead of every module it inlines; those markers let
 // a test pick out one module's compiled code without re-implementing the build.
 import { existsSync, readFileSync } from 'node:fs'
 
-export const CLIENT_BUNDLE = new URL('../../dist/client.cjs', import.meta.url)
+export const CLIENT_BUNDLE = new URL('../../lib/client.js', import.meta.url)
 
 let cached
 
 export function clientBundle() {
   if (cached !== undefined) return cached
-  if (!existsSync(CLIENT_BUNDLE)) throw new Error('dist/client.cjs is missing: run `node scripts/build.mjs` before the client tests')
+  if (!existsSync(CLIENT_BUNDLE)) throw new Error('lib/client.js is missing: run `node scripts/build.mjs` before the client tests')
   cached = readFileSync(CLIENT_BUNDLE, 'utf8')
   return cached
 }
@@ -29,7 +29,7 @@ export function bundledModules(source = clientBundle()) {
 
 export function bundledModule(path, source = clientBundle()) {
   const code = bundledModules(source).get(path)
-  if (code === undefined) throw new Error(`dist/client.cjs no longer inlines ${path}`)
+  if (code === undefined) throw new Error(`lib/client.js no longer inlines ${path}`)
   return code
 }
 

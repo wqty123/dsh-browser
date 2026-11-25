@@ -1,7 +1,7 @@
 // 构建入口：宿主侧用 tsc 编到 `lib/`（类型错误不阻断——迁移来的源码在更严格的配置下仍有既有类型问题，
-// 但这些文件本来就能跑，发布形态由 0.5.8 验证过），客户端半交给 tsdown，最后收尾出口并守卫形态。
-//
-// 顺序有意为之：**先删 ESM 薄壳，再守卫**，否则守卫会在删除前就看到残留而误报。
+// 但这些文件本来就能跑），客户端半由 `scripts/build-client.mjs` 直接以 DSH 0.2.3 信封形态编到
+// `lib/client.js`（`window.__ModuleLoader__.load({ id, factory, meta })` + `meta().stylesheets`），
+// 最后收尾出口并守卫形态。
 import { spawnSync } from 'node:child_process'
 import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -45,22 +45,25 @@ function entryOf(relative, packageName) {
 runNode([entryOf('typescript/bin/tsc', 'typescript'), '-p', 'tsconfig.build.json'], true)
 runNode(['scripts/bundle-host.mjs'])
 
-// 2) 客户端半：tsdown → dist/client.cjs（另有一份无用的 ESM 薄壳，第 3 步删掉）
-runNode([entryOf('tsdown/dist/run.mjs', 'tsdown')])
+// 2) 客户端半：rolldown + lightningcss → lib/client.js（0.2.3 `{ id, factory, meta }` 信封）
+runNode(['scripts/build-client.mjs'])
 
-// 3) 删掉客户端 ESM 薄壳：内容是 `export { apply, inject } from "./client/index.ts"`——按源码路径
-//    转发，被 vite 加载即 `Failed to resolve import`，整页被遮罩。发布只用 dist/client.cjs。
-for (const file of [join(cwd, 'dist', 'client.mjs'), join(cwd, 'dist', 'client.mjs.map')]) {
+// 3) 清理历史遗留的 dist/client.* 产物，避免旧产物残留在发布包里
+for (const file of [
+  join(cwd, 'dist', 'client.cjs'),
+  join(cwd, 'dist', 'client.mjs'),
+  join(cwd, 'dist', 'client.mjs.map'),
+]) {
   if (existsSync(file)) {
     rmSync(file, { force: true })
-    console.log(`[build] 已删除客户端 ESM 薄壳：${file}`)
+    console.log(`[build] 已清理旧客户端产物：${file}`)
   }
 }
 
-// 4) 出口收尾：写回 dev→src / publish→lib+dist 的两套出口（构建链会覆盖 exports）
+// 4) 出口收尾：写回 dev→src / publish→lib 的两套出口
 runNode(['scripts/fix-exports.mjs'])
 
-// 5) 出口守卫：形态不合格直接失败（含「dev 指向 dist」这条反复出过的事故）
+// 5) 出口守卫：形态与信封不合格直接失败
 runNode(['scripts/verify-exports.mjs'])
 
-console.log('[build] 完成：lib/<宿主侧> + dist/client.cjs<客户端半>')
+console.log('[build] 完成：lib/<宿主侧> + lib/client.js<客户端半>')
