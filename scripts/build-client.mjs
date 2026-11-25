@@ -10,14 +10,14 @@
  * are compiled with lightningcss (`pattern: '[hash]_[local]'`, `minify: true`) and handed
  * off through `meta().stylesheets` instead of self-injecting `<style>` tags at runtime.
  */
-import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path'
-import { rolldown } from 'rolldown'
+import { pathToFileURL } from 'node:url'
 import { transform } from 'lightningcss'
 
+const require = createRequire(import.meta.url)
 const PACKAGE_DIR = process.cwd()
 const MANIFEST = JSON.parse(readFileSync(join(PACKAGE_DIR, 'package.json'), 'utf8').replace(/^\uFEFF/, ''))
 const PLUGIN_ID = MANIFEST.name
@@ -113,6 +113,7 @@ async function urlReplacements(cssBuffer, from) {
   transform({
     filename: from,
     code: cssBuffer,
+    errorRecovery: true,
     visitor: {
       Url(url) {
         const value = url.url
@@ -149,11 +150,19 @@ function urlVisitor(replacements) {
   }
 }
 
+async function loadRolldown() {
+  try {
+    return await import('rolldown')
+  } catch {
+    return await import(pathToFileURL(createRequire(require.resolve('tsdown')).resolve('rolldown')).href)
+  }
+}
+
 async function buildClient() {
+  const { rolldown } = await loadRolldown()
   const mode = process.env.NODE_ENV ?? 'production'
   const externals = buildExternals()
   const styles = new Map()
-  const styleMarker = `/*__dshChunkStyles_${randomBytes(16).toString('hex')}__*/`
 
   const build = await rolldown({
     input: ENTRY,
@@ -197,6 +206,7 @@ async function buildClient() {
             code: source,
             cssModules: { pattern: '[hash]_[local]' },
             minify: true,
+            errorRecovery: true,
             ...(visitor === undefined ? {} : { visitor }),
           })
           const classMap = {}
@@ -204,7 +214,7 @@ async function buildClient() {
             classMap[local] = entry.name
           }
           styles.set(virtualId, { path: stylesheetKey(fileId), css: code.toString() })
-          return { code: `export default ${JSON.stringify(classMap)};`, moduleSideEffects: 'no-treeshake' }
+          return { code: `export default ${JSON.stringify(classMap)};`, moduleSideEffects: true }
         },
       },
       {
@@ -227,6 +237,7 @@ async function buildClient() {
             filename: fileId,
             code: source,
             minify: true,
+            errorRecovery: true,
             ...(visitor === undefined ? {} : { visitor }),
           })
           return `export default ${JSON.stringify(code.toString())};`
@@ -251,10 +262,11 @@ async function buildClient() {
             filename: fileId,
             code: source,
             minify: true,
+            errorRecovery: true,
             ...(visitor === undefined ? {} : { visitor }),
           })
           styles.set(virtualId, { path: stylesheetKey(fileId), css: code.toString() })
-          return { code: 'export {};', moduleSideEffects: 'no-treeshake' }
+          return { code: 'export {};', moduleSideEffects: true }
         },
       },
     ],
@@ -267,15 +279,10 @@ async function buildClient() {
       entryFileNames: 'client.js',
       banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PLUGIN_ID)}, factory: (require) => {`,
       intro: 'var module = { exports: {} }; var exports = module.exports;',
-      footer: `return module.exports; }${styleMarker} });`,
     })
     const chunk = output.find(item => item.type === 'chunk')
     if (chunk === undefined || chunk.type !== 'chunk') {
       throw new Error(`[build-client] rolldown produced no chunk for ${PLUGIN_ID}`)
-    }
-    const markerIndex = chunk.code.indexOf(styleMarker)
-    if (markerIndex < 0 || chunk.code.indexOf(styleMarker, markerIndex + styleMarker.length) !== -1) {
-      throw new Error(`[build-client] missing or duplicated style marker in ${PLUGIN_ID} client bundle`)
     }
     const resources = new Map()
     for (const moduleId of Object.keys(chunk.modules)) {
@@ -287,7 +294,7 @@ async function buildClient() {
       .map(style => `${JSON.stringify(style.path)}: { text: (context) => ${JSON.stringify(style.css)} }`)
       .join(',')
     const metaSnippet = entries.length === 0 ? '' : `, meta: () => ({ stylesheets: {${entries}} })`
-    const finalCode = chunk.code.slice(0, markerIndex) + metaSnippet + chunk.code.slice(markerIndex + styleMarker.length)
+    const finalCode = `${chunk.code}\nreturn module.exports; }${metaSnippet} });\n`
     await mkdir(dirname(OUT_FILE), { recursive: true })
     await writeFile(OUT_FILE, finalCode, 'utf8')
     console.log(`[build-client] 已生成 lib/client.js（${resources.size} 份样式表已挂入 meta().stylesheets）`)
