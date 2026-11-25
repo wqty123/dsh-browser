@@ -110,7 +110,7 @@ import type { CarrierPage } from '../browser/types.ts'
 import { readTabHandle, resolveSessionHandle, resolveTabHandle, sessionWireId, tabWireId, type BrowserSessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 
 /** Which browser the user asked for. */
-export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'auto' | 'sidebar'
+export type BrowserChannel = 'bundled' | 'chrome' | 'edge' | 'electron' | 'auto' | 'sidebar'
 
 /** A resolved browser installation. */
 export interface DetectedBrowser {
@@ -249,7 +249,7 @@ export function detectBrowser(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): DetectedBrowser | undefined {
-  if (channel === 'bundled') return undefined
+  if (channel === 'bundled' || channel === 'electron' || channel === 'sidebar') return undefined
   const order: DetectedBrowser['kind'][] = channel === 'auto' ? ['chrome', 'edge', 'brave'] : [channel as DetectedBrowser['kind']]
   for (const kind of order) {
     const fromEnv = (kind === 'chrome' ? env.DSH_BROWSER_CHROME_PATH : kind === 'edge' ? env.DSH_BROWSER_EDGE_PATH : undefined)
