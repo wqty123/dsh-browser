@@ -49,10 +49,11 @@ export function readSurface(): 'panel' | 'builtin' {
     const parsed = JSON.parse(raw) as { browser?: { surface?: unknown; channel?: unknown } }
     const surface = parsed.browser?.surface
     if (surface === 'builtin' || surface === 'panel') return surface
-    // Issue #106: an explicit installed browser channel (chrome / edge) must launch and drive that
-    // browser carrier rather than falling into the Web iframe / Desktop sidebar panel by default.
+    // Issue #106 & standalone Electron channel: an explicit external/standalone browser channel
+    // (chrome / edge / electron) must launch and drive that browser carrier rather than falling
+    // into the Web iframe / Desktop sidebar panel by default.
     const channel = parsed.browser?.channel
-    if (channel === 'chrome' || channel === 'edge') return 'builtin'
+    if (channel === 'chrome' || channel === 'edge' || channel === 'electron') return 'builtin'
   } catch { /* no settings yet */ }
   if (declared === 'panel') return 'panel'
   return 'panel'

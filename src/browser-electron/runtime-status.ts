@@ -134,7 +134,9 @@ export interface RuntimeStatusDeps {
 
 /** Which carrier a channel names. */
 function carrierOf(channel: BrowserChannel): CarrierKind {
-  return channel === 'chrome' || channel === 'edge' ? 'system' : 'sidebar'
+  if (channel === 'chrome' || channel === 'edge') return 'system'
+  if (channel === 'electron') return 'bundled'
+  return 'sidebar'
 }
 
 /**
@@ -218,7 +220,10 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
 
   let readiness: Readiness
   let resolvedCarrier: RuntimeStatusReport['resolvedCarrier']
-  if (carrier === 'sidebar') {
+  if (carrier === 'bundled') {
+    resolvedCarrier = 'bundled'
+    readiness = runnable ? 'ready' : 'blocked'
+  } else if (carrier === 'sidebar') {
     resolvedCarrier = 'sidebar'
     readiness = sidebarReady ? 'ready' : 'blocked'
   } else if (selected === 'cdp') {
@@ -234,7 +239,7 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
 
   return {
     ...deps.nativeHostRegistration ? { nativeHostRegistration: deps.nativeHostRegistration() } : {},
-    controlledProfile: resolvedCarrier === 'extension' ? 'user' : resolvedCarrier === 'system' || resolvedCarrier === 'cdp' ? 'plugin' : 'sidebar',
+    controlledProfile: resolvedCarrier === 'extension' ? 'user' : resolvedCarrier === 'system' || resolvedCarrier === 'cdp' || resolvedCarrier === 'bundled' ? 'plugin' : 'sidebar',
     ...(preferExtension && resolvedCarrier === 'cdp' ? { fallbackReason: deps.fallbackReason?.() ?? (extension?.state === 'disabled' ? 'disabled' : 'not-connected') } : {}),
     ...extension === undefined ? {} : { extension },
     channel,
@@ -246,6 +251,6 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
     electron,
     bridge,
     ...shell === undefined ? {} : { shell },
-    canProvision: false,
+    canProvision: resolvedCarrier === 'bundled' && !runnable && snapshot.state !== 'preparing',
   }
 }
