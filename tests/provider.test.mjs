@@ -1,6 +1,3 @@
-// Measured on the same page: after a tab switch every command failed with "Session with given id
-// not found" and nothing in the plugin ever recovered — open, refresh and execute all failed until
-// the browser was restarted. The session id is worthless after that, but the VIEW is fine.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync } from 'node:fs'
@@ -1050,12 +1047,14 @@ test('a stale CDP session is rebuilt once instead of failing forever', () => {
   const source = readFileSync(new URL('../src/browser-electron/system-browser.ts', import.meta.url), 'utf8')
   const at = source.indexOf('const sendWithAttach')
   assert.ok(at !== -1, 'the recovery wrapper exists')
-  const block = source.slice(at, at + 2200)
+  const end = source.indexOf('return await sendWithAttach(session)', at)
+  assert.ok(end !== -1, 'the recovery wrapper has a clear end')
+  const block = source.slice(at, end)
   assert.match(block, /Session with given id not found/, 'it recognises the stale-session error')
   assert.match(block, /this\.views\.delete\(viewId\)/, 'it drops the dead attach')
   assert.match(block, /this\.sessions\.delete\(target\)/, 'and its target mapping')
-  assert.match(block, /const rebuilt = await this\.(?:reattachTarget\(client, viewId, deadTarget\)|ensureSession\(viewId\))/, 'then attaches again')
-  assert.match(block, /client\.send\(method, params, rebuilt\)/, 'and retries the command once')
+  assert.match(block, /const rebuilt = await this\.reattachTarget\(client, viewId, deadTarget\)/, 'reattaches to live targets directly')
+  assert.match(block, /const rebuilt = await this\.ensureSession\(viewId\)/, 'falls back to ensureSession only when no target was recorded')
   // Live targets reattach directly without spawning a blank page; missing targets fall back to ensureSession.
   assert.equal((block.match(/await client\.send\(method, params, rebuilt\)/g) ?? []).length, 2, 'each recovery branch retries once')
 })

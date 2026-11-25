@@ -48,9 +48,10 @@ await fill([
   { name: 'comments', kind: 'textarea', value: 'Ring bell' },
 ])
 await click('Submit order')
-await wait_for_text('bob@example.test')
-const tabs = await list_tabs()
-const body = JSON.parse(await js('document.body.innerText'))
+await wait_for_text('"custname"')
+const tabs = (await list_tabs()).tabs
+const raw = await js('(document.querySelector("pre") || document.body).textContent')
+const body = JSON.parse(raw)
 JSON.stringify({ tabCount: tabs.length, url: tabs[0]?.url, form: body.form })`))
   const summary = JSON.parse(done.output.trim().split('\n').at(-1))
   assert.equal(summary.tabCount, 1, 'no stray about:blank tab created on submit')
