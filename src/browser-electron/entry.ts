@@ -5,8 +5,8 @@ import { BROWSER_PROFILE_DIR, SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '..
  * `BrowserProvider` with `ctx.browser`. The provider needs a view host (real
  * Electron `WebContentsView` objects). When a desktop shell supplies
  * `ctx.electronViewHost`, that host is used (embedded, human-machine shared
- * view). Otherwise it requires a reconnectable sidebar carrier. Only explicitly
- * selected Chrome or Edge may launch an external browser.
+ * view). Otherwise it requires a reconnectable sidebar carrier unless the user
+ * explicitly selects the standalone Electron window, Chrome, or Edge.
  * @module dsh-browser/browser-electron
  */
 
@@ -18,6 +18,7 @@ import z from '@deepseek-ai/schemastery'
 import type { BrowserRuntime } from '../browser/runtime.ts'
 import { ElectronBrowserProvider } from './provider.ts'
 import { provisionElectronInBackground, provisionSnapshot, hasElectronRuntime } from './electron-provision.ts'
+import { RemoteElectronViewHost, defaultHostMainPath } from './remote-host.ts'
 import type { ElectronBrowserViewHost } from './provider.ts'
 import type { CarrierLossReason } from '../browser/types.ts'
 import { randomUUID } from 'node:crypto'
@@ -104,7 +105,7 @@ function overlayTag(): string {
  * The surface this host would use for an open, echoed to the client.
  *
  * The client must not place a tab when the host is in "builtin" mode, or when an installed
- * Chrome/Edge channel is selected (issue #106): that combination is the double-open.
+ * Chrome/Edge/standalone Electron channel is selected (issue #106): that combination is the double-open.
  * @returns "panel" or "builtin".
  */
 function readSurfaceForRoute(): 'panel' | 'builtin' {
@@ -116,7 +117,8 @@ function readSurfaceForRoute(): 'panel' | 'builtin' {
     const parsed = JSON.parse(fs.readFileSync(settingsPath(), 'utf8').replace(/^\uFEFF/u, '')) as { browser?: { surface?: unknown; channel?: unknown } }
     if (parsed.browser?.surface === 'builtin') return 'builtin'
     if (parsed.browser?.surface === 'panel') return 'panel'
-    return parsed.browser?.channel === 'chrome' || parsed.browser?.channel === 'edge' ? 'builtin' : 'panel'
+    const channel = parsed.browser?.channel
+    return channel === 'chrome' || channel === 'edge' || channel === 'electron' ? 'builtin' : 'panel'
   } catch { return 'panel' }
 }
 
@@ -418,6 +420,16 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
             ? 'Browser takeover needs a visible window, but this Chrome/Edge session is running headless. Launch it with a window (browser.headless = windowed) and retry.'
             : undefined,
         })), { exclusive: false })
+      } else if (host instanceof RemoteElectronViewHost) {
+        const provider = referenceProvider!
+        unregisterTakeover = registerCarrierTakeover(ctx.browser, owner => provider.takeoverTargets(owner).map(target => ({
+          ...target,
+          connected: () => adoptedCarrier === host && host.available(),
+          reveal: async () => {
+            await host.presentView({ id: target.tabId, sendCommand: async () => ({}) }, target.owner, { quiet: false })
+            return true
+          },
+        })), { exclusive: false })
       }
       ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
       // A borrowed carrier can lose the process behind it, and this is the only notification that
@@ -484,6 +496,17 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // spawns a browser window. (An earlier version launched it here, which meant a
   // browser appeared the moment the plugin loaded — reported and fixed.)
   const channel = settings.get().browser.channel
+  // Explicit standalone Electron window: spawns the plugin's own Electron child
+  // on first use (never on construction), reusing any pre-existing Electron binary
+  // on disk or one provisioned on demand from Settings → Browser → Readiness.
+  if (channel === 'electron') {
+    const profileRoot = join(dshHome(), BROWSER_PROFILE_DIR)
+    adoptLegacyProfileRoot(profileRoot)
+    ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = 'standalone-electron'
+    const standalone = new RemoteElectronViewHost(defaultHostMainPath())
+    adopt(standalone, 'will drive the standalone Electron window (on-demand runtime)', choice)
+    return
+  }
   // Naming a browser is a decision about which one to use, so it also decides whether the
   // desktop sidebar may take over. Skipping discovery for an explicit choice is what makes
   // that choice real — otherwise a user who picked Chrome would silently get the sidebar,
@@ -604,8 +627,10 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
       const usesExternalBrowser = isPreferredCarrier(adoptedCarrier)
         || adoptedCarrier instanceof SystemBrowserViewHost
         || adoptedCarrier instanceof MissingSystemBrowserHost
+        || adoptedCarrier instanceof RemoteElectronViewHost
         || selectedChannel === 'chrome'
         || selectedChannel === 'edge'
+        || selectedChannel === 'electron'
       const surface = usesExternalBrowser ? 'builtin' : readSurfaceForRoute()
       replyJson(response, 200, { ok: true, surface, open: usesExternalBrowser ? null : fresh ?? null })
     }),
@@ -809,7 +834,9 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           message => ctx.logger?.info?.(`dsh-builtin-browser: ${message}`),
           undefined,
           { force: true },
-        )
+        ).then(() => {
+          if (adoptedCarrier instanceof RemoteElectronViewHost) adoptedCarrier.refreshAvailability()
+        })
         return provisionSnapshot()
       },
     }
