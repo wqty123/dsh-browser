@@ -8,7 +8,7 @@ import type { ProductionRuntime } from '../production/runtime.ts'
 import type { RequestLike } from '../production/http-transport.ts'
 import { ROUTES, type RevealResultWire } from '../production/protocol.ts'
 import { browserSourceRule } from '../production/user-text-rule.ts'
-import { UserTextDocument } from '@deepseek-ai/dsh-client-ui-conversation/src/client/conversation/user-text-document.ts'
+import { UserTextDocument } from './user-text-test-double.ts'
 import { encodeBrowserRefUri } from '../scheme.ts'
 import { createBrowserInitializationJournal, createBrowserInitializationReader } from '../../../browser/initialization.ts'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
@@ -195,7 +195,7 @@ async function assembled(storage = memoryKV(), options: {
       const nodes = new UserTextDocument().evaluate({ text, facts: {} }, [sourceRule!])
       expect(nodes.find(node => node.id === 'browser-ref')).toMatchObject({ data: { uri: encodeBrowserRefUri({ referenceId: 'ref-mixed-1' }) } })
       return mount(() => createElement(Fragment, null, ...nodes.map(node =>
-        node.id === 'text' ? node.data.display ?? node.data.text :
+        node.id === 'text' ? (node.data.display ?? node.data.text) as ReactNode :
           components.get('conversation.user.text.node')!({ node, raw: text.slice(node.start, node.end) }) as ReactNode)))
     },
     async composer() {
