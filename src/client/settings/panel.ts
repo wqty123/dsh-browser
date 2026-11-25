@@ -1304,7 +1304,7 @@ const react = require("react")
 
     return h("div", { style: styles.wrap, className: "dsh-bb-settings" }, [
       selector("browser.channel", settings.browser.channel,
-        options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"]),
+        options("browser.", ["sidebar", "chrome", "edge", "electron", "bundled", "auto"]),
         channel => patch({ browser: { channel } })),
       systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
         options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
