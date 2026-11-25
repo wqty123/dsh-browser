@@ -1,4 +1,4 @@
-import { LOOPBACK_IPV4 } from '../../assets/browser-policy.mjs'
+import { BROWSER_PROFILE_DIR, LOOPBACK_IPV4 } from '../../assets/browser-policy.mjs'
 /**
  * Legacy standalone Electron browser host (not a supported package export): an
  * {@link ElectronBrowserViewHost} implementation that spawns the plugin's own
@@ -34,7 +34,7 @@ import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { withTimeoutShared } from './timing.ts'
-import { browserHostLogPath } from './paths.ts'
+import { browserHostLogPath, dshHome } from './paths.ts'
 import { fileURLToPath } from 'node:url'
 import type { BrowserUserAction, ElectronBrowserViewHost, ElectronViewHandle, PresentOptions, ScreenshotOptions } from './provider.ts'
 import type { ExportedCookie } from '../browser/types.ts'
@@ -53,23 +53,24 @@ const MAX_RPC_BUFFER_BYTES = 512 * 1024 * 1024
  * Locate a SPAWNABLE Electron binary — one that runs a script given as an
  * argument, i.e. a BARE electron, never a packaged app executable:
  *   0. ELECTRON_PATH (explicit override — user intent beats auto-discovery),
- *   1. the plugin's own electron package (a real dependency since 0.1.18),
+ *   1. the plugin's managed Electron runtime directory under `$DSH_HOME`,
+ *   2. the plugin's own electron package (a real dependency since 0.1.18),
  *      found by a pure filesystem walk — never require(), whose semantics
  *      differ inside an Electron main process (there it is the built-in API
  *      module, not the npm package) and which would trigger electron 44+'s
  *      lazy binary download;
- *   2. every DSH install anchor (electron installed separately, e.g.
+ *   3. every DSH install anchor (electron installed separately, e.g.
  *      `dsh plugin add electron` into the profile or a global prefix),
  *      choosing the NEWEST version found. Older Electron releases (e.g.
  *      33.x) have a compositor defect that intermittently breaks page
  *      capture, so prefer the newest binary available in the environment,
- *   3. the current process, when it IS a bare Electron (dev hosts, e.g.
+ *   4. the current process, when it IS a bare Electron (dev hosts, e.g.
  *      `electron .`): reuse the host binary. Packaged app executables
  *      (resources/app.asar beside the exe) are never reused — they ignore
  *      the script argument and launch the app itself, typically exiting
  *      immediately via the single-instance lock, which is exactly the
  *      "browser host exited (code=0)" failure on DSH Desktop;
- *   4. last resort: the process ancestry, for hosts that run this plugin in a
+ *   5. last resort: the process ancestry, for hosts that run this plugin in a
  *      child Node process of their own bare-Electron main process.
  * @returns the path to the Electron executable.
  */
@@ -81,6 +82,8 @@ interface ElectronPathInputs {
   readonly inElectron: boolean
   /** process.execPath (candidate for in-process host reuse). */
   readonly execPath: string
+  /** The plugin's managed runtime directory probe. */
+  readonly managed?: () => string | undefined
   /** The plugin's own electron package probe (bundled). */
   readonly bundled: () => string | undefined
   /** The DSH install-anchor probe. */
@@ -89,11 +92,30 @@ interface ElectronPathInputs {
   readonly ancestry: () => string | undefined
 }
 
+/**
+ * Plugin-owned Electron runtime prefix (`$DSH_HOME/dsh-builtin-browser-host/electron-runtime`),
+ * kept outside DSH profile `node_modules` so plugin reinstalls never sweep it away.
+ */
+export function managedElectronDir(): string {
+  return join(dshHome(), BROWSER_PROFILE_DIR, 'electron-runtime')
+}
+
+/** Package root (`.../electron-runtime/node_modules/electron`) inside the managed runtime prefix. */
+export function managedElectronPackageDir(): string {
+  return join(managedElectronDir(), 'node_modules', 'electron')
+}
+
+function managedElectronBinary(): string | undefined {
+  const pkgRoot = managedElectronPackageDir()
+  return existsSync(join(pkgRoot, 'package.json')) ? electronDistExe(pkgRoot) : undefined
+}
+
 function resolveElectronPath(): string {
   return resolveElectronPathImpl({
     override: process.env.ELECTRON_PATH,
     inElectron: typeof process.versions.electron === 'string',
     execPath: process.execPath,
+    managed: managedElectronBinary,
     bundled: bundledElectronBinary,
     anchored: anchoredElectronBinary,
     ancestry: hostElectronViaProcessTree,
@@ -102,9 +124,9 @@ function resolveElectronPath(): string {
 
 /**
  * Pure selection over the discovery probes, in order:
- *   0. override (user intent) → 1. bundled package → 2. anchors (newest) →
- *   3. in-process BARE host → 4. process ancestry → throw.
- * Packaged app executables are never reused (steps 3/4 skip them).
+ *   0. override (user intent) → 1. managed runtime → 2. bundled package → 3. anchors (newest) →
+ *   4. in-process BARE host → 5. process ancestry → throw.
+ * Packaged app executables are never reused (steps 4/5 skip them).
  */
 function resolveElectronPathImpl(inputs: ElectronPathInputs): string {
   // 0. Explicit override first: a user-set ELECTRON_PATH is a deliberate
@@ -112,20 +134,23 @@ function resolveElectronPathImpl(inputs: ElectronPathInputs): string {
   //    package) — auto-discovery is a fallback, not an override.
   const override = inputs.override
   if (typeof override === 'string' && override.length > 0 && existsSync(override)) return override
-  // 1. The plugin's own electron package (filesystem probe). Never require():
+  // 1. Plugin-managed runtime directory under $DSH_HOME (provisioned on demand).
+  const managed = inputs.managed?.()
+  if (managed !== undefined) return managed
+  // 2. The plugin's own electron package (filesystem probe). Never require():
   //    inside an Electron main process require('electron') is the built-in
   //    API module, not the npm package, and electron 44+ downloads its binary
   //    on first require — probing must stay side-effect free (available()
   //    would otherwise block DSH startup on the download).
   const bundled = inputs.bundled()
   if (bundled !== undefined) return bundled
-  // 2. DSH install anchors, newest wins. (The plugin's own tree — plain and
-  //    pnpm store layouts — was already scanned in step 1; the anchors cover
+  // 3. DSH install anchors, newest wins. (The plugin's own tree — plain and
+  //    pnpm store layouts — was already scanned in step 2; the anchors cover
   //    electron installed separately, e.g. `dsh plugin add electron` into the
   //    profile or a global prefix.)
   const anchored = inputs.anchored()
   if (anchored !== undefined) return anchored
-  // 3. The current process IS a bare Electron (dev hosts, e.g. `electron .`):
+  // 4. The current process IS a bare Electron (dev hosts, e.g. `electron .`):
   //    reuse the host binary — it cannot be missing because we are running on
   //    it. A PACKAGED app executable (resources/app.asar beside it, e.g. DSH
   //    Desktop.exe) is NOT spawnable as bare electron: it ignores the script
@@ -135,18 +160,17 @@ function resolveElectronPathImpl(inputs: ElectronPathInputs): string {
     const exe = inputs.execPath
     if (typeof exe === 'string' && exe.length > 0 && existsSync(exe) && isBareElectron(exe)) return exe
   }
-  // 4. Last resort for bare-Electron hosts: walk the process ancestry (the
+  // 5. Last resort for bare-Electron hosts: walk the process ancestry (the
   //    plugin may run in a child Node process of an Electron main process).
   const hostExe = inputs.ancestry()
   if (hostExe !== undefined) return hostExe
   throw new Error(
     'dsh-builtin-browser: cannot locate a spawnable Electron binary. ' +
-    'The electron package ships with the plugin and its binary is downloaded on first use, not at install time ' +
-    '(issue #41: an install-time download made default profiles refuse the plugin). The plugin prepares it ' +
-    'automatically when the bundled carrier is selected, so right after an install this can mean the ' +
-    'download is still running: Settings → Browser → Readiness shows that state and can retry it. To do it ' +
-    'by hand instead, run `npx --no dsh-browser-install-electron` in the profile that installed the ' +
-    'plugin, then retry. Alternatively set ELECTRON_PATH to an electron executable. Note: the host\'s own ' +
+    'The electron package is not bundled as an install-time dependency ' +
+    '(issue #41: an install-time download made default profiles refuse the plugin). When the standalone ' +
+    'Electron channel is selected, open Settings → Browser → Readiness and click "Prepare the bundled ' +
+    'browser" to download it once (or run `npx --no dsh-browser-install-electron`), then retry. ' +
+    'Alternatively set ELECTRON_PATH to an electron executable. Note: the host\'s own ' +
     'executable cannot be reused when it is a packaged Electron app (e.g. DSH Desktop.exe) — only a real ' +
     'electron binary can be spawned.',
   )
@@ -898,6 +922,7 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
    * on a cooldown heals it by itself while keeping the scan off the hot path.
    */
   available(): boolean {
+    if (this.disposed) return false
     if (this.electronAvailable === true) return true
     if (Date.now() < this.nextProbeAt) return false
     this.nextProbeAt = Date.now() + PROBE_RETRY_MS
@@ -912,6 +937,14 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
       process.stderr.write(`[dsh-browser host] electron unavailable: ${error instanceof Error ? error.message : String(error)}\n`)
     }
     return this.electronAvailable
+  }
+
+  /** Clear a negative probe cache after an on-demand runtime installation finishes. */
+  refreshAvailability(): void {
+    if (this.electronAvailable !== true) {
+      this.electronAvailable = undefined
+      this.nextProbeAt = 0
+    }
   }
 
   /**
@@ -1457,6 +1490,7 @@ export const internals = {
   electronDistExe,
   electronExeBeside,
   isBareElectron,
+  managedElectronBinary,
   resolveElectronPath,
   resolveElectronPathImpl,
 }
