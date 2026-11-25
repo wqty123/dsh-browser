@@ -279,6 +279,7 @@ async function buildClient() {
       entryFileNames: 'client.js',
       banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PLUGIN_ID)}, factory: (require) => {`,
       intro: 'var module = { exports: {} }; var exports = module.exports;',
+      footer: 'return module.exports; } });',
     })
     const chunk = output.find(item => item.type === 'chunk')
     if (chunk === undefined || chunk.type !== 'chunk') {
@@ -294,7 +295,11 @@ async function buildClient() {
       .map(style => `${JSON.stringify(style.path)}: { text: (context) => ${JSON.stringify(style.css)} }`)
       .join(',')
     const metaSnippet = entries.length === 0 ? '' : `, meta: () => ({ stylesheets: {${entries}} })`
-    const finalCode = `${chunk.code}\nreturn module.exports; }${metaSnippet} });\n`
+    const tail = chunk.code.lastIndexOf('});')
+    if (tail < 0) {
+      throw new Error(`[build-client] unexpected footer in ${PLUGIN_ID} client bundle`)
+    }
+    const finalCode = `${chunk.code.slice(0, tail)}${metaSnippet} });\n`
     await mkdir(dirname(OUT_FILE), { recursive: true })
     await writeFile(OUT_FILE, finalCode, 'utf8')
     console.log(`[build-client] 已生成 lib/client.js（${resources.size} 份样式表已挂入 meta().stylesheets）`)
