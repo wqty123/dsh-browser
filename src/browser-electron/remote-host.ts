@@ -27,7 +27,7 @@ import { BROWSER_PROFILE_DIR, LOOPBACK_IPV4 } from '../../assets/browser-policy.
  */
 
 import { execFileSync, spawn } from 'node:child_process'
-import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs'
@@ -473,6 +473,8 @@ class ElectronChildClient {
     /** Test seam: the executable to spawn instead of the resolved Electron
      *  binary. Absent -> resolveElectronPath() (production behavior). */
     private readonly executable?: string,
+    /** Optional ephemeral userData dir when cookies.persist is false. */
+    private readonly userDataDir?: string,
   ) {
     const electron = this.executable ?? resolveElectronPath()
     const source = this.executable !== undefined
@@ -502,6 +504,7 @@ class ElectronChildClient {
     // expose argv, and preferred over stdin only when stdin cannot deliver):
     // the child reads env only as a fallback after stdin yields nothing.
     env.DSH_BROWSER_RPC_TOKEN = token
+    if (this.userDataDir !== undefined) env.DSH_BROWSER_USER_DATA_DIR = this.userDataDir
     this.child = spawn(electron, [hostMainPath, '--rpc-port', String(port)], {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: false,
@@ -900,6 +903,8 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     /** Test seam: the binary probe behind `available()`. Absent ->
      *  resolveElectronPath(). */
     private readonly probe: () => void = resolveElectronPath,
+    /** Optional ephemeral userData directory when cookies.persist is false; removed on dispose(). */
+    private readonly ephemeralUserDataDir?: string,
   ) {}
 
   /**
@@ -1141,6 +1146,7 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
       action => this.userActionHandler?.(action),
       windowId => this.viewClosedHandler?.(windowId),
       this.spawnExecutable,
+      this.ephemeralUserDataDir,
     )
     if (this.pendingSocket !== undefined) {
       this.client.attach(this.pendingSocket)
@@ -1336,6 +1342,12 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     this.pendingSocket = undefined
     this.readyPromise = undefined
     this.views.clear()
+    if (this.ephemeralUserDataDir !== undefined) {
+      const dir = this.ephemeralUserDataDir
+      setTimeout(() => {
+        try { rmSync(dir, { recursive: true, force: true }) } catch { /* best-effort cleanup */ }
+      }, 600).unref?.()
+    }
   }
 }
 

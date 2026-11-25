@@ -42,7 +42,7 @@ import { authenticatedRoute, pairedRoute, isDirectLoopback, type BrowserConnecti
 import { overlayScript } from '../browser-reference/entry.ts'
 import { getLastOpen } from './open-slot.ts'
 import { GUEST_ROUTE, handleGuest } from './guest-route.ts'
-import { resolveSessionHandle, sessionWireId } from '../browser/handles.ts'
+import { resolveSessionHandle, sessionWireId, type BrowserTabWireId } from '../browser/handles.ts'
 import { handleBridgeStatus, handlePreviewFrame, handlePreviewSessions, BRIDGE_STATUS_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE } from './preview-route.ts'
 import { detectDesktopShell, findDesktopInstall, readBridgeStatus } from './bridge-status.ts'
 import { publishTauriDesktopMain, runningTauriRuntime } from './tauri-host.ts'
@@ -138,8 +138,10 @@ export type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
 /** Cordis plugin name used by loader diagnostics. */
 
 function carrierSettingsKey(settings: ReturnType<SettingsStore['get']>): string {
+  const usesPluginProfile = settings.browser.channel === 'electron'
+    || ((settings.browser.channel === 'chrome' || settings.browser.channel === 'edge') && settings.browser.systemProfile === 'plugin')
   return JSON.stringify([settings.browser.channel, settings.browser.systemProfile, settings.browser.headless,
-    settings.browser.systemProfile === 'plugin' ? settings.cookies.persist : undefined])
+    usesPluginProfile ? settings.cookies.persist : undefined])
 }
 
 export const name = 'browser-electron'
@@ -425,11 +427,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           ...target,
           connected: () => adoptedCarrier === host && host.available(),
           reveal: async () => {
-            const session = provider.watchableSessions().find(id => id === target.session)
-            if (session !== undefined) {
-              const tab = provider.sessions.get(session)?.tabs[provider.sessions.get(session)?.activeIndex ?? 0]
-              if (tab !== undefined) host.showView(tab.handle, owner, { quiet: false })
-            }
+            await provider.switchTab(target.session, target.tabId as BrowserTabWireId, { user: true }).catch(() => {})
+            host.showView({ id: target.tabId, sendCommand: async () => ({}) }, owner, { quiet: false })
             return true
           },
         })), { exclusive: false })
@@ -502,11 +501,15 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   if (channel === 'electron') {
     const profileRoot = join(dshHome(), BROWSER_PROFILE_DIR)
     adoptLegacyProfileRoot(profileRoot)
-    ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = 'standalone-electron'
-    if (!(adoptedCarrier instanceof RemoteElectronViewHost)) {
-      adopt(new RemoteElectronViewHost(defaultHostMainPath()),
-        'will drive the standalone Electron browser window (on-demand runtime)', choice)
+    const persist = settings.get().cookies.persist
+    const ephemeralDir = persist ? undefined : join(profileRoot, ephemeralProfileName('electron', randomUUID()))
+    if (!persist && ephemeralDir !== undefined) {
+      sweepAbandonedEphemeralProfiles(profileRoot, 'electron')
+      claimEphemeralProfile(ephemeralDir)
     }
+    ;(globalThis as unknown as Record<string, unknown>).__dshBrowserCarrier = 'standalone-electron'
+    adopt(new RemoteElectronViewHost(defaultHostMainPath(), undefined, undefined, ephemeralDir),
+      `will drive the standalone Electron browser window (on-demand runtime${persist ? '' : ', ephemeral profile'})`, choice)
     return
   }
   // Naming a browser is a decision about which one to use, so it also decides whether the
