@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -22,9 +22,20 @@ test('supported package exports cannot launch standalone Electron', () => {
 test('export guard accepts sidebar exports and refuses either standalone subpath', t => {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-sidebar-package-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const manifest = JSON.parse(read('../package.json'))
   mkdirSync(join(directory, 'scripts'))
   copyFileSync(new URL('../scripts/verify-exports.mjs', import.meta.url), join(directory, 'scripts', 'verify-exports.mjs'))
-  const manifest = JSON.parse(read('../package.json'))
+  mkdirSync(join(directory, 'lib'))
+  const builtClient = new URL('../lib/client.js', import.meta.url)
+  const targetClient = join(directory, 'lib', 'client.js')
+  if (existsSync(builtClient)) {
+    copyFileSync(builtClient, targetClient)
+  } else {
+    writeFileSync(
+      targetClient,
+      `window.__ModuleLoader__.load({ id: ${JSON.stringify(manifest.name)}, factory: (require) => {\n  return {}\n}, meta: () => ({ stylesheets: {} }) })\n`,
+    )
+  }
   for (const target of [undefined, 'exports', 'publishConfig']) {
     const changed = structuredClone(manifest)
     if (target === 'exports') changed.exports['./host-main'] = './src/browser-electron/host-main.ts'
