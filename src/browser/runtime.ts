@@ -156,15 +156,15 @@ export class BrowserRuntime extends Service {
     this.providerId = config.browserProvider
     // Optionally claim the DSH >= 0.2.3 exclusive `ctx.browserUse` registry when present
     // so co-installed browser-use plugins cannot silently collide.
-    const injectBrowserUse = (ctx as unknown as {
+    const surface = ctx as unknown as {
       inject?: (deps: readonly string[], callback: (scope: {
         readonly browserUse: { register(name: string): () => void }
         effect(callback: () => (() => void) | void, label?: string): void
       }) => void) => void
-    }).inject
-    if (typeof injectBrowserUse === 'function') {
+    }
+    if (typeof surface.inject === 'function') {
       try {
-        injectBrowserUse(['browserUse'], (scope) => {
+        surface.inject(['browserUse'], (scope) => {
           if (typeof scope.browserUse?.register !== 'function') return
           scope.effect(() => scope.browserUse.register('dsh-builtin-browser'), 'dsh-builtin-browser: browserUse registration')
         })
