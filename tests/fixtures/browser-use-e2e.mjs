@@ -61,6 +61,25 @@ const FORM = page('Complex form', `
   })
 </script>`)
 
+const LONG_ORDER_FORM = page('Order form', `
+<form id="order" method="post" action="/long-form">
+  <p><label>Customer name: <input name="custname"></label></p>
+  <p><label>Telephone: <input type="tel" name="custtel"></label></p>
+  <p><label>E-mail address: <input type="email" name="custemail"></label></p>
+  <fieldset><legend>Pizza Size</legend>
+    <p><label><input type="radio" name="size" value="small"> Small</label></p>
+    <p><label><input type="radio" name="size" value="medium"> Medium</label></p>
+    <p><label><input type="radio" name="size" value="large"> Large</label></p>
+  </fieldset>
+  <fieldset><legend>Pizza Toppings</legend>
+    <p><label><input type="checkbox" name="topping" value="bacon"> Bacon</label></p>
+    <p><label><input type="checkbox" name="topping" value="cheese"> Extra Cheese</label></p>
+  </fieldset>
+  <div style="height: 1600px" aria-hidden="true"></div>
+  <p><label>Delivery instructions: <textarea name="comments"></textarea></label></p>
+  <p><button type="submit">Submit order</button></p>
+</form>`)
+
 const SHADOW = page('Shadow DOM', `
 <app-shell><p slot="note">Slotted light-DOM note</p></app-shell>
 <closed-widget></closed-widget>
@@ -147,6 +166,14 @@ export async function fixtureSite(t) {
           return html(page('Account created', `<h1>Account created</h1><pre id="echo">${escape(JSON.stringify(fields))}</pre>`))
         }
         return html(FORM)
+      case '/long-form':
+        if (request.method === 'POST') {
+          const fields = Object.fromEntries(new URLSearchParams(body.toString()))
+          state.forms.push(fields)
+          response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+          return response.end(JSON.stringify({ form: fields }))
+        }
+        return html(LONG_ORDER_FORM)
       case '/items': {
         const n = Math.max(1, Number(url.searchParams.get('page') ?? 1))
         const pages = Math.ceil(ITEMS.length / PAGE_SIZE)

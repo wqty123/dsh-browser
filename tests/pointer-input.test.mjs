@@ -12,7 +12,12 @@ async function recordingProvider(onMouse = async () => {}) {
     id: 'pointer-view',
     async sendCommand(method, params) {
       commands.push({ method, params })
-      if (method === 'Runtime.evaluate') return { result: { value: { width: 500, height: 400 } } }
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params?.expression ?? '')
+        if (expr.includes('scrollIntoView')) return { result: { value: { ok: true, x: 90, y: 120, __point: { x: 90, y: 120 } } } }
+        if (expr.includes('__dsh_agent_cursor__')) return { result: { value: true } }
+        return { result: { value: { width: 500, height: 400 } } }
+      }
       if (method === 'Input.dispatchMouseEvent') await onMouse(params)
       return {}
     },
@@ -108,4 +113,20 @@ test('out-of-viewport drag reports failure without pressing the mouse', async ()
   })
   assert.equal(JSON.parse(result.value).ok, false)
   assert.deepEqual(check.mouse(), [])
+})
+
+test('click settles cursor paint before mouseMoved/mousePressed/mouseReleased and waits for scroll frames', async () => {
+  const check = await recordingProvider()
+  await check.provider.click(check.session, { target: { by: 'text', value: 'Submit order' } })
+  const sequence = check.commands.map(command => {
+    if (command.method === 'Input.dispatchMouseEvent') return command.params.type
+    if (command.method === 'Runtime.evaluate' && String(command.params?.expression).includes('__dsh_agent_cursor__')) return 'cursor'
+    if (command.method === 'Runtime.evaluate' && String(command.params?.expression).includes('scrollIntoView')) return 'locate'
+    return command.method
+  })
+  assert.deepEqual(sequence, ['locate', 'cursor', 'mouseMoved', 'mousePressed', 'mouseReleased'],
+    'cursor paint must settle before mouse events so it never interleaves between move and press')
+  const locateExpr = String(check.commands[0].params.expression)
+  assert.match(locateExpr, /requestAnimationFrame/, 'click waits for compositor frames after scrolling')
+  assert.match(locateExpr, /frameElement/, 'click converts same-origin iframe rects to top-viewport coordinates')
 })

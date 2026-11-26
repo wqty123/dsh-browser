@@ -1,5 +1,7 @@
 // Issue #105: the reference overlay pump on SystemBrowserViewHost must never recreate
 // tabs that the user closed as about:blank, and must never relaunch a killed browser.
+// Also verifies that a stale CDP session on a still-live target reattaches to that
+// original target instead of spawning a blank replacement tab.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
@@ -74,6 +76,7 @@ function encodeFrame(text) {
 function createClosableBrowser() {
   const liveTargets = new Set()
   const created = []
+  const attachedTargets = []
   const sessionToTarget = new Map()
   const sockets = new Set()
 
@@ -133,6 +136,7 @@ function createClosableBrowser() {
       if (!liveTargets.has(targetId)) return { id, error: { message: 'No target with given id found' } }
       const sid = `session-${randomUUID()}`
       sessionToTarget.set(sid, targetId)
+      attachedTargets.push(targetId)
       return { id, result: { sessionId: sid } }
     }
     if (sessionId !== undefined) {
@@ -143,7 +147,7 @@ function createClosableBrowser() {
       if (method === 'Runtime.evaluate') {
         const expr = String(params?.expression ?? '')
         if (expr.includes('__dshRefOverlayInstalled')) return { id, sessionId, result: { result: { value: null } } }
-        return { id, sessionId, result: { result: { value: 'ok' } } }
+        return { id, sessionId, result: { result: { value: `ok:${targetId}` } } }
       }
     }
     return { id, sessionId, result: {} }
@@ -152,9 +156,16 @@ function createClosableBrowser() {
   return {
     get created() { return [...created] },
     get liveTargets() { return [...liveTargets] },
+    get attachedTargets() { return [...attachedTargets] },
     async listen() {
       await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
       return server.address().port
+    },
+    /** Expire all CDP sessions for a still-alive target (simulates renderer/attach swap). */
+    expireSessions(targetId) {
+      for (const [sid, tid] of sessionToTarget) {
+        if (tid === targetId) sessionToTarget.delete(sid)
+      }
     },
     /** Simulate the user closing a tab in Chrome/Edge. */
     closeTargetByUser(targetId, { emitDestroyed = true } = {}) {
@@ -249,6 +260,61 @@ for (const emitDestroyed of [true, false]) {
     }
   })
 }
+
+test('stale CDP session on a still-alive target reattaches to the original page without creating about:blank', async t => {
+  const profileDir = mkdtempSync(join(tmpdir(), 'dsh-reattach-live-'))
+  const browser = createClosableBrowser()
+  const port = await browser.listen()
+  const children = []
+  const host = new SystemBrowserViewHost(
+    { kind: 'chrome', path: process.execPath },
+    profileDir,
+    [],
+    undefined,
+    () => {
+      const portFile = join(profileDir, 'DevToolsActivePort')
+      writeFileSync(portFile, `${port}\n`)
+      const ahead = new Date(Date.now() + 1000)
+      utimesSync(portFile, ahead, ahead)
+      const child = fakeChild()
+      children.push(child)
+      return child
+    },
+    'auto',
+    () => false,
+    undefined,
+    { managed: true },
+  )
+  const provider = new ElectronBrowserProvider(host, { history: { enabled: false } })
+  provider.stopReferenceEntryPump()
+  t.after(async () => {
+    provider.dispose()
+    host.dispose()
+    for (const child of children) { child.exitCode = 0 }
+    await browser.kill()
+    rmSync(profileDir, { recursive: true, force: true })
+  })
+
+  const sessionId = await provider.open('agent-reattach')
+  const tab = provider.sessions.get(sessionId).tabs[0]
+  const first = await tab.handle.sendCommand('Runtime.evaluate', { expression: '1' })
+  assert.equal(browser.created.length, 1)
+  const originalTarget = browser.created[0]
+  assert.equal(first.result.value, `ok:${originalTarget}`)
+
+  // Expire the CDP session id while the page target remains alive (e.g. renderer swap on form POST).
+  browser.expireSessions(originalTarget)
+
+  const [retriedA, retriedB] = await Promise.all([
+    tab.handle.sendCommand('Runtime.evaluate', { expression: '2' }),
+    tab.handle.sendCommand('Runtime.evaluate', { expression: '3' }),
+  ])
+  assert.equal(browser.created.length, 1, 'must not spawn a replacement about:blank target')
+  assert.equal(browser.liveTargets.length, 1, 'only the original target exists')
+  assert.equal(retriedA.result.value, `ok:${originalTarget}`, 'command runs on the original target')
+  assert.equal(retriedB.result.value, `ok:${originalTarget}`, 'concurrent command shares the reattached target')
+  assert.deepEqual(browser.attachedTargets, [originalTarget, originalTarget], 'reattached exactly once to the original target')
+})
 
 test('reference pump does not relaunch a browser after the user kills its process', async t => {
   const profileDir = mkdtempSync(join(tmpdir(), 'dsh-issue105-kill-'))
