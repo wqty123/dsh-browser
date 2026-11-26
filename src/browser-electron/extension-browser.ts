@@ -23,8 +23,12 @@ class LazyNativeBrowserClient implements NativeBrowserClient {
   private disposed = false
   private detail = 'Optional browser extension is not connected; managed CDP fallback is available.'
   private readonly listeners = new Set<Parameters<NativeBrowserClient['onEvent']>[0]>()
-
-  constructor(private readonly directory: string, private readonly browser: 'edge' | 'chrome') {}
+  private readonly directory: string
+  private readonly browser: 'edge' | 'chrome'
+  constructor(directory: string, browser: 'edge' | 'chrome') {
+    this.directory = directory
+    this.browser = browser
+  }
 
   status(): ExtensionConnectionStatus {
     return this.client?.status() ?? { state: 'extension-missing', connected: false, browser: this.browser, detail: this.detail }
@@ -87,8 +91,11 @@ export class ExtensionBrowserViewHost implements ElectronBrowserViewHost {
   private readonly detaching = new Map<BrowserSessionId, Set<Promise<unknown>>>()
   private readonly unsubscribe: () => void
   private disposed = false
-
-  constructor(readonly browser: 'edge' | 'chrome', private readonly client: NativeBrowserClient = new LazyNativeBrowserClient(extensionDirectory(browser), browser)) {
+  readonly browser: 'edge' | 'chrome'
+  private readonly client: NativeBrowserClient
+  constructor(browser: 'edge' | 'chrome', client: NativeBrowserClient = new LazyNativeBrowserClient(extensionDirectory(browser), browser)) {
+    this.browser = browser
+    this.client = client
     this.unsubscribe = client.onEvent(event => {
       if (event.method === 'transport.disconnected') for (const view of this.views.values()) view.invalid = true
       if (event.method === 'target.detached' || event.method === 'target.closed') {

@@ -79,8 +79,9 @@ function pathMatches(pathname: string, path: string): boolean {
 
 export class GuestCookieJar {
   private readonly store = new Map<string, ScopedCookie>()
-
-  constructor(private readonly changed?: (cookies: readonly StoredCookie[]) => void, saved: readonly StoredCookie[] = []) {
+  private readonly changed?: (cookies: readonly StoredCookie[]) => void
+  constructor(changed?: (cookies: readonly StoredCookie[]) => void, saved: readonly StoredCookie[] = []) {
+    this.changed = changed
     for (const value of saved) {
       const cookie = normalizeStoredCookie(value)
       if (cookie !== undefined && (cookie.expiresAt === undefined || cookie.expiresAt > Date.now())) {

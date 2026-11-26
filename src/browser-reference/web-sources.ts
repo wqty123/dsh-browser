@@ -25,7 +25,10 @@ interface Source {
 /** App-owned iframe leases; no guest can register or acknowledge a command. */
 export class WebReferenceSources {
   private readonly leases = new Map<string, Source>()
-  constructor(private readonly timeoutMs = 8_000) {}
+  private readonly timeoutMs: number
+  constructor(timeoutMs = 8_000) {
+    this.timeoutMs = timeoutMs
+  }
 
   private prune(): void {
     for (const [lease, source] of this.leases) {

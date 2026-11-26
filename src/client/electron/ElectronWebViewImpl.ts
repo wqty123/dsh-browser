@@ -38,17 +38,22 @@ export class ElectronWebViewImpl implements BrowserFrame {
   private disposal: Promise<void> | undefined
   private attachment: AbortController | undefined
   private readonly releases = new Set<Promise<void>>()
-
-  /**
-   * @param options - saved address, persistence and source-tab opening callback.
-   * @param bridge - main-process guest operations.
-   * @param workspace - resolves the storage account once for this frame lifetime.
-   * @param presentation - tag and Sidebar placement adapter.
-   */
-  constructor(private readonly options: BrowserPageOptions, private readonly bridge: DesktopBrowserBridge,
-    private readonly workspace: (signal: AbortSignal) => Promise<string>,
-    private readonly presentation: ElectronWebviewPresentation, private readonly sessionId: string,
-    private readonly capture: (intent: object, owner?: string) => Promise<void> = (intent, owner) => captureReferenceIntent(intent, owner ?? '')) {
+  private readonly options: BrowserPageOptions
+  private readonly bridge: DesktopBrowserBridge
+  private readonly workspace: (signal: AbortSignal) => Promise<string>
+  private readonly presentation: ElectronWebviewPresentation
+  private readonly sessionId: string
+  private readonly capture: (intent: object, owner?: string) => Promise<void>
+  constructor(options: BrowserPageOptions, bridge: DesktopBrowserBridge,
+    workspace: (signal: AbortSignal) => Promise<string>,
+    presentation: ElectronWebviewPresentation, sessionId: string,
+    capture: (intent: object, owner?: string) => Promise<void> = (intent, owner) => captureReferenceIntent(intent, owner ?? '')) {
+    this.options = options
+    this.bridge = bridge
+    this.workspace = workspace
+    this.presentation = presentation
+    this.sessionId = sessionId
+    this.capture = capture
     this.checkpoint = currentBrowserTarget(options.initial)
     this.store = createSnapshotStore(emptyBrowserFrame())
     this.carrier = createSnapshotStore<BrowserCarrierState>({ stage: 'idle' })

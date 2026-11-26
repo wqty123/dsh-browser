@@ -34,9 +34,11 @@ export class IframeImpl implements BrowserFrame {
   private disposed = false
   private disposal: Promise<void> | undefined
   private navigationId: string | undefined
-
-  /** @param options - initial checkpoint and persistence writer. @param presentation - iframe DOM adapter. */
-  constructor(private readonly options: BrowserPageOptions, private readonly presentation: IframePresentation) {
+  private readonly options: BrowserPageOptions
+  private readonly presentation: IframePresentation
+  constructor(options: BrowserPageOptions, presentation: IframePresentation) {
+    this.options = options
+    this.presentation = presentation
     this.navigation = new BrowserNavigation(options.initial)
     this.store = createSnapshotStore({ ...emptyBrowserFrame(), sandboxEnabled: this.sandboxed })
   }

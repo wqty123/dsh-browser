@@ -218,12 +218,17 @@ export type ExportFormat = 'jsonl' | 'markdown' | 'zip' | 'markdown-zip'
 
 /** Transport error whose status shapes the caller's decision (409 = refuse ACK). */
 export class ReferenceHttpError extends Error {
+  readonly status: number
+  readonly body?: unknown
   constructor(
     message: string,
-    readonly status: number,
-    readonly body?: unknown,
+    status: number,
+    body?: unknown,
   ) {
+    
     super(message)
+    this.status = status
+    this.body = body
     this.name = 'ReferenceHttpError'
   }
 }

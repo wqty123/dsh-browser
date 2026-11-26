@@ -443,11 +443,12 @@ export class SettingsStore {
   private cached: BrowserSettings | undefined
   /** Last observed mtime, used to invalidate the cache on external edits. */
   private cachedMtimeMs = -1
-
-  /**
-   * @param file - settings file path (defaults beside the browser profile).
-   */
-  constructor(private readonly file: string = settingsPath(), private readonly log?: (message: string) => void) {}
+  private readonly file: string
+  private readonly log?: (message: string) => void
+  constructor(file: string = settingsPath(), log?: (message: string) => void) {
+    this.file = file
+    this.log = log
+  }
 
   /** Path this store reads and writes. */
   path(): string {

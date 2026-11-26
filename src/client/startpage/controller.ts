@@ -62,13 +62,10 @@ export class StartPageController implements HostObservable<StartPageSnapshot> {
   private disposed = false
   private readonly createId: () => string
   private readonly applicationOrigin: string
-
-  /**
-   * @param form - the shared `browser-startpage` configuration form.
-   * @param options - current application origin and an optional id source.
-   */
-  constructor(private readonly form: ConfigForm<BrowserStartPagePreferences>,
+  private readonly form: ConfigForm<BrowserStartPagePreferences>
+  constructor(form: ConfigForm<BrowserStartPagePreferences>,
     options: { readonly applicationOrigin: string; readonly createId?: () => string }) {
+    this.form = form
     this.applicationOrigin = options.applicationOrigin
     this.createId = options.createId ?? (() => globalThis.crypto.randomUUID())
     this.unsubscribe = form.subscribe(() => { this.publish() })
