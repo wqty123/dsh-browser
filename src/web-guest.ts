@@ -19,7 +19,7 @@ function overlayTag(): string {
 export function registerWebGuest(ctx: Context): void {
   const inject = (ctx as unknown as {
     inject?: (names: readonly string[], callback: (host: {
-      readonly webServer: { register(route: { kind: string; path: string; handler: (request: unknown, response: unknown) => void }, label?: string): () => void }
+      readonly webServer: { register(route: { kind: string; path: string; auth?: 'anonymous' | 'required' | 'deny'; handler: (request: unknown, response: unknown) => void }, label?: string): () => void }
       effect(callback: () => () => void, label?: string): void
     }) => void) => void
   }).inject
@@ -28,6 +28,7 @@ export function registerWebGuest(ctx: Context): void {
     host.effect(() => host.webServer.register({
       kind: 'exact',
       path: GUEST_ROUTE,
+      auth: 'anonymous',
       handler: (request, response) => handleGuest(request as never, response as never, overlayTag(), ''),
     }, 'dsh-builtin-browser: web guest proxy (root row)'))
   })

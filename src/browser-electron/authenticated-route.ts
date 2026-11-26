@@ -1,6 +1,8 @@
 /**
  * Authenticate plugin HTTP routes with the browser session owned by DSH.
- * The connection service verifies its signed cookie and completes denied responses.
+ * On DSH >= 0.2.3, `webServer` admits requests before dispatch and passes the
+ * live Peer as the third handler argument; on older hosts, the connection
+ * service verifies its signed cookie and completes denied responses.
  * @module dsh-browser/browser-electron/authenticated-route
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -15,8 +17,17 @@ export interface BrowserPairingConnection {
   requestRejection(request: IncomingMessage): 401 | 403 | undefined
 }
 
+/** Host-admitted peer passed as the third handler argument on DSH >= 0.2.3. */
+export interface BrowserHttpPeer {
+  readonly signal?: AbortSignal
+}
+
 /** An exact HTTP route registered with the DSH web server. */
-export type BrowserHttpHandler = (request: IncomingMessage, response: ServerResponse) => void | Promise<void>
+export type BrowserHttpHandler = (
+  request: IncomingMessage,
+  response: ServerResponse,
+  peer?: BrowserHttpPeer,
+) => void | Promise<void>
 
 /**
  * Check the current host credential on every request before reading settings, capturing a frame,
@@ -29,7 +40,14 @@ export function authenticatedRoute(
   connection: () => BrowserConnection | undefined,
   handler: BrowserHttpHandler,
 ): BrowserHttpHandler {
-  return (request, response) => {
+  return (request, response, peer) => {
+    if (peer !== undefined) {
+      if (peer.signal?.aborted) {
+        replyJson(response, 401, { error: 'unauthorized' })
+        return
+      }
+      return handler(request, response, peer)
+    }
     let host: BrowserConnection | undefined
     try {
       host = connection()
@@ -51,7 +69,14 @@ export function pairedRoute(
   connection: () => BrowserPairingConnection | undefined,
   handler: BrowserHttpHandler,
 ): BrowserHttpHandler {
-  return (request, response) => {
+  return (request, response, peer) => {
+    if (peer !== undefined) {
+      if (peer.signal?.aborted) {
+        replyJson(response, 401, { error: 'unauthorized' })
+        return
+      }
+      return handler(request, response, peer)
+    }
     let rejection: 401 | 403 | undefined
     try {
       const host = connection()
