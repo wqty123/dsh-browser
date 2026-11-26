@@ -828,7 +828,12 @@ const react = require("react")
       finally { setBusy(false); void read() }
     }
     const extensionButton = h("button", { key: "install-extension", type: "button", style: styles.button, disabled: controlsBusy, onClick: extensionAction }, t('extension.button'))
+    // `unsupported-layout`: the desktop is recognized, but this build has no host-patch spec for its
+    // main entry. Offering the install would only produce a failure, so the panel explains the state
+    // and points at the web sidebar instead (issue #112).
     const canManageBridge = runtime.shell?.patchable !== false && runtime.bridge.present === true && runtime.bridge.state !== "absent"
+      && runtime.bridge.state !== "unsupported-layout"
+    const unsupportedLayout = runtime.bridge.state === "unsupported-layout"
     const extensionUnsupported = runtime.bridge.code === "DESKTOP_MAIN_EXTENSION_UNSUPPORTED"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
     const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
@@ -872,6 +877,7 @@ const react = require("react")
       bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
         `${t("readiness.hostPatch")}: ${t("readiness.hostPatch." + bridgeJob.hostPatch.status.replaceAll(" ", "-"))}`) : null,
       bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
+      unsupportedLayout ? h("p", { key: "unsupported-layout", role: "status", style: styles.hint }, String(runtime.bridge.detail ?? "")) : null,
       bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
       runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
