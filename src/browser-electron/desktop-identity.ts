@@ -47,6 +47,14 @@ export interface DesktopLayout {
 interface IdentityRule {
   readonly packageNames: readonly string[]
   readonly mainEntry: string
+  /** Further accepted entries; each states the dependency that must be present to qualify. */
+  readonly mainEntryCandidates?: readonly {
+    readonly entry: string
+    readonly packageName?: string
+    /** Dependency that must appear in the app's own manifest for this entry to be accepted. */
+    readonly requiresDependency?: string
+    readonly note?: string
+  }[]
   /** Main entries of look-alike Desktops that are recognized only to be refused, with the reason. */
   readonly unsupportedMainEntries?: Readonly<Record<string, string>>
   readonly layouts: readonly DesktopLayout[]
@@ -61,6 +69,14 @@ interface IdentityRule {
 export const FALLBACK_RULE: IdentityRule = {
   packageNames: ['@deepseek-ai/dsh-desktop', 'dsh-desktop'],
   mainEntry: 'lib/main.js',
+  mainEntryCandidates: [
+    {
+      entry: 'out/main/index.js',
+      packageName: 'dsh-desktop',
+      requiresDependency: '@deepseek-ai/dsh',
+      note: 'electron-vite layout. The official DSH Desktop 0.14.0 ships this entry with `main: ./out/main/index.js` and no `lib` directory at all (issue #112), while the third-party electron-vite shell (dataelement/dsh-desktop, issue #62) shares the same shape. The `@deepseek-ai/dsh` dependency is what separates them: the official bundle carries it, the third-party shell does not.',
+    },
+  ],
   unsupportedMainEntries: {
     'out/main/index.js': 'the electron-vite layout of a third-party DSH Desktop (dataelement/dsh-desktop, issue #62), which shares the package name but not the DeepSeek Harness Desktop shell the bridge patches',
   },
@@ -73,6 +89,8 @@ export const FALLBACK_RULE: IdentityRule = {
 /** A verified install. */
 export interface DesktopIdentity {
   readonly ok: true
+  /** The entry this install actually uses: `mainEntry`, or an accepted candidate. */
+  readonly mainEntry: string
   /** The install root that was verified. */
   readonly root: string
   /** Which shape was verified — the archive when it exists, the extraction only without one. */
@@ -129,14 +147,24 @@ export function readIdentityRule(): IdentityRule | { readonly error: string } {
       || layouts[layouts.length - 1]?.marker !== undefined) {
       return { error: 'desktop-identity.json: layouts must be a non-empty array whose last entry has no marker' }
     }
+    const candidates = raw.mainEntryCandidates
+    if (candidates !== undefined && (!Array.isArray(candidates) || candidates.some(c => c === null || typeof c !== 'object'
+      || !field(c.entry) || (c.requiresDependency !== undefined && !field(c.requiresDependency))))) {
+      return { error: 'desktop-identity.json: mainEntryCandidates must list entries with an optional requiresDependency' }
+    }
     const unsupported = raw.unsupportedMainEntries
     if (unsupported !== undefined && (unsupported === null || typeof unsupported !== 'object' || Array.isArray(unsupported)
       || Object.entries(unsupported).some(([entry, reason]) => entry === '' || !field(reason)))) {
       return { error: 'desktop-identity.json: unsupportedMainEntries must map entry paths to reasons' }
     }
+    // The candidates are part of the rule; dropping them here is what made a valid candidate entry
+    // indistinguishable from an unsupported one.
+    const base = candidates === undefined
+      ? { packageNames: names, mainEntry: main }
+      : { packageNames: names, mainEntry: main, mainEntryCandidates: candidates }
     return unsupported === undefined
-      ? { packageNames: names, mainEntry: main, layouts }
-      : { packageNames: names, mainEntry: main, unsupportedMainEntries: unsupported, layouts }
+      ? { ...base, layouts }
+      : { ...base, unsupportedMainEntries: unsupported, layouts }
   } catch (error) {
     if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
       return FALLBACK_RULE
@@ -286,7 +314,6 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
 
   const layout: 'packed' | 'unpacked' = archivePresent ? 'packed' : 'unpacked'
   let manifestText: string | undefined
-  let mainPresent: boolean
   let hasEntry: (entry: string) => boolean
   if (archivePresent) {
     const parsed = readAsarHeader(archive)
@@ -302,7 +329,6 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
       return { ok: false, reason: `${archive}: package.json is listed but its bytes cannot be read` }
     }
     hasEntry = entry => entryAt(parsed.header.files, entry) !== undefined
-    mainPresent = hasEntry(rule.mainEntry)
   } else {
     const manifestPath = join(appDir, 'package.json')
     try {
@@ -315,7 +341,6 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
       return { ok: false, reason: `${manifestPath} is missing; a directory without a package manifest is not a DSH Desktop install` }
     }
     hasEntry = entry => existsSync(join(appDir, ...entry.split('/')))
-    mainPresent = hasEntry(rule.mainEntry)
   }
 
   let manifest: { name?: unknown; version?: unknown }
@@ -333,8 +358,22 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
     }
   }
 
-  // The main entry is the file the installer patches and the shell runs; if it is not there, this
-  // is not an install this plugin can reason about even though the manifest looks right.
+  // The main entry is the file the installer patches and the shell runs. The default name comes
+  // first; the candidates cover layouts that later official builds adopted (0.14.0 ships
+  // "out/main/index.js" and no "lib" at all), and each candidate is gated on a dependency that the
+  // official bundle carries and the look-alike third-party shell does not.
+  let mainEntry: string = rule.mainEntry
+  let mainPresent = hasEntry(mainEntry)
+  if (!mainPresent) {
+    const dependencies = (manifest as { dependencies?: Record<string, unknown> }).dependencies
+    for (const candidate of rule.mainEntryCandidates ?? []) {
+      if (!hasEntry(candidate.entry)) continue
+      if (candidate.requiresDependency !== undefined && dependencies?.[candidate.requiresDependency] === undefined) continue
+      mainEntry = candidate.entry
+      mainPresent = true
+      break
+    }
+  }
   if (!mainPresent) {
     const foreign = Object.entries(rule.unsupportedMainEntries ?? {}).find(([entry]) => hasEntry(entry))
     if (foreign !== undefined) {
@@ -347,6 +386,7 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
     ok: true,
     root: installRoot,
     layout,
+    mainEntry,
     packageName: name,
     ...typeof manifest.version === 'string' ? { version: manifest.version } : {},
   }
