@@ -102,6 +102,16 @@ function pageEval(body: string): string {
  */
 export function overlayScript(): string {
   const body = [
+    // The carrier waits for a document identity handshake before it treats a guest as loaded
+    // (IframePresentation.awaitIdentity posts `dsh.browser.guest.navigation.request`). This block
+    // answers it, and announces on load so a fresh document is known without waiting for a request.
+    // It sits BEFORE the "already installed" early return on purpose: a re-injected overlay still has
+    // to answer, otherwise the carrier loses the document after a hot reload.
+    'var guestDocumentId = window.__dshGuestDocumentId || (window.__dshGuestDocumentId = String(Date.now()) + "-" + Math.random().toString(36).slice(2))',
+    'var announceGuestIdentity = function (loadId) { try { if (window.parent && window.parent !== window) window.parent.postMessage({ type: "dsh.browser.guest.navigation", url: String(location.href), documentId: guestDocumentId, loadId: loadId }, "*") } catch (error) {} }',
+    'window.addEventListener("message", function (event) { if (event.data && event.data.type === "dsh.browser.guest.navigation.request") announceGuestIdentity(event.data.loadId) })',
+    'if (document.readyState === "complete") announceGuestIdentity()',
+    'else window.addEventListener("load", function () { announceGuestIdentity() })',
     'if (window.__dshRefOverlayInstalled) return JSON.stringify({ ok: true, already: true })',
     // The bar freezes the COMPLETE capture (ordered text runs, assets, table
     // ranges, anchors), not only its words. Installed once per document, in its

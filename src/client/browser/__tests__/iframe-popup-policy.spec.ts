@@ -28,7 +28,11 @@ function expectNoPopups(frame: { attributes: Map<string, string> } | undefined) 
   const policy = frame?.attributes.get('sandbox')
   expect(policy).toBeDefined()
   const tokens = policy?.split(/\s+/u) ?? []
-  expect(tokens).not.toContain('allow-same-origin')
+  // allow-same-origin is required on the guest frame: without it the frame is an opaque origin,
+  // `localStorage` throws SecurityError on first access and the page's whole script dies — which
+  // shows up as "nothing navigates, no images load". A cross-origin page still keeps its own
+  // origin, so this does not hand it the host document; the popup/navigation grants stay off.
+  expect(tokens).toContain('allow-same-origin')
   expect(tokens).not.toContain('allow-top-navigation')
   expect(tokens).not.toContain('allow-popups')
   expect(tokens).not.toContain('allow-popups-to-escape-sandbox')

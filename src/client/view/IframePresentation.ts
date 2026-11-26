@@ -306,7 +306,13 @@ export class IframePresentation implements BrowserPresentation {
     this.identityTimer = setTimeout(() => {
       this.identityTimer = undefined
       if (revision === undefined || this.document?.revision !== revision) return
-      this.events.guestFailed?.(revision, 'GUEST_DOCUMENT_IDENTITY_UNAVAILABLE: source iframe did not provide a matching document identity')
+      // Nothing answers this handshake today: the guest overlay only listens for
+      // `dsh-browser-ref:intent` and never posts a `dsh.browser.guest.navigation` identity, and a
+      // directly loaded document carries no overlay at all. Waiting for one therefore only painted a
+      // five-second "页面加载失败" banner over documents that had already loaded, and `guestFailed` in
+      // turn marked the carrier as unusable. Report the document as loaded and leave the reference
+      // channel unavailable, which is what the states actually are.
+      this.markLoaded()
     }, 5000)
   }
 
