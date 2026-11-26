@@ -107,11 +107,12 @@ export function overlayScript(): string {
     // answers it, and announces on load so a fresh document is known without waiting for a request.
     // It sits BEFORE the "already installed" early return on purpose: a re-injected overlay still has
     // to answer, otherwise the carrier loses the document after a hot reload.
-    'var guestDocumentId = window.__dshGuestDocumentId || (window.__dshGuestDocumentId = String(Date.now()) + "-" + Math.random().toString(36).slice(2))',
+    // Everything here is defensive: this block runs before the overlay is built, and a page (or a
+    // test double) without addEventListener must not stop the bar from being installed.
+    'var guestDocumentId = window.__dshGuestDocumentId || (window.__dshGuestDocumentId = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2))',
     'var announceGuestIdentity = function (loadId) { try { if (window.parent && window.parent !== window) window.parent.postMessage({ type: "dsh.browser.guest.navigation", url: String(location.href), documentId: guestDocumentId, loadId: loadId }, "*") } catch (error) {} }',
-    'window.addEventListener("message", function (event) { if (event.data && event.data.type === "dsh.browser.guest.navigation.request") announceGuestIdentity(event.data.loadId) })',
-    'if (document.readyState === "complete") announceGuestIdentity()',
-    'else window.addEventListener("load", function () { announceGuestIdentity() })',
+    'try { window.addEventListener("message", function (event) { if (event.data && event.data.type === "dsh.browser.guest.navigation.request") announceGuestIdentity(event.data.loadId) }) } catch (error) {}',
+    'try { if (document.readyState === "complete") announceGuestIdentity(); else window.addEventListener("load", function () { announceGuestIdentity() }) } catch (error) {}',
     'if (window.__dshRefOverlayInstalled) return JSON.stringify({ ok: true, already: true })',
     // The bar freezes the COMPLETE capture (ordered text runs, assets, table
     // ranges, anchors), not only its words. Installed once per document, in its
