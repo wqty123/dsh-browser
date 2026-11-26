@@ -1301,10 +1301,12 @@ const react = require("react")
       ...children,
     ])
     const systemBrowser = ["chrome", "edge"].includes(settings.browser.channel)
+    const pluginOwnedProfile = settings.browser.channel === "electron"
+      || (systemBrowser && settings.browser.systemProfile !== "user")
 
     return h("div", { style: styles.wrap, className: "dsh-bb-settings" }, [
       selector("browser.channel", settings.browser.channel,
-        options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"]),
+        options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge", "electron"]),
         channel => patch({ browser: { channel } })),
       systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
         options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
@@ -1330,7 +1332,7 @@ const react = require("react")
           { value: "auto", label: t("vision.auto") },
           { value: "nonVisual", label: t("vision.nonVisual") },
         ], strategy => patch({ vision: { strategy } })),
-        systemBrowser && settings.browser.systemProfile !== "user" ? toggle("cookies", "persist", "browser.profile", "browser.profile.hint") : null,
+        pluginOwnedProfile ? toggle("cookies", "persist", "browser.profile", "browser.profile.hint") : null,
         systemBrowser && settings.browser.systemProfile !== "user" ? selector("browser.headless", settings.browser.headless ?? "auto",
           options("browser.headless.", ["auto", "windowed", "headless"]),
           headless => patch({ browser: { headless } }), "browser.headless.hint") : null,

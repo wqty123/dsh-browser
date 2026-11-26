@@ -45,7 +45,7 @@ test('missing external Electron package fails with a local recovery command', t 
   assert.doesNotMatch(result.stderr, /electron API entry must not be loaded/)
 })
 
-test('an external package must be explicitly selected, never resolved from the plugin generation', t => {
+test('an explicit invalid DSH_BROWSER_ELECTRON_PACKAGE is rejected before resolving anything', t => {
   const { run, marker } = fixture(t, "require('node:fs').writeFileSync(process.env.DSH_INSTALL_TEST_MARKER, 'ran')")
   for (const directory of ['', 'relative/node_modules/electron']) {
     const result = run({ DSH_BROWSER_ELECTRON_PACKAGE: directory })
@@ -53,6 +53,22 @@ test('an external package must be explicitly selected, never resolved from the p
     assert.match(result.stderr, /absolute external electron package/)
     assert.equal(existsSync(marker), false)
   }
+})
+
+test('when DSH_BROWSER_ELECTRON_PACKAGE is unset, an already-staged managed package is used directly', t => {
+  const { root, run, marker } = fixture(t, "require('node:fs').writeFileSync(process.env.DSH_INSTALL_TEST_MARKER, 'managed-ran')")
+  const home = join(root, 'dsh-home')
+  const managedPkg = join(home, 'dsh-builtin-browser-host', 'electron-runtime', 'node_modules', 'electron')
+  mkdirSync(managedPkg, { recursive: true })
+  writeFileSync(join(managedPkg, 'package.json'), JSON.stringify({ name: 'electron', version: '44.10.0' }))
+  writeFileSync(join(managedPkg, 'install.js'), "require('node:fs').writeFileSync(process.env.DSH_INSTALL_TEST_MARKER, 'managed-ran')")
+  const env = { ...process.env, NODE_PATH: '', ELECTRON_RUN_AS_NODE: '0', DSH_HOME: home, DSH_INSTALL_TEST_MARKER: marker }
+  delete env.DSH_BROWSER_ELECTRON_PACKAGE
+  delete env.ELECTRON_SKIP_BINARY_DOWNLOAD
+  const wrapper = join(root, 'plugin with spaces', 'scripts', 'install-electron.mjs')
+  const result = spawnSync(process.execPath, [wrapper], { cwd: root, env, encoding: 'utf8', timeout: 10_000 })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(marker, 'utf8'), 'managed-ran')
 })
 
 test('a different external package is rejected before executing its installer', t => {

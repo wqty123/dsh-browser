@@ -135,6 +135,7 @@ for (const source of ['PUT', 'disk']) test(`${source} replaces the carrier for p
   for (const patch of [
     { browser: { systemProfile: 'user' } }, { browser: { systemProfile: 'plugin' } },
     { browser: { headless: 'windowed' } }, { cookies: { persist: false } },
+    { browser: { channel: 'electron' } }, { cookies: { persist: true } },
     { browser: { channel: 'sidebar' } },
   ]) {
     const previous = h.current

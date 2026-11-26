@@ -9,7 +9,7 @@ test('a mistyped channel is reported and coerced to the sidebar-only default', (
   assert.equal(resolved.browser.channel, 'sidebar')
   assert.equal(complaints.length, 1)
   assert.match(complaints[0], /edgeee/)
-  assert.match(complaints[0], /chrome, edge, auto, bundled, sidebar/)
+  assert.match(complaints[0], /chrome, edge, electron, auto, bundled, sidebar/)
 })
 
 test('a channel that is absent is the ordinary case, not a mistake', () => {
@@ -22,6 +22,7 @@ test('a channel that is absent is the ordinary case, not a mistake', () => {
 test('a valid channel says nothing at all', () => {
   const complaints = []
   assert.equal(resolveSettings({ browser: { channel: 'edge' } }, message => complaints.push(message)).browser.channel, 'edge')
+  assert.equal(resolveSettings({ browser: { channel: 'electron' } }, message => complaints.push(message)).browser.channel, 'electron')
   assert.deepEqual(complaints, [])
 })
 
@@ -32,8 +33,12 @@ test('settings changes rechoose the carrier and release the previous selection',
   const chrome = h.current
   assert.notEqual(chrome, initial)
   assert.equal(initial.available(), false)
-  assert.equal((await h.choose('sidebar')).carrierRechosen, true)
+  assert.equal((await h.choose('electron')).carrierRechosen, true)
+  const standalone = h.current
+  assert.equal(standalone.constructor.name, 'RemoteElectronViewHost')
   assert.equal(chrome.available(), false)
+  assert.equal((await h.choose('sidebar')).carrierRechosen, true)
+  assert.equal(standalone.available(), false)
   assert.equal(h.current.constructor.name, 'SidebarOnlyHost')
 })
 

@@ -44,7 +44,7 @@ import { writeFileNoReplace } from './file-write.ts'
 import { electronRuntimeDiagnosticLines } from './runtime-diagnostics.ts'
 import { createRpcLineReader } from './rpc-input.ts'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { withTimeoutShared } from './timing.ts'
 import { dshHome } from './paths.ts'
 
@@ -65,10 +65,14 @@ for (const line of electronRuntimeDiagnosticLines(process.versions)) {
 // several Electron instances sharing Roaming\Electron fight over the GPU
 // cache/session locks, which can leave the window without a display surface
 // (capturePage then fails). A dedicated userData also persists cookies across
-// host restarts (on top of dsh_browser_auth). Must run before app is ready.
+// host restarts (on top of dsh_browser_auth) unless an ephemeral userData dir
+// is passed via DSH_BROWSER_USER_DATA_DIR. Must run before app is ready.
 try {
-  const base = dshHome()
-  app.setPath('userData', join(base, BROWSER_PROFILE_DIR))
+  const overrideUserData = process.env.DSH_BROWSER_USER_DATA_DIR
+  const userDataDir = typeof overrideUserData === 'string' && overrideUserData !== '' && isAbsolute(overrideUserData)
+    ? overrideUserData
+    : join(dshHome(), BROWSER_PROFILE_DIR)
+  app.setPath('userData', userDataDir)
 } catch (error) {
   process.stderr.write(`[dsh-browser host] userData setup failed: ${String(error)}\n`)
 }

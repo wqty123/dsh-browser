@@ -247,7 +247,7 @@ const SETTINGS_WHEN_UNREADABLE: BrowserSettings = {
  * Exported so the log line and the error message can quote the same set the parser accepts: a
  * message that lists a value the code rejects (or omits one it takes) is worse than no message.
  */
-export const BROWSER_CHANNELS = ['chrome', 'edge', 'auto', 'bundled', 'sidebar'] as const
+export const BROWSER_CHANNELS = ['chrome', 'edge', 'electron', 'auto', 'bundled', 'sidebar'] as const
 
 /**
  * Coerce the headless mode, keeping `auto` when the value is not one of the known choices.
