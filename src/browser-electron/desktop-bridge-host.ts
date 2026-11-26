@@ -38,8 +38,9 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   private lostListener: ((reason: CarrierLossReason) => void) | undefined
   private static refuseIframe = false
   private static versionError: string | undefined
-
-  private constructor(endpoint: BridgeEndpoint, private readonly isQuiet: () => boolean = () => false) {
+  private readonly isQuiet: () => boolean
+  private constructor(endpoint: BridgeEndpoint, isQuiet: () => boolean = () => false) {
+    this.isQuiet = isQuiet
     this.connection = new BridgeConnection(endpoint, bridgeEndpointPath(), () => this.lostListener?.('shell-exited'))
   }
 

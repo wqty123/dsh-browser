@@ -27,8 +27,13 @@ export class PreferredBrowserViewHost implements ElectronBrowserViewHost {
   private selected?: 'extension' | 'cdp'
   fallbackReason?: string
   private readonly extension: ExtensionBrowserViewHost
-
-  constructor(readonly browser: 'edge' | 'chrome', readonly fallback: ElectronBrowserViewHost & { connectionStatus?: () => { connected: boolean; detail: string } }, client?: NativeBrowserClient, private readonly bound = EXTENSION_READY_TIMEOUT_MS) {
+  readonly browser: 'edge' | 'chrome'
+  readonly fallback: ElectronBrowserViewHost & { connectionStatus?: () => { connected: boolean; detail: string } }
+  private readonly bound = EXTENSION_READY_TIMEOUT_MS
+  constructor(browser: 'edge' | 'chrome', fallback: ElectronBrowserViewHost & { connectionStatus?: () => { connected: boolean; detail: string } }, client?: NativeBrowserClient, bound = EXTENSION_READY_TIMEOUT_MS) {
+    this.browser = browser
+    this.fallback = fallback
+    this.bound = bound
     this.extension = new ExtensionBrowserViewHost(browser, client)
   }
 

@@ -110,17 +110,18 @@ export class BridgeConnection {
   private serialisable = false
   /** True once the shell behind this connection has been reported gone. */
   private lostNotified = false
-
-  /**
-   * @param endpoint - the shell's published bridge endpoint.
-   * @param endpointPath - where that endpoint is republished, so a moved port can be followed.
-   * @param onLost - called once when this connection concludes the shell behind it is gone.
-   */
+  private endpoint: BridgeEndpoint
+  private readonly endpointPath?: string
+  private readonly onLost?: () => void
   constructor(
-    private endpoint: BridgeEndpoint,
-    private readonly endpointPath?: string,
-    private readonly onLost?: () => void,
-  ) {}
+    endpoint: BridgeEndpoint,
+    endpointPath?: string,
+    onLost?: () => void,
+  ) {
+    this.endpoint = endpoint
+    this.endpointPath = endpointPath
+    this.onLost = onLost
+  }
 
   /**
    * Re-read the published endpoint, and adopt it if the shell has moved.

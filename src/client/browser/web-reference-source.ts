@@ -4,7 +4,11 @@ import type { FrozenSnapshot } from '../reference/client/production/protocol.ts'
 import { iframeReferenceSource } from './iframe-reference.ts'
 
 class WebSourceHttpError extends Error {
-  constructor(readonly status: number) { super(`web source channel failed (${status})`) }
+  readonly status: number
+  constructor(status: number) {
+    super(`web source channel failed (${status})`)
+    this.status = status
+  }
 }
 
 /** The authenticated app, not the opaque guest, owns this lease and its replies. */

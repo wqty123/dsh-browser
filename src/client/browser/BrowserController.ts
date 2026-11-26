@@ -69,9 +69,9 @@ export class BrowserController implements HostObservable<BrowserControllerState>
   private readonly journal: BrowserInitializationJournal
   private readonly sessionId: string
   private readonly occurrenceId: string
-
-  /** @param options - identity, persistence, page factory and source-tab navigation. */
-  constructor(private readonly options: BrowserControllerOptions) {
+  private readonly options: BrowserControllerOptions
+  constructor(options: BrowserControllerOptions) {
+    this.options = options
     this.actions = options.actions
     this.journal = options.journal ?? createBrowserInitializationJournal()
     this.sessionId = options.sessionId ?? ''

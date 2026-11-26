@@ -65,15 +65,12 @@ export class HistoryStore {
   private limitsChanged = false
   private maxEntries: number
   private maxAgeMs: number
-
-  /**
-   * @param file - absolute path of the JSONL history file.
-   * @param limits - retention overrides (entry count and age).
-   */
+  private readonly file: string
   constructor(
-    private readonly file: string = visitedHistoryPath(),
+    file: string = visitedHistoryPath(),
     limits: HistoryLimits = {},
   ) {
+    this.file = file
     this.maxEntries = limits.maxEntries ?? DEFAULT_MAX_ENTRIES
     this.maxAgeMs = (limits.maxAgeDays ?? DEFAULT_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000
     // The first rewrite is due once the file has grown the slack past the cap.

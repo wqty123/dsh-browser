@@ -5,9 +5,17 @@ import { readTabHandle } from '../../browser/handles.ts'
 
 export class NativeChildPresentation {
   private readonly children = new Map<string, DesktopNativeChild>()
-
-  constructor(readonly api: DesktopNativeChildTabs, private readonly owner: string,
-    private readonly open: (tab: TabId) => boolean, private readonly close: (tab: TabId) => void) {}
+  readonly api: DesktopNativeChildTabs
+  private readonly owner: string
+  private readonly open: (tab: TabId) => boolean
+  private readonly close: (tab: TabId) => void
+  constructor(api: DesktopNativeChildTabs, owner: string,
+    open: (tab: TabId) => boolean, close: (tab: TabId) => void) {
+    this.api = api
+    this.owner = owner
+    this.open = open
+    this.close = close
+  }
 
   child(tab: TabId): DesktopNativeChild | undefined { return this.children.get(tab) }
 

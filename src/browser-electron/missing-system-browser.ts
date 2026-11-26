@@ -55,11 +55,12 @@ const SETTING_LABEL: Record<string, string> = {
  * requested, where the plugin looked, and the three concrete ways to resolve it.
  */
 export class MissingSystemBrowserHost implements ElectronBrowserViewHost {
-  /**
-   * @param kind - the browser the user asked for.
-   * @param searched - the names and locations that were checked, for the report.
-   */
-  constructor(private readonly kind: Exclude<BrowserChannel, 'bundled' | 'auto'>, private readonly searched: readonly string[]) {}
+  private readonly kind: Exclude<BrowserChannel, 'bundled' | 'auto'>
+  private readonly searched: readonly string[]
+  constructor(kind: Exclude<BrowserChannel, 'bundled' | 'auto'>, searched: readonly string[]) {
+    this.kind = kind
+    this.searched = searched
+  }
 
   /** @returns always true: see the module comment — reporting false would hide this. */
   available(): boolean {

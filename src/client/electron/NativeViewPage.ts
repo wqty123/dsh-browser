@@ -34,11 +34,25 @@ export class NativeViewPage implements BrowserFrame, BrowserPresentation {
   private documentLifetime: AbortController | undefined
   private releaseChildOwner: (() => void) | undefined
   private unsubscribeChildren: (() => void) | undefined
-
-  constructor(private readonly options: BrowserPageOptions, private readonly native: DesktopNativeViews,
-    private readonly register: NativeSlotRegistrar, private readonly workspace: (signal: AbortSignal) => Promise<string>,
-    private readonly owner: string, private readonly capture?: (intent: object, owner?: string) => Promise<void>,
-    private readonly children?: NativeChildPresentation) {}
+  private readonly options: BrowserPageOptions
+  private readonly native: DesktopNativeViews
+  private readonly register: NativeSlotRegistrar
+  private readonly workspace: (signal: AbortSignal) => Promise<string>
+  private readonly owner: string
+  private readonly capture?: (intent: object, owner?: string) => Promise<void>
+  private readonly children?: NativeChildPresentation
+  constructor(options: BrowserPageOptions, native: DesktopNativeViews,
+    register: NativeSlotRegistrar, workspace: (signal: AbortSignal) => Promise<string>,
+    owner: string, capture?: (intent: object, owner?: string) => Promise<void>,
+    children?: NativeChildPresentation) {
+    this.options = options
+    this.native = native
+    this.register = register
+    this.workspace = workspace
+    this.owner = owner
+    this.capture = capture
+    this.children = children
+  }
 
   readonly lifecycle = { getSnapshot: (): BrowserCarrierState => this.carrier.getSnapshot(),
     subscribe: (listener: () => void): (() => void) => this.carrier.subscribe(listener) }

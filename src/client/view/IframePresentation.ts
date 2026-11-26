@@ -155,9 +155,11 @@ export class IframePresentation implements BrowserPresentation {
     }
     if (data.ready === true) this.events.guestReady?.(this.document.revision, this.pageId)
   }
-
-  /** @param events - provider-owned load and remount callbacks. */
-  constructor(private readonly events: IframePresentationEvents, private readonly owner?: string) {
+  private readonly events: IframePresentationEvents
+  private readonly owner?: string
+  constructor(events: IframePresentationEvents, owner?: string) {
+    this.events = events
+    this.owner = owner
     if (owner !== undefined) this.sourceLifetime.signal.addEventListener('abort', registerTakeoverSummary(this.pageId, owner, async signal => {
       const result = await this.command('summary', { maxChars: 1500, legacy: false }, signal, this.observedUrl ?? '', this.loadId)
       return result as unknown as TakeoverSummary

@@ -42,8 +42,10 @@ export class SidebarOnlyHost implements ElectronBrowserViewHost {
   private disposed = false
   private readonly discovery = new AbortController()
   private lostListener: ((reason: CarrierLossReason) => void) | undefined
-
-  constructor(private readonly loader: (signal: AbortSignal) => Promise<ElectronBrowserViewHost>) {}
+  private readonly loader: (signal: AbortSignal) => Promise<ElectronBrowserViewHost>
+  constructor(loader: (signal: AbortSignal) => Promise<ElectronBrowserViewHost>) {
+    this.loader = loader
+  }
 
   /** Keep the explicit selection available so discovery failures reach the caller unchanged. */
   available(): boolean { return !this.disposed }

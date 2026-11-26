@@ -119,9 +119,15 @@ function dataDirectory(argv: readonly string[]): string | undefined {
 
 export class BrowserProcessOwnership {
   private readonly records = new WeakMap<ChildProcess, { identity: ProcessIdentity; executable: string; directory: string }>()
-
-  constructor(private readonly executable: string, private readonly directory: string,
-    private readonly options: ProcessOwnershipOptions) {}
+  private readonly executable: string
+  private readonly directory: string
+  private readonly options: ProcessOwnershipOptions
+  constructor(executable: string, directory: string,
+    options: ProcessOwnershipOptions) {
+    this.executable = executable
+    this.directory = directory
+    this.options = options
+  }
 
   private live(child: ChildProcess): boolean {
     return Number.isSafeInteger(child.pid) && child.exitCode === null && child.signalCode === null

@@ -38,8 +38,10 @@ export class ElectronWebviewPresentation implements BrowserPresentation {
     this.watchScale()
     void this.syncZoom()
   }
-
-  constructor(private readonly events: ElectronPresentationEvents) {}
+  private readonly events: ElectronPresentationEvents
+  constructor(events: ElectronPresentationEvents) {
+    this.events = events
+  }
 
   /** @param viewportId - committed content container. @returns ends attachment and releases its guest. */
   mount(viewportId: string): () => void {

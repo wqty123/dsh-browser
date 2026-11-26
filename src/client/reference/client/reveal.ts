@@ -44,8 +44,10 @@ export interface RevealerOptions {
  * broken".
  */
 export class RevealFailed extends Error {
-  constructor(readonly status: RevealStatus, message?: string) {
+  readonly status: RevealStatus
+  constructor(status: RevealStatus, message?: string) {
     super(message ?? status)
+    this.status = status
     this.name = 'RevealFailed'
   }
 }

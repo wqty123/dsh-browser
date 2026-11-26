@@ -871,11 +871,14 @@ export abstract class ProviderCore {
 
   /** Live settings source; absent when nothing owns a settings document. */
   protected readonly settingsSource: (() => BrowserSettings) | undefined
-
+  protected readonly host: ElectronBrowserViewHost
+  protected readonly config: ElectronBrowserProviderConfig
   constructor(
-    protected readonly host: ElectronBrowserViewHost,
-    protected readonly config: ElectronBrowserProviderConfig = {},
+    host: ElectronBrowserViewHost,
+    config: ElectronBrowserProviderConfig = {},
   ) {
+    this.host = host
+    this.config = config
     this.httpOnly = config.httpOnly ?? true
     this.snapshotMaxElements = config.snapshotMaxElements ?? 60
     this.contentMaxChars = config.contentMaxChars

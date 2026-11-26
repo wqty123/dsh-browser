@@ -499,36 +499,37 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private readonly ownedClients = new WeakMap<CdpClient, ChildProcess>()
   private readonly ownedChildren = new WeakSet<ChildProcess>()
   private readonly createdTargets = new WeakMap<CdpClient, Map<string, BrowserTabWireId>>()
-
-  /**
-   * @param browser - the detected installation to launch on first use.
-   * @param profileDir - a plugin-owned directory; the user's own profile is never touched.
-   * @param extraArgs - additional Chromium switches.
-   * @param ephemeralDir - a directory to delete on release, when the user has turned
-   *   persistence off so no login state outlives the session.
-   * @param launcher - how to start the browser, for tests.
-   *
-   *   Recovery after the browser dies was untestable without this: the suite spawns a stub
-   *   with Chromium's arguments, and a stub that is not a browser rejects them and exits, so
-   *   no CDP endpoint ever appears and no session is ever created. Verified by mutation —
-   *   removing every sessions.clear() left the recovery tests green. A launcher lets a test
-   *   provide something that actually speaks CDP, so the state those tests describe exists.
-   */
+  private readonly browser: DetectedBrowser
+  private readonly profileDir: string
+  private readonly extraArgs: readonly string[]
+  private readonly ephemeralDir?: string
+  private readonly launcher: BrowserLauncher
+  private readonly headlessMode: HeadlessMode
+  private readonly isQuiet: () => boolean
+  private readonly profileError?: string
   constructor(
-    private readonly browser: DetectedBrowser,
-    private readonly profileDir: string,
-    private readonly extraArgs: readonly string[] = [],
-    private readonly ephemeralDir?: string,
-    private readonly launcher: BrowserLauncher = defaultLauncher,
+    browser: DetectedBrowser,
+    profileDir: string,
+    extraArgs: readonly string[] = [],
+    ephemeralDir?: string,
+    launcher: BrowserLauncher = defaultLauncher,
     /**
      * Whether this launch should get a window. See {@link resolveLaunchMode} for how `auto` decides
      * and why a display-less host needs headless at all (issue #32).
      */
-    private readonly headlessMode: HeadlessMode = 'auto',
-    private readonly isQuiet: () => boolean = () => false,
-    private readonly profileError?: string,
+    headlessMode: HeadlessMode = 'auto',
+    isQuiet: () => boolean = () => false,
+    profileError?: string,
     ownership: ProcessOwnershipOptions = { managed: false },
   ) {
+    this.browser = browser
+    this.profileDir = profileDir
+    this.extraArgs = extraArgs
+    this.ephemeralDir = ephemeralDir
+    this.launcher = launcher
+    this.headlessMode = headlessMode
+    this.isQuiet = isQuiet
+    this.profileError = profileError
     this.ownership = new BrowserProcessOwnership(browser.path, profileDir, ownership)
   }
 

@@ -16,8 +16,11 @@ export class GuestStorage {
   private readonly secret = randomBytes(32)
   private local: Partitions = new Map()
   private session: Partitions = new Map()
-
-  constructor(private readonly directory?: string, private readonly quota = 5 * 1024 * 1024) {
+  private readonly directory?: string
+  private readonly quota = 5 * 1024 * 1024
+  constructor(directory?: string, quota = 5 * 1024 * 1024) {
+    this.directory = directory
+    this.quota = quota
     if (directory === undefined) return
     let fd: number | undefined
     try {

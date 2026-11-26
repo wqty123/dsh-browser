@@ -439,23 +439,36 @@ class ElectronChildClient {
    */
   private awaitingHello = true
   private helloTimer: ReturnType<typeof setTimeout> | undefined
-
+  private readonly hostMainPath: string
+  private readonly port: number
+  private readonly token: string
+  private readonly onExit?: () => void
+  private readonly onUserAction?: (action: BrowserUserAction) => void
+  private readonly onViewClosed?: (windowId: string) => void
+  private readonly executable?: string
   constructor(
-    private readonly hostMainPath: string,
-    private readonly port: number,
-    private readonly token: string,
-    private readonly onExit?: () => void,
-    private readonly onUserAction?: (action: BrowserUserAction) => void,
+    hostMainPath: string,
+    port: number,
+    token: string,
+    onExit?: () => void,
+    onUserAction?: (action: BrowserUserAction) => void,
     /**
      * Called when the human closes a browser window. The session it showed is
      * over: the provider releases it, while history and login state stay on disk
      * so the next open is a clean session rather than a resurrected one.
      */
-    private readonly onViewClosed?: (windowId: string) => void,
+    onViewClosed?: (windowId: string) => void,
     /** Test seam: the executable to spawn instead of the resolved Electron
      *  binary. Absent -> resolveElectronPath() (production behavior). */
-    private readonly executable?: string,
+    executable?: string,
   ) {
+    this.hostMainPath = hostMainPath
+    this.port = port
+    this.token = token
+    this.onExit = onExit
+    this.onUserAction = onUserAction
+    this.onViewClosed = onViewClosed
+    this.executable = executable
     const electron = this.executable ?? resolveElectronPath()
     const source = this.executable !== undefined
       ? 'provided'
@@ -767,7 +780,12 @@ class ElectronChildClient {
 
 /** One view in the child: its id, used for every command. */
 class RemoteView implements ElectronViewHandle {
-  constructor(readonly id: string, private readonly client: ElectronChildClient) {}
+  readonly id: string
+  private readonly client: ElectronChildClient
+  constructor(id: string, client: ElectronChildClient) {
+    this.id = id
+    this.client = client
+  }
 
   sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
     return this.client.call<Record<string, unknown>>('command', {
@@ -873,16 +891,22 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
    * next open starts clean instead of resuming a window nobody can see.
    */
   private viewClosedHandler: ((windowId: string) => void) | undefined
-
+  private readonly hostMainPath: string
+  private readonly spawnExecutable?: string
+  private readonly probe: () => void
   constructor(
-    private readonly hostMainPath: string,
+    hostMainPath: string,
     /** Test seam: the executable to spawn instead of the resolved Electron
      *  binary. Absent -> resolveElectronPath() (production behavior). */
-    private readonly spawnExecutable?: string,
+    spawnExecutable?: string,
     /** Test seam: the binary probe behind `available()`. Absent ->
      *  resolveElectronPath(). */
-    private readonly probe: () => void = resolveElectronPath,
-  ) {}
+    probe: () => void = resolveElectronPath,
+  ) {
+    this.hostMainPath = hostMainPath
+    this.spawnExecutable = spawnExecutable
+    this.probe = probe
+  }
 
   /**
    * Cheap usability probe: can we find an Electron binary to spawn? The scan
@@ -1311,11 +1335,15 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
 /** A view handle that waits for child readiness before issuing commands. */
 class DeferredRemoteView implements ElectronViewHandle {
   private materialized: Promise<RemoteView> | undefined
-
+  readonly id: string
+  private readonly materialize: () => Promise<RemoteView>
   constructor(
-    readonly id: string,
-    private readonly materialize: () => Promise<RemoteView>,
-  ) {}
+    id: string,
+    materialize: () => Promise<RemoteView>,
+  ) {
+    this.id = id
+    this.materialize = materialize
+  }
 
   /**
    * Materialize once and cache: every operation on the same handle must
