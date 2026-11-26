@@ -156,7 +156,9 @@ export interface BridgeStatus {
   readonly mainExtension?: MainExtensionStatus
   readonly code?: string
   /** `installed`, `missing` or `stale`; see the module comment for what each means. */
-  readonly state: 'installed' | 'missing' | 'stale'
+  readonly state: 'installed' | 'missing' | 'stale' | 'unsupported-layout'
+  /** Main entry the identity resolved, for an install this build has no patch spec for. */
+  readonly entry?: string
   /** Whether the loaded application passed DSH Desktop identity verification. */
   readonly present: boolean
   /**
@@ -235,6 +237,12 @@ export function readBridgeStatus(installRoot: string, mainExtension?: MainExtens
     code: mainExtension.code }
 }
 
+/** The main entry the identity resolved for this install, when it can be read again cheaply. */
+function identityEntry(installRoot: string): string | undefined {
+  const identity = readDesktopIdentity(installRoot)
+  return identity.ok ? identity.mainEntry : undefined
+}
+
 function readBridgeInstallStatus(installRoot: string): BridgeStatus {
   let resources: string
   try { resources = desktopPaths(installRoot).resources }
@@ -242,7 +250,10 @@ function readBridgeInstallStatus(installRoot: string): BridgeStatus {
     return { state: 'missing', present: false, installRoot, archivePresent: false, detail: `not a DSH Desktop install: ${String(error)}` }
   }
   const appDir = join(resources, 'app')
-  const mainPath = join(appDir, 'lib', 'main.js')
+  // Follow the entry the identity actually resolved instead of assuming the legacy name. When it is
+  // not the entry our patch specs target, the install is recognized but cannot be patched yet — that
+  // is a distinct answer from "this is not DSH Desktop at all" (issue #112).
+  const mainPath = join(appDir, ...(identityEntry(installRoot) ?? 'lib/main.js').split('/'))
   const archivePath = join(resources, 'app.asar')
   const backupPath = `${mainPath}.before-bridge`
 
@@ -263,6 +274,21 @@ function readBridgeInstallStatus(installRoot: string): BridgeStatus {
 
   const archivePresent = safeExists(archivePath)
   const version = identity.version ?? 'unknown'
+  // A recognized DSH Desktop whose main entry we have no patch spec for. Reported as its own state so
+  // the panel can say "this desktop version has no patch yet, use the web sidebar" instead of either
+  // pretending the desktop is absent (#112) or offering an install that must fail.
+  const entry = identityEntry(installRoot) ?? 'lib/main.js'
+  if (entry !== 'lib/main.js') {
+    return {
+      state: 'unsupported-layout',
+      present: true,
+      installRoot,
+      archivePresent,
+      version,
+      entry,
+      detail: `DSH Desktop ${version} uses ${entry}, which this build has no host-patch spec for; the web sidebar works without it`,
+    }
+  }
   const mainPresent = safeExists(mainPath)
   if (!mainPresent && !archivePresent) {
     // Unreachable once identity has passed (identity requires the loaded main entry), kept as the
