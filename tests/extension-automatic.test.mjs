@@ -34,6 +34,13 @@ test('Windows launcher flushes each stdin and stdout chunk before waiting for EO
   assert.doesNotMatch(source, /OpenStandardInput\(\)\.CopyTo|StandardOutput\.BaseStream\.CopyTo/)
 })
 
+test('Windows launcher runs electron as node so Native Messaging never spawns a window', () => {
+  // `install` passes process.execPath, which is electron.exe inside DSH Desktop. Without this the
+  // launcher starts a GUI app on every connect and steals focus (issue #129).
+  const source = launcherSource('C:\\Program Files\\node.exe', 'C:\\plugin\\host.mjs', 'C:\\state\\config.json')
+  assert.match(source, /info\.EnvironmentVariables\["ELECTRON_RUN_AS_NODE"\]="1"/)
+})
+
 test('published Windows launcher answers a small hello while stdin remains open', { skip: process.platform !== 'win32' }, async t => {
   const dir = directory(t)
   const installed = install({ browser: 'edge', directory: dir, register: false })
