@@ -13,10 +13,7 @@
       "note": "electron-vite layout. The official DSH Desktop 0.14.0 ships this entry with `main: ./out/main/index.js` and no `lib` directory at all (issue #112), while the third-party electron-vite shell (dataelement/dsh-desktop, issue #62) shares the same shape. The `@deepseek-ai/dsh` dependency is what separates them: the official bundle carries it, the third-party shell does not."
     }
   ],
-  "unsupportedMainEntries": {
-    "out/main/index.js": "an electron-vite DSH Desktop without the @deepseek-ai/dsh dependency — the third-party shell from issue #62, which shares the package name but not the DeepSeek Harness Desktop bundle the bridge patches"
-  },
-  "_unsupportedNote": "A recognized package name with one of these entries instead of mainEntry, and without the candidate's required dependency, is refused with the reason given, so the user learns which Desktop they have rather than seeing a missing-file error.",
+  "_unsupportedNote": "Entries listed here are refused with their reason instead of a bare missing-file error. Deliberately empty for out/main/index.js: that IS the official entry (dataelement/dsh-desktop is the official Dataelem desktop, and issue #62 was wrong to call it third-party — its own upstream-baseline.json points at deepseek-ai/deepseek-harness). The candidate list above decides by dependency instead.",
   "_layoutNote": "resources/app.asar wins over resources/app whenever it exists, so identity is read from the archive in that case and never from the sibling extraction, which the updater leaves behind and which may be a different build.",
   "layouts": [
     {

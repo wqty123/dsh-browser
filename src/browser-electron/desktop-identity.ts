@@ -77,9 +77,7 @@ export const FALLBACK_RULE: IdentityRule = {
       note: 'electron-vite layout. The official DSH Desktop 0.14.0 ships this entry with `main: ./out/main/index.js` and no `lib` directory at all (issue #112), while the third-party electron-vite shell (dataelement/dsh-desktop, issue #62) shares the same shape. The `@deepseek-ai/dsh` dependency is what separates them: the official bundle carries it, the third-party shell does not.',
     },
   ],
-  unsupportedMainEntries: {
-    'out/main/index.js': 'the electron-vite layout of a third-party DSH Desktop (dataelement/dsh-desktop, issue #62), which shares the package name but not the DeepSeek Harness Desktop shell the bridge patches',
-  },
+
   layouts: [
     { name: 'macos-bundle', marker: 'Contents/Info.plist', resources: 'Contents/Resources', executable: 'Contents/MacOS/DeepSeek Harness', cliLauncher: 'runtime/cli/bin/dsh' },
     { name: 'directory', resources: 'resources', executable: 'DeepSeek Harness.exe', cliLauncher: 'runtime/cli/bin/dsh.cmd' },
