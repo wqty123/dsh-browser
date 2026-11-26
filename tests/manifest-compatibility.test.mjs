@@ -29,7 +29,7 @@ test('the DSH range is declared where DSH reads it', () => {
 })
 
 test('engines.dsh aligns with the published 0.2.3-alpha.2+ baseline', () => {
-  assert.equal(manifest.engines.dsh, '>=0.2.3-alpha.2 <0.3.0', 'engines.dsh matches the supported DSH 0.2.3-alpha.2+ baseline')
+  // The official DataElem desktop bundles harness 0.2.2-rc.5 / 0.2.2-rc.1, so the floor covers that line\n  assert.equal(manifest.engines.dsh, '>=0.2.2-rc.1 <0.3.0', 'engines.dsh covers the desktop line the official build ships')
   const ranges = new Set(dshPeerRanges())
   assert.ok(ranges.size > 0, 'the peer fallback ranges exist')
   for (const range of ranges) {
