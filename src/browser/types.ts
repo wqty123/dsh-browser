@@ -7,7 +7,7 @@
  * @module dsh-browser/browser/types
  */
 
-import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { HarnessError } from '@deepseek-ai/dsh-error'
 
 /**
  * Stable identity of one browser session, resolved by the Host through a

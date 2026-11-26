@@ -1,7 +1,7 @@
 // Tools ask the carrier for one capability instead of testing which carrier a task is on.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { HarnessError } from '@deepseek-ai/dsh-error'
 import { assertCapability, CarrierCapabilityError, CDP_CARRIER_CAPABILITIES, WEB_PANEL_CAPABILITIES } from '../lib/browser/types.js'
 import { carrierCapabilities, createState, maxWaitFor } from '../lib/tool-browser/state.js'
 import * as policy from '../assets/browser-policy.mjs'

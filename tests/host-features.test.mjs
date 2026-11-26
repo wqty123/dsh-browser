@@ -1,7 +1,7 @@
 /**
  * Host feature probes: runtime checks, not host version strings, decide what the plugin uses.
- * The static guard keeps those checks in src/compat/host-features.ts and pins the deep
- * `@deepseek-ai/<pkg>/src/...` imports to the ones whose symbols no package export offers.
+ * The static guard keeps those checks in src/compat/host-features.ts and forbids deep
+ * `@deepseek-ai/<pkg>/src/...` imports across the entire source tree.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -83,25 +83,12 @@ test('host protocol and PTC probes live only in src/compat/host-features.ts', ()
   assert.deepEqual(offenders, [])
 })
 
-/** Symbols the host packages do not export from their root, `/client` or `/types` entries. */
-const DEEP_IMPORT_ALLOWLIST = new Set([
-  '@deepseek-ai/dsh-client-ui-conversation/src/client/conversation/user-text-document.ts',
-  '@deepseek-ai/dsh-client-ui-conversation/src/client/input/editor/runtime.ts',
-  '@deepseek-ai/dsh-client-ui-conversation/src/client/input/prompt.ts',
-  '@deepseek-ai/dsh-client-ui-conversation/src/client/user-text/UserText.tsx',
-  '@deepseek-ai/dsh-client-ui-chat/src/client/chat/UserContent.tsx',
-  '@deepseek-ai/dsh-message-quotes/src/client/quote-rule.ts',
-])
-
-test('deep @deepseek-ai/*/src imports are limited to symbols with no package export', () => {
+test('no file in src/ deep-imports @deepseek-ai/*/src/*', () => {
   const deep = new Map()
   for (const path of sources()) {
     for (const [, specifier] of readFileSync(path, 'utf8').matchAll(/['"](@deepseek-ai\/[^'"]+\/src\/[^'"]+)['"]/g)) {
-      if (!DEEP_IMPORT_ALLOWLIST.has(specifier)) deep.set(specifier, rel(path))
+      deep.set(specifier, rel(path))
     }
   }
   assert.deepEqual([...deep], [], 'import from the package root, /client or /types instead')
-  for (const path of sources().filter(path => !rel(path).includes('__tests__/'))) {
-    assert.doesNotMatch(readFileSync(path, 'utf8'), /['"]@deepseek-ai\/[^'"]+\/src\//, `${rel(path)}: production code never deep-imports a host package`)
-  }
 })

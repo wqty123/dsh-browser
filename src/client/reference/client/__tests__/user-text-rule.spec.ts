@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { UserTextDocument } from '@deepseek-ai/dsh-client-ui-conversation/src/client/conversation/user-text-document.ts'
+import { UserTextDocument, quoteRule } from './user-text-test-double.ts'
 import { browserSourceRule } from '../production/user-text-rule.ts'
 import { sourceMarker, submissionQuote } from '../production/source-marker.ts'
-import { quoteRule } from '@deepseek-ai/dsh-message-quotes/src/client/quote-rule.ts'
 
 describe('native browser source text nodes', () => {
   it.each(['> ', '>', '   >\t'])('owns an atomic browser-source quote before the generic quote rule (%j)', prefix => {
