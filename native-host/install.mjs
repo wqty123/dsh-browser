@@ -53,6 +53,11 @@ export function launcherSource(nodePath, hostScript, configPath) {
         var info=new ProcessStartInfo(${literal(nodePath)});
         info.Arguments=QuoteArg(${literal(hostScript)})+" --config "+QuoteArg(${literal(configPath)})+" "+QuoteArg(args[0]);
         info.UseShellExecute=false; info.CreateNoWindow=true;
+        // nodePath is process.execPath, which is electron.exe inside DSH Desktop. Without this an
+        // Electron binary starts as a GUI app: every Native Messaging connect spawned a window and
+        // stole focus from whatever the user was doing (issue #129). A real node.exe ignores the
+        // variable, so setting it unconditionally is safe for both.
+        info.EnvironmentVariables["ELECTRON_RUN_AS_NODE"]="1";
         info.RedirectStandardInput=true; info.RedirectStandardOutput=true; info.RedirectStandardError=true;
         using(var process=Process.Start(info)) {
           Task.Run(()=>{try{Relay(Console.OpenStandardInput(),process.StandardInput.BaseStream);}catch{}finally{try{process.StandardInput.Close();}catch{}}});
