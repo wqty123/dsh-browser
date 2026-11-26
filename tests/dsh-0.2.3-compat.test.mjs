@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -61,7 +61,7 @@ test('the surface is read from DSH_HOME only, never a machine-specific path', ()
   }
 })
 
-test('the host patch refuses DSH 0.2.3-alpha.2 without writing, so the plugin falls back to its own surface', () => {
+test('the host patch accepts DSH 0.2.3-alpha.2 and refuses to write when its artefacts do not match', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-host-patch-023-'))
   try {
     const pkg = JSON.stringify({ name: '@deepseek-ai/dsh-client-ui-sidebar-right', version: '0.2.3-alpha.2' })
@@ -75,16 +75,37 @@ test('the host patch refuses DSH 0.2.3-alpha.2 without writing, so the plugin fa
         return { code: error.status, result: JSON.parse(error.stdout) }
       }
     }
+    // 0.2.3-alpha.2 now has a spec, so the version on its own is no longer a reason to refuse. What
+    // must still hold is that a package whose artefacts are missing (here: no lib/client.js) is
+    // rejected without writing anything — that is the safety property, and it is version-agnostic.
     for (const command of ['status', 'apply']) {
       const { code, result } = run(command)
-      assert.equal(code, 1, `${command} exits non-zero`)
-      assert.equal(result.status, 'unsupported version')
-      assert.match(result.reason, /0\.2\.3-alpha\.2/)
+      assert.equal(code, 1, `${command} exits non-zero while the artefacts are missing`)
+      assert.notEqual(result.status, 'unsupported version', '0.2.3-alpha.2 has a spec now')
+      assert.ok(result.reason, `${command} explains why it refused`)
     }
-    assert.equal(run('apply').result.changed, false)
     assert.deepEqual(readdirSync(dir), ['package.json'], 'no backup, no patched file')
     assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), pkg)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('the 0.2.3 spec resolves against the installed DSH artefacts when they are present', t => {
+  const sidebar = join(repo, 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right')
+  const manifestPath = join(sidebar, 'package.json')
+  const bundle = join(sidebar, 'lib', 'client.js')
+  if (!existsSync(manifestPath) || !existsSync(bundle)) {
+    t.skip('dsh-client-ui-sidebar-right is not installed with a built bundle')
+    return
+  }
+  const installed = JSON.parse(readFileSync(manifestPath, 'utf8')).version
+  if (installed !== '0.2.3-alpha.2') {
+    t.skip(`installed sidebar is ${installed}; the 0.2.3 spec only claims 0.2.3-alpha.2`)
+    return
+  }
+  const script = join(repo, 'dsh-host-patch', 'apply.mjs')
+  const out = execFileSync(process.execPath, [script, 'status', sidebar], { encoding: 'utf8', stdio: 'pipe' })
+  const result = JSON.parse(out)
+  assert.equal(result.status, 'absent', 'ready to apply: version accepted and every anchor resolved')
 })
