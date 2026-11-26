@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { gunzipSync } from 'node:zlib'
 import { stripLegacyBridge } from './legacy-bridge.mjs'
 
-const specs = ['rc3', 'rc5', 'tauri'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8')))
+const specs = ['rc3', 'rc5', 'tauri', 'v023-alpha2'].map(name => JSON.parse(fs.readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8')))
 const previousSpecs = ['rc3', 'rc5'].flatMap(name => [8, 7, 6, 5, 4, 3, 2, 1].map(revision =>
   JSON.parse(revision >= 3
     ? gunzipSync(fs.readFileSync(new URL(`./${name}-revision${revision}.json.gz`, import.meta.url))).toString('utf8')
