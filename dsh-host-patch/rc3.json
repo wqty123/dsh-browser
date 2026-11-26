@@ -65,7 +65,7 @@
       "id": "main",
       "packageName": "@deepseek-ai/dsh-desktop",
       "file": "lib/main.js",
-      "marker": "async savedCookies()",
+      "marker": "clearTimeout(force)",
       "sha256": "f808749c7a1a907e1acb354e774d1cebf1d1c2561fd789d8fbee1e9c412caa00",
       "edits": [
         {
