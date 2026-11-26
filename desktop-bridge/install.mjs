@@ -688,7 +688,14 @@ function readIdentityRule() {
     const mainEntry = raw.mainEntry
     const layouts = raw.layouts
     const unsupportedMainEntries = raw.unsupportedMainEntries ?? {}
+    const mainEntryCandidates = raw.mainEntryCandidates
     const field = value => typeof value === 'string' && value !== ''
+    if (mainEntryCandidates !== undefined && (!Array.isArray(mainEntryCandidates)
+      || mainEntryCandidates.some(c => c === null || typeof c !== 'object' || !field(c.entry)
+        || (c.requiresDependency !== undefined && !field(c.requiresDependency))))) {
+      console.error('desktop-identity.json is malformed: mainEntryCandidates must list entries with an optional requiresDependency')
+      return undefined
+    }
     if (!Array.isArray(names) || names.length === 0 || names.some(name => typeof name !== 'string')
       || typeof mainEntry !== 'string' || mainEntry === ''
       || !Array.isArray(layouts) || layouts.length === 0 || layouts.at(-1)?.marker !== undefined
@@ -699,7 +706,7 @@ function readIdentityRule() {
       console.error('desktop-identity.json is malformed: expected packageNames[], mainEntry, layouts[] and an optional unsupportedMainEntries map')
       return undefined
     }
-    return { packageNames: names, mainEntry, unsupportedMainEntries, layouts }
+    return { packageNames: names, mainEntry, unsupportedMainEntries, mainEntryCandidates, layouts }
   } catch (error) {
     console.error(`desktop-identity.json could not be read: ${String(error)}`)
     return undefined
@@ -885,16 +892,35 @@ function verifyDesktopIdentity(root) {
   const hasEntry = entry => archivePresent
     ? readAsarEntry(archive, entry) !== undefined
     : existsSync(join(appDir, ...entry.split('/')))
-  if (!hasEntry(rule.mainEntry)) {
+  let entry = rule.mainEntry
+  let mainPresent = hasEntry(entry)
+  if (!mainPresent) {
+    const dependencies = manifest.dependencies
+    for (const candidate of rule.mainEntryCandidates ?? []) {
+      if (!hasEntry(candidate.entry)) continue
+      if (candidate.requiresDependency !== undefined && (dependencies === null || typeof dependencies !== 'object'
+        || dependencies[candidate.requiresDependency] === undefined)) continue
+      entry = candidate.entry
+      mainPresent = true
+      break
+    }
+  }
+  if (!mainPresent) {
     const foreign = Object.entries(rule.unsupportedMainEntries).find(([entry]) => hasEntry(entry))
     if (foreign !== undefined) {
       return { ok: false, reason: `${foreign[0]} instead of ${rule.mainEntry}: ${foreign[1]}; use DSH Web or DeepSeek Harness Desktop` }
+    }
+    const lookAlike = (rule.mainEntryCandidates ?? []).find(candidate => hasEntry(candidate.entry))
+    if (lookAlike !== undefined) {
+      const gate = lookAlike.requiresDependency === undefined ? 'its identity gate' : lookAlike.requiresDependency
+      return { ok: false, reason: `${lookAlike.entry} instead of ${rule.mainEntry}, but ${gate} is absent, so this is not the DSH Desktop bundle (issue #62); use DSH Web or DeepSeek Harness Desktop` }
     }
     return { ok: false, reason: `${rule.mainEntry} is not present under ${archivePresent ? archive : appDir}` }
   }
   return {
     ok: true,
     layout,
+    mainEntry: entry,
     packageName: name,
     version: typeof manifest.version === 'string' ? manifest.version : undefined,
   }

@@ -377,6 +377,13 @@ export function readDesktopIdentity(installRoot: string): DesktopIdentity | Iden
     if (foreign !== undefined) {
       return { ok: false, shell: 'third-party-shell', ...versionOf(manifest), reason: `${foreign[0]} instead of ${rule.mainEntry}: ${foreign[1]}; use DSH Web or DeepSeek Harness Desktop` }
     }
+    // A candidate entry is present but its gate was not satisfied: the package name was borrowed by a
+    // look-alike shell. Naming that is more useful than reporting the missing default entry.
+    const lookAlike = (rule.mainEntryCandidates ?? []).find(candidate => hasEntry(candidate.entry))
+    if (lookAlike !== undefined) {
+      const gate = lookAlike.requiresDependency === undefined ? 'its identity gate' : `${lookAlike.requiresDependency}`
+      return { ok: false, shell: 'third-party-shell', ...versionOf(manifest), reason: `${lookAlike.entry} instead of ${rule.mainEntry}, but ${gate} is absent, so this is not the DSH Desktop bundle (issue #62); use DSH Web or DeepSeek Harness Desktop` }
+    }
     return { ok: false, shell: 'official-unsupported', ...versionOf(manifest), reason: `${rule.mainEntry} is not present under ${archivePresent ? archive : appDir}` }
   }
 
