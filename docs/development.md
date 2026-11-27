@@ -114,6 +114,19 @@ node tools/deploy-local.mjs --no-build        # 复用现有 lib/
 脚本把 `publishConfig.exports`（与 npm 发布时应用的是同一份映射）写进安装目录的 `package.json`，并断言
 `./client` 解析到 `./lib/client.js`、该文件带 `__ModuleLoader__` 信封。回归测试：`tests/deploy-manifest.test.mjs`。
 
+### 升级 / 替换已有安装（#131）
+
+直接往已有目录里覆盖会留下"新旧文件混在一起"的安装。替换时先备份旧目录：
+
+```sh
+node tools/deploy-local.mjs --replace        # 旧目录改名为 <target>.backup-<时间戳>，再装新的
+```
+
+备份名里的时间戳精确到秒；确认新版可用后可以删除备份。目录链接安装（`node_modules/dsh-builtin-browser`
+是指向该目录的 Junction）会**拒绝** `--replace`：改名字会让链接悬空，脚本会直接报错并提示先移除链接。
+
+npm 安装的 profile 走 DSH 自己的插件管理：先移除旧版本，再安装新版本（`dsh plugin remove` → `dsh plugin add`）。
+
 ## 代码结构
 
 | 目录 | 职责 |

@@ -10,7 +10,7 @@
 //
 // So a local deploy has to write the publish-form manifest itself, and then prove the installed tree
 // resolves the way the host will read it.
-import { cpSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -98,8 +98,32 @@ export function copyPackage(root, target) {
 }
 
 /**
+ * Move an existing install aside before a replacement (issue #131).
+ *
+ * The update path this serves is the one that actually fails: a profile that still has the previous
+ * directory, where writing over it leaves a mix of old and new files. A rename is atomic and keeps
+ * the old tree for a rollback; the caller can delete it once the new install is proven.
+ * @param target - the installed plugin directory.
+ * @param now - injected for a deterministic backup name in tests.
+ * @returns the backup path, or undefined when there was nothing to move.
+ */
+export function backupExisting(target, now = new Date()) {
+  if (!existsSync(target)) return undefined
+  // A directory link (`node_modules/dsh-builtin-browser` → target) cannot be renamed out from under
+  // its own parent: the link would dangle. Refuse loudly instead of breaking the profile.
+  const link = join(dirname(target), 'node_modules', 'dsh-builtin-browser')
+  if (existsSync(link) && lstatSync(link).isSymbolicLink()) {
+    throw new Error(`${link} is a directory link to this install; remove the link before replacing the directory`)
+  }
+  const stamp = now.toISOString().replace(/[:.]/gu, '-').slice(0, 19)
+  const backup = `${target}.backup-${stamp}`
+  renameSync(target, backup)
+  return backup
+}
+
+/**
  * Build, stage, copy and verify.
- * @param options - target directory and whether to rebuild first.
+ * @param options - target directory, whether to rebuild first, and whether to replace an existing install.
  * @returns a one-line summary of the installed package.
  */
 export function deploy(options = {}) {
@@ -109,20 +133,22 @@ export function deploy(options = {}) {
     const build = spawnSync(process.execPath, ['scripts/build.mjs'], { cwd: ROOT, stdio: 'inherit' })
     if ((build.status ?? 1) !== 0) throw new Error('build failed; nothing was installed')
   }
+  const backup = options.replace === true ? backupExisting(target) : undefined
   const staged = stageManifest(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')))
   copyPackage(ROOT, target)
   writeFileSync(join(target, 'package.json'), `${JSON.stringify(staged, null, 2)}\n`, 'utf8')
   const resolved = resolveStagedExports(target, staged)
   const bytes = assertClientEnvelope(target, staged)
-  return { target, version: staged.version, clientBytes: bytes, resolved }
+  return { target, version: staged.version, clientBytes: bytes, resolved, ...(backup === undefined ? {} : { backup }) }
 }
 
 const invokedDirectly = process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
 if (invokedDirectly) {
   const targetIndex = process.argv.indexOf('--target')
   const target = targetIndex === -1 ? undefined : process.argv[targetIndex + 1]
-  const result = deploy({ target, build: !process.argv.includes('--no-build') })
+  const result = deploy({ target, build: !process.argv.includes('--no-build'), replace: process.argv.includes('--replace') })
   console.log(`[deploy] ${result.version} -> ${result.target}`)
   console.log(`[deploy] ./client = ${result.resolved['./client']} (${Math.round(result.clientBytes / 1024)} KB, __ModuleLoader__ envelope)`)
   console.log('[deploy] exports verified: ' + Object.entries(result.resolved).map(([subpath, specifier]) => `${subpath}=${specifier}`).join(' '))
+  if (result.backup !== undefined) console.log(`[deploy] previous install kept at ${result.backup}`)
 }
