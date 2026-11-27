@@ -86,7 +86,9 @@ export function createHostPatchMaintenance(deps: {
           accessSync(path, constants.W_OK)
         }
       } catch (error) { writable = false; reason = `The ${surface === 'web' ? 'served sidebar package' : 'DSH Tauri runtime'} is not writable: ` + String(error) }
+      const needed = typeof patcher.hostPatchNeeded === 'function' ? patcher.hostPatchNeeded(directory) : undefined
       return { ...result, ...(reason === undefined ? {} : { reason }), surface,
+        ...(needed === undefined ? {} : { needed }),
         canInstall: writable && result.status === 'absent',
         canRestore: writable && result.status === 'applied' && existsSync(join(directory, `${target}.before-dsh-host-patch`)),
         restartRequired: false }

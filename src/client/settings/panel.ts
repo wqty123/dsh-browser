@@ -601,19 +601,21 @@ const react = require("react")
       finally { pending.current = false; if (alive.current) setBusy(false) }
     }
     if (state === null && error === "") return null
+    // The host says whether this line needs a patch at all (its spec carries `native`). A host that
+    // already supports the feature keeps the section out; older lines still get one action.
+    if (state?.needed === false) return null
     // One row, one action. Nothing actionable and nothing wrong means this host needs no patch at
     // all, so the whole section stays out of the panel instead of offering a no-op install.
     const status = String(state?.status ?? "")
     const applied = status === "applied"
     const broken = /mismatch|unsupported|failed/u.test(status)
     const actionable = applied ? state?.canRestore === true : state?.canInstall === true
-    if (state !== null && !actionable && !broken) return null
     const action = applied ? "restore" : "install"
     const actionKey = applied ? "hostPatch.uninstall" : broken ? "hostPatch.reinstall" : "hostPatch.install"
     return h("div", { key: "web-host-patch", style: styles.group }, [
       h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
         h("span", { key: "title", role: "status" }, t(state?.surface === "tauri" ? "readiness.hostPatch.tauri" : "readiness.hostPatch") + (state ? ": " + t((state.surface === "tauri" && applied ? "readiness.hostPatch.tauri." : "readiness.hostPatch.") + status.replaceAll(" ", "-")) : "")),
-        h("button", { key: "action", type: "button", style: styles.button, disabled: busy || (state !== null && !actionable && !broken), onClick: () => change(action) }, t(busy ? "hostPatch.working" : actionKey)),
+        h("button", { key: "action", type: "button", style: styles.button, disabled: busy || state === null || !actionable, onClick: () => change(action) }, t(busy ? "hostPatch.working" : actionKey)),
       ]),
       state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
       notice ? h("p", { key: "notice", role: "status", style: styles.hint }, t(notice)) : null,
