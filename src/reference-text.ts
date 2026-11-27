@@ -1,3 +1,5 @@
+import { GUEST_ROUTE } from '../assets/browser-policy.mjs'
+
 export const MAX_REFERENCE_TEXT = 20_000
 
 export type ReferenceTextNode =
@@ -65,6 +67,26 @@ function escapeMarkdown(text: string): string {
   return text.replace(/[\\`*_{}[\]<>!|#]/gu, '\\$&')
 }
 
+/**
+ * A captured href comes from the guest document, where the proxy rewrote every link to its own
+ * route (`<GUEST_ROUTE>?u=<real>`). The projection must show the site's URL, never this machine's.
+ *
+ * The captured text is what the model reads and what the composer renders, so a proxy URL here
+ * showed up as a blue `http://127.0.0.1:<port>/…` link inside the user's own message.
+ * @param href - the href recorded in the snapshot.
+ * @returns the site's URL, or the input when it is not a guest-proxy link.
+ */
+function realHref(href: string): string {
+  const marker = `${GUEST_ROUTE}?`
+  if (!href.includes(marker)) return href
+  try {
+    const raw = new URL(href).searchParams.get('u')
+    return raw === null || raw === '' ? href : raw
+  } catch {
+    return href
+  }
+}
+
 export function referenceTextContent(nodes: readonly ReferenceTextNode[]): string {
   return nodes.map(node => node.type === 'text' ? node.text : node.type === 'math' ? node.latex : node.type === 'rule' ? '\n---\n' : node.type === 'break' ? '\n' : referenceTextContent(node.children)).join('')
 }
@@ -107,7 +129,7 @@ export function renderReferenceText(nodes: readonly ReferenceTextNode[]): string
       case 'ruby-text': return `<rt>${text}</rt>`
       case 'strong': return `**${text}**`
       case 'emphasis': return `*${text}*`
-      case 'link': return `[${text}](${node.href.replace(/[\s()<>\\]/gu, char => encodeURIComponent(char).replace(/[()]/gu, token => `%${token.charCodeAt(0).toString(16).toUpperCase()}`))})`
+      case 'link': return `[${text}](${realHref(node.href).replace(/[\s()<>\\]/gu, char => encodeURIComponent(char).replace(/[()]/gu, token => `%${token.charCodeAt(0).toString(16).toUpperCase()}`))})`
       case 'blockquote': return text.trim().split('\n').map(line => `> ${line}`).join('\n')
       case 'list-item': return text
       case 'list': {

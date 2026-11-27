@@ -186,6 +186,9 @@ export function createLiveCardDockComponent(
       actions: {
         onEditComment: (referenceId, comment) => { runtime.setComment(referenceId, comment) },
         onReveal: (referenceId) => { void runtime.revealReference(referenceId) },
+      // The dock chip keeps its remove affordance. Dropping this in the submission-seam rework left
+      // the chip unremovable even though the capsules still render the button when it exists.
+      onRemove: (referenceId) => { void runtime.removeCard(referenceId) },
       },
       ...(view.issue === undefined ? {} : { notice: view.issue }),
     })
