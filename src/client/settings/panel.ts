@@ -806,6 +806,12 @@ const react = require("react")
       : t("readiness.status.checkPending")
     // A third-party desktop shell is never patched (issue #62): no bridge controls, and the system
     // browser is recommended first because it works from this page right now.
+    // Which rows and diagnostics belong to the selected carrier: bridge/patch are sidebar-only,
+    // native-host registration is the Installed Chrome/Edge path only. Showing every carrier's
+    // errors at once is what made all three modes look identically broken.
+    // `bundled` is the legacy name of the sidebar carrier, so it counts as sidebar here too.
+    const carrierIsSidebar = resolvedCarrier === "sidebar" || runtime.carrier === "sidebar" || runtime.carrier === "bundled"
+    const selectedSystemBrowser = runtime.channel === "edge" ? "edge" : runtime.channel === "chrome" ? "chrome" : undefined
     const thirdPartyShell = runtime.shell?.kind === "third-party-shell"
     const shellBrowserName = runtime.shell?.recommendedCarrier === "edge" ? "Edge" : "Chrome"
     const extensionDisconnected = runtime.extension?.state === 'not-connected' || runtime.extension?.state === 'extension-missing'
@@ -877,7 +883,7 @@ const react = require("react")
       // Host patch gets its own row, and only when a patch spec matches this Desktop build. A
       // third-party shell or an unsupported version has no patchable target, so the row is absent
       // rather than a dead "unsupported" line.
-      isDesktop && runtime.shell?.patchable === true ? h("div", { key: "host-patch-row", className: "dsh-bb-row", style: styles.row }, [
+      carrierIsSidebar && isDesktop && runtime.shell?.patchable === true ? h("div", { key: "host-patch-row", className: "dsh-bb-row", style: styles.row }, [
         h("span", { key: "title" }, t("readiness.hostPatch")),
         h("span", { key: "state", role: "status", style: styles.hint }, t(runtime.shell?.hostPatch?.status === "applied" ? "readiness.hostPatch.applied" : "readiness.hostPatch.absent")),
       ]) : null,
@@ -886,19 +892,21 @@ const react = require("react")
       // A failed native-host registration is not the user's fault and not a raw command dump: on
       // Windows it is usually EPERM (the registry write needs elevation). Say what it means and
       // keep the exact command in the diagnostics block below.
-      ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered).map(([browser, status]) => {
-        const detail = String(status.detail ?? "")
-        const needsAdmin = /EPERM|EACCES|Access is denied/iu.test(detail)
-        return h("p", { key: "registration-" + browser, role: "status", style: needsAdmin ? styles.hint : styles.error },
-          needsAdmin ? t("readiness.registration.needsAdmin").replaceAll("{browser}", browser) : browser + ': ' + detail)
-      }),
+      ...(selectedSystemBrowser === undefined ? [] : Object.entries(runtime.nativeHostRegistration ?? {})
+        .filter(([browser, status]) => !status.registered && browser === selectedSystemBrowser)
+        .map(([browser, status]) => {
+          const detail = String(status.detail ?? "")
+          const needsAdmin = /EPERM|EACCES|Access is denied/iu.test(detail)
+          return h("p", { key: "registration-" + browser, role: "status", style: needsAdmin ? styles.hint : styles.error },
+            needsAdmin ? t("readiness.registration.needsAdmin").replaceAll("{browser}", browser) : browser + ': ' + detail)
+        })),
       bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase}`)) : null,
       bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t("readiness.bridge.installedDone")) : null,
       bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
         `${t("readiness.hostPatch")}: ${t("readiness.hostPatch." + bridgeJob.hostPatch.status.replaceAll(" ", "-"))}`) : null,
-      bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
-      bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
-      runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
+      carrierIsSidebar && (bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled") ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
+      carrierIsSidebar && bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
+      carrierIsSidebar && runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
         h("summary", { key: "title", style: styles.hint }, t("readiness.details")),
         h("div", { key: "kv", style: styles.kv }, [
