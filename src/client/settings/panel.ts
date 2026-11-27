@@ -1305,11 +1305,11 @@ const react = require("react")
       || (systemBrowser && settings.browser.systemProfile !== "user")
 
     return h("div", { style: styles.wrap, className: "dsh-bb-settings" }, [
-      selector("browser.channel", settings.browser.channel,
-        options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge", "electron"]),
+      selector("browser.channel", settings.browser.channel === "bundled" || settings.browser.channel === "auto" ? "sidebar" : settings.browser.channel,
+        options("browser.", ["sidebar", "electron", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
       systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
-        options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
+        options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } }), "browser.modeHint") : null,
       h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel }),
       h(HostPatchControls, { key: "host-patch" }),
       section("ui.title", [
