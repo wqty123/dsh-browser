@@ -123,6 +123,8 @@ export interface RuntimeStatusReport {
    * block can show and a reporter can paste.
    */
   readonly peers?: readonly PeerResolution[]
+  /** Why the carrier was adopted, newest last (issue #106). */
+  readonly carrierHistory?: readonly string[]
 }
 
 /** One host peer's resolution result. */
@@ -159,6 +161,8 @@ export interface RuntimeStatusDeps {
   readonly systemConnection?: () => { connected: boolean; detail: string; launch?: SystemBrowserLaunchDiagnostic } | undefined
   /** Resolve one host peer; defaults to this plugin's own `require.resolve` (issue #59). */
   readonly resolvePeer?: (name: string) => string
+  /** The last carrier decisions, newest last (issue #106). */
+  readonly carrierHistory?: () => readonly string[]
 }
 
 /** Which carrier a channel names. */
@@ -283,6 +287,7 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
     ...shell === undefined ? {} : { shell },
     canProvision: resolvedCarrier === 'bundled' && !runnable && snapshot.state !== 'preparing',
     ...peerReport(deps.resolvePeer),
+    ...deps.carrierHistory === undefined ? {} : { carrierHistory: deps.carrierHistory() },
   }
 }
 

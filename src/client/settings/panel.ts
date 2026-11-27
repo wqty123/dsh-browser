@@ -956,6 +956,8 @@ const react = require("react")
         // can paste one line instead of describing the symptom.
         ...(runtime.peers ?? []).filter(peer => !peer.resolved).map(peer =>
           h("code", { key: "peer-" + peer.name, style: styles.mono }, `${peer.name}: ${peer.error ?? "unresolved"}`)),
+          // The carrier decision trail (issue #106): which browser was adopted last, and why.
+          ...(runtime.carrierHistory ?? []).map((reason, index) => h("code", { key: "carrier-" + index, style: styles.mono }, reason)),
         // The exact command a human needs when a registration failed (elevation, wrong browser).
         ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered)
           .map(([browser, status]) => h("code", { key: "registration-detail-" + browser, style: styles.mono }, String(status.detail ?? ""))),
