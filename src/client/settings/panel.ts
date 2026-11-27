@@ -951,6 +951,11 @@ const react = require("react")
         runtime.systemBrowser?.path ? h("code", { key: "system-path", style: styles.mono }, runtime.systemBrowser.path) : null,
         bridgeError?.detail ? h("code", { key: "bridge-error-detail", style: styles.mono }, bridgeError.detail) : null,
         bridgeJobDiagnostic !== "" ? h("code", { key: "bridge-job-detail", style: styles.mono }, bridgeJobDiagnostic) : null,
+        // A host peer that does not resolve is what makes four entries stay inactive on a Desktop
+        // install that shipped the plugin without its peers (issue #59): name it here so a reporter
+        // can paste one line instead of describing the symptom.
+        ...(runtime.peers ?? []).filter(peer => !peer.resolved).map(peer =>
+          h("code", { key: "peer-" + peer.name, style: styles.mono }, `${peer.name}: ${peer.error ?? "unresolved"}`)),
         // The exact command a human needs when a registration failed (elevation, wrong browser).
         ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered)
           .map(([browser, status]) => h("code", { key: "registration-detail-" + browser, style: styles.mono }, String(status.detail ?? ""))),
