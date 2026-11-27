@@ -681,7 +681,7 @@ test('HTML sub-requests stay raw by explicit marker or fetch destination; framin
     assert.equal(result.headers['content-type'], 'text/html')
     assert.equal(result.body, '<a href="/raw">fragment</a>')
     assert.equal(result.headers['x-frame-options'], undefined)
-    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms;/)
+    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms allow-same-origin;/)
   }
 })
 
@@ -721,14 +721,16 @@ test('guest CSP permits proxied and data image/font resources without admitting 
     const [directive, ...sources] = value.trim().split(/\s+/u)
     return [directive, sources]
   }))
-  assert.deepEqual(csp.sandbox, ['allow-scripts', 'allow-forms'])
+  // Same-origin is granted on purpose: DSH 0.2.3's Host admission rejects `Origin: null`, and an
+  // opaque guest sends exactly that on every subresource (images and styles answer 403, so pages
+  // lose their formatting). See docs/limitations.md; the sources below still exclude app APIs.
+  assert.deepEqual(csp.sandbox, ['allow-scripts', 'allow-forms', 'allow-same-origin'])
   for (const directive of ['img-src', 'font-src']) {
     assert.ok(csp[directive].includes('data:'))
     assert.ok(csp[directive].every(value => value === 'data:' || value === 'blob:' || value.endsWith('/dsh-builtin-browser/browser-view/isolated-guest')))
   }
   assert.deepEqual(csp['base-uri'], ["'none'"])
   assert.deepEqual(csp['worker-src'], ["'none'"])
-  assert.ok(!csp.sandbox.includes('allow-same-origin'))
 })
 
 test('one authoritative guest policy permits data fonts for documents, subrequests, large HTML and stylesheets', async () => {
@@ -739,7 +741,7 @@ test('one authoritative guest policy permits data fonts for documents, subreques
     const result = await call(guestPath('https://ordinary.example' + path), { headers })
     assert.equal(result.status, 200)
     assert.match(result.headers['content-security-policy'], /(?:^|;)\s*font-src [^;]*\bdata:/u)
-    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms;/u)
+    assert.match(result.headers['content-security-policy'], /sandbox allow-scripts allow-forms allow-same-origin;/u)
     assert.doesNotMatch(result.headers['content-security-policy'], /font-src 'none'/u)
     assert.equal(result.headers['content-security-policy-report-only'], undefined)
     if (path.endsWith('doc')) {

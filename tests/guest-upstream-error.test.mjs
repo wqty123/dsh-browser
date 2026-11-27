@@ -110,7 +110,7 @@ test('connect/TLS/ALPN and upstream body failures return complete non-sensitive 
     assert.equal(result.status, 502, path); assert.equal(result.complete, true)
     assert.match(result.headers['content-type'], /^text\/plain; charset=utf-8$/u)
     assert.equal(result.headers['cache-control'], 'no-store')
-    assert.match(result.headers['content-security-policy'], /^sandbox allow-scripts allow-forms;/u)
+    assert.match(result.headers['content-security-policy'], /^sandbox allow-scripts allow-forms allow-same-origin;/u)
     assert.match(result.body, /^guest proxy: upstream (request|response) failed$/u)
     assert.doesNotMatch(result.body, /sensitive|token|TLS|ALPN/u)
     const healthy = await call('/healthy'); assert.equal(healthy.status, 200); assert.equal(healthy.body, 'healthy')
