@@ -36,7 +36,8 @@
 ## #132 双注册带走客户端注册 + 关 Edge 弹 about:blank
 
 - 症状：双注册时设置页没有「浏览器」分节；关闭 Edge 窗口后页面立刻弹回 about:blank。
-- 需要的数据：客户端 `__ModuleLoader__.load` 被调用两次时的调用栈，以及两次注册的 id。
+- 已做（缩小爆炸半径）：`apply()` 里 `watchClientVersion` 与 `applySettingsSection` 各自 try/catch 隔离——任一步失败只丢那一步并打一行 warn，不会再让整个客户端注册一起失败（参考坞此前已是这个模式）。
+- 仍需：两次 `__ModuleLoader__.load` 的调用栈与两次注册的 id（判断第二份是同一个包被装了两遍，还是宿主把同一行解析了两次）。
 
 ## #131 0.5.8 → 1.0.1 更新失败
 

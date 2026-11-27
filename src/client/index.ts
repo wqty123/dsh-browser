@@ -131,12 +131,15 @@ function watchClientVersion(ctx: Context): void {
 
 export function apply(ctx: Context): void {
   // 先挂客户端自更新：产物一变，本页自己换到新 bundle（否则会一直用缓存里的旧脚本）。
-  watchClientVersion(ctx)
+  // Isolated like the reference dock: an update watcher that cannot start must not take the whole
+  // client registration with it (issue #132: one failing registration left the settings section
+  // missing altogether).
+  try { watchClientVersion(ctx) } catch (error) { console.warn('[dsh-builtin-browser] client version watch failed to start', error) }
   // 先装引用坞：它是输入栏那一侧的注册，与侧栏标签互不依赖。
   // 每个注册各自隔离：一个失败只丢一块能力，不能把同一 apply 里的其余注册一起掐断。
   try { applyReference(ctx as never) } catch (error) { console.warn('[dsh-builtin-browser] reference dock failed to mount', error) }
   // 再装设置页分节：旧插件的设置面板（宿主 /dsh-builtin-browser/settings 的 UI）。
-  applySettingsSection(ctx)
+  try { applySettingsSection(ctx) } catch (error) { console.warn('[dsh-builtin-browser] settings section failed to mount', error) }
 
   const namespace = SIDEBAR_BROWSER_LOCALE_NS
   const t = ctx.locale.bind(namespace)
