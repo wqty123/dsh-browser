@@ -1,5 +1,5 @@
 import { zh, en } from '../../../assets/browser-panel-locales.mjs'
-import { REFERENCE_REVEAL_ROUTE, REFERENCE_INSERT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE, BRIDGE_STATUS_ROUTE, RUNTIME_STATUS_ROUTE, RUNTIME_PROVISION_ROUTE } from '../../../assets/browser-policy.mjs'
+import { REFERENCE_REVEAL_ROUTE, REFERENCE_INSERT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, REFERENCE_LIST_ROUTE, REFERENCE_EXPORT_ROUTE, OPEN_REQUEST_ROUTE, HOST_PATCH_ROUTE, AUTOMATIC_MAINTENANCE_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE, BRIDGE_STATUS_ROUTE, RUNTIME_STATUS_ROUTE, RUNTIME_PROVISION_ROUTE } from '../../../assets/browser-policy.mjs'
 import { SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../../assets/browser-policy.mjs'
 import { nativeViews } from '../../compat/host-features.ts'
 /**
@@ -569,7 +569,7 @@ const react = require("react")
     }, [])
     useEffect(() => {
       alive.current = true
-      void fetch("/dsh-builtin-browser/host-patch-maintenance", { headers: { accept: "application/json" } })
+      void fetch(HOST_PATCH_ROUTE, { headers: { accept: "application/json" } })
         .then(async response => {
           if (response.status === 404) return
           const data = await response.json()
@@ -583,7 +583,7 @@ const react = require("react")
       pending.current = true
       setBusy(true); setError(""); setNotice(""); publishHostPatchNotice("")
       try {
-        const response = await fetch("/dsh-builtin-browser/host-patch-maintenance", {
+        const response = await fetch(HOST_PATCH_ROUTE, {
           method: "POST", headers: { accept: "application/json", "content-type": "application/json" },
           body: JSON.stringify({ action }),
         })
@@ -666,7 +666,7 @@ const react = require("react")
     const bridgeActive = bridgeJob !== null && bridgeActivePhases.includes(bridgeJob.phase)
     const readBridgeJob = useCallback(async () => {
       try {
-        const response = await fetch("/dsh-builtin-browser/bridge-maintenance", { headers: { accept: "application/json" } })
+        const response = await fetch(AUTOMATIC_MAINTENANCE_ROUTE, { headers: { accept: "application/json" } })
         if (!response.ok) return
         const data = await response.json()
         if (!alive.current || bridgeSubmitting.current || data.ok !== true || data.protocol !== 1 || !data.job || typeof data.job.id !== "string") return
@@ -738,7 +738,7 @@ const react = require("react")
       setBridgeError(null)
       let accepted = false
       try {
-        const response = await fetch("/dsh-builtin-browser/bridge-maintenance", {
+        const response = await fetch(AUTOMATIC_MAINTENANCE_ROUTE, {
           method: "POST",
           headers: { accept: "application/json", "content-type": "application/json" },
           body: JSON.stringify({ action, locale: currentLocale }),
@@ -998,7 +998,7 @@ const react = require("react")
     const load = useCallback(() => {
       const revision = ++loadRevision.current
       setStatus("loading")
-      fetch("/dsh-builtin-browser/reference/list?limit=10", { headers: { accept: "application/json" } })
+      fetch(`${REFERENCE_LIST_ROUTE}?limit=10`, { headers: { accept: "application/json" } })
         .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
         .then(data => {
           if (!alive.current || loadRevision.current !== revision) return
@@ -1040,7 +1040,7 @@ const react = require("react")
     const exportAs = format => {
       setExporting(format)
       setOutcome(null)
-      fetch(`/dsh-builtin-browser/reference/export?format=${encodeURIComponent(format)}`, { headers: { accept: "*/*" } })
+      fetch(`${REFERENCE_EXPORT_ROUTE}?format=${encodeURIComponent(format)}`, { headers: { accept: "*/*" } })
         .then(async response => {
           if (!response.ok) throw new Error(`HTTP ${response.status}`)
           const blob = await response.blob()
@@ -1637,7 +1637,7 @@ const react = require("react")
     function drainOpenRequest() {
       const sessionId = guestSession()
       if (typeof sessionId !== "string" || sessionId === "") return
-      fetch("/dsh-builtin-browser/browser/open-request", { headers: { accept: "application/json" } })
+      fetch(OPEN_REQUEST_ROUTE, { headers: { accept: "application/json" } })
         .then(response => (response.ok ? response.json() : undefined))
         .then(body => {
           const open = body && body.open

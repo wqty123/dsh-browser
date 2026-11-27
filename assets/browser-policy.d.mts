@@ -41,6 +41,14 @@ export const PREVIEW_ROUTE: string
 export const PREVIEW_SESSIONS_ROUTE: string
 export const BRIDGE_STATUS_ROUTE: string
 export const GUEST_ROUTE: string
+/** Sidebar/host handshake routes; declared here so host and client cannot drift apart. */
+export const OPEN_REQUEST_ROUTE: string
+export const SURFACE_DECL_ROUTE: string
+export const BRIDGE_ACTION_ROUTE: string
+export const HOST_PATCH_ROUTE: string
+export const AUTOMATIC_MAINTENANCE_ROUTE: string
+export const TAKEOVER_ROUTE: string
+export const WEB_SOURCE_ROUTE: string
 export const WEB_BROWSER_SANDBOX: string
 export const RELAXED_BROWSER_SANDBOX: string
 export const RUNTIME_STATUS_ROUTE: string

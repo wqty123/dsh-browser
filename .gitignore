@@ -3,3 +3,6 @@
 *cookies*.txt
 p-live.json
 .dsh-sdk-types/
+
+# agent run logs
+.tmp-*

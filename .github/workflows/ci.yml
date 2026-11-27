@@ -14,8 +14,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The oldest line the host patch supports, and the newest DSH release.
-        dsh: ['0.2.2-rc.3', '0.2.3-alpha.2']
+        # The lines this plugin verifies: the oldest one the host patch supports, the line the
+        # official desktop ships, and the newest DSH prerelease.
+        dsh: ['0.2.2-rc.3', '0.2.2-rc.5', '0.2.3-alpha.2']
     name: test (DSH ${{ matrix.dsh }})
     env:
       DSH_VERSION: ${{ matrix.dsh }}

@@ -1,5 +1,5 @@
 import { referenceCaptureMessages, referenceCaptureErrors } from '../../assets/browser-messages.mjs'
-import { BROWSER_PROFILE_DIR, SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../assets/browser-policy.mjs'
+import { BROWSER_PROFILE_DIR, SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE, OPEN_REQUEST_ROUTE, SURFACE_DECL_ROUTE, BRIDGE_ACTION_ROUTE } from '../../assets/browser-policy.mjs'
 /**
  * Electron browser provider plugin entry: registers the Electron-backed
  * `BrowserProvider` with `ctx.browser`. The provider needs a view host (real
@@ -122,12 +122,10 @@ function readSurfaceForRoute(): 'panel' | 'builtin' {
 }
 
 
-export const OPEN_REQUEST_ROUTE = '/dsh-builtin-browser/browser/open-request'
 /** open 记录的有效期：超过就不再重放。这是一次即时事件，客户端 2 秒轮询一次，10 秒足够送达；
  *  留得越久，「关掉侧栏后刷新又被拉起来」的窗口越大（实测复现过）。 */
 const OPEN_REQUEST_TTL_MS = 10_000
 /** The client declares which surface it can host, so the host needs no file sniffing. */
-export const SURFACE_DECL_ROUTE = '/dsh-builtin-browser/browser/declare-surface'
 
 export {
   ELECTRON_BROWSER_PROVIDER_ID,
@@ -664,8 +662,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * exactly like the other two.
    * @param ctx - the plugin context.
    */
-  /** Where the panel asks to install or remove the bridge. */
-  const BRIDGE_ACTION_ROUTE = '/dsh-builtin-browser/bridge-action'
+  /** Where the panel asks to install or remove the bridge (the path is declared in browser-policy). */
   let bridgeActionRunning = false
 
   /**

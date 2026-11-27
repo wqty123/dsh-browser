@@ -8,7 +8,9 @@ import { isDirectLoopback } from './authenticated-route.ts'
 import { readJsonBody } from './http-body.ts'
 import { replyJson } from './json-reply.ts'
 
-export const HOST_PATCH_ROUTE = '/dsh-builtin-browser/host-patch-maintenance'
+import { HOST_PATCH_ROUTE } from '../../assets/browser-policy.mjs'
+export { HOST_PATCH_ROUTE }
+
 const sidebar = '@deepseek-ai/dsh-client-ui-sidebar-right'
 
 /** The registry owns the exact npm or source-checkout bundle served by this Host. */

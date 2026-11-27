@@ -6,7 +6,8 @@ import { replyJson } from './json-reply.ts'
 import { readJsonBody } from './http-body.ts'
 import type { AutomaticMaintenanceJob, AutomaticMaintenanceOptions } from './automatic-maintenance.ts'
 
-export const AUTOMATIC_MAINTENANCE_ROUTE = '/dsh-builtin-browser/bridge-maintenance'
+import { AUTOMATIC_MAINTENANCE_ROUTE } from '../../assets/browser-policy.mjs'
+export { AUTOMATIC_MAINTENANCE_ROUTE }
 export interface AutomaticMaintenanceRouteDeps {
   readonly supported: () => boolean
   /** How Desktop is asked to quit: `menu` waits for the panel to open the native menu, `self` needs nothing from it. */
