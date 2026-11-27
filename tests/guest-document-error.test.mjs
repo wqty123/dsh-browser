@@ -116,7 +116,7 @@ for (const mode of ['connect', 'probe', 'body', 'unknown']) test(`top-level ${mo
   assert.equal(result.status, 502); assert.equal(result.complete, true)
   assert.equal(result.headers['content-type'], 'text/html; charset=utf-8')
   assert.equal(result.headers['cache-control'], 'no-store')
-  assert.match(result.headers['content-security-policy'], /^sandbox allow-scripts allow-forms allow-same-origin allow-downloads [^;]*;/u)
+  assert.match(result.headers['content-security-policy'], /^sandbox allow-scripts allow-forms allow-downloads [^;]*;/u)
   assert.match(result.body, /Page unavailable/u); assert.match(result.body, /data-dsh-guest-runtime/u)
   assert.match(result.body, /dsh\.browser\.guest\.navigation/u)
   assert.match(result.body, mode === 'body' ? /upstream response failed/u : /upstream request failed/u)

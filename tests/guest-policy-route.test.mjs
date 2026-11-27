@@ -65,12 +65,10 @@ test('registered guest route commits the same data-font policy on HTML navigatio
   assert.doesNotMatch(document.body, /<meta\b/iu)
   const policy = document.headers['content-security-policy']
   assert.match(policy, /(?:^|;)\s*font-src [^;]*\bdata:/u)
-  assert.match(policy, /^sandbox allow-scripts allow-forms allow-same-origin allow-downloads [^;]*;/u)
+  assert.match(policy, /^sandbox allow-scripts allow-forms allow-downloads [^;]*;/u)
   const sandbox = policy.split(';')[0].split(' ').slice(1)
   assert.deepEqual(sandbox, RELAXED_BROWSER_SANDBOX.split(' '))
-  // allow-same-origin is granted on purpose (a page's own storage must work); the popup and
-  // navigation grants are the ones that must stay off.
-  for (const token of ['allow-popups', 'allow-popups-to-escape-sandbox', 'allow-top-navigation'])
+  for (const token of ['allow-same-origin', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-top-navigation'])
     assert.ok(!sandbox.includes(token), token)
   const unframed = policy.replace(RELAXED_BROWSER_SANDBOX, WEB_BROWSER_SANDBOX)
   for (const destination of ['document', undefined]) {
