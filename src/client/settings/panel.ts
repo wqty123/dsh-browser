@@ -815,10 +815,17 @@ const react = require("react")
     const thirdPartyShell = runtime.shell?.kind === "third-party-shell"
     const shellBrowserName = runtime.shell?.recommendedCarrier === "edge" ? "Edge" : "Chrome"
     const extensionDisconnected = runtime.extension?.state === 'not-connected' || runtime.extension?.state === 'extension-missing'
+    // Desktop presence is the only honest signal for the bridge / host-patch / extension rows: a
+    // Desktop install on disk is not proof that THIS page is the Desktop shell, and the Web surface
+    // has none of those three things. Defined before `stateLabel`, which must not report a bridge
+    // state on the Web surface.
+    const isDesktop = typeof globalThis.dshDesktop === "object" && globalThis.dshDesktop !== null
+    const isSystemCarrier = runtime.channel === 'chrome' || runtime.channel === 'edge'
     const stateLabel = resolvedCarrier === "extension" ? extensionDisconnected ? t('extension.notConnected') : runtime.extension?.detail ?? t("readiness.state.blocked")
       : resolvedCarrier === "system" || resolvedCarrier === "cdp" ? systemLabel
       : resolvedCarrier === "sidebar"
-        ? thirdPartyShell ? t("readiness.status.thirdPartyShell")
+        ? !isDesktop ? t("readiness.status.webSidebar")
+        : thirdPartyShell ? t("readiness.status.thirdPartyShell")
         : runtime.shell?.kind === "tauri" ? t(runtime.shell.hostPatch?.status === "applied" ? "readiness.status.tauriReady" : "readiness.status.tauriPatchMissing")
         : t(runtime.bridge.state === "installed"
           ? runtime.bridge.running === true ? "readiness.status.bridgeReady"
@@ -829,12 +836,7 @@ const react = require("react")
           : runtime.electron.state === "preparing" ? "readiness.status.bundledPreparing"
             : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
     const controlsBusy = busy || bridgeBusy !== null || bridgeActive
-    // Desktop-only rows. The Desktop preload object is the only honest signal: a host on disk is not
-    // proof that THIS page runs inside the Desktop shell, and on the Web surface the bridge, the
-    // host patch and the browser extension do not exist at all. Those rows are absent there — not
-    // greyed out, not explained.
-    const isDesktop = typeof globalThis.dshDesktop === "object" && globalThis.dshDesktop !== null
-    const isSystemCarrier = runtime.channel === 'chrome' || runtime.channel === 'edge'
+    // (Desktop detection moved above `stateLabel`: the Web surface must not report bridge states.)
     const extensionAction = async () => {
       setBusy(true)
       try {
@@ -893,7 +895,7 @@ const react = require("react")
       // Windows it is usually EPERM (the registry write needs elevation). Say what it means and
       // keep the exact command in the diagnostics block below.
       ...(selectedSystemBrowser === undefined ? [] : Object.entries(runtime.nativeHostRegistration ?? {})
-        .filter(([browser, status]) => !status.registered && browser === selectedSystemBrowser)
+        .filter(([browser, status]) => isDesktop && !status.registered && browser === selectedSystemBrowser)
         .map(([browser, status]) => {
           const detail = String(status.detail ?? "")
           const needsAdmin = /EPERM|EACCES|Access is denied/iu.test(detail)
@@ -904,9 +906,9 @@ const react = require("react")
       bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t("readiness.bridge.installedDone")) : null,
       bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
         `${t("readiness.hostPatch")}: ${t("readiness.hostPatch." + bridgeJob.hostPatch.status.replaceAll(" ", "-"))}`) : null,
-      carrierIsSidebar && (bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled") ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
-      carrierIsSidebar && bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
-      carrierIsSidebar && runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
+      isDesktop && carrierIsSidebar && (bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled") ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
+      isDesktop && carrierIsSidebar && bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
+      isDesktop && carrierIsSidebar && runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
         h("summary", { key: "title", style: styles.hint }, t("readiness.details")),
         h("div", { key: "kv", style: styles.kv }, [
