@@ -578,7 +578,9 @@ const react = require("react")
           if (response.status === 404) return
           const data = await response.json()
           if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
-          if (alive.current && (data.hostPatch?.surface === "web" || data.hostPatch?.surface === "tauri")) setState(data.hostPatch)
+          // The Web surface runs the sidebar without a host patch on this DSH line, so its probe is
+          // not offered here at all; only the Tauri sidebar still has a patch surface.
+          if (alive.current && data.hostPatch?.surface === "tauri") setState(data.hostPatch)
         }).catch(failure => { if (alive.current) setError(String(failure)) })
       return () => { alive.current = false }
     }, [])
@@ -601,13 +603,21 @@ const react = require("react")
       finally { pending.current = false; if (alive.current) setBusy(false) }
     }
     if (state === null && error === "") return null
+    // One row, one action. Nothing actionable and nothing wrong means this host needs no patch at
+    // all, so the whole section stays out of the panel instead of offering a no-op install.
+    const status = String(state?.status ?? "")
+    const applied = status === "applied"
+    const broken = /mismatch|unsupported|failed/u.test(status)
+    const actionable = applied ? state?.canRestore === true : state?.canInstall === true
+    if (state !== null && !actionable && !broken) return null
+    const action = applied ? "restore" : "install"
+    const actionKey = applied ? "hostPatch.uninstall" : broken ? "hostPatch.reinstall" : "hostPatch.install"
     return h("div", { key: "web-host-patch", style: styles.group }, [
-      h("p", { key: "state", role: "status" }, t(state?.surface === "tauri" ? "readiness.hostPatch.tauri" : "readiness.hostPatch") + (state ? ": " + t((state.surface === "tauri" && state.status === "applied" ? "readiness.hostPatch.tauri." : "readiness.hostPatch.") + state.status.replaceAll(" ", "-")) : "")),
-      state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
-      h("div", { key: "buttons", style: styles.row }, [
-        h("button", { key: "install", type: "button", style: styles.button, disabled: busy || !state?.canInstall, onClick: () => change("install") }, t(busy ? "hostPatch.working" : "hostPatch.install")),
-        h("button", { key: "restore", type: "button", style: styles.button, disabled: busy || !state?.canRestore, onClick: () => change("restore") }, t("hostPatch.restore")),
+      h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
+        h("span", { key: "title", role: "status" }, t(state?.surface === "tauri" ? "readiness.hostPatch.tauri" : "readiness.hostPatch") + (state ? ": " + t((state.surface === "tauri" && applied ? "readiness.hostPatch.tauri." : "readiness.hostPatch.") + status.replaceAll(" ", "-")) : "")),
+        h("button", { key: "action", type: "button", style: styles.button, disabled: busy || (state !== null && !actionable && !broken), onClick: () => change(action) }, t(busy ? "hostPatch.working" : actionKey)),
       ]),
+      state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
       notice ? h("p", { key: "notice", role: "status", style: styles.hint }, t(notice)) : null,
       error ? h("p", { key: "error", role: "alert", style: styles.error }, error) : null,
     ])
@@ -779,12 +789,16 @@ const react = require("react")
       ])
     }
 
-    // A detected system browser that has not been launched yet is idle, not broken: the plugin
-    // starts it over CDP on the first command, and the extension is optional. Grey ("detected, will
-    // launch") instead of amber — amber is reserved for "something is actually wrong".
-    const detectedSystemIdle = runtime.systemBrowser?.present === true && runtime.readiness !== "ready"
-    const tone = runtime.readiness === "ready" ? styles.badgeOk
-      : detectedSystemIdle ? styles.badgeUnknown
+    // Usable is one colour. CDP readiness, a detected browser that has not been launched yet, and the
+    // Web sidebar all mean "this works"; amber stays for genuinely unusable states.
+    // `isDesktop`/`carrierIsSidebar` are declared below; inline those two facts here. Usable is one
+    // colour: CDP readiness, a detected-but-not-yet-launched browser, and the Web sidebar all mean
+    // "this works"; amber stays for genuinely unusable states.
+    const desktopNow = typeof globalThis.dshDesktop === "object" && globalThis.dshDesktop !== null
+    const sidebarNow = runtime.resolvedCarrier === "sidebar" || runtime.carrier === "sidebar" || runtime.carrier === "bundled"
+    const usable = runtime.readiness === "ready" || (!desktopNow && sidebarNow)
+      || (runtime.systemBrowser?.present === true && runtime.readiness !== "blocked")
+    const tone = usable ? styles.badgeOk
       : runtime.readiness === "blocked" ? styles.badgeWarn : styles.badgeUnknown
     const row = (key, label, value) => [
       h("span", { key: `${key}-k`, style: styles.kvKey }, label),
