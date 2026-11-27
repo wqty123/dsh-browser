@@ -436,7 +436,7 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'dsh_browser_state',
-    description: 'One compact answer to "what is on screen": URL, title, load state, requests still in flight and how long the page has been quiet, plus the counts of inputs/buttons/links, scroll position, current selection and the first 400 characters of visible text. Use it before a full snapshot when you only need to know where you are, and after an action to see whether the page moved at all.',
+    description: 'One compact answer to "what is on screen": URL, title, load state, requests still in flight and how long the page has been quiet, plus the counts of inputs/buttons/links, scroll position, the viewport size and device pixel ratio, current selection and the first 400 characters of visible text. Use it before a full snapshot when you only need to know where you are, and after an action to see whether the page moved at all.',
     parameters: {},
     output: {
       schema: {
@@ -451,6 +451,7 @@ export function observationTools(scope: ToolScope): ToolDefinition[] {
           `${String(row.title)}`,
           `${String(row.readyState)}, ${String(row.pending)} in flight, quiet ${String(row.quietMs)}ms`,
           `${String(row.inputs)} input(s), ${String(row.buttons)} button(s), ${String(row.links)} link(s), scroll ${String(row.scrollY)}`,
+          `viewport ${String(row.vpWidth)}×${String(row.vpHeight)} @${String(row.dpr)} (window ${String(row.winWidth)}×${String(row.winHeight)})`,
           row.selection ? `selection: ${String(row.selection)}` : 'no selection',
           String(row.text ?? ''),
         ].join('\n') }]

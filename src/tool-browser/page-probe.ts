@@ -30,7 +30,7 @@ import type { BrowserPageOperationRequest, BrowserProbeMethod } from '../browser
 import { DEEP_DOM_SOURCE } from '../browser/deep-dom.ts'
 
 /** Bumped when the probe's shape changes; an older probe is replaced rather than trusted. */
-export const PROBE_VERSION = 9
+export const PROBE_VERSION = 10
 
 /** Where the probe keeps itself, and the only global it adds. */
 const PROBE_KEY = '__dshProbe'
@@ -411,6 +411,13 @@ export const PROBE_INSTALL_SCRIPT = `(() => {${DEEP_DOM_SOURCE}
       links: query('a[href]'),
       scrollX: Math.round(globalThis.scrollX || 0),
       scrollY: Math.round(globalThis.scrollY || 0),
+      // The page's own geometry (issue #140): a screenshot that disagrees with these numbers was
+      // captured from a different surface, which is a fact only the page can prove.
+      vpWidth: Math.round(globalThis.innerWidth || 0),
+      vpHeight: Math.round(globalThis.innerHeight || 0),
+      dpr: Number(globalThis.devicePixelRatio || 1),
+      winWidth: Math.round(globalThis.outerWidth || 0),
+      winHeight: Math.round(globalThis.outerHeight || 0),
       selection: short(globalThis.getSelection ? String(globalThis.getSelection()) : '', 120),
       text: short(String(body || '').replace(/\\s+/g, ' ').trim(), 400),
     }
