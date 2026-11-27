@@ -265,6 +265,13 @@ async function mount(options = {}) {
   if (options.fetch !== undefined) activeFetch = options.fetch
   const host = makeHost(settings)
   const exports = bundleFactory(options.timers)(host.requireFn)
+  // These tests exercise the Desktop surface unless a test says otherwise: Desktop presence is the
+  // preload object, and the bridge / extension / host-patch rows only exist there. The two
+  // `dshDesktop=undefined|null` cases assign their own value right after mounting.
+  // Desktop presence is read as `globalThis.dshDesktop`; the sandbox keeps `window` as a mirror, so
+  // both are seeded and both are cleared by the tests that exercise a non-Desktop surface.
+  if (activeSandbox.dshDesktop === undefined) activeSandbox.dshDesktop = {}
+  if (activeSandbox.window !== undefined && activeSandbox.window.dshDesktop === undefined) activeSandbox.window.dshDesktop = {}
 
   let registration
   // The bundle now registers TWO slots: the settings section and the on-demand
@@ -2500,17 +2507,17 @@ test('a Desktop preload object can arm maintenance without a custom menu', async
   assert.equal(fixture.calls.filter(call => call.init.method === 'POST').length, 1)
 })
 
-for (const desktop of [undefined, null]) test(`remote or unsupported surfaces cannot arm bridge maintenance (dshDesktop=${desktop})`, async () => {
+for (const desktop of [undefined, null]) test(`a surface without a Desktop preload shows no bridge control at all (dshDesktop=${desktop})`, async () => {
   const fixture = maintenanceFixture(), timers = maintenanceTimers()
   const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: makeDocument(), timers })
   activeSandbox.dshDesktop = desktop
+  if (activeSandbox.window !== undefined) activeSandbox.window.dshDesktop = desktop
   const Component = readinessComponent(mounted.exports)
   const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
-  await bridgeButton(tree, 'readiness.bridge.reinstall').props.onClick()
-  const refused = await renderPanel(Component, mounted.host, fixture.fetchMock)
+  // The row does not exist on a non-Desktop surface: nothing to click, and the panel never offers
+  // a maintenance action it could not run.
+  assert.equal(bridgeButton(tree, 'readiness.bridge.reinstall'), undefined)
   assert.equal(fixture.calls.some(call => call.init.method === 'POST'), false)
-  assert.ok(textOf(refused).includes('readiness.bridge.localOnly'))
-  assert.equal(bridgeButton(refused, 'readiness.bridge.reinstall').props.disabled, false)
 })
 
 for (const [name, response, reason] of [

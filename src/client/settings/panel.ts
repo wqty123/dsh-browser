@@ -823,10 +823,11 @@ const react = require("react")
           : runtime.electron.state === "preparing" ? "readiness.status.bundledPreparing"
             : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
     const controlsBusy = busy || bridgeBusy !== null || bridgeActive
-    // Desktop-only rows. On the Web surface these three things do not exist — no bridge, no host
-    // patch, and a browser extension cannot be installed from a Web page either — so the rows are
-    // absent rather than greyed out or explained.
-    const isDesktop = runtime.shell !== undefined
+    // Desktop-only rows. The Desktop preload object is the only honest signal: a host on disk is not
+    // proof that THIS page runs inside the Desktop shell, and on the Web surface the bridge, the
+    // host patch and the browser extension do not exist at all. Those rows are absent there — not
+    // greyed out, not explained.
+    const isDesktop = typeof globalThis.dshDesktop === "object" && globalThis.dshDesktop !== null
     const isSystemCarrier = runtime.channel === 'chrome' || runtime.channel === 'edge'
     const extensionAction = async () => {
       setBusy(true)
