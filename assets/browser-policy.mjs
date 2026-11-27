@@ -60,7 +60,15 @@ export const HOST_PATCH_ROUTE = '/dsh-builtin-browser/host-patch-maintenance'
 export const AUTOMATIC_MAINTENANCE_ROUTE = '/dsh-builtin-browser/bridge-maintenance'
 export const TAKEOVER_ROUTE = '/dsh-builtin-browser/browser/takeover'
 export const WEB_SOURCE_ROUTE = '/dsh-builtin-browser/reference/source'
-export const WEB_BROWSER_SANDBOX = 'allow-scripts allow-forms'
+// `allow-same-origin` is not a convenience here: DSH 0.2.3's Host admission rejects any request that
+// carries `Origin: null`, and a sandboxed opaque-origin document sends exactly that on every
+// subresource (image, stylesheet, script). Measured on 0.2.3-alpha.2: the host answers 403 to
+// `GET /` with `Origin: null`, and with an opaque guest every image and stylesheet of a real page
+// came back 403, so pages rendered without formatting or images. Granting the guest this origin is
+// what lets those subrequests through. The consequence is that a browsed page shares this
+// application's origin and must be treated as trusted; `docs/limitations.md` states it, and the
+// long-term fix is a Host-side exemption for this route so the guest can stay opaque.
+export const WEB_BROWSER_SANDBOX = 'allow-scripts allow-forms allow-same-origin'
 export const RELAXED_BROWSER_SANDBOX = `${WEB_BROWSER_SANDBOX} allow-downloads allow-modals allow-pointer-lock allow-orientation-lock allow-presentation allow-storage-access-by-user-activation`
 export const RUNTIME_STATUS_ROUTE = '/dsh-builtin-browser/runtime-status'
 export const RUNTIME_PROVISION_ROUTE = '/dsh-builtin-browser/runtime-provision'
