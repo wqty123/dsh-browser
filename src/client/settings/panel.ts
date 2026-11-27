@@ -840,6 +840,9 @@ const react = require("react")
     // state on the Web surface.
     const isDesktop = typeof globalThis.dshDesktop === "object" && globalThis.dshDesktop !== null
     const isSystemCarrier = runtime.channel === 'chrome' || runtime.channel === 'edge'
+    // A healthy bridge makes an older terminal failure stale: the record on disk is only replaced
+    // when the next maintenance starts, so it must not keep colouring the panel red (issue #142).
+    const bridgeHealthy = runtime.bridge.state === "installed" && runtime.bridge.running === true
     // The patch row is about the sidebar carrier only, and only while this Desktop build cannot
     // provide native views by itself: a host that already exposes them needs nothing from us, so
     // the row is absent instead of offering a no-op install.
@@ -930,7 +933,7 @@ const react = require("react")
       bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t("readiness.bridge.installedDone")) : null,
       bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
         `${t("readiness.hostPatch")}: ${t("readiness.hostPatch." + bridgeJob.hostPatch.status.replaceAll(" ", "-"))}`) : null,
-      isDesktop && carrierIsSidebar && (bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled") ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
+      isDesktop && carrierIsSidebar && !bridgeHealthy && (bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled") ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
       isDesktop && carrierIsSidebar && bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
       isDesktop && carrierIsSidebar && runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
