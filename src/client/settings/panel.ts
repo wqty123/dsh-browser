@@ -578,9 +578,7 @@ const react = require("react")
           if (response.status === 404) return
           const data = await response.json()
           if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
-          // The Web surface runs the sidebar without a host patch on this DSH line, so its probe is
-          // not offered here at all; only the Tauri sidebar still has a patch surface.
-          if (alive.current && data.hostPatch?.surface === "tauri") setState(data.hostPatch)
+          if (alive.current && (data.hostPatch?.surface === "web" || data.hostPatch?.surface === "tauri")) setState(data.hostPatch)
         }).catch(failure => { if (alive.current) setError(String(failure)) })
       return () => { alive.current = false }
     }, [])
@@ -1375,7 +1373,6 @@ const react = require("react")
         options("browser.", ["sidebar", "electron", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
       h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel, experimental: advancedOpen }),
-      h(HostPatchControls, { key: "host-patch" }),
       section("ui.title", [
         toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
         toggle("ui", "autoExpandOnce"),
@@ -1391,6 +1388,9 @@ const react = require("react")
       ]),
       h("details", { key: "advanced", style: styles.group, onToggle: event => setAdvancedOpen(event.currentTarget.open) }, [
         h("summary", { key: "title", style: styles.groupTitle }, t("settings.advanced")),
+        // The host patch is a maintenance surface, not a daily control: it lives here with the other
+        // optional plumbing, and it renders nothing when there is nothing actionable.
+        h(HostPatchControls, { key: "host-patch" }),
         advancedOpen && systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
           options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
         toggle("history", "enabled"),
