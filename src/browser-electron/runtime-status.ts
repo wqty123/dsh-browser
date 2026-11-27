@@ -229,13 +229,13 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
     readiness = runnable ? 'ready' : 'blocked'
   } else if (selected === 'cdp') {
     resolvedCarrier = 'cdp'
-    readiness = detected !== undefined ? 'ready' : 'blocked'
+    readiness = detected !== undefined && connection?.connected === true ? 'ready' : 'blocked'
   } else if (carrier === 'extension') {
     resolvedCarrier = 'extension'
     readiness = extension?.state === 'connected' && extension.connected ? 'ready' : 'blocked'
   } else {
     resolvedCarrier = 'system'
-    readiness = detected !== undefined ? 'ready' : 'blocked'
+    readiness = detected !== undefined && connection?.connected === true ? 'ready' : 'blocked'
   }
 
   return {

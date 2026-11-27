@@ -613,7 +613,7 @@ const react = require("react")
     ])
   }
 
-  function Readiness({ channel } = {}) {
+  function Readiness({ channel, experimental = false } = {}) {
     useLocaleVersion()
     const t = translate
     const [runtime, setRuntime] = useState(null)
@@ -779,7 +779,12 @@ const react = require("react")
       ])
     }
 
+    // A detected system browser that has not been launched yet is idle, not broken: the plugin
+    // starts it over CDP on the first command, and the extension is optional. Grey ("detected, will
+    // launch") instead of amber — amber is reserved for "something is actually wrong".
+    const detectedSystemIdle = runtime.systemBrowser?.present === true && runtime.readiness !== "ready"
     const tone = runtime.readiness === "ready" ? styles.badgeOk
+      : detectedSystemIdle ? styles.badgeUnknown
       : runtime.readiness === "blocked" ? styles.badgeWarn : styles.badgeUnknown
     const row = (key, label, value) => [
       h("span", { key: `${key}-k`, style: styles.kvKey }, label),
@@ -865,7 +870,7 @@ const react = require("react")
         h("span", { key: "title" }, t("readiness.title")),
         h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, stateLabel),
       ]),
-      isDesktop && isSystemCarrier && runtime.extension ? h("div", { key: "extension" }, [
+      experimental && isDesktop && isSystemCarrier && runtime.extension ? h("div", { key: "extension" }, [
         resolvedCarrier !== 'extension' && extensionDisconnected ? h('p', { key: 'fallback-hint', role: 'status', style: styles.hint }, t('extension.notConnected')) : null,
         h("p", { key: "profile", role: "status", style: styles.hint }, [runtime.extension.browser, runtime.extension.profile, runtime.extension.connectionId, runtime.extension.state].filter(Boolean).join(" · ")),
         h("p", { key: "quiet", style: styles.hint }, t("extension.quiet")),
@@ -878,7 +883,7 @@ const react = require("react")
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
           h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: bridgeAction }, t("readiness.bridge.reinstall")),
-          extensionButton,
+          experimental ? extensionButton : null,
         ]),
         h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
       ]) : null,
@@ -886,7 +891,7 @@ const react = require("react")
         h("p", { key: "use-browser", style: styles.hint }, t("readiness.shell.thirdParty.useBrowser").replaceAll("{browser}", shellBrowserName)),
         h("p", { key: "official", style: styles.hint }, t("readiness.shell.thirdParty.official")),
       ]) : null,
-      isDesktop && isSystemCarrier && !canManageBridge ? extensionButton : null,
+      experimental && isDesktop && isSystemCarrier && !canManageBridge ? extensionButton : null,
       // Host patch gets its own row, and only when a patch spec matches this Desktop build. A
       // third-party shell or an unsupported version has no patchable target, so the row is absent
       // rather than a dead "unsupported" line.
@@ -894,13 +899,13 @@ const react = require("react")
         h("span", { key: "title" }, t("readiness.hostPatch")),
         h("span", { key: "state", role: "status", style: styles.hint }, t(runtime.shell?.hostPatch?.status === "applied" ? "readiness.hostPatch.applied" : "readiness.hostPatch.absent")),
       ]) : null,
-      extensionMessage ? h('p', { key: 'extension-message', role: 'status', style: styles.hint }, extensionMessage) : null,
+      experimental && extensionMessage ? h('p', { key: 'extension-message', role: 'status', style: styles.hint }, extensionMessage) : null,
       h('p', { key: 'active-carrier', role: 'status', style: styles.hint }, [runtime.resolvedCarrier, runtime.controlledProfile, runtime.fallbackReason, runtime.extension?.registration?.detail].filter(Boolean).join(' · ')),
       // A failed native-host registration is not the user's fault and not a raw command dump: on
       // Windows it is usually EPERM (the registry write needs elevation). Say what it means and
       // keep the exact command in the diagnostics block below.
       ...(selectedSystemBrowser === undefined ? [] : Object.entries(runtime.nativeHostRegistration ?? {})
-        .filter(([browser, status]) => isDesktop && !status.registered && browser === selectedSystemBrowser)
+        .filter(([browser, status]) => experimental && isDesktop && !status.registered && browser === selectedSystemBrowser)
         .map(([browser, status]) => {
           const detail = String(status.detail ?? "")
           const needsAdmin = /EPERM|EACCES|Access is denied/iu.test(detail)
@@ -1262,6 +1267,10 @@ const react = require("react")
     const [error, setError] = useState("")
     const [busy, setBusy] = useState(false)
     const [saved, setSaved] = useState(false)
+    // The main panel is the carrier switch plus CDP readiness — CDP is the baseline that needs no
+    // installation. The extension (drive the user's own browser) is an optional control that lives
+    // in 高级设置 and only renders while that section is open.
+    const [advancedOpen, setAdvancedOpen] = useState(false)
     const saving = useRef(false)
     const savedTimer = useRef(null)
     const alive = useRef(true)
@@ -1351,9 +1360,7 @@ const react = require("react")
       selector("browser.channel", settings.browser.channel === "bundled" || settings.browser.channel === "auto" ? "sidebar" : settings.browser.channel,
         options("browser.", ["sidebar", "electron", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
-      systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
-        options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
-      h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel }),
+      h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel, experimental: advancedOpen }),
       h(HostPatchControls, { key: "host-patch" }),
       section("ui.title", [
         toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
@@ -1368,8 +1375,10 @@ const react = require("react")
         toggle("credentials", "allowRead"),
         toggle("actions", "allowCredentialWrite", "actions.allowCredentialWrite", "actions.allowCredentialWrite.hint"),
       ]),
-      h("details", { key: "advanced", style: styles.group }, [
+      h("details", { key: "advanced", style: styles.group, onToggle: event => setAdvancedOpen(event.currentTarget.open) }, [
         h("summary", { key: "title", style: styles.groupTitle }, t("settings.advanced")),
+        advancedOpen && systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
+          options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
         toggle("history", "enabled"),
         selector("vision.strategy", settings.vision.strategy, [
           { value: "auto", label: t("vision.auto") },

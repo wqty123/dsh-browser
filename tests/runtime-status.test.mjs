@@ -290,9 +290,7 @@ test('the default reader detects a real file through the launch path detector wi
       bridge: noDesktop,
       endpoint: noShell,
     })
-    // Detection alone is readiness: the browser is launched over CDP on the first command, and
-    // probing the fixture never executes it (asserted below).
-    assert.equal(status.readiness, 'ready')
+    assert.equal(status.readiness, 'blocked')
     assert.equal(status.executable, path)
     assert.equal(readFileSync(path, 'utf8'), 'this fixture is not an executable')
   } finally {
@@ -302,26 +300,22 @@ test('the default reader detects a real file through the launch path detector wi
   }
 })
 
-test('system readiness follows the installed browser, and still reports launch state', () => {
-  // Detected is enough to be ready: the plugin launches the browser over CDP on the first command,
-  // so a missing extension or an idle connection is not a blocker — the extension is an optional
-  // convenience for reusing a personal profile, not the driving mechanism.
+test('system readiness follows the selected live CDP connection and preserves launch failures', () => {
   let state
   const options = { browserReader: () => ({ kind: 'edge', path: 'edge.exe' }), systemConnection: () => state }
-  assert.equal(report('edge', options).readiness, 'ready')
+  assert.equal(report('edge', options).readiness, 'blocked')
   assert.match(report('edge', options).systemBrowser.detail, /has not launched/)
   for (const detail of ['Browser launch is in progress', 'Default-profile debugging refused', 'Singleton handoff without DevToolsActivePort', 'CDP connection lost']) {
     state = { connected: false, detail }
     const status = report('edge', options)
-    assert.equal(status.readiness, 'ready', `${detail} still leaves a drivable browser`)
+    assert.equal(status.readiness, 'blocked')
     assert.equal(status.systemBrowser.detail, detail)
     assert.equal(status.resolvedCarrier, 'system')
   }
   state = { connected: true, detail: 'Live CDP' }
   assert.equal(report('edge', options).readiness, 'ready')
-  // Nothing installed is the only blocked case for this carrier.
-  const missing = { browserReader: () => undefined, systemConnection: () => state }
-  assert.equal(report('edge', missing).readiness, 'blocked')
+  state = { connected: false, detail: 'CDP closed' }
+  assert.equal(report('edge', options).readiness, 'blocked')
 })
 
 test('a runtime installed by hand is diagnostic, not a working sidebar', () => {
