@@ -98,6 +98,22 @@ node tests/run.mjs tests/code-tool.test.mjs
 
 单元测试并不等于安装包验收。需要原生组合、系统焦点或安装退出流程的场景，要用实际运行的对应宿主复验。
 
+## 部署到 profile（目录链接）
+
+profile 里若用 `link:./plugins/dsh-builtin-browser` 安装，pnpm 不会应用 `publishConfig`，包内 `exports` 仍是开发态
+（`./client` → `./src/client/index.ts`）。宿主的客户端模块服务只读 `exports`，于是会把 TypeScript 源码发给浏览器，
+浏览器执行不了，插件不注册（症状：设置页停在骨架屏、宿主日志 `loaded without registering`）。
+
+因此本地部署一律用脚本，不要手工复制目录：
+
+```sh
+node tools/deploy-local.mjs                  # 构建 + 写入发布态 exports + 校验每个导出目标存在
+node tools/deploy-local.mjs --no-build        # 复用现有 lib/
+```
+
+脚本把 `publishConfig.exports`（与 npm 发布时应用的是同一份映射）写进安装目录的 `package.json`，并断言
+`./client` 解析到 `./lib/client.js`、该文件带 `__ModuleLoader__` 信封。回归测试：`tests/deploy-manifest.test.mjs`。
+
 ## 代码结构
 
 | 目录 | 职责 |

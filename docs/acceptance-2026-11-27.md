@@ -4,6 +4,21 @@
 安装位置：`%DSH_HOME%\profiles\web\plugins\dsh-builtin-browser`（本机为 `D:\dsh-home`）。
 备份位置：同目录旁的 `dsh-builtin-browser.bak-20261127`。
 
+## 零、部署方式（不要手工拷贝目录）
+
+目录链接安装（profile 里的 `link:./plugins/...`）**不会应用 `publishConfig`**：手工拷贝后包里仍是开发态
+`exports`（`./client` → `./src/client/index.ts`），宿主会把 TypeScript 源码当客户端包发给浏览器，浏览器执行不了，
+插件永远不会调用 `__ModuleLoader__.load`，设置页停在骨架屏并报 `loaded without registering`。
+
+正确的部署命令（构建 + 写入发布态 manifest + 逐项校验 exports）：
+
+```powershell
+node tools/deploy-local.mjs                              # 默认装到 $env:DSH_HOME\profiles\web\plugins\dsh-builtin-browser
+node tools/deploy-local.mjs --target <目录> --no-build   # 指定目录 / 复用已有构建
+```
+
+脚本会输出 `./client = ./lib/client.js (… KB, __ModuleLoader__ envelope)`，并断言每个导出的目标文件都存在。
+
 ## 一、重启后才生效
 
 插件代码在 DSH 启动时加载，重启 `dsh web` 那一个进程即可。**不要删 `DSH_HOME`**。
