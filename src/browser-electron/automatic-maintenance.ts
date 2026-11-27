@@ -1,4 +1,4 @@
-import { BROWSER_PROFILE_DIR } from '../../assets/browser-policy.mjs'
+import { BROWSER_PROFILE_DIR, MAINTENANCE_PLAN_MAX_AGE_MS, MAINTENANCE_QUIT_WAIT_MS, MAINTENANCE_RESULT_CACHE_MS } from '../../assets/browser-policy.mjs'
 /** User-requested Desktop maintenance (Windows and macOS), coordinated outside the Desktop process tree. */
 import { execFile, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -326,7 +326,7 @@ export async function waitForDesktopExit(deps: {
   readonly now?: () => number
 }): Promise<void> {
   const now = deps.now ?? Date.now
-  const deadline = now() + 60_000
+  const deadline = now() + MAINTENANCE_QUIT_WAIT_MS
   let incomplete = false
   while (now() < deadline) {
     deps.checkCancelled()
@@ -448,7 +448,7 @@ async function clearStaleLock(lockPath: string, home: string): Promise<boolean> 
   try {
     const info = await statAsync(lockPath)
     // Never touch a lock another request may still be preparing (concurrent start window).
-    if (Date.now() - info.mtimeMs < 5 * 60_000) return false
+    if (Date.now() - info.mtimeMs < MAINTENANCE_RESULT_CACHE_MS) return false
     const id = (await readFile(lockPath, 'utf8')).trim()
     if (!/^(?:install|uninstall|reinstall)-[A-Za-z0-9]+$/.test(id)) return false
     const prior = readAutomaticMaintenance(home)
@@ -481,7 +481,7 @@ function validatePlan(value: unknown, path: string, now = Date.now()): Automatic
     || typeof plan.dependency !== 'string' || plan.dependency.trim() === ''
     || typeof plan.id !== 'string' || !/^reinstall-[A-Za-z0-9]+$/.test(plan.id)
     || ![plan.root, plan.home, plan.nodePath, plan.directory].every(p => typeof p === 'string' && isAbsolute(p))
-    || typeof plan.electronNode !== 'boolean' || !Number.isFinite(created) || created > now || now - created > 30_000
+    || typeof plan.electronNode !== 'boolean' || !Number.isFinite(created) || created > now || now - created > MAINTENANCE_PLAN_MAX_AGE_MS
     || (plan.locale !== undefined && !['zh', 'en'].includes(plan.locale))) {
     throw new Error('invalid or expired automatic maintenance plan')
   }

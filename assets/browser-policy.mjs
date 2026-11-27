@@ -6,6 +6,22 @@ export const EXTENSION_INSTALL_ROUTE = '/dsh-builtin-browser/extension/install'
 export const DEFAULT_OPERATION_TIMEOUT_MS = 30_000
 export const CDP_DEFAULT_ATTACH_PORT = 9222
 export const CDP_ATTACH_PROBE_TIMEOUT_MS = 600
+/** Budget for one control exchange with a carrier: a bridge call or a CDP command. */
+export const CARRIER_CALL_TIMEOUT_MS = 30_000
+/** A carrier call that moves a file (download) gets the longer budget. */
+export const CARRIER_DOWNLOAD_TIMEOUT_MS = 60_000
+/** A cheap carrier probe (listing views) does not need the full call budget. */
+export const CARRIER_PROBE_TIMEOUT_MS = 5_000
+/** Budget for one maintenance child process (bridge install, profile command). */
+export const MAINTENANCE_PROCESS_TIMEOUT_MS = 30_000
+/** How long maintenance waits for Desktop to exit. */
+export const MAINTENANCE_QUIT_WAIT_MS = 60_000
+/** A maintenance plan older than this is refused instead of executed. */
+export const MAINTENANCE_PLAN_MAX_AGE_MS = 30_000
+/** How long a finished maintenance result is reused instead of re-inspected. */
+export const MAINTENANCE_RESULT_CACHE_MS = 5 * 60_000
+/** Budget for one Electron profile command. */
+export const PROFILE_COMMAND_TIMEOUT_MS = 60_000
 export const EXTENSION_READY_TIMEOUT_MS = 2500
 export const EXTENSION_PROBE_TIMEOUT_MS = 1500
 export const NATIVE_REGISTRATION_TIMEOUT_MS = 60_000

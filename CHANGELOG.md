@@ -2,6 +2,11 @@
 
 本文件记录各轮功能开发与问题修复(由仓库外独立文档迁移,随仓库管理)。
 
+## 1.0.3（2026-11-27）— 载体预算收口与文案去混排
+
+- **载体与维护的时间预算收进 `assets/browser-policy.mjs`。** 同一个 30 秒原先在四个模块各写一遍（桌面桥调用、CDP 命令、桥接安装、profile 命令），改一处会漏三处；现在分别由 `CARRIER_CALL_TIMEOUT_MS` / `CARRIER_DOWNLOAD_TIMEOUT_MS` / `CARRIER_PROBE_TIMEOUT_MS` / `MAINTENANCE_PROCESS_TIMEOUT_MS` / `MAINTENANCE_QUIT_WAIT_MS` / `PROFILE_COMMAND_TIMEOUT_MS` 表达，并新增 `tests/carrier-budgets.test.mjs` 守住“探针 < 调用 ≤ 下载”的语义顺序。
+- **缺浏览器提示不再中英混排。** `missing-system-browser.ts` 里 `'本机 Chrome / installed Chrome'` 这类同一字符串塞两种语言的写法改为单一英文标签（该提示正文本就是英文）；中文用户的入口是设置页的载体名，仍由面板文案负责。
+
 ## 1.0.2（2026-11-27）— 适配 DSH 0.2.3-alpha.2
 
 - **`engines.dsh` 回到已验收的下限 `>=0.2.2-rc.3 <0.3.0`，CI 增加 0.2.2-rc.5 一条腿。** 之前的下限一度被抬到 `0.2.3-alpha.2`，官方桌面（内置 `0.2.2-rc.5`）因此装不上；而 0.2.3 的鉴权修复在运行中的 0.2.3-alpha.2 宿主上实测已经生效（插件路由返回 401 而不是 503），不需要靠抬下限来“声明支持”。现在三行都进 CI：rc.3、rc.5、0.2.3-alpha.2，`0.2.2-rc.1` 及更早仍被拒绝。

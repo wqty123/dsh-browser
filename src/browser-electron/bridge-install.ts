@@ -1,3 +1,4 @@
+import { MAINTENANCE_PROCESS_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 /**
  * Install, repair or remove the desktop bridge from the settings panel.
  *
@@ -98,7 +99,7 @@ export interface BridgeReadyOptions {
  */
 export async function waitForRestartedBridge(pid: number, options: BridgeReadyOptions = {}): Promise<void> {
   const path = options.endpointPath ?? bridgeEndpointPath()
-  const timeoutMs = options.timeoutMs ?? 30_000
+  const timeoutMs = options.timeoutMs ?? MAINTENANCE_PROCESS_TIMEOUT_MS
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     try {

@@ -6,6 +6,14 @@ export const EXTENSION_INSTALL_ROUTE: string
 export const DEFAULT_OPERATION_TIMEOUT_MS: number
 export const CDP_DEFAULT_ATTACH_PORT: number
 export const CDP_ATTACH_PROBE_TIMEOUT_MS: number
+export const CARRIER_CALL_TIMEOUT_MS: number
+export const CARRIER_DOWNLOAD_TIMEOUT_MS: number
+export const CARRIER_PROBE_TIMEOUT_MS: number
+export const MAINTENANCE_PROCESS_TIMEOUT_MS: number
+export const MAINTENANCE_QUIT_WAIT_MS: number
+export const MAINTENANCE_PLAN_MAX_AGE_MS: number
+export const MAINTENANCE_RESULT_CACHE_MS: number
+export const PROFILE_COMMAND_TIMEOUT_MS: number
 export const EXTENSION_READY_TIMEOUT_MS: number
 export const EXTENSION_PROBE_TIMEOUT_MS: number
 export const NATIVE_REGISTRATION_TIMEOUT_MS: number

@@ -1,10 +1,11 @@
+import { PROFILE_COMMAND_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 import { execFile, spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { windowsPowerShellPath } from './windows-system.ts'
 import { MaintenanceRecoveryError } from './maintenance-lifecycle.ts'
 
 /** Terminate the complete package-manager tree before allowing a profile rollback. */
-export async function runProfileCommand(command: string, args: readonly string[], environment: NodeJS.ProcessEnv, timeoutMs = 60_000): Promise<{ code: number; output: string }> {
+export async function runProfileCommand(command: string, args: readonly string[], environment: NodeJS.ProcessEnv, timeoutMs = PROFILE_COMMAND_TIMEOUT_MS): Promise<{ code: number; output: string }> {
   const taskkill = process.platform === 'win32' ? join(dirname(dirname(dirname(windowsPowerShellPath(environment)))), 'taskkill.exe') : undefined
   return await new Promise((resolve, reject) => {
     const child = spawn(command, [...args], { env: environment, windowsHide: true, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
