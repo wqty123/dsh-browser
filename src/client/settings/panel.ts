@@ -379,7 +379,11 @@ const react = require("react")
     // the label next to them is always a locale string.
     badge: { display: "inline-block", padding: "1px 8px", marginRight: "8px", borderRadius: "10px", fontSize: "11px", lineHeight: 1.6, border: "1px solid transparent" },
     badgeOk: { color: "#2f9e44", borderColor: "rgba(47,158,68,.5)", background: "rgba(47,158,68,.12)" },
-    badgeWarn: { color: "#e5534b", borderColor: "rgba(229,83,75,.5)", background: "rgba(229,83,75,.12)" },
+    // Amber is "recoverable, act if you want"; red is reserved for a real failure. A blocked
+    // readiness whose extension is simply not connected used to be red, which read as "your
+    // browser was found but it is broken".
+    badgeWarn: { color: "#b26a00", borderColor: "rgba(178,106,0,.5)", background: "rgba(178,106,0,.12)" },
+    badgeError: { color: "#e5534b", borderColor: "rgba(229,83,75,.5)", background: "rgba(229,83,75,.12)" },
     badgeUnknown: { color: "#a0a0a8", borderColor: "rgba(160,160,168,.5)", background: "rgba(160,160,168,.12)" },
     kv: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 12px", margin: "8px 0 0", fontSize: "12px" },
     kvKey: { opacity: 0.68 },
@@ -819,6 +823,11 @@ const react = require("react")
           : runtime.electron.state === "preparing" ? "readiness.status.bundledPreparing"
             : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
     const controlsBusy = busy || bridgeBusy !== null || bridgeActive
+    // Desktop-only rows. On the Web surface these three things do not exist — no bridge, no host
+    // patch, and a browser extension cannot be installed from a Web page either — so the rows are
+    // absent rather than greyed out or explained.
+    const isDesktop = runtime.shell !== undefined
+    const isSystemCarrier = runtime.channel === 'chrome' || runtime.channel === 'edge'
     const extensionAction = async () => {
       setBusy(true)
       try {
@@ -828,7 +837,7 @@ const react = require("react")
       finally { setBusy(false); void read() }
     }
     const extensionButton = h("button", { key: "install-extension", type: "button", style: styles.button, disabled: controlsBusy, onClick: extensionAction }, t('extension.button'))
-    const canManageBridge = runtime.shell?.patchable !== false && runtime.bridge.present === true && runtime.bridge.state !== "absent"
+    const canManageBridge = isDesktop && runtime.shell?.patchable !== false && runtime.bridge.present === true && runtime.bridge.state !== "absent"
     const extensionUnsupported = runtime.bridge.code === "DESKTOP_MAIN_EXTENSION_UNSUPPORTED"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
     const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
@@ -842,7 +851,7 @@ const react = require("react")
         h("span", { key: "title" }, t("readiness.title")),
         h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, stateLabel),
       ]),
-      runtime.extension ? h("div", { key: "extension" }, [
+      isDesktop && isSystemCarrier && runtime.extension ? h("div", { key: "extension" }, [
         resolvedCarrier !== 'extension' && extensionDisconnected ? h('p', { key: 'fallback-hint', role: 'status', style: styles.hint }, t('extension.notConnected')) : null,
         h("p", { key: "profile", role: "status", style: styles.hint }, [runtime.extension.browser, runtime.extension.profile, runtime.extension.connectionId, runtime.extension.state].filter(Boolean).join(" · ")),
         h("p", { key: "quiet", style: styles.hint }, t("extension.quiet")),
@@ -863,10 +872,25 @@ const react = require("react")
         h("p", { key: "use-browser", style: styles.hint }, t("readiness.shell.thirdParty.useBrowser").replaceAll("{browser}", shellBrowserName)),
         h("p", { key: "official", style: styles.hint }, t("readiness.shell.thirdParty.official")),
       ]) : null,
-      !canManageBridge ? extensionButton : null,
+      isDesktop && isSystemCarrier && !canManageBridge ? extensionButton : null,
+      // Host patch gets its own row, and only when a patch spec matches this Desktop build. A
+      // third-party shell or an unsupported version has no patchable target, so the row is absent
+      // rather than a dead "unsupported" line.
+      isDesktop && runtime.shell?.patchable === true ? h("div", { key: "host-patch-row", className: "dsh-bb-row", style: styles.row }, [
+        h("span", { key: "title" }, t("readiness.hostPatch")),
+        h("span", { key: "state", role: "status", style: styles.hint }, t(runtime.shell?.hostPatch?.status === "applied" ? "readiness.hostPatch.applied" : "readiness.hostPatch.absent")),
+      ]) : null,
       extensionMessage ? h('p', { key: 'extension-message', role: 'status', style: styles.hint }, extensionMessage) : null,
       h('p', { key: 'active-carrier', role: 'status', style: styles.hint }, [runtime.resolvedCarrier, runtime.controlledProfile, runtime.fallbackReason, runtime.extension?.registration?.detail].filter(Boolean).join(' · ')),
-      ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered).map(([browser, status]) => h('p', { key: 'registration-' + browser, role: 'status', style: styles.hint }, browser + ': ' + status.detail)),
+      // A failed native-host registration is not the user's fault and not a raw command dump: on
+      // Windows it is usually EPERM (the registry write needs elevation). Say what it means and
+      // keep the exact command in the diagnostics block below.
+      ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered).map(([browser, status]) => {
+        const detail = String(status.detail ?? "")
+        const needsAdmin = /EPERM|EACCES|Access is denied/iu.test(detail)
+        return h("p", { key: "registration-" + browser, role: "status", style: needsAdmin ? styles.hint : styles.error },
+          needsAdmin ? t("readiness.registration.needsAdmin").replaceAll("{browser}", browser) : browser + ': ' + detail)
+      }),
       bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase}`)) : null,
       bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t("readiness.bridge.installedDone")) : null,
       bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
@@ -886,6 +910,9 @@ const react = require("react")
         runtime.systemBrowser?.path ? h("code", { key: "system-path", style: styles.mono }, runtime.systemBrowser.path) : null,
         bridgeError?.detail ? h("code", { key: "bridge-error-detail", style: styles.mono }, bridgeError.detail) : null,
         bridgeJobDiagnostic !== "" ? h("code", { key: "bridge-job-detail", style: styles.mono }, bridgeJobDiagnostic) : null,
+        // The exact command a human needs when a registration failed (elevation, wrong browser).
+        ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered)
+          .map(([browser, status]) => h("code", { key: "registration-detail-" + browser, style: styles.mono }, String(status.detail ?? ""))),
         runtime.electron.state === "failed" || runtime.electron.state === "skipped"
           ? h("p", { key: "edetail", style: styles.hint }, runtime.electron.detail) : null,
         runtime.bridge.state === "installed" && runtime.bridge.running === false
