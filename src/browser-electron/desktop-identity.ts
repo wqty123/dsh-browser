@@ -78,7 +78,7 @@ export const FALLBACK_RULE: IdentityRule = {
     },
   ],
   unsupportedMainEntries: {
-    'out/main/index.js': 'the electron-vite layout of a third-party DSH Desktop (dataelement/dsh-desktop, issue #62), which shares the package name but not the DeepSeek Harness Desktop shell the bridge patches',
+    'out/main/index.js': 'an electron-vite DSH Desktop without the @deepseek-ai/dsh dependency — the third-party shell from issue #62, which shares the package name but not the DeepSeek Harness Desktop bundle the bridge patches',
   },
   layouts: [
     { name: 'macos-bundle', marker: 'Contents/Info.plist', resources: 'Contents/Resources', executable: 'Contents/MacOS/DeepSeek Harness', cliLauncher: 'runtime/cli/bin/dsh' },
