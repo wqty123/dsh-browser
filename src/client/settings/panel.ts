@@ -821,6 +821,11 @@ const react = require("react")
     // state on the Web surface.
     const isDesktop = typeof globalThis.dshDesktop === "object" && globalThis.dshDesktop !== null
     const isSystemCarrier = runtime.channel === 'chrome' || runtime.channel === 'edge'
+    // The patch row is about the sidebar carrier only, and only while this Desktop build cannot
+    // provide native views by itself: a host that already exposes them needs nothing from us, so
+    // the row is absent instead of offering a no-op install.
+    const channelIsSidebar = runtime.channel === 'sidebar' || runtime.channel === 'bundled'
+    const nativeViewsPresent = typeof globalThis.dshDesktop?.browser?.nativeViews === 'object'
     const stateLabel = resolvedCarrier === "extension" ? extensionDisconnected ? t('extension.notConnected') : runtime.extension?.detail ?? t("readiness.state.blocked")
       : resolvedCarrier === "system" || resolvedCarrier === "cdp" ? systemLabel
       : resolvedCarrier === "sidebar"
@@ -885,7 +890,7 @@ const react = require("react")
       // Host patch gets its own row, and only when a patch spec matches this Desktop build. A
       // third-party shell or an unsupported version has no patchable target, so the row is absent
       // rather than a dead "unsupported" line.
-      carrierIsSidebar && isDesktop && runtime.shell?.patchable === true ? h("div", { key: "host-patch-row", className: "dsh-bb-row", style: styles.row }, [
+      isDesktop && channelIsSidebar && !nativeViewsPresent && runtime.shell?.patchable === true ? h("div", { key: "host-patch-row", className: "dsh-bb-row", style: styles.row }, [
         h("span", { key: "title" }, t("readiness.hostPatch")),
         h("span", { key: "state", role: "status", style: styles.hint }, t(runtime.shell?.hostPatch?.status === "applied" ? "readiness.hostPatch.applied" : "readiness.hostPatch.absent")),
       ]) : null,
@@ -1347,7 +1352,7 @@ const react = require("react")
         options("browser.", ["sidebar", "electron", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
       systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
-        options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } }), "browser.modeHint") : null,
+        options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
       h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel }),
       h(HostPatchControls, { key: "host-patch" }),
       section("ui.title", [
