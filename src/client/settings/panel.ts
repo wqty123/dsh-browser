@@ -734,8 +734,8 @@ const react = require("react")
       }
     }
 
-    const bridgeAction = async () => {
-      const action = "reinstall"
+    const bridgeAction = async (requested = "reinstall") => {
+      const action = requested
       if (bridgePending.current || busy || bridgeActive) return
       const desktopMenu = () => typeof document.querySelector === "function"
         ? document.querySelector("[data-windows-menu]")?.shadowRoot?.querySelector("button") : null
@@ -899,7 +899,10 @@ const react = require("react")
             `${t("readiness.bridge.extension." + runtime.bridge.mainExtension.state)}${runtime.bridge.mainExtension.version ? " · " + runtime.bridge.mainExtension.version : ""}${runtime.bridge.mainExtension.code ? " · " + runtime.bridge.mainExtension.code : ""}`) : null,
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
-          h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: bridgeAction }, t("readiness.bridge.reinstall")),
+          h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: () => bridgeAction("reinstall") }, t("readiness.bridge.reinstall")),
+          // The only way out when the desktop integration itself is the problem: revert and stop,
+          // instead of reinstall-and-repatch (#126). Kept next to reinstall so the row stays honest.
+          h("button", { key: "uninstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, onClick: () => bridgeAction("uninstall") }, t("readiness.bridge.uninstall")),
           experimental ? extensionButton : null,
         ]),
         h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),

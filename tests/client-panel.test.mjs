@@ -2281,8 +2281,9 @@ for (const [state, label] of [
     const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
     const diagnostics = elements(tree).find(node => node.type === 'details' && node.props.key === 'diagnostics')
     assert.ok(controls, 'bridge management remains visible without opening diagnostics')
-    // The extension is an optional control in 高级设置; the main panel keeps one action per row.
-    assert.equal(elements(controls).filter(node => node.type === 'button').length, 1)
+    // Reinstall and the "remove the bridge only" exit (#126); the extension moved to 高级设置.
+    assert.equal(elements(controls).filter(node => node.type === 'button').length, 2)
+    assert.ok(elements(controls).find(node => node.type === 'button' && node.props.key === 'uninstall'), 'the bridge can be removed without reinstalling')
     assert.equal(elements(controls).find(node => node.type === 'button' && node.props.key === 'install-extension'), undefined, 'the extension control is not in the main panel')
     assert.ok(bridgeButton(controls, label), 'the action matches the actual bridge state')
     assert.equal(bridgeButton(diagnostics, label), undefined, 'the primary action is not buried in diagnostics')

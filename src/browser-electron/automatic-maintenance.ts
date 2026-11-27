@@ -31,7 +31,7 @@ export interface AutomaticMaintenanceOptions {
 interface AutomaticPlan {
   readonly version: 1
   readonly id: string
-  readonly action: 'reinstall'
+  readonly action: 'reinstall' | 'uninstall'
   readonly root: string
   readonly nodePath: string
   readonly electronNode: boolean
@@ -201,7 +201,7 @@ export interface ReinstallSteps {
 }
 
 /** Called under the automatic job lock, only after the closed-process barrier. */
-export async function runReinstallTransaction(steps: ReinstallSteps): Promise<BridgeActionResult> {
+export async function runReinstallTransaction(steps: ReinstallSteps, action: 'reinstall' | 'uninstall' = 'reinstall'): Promise<BridgeActionResult> {
   const removed = await steps.absent() ? undefined : await steps.remove()
   if (removed && !removed.ok) throw new Error(`REINSTALL_REMOVE_FAILED: ${removed.output}`)
   if (!await steps.absent()) throw new Error('REINSTALL_REMOVE_FAILED: profile dependency remains installed')
@@ -210,6 +210,11 @@ export async function runReinstallTransaction(steps: ReinstallSteps): Promise<Br
   if (!reverted.ok && !(wasAbsent && steps.hostAbsent() && reverted.code === 1 && /^nothing to revert in /m.test(reverted.output)
     && !/error|refus|incomplete|EACCES|EPERM/i.test(reverted.output))) throw new Error(`REINSTALL_REVERT_FAILED: ${reverted.output}`)
   if (!steps.hostAbsent()) throw new Error('REINSTALL_REVERT_FAILED: host patch is still present')
+  // uninstall stops here on purpose: the machine is now free of the bridge and of the host patch,
+  // which is the only exit a user has when the desktop integration itself is the problem (#126).
+  if (action === 'uninstall') {
+    return { ...reverted, output: [removed?.output, reverted.output].filter(Boolean).join('\n').slice(-20_000) }
+  }
   const applied = await steps.apply()
   if (!applied.ok || applied.hostPatch?.status !== 'applied') throw new Error(`REINSTALL_APPLY_FAILED: ${applied.output}`)
   const added = await steps.add()
@@ -477,9 +482,9 @@ function validatePlan(value: unknown, path: string, now = Date.now()): Automatic
   if (value === null || typeof value !== 'object') throw new Error('invalid automatic maintenance plan')
   const plan = value as Partial<AutomaticPlan>
   const created = typeof plan.createdAt === 'string' ? Date.parse(plan.createdAt) : NaN
-  if (plan.version !== 1 || plan.action !== 'reinstall'
+  if (plan.version !== 1 || (plan.action !== 'reinstall' && plan.action !== 'uninstall')
     || typeof plan.dependency !== 'string' || plan.dependency.trim() === ''
-    || typeof plan.id !== 'string' || !/^reinstall-[A-Za-z0-9]+$/.test(plan.id)
+    || typeof plan.id !== 'string' || !/^(?:reinstall|uninstall)-[A-Za-z0-9]+$/.test(plan.id)
     || ![plan.root, plan.home, plan.nodePath, plan.directory].every(p => typeof p === 'string' && isAbsolute(p))
     || typeof plan.electronNode !== 'boolean' || !Number.isFinite(created) || created > now || now - created > MAINTENANCE_PLAN_MAX_AGE_MS
     || (plan.locale !== undefined && !['zh', 'en'].includes(plan.locale))) {
@@ -528,9 +533,9 @@ export async function commitAutomaticMaintenance(jobId: string, home = homePath(
 }
 
 /** Only the new, authenticated explicit-click endpoint calls this function. */
-export async function startAutomaticMaintenance(action: 'reinstall', root: string, options: AutomaticMaintenanceOptions = {}): Promise<AutomaticMaintenanceJob> {
+export async function startAutomaticMaintenance(action: 'reinstall' | 'uninstall', root: string, options: AutomaticMaintenanceOptions = {}): Promise<AutomaticMaintenanceJob> {
   requireLiveDesktop()
-  if (action !== 'reinstall') throw new Error('invalid bridge maintenance action')
+  if (action !== 'reinstall' && action !== 'uninstall') throw new Error('invalid bridge maintenance action')
   if (options.locale !== undefined && !['zh', 'en'].includes(options.locale)) throw new Error('invalid bridge maintenance locale')
   const dependency = await preflightReinstall(root, homePath())
   if (!readDesktopIdentity(root).ok) throw new Error('the maintenance target is not a verified DSH Desktop installation')
@@ -553,7 +558,7 @@ export async function startAutomaticMaintenance(action: 'reinstall', root: strin
   try {
     const prepared = await prepareBridgeMaintenance('install', root, { directory: base })
     const original = JSON.parse(await readFile(prepared.planPath, 'utf8')) as { nodePath: string; electronNode: boolean }
-    const id = basename(prepared.directory).replace(/^install-/, 'reinstall-')
+    const id = basename(prepared.directory).replace(/^install-/, action === 'uninstall' ? 'uninstall-' : 'reinstall-')
     const directory = join(base, id)
     await renameMaintenanceFile(prepared.directory, directory)
     const stagedWorker = await stageReinstallRuntime(directory)
@@ -677,6 +682,7 @@ async function runWorker(path: string): Promise<void> {
         return await withProfileCheckpoint(plan.home, plan.directory, async () => {
           const residue = await cleanProfileResidue(plan.home)
           const result = await runReinstallTransaction({
+            // The action rides on the plan; the worker only executes what it was committed to.
             remove: () => profile('uninstall'),
             absent: async () => {
               const manifest = JSON.parse(await readFile(join(plan.home, 'profiles', 'desktop', 'package.json'), 'utf8')) as { dependencies?: Record<string, unknown> }
@@ -685,7 +691,7 @@ async function runWorker(path: string): Promise<void> {
             revert: () => bridge('uninstall'),
             hostAbsent: () => inspectReinstallHost(plan.root).status === 'absent',
             apply: () => bridge('install'), add: () => profile('install'),
-          })
+          }, plan.action)
           extension = await installedProfileExtension(plan.home)
           return { ...result, output: [residue, result.output].filter(Boolean).join('\n') }
         }, { reconcile: () => reconcileProfile(plan.root, plan.home) })
