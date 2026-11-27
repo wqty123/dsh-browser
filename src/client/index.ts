@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { apply as applyReference } from './reference/client/plugin.ts'
 import { applySettingsSection } from './settings/index.ts'
+import { createApplyGuard } from './apply-guard.ts'
 import { BrowserBody, type BrowserBodyProps } from './view/BrowserBody.tsx'
 import { BrowserTitle } from './view/BrowserTitle.tsx'
 import { createBrowserControllers } from './browser/BrowserController.ts'
@@ -129,7 +130,15 @@ function watchClientVersion(ctx: Context): void {
   ctx.effect(() => () => { clearInterval(timer) }, 'dsh-builtin-browser: client version watch')
 }
 
+/** One client registration per context; a second pass is refused, not half-applied (#132). */
+const stillNeeded = createApplyGuard()
+
+/** Register the Browser tab type. A repeated registration on the same context is a no-op. */
 export function apply(ctx: Context): void {
+  if (!stillNeeded(ctx as unknown as object)) {
+    console.warn('[dsh-builtin-browser] this context is already configured; the repeated registration is skipped')
+    return
+  }
   // 先挂客户端自更新：产物一变，本页自己换到新 bundle（否则会一直用缓存里的旧脚本）。
   // Isolated like the reference dock: an update watcher that cannot start must not take the whole
   // client registration with it (issue #132: one failing registration left the settings section
