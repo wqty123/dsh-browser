@@ -114,20 +114,44 @@ function watchClientVersion(ctx: Context): void {
       const body = await response.json() as { readonly version?: string }
       const version = body.version
       if (typeof version !== 'string' || version === '' || version === 'unknown') return
+      const reload = (token: string): void => {
+        const url = new URL(location.href)
+        url.searchParams.set('v', token)
+        location.replace(url.toString())
+      }
       const seen = sessionStorage.getItem(CLIENT_VERSION_WATCH)
-      if (seen === null) { sessionStorage.setItem(CLIENT_VERSION_WATCH, version); return }
+      // The first check of a page that was opened BEFORE a deploy must not adopt the deployed token
+      // as "seen": the page is still running the old bundle. The deployed token is kept in
+      // localStorage precisely so the next tab (or the next load) notices it and reloads once.
+      if (seen === null) {
+        const deployed = localStorage.getItem(CLIENT_VERSION_WATCH)
+        sessionStorage.setItem(CLIENT_VERSION_WATCH, version)
+        localStorage.setItem(CLIENT_VERSION_WATCH, version)
+        if (deployed !== null && deployed !== version) { reload(version); return }
+        return
+      }
       if (seen === version) return
       sessionStorage.setItem(CLIENT_VERSION_WATCH, version)
-      const url = new URL(location.href)
-      url.searchParams.set('v', version)
+      localStorage.setItem(CLIENT_VERSION_WATCH, version)
+      reload(version)
       location.replace(url.toString())
     } catch {
       // 下一次轮询再试：这条通道失败不该影响界面。
     }
   }
   void check()
-  const timer = setInterval(() => { void check() }, 60_000)
-  ctx.effect(() => () => { clearInterval(timer) }, 'dsh-builtin-browser: client version watch')
+  // A deploy replaces lib/client.js, so the served token (mtime-size) changes. Checking only
+  // every minute left a deploy unseen until a poll happened to land; re-checking on focus and on
+  // the tab becoming visible is what makes it feel like a dev server's hot reload.
+  const timer = setInterval(() => { if (typeof document === 'undefined' || document.visibilityState === 'visible') void check() }, 15_000)
+  const onVisible = (): void => { if (typeof document === 'undefined' || document.visibilityState === 'visible') void check() }
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible)
+  if (typeof window !== 'undefined') window.addEventListener('focus', onVisible)
+  ctx.effect(() => () => {
+    clearInterval(timer)
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible)
+    if (typeof window !== 'undefined') window.removeEventListener('focus', onVisible)
+  }, 'dsh-builtin-browser: client version watch')
 }
 
 /** One client registration per context; a second pass is refused, not half-applied (#132). */
