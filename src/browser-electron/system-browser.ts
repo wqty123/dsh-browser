@@ -1,5 +1,5 @@
 import { PATH_NAMES, INSTALL_LOCATIONS } from '../../assets/browser-products.mjs'
-import { cdpVersionUrl, CDP_DEFAULT_ATTACH_PORT, CDP_ATTACH_PROBE_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
+import { CARRIER_CALL_TIMEOUT_MS, cdpVersionUrl, CDP_DEFAULT_ATTACH_PORT, CDP_ATTACH_PROBE_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 /**
  * Drive the browser the user already has (Chrome / Edge / any Chromium) instead of
  * the Electron we ship — the same approach Codex Browser Use takes.
@@ -359,7 +359,7 @@ class CdpClient {
     return this.socket.readyState === WebSocket.OPEN
   }
 
-  async whenReady(deadline = Date.now() + 30_000): Promise<void> {
+  async whenReady(deadline = Date.now() + CARRIER_CALL_TIMEOUT_MS): Promise<void> {
     const timeoutMs = Math.max(1, deadline - Date.now())
     let timer: NodeJS.Timeout | undefined
     try {
@@ -389,7 +389,7 @@ class CdpClient {
    * @param sessionId - the flattened session to target, when this is a page command.
    * @returns the CDP result.
    */
-  async send(method: string, params?: Record<string, unknown>, sessionId?: string, timeoutMs = 30_000): Promise<unknown> {
+  async send(method: string, params?: Record<string, unknown>, sessionId?: string, timeoutMs = CARRIER_CALL_TIMEOUT_MS): Promise<unknown> {
     // Fail fast and say why. Waiting out the timeout on a closed socket produced
     // only "timed out", which reads as a slow page and hides the real cause.
     if (!this.isAlive()) {
@@ -706,7 +706,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * @param _why - a short phrase for the log, naming which attempt this is.
    * @returns a connected client for the running browser, or undefined when there is none.
    */
-  private async adoptRunningBrowser(_why: string, explicitPort?: number, deadline = Date.now() + 30_000): Promise<CdpClient | undefined> {
+  private async adoptRunningBrowser(_why: string, explicitPort?: number, deadline = Date.now() + CARRIER_CALL_TIMEOUT_MS): Promise<CdpClient | undefined> {
     const portFile = join(this.profileDir, 'DevToolsActivePort')
     let port: number
     if (typeof explicitPort === 'number' && explicitPort > 0) {
@@ -765,7 +765,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * @returns the connected client.
    */
   private async start(): Promise<CdpClient> {
-    const deadline = Date.now() + 30_000
+    const deadline = Date.now() + CARRIER_CALL_TIMEOUT_MS
     if (this.profileLease === undefined) {
       const lease = await (this.profileLeasing ??= acquireProfileLease(this.profileDir).finally(() => { this.profileLeasing = undefined }))
       if (this.disposed) { await lease.release(); throw new Error('dsh-builtin-browser: the browser host was disposed while launching') }

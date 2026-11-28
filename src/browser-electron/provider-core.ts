@@ -490,7 +490,7 @@ export interface CdpCookie {
  * @param metrics - the raw CDP response.
  * @returns the document and viewport size in CSS pixels.
  */
-export function layoutSize(metrics: Record<string, unknown>): { width: number; height: number; viewportHeight: number } | undefined {
+export function layoutSize(metrics: Record<string, unknown>): { width: number; height: number; viewportHeight: number; viewportWidth: number } | undefined {
   const pick = (candidates: readonly unknown[]): { width: number; height: number } | undefined => {
     for (const candidate of candidates) {
       if (typeof candidate !== 'object' || candidate === null) continue
@@ -504,7 +504,7 @@ export function layoutSize(metrics: Record<string, unknown>): { width: number; h
   const content = pick([metrics.cssContentSize, metrics.contentSize])
   const viewport = pick([metrics.cssLayoutViewport, metrics.layoutViewport])
   if (content === undefined) return undefined
-  return { width: content.width, height: content.height, viewportHeight: viewport?.height ?? content.height }
+  return { width: content.width, height: content.height, viewportHeight: viewport?.height ?? content.height, viewportWidth: viewport?.width ?? content.width }
 }
 
 /**

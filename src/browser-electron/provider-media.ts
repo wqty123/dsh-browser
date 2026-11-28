@@ -427,7 +427,13 @@ export abstract class ProviderMedia extends ProviderInteraction {
       if (shot.base64 === '') {
         throw new BrowserError('browser: capture returned an empty image (view not painted); retry shortly', 'BROWSER_SCREENSHOT_FAILED')
       }
-      return this.saveScreenshot(
+      // The native capture describes the VIEW it was taken from, and that view is not always the
+      // page's own layout surface: an off-screen parked window answered a full-width capture with a
+      // 231×960 image while the page itself was 1254×707 (issue #140). A capture whose aspect ratio
+      // disagrees with the page's layout viewport was taken from another surface, so it is replaced
+      // by a CDP clip of the viewport below instead of being handed to the caller.
+      const nativeShape = await this.captureMatchesViewport(handle, shot.width, shot.height)
+      if (nativeShape) return this.saveScreenshot(
         shot.base64,
         request?.savePath,
         shot.mime ?? 'image/png',
@@ -462,6 +468,17 @@ export abstract class ProviderMedia extends ProviderInteraction {
       // `captureBeyondViewport` captures the full scrollable content; without
       // a clip this yields the full-page image (CDP default is the viewport).
       params.captureBeyondViewport = true
+    }
+    // A viewport capture is defined by the PAGE's layout viewport, never by whatever surface the
+    // window happens to have when the screenshot is taken (issue #140).
+    if (region === undefined && request?.fullPage !== true && params.clip === undefined) {
+      const metrics = await withTimeout(handle.sendCommand('Page.getLayoutMetrics', {}), timeoutMs, signal, `browser: screenshot timed out after ${timeoutMs}ms`)
+      const size = layoutSize(metrics as Record<string, unknown>)
+      if (size !== undefined && size.viewportWidth > 0 && size.viewportHeight > 0) {
+        params.clip = { x: 0, y: 0, width: size.viewportWidth, height: size.viewportHeight, scale: 1 }
+        params.fromSurface = true
+        params.captureBeyondViewport = false
+      }
     }
     const supportsJpeg = (handle as { supportsCdpJpeg?: boolean }).supportsCdpJpeg === true
     if (format === 'jpeg' && supportsJpeg) {
@@ -517,6 +534,29 @@ export abstract class ProviderMedia extends ProviderInteraction {
     // mislabelled image, and a caller that decodes by mime wrote the wrong file.
     const mime = params.format === 'jpeg' ? 'image/jpeg' : 'image/png'
     return this.saveScreenshot(data, request?.savePath, mime, rendered)
+  }
+
+  /**
+   * Does a native capture describe the page's own layout viewport?
+   *
+   * Aspect ratio is the DPR-independent test: a correct capture keeps the viewport's shape whatever
+   * the device scale factor is, while a capture of another surface (an off-screen window's tiny
+   * backing store, a narrow panel view) does not. Absent metrics, the capture is trusted — this is a
+   * repair for a wrong surface, not a second guess at a right one.
+   */
+  private async captureMatchesViewport(
+    handle: { sendCommand(method: string, params: Record<string, unknown>, options?: { present?: boolean }): Promise<unknown> },
+    width: number | undefined,
+    height: number | undefined,
+  ): Promise<boolean> {
+    if (width === undefined || height === undefined || width <= 0 || height <= 0) return true
+    try {
+      const size = layoutSize(await handle.sendCommand('Page.getLayoutMetrics', {}) as Record<string, unknown>)
+      if (size === undefined || size.viewportWidth <= 0 || size.viewportHeight <= 0) return true
+      const captured = width / height
+      const viewport = size.viewportWidth / size.viewportHeight
+      return Math.abs(captured - viewport) / viewport <= 0.05
+    } catch { return true }
   }
 
   /**

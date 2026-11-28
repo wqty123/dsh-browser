@@ -1,5 +1,6 @@
 /** Iframe navigation provider with bounded application-known history. */
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { sameFrameState } from './frame-state.ts'
 import type { IframePresentation } from '../view/IframePresentation.ts'
 import { emptyBrowserFrame, type BrowserCarrierState, type BrowserFrame, type BrowserFrameState, type BrowserLoadError, type BrowserSandboxControl } from './BrowserFrame.ts'
 import type { BrowserPageOptions } from './BrowserPage.ts'
@@ -172,7 +173,10 @@ export class IframeImpl implements BrowserFrame {
   }
 
   private publish(): void {
-    this.store.set(this.snapshot())
+    const next = this.snapshot()
+    // Publishing an identical state wakes every subscriber for nothing; in a dock that re-renders on
+    // each publish that is the React #185 loop (issue #127). Compare first, then set.
+    if (!sameFrameState(this.store.getSnapshot(), next)) this.store.set(next)
     this.options.persist(this.navigation.snapshot)
   }
 }

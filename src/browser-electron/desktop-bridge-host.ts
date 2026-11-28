@@ -1,3 +1,4 @@
+import { CARRIER_CALL_TIMEOUT_MS, CARRIER_DOWNLOAD_TIMEOUT_MS, CARRIER_PROBE_TIMEOUT_MS } from '../../assets/browser-policy.mjs'
 /** Drive the visible sidebar guest through canonical, bridge-bound handles. */
 import { BridgeConnection, type BridgeEndpoint } from './bridge-connection.ts'
 import { readFileSync } from 'node:fs'
@@ -60,7 +61,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
     } catch { return undefined }
     const probe = new BridgeConnection(endpoint, bridgeEndpointPath())
     try {
-      const answer = await probe.call({ op: 'list' }, 5_000)
+      const answer = await probe.call({ op: 'list' }, CARRIER_PROBE_TIMEOUT_MS)
       if (isBridgeVersionMismatch(answer)) throw new BridgeVersionError()
       if (answer.ok !== true) return undefined
       if (typeof answer.protocol !== 'number' || !Number.isInteger(answer.protocol)) throw new BridgeVersionError()
@@ -79,7 +80,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
 
   async listPages(scope: BrowserSessionWireId, _options: { readonly requireRunning?: boolean } = {}): Promise<readonly CarrierPage[]> {
     resolveSessionHandle(scope)
-    const answer = await this.connection.call({ op: 'list', handle: scope }, 5_000)
+    const answer = await this.connection.call({ op: 'list', handle: scope }, CARRIER_PROBE_TIMEOUT_MS)
     if (answer.ok !== true) throw new Error(String(answer.error ?? 'sidebar page listing failed'))
     if (!Array.isArray(answer.sidebar)) throw new Error('invalid sidebar page listing')
     const pages: CarrierPage[] = []
@@ -125,7 +126,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       throw new BrowserPanelNotDisplayedError('this view has no attached guest yet', PANEL_INITIALIZING)
     }
     if (entry.adopted) throw new Error('dsh-builtin-browser: the sidebar page this view was adopted from is gone')
-    const deadline = options?.deadline ?? Date.now() + 30_000
+    const deadline = options?.deadline ?? Date.now() + CARRIER_CALL_TIMEOUT_MS
     const transactionId = randomUUID()
     const cancel = (): void => { void this.connection.call({ op: 'cancelSidebar', handle: id, transactionId }, 2_000).catch(() => {}) }
     options?.signal?.addEventListener('abort', cancel, { once: true })
@@ -159,7 +160,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
       id,
       download: async (url, savePath) => {
         await this.guestFor(id)
-        const answer = await this.connection.call({ op: 'download', handle: id, url, savePath }, 60_000)
+        const answer = await this.connection.call({ op: 'download', handle: id, url, savePath }, CARRIER_DOWNLOAD_TIMEOUT_MS)
         if (answer.ok !== true) throw new Error(`dsh-builtin-browser: sidebar download failed: ${String(answer.error)}`)
       },
       sendCommand: async (method, params, options) => {
@@ -187,7 +188,7 @@ export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
   showView(handle: ElectronViewHandle, _label?: string, options?: { readonly quiet?: boolean; readonly select?: boolean }): void {
     if ((options?.quiet ?? this.isQuiet()) && options?.select !== true) return
     if (!this.views.get(handle.id)?.bound) return
-    void this.connection.call({ op: 'showTab', handle: tabWireId(readTabHandle(handle.id)) }, 5_000).catch(() => {})
+    void this.connection.call({ op: 'showTab', handle: tabWireId(readTabHandle(handle.id)) }, CARRIER_PROBE_TIMEOUT_MS).catch(() => {})
   }
 
   onUserAction(_handler: (action: BrowserUserAction) => void): void {}

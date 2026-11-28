@@ -42,10 +42,10 @@ const PRODUCT: Record<string, { label: string; install: string; variable: string
 
 /** How the setting is named to the user. */
 const SETTING_LABEL: Record<string, string> = {
-  chrome: '本机 Chrome / installed Chrome',
-  edge: '本机 Edge / installed Edge',
-  auto: '自动 / automatic',
-  bundled: '内置 / bundled',
+  chrome: 'installed Chrome',
+  edge: 'installed Edge',
+  auto: 'automatic',
+  bundled: 'bundled',
 }
 
 /**
@@ -87,7 +87,7 @@ export class MissingSystemBrowserHost implements ElectronBrowserViewHost {
       `To fix it, any ONE of these is enough:`,
       `  1. ${product.install}, then restart DSH;`,
       `  2. point ${product.variable} at its executable;`,
-      `  3. set the browser carrier back to "内置 / bundled" (or "自动 / automatic" to let it`,
+      `  3. set the browser carrier back to "bundled" (or "automatic" to let it`,
       `     fall back on its own next time).`,
     ].join('\n')
   }

@@ -1,5 +1,5 @@
 import { referenceCaptureMessages, referenceCaptureErrors } from '../../assets/browser-messages.mjs'
-import { BROWSER_PROFILE_DIR, SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../assets/browser-policy.mjs'
+import { BROWSER_PROFILE_DIR, SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE, OPEN_REQUEST_ROUTE, SURFACE_DECL_ROUTE, BRIDGE_ACTION_ROUTE } from '../../assets/browser-policy.mjs'
 /**
  * Electron browser provider plugin entry: registers the Electron-backed
  * `BrowserProvider` with `ctx.browser`. The provider needs a view host (real
@@ -57,6 +57,13 @@ import { runWithManualBridgePreference } from './bridge-auto.ts'
 import { replyJson, writeJsonText } from './json-reply.ts'
 import { readJsonBody, readTextBody } from './http-body.ts'
 import { readRuntimeStatus } from './runtime-status.ts'
+
+/**
+ * The last few carrier decisions, newest last (issue #106). "Which browser did it pick, and why" is
+ * the one fact the panel could not show, and the reason a Web user saw the sidebar after choosing
+ * Chrome was indistinguishable from the setting not being written at all.
+ */
+const carrierHistory: { readonly reason: string; readonly at: number }[] = []
 import { handleRuntimeProvision, handleRuntimeStatus, RUNTIME_PROVISION_ROUTE, RUNTIME_STATUS_ROUTE } from './runtime-route.ts'
 import { createShortcutRouteHandlers, SHORTCUT_ADD_ROUTE, SHORTCUT_REMOVE_ROUTE, SHORTCUTS_ROUTE } from './shortcuts-route.ts'
 import { createShortcutStore, type ShortcutSettings } from './startpage-shortcuts.ts'
@@ -122,12 +129,10 @@ function readSurfaceForRoute(): 'panel' | 'builtin' {
 }
 
 
-export const OPEN_REQUEST_ROUTE = '/dsh-builtin-browser/browser/open-request'
 /** open 记录的有效期：超过就不再重放。这是一次即时事件，客户端 2 秒轮询一次，10 秒足够送达；
  *  留得越久，「关掉侧栏后刷新又被拉起来」的窗口越大（实测复现过）。 */
 const OPEN_REQUEST_TTL_MS = 10_000
 /** The client declares which surface it can host, so the host needs no file sniffing. */
-export const SURFACE_DECL_ROUTE = '/dsh-builtin-browser/browser/declare-surface'
 
 export {
   ELECTRON_BROWSER_PROVIDER_ID,
@@ -398,6 +403,8 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     // is right against two carriers racing in, and exactly wrong for a user changing the setting:
     // `chooseCarrier` runs again on purpose, and a refusal here is indistinguishable from the
     // write having done nothing. The previous carrier is now released by the replacement instead.
+    carrierHistory.push({ reason: note, at: Date.now() })
+    if (carrierHistory.length > 8) carrierHistory.shift()
     const previous = adoptedCarrier
     try {
       unregister()
@@ -664,8 +671,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
    * exactly like the other two.
    * @param ctx - the plugin context.
    */
-  /** Where the panel asks to install or remove the bridge. */
-  const BRIDGE_ACTION_ROUTE = '/dsh-builtin-browser/bridge-action'
+  /** Where the panel asks to install or remove the bridge (the path is declared in browser-policy). */
   let bridgeActionRunning = false
 
   /**
@@ -820,6 +826,7 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
           extensionConnection: () => isPreferredCarrier(adoptedCarrier) ? {
             ...adoptedCarrier.connectionStatus(), install: extensionInstallHelp(adoptedCarrier.browser), registration: registrationStatus.get(adoptedCarrier.browser),
           } : undefined,
+          carrierHistory: () => carrierHistory.map(entry => entry.reason),
           selectedCarrier: () => adoptedCarrier instanceof DesktopBridgeViewHost || adoptedCarrier instanceof SidebarOnlyHost ? 'sidebar'
             : adoptedCarrier instanceof PreferredBrowserViewHost ? adoptedCarrier.activeCarrier()
             : adoptedCarrier instanceof ExtensionBrowserViewHost ? 'extension'

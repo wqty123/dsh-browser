@@ -8,7 +8,9 @@ import { isDirectLoopback } from './authenticated-route.ts'
 import { readJsonBody } from './http-body.ts'
 import { replyJson } from './json-reply.ts'
 
-export const HOST_PATCH_ROUTE = '/dsh-builtin-browser/host-patch-maintenance'
+import { HOST_PATCH_ROUTE } from '../../assets/browser-policy.mjs'
+export { HOST_PATCH_ROUTE }
+
 const sidebar = '@deepseek-ai/dsh-client-ui-sidebar-right'
 
 /** The registry owns the exact npm or source-checkout bundle served by this Host. */
@@ -84,7 +86,9 @@ export function createHostPatchMaintenance(deps: {
           accessSync(path, constants.W_OK)
         }
       } catch (error) { writable = false; reason = `The ${surface === 'web' ? 'served sidebar package' : 'DSH Tauri runtime'} is not writable: ` + String(error) }
+      const needed = typeof patcher.hostPatchNeeded === 'function' ? patcher.hostPatchNeeded(directory) : undefined
       return { ...result, ...(reason === undefined ? {} : { reason }), surface,
+        ...(needed === undefined ? {} : { needed }),
         canInstall: writable && result.status === 'absent',
         canRestore: writable && result.status === 'applied' && existsSync(join(directory, `${target}.before-dsh-host-patch`)),
         restartRequired: false }

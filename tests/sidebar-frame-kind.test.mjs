@@ -36,7 +36,7 @@ test('the frame kind is read without a conversation, because it is a property of
   const body = fn.slice(0, fn.indexOf('\n}\n'))
   assert.doesNotMatch(body, /owner/, 'no conversation is involved')
   assert.match(body, /executeJavaScript/, 'and the shell is read the same way every other shell read is')
-  assert.match(host, /const answer = await probe\.call\(\{ op: 'list' \}, 5_000\)/,
+  assert.match(host, /const answer = await probe\.call\(\{ op: 'list' \}, CARRIER_PROBE_TIMEOUT_MS\)/,
     'which is what the owner-less probe already sends')
 })
 

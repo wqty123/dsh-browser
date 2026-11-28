@@ -55,6 +55,7 @@ function report(channel, {
   selectedCarrier,
   bridgeError,
   systemConnection,
+  resolvePeer,
 } = {}) {
   return readRuntimeStatus({
     channel: () => channel,
@@ -66,8 +67,24 @@ function report(channel, {
     selectedCarrier,
     bridgeError,
     systemConnection,
+    resolvePeer,
   })
 }
+
+test('every host peer resolves, and the failures are named (issue #59)', () => {
+  const status = report('sidebar', {
+    resolvePeer: name => {
+      if (name === '@deepseek-ai/dsh-tools') throw new Error('Cannot find module @deepseek-ai/dsh-tools')
+      return '/virtual/' + name
+    },
+  })
+  assert.ok(Array.isArray(status.peers) && status.peers.length > 0, 'the manifest declares peers to check')
+  assert.deepEqual(status.peers.filter(peer => !peer.resolved), [
+    { name: '@deepseek-ai/dsh-tools', resolved: false, error: 'Cannot find module @deepseek-ai/dsh-tools' },
+  ])
+  const allResolved = report('sidebar', { resolvePeer: () => '/virtual' })
+  assert.ok(allResolved.peers.every(peer => peer.resolved), 'a host that resolves everything reports no failures')
+})
 
 test('a discovery version mismatch overrides installed and running readiness until a compatible discovery', () => {
   let mismatch = '桥接版本过旧，请点击 卸载并重装'

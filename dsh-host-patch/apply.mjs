@@ -82,7 +82,7 @@ function electronRsTargets(root, io) {
     }
     return target
   })
-  return { version: spec.version, targets }
+  return { version: spec.version, targets, native: spec.native === true }
 }
 
 function packageTargets(root, io) {
@@ -93,7 +93,7 @@ function packageTargets(root, io) {
   if (!spec) throw unsupported(`unsupported DSH version: ${String(manifest.version)} (supported: ${packageSpecs.map(item => item.version).join(', ')})`)
   const targets = spec.targets.filter(item => item.packageName === manifest.name)
   if (targets.length === 0) throw new Error(`unsupported package: ${String(manifest.name)}`)
-  return { version: spec.version, targets }
+  return { version: spec.version, targets, native: spec.native === true }
 }
 
 function plan(packages, restoring, io) {
@@ -155,6 +155,18 @@ function inspect(packages, restoring, io) {
   } catch (error) {
     return { status: error.status ?? 'anchors mismatch', reason: String(error.message ?? error) }
   }
+}
+
+/**
+ * The DSH line this install matched, when a spec matched. `0.2.3` already ships the native sidebar
+ * support the patch adds, so callers use this to decide whether the patch is worth offering at all.
+ * @param packages - the installed DSH directory.
+ * @param options - optional fs injection.
+ * @returns the matched spec version, or undefined when nothing matched.
+ */
+/** Whether this line still needs the patch: 0.2.3 ships the native support, so its spec says so. */
+export function hostPatchNeeded(packages, options = {}) {
+  try { return packageTargets(packages, options.fs ?? fs).native !== true } catch { return true }
 }
 
 /** Read-only validation. A valid absent patch is ready to apply; a mismatch never writes. */

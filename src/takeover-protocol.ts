@@ -1,4 +1,4 @@
-export const TAKEOVER_ROUTE = '/dsh-builtin-browser/browser/takeover'
+export { TAKEOVER_ROUTE } from '../assets/browser-policy.mjs'
 export const TAKEOVER_TOOL = 'dsh_browser_request_takeover'
 
 /**
