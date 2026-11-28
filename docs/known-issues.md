@@ -10,7 +10,7 @@
 | #127 | 多会话交替渲染 dock 触发 React #185 | 发布去重：快照未变化不再 `store.set`（`sameFrameState`） | `frame-state` 3/3；`fix(dock)` 提交 | 复现确认：两会话交替渲染后是否仍出现 `Maximum update depth exceeded` | 若仍复现，按 issue 里的 `publish` 栈改 store 订阅 |
 | #132 | 双注册带走客户端注册；关 Edge 弹 about:blank | ① 重复注册按上下文拒绝（`apply-guard`）；② `watchClientVersion` / `applySettingsSection` 各自隔离 | `apply-guard` 2/2、`frame-state` 3/3；`fix(client)` 提交 | 两次 `__ModuleLoader__.load` 的栈与注册 id（第二份来自哪） | 若是同包装两遍 → 安装期去重；若是宿主解析两次 → 宿主侧 |
 | #59 | Desktop 上 `@deepseek-ai/*` 解析不到，四入口不激活 | runtime status 逐条解析 6 个 host peer，诊断区列出未解析项与错误原文；已证伪"发布清单带 `workspace:^`"（npm 上是真实范围） | `runtime-status` 165/165；`feat(diagnostics)` 提交 | 诊断区里那行未解析 peer 文本 | 若是应用 node_modules 布局问题 → 插件侧改用宿主注入的依赖解析 |
-| #140 | Edge builtin 截图 189×960，页面实际 1029×768 | 已排除 clip 换算与建窗尺寸；`dsh_browser_state` 现在带 `viewport 1029×768 @2 (window …)`（探测版本 10） | `page-probe` 17/17；`feat(state)` 提交 | 复现时 `dsh_browser_state` 的那一行 | 视口一致 → 截的是另一个 surface（查 target）；视口本身是 189 → 改启动参数/缩放 |
+| #140 | Edge builtin 截图 189×960，页面实际 1029×768 | **本次复现并修复**：本机 channel=edge 下截图 231×960 而页面 1254×707（同一文档，洋红背景可见）。原生 capture 描述的是"视图"而非页面布局；现在长宽比与 `Page.getLayoutMetrics` 视口不符时改用 CDP 视口 clip 重截 | `screenshot-geometry` 3/3、`layout-metrics` 3/3、`preview-read-only` 通过 | 宿主半需重启才生效 | 重启后若仍有偏差，看 `Page.getLayoutMetrics` 的 css 值 |
 | #106 | Web 端选本机 Chrome 仍走侧栏 | `adopt()` 记录最近 8 条决策 reason，随状态返回并在诊断区列出 | `runtime-status` 165/165；`feat(diagnostics)` 提交 | 诊断区最后一条 reason 序列 | 末条是「not installed」→ 修检测；末条是「using only the selected DSH sidebar」→ 修 adopt 覆盖顺序 |
 | #119 | 「绝不自动解验证码」的前提 | 不改：产品红线 | — | — | — |
 

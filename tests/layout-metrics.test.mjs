@@ -14,7 +14,7 @@ test('the layout size prefers CSS boxes and takes the viewport height from the l
     cssLayoutViewport: { width: 1029, height: 768 },
     contentSize: { width: 1, height: 1 },
     layoutViewport: { width: 1, height: 1 },
-  }), { width: 1029, height: 3200, viewportHeight: 768 })
+  }), { width: 1029, height: 3200, viewportHeight: 768, viewportWidth: 1029 })
 })
 
 test('the device-pixel boxes are never used when the CSS ones are present', () => {
@@ -29,7 +29,7 @@ test('the device-pixel boxes are never used when the CSS ones are present', () =
 })
 
 test('a missing viewport falls back to the document height, and a missing document is unknown', () => {
-  assert.deepEqual(layoutSize({ cssContentSize: { width: 800, height: 600 } }), { width: 800, height: 600, viewportHeight: 600 })
+  assert.deepEqual(layoutSize({ cssContentSize: { width: 800, height: 600 } }), { width: 800, height: 600, viewportHeight: 600, viewportWidth: 800 })
   assert.equal(layoutSize({}), undefined)
   assert.equal(layoutSize({ cssLayoutViewport: { width: 800, height: 600 } }), undefined, 'width comes from the document, not the viewport')
 })
