@@ -5,6 +5,8 @@
 ## 1.0.4（未发布）— 设置页按载体收敛与两个用户可见修复
 
 - **#131 增加"替换已有安装"的备份路径。** `node tools/deploy-local.mjs --replace` 先把旧安装目录改名为 `<target>.backup-<时间戳>` 再装新版本，避免覆盖后新旧文件混杂；目录链接（Junction）安装会被拒绝并提示先移除链接。npm 安装仍走 DSH 的"先移除再安装"。
+- **#140 截图按页面视口截。** 本机复现：页面 `viewport 1254×707`，截图却是 `231×960`（同一文档，洋红背景可见），说明原生 capture 描述的是"视图"而非页面布局面。现在原生截图的长宽比与 `Page.getLayoutMetrics` 的视口不符时，改用 CDP 视口 clip 重截；形状相符（含 DPR 2）不重截。`tests/screenshot-geometry.test.mjs` 守住这三条。
+- **桥接重装不再卡在交互提示。** 用户机器的重装日志里 pnpm 打出一行 `?`（供应链接策略确认）后非零退出，事务回滚，桥接永远修不好。reconcile 现在以 `CI=true`、`--reporter=append-only` 运行，无人值守命令只产出日志、不提问。
 - **#127 发布去重。** 标签页每次 tick 都会重建快照并写 store，store 每次 `set` 都通知订阅者，dock 于是重渲染再发布——这是 React #185 的典型燃料。现在快照未变化时不写 store（`sameFrameState`），新 `tests/frame-state.test.mjs` 守住"同值不发布、任一字段变化仍发布"。
 - **#132 重复注册防护。** 同一上下文第二次 `apply()` 直接跳过并打 warn（`apply-guard`），版本自更新产生的新 bundle 仍是新模块实例、照常注册；`watchClientVersion` 与 `applySettingsSection` 各自 try/catch，一个注册失败不再连坐整批。
 - **#59 诊断。** runtime status 逐条解析 6 个 host peer，未解析的在诊断区列出（包名 + 解析器原文），这是"四入口不激活"最缺的一条证据。
