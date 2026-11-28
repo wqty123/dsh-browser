@@ -875,7 +875,12 @@ const react = require("react")
       finally { setBusy(false); void read() }
     }
     const extensionButton = h("button", { key: "install-extension", type: "button", style: styles.button, disabled: controlsBusy, onClick: extensionAction }, t('extension.button'))
-    const canManageBridge = isDesktop && runtime.shell?.patchable !== false && runtime.bridge.present === true && runtime.bridge.state !== "absent"
+    // `unsupported-layout`: the desktop is recognized, but this build has no host-patch spec for its
+    // main entry. Offering the install would only produce a failure, so the panel explains the state
+    // and points at the web sidebar instead (issue #112).
+    const canManageBridge = isDesktop && runtime.shell?.patchable !== false && runtime.bridge.present === true
+      && runtime.bridge.state !== "absent" && runtime.bridge.state !== "unsupported-layout"
+    const unsupportedLayout = runtime.bridge.state === "unsupported-layout"
     const extensionUnsupported = runtime.bridge.code === "DESKTOP_MAIN_EXTENSION_UNSUPPORTED"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
     const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button

@@ -33,6 +33,7 @@ test('engines.dsh covers every DSH line this plugin verifies', () => {
   // 0.2.2-rc.5; 0.2.3-alpha.2 is the current line. All three must install, and nothing older may:
   // the authentication path below rc.3 has no evidence behind it.
   assert.equal(manifest.engines.dsh, '>=0.2.2-rc.3 <0.3.0', 'engines.dsh covers the verified DSH lines')
+
   const ranges = new Set(dshPeerRanges())
   assert.ok(ranges.size > 0, 'the peer fallback ranges exist')
   for (const range of ranges) {

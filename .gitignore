@@ -4,5 +4,6 @@
 p-live.json
 .dsh-sdk-types/
 
+# agent scratch files
 # agent run logs
 .tmp-*
