@@ -2,7 +2,12 @@
 
 本文件记录各轮功能开发与问题修复(由仓库外独立文档迁移,随仓库管理)。
 
-## 1.0.4（未发布）— 设置页按载体收敛与两个用户可见修复
+## 1.0.4（2026-11-28）— 打包形态修复与设置页收敛
+
+- **修复 1.0.3 的打包缺陷（本次发布的主因）。** 1.0.3 的 tarball 缺 `browser-extension/`，导致 `native-host/install.mjs` 在真实桌面上报 `ERR_MODULE_NOT_FOUND: browser-extension/constants.mjs`，本机消息宿主注册全线失败，设置页显示 `DESKTOP_MAIN_EXTENSION_UNSUPPORTED`。现在 `scripts/pack.mjs` 整包复制、按 `files` 打包，并在出包前校验 10 个运行时关键路径（含 `browser-extension/constants.mjs`、`native-host/install.mjs`），缺一即拒绝出包；`npm run` 的发布清单不再删除 `files`。1.0.3 已标记废弃并指向 1.0.1。
+- **发布链路的 peer 修复。** `scripts/publish-manifest.mjs` 把 `workspace:^` 改写成真实范围（`>=0.2.2-rc.3 <0.3.0`），避免 tarball 安装拿到无法解析的 peer。
+- 其余内容同下方「设置页按载体收敛」一节（截图几何、dock 会话切换、幂等注册、补丁区显隐等）。
+## 1.0.4（未发布，见上）— 设置页按载体收敛与两个用户可见修复
 
 - **#131 增加"替换已有安装"的备份路径。** `node tools/deploy-local.mjs --replace` 先把旧安装目录改名为 `<target>.backup-<时间戳>` 再装新版本，避免覆盖后新旧文件混杂；目录链接（Junction）安装会被拒绝并提示先移除链接。npm 安装仍走 DSH 的"先移除再安装"。
 - **#140 截图按页面视口截。** 本机复现：页面 `viewport 1254×707`，截图却是 `231×960`（同一文档，洋红背景可见），说明原生 capture 描述的是"视图"而非页面布局面。现在原生截图的长宽比与 `Page.getLayoutMetrics` 的视口不符时，改用 CDP 视口 clip 重截；形状相符（含 DPR 2）不重截。`tests/screenshot-geometry.test.mjs` 守住这三条。
