@@ -74,13 +74,13 @@ test('the layout size accepts both CDP spellings', () => {
     cssContentSize: { width: 1000, height: 2000 },
     cssLayoutViewport: { width: 1000, height: 800 },
   })
-  assert.deepEqual(modern, { width: 1000, height: 2000, viewportHeight: 800 })
+  assert.deepEqual(modern, { width: 1000, height: 2000, viewportHeight: 800, viewportWidth: 1000 })
 
   const older = layoutSize({
     contentSize: { width: 500, height: 600 },
     layoutViewport: { width: 500, height: 400 },
   })
-  assert.deepEqual(older, { width: 500, height: 600, viewportHeight: 400 })
+  assert.deepEqual(older, { width: 500, height: 600, viewportHeight: 400, viewportWidth: 500 })
 })
 
 test('an unusable layout response reports nothing rather than zeroes', () => {

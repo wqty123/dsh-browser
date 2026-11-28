@@ -1,6 +1,7 @@
 import { guestReferenceHandlerScript } from '../browser-reference/page-script.ts'
 import { guestStorageScript, type GuestStorageConfig } from './guest-storage-runtime.ts'
 import { guestCssRuntimeScript } from './guest-css-runtime.ts'
+import { GUEST_ROUTE } from '../../assets/browser-policy.mjs'
 
 /** Early, self-contained interception for documents served from the guest proxy. */
 export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig, referrerPolicy = ''): string {
@@ -8,7 +9,7 @@ export function guestRuntimeScript(pageUrl: string, storage?: GuestStorageConfig
   if (window.__dshGuestRuntime) return;
   window.__dshGuestRuntime = true;
   let real = ${JSON.stringify(pageUrl).replace(/</gu, '\\u003c')};
-  const route = '/dsh-builtin-browser/browser-view/isolated-guest';
+  const route = ${JSON.stringify(GUEST_ROUTE)};
   const attempt = fn => { try { return fn(); } catch {} };
   attempt(() => {
     const cache = { match: async () => undefined, matchAll: async () => [], keys: async () => [],

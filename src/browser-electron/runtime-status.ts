@@ -26,7 +26,19 @@ import type { BridgeEndpointState } from './bridge-endpoint.ts'
 import type { ProvisionSnapshot } from './electron-provision.ts'
 import type { ExtensionConnectionStatus } from '../../native-host/client.mjs'
 import type { extensionInstallHelp } from './extension-browser.ts'
+import { createRequire } from 'node:module'
 import { detectBrowser, type BrowserChannel, type DetectedBrowser, type SystemBrowserLaunchDiagnostic } from './system-browser.ts'
+
+/** This plugin's own resolver, used when a caller does not inject one. */
+const pluginRequire = createRequire(import.meta.url)
+
+/** The host peers this plugin imports; read from the manifest so the list cannot drift. */
+const HOST_PEERS: readonly string[] = (() => {
+  try {
+    const manifest = pluginRequire('../../package.json') as { peerDependencies?: Record<string, string> }
+    return Object.freeze(Object.keys(manifest.peerDependencies ?? {}))
+  } catch { return Object.freeze([] as string[]) }
+})()
 
 /** The part of the carrier the channel names, in the terms the panel has to explain. */
 export type CarrierKind = 'sidebar' | 'bundled' | 'system' | 'extension' | 'cdp' | 'auto'
@@ -104,6 +116,23 @@ export interface RuntimeStatusReport {
   readonly shell?: DesktopShellReport
   /** Whether "Prepare the bundled browser" is worth offering (it is not while one is running). */
   readonly canProvision: boolean
+  /**
+   * Whether each host peer (`@deepseek-ai/*`) resolves from this plugin (issue #59). A Desktop app
+   * that ships the plugin without its peers makes the plugin's own imports fail at the first use,
+   * and the four entries simply stay inactive; this turns that into a named list the diagnostics
+   * block can show and a reporter can paste.
+   */
+  readonly peers?: readonly PeerResolution[]
+  /** Why the carrier was adopted, newest last (issue #106). */
+  readonly carrierHistory?: readonly string[]
+}
+
+/** One host peer's resolution result. */
+export interface PeerResolution {
+  readonly name: string
+  readonly resolved: boolean
+  /** The resolver's own words when it failed. */
+  readonly error?: string
 }
 
 /** Everything the report reads, so a test can answer without any of the real machinery. */
@@ -130,6 +159,10 @@ export interface RuntimeStatusDeps {
   /** The provider's current carrier, including a fallback selected after sidebar loss. */
   readonly selectedCarrier?: () => Exclude<CarrierKind, 'auto'> | undefined
   readonly systemConnection?: () => { connected: boolean; detail: string; launch?: SystemBrowserLaunchDiagnostic } | undefined
+  /** Resolve one host peer; defaults to this plugin's own `require.resolve` (issue #59). */
+  readonly resolvePeer?: (name: string) => string
+  /** The last carrier decisions, newest last (issue #106). */
+  readonly carrierHistory?: () => readonly string[]
 }
 
 /** Which carrier a channel names. */
@@ -253,5 +286,24 @@ export function readRuntimeStatus(deps: RuntimeStatusDeps): RuntimeStatusReport 
     bridge,
     ...shell === undefined ? {} : { shell },
     canProvision: resolvedCarrier === 'bundled' && !runnable && snapshot.state !== 'preparing',
+    ...peerReport(deps.resolvePeer),
+    ...deps.carrierHistory === undefined ? {} : { carrierHistory: deps.carrierHistory() },
+  }
+}
+
+/**
+ * Resolve every host peer and report the failures (#59). Never throws: an unresolvable peer is a
+ * fact to display, not a reason to break the readiness report that needs it.
+ * @param resolve - the resolver to use; defaults to this plugin's own.
+ * @returns the report field, empty when the manifest declared no peers.
+ */
+function peerReport(resolve?: (name: string) => string): { peers: PeerResolution[] } | Record<string, never> {
+  if (HOST_PEERS.length === 0) return {}
+  const lookup = resolve ?? ((name: string) => pluginRequire.resolve(name))
+  return {
+    peers: HOST_PEERS.map(name => {
+      try { lookup(name); return { name, resolved: true } }
+      catch (error) { return { name, resolved: false, error: error instanceof Error ? error.message : String(error) } }
+    }),
   }
 }

@@ -79,7 +79,12 @@ export class IframePresentation implements BrowserPresentation {
   private identityTimer: ReturnType<typeof setTimeout> | undefined
   private identityRetried = false
   private readonly receive = (event: MessageEvent): void => {
-    if (event.origin !== 'null' || event.source !== this.element?.contentWindow) return
+    // A sandboxed guest posts from the opaque origin `null`. A carrier that granted the guest its
+    // own origin (storage-compatible mode) posts from this application's origin instead. Both can
+    // only be this frame's own document; the source check is what proves it, and any other origin
+    // is a different frame and is dropped.
+    const ownOrigin = event.origin === 'null' || event.origin === location.origin
+    if (!ownOrigin || event.source !== this.element?.contentWindow) return
     const data = event.data
     if (data?.type === 'dsh.browser.guest.child.request') {
       if (this.loadId === undefined || data.loadId !== this.loadId || !Number.isSafeInteger(data.requestId)
@@ -306,7 +311,13 @@ export class IframePresentation implements BrowserPresentation {
     this.identityTimer = setTimeout(() => {
       this.identityTimer = undefined
       if (revision === undefined || this.document?.revision !== revision) return
-      this.events.guestFailed?.(revision, 'GUEST_DOCUMENT_IDENTITY_UNAVAILABLE: source iframe did not provide a matching document identity')
+      // Nothing answers this handshake today: the guest overlay listens for `dsh-browser-ref:intent`
+      // and never posts a `dsh.browser.guest.navigation` identity, and a directly loaded document
+      // carries no overlay at all. Failing the document here painted a five-second "load failed"
+      // banner over a page that had already loaded, and `guestFailed` also marked the whole carrier
+      // unusable. Report the document as loaded instead; the reference channel stays unavailable,
+      // which is what the states actually are.
+      this.markLoaded()
     }, 5000)
   }
 

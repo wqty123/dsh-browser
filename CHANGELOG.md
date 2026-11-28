@@ -2,8 +2,39 @@
 
 本文件记录各轮功能开发与问题修复(由仓库外独立文档迁移,随仓库管理)。
 
-## 未发布 — 适配 DSH 0.2.3-alpha.2
+## 1.0.4（2026-11-28）— 打包形态修复与设置页收敛
 
+- **修复 1.0.3 的打包缺陷（本次发布的主因）。** 1.0.3 的 tarball 缺 `browser-extension/`，导致 `native-host/install.mjs` 在真实桌面上报 `ERR_MODULE_NOT_FOUND: browser-extension/constants.mjs`，本机消息宿主注册全线失败，设置页显示 `DESKTOP_MAIN_EXTENSION_UNSUPPORTED`。现在 `scripts/pack.mjs` 整包复制、按 `files` 打包，并在出包前校验 10 个运行时关键路径（含 `browser-extension/constants.mjs`、`native-host/install.mjs`），缺一即拒绝出包；`npm run` 的发布清单不再删除 `files`。1.0.3 已标记废弃并指向 1.0.1。
+- **发布链路的 peer 修复。** `scripts/publish-manifest.mjs` 把 `workspace:^` 改写成真实范围（`>=0.2.2-rc.3 <0.3.0`），避免 tarball 安装拿到无法解析的 peer。
+- 其余内容同下方「设置页按载体收敛」一节（截图几何、dock 会话切换、幂等注册、补丁区显隐等）。
+## 1.0.4（未发布，见上）— 设置页按载体收敛与两个用户可见修复
+
+- **#131 增加"替换已有安装"的备份路径。** `node tools/deploy-local.mjs --replace` 先把旧安装目录改名为 `<target>.backup-<时间戳>` 再装新版本，避免覆盖后新旧文件混杂；目录链接（Junction）安装会被拒绝并提示先移除链接。npm 安装仍走 DSH 的"先移除再安装"。
+- **#140 截图按页面视口截。** 本机复现：页面 `viewport 1254×707`，截图却是 `231×960`（同一文档，洋红背景可见），说明原生 capture 描述的是"视图"而非页面布局面。现在原生截图的长宽比与 `Page.getLayoutMetrics` 的视口不符时，改用 CDP 视口 clip 重截；形状相符（含 DPR 2）不重截。`tests/screenshot-geometry.test.mjs` 守住这三条。
+- **桥接重装不再卡在交互提示。** 用户机器的重装日志里 pnpm 打出一行 `?`（供应链接策略确认）后非零退出，事务回滚，桥接永远修不好。reconcile 现在以 `CI=true`、`--reporter=append-only` 运行，无人值守命令只产出日志、不提问。
+- **#127 发布去重。** 标签页每次 tick 都会重建快照并写 store，store 每次 `set` 都通知订阅者，dock 于是重渲染再发布——这是 React #185 的典型燃料。现在快照未变化时不写 store（`sameFrameState`），新 `tests/frame-state.test.mjs` 守住"同值不发布、任一字段变化仍发布"。
+- **#132 重复注册防护。** 同一上下文第二次 `apply()` 直接跳过并打 warn（`apply-guard`），版本自更新产生的新 bundle 仍是新模块实例、照常注册；`watchClientVersion` 与 `applySettingsSection` 各自 try/catch，一个注册失败不再连坐整批。
+- **#59 诊断。** runtime status 逐条解析 6 个 host peer，未解析的在诊断区列出（包名 + 解析器原文），这是"四入口不激活"最缺的一条证据。
+- **#106 诊断。** 每次载体采纳都记 reason（最近 8 条）并在诊断区列出，用于判断"选了 Chrome 却走侧栏"是检测失败还是被侧栏覆盖。
+- **#140 的读数进 `dsh_browser_state`。** 状态行现在带 `viewport 1029×768 @2 (window 1050×1784)`：截图尺寸与页面自报几何不一致时，这一行就能证明"截到的是另一个 surface"。探测版本升到 10，已加载的页面会自动重装探测。
+- **#142 桥接恢复后不再常驻「桥接维护失败」。** 上一次维护的终态 `failed` 记录只会在下一次维护开始时被覆盖，桥接明明已经 `installed` 且 `running`，设置页还是常驻红字。现在桥接健康时这条终态失败不再渲染（诊断折叠里仍保留原始记录），只有桥接仍不健康时才提示。
+- **#126 新增「仅移除桥接」出口。** 宿主维护任务接受 `uninstall` 动作：还原宿主补丁与拆包布局后即停止，不再顺手重装；设置页在桥接行里给出「仅移除桥接」按钮，作为桌面集成本身出问题时的退路。
+- **宿主补丁区按「这一版还需要吗」显隐。** 补丁规格里带上 `native` 标记（0.2.3 线已原生支持），宿主回报 `needed`；面板只在 `needed === false` 时整块隐藏，老版本（rc.3 / rc.5 / Tauri）仍显示。补丁操作收敛成**一个按钮、与标题同一行**：未打=安装、已打=卸载、出问题=重装。
+- **可用状态统一绿色。** CDP 就绪、已找到但尚未启动的浏览器、Web 侧栏都算「可用」，统一绿色徽标；琥珀色只留给真正不可用。
+- **浏览器扩展与「仅用 CDP 驱动」收进高级设置。** 主面板只保留「默认浏览器 + 环境检查（CDP）」；扩展状态、一键安装、「用我自己的浏览器」的选择在展开高级设置后才出现，不展开不渲染。
+- **Web 表面不再报告 Desktop 专属状态。** 桥接、宿主补丁、扩展注册三类诊断都要求 `window.dshDesktop` 存在；Web 端侧栏状态改为「Web 侧栏可用」，不再借用桥接措辞。
+
+## 1.0.3（2026-11-27）— 载体预算收口与文案去混排
+
+- **载体与维护的时间预算收进 `assets/browser-policy.mjs`。** 同一个 30 秒原先在四个模块各写一遍（桌面桥调用、CDP 命令、桥接安装、profile 命令），改一处会漏三处；现在分别由 `CARRIER_CALL_TIMEOUT_MS` / `CARRIER_DOWNLOAD_TIMEOUT_MS` / `CARRIER_PROBE_TIMEOUT_MS` / `MAINTENANCE_PROCESS_TIMEOUT_MS` / `MAINTENANCE_QUIT_WAIT_MS` / `PROFILE_COMMAND_TIMEOUT_MS` 表达，并新增 `tests/carrier-budgets.test.mjs` 守住“探针 < 调用 ≤ 下载”的语义顺序。
+- **缺浏览器提示不再中英混排。** `missing-system-browser.ts` 里 `'本机 Chrome / installed Chrome'` 这类同一字符串塞两种语言的写法改为单一英文标签（该提示正文本就是英文）；中文用户的入口是设置页的载体名，仍由面板文案负责。
+
+## 1.0.2（2026-11-27）— 适配 DSH 0.2.3-alpha.2
+
+- **`engines.dsh` 回到已验收的下限 `>=0.2.2-rc.3 <0.3.0`，CI 增加 0.2.2-rc.5 一条腿。** 之前的下限一度被抬到 `0.2.3-alpha.2`，官方桌面（内置 `0.2.2-rc.5`）因此装不上；而 0.2.3 的鉴权修复在运行中的 0.2.3-alpha.2 宿主上实测已经生效（插件路由返回 401 而不是 503），不需要靠抬下限来“声明支持”。现在三行都进 CI：rc.3、rc.5、0.2.3-alpha.2，`0.2.2-rc.1` 及更早仍被拒绝。
+- **Web 侧栏的引用通道恢复。** 客户端只接受隔离来源（`null`）的消息，而授予了同源存储的载体会从本应用来源发消息，于是引用确认、子标签请求全部被丢弃。现在两种来源都接受，仍以 `event.source` 证明是同一个帧。
+- **文档不再对已加载的页面报“加载失败”。** 等不到文档身份回执时不再触发 `guestFailed`（那会把整个载体标记为不可用），而是按已加载处理，引用通道保持不可用状态。
+- **路由常量收敛到 `assets/browser-policy.mjs` 一处。** 打开请求、表面声明、桥接动作、宿主补丁维护、自动维护、接管、Web 来源这 7 条路由原先在模块里各自声明，客户端设置面板另有 7 处字面量；现在宿主与客户端都从同一份协议常量导入。
 - **`dsh_browser_do` 的 tap 不再把按钮自己的子元素当成遮挡。** 可达性检查只比较 `elementFromPoint` 命中的元素描述，Heroku 登录按钮 `<button><i> Login</i></button>` 命中的是 `<i>`，于是报“被遮挡”。现在命中目标本身或其后代（含 open shadow root 内）都算落在目标上；目标内部的浮层（模态框）与真正的遮挡照旧按遮挡处理。
 - **`dsh_browser_do` 不再把 `{"type": "field", …}` 当成输入步骤。** 之前只数步骤里属于步骤种类的键，模型写的 `{"type":"field","selector":"#username","text":"tomsmith"}` 被当成 `type` 步骤，在没有焦点的页面上输入字面量 `field`；`{"type":"tap",…}` 同理。现在参数 schema 的每个步骤是只含一个种类键的 `oneOf`，描述里给出 field 与 tap 示例，含其它键的步骤在任何动作执行前就被拒绝。
 - **没有可编辑元素获得焦点时，输入直接报错而不再让页面崩溃。** Electron 访客页（DSH Desktop 与 DSH Tauri 侧栏）在无焦点时收到 `insertText`（原生或 CDP `Input.insertText`）会让渲染进程崩溃，DSH Tauri 随即关闭该页，页面显示「could not load」，标签页和浏览器句柄全部失效。现在 `type` 先确认焦点在文本框、文本域、可编辑元素或 `designMode` 文档上，否则返回 `BROWSER_TYPE_NO_FOCUS`，不发送任何输入。

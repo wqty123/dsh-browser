@@ -265,6 +265,13 @@ async function mount(options = {}) {
   if (options.fetch !== undefined) activeFetch = options.fetch
   const host = makeHost(settings)
   const exports = bundleFactory(options.timers)(host.requireFn)
+  // These tests exercise the Desktop surface unless a test says otherwise: Desktop presence is the
+  // preload object, and the bridge / extension / host-patch rows only exist there. The two
+  // `dshDesktop=undefined|null` cases assign their own value right after mounting.
+  // Desktop presence is read as `globalThis.dshDesktop`; the sandbox keeps `window` as a mirror, so
+  // both are seeded and both are cleared by the tests that exercise a non-Desktop surface.
+  if (activeSandbox.dshDesktop === undefined) activeSandbox.dshDesktop = {}
+  if (activeSandbox.window !== undefined && activeSandbox.window.dshDesktop === undefined) activeSandbox.window.dshDesktop = {}
 
   let registration
   // The bundle now registers TWO slots: the settings section and the on-demand
@@ -2274,8 +2281,10 @@ for (const [state, label] of [
     const controls = elements(tree).find(node => node.props.key === 'bridge-controls')
     const diagnostics = elements(tree).find(node => node.type === 'details' && node.props.key === 'diagnostics')
     assert.ok(controls, 'bridge management remains visible without opening diagnostics')
+    // Reinstall and the "remove the bridge only" exit (#126); the extension moved to 高级设置.
     assert.equal(elements(controls).filter(node => node.type === 'button').length, 2)
-    assert.ok(elements(controls).find(node => node.type === 'button' && node.props.key === 'install-extension'), 'optional extension setup sits beside bridge reinstall')
+    assert.ok(elements(controls).find(node => node.type === 'button' && node.props.key === 'uninstall'), 'the bridge can be removed without reinstalling')
+    assert.equal(elements(controls).find(node => node.type === 'button' && node.props.key === 'install-extension'), undefined, 'the extension control is not in the main panel')
     assert.ok(bridgeButton(controls, label), 'the action matches the actual bridge state')
     assert.equal(bridgeButton(diagnostics, label), undefined, 'the primary action is not buried in diagnostics')
     assert.equal(elements(controls).filter(node => node.type === 'button' && node.props.key === 'reinstall').length, 1)
@@ -2500,17 +2509,17 @@ test('a Desktop preload object can arm maintenance without a custom menu', async
   assert.equal(fixture.calls.filter(call => call.init.method === 'POST').length, 1)
 })
 
-for (const desktop of [undefined, null]) test(`remote or unsupported surfaces cannot arm bridge maintenance (dshDesktop=${desktop})`, async () => {
+for (const desktop of [undefined, null]) test(`a surface without a Desktop preload shows no bridge control at all (dshDesktop=${desktop})`, async () => {
   const fixture = maintenanceFixture(), timers = maintenanceTimers()
   const mounted = await mount({ fetch: fixture.fetchMock, render: false, document: makeDocument(), timers })
   activeSandbox.dshDesktop = desktop
+  if (activeSandbox.window !== undefined) activeSandbox.window.dshDesktop = desktop
   const Component = readinessComponent(mounted.exports)
   const tree = await renderPanel(Component, mounted.host, fixture.fetchMock)
-  await bridgeButton(tree, 'readiness.bridge.reinstall').props.onClick()
-  const refused = await renderPanel(Component, mounted.host, fixture.fetchMock)
+  // The row does not exist on a non-Desktop surface: nothing to click, and the panel never offers
+  // a maintenance action it could not run.
+  assert.equal(bridgeButton(tree, 'readiness.bridge.reinstall'), undefined)
   assert.equal(fixture.calls.some(call => call.init.method === 'POST'), false)
-  assert.ok(textOf(refused).includes('readiness.bridge.localOnly'))
-  assert.equal(bridgeButton(refused, 'readiness.bridge.reinstall').props.disabled, false)
 })
 
 for (const [name, response, reason] of [

@@ -142,9 +142,9 @@ test('Web settings install and restore buttons send explicit actions and explain
     } }) }
   })
   let tree = await p.mount()
-  await elements(tree).find(n => n.props?.key === 'install').props.onClick()
+  await elements(tree).find(n => n.props?.key === 'action').props.onClick()
   assert.match(text(p.render()), /hostPatch.reload/)
-  await elements(p.render()).find(n => n.props?.key === 'restore').props.onClick()
+  await elements(p.render()).find(n => n.props?.key === 'action').props.onClick()
   assert.match(text(p.render()), /hostPatch.restart/)
   assert.deepEqual(p.calls.filter(c => c.method === 'POST').map(c => JSON.parse(c.body)), [{ action: 'install' }, { action: 'restore' }])
 })
@@ -174,7 +174,7 @@ test('Web patch guidance survives module remounts before and after both action r
       }
       const old = panel(t, answer)
       const tree = await old.mount()
-      const pending = elements(tree).find(n => n.props?.key === action).props.onClick()
+      const pending = elements(tree).find(n => n.props?.key === 'action').props.onClick()
       if (timing === 'before') { complete(); await pending }
       old.unmount()
       const replacement = panel(t, answer)
@@ -194,7 +194,7 @@ test('a failed Web patch action does not publish successful reload guidance', as
   const p = panel(t, init => ({ ok: init.method !== 'POST', status: init.method === 'POST' ? 409 : 200,
     json: async () => ({ ok: init.method !== 'POST', error: 'file changed', hostPatch: {
       surface: 'web', status: 'absent', canInstall: true, canRestore: false } }) }))
-  await elements(await p.mount()).find(n => n.props?.key === 'install').props.onClick()
+  await elements(await p.mount()).find(n => n.props?.key === 'action').props.onClick()
   assert.match(text(p.render()), /file changed/)
   assert.doesNotMatch(text(p.render()), /hostPatch.reload|hostPatch.restart/)
 })

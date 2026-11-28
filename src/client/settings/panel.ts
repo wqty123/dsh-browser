@@ -1,5 +1,5 @@
 import { zh, en } from '../../../assets/browser-panel-locales.mjs'
-import { REFERENCE_REVEAL_ROUTE, REFERENCE_INSERT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE, BRIDGE_STATUS_ROUTE, RUNTIME_STATUS_ROUTE, RUNTIME_PROVISION_ROUTE } from '../../../assets/browser-policy.mjs'
+import { REFERENCE_REVEAL_ROUTE, REFERENCE_INSERT_ROUTE, REFERENCE_IMPORT_ROUTE, REFERENCE_DELIVERY_REMOVE_ROUTE, REFERENCE_LIST_ROUTE, REFERENCE_EXPORT_ROUTE, OPEN_REQUEST_ROUTE, HOST_PATCH_ROUTE, AUTOMATIC_MAINTENANCE_ROUTE, PREVIEW_ROUTE, PREVIEW_SESSIONS_ROUTE, BRIDGE_STATUS_ROUTE, RUNTIME_STATUS_ROUTE, RUNTIME_PROVISION_ROUTE } from '../../../assets/browser-policy.mjs'
 import { SETTINGS_ROUTE, EXTENSION_INSTALL_ROUTE } from '../../../assets/browser-policy.mjs'
 import { nativeViews } from '../../compat/host-features.ts'
 /**
@@ -379,7 +379,11 @@ const react = require("react")
     // the label next to them is always a locale string.
     badge: { display: "inline-block", padding: "1px 8px", marginRight: "8px", borderRadius: "10px", fontSize: "11px", lineHeight: 1.6, border: "1px solid transparent" },
     badgeOk: { color: "#2f9e44", borderColor: "rgba(47,158,68,.5)", background: "rgba(47,158,68,.12)" },
-    badgeWarn: { color: "#e5534b", borderColor: "rgba(229,83,75,.5)", background: "rgba(229,83,75,.12)" },
+    // Amber is "recoverable, act if you want"; red is reserved for a real failure. A blocked
+    // readiness whose extension is simply not connected used to be red, which read as "your
+    // browser was found but it is broken".
+    badgeWarn: { color: "#b26a00", borderColor: "rgba(178,106,0,.5)", background: "rgba(178,106,0,.12)" },
+    badgeError: { color: "#e5534b", borderColor: "rgba(229,83,75,.5)", background: "rgba(229,83,75,.12)" },
     badgeUnknown: { color: "#a0a0a8", borderColor: "rgba(160,160,168,.5)", background: "rgba(160,160,168,.12)" },
     kv: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 12px", margin: "8px 0 0", fontSize: "12px" },
     kvKey: { opacity: 0.68 },
@@ -569,7 +573,7 @@ const react = require("react")
     }, [])
     useEffect(() => {
       alive.current = true
-      void fetch("/dsh-builtin-browser/host-patch-maintenance", { headers: { accept: "application/json" } })
+      void fetch(HOST_PATCH_ROUTE, { headers: { accept: "application/json" } })
         .then(async response => {
           if (response.status === 404) return
           const data = await response.json()
@@ -583,7 +587,7 @@ const react = require("react")
       pending.current = true
       setBusy(true); setError(""); setNotice(""); publishHostPatchNotice("")
       try {
-        const response = await fetch("/dsh-builtin-browser/host-patch-maintenance", {
+        const response = await fetch(HOST_PATCH_ROUTE, {
           method: "POST", headers: { accept: "application/json", "content-type": "application/json" },
           body: JSON.stringify({ action }),
         })
@@ -597,19 +601,29 @@ const react = require("react")
       finally { pending.current = false; if (alive.current) setBusy(false) }
     }
     if (state === null && error === "") return null
+    // The host says whether this line needs a patch at all (its spec carries `native`). A host that
+    // already supports the feature keeps the section out; older lines still get one action.
+    if (state?.needed === false) return null
+    // One row, one action. Nothing actionable and nothing wrong means this host needs no patch at
+    // all, so the whole section stays out of the panel instead of offering a no-op install.
+    const status = String(state?.status ?? "")
+    const applied = status === "applied"
+    const broken = /mismatch|unsupported|failed/u.test(status)
+    const actionable = applied ? state?.canRestore === true : state?.canInstall === true
+    const action = applied ? "restore" : "install"
+    const actionKey = applied ? "hostPatch.uninstall" : broken ? "hostPatch.reinstall" : "hostPatch.install"
     return h("div", { key: "web-host-patch", style: styles.group }, [
-      h("p", { key: "state", role: "status" }, t(state?.surface === "tauri" ? "readiness.hostPatch.tauri" : "readiness.hostPatch") + (state ? ": " + t((state.surface === "tauri" && state.status === "applied" ? "readiness.hostPatch.tauri." : "readiness.hostPatch.") + state.status.replaceAll(" ", "-")) : "")),
-      state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
-      h("div", { key: "buttons", style: styles.row }, [
-        h("button", { key: "install", type: "button", style: styles.button, disabled: busy || !state?.canInstall, onClick: () => change("install") }, t(busy ? "hostPatch.working" : "hostPatch.install")),
-        h("button", { key: "restore", type: "button", style: styles.button, disabled: busy || !state?.canRestore, onClick: () => change("restore") }, t("hostPatch.restore")),
+      h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
+        h("span", { key: "title", role: "status" }, t(state?.surface === "tauri" ? "readiness.hostPatch.tauri" : "readiness.hostPatch") + (state ? ": " + t((state.surface === "tauri" && applied ? "readiness.hostPatch.tauri." : "readiness.hostPatch.") + status.replaceAll(" ", "-")) : "")),
+        h("button", { key: "action", type: "button", style: styles.button, disabled: busy || state === null || !actionable, onClick: () => change(action) }, t(busy ? "hostPatch.working" : actionKey)),
       ]),
+      state?.reason ? h("p", { key: "reason", style: styles.hint }, state.reason) : null,
       notice ? h("p", { key: "notice", role: "status", style: styles.hint }, t(notice)) : null,
       error ? h("p", { key: "error", role: "alert", style: styles.error }, error) : null,
     ])
   }
 
-  function Readiness({ channel } = {}) {
+  function Readiness({ channel, experimental = false } = {}) {
     useLocaleVersion()
     const t = translate
     const [runtime, setRuntime] = useState(null)
@@ -666,7 +680,7 @@ const react = require("react")
     const bridgeActive = bridgeJob !== null && bridgeActivePhases.includes(bridgeJob.phase)
     const readBridgeJob = useCallback(async () => {
       try {
-        const response = await fetch("/dsh-builtin-browser/bridge-maintenance", { headers: { accept: "application/json" } })
+        const response = await fetch(AUTOMATIC_MAINTENANCE_ROUTE, { headers: { accept: "application/json" } })
         if (!response.ok) return
         const data = await response.json()
         if (!alive.current || bridgeSubmitting.current || data.ok !== true || data.protocol !== 1 || !data.job || typeof data.job.id !== "string") return
@@ -720,8 +734,8 @@ const react = require("react")
       }
     }
 
-    const bridgeAction = async () => {
-      const action = "reinstall"
+    const bridgeAction = async (requested = "reinstall") => {
+      const action = requested
       if (bridgePending.current || busy || bridgeActive) return
       const desktopMenu = () => typeof document.querySelector === "function"
         ? document.querySelector("[data-windows-menu]")?.shadowRoot?.querySelector("button") : null
@@ -738,7 +752,7 @@ const react = require("react")
       setBridgeError(null)
       let accepted = false
       try {
-        const response = await fetch("/dsh-builtin-browser/bridge-maintenance", {
+        const response = await fetch(AUTOMATIC_MAINTENANCE_ROUTE, {
           method: "POST",
           headers: { accept: "application/json", "content-type": "application/json" },
           body: JSON.stringify({ action, locale: currentLocale }),
@@ -775,7 +789,18 @@ const react = require("react")
       ])
     }
 
-    const tone = runtime.readiness === "ready" ? styles.badgeOk
+    // Usable is one colour. CDP readiness, a detected browser that has not been launched yet, and the
+    // Web sidebar all mean "this works"; amber stays for genuinely unusable states.
+    // `isDesktop`/`carrierIsSidebar` are declared below; inline those two facts here. Usable is one
+    // colour: CDP readiness, a detected-but-not-yet-launched browser, and the Web sidebar all mean
+    // "this works"; amber stays for genuinely unusable states.
+    const desktopNow = typeof globalThis.dshDesktop === "object" && globalThis.dshDesktop !== null
+    const sidebarNow = runtime.resolvedCarrier === "sidebar" || runtime.carrier === "sidebar" || runtime.carrier === "bundled"
+    const usable = runtime.readiness === "ready" || (!desktopNow && sidebarNow)
+      // A detected browser is usable: the plugin launches it over CDP on the first command, so
+      // "found but not connected yet" is not a warning — that was the amber badge the user kept seeing.
+      || runtime.systemBrowser?.present === true
+    const tone = usable ? styles.badgeOk
       : runtime.readiness === "blocked" ? styles.badgeWarn : styles.badgeUnknown
     const row = (key, label, value) => [
       h("span", { key: `${key}-k`, style: styles.kvKey }, label),
@@ -802,13 +827,34 @@ const react = require("react")
       : t("readiness.status.checkPending")
     // A third-party desktop shell is never patched (issue #62): no bridge controls, and the system
     // browser is recommended first because it works from this page right now.
+    // Which rows and diagnostics belong to the selected carrier: bridge/patch are sidebar-only,
+    // native-host registration is the Installed Chrome/Edge path only. Showing every carrier's
+    // errors at once is what made all three modes look identically broken.
+    // `bundled` is the legacy name of the sidebar carrier, so it counts as sidebar here too.
+    const carrierIsSidebar = resolvedCarrier === "sidebar" || runtime.carrier === "sidebar" || runtime.carrier === "bundled"
+    const selectedSystemBrowser = runtime.channel === "edge" ? "edge" : runtime.channel === "chrome" ? "chrome" : undefined
     const thirdPartyShell = runtime.shell?.kind === "third-party-shell"
     const shellBrowserName = runtime.shell?.recommendedCarrier === "edge" ? "Edge" : "Chrome"
     const extensionDisconnected = runtime.extension?.state === 'not-connected' || runtime.extension?.state === 'extension-missing'
+    // Desktop presence is the only honest signal for the bridge / host-patch / extension rows: a
+    // Desktop install on disk is not proof that THIS page is the Desktop shell, and the Web surface
+    // has none of those three things. Defined before `stateLabel`, which must not report a bridge
+    // state on the Web surface.
+    const isDesktop = typeof globalThis.dshDesktop === "object" && globalThis.dshDesktop !== null
+    const isSystemCarrier = runtime.channel === 'chrome' || runtime.channel === 'edge'
+    // A healthy bridge makes an older terminal failure stale: the record on disk is only replaced
+    // when the next maintenance starts, so it must not keep colouring the panel red (issue #142).
+    const bridgeHealthy = runtime.bridge.state === "installed" && runtime.bridge.running === true
+    // The patch row is about the sidebar carrier only, and only while this Desktop build cannot
+    // provide native views by itself: a host that already exposes them needs nothing from us, so
+    // the row is absent instead of offering a no-op install.
+    const channelIsSidebar = runtime.channel === 'sidebar' || runtime.channel === 'bundled'
+    const nativeViewsPresent = typeof globalThis.dshDesktop?.browser?.nativeViews === 'object'
     const stateLabel = resolvedCarrier === "extension" ? extensionDisconnected ? t('extension.notConnected') : runtime.extension?.detail ?? t("readiness.state.blocked")
       : resolvedCarrier === "system" || resolvedCarrier === "cdp" ? systemLabel
       : resolvedCarrier === "sidebar"
-        ? thirdPartyShell ? t("readiness.status.thirdPartyShell")
+        ? !isDesktop ? t("readiness.status.webSidebar")
+        : thirdPartyShell ? t("readiness.status.thirdPartyShell")
         : runtime.shell?.kind === "tauri" ? t(runtime.shell.hostPatch?.status === "applied" ? "readiness.status.tauriReady" : "readiness.status.tauriPatchMissing")
         : t(runtime.bridge.state === "installed"
           ? runtime.bridge.running === true ? "readiness.status.bridgeReady"
@@ -819,6 +865,7 @@ const react = require("react")
           : runtime.electron.state === "preparing" ? "readiness.status.bundledPreparing"
             : runtime.electron.state === "failed" ? "readiness.status.bundledFailed" : "readiness.status.bundledMissing")
     const controlsBusy = busy || bridgeBusy !== null || bridgeActive
+    // (Desktop detection moved above `stateLabel`: the Web surface must not report bridge states.)
     const extensionAction = async () => {
       setBusy(true)
       try {
@@ -828,7 +875,7 @@ const react = require("react")
       finally { setBusy(false); void read() }
     }
     const extensionButton = h("button", { key: "install-extension", type: "button", style: styles.button, disabled: controlsBusy, onClick: extensionAction }, t('extension.button'))
-    const canManageBridge = runtime.shell?.patchable !== false && runtime.bridge.present === true && runtime.bridge.state !== "absent"
+    const canManageBridge = isDesktop && runtime.shell?.patchable !== false && runtime.bridge.present === true && runtime.bridge.state !== "absent"
     const extensionUnsupported = runtime.bridge.code === "DESKTOP_MAIN_EXTENSION_UNSUPPORTED"
     const bridgeButtonBusy = bridgeBusy !== null || bridgeActive
     const bridgeButtonStyle = controlsBusy || preparing ? { ...styles.button, cursor: "default", opacity: .6 } : styles.button
@@ -842,7 +889,7 @@ const react = require("react")
         h("span", { key: "title" }, t("readiness.title")),
         h("span", { key: "state", role: "status", style: { ...styles.badge, ...tone } }, stateLabel),
       ]),
-      runtime.extension ? h("div", { key: "extension" }, [
+      experimental && isDesktop && isSystemCarrier && runtime.extension ? h("div", { key: "extension" }, [
         resolvedCarrier !== 'extension' && extensionDisconnected ? h('p', { key: 'fallback-hint', role: 'status', style: styles.hint }, t('extension.notConnected')) : null,
         h("p", { key: "profile", role: "status", style: styles.hint }, [runtime.extension.browser, runtime.extension.profile, runtime.extension.connectionId, runtime.extension.state].filter(Boolean).join(" · ")),
         h("p", { key: "quiet", style: styles.hint }, t("extension.quiet")),
@@ -854,8 +901,11 @@ const react = require("react")
             `${t("readiness.bridge.extension." + runtime.bridge.mainExtension.state)}${runtime.bridge.mainExtension.version ? " · " + runtime.bridge.mainExtension.version : ""}${runtime.bridge.mainExtension.code ? " · " + runtime.bridge.mainExtension.code : ""}`) : null,
         h("div", { key: "row", className: "dsh-bb-row", style: styles.row }, [
           h("span", { key: "title" }, t("readiness.bridge")),
-          h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: bridgeAction }, t("readiness.bridge.reinstall")),
-          extensionButton,
+          h("button", { key: "reinstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, "aria-busy": bridgeButtonBusy ? "true" : undefined, onClick: () => bridgeAction("reinstall") }, t("readiness.bridge.reinstall")),
+          // The only way out when the desktop integration itself is the problem: revert and stop,
+          // instead of reinstall-and-repatch (#126). Kept next to reinstall so the row stays honest.
+          h("button", { key: "uninstall", type: "button", style: bridgeButtonStyle, disabled: controlsBusy || preparing, onClick: () => bridgeAction("uninstall") }, t("readiness.bridge.uninstall")),
+          experimental ? extensionButton : null,
         ]),
         h("p", { key: "hint", role: bridgeBusy !== null || bridgeActive ? "status" : undefined, style: styles.hint }, t(bridgeBusy !== null ? "readiness.bridge.working" : bridgeActive ? "readiness.bridge.progressHint" : "readiness.bridge.maintenanceHint")),
       ]) : null,
@@ -863,17 +913,34 @@ const react = require("react")
         h("p", { key: "use-browser", style: styles.hint }, t("readiness.shell.thirdParty.useBrowser").replaceAll("{browser}", shellBrowserName)),
         h("p", { key: "official", style: styles.hint }, t("readiness.shell.thirdParty.official")),
       ]) : null,
-      !canManageBridge ? extensionButton : null,
-      extensionMessage ? h('p', { key: 'extension-message', role: 'status', style: styles.hint }, extensionMessage) : null,
+      experimental && isDesktop && isSystemCarrier && !canManageBridge ? extensionButton : null,
+      // Host patch gets its own row, and only when a patch spec matches this Desktop build. A
+      // third-party shell or an unsupported version has no patchable target, so the row is absent
+      // rather than a dead "unsupported" line.
+      isDesktop && channelIsSidebar && !nativeViewsPresent && runtime.shell?.patchable === true ? h("div", { key: "host-patch-row", className: "dsh-bb-row", style: styles.row }, [
+        h("span", { key: "title" }, t("readiness.hostPatch")),
+        h("span", { key: "state", role: "status", style: styles.hint }, t(runtime.shell?.hostPatch?.status === "applied" ? "readiness.hostPatch.applied" : "readiness.hostPatch.absent")),
+      ]) : null,
+      experimental && extensionMessage ? h('p', { key: 'extension-message', role: 'status', style: styles.hint }, extensionMessage) : null,
       h('p', { key: 'active-carrier', role: 'status', style: styles.hint }, [runtime.resolvedCarrier, runtime.controlledProfile, runtime.fallbackReason, runtime.extension?.registration?.detail].filter(Boolean).join(' · ')),
-      ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered).map(([browser, status]) => h('p', { key: 'registration-' + browser, role: 'status', style: styles.hint }, browser + ': ' + status.detail)),
+      // A failed native-host registration is not the user's fault and not a raw command dump: on
+      // Windows it is usually EPERM (the registry write needs elevation). Say what it means and
+      // keep the exact command in the diagnostics block below.
+      ...(selectedSystemBrowser === undefined ? [] : Object.entries(runtime.nativeHostRegistration ?? {})
+        .filter(([browser, status]) => experimental && isDesktop && !status.registered && browser === selectedSystemBrowser)
+        .map(([browser, status]) => {
+          const detail = String(status.detail ?? "")
+          const needsAdmin = /EPERM|EACCES|Access is denied/iu.test(detail)
+          return h("p", { key: "registration-" + browser, role: "status", style: needsAdmin ? styles.hint : styles.error },
+            needsAdmin ? t("readiness.registration.needsAdmin").replaceAll("{browser}", browser) : browser + ': ' + detail)
+        })),
       bridgeActive ? h("p", { key: "bridge-progress", role: "status", style: styles.hint }, t(`readiness.bridge.phase.${bridgeJob.phase}`)) : null,
       bridgeJob?.phase === "completed" ? h("p", { key: "bridge-result", role: "status", style: styles.hint }, t("readiness.bridge.installedDone")) : null,
       bridgeJob?.hostPatch ? h("p", { key: "host-patch", role: "status", style: styles.hint },
         `${t("readiness.hostPatch")}: ${t("readiness.hostPatch." + bridgeJob.hostPatch.status.replaceAll(" ", "-"))}`) : null,
-      bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled" ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
-      bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
-      runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
+      isDesktop && carrierIsSidebar && !bridgeHealthy && (bridgeJob?.phase === "failed" || bridgeJob?.phase === "cancelled") ? h("p", { key: "bridge-job-error", role: "alert", style: styles.error }, t(`readiness.bridge.${bridgeJob.phase}`)) : null,
+      isDesktop && carrierIsSidebar && bridgeError !== null ? h("p", { key: "bridge-error", role: "alert", style: styles.error }, t(bridgeError.key)) : null,
+      isDesktop && carrierIsSidebar && runtime.bridge.state === "stale" ? h("p", { key: "bridge-compatibility-error", role: "alert", style: styles.error }, runtime.bridge.detail) : null,
       h("details", { key: "diagnostics", className: "dsh-bb-diagnostics" }, [
         h("summary", { key: "title", style: styles.hint }, t("readiness.details")),
         h("div", { key: "kv", style: styles.kv }, [
@@ -881,11 +948,21 @@ const react = require("react")
           runtime.resolvedCarrier ? row("resolved-carrier", t("readiness.resolvedCarrier"), t(`readiness.carrier.${runtime.resolvedCarrier}`)) : null,
           runtime.systemBrowser?.checked === true ? row("system", t("readiness.system"), systemLabel) : null,
           ...row("electron", t("readiness.electron"), t(`readiness.electron.${runtime.electron.state}`)),
-          ...row("bridge", t("readiness.bridge"), bridgeLabel),
+          ...(carrierIsSidebar ? row("bridge", t("readiness.bridge"), bridgeLabel) : []),
         ]),
         runtime.systemBrowser?.path ? h("code", { key: "system-path", style: styles.mono }, runtime.systemBrowser.path) : null,
         bridgeError?.detail ? h("code", { key: "bridge-error-detail", style: styles.mono }, bridgeError.detail) : null,
-        bridgeJobDiagnostic !== "" ? h("code", { key: "bridge-job-detail", style: styles.mono }, bridgeJobDiagnostic) : null,
+        carrierIsSidebar && bridgeJobDiagnostic !== "" ? h("code", { key: "bridge-job-detail", style: styles.mono }, bridgeJobDiagnostic) : null,
+        // A host peer that does not resolve is what makes four entries stay inactive on a Desktop
+        // install that shipped the plugin without its peers (issue #59): name it here so a reporter
+        // can paste one line instead of describing the symptom.
+        ...(runtime.peers ?? []).filter(peer => !peer.resolved).map(peer =>
+          h("code", { key: "peer-" + peer.name, style: styles.mono }, `${peer.name}: ${peer.error ?? "unresolved"}`)),
+          // The carrier decision trail (issue #106): which browser was adopted last, and why.
+          ...(runtime.carrierHistory ?? []).map((reason, index) => h("code", { key: "carrier-" + index, style: styles.mono }, reason)),
+        // The exact command a human needs when a registration failed (elevation, wrong browser).
+        ...Object.entries(runtime.nativeHostRegistration ?? {}).filter(([, status]) => !status.registered)
+          .map(([browser, status]) => h("code", { key: "registration-detail-" + browser, style: styles.mono }, String(status.detail ?? ""))),
         runtime.electron.state === "failed" || runtime.electron.state === "skipped"
           ? h("p", { key: "edetail", style: styles.hint }, runtime.electron.detail) : null,
         runtime.bridge.state === "installed" && runtime.bridge.running === false
@@ -998,7 +1075,7 @@ const react = require("react")
     const load = useCallback(() => {
       const revision = ++loadRevision.current
       setStatus("loading")
-      fetch("/dsh-builtin-browser/reference/list?limit=10", { headers: { accept: "application/json" } })
+      fetch(`${REFERENCE_LIST_ROUTE}?limit=10`, { headers: { accept: "application/json" } })
         .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
         .then(data => {
           if (!alive.current || loadRevision.current !== revision) return
@@ -1040,7 +1117,7 @@ const react = require("react")
     const exportAs = format => {
       setExporting(format)
       setOutcome(null)
-      fetch(`/dsh-builtin-browser/reference/export?format=${encodeURIComponent(format)}`, { headers: { accept: "*/*" } })
+      fetch(`${REFERENCE_EXPORT_ROUTE}?format=${encodeURIComponent(format)}`, { headers: { accept: "*/*" } })
         .then(async response => {
           if (!response.ok) throw new Error(`HTTP ${response.status}`)
           const blob = await response.blob()
@@ -1219,6 +1296,10 @@ const react = require("react")
     const [error, setError] = useState("")
     const [busy, setBusy] = useState(false)
     const [saved, setSaved] = useState(false)
+    // The main panel is the carrier switch plus CDP readiness — CDP is the baseline that needs no
+    // installation. The extension (drive the user's own browser) is an optional control that lives
+    // in 高级设置 and only renders while that section is open.
+    const [advancedOpen, setAdvancedOpen] = useState(false)
     const saving = useRef(false)
     const savedTimer = useRef(null)
     const alive = useRef(true)
@@ -1305,13 +1386,10 @@ const react = require("react")
       || (systemBrowser && settings.browser.systemProfile !== "user")
 
     return h("div", { style: styles.wrap, className: "dsh-bb-settings" }, [
-      selector("browser.channel", settings.browser.channel,
-        options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge", "electron"]),
+      selector("browser.channel", settings.browser.channel === "bundled" || settings.browser.channel === "auto" ? "sidebar" : settings.browser.channel,
+        options("browser.", ["sidebar", "electron", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
-      systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
-        options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
-      h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel }),
-      h(HostPatchControls, { key: "host-patch" }),
+      h(Readiness, { key: "readiness-" + settings.browser.channel + "-" + settings.browser.systemProfile, channel: settings.browser.channel, experimental: advancedOpen }),
       section("ui.title", [
         toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
         toggle("ui", "autoExpandOnce"),
@@ -1325,8 +1403,13 @@ const react = require("react")
         toggle("credentials", "allowRead"),
         toggle("actions", "allowCredentialWrite", "actions.allowCredentialWrite", "actions.allowCredentialWrite.hint"),
       ]),
-      h("details", { key: "advanced", style: styles.group }, [
+      h("details", { key: "advanced", style: styles.group, onToggle: event => setAdvancedOpen(event.currentTarget.open) }, [
         h("summary", { key: "title", style: styles.groupTitle }, t("settings.advanced")),
+        // The host patch is a maintenance surface, not a daily control: it lives here with the other
+        // optional plumbing, and it renders nothing when there is nothing actionable.
+        h(HostPatchControls, { key: "host-patch" }),
+        advancedOpen && systemBrowser ? selector("browser.systemProfile", settings.browser.systemProfile ?? "plugin",
+          options("browser.mode.", ["plugin", "user"]), systemProfile => patch({ browser: { systemProfile } })) : null,
         toggle("history", "enabled"),
         selector("vision.strategy", settings.vision.strategy, [
           { value: "auto", label: t("vision.auto") },
@@ -1637,7 +1720,7 @@ const react = require("react")
     function drainOpenRequest() {
       const sessionId = guestSession()
       if (typeof sessionId !== "string" || sessionId === "") return
-      fetch("/dsh-builtin-browser/browser/open-request", { headers: { accept: "application/json" } })
+      fetch(OPEN_REQUEST_ROUTE, { headers: { accept: "application/json" } })
         .then(response => (response.ok ? response.json() : undefined))
         .then(body => {
           const open = body && body.open
@@ -1967,8 +2050,16 @@ const react = require("react")
       },
       async initializePanel(sessionId, url, options) {
         const refuse = (code, reason) => ({ ok: false, code, reason, panel: false, guestId: null })
-        if (typeof options?.viewId !== "string" || options.viewId === "") return refuse("panel-initialization-failed", "a logical view identity is required")
-        if (onScreenSession() !== sessionId && !api.isBackgroundRendering(sessionId)) return refuse("panel-not-displayed", "the requested conversation is not displayed; select it before opening its browser")
+        if (onScreenSession() !== sessionId && !api.isBackgroundRendering(sessionId)) {
+          // Opening the tab and binding the sidebar are two steps in the shell, and the binding lands a
+          // frame or two later. Waiting for it is not the same as switching conversations — the contract
+          // that a tool-driven initialization never changes what the user is looking at still holds; we
+          // only give the shell time to catch up before refusing.
+          for (let attempt = 0; attempt < 4 && onScreenSession() !== sessionId; attempt += 1)
+            await new Promise(resolve => setTimeout(resolve, 250))
+          if (onScreenSession() !== sessionId && !api.isBackgroundRendering(sessionId))
+            return refuse("panel-not-displayed", `the requested conversation is not displayed (sidebar shows ${String(onScreenSession() ?? "nothing")}, asked for ${sessionId}); select it before opening its browser`)
+        }
         const reader = initializationReader
         if (reader === null || typeof reader.wait !== "function") return refuse("panel-initialization-failed", "the browser initialization subscription is unavailable; reload the plugin client")
         const deadline = options.deadline
