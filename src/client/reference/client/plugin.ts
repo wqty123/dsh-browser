@@ -94,6 +94,22 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
   const bindingFor = (sessionId: string): HostInputFace =>
     (sessionId === '' ? undefined : bindings.get(sessionId)?.face) ?? inertFace
 
+  // Two dock components can be mounted at once (one per kept-alive conversation), and each one's
+  // render reported its own Session here. Switching the runtime synchronously during render
+  // notified the other dock, which rendered and switched back — an unbounded render↔publish cycle
+  // that React reports as "Maximum update depth exceeded" (issue #127). The switch now happens in a
+  // microtask, so a render never mutates the store it reads and repeated reports collapse.
+  let pendingSession: string | undefined
+  const scheduleSession = (sessionId: string): void => {
+    if (pendingSession === sessionId) return
+    pendingSession = sessionId
+    queueMicrotask(() => {
+      const next = pendingSession
+      pendingSession = undefined
+      if (next !== undefined) runtime.setSession(next)
+    })
+  }
+
   const runtime: ProductionRuntime = applyProduction(ctx, {
     ...config,
     createElement: (config.createElement ?? createElement) as unknown as HostElementFactory,
@@ -104,12 +120,12 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
       const rawSession = dock?.sessionId ?? dock?.session?.sessionId
       const sessionId = typeof rawSession === 'string' ? referenceOwnerKey(rawSession) : undefined
       const actions = dock?.inputActions
-      if (typeof rawSession !== 'string' || typeof sessionId !== 'string' || sessionId === '') { runtime.setSession(''); return }
+      if (typeof rawSession !== 'string' || typeof sessionId !== 'string' || sessionId === '') { scheduleSession(''); return }
       hostSessions.set(sessionId, rawSession.trim())
       // The visible Session becomes the active one: this is what makes the
       // default entry poll a real conversation instead of the empty id, and it
       // keeps an async delivery bound to the Session it belongs to.
-      runtime.setSession(sessionId)
+      scheduleSession(sessionId)
       if (actions === undefined) return
       const readDraft = (): string => {
         const text = dock?.input?.draft
