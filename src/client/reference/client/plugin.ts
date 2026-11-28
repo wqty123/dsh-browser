@@ -18,6 +18,7 @@ import { createElement } from 'react'
 import { referenceOwnerKey } from '../../../reference-owner.ts'
 import type { BrowserInitializationReader } from '../../browser/initialization.ts'
 import { openReferenceSource, type SourceSidebar } from './production/source-opener.ts'
+import { createSessionScheduler } from './session-schedule.ts'
 import {
   apply as applyProduction,
   type AssemblyConfig,
@@ -97,19 +98,12 @@ export function apply(ctx: HostContext, config: AssemblyConfig = {}): Production
   // Two dock components can be mounted at once (one per kept-alive conversation), and each one's
   // render reported its own Session here. Switching the runtime synchronously during render
   // notified the other dock, which rendered and switched back — an unbounded render↔publish cycle
-  // that React reports as "Maximum update depth exceeded" (issue #127). The switch now happens in a
-  // microtask, so a render never mutates the store it reads and repeated reports collapse.
-  let pendingSession: string | undefined
-  const scheduleSession = (sessionId: string): void => {
-    if (pendingSession === sessionId) return
-    pendingSession = sessionId
-    queueMicrotask(() => {
-      const next = pendingSession
-      pendingSession = undefined
-      if (next !== undefined) runtime.setSession(next)
-    })
-  }
-
+  // that React reports as "Maximum update depth exceeded" (issue #127). The switch is deferred and
+  // only the last report of a tick survives (see session-schedule.ts).
+  const scheduleSession = createSessionScheduler(
+    sessionId => runtime.setSession(sessionId),
+    task => queueMicrotask(task),
+  )
   const runtime: ProductionRuntime = applyProduction(ctx, {
     ...config,
     createElement: (config.createElement ?? createElement) as unknown as HostElementFactory,
