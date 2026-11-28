@@ -26,8 +26,15 @@ function panelRequire(id: string): unknown {
  * @param ctx - 客户端上下文（`slots` 与 `locale` 由面板自己使用）。
  */
 export function applySettingsSection(ctx: Context): void {
+  // The host keeps the slot registration from the first apply, and HMR replaces this module in
+  // place, so a re-apply would register the same `settings.section` id twice — the host then fails
+  // the whole client registration and the panel disappears (issue #132). The flag is per page and
+  // is set only after a successful mount, so a genuinely failed mount still retries.
+  const scope = globalThis as unknown as Record<string, unknown>
+  if (scope.__dshBuiltinBrowserSettingsMounted === true) return
   try {
     loadSettingsPanel(panelRequire).apply(ctx as never)
+    scope.__dshBuiltinBrowserSettingsMounted = true
   } catch (error) {
     console.warn('[dsh-builtin-browser] settings section failed to mount', error)
   }
