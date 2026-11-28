@@ -14,6 +14,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import * as React from 'react'
 import { loadSettingsPanel } from './panel.ts'
+import { claimSettingsMount, markSettingsMounted } from './mount-guard.ts'
 
 /** 旧面板在运行期需要的模块；它只 require('react') 一个。 */
 function panelRequire(id: string): unknown {
@@ -31,10 +32,10 @@ export function applySettingsSection(ctx: Context): void {
   // the whole client registration and the panel disappears (issue #132). The flag is per page and
   // is set only after a successful mount, so a genuinely failed mount still retries.
   const scope = globalThis as unknown as Record<string, unknown>
-  if (scope.__dshBuiltinBrowserSettingsMounted === true) return
+  if (!claimSettingsMount(scope)) return
   try {
     loadSettingsPanel(panelRequire).apply(ctx as never)
-    scope.__dshBuiltinBrowserSettingsMounted = true
+    markSettingsMounted(scope)
   } catch (error) {
     console.warn('[dsh-builtin-browser] settings section failed to mount', error)
   }
