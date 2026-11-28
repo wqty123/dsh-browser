@@ -41,7 +41,6 @@ export function stagePublishManifest(manifest, options = {}) {
   delete staged.publishConfig
   delete staged.devDependencies
   delete staged.scripts
-  delete staged.files
   return { manifest: staged, rewrittenPeers: rewritten }
 }
 
