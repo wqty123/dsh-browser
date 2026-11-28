@@ -110,7 +110,12 @@ function profileEnvironment(home: string, packedCli = false): NodeJS.ProcessEnv 
   for (const key of Object.keys(env)) {
     if (key.toUpperCase() === 'ELECTRON_NO_ASAR') delete env[key]
   }
+  // `CI` makes pnpm non-interactive. Without it a reconcile answered a supply-chain prompt with
+  // "?" and exited non-zero, the maintenance transaction rolled back, and the bridge stayed
+  // "已失效" — a repair path that could not repair. The reporter is pinned for the same reason:
+  // an unattended command must produce a log, not a question.
   return { ...env, DSH_HOME: home, ELECTRON_RUN_AS_NODE: '1', ...(packedCli ? {} : { ELECTRON_NO_ASAR: '1' }),
+    CI: 'true', npm_config_reporter: 'append-only', PNPM_CONFIG_REPORTER: 'append-only',
     npm_config_ignore_scripts: 'true', npm_config_auto_install_peers: 'false',
     PNPM_CONFIG_IGNORE_SCRIPTS: 'true', PNPM_CONFIG_AUTO_INSTALL_PEERS: 'false' }
 }
