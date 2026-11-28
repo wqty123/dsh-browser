@@ -797,7 +797,9 @@ const react = require("react")
     const desktopNow = typeof globalThis.dshDesktop === "object" && globalThis.dshDesktop !== null
     const sidebarNow = runtime.resolvedCarrier === "sidebar" || runtime.carrier === "sidebar" || runtime.carrier === "bundled"
     const usable = runtime.readiness === "ready" || (!desktopNow && sidebarNow)
-      || (runtime.systemBrowser?.present === true && runtime.readiness !== "blocked")
+      // A detected browser is usable: the plugin launches it over CDP on the first command, so
+      // "found but not connected yet" is not a warning — that was the amber badge the user kept seeing.
+      || runtime.systemBrowser?.present === true
     const tone = usable ? styles.badgeOk
       : runtime.readiness === "blocked" ? styles.badgeWarn : styles.badgeUnknown
     const row = (key, label, value) => [
@@ -946,11 +948,11 @@ const react = require("react")
           runtime.resolvedCarrier ? row("resolved-carrier", t("readiness.resolvedCarrier"), t(`readiness.carrier.${runtime.resolvedCarrier}`)) : null,
           runtime.systemBrowser?.checked === true ? row("system", t("readiness.system"), systemLabel) : null,
           ...row("electron", t("readiness.electron"), t(`readiness.electron.${runtime.electron.state}`)),
-          ...row("bridge", t("readiness.bridge"), bridgeLabel),
+          ...(carrierIsSidebar ? row("bridge", t("readiness.bridge"), bridgeLabel) : []),
         ]),
         runtime.systemBrowser?.path ? h("code", { key: "system-path", style: styles.mono }, runtime.systemBrowser.path) : null,
         bridgeError?.detail ? h("code", { key: "bridge-error-detail", style: styles.mono }, bridgeError.detail) : null,
-        bridgeJobDiagnostic !== "" ? h("code", { key: "bridge-job-detail", style: styles.mono }, bridgeJobDiagnostic) : null,
+        carrierIsSidebar && bridgeJobDiagnostic !== "" ? h("code", { key: "bridge-job-detail", style: styles.mono }, bridgeJobDiagnostic) : null,
         // A host peer that does not resolve is what makes four entries stay inactive on a Desktop
         // install that shipped the plugin without its peers (issue #59): name it here so a reporter
         // can paste one line instead of describing the symptom.
