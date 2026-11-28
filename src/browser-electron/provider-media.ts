@@ -473,7 +473,7 @@ export abstract class ProviderMedia extends ProviderInteraction {
     // window happens to have when the screenshot is taken (issue #140).
     if (region === undefined && request?.fullPage !== true && params.clip === undefined) {
       const metrics = await withTimeout(handle.sendCommand('Page.getLayoutMetrics', {}), timeoutMs, signal, `browser: screenshot timed out after ${timeoutMs}ms`)
-      const size = layoutSize(metrics)
+      const size = layoutSize(metrics as Record<string, unknown>)
       if (size !== undefined && size.viewportWidth > 0 && size.viewportHeight > 0) {
         params.clip = { x: 0, y: 0, width: size.viewportWidth, height: size.viewportHeight, scale: 1 }
         params.fromSurface = true
@@ -551,7 +551,7 @@ export abstract class ProviderMedia extends ProviderInteraction {
   ): Promise<boolean> {
     if (width === undefined || height === undefined || width <= 0 || height <= 0) return true
     try {
-      const size = layoutSize(await handle.sendCommand('Page.getLayoutMetrics', {}))
+      const size = layoutSize(await handle.sendCommand('Page.getLayoutMetrics', {}) as Record<string, unknown>)
       if (size === undefined || size.viewportWidth <= 0 || size.viewportHeight <= 0) return true
       const captured = width / height
       const viewport = size.viewportWidth / size.viewportHeight
