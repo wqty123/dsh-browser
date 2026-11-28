@@ -2,6 +2,16 @@
 
 本文件记录各轮功能开发与问题修复(由仓库外独立文档迁移,随仓库管理)。
 
+## 1.1.0（2026-11-28）— 桌面端识别与退出修复合并发布
+
+包含 1.0.4 的全部内容，并合入原先拆分的桌面端修复（PR #144）：
+
+- **官方 Desktop 0.14.0 被正确识别**（#112）：`out/main/index.js` 入口 + `@deepseek-ai/dsh` 依赖作为候选入口，识别后按可打补丁状态给出说明，而不是当作"未检测到桌面端"。
+- **退出不再被永久取消**（#137、#125）：`will-quit` 里 `preventDefault()` 之后的重入有截止时间，单实例锁随之释放。
+- **native host 以 node 方式运行**（#129）：启动器带上 `ELECTRON_RUN_AS_NODE=1`，扩展连接不再拉起 GUI 实例抢焦点。
+- **第三方壳被识别并说明**（#62）：共享包名但入口不同的 electron-vite 外壳，状态检查与安装器点名拒绝并说明原因，不改动任何文件。
+- **宿主补丁 revision 9 快照**与标记随注入体移动。
+- 1.0.4 的全部修复：出包完整性校验（`browser-extension/` 缺失即拒绝）、peer 范围改写、#140 截图几何、#127 dock 会话切换、#132 幂等注册、#142 终态失败失效、#126 仅移除桥接。
 ## 1.0.4（2026-11-28）— 打包形态修复与设置页收敛
 
 - **修复 1.0.3 的打包缺陷（本次发布的主因）。** 1.0.3 的 tarball 缺 `browser-extension/`，导致 `native-host/install.mjs` 在真实桌面上报 `ERR_MODULE_NOT_FOUND: browser-extension/constants.mjs`，本机消息宿主注册全线失败，设置页显示 `DESKTOP_MAIN_EXTENSION_UNSUPPORTED`。现在 `scripts/pack.mjs` 整包复制、按 `files` 打包，并在出包前校验 10 个运行时关键路径（含 `browser-extension/constants.mjs`、`native-host/install.mjs`），缺一即拒绝出包；`npm run` 的发布清单不再删除 `files`。1.0.3 已标记废弃并指向 1.0.1。

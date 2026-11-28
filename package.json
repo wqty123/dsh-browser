@@ -1,6 +1,6 @@
 {
   "name": "dsh-builtin-browser",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "description": "Sidebar browser for DeepSeek Harness with navigation, structured references and dsh_browser_* tools. Browser tools require a controllable host-provided sidebar. External Chrome or Edge requires explicit opt-in; no standalone Electron fallback.",
   "keywords": [
     "browser",
