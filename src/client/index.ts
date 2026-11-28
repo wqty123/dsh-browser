@@ -12,7 +12,6 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { apply as applyReference } from './reference/client/plugin.ts'
 import { applySettingsSection } from './settings/index.ts'
-import { createApplyGuard } from './apply-guard.ts'
 import { BrowserBody, type BrowserBodyProps } from './view/BrowserBody.tsx'
 import { BrowserTitle } from './view/BrowserTitle.tsx'
 import { createBrowserControllers } from './browser/BrowserController.ts'
@@ -74,12 +73,12 @@ declare module '@deepseek-ai/dsh-client-ui-context-menu/client' {
 }
 
 /** Required Browser services. */
-// 引用坞（划选→浮条→输入栏胶囊）与侧栏标签同属这一个包，客户端入口把两者一起注册。
-// uiConversation 是引用坞需要的会话面服务。
+// 寮曠敤鍧烇紙鍒掗€夆啋娴潯鈫掕緭鍏ユ爮鑳跺泭锛変笌渚ф爮鏍囩鍚屽睘杩欎竴涓寘锛屽鎴风鍏ュ彛鎶婁袱鑰呬竴璧锋敞鍐屻€?
+// uiConversation 鏄紩鐢ㄥ潪闇€瑕佺殑浼氳瘽闈㈡湇鍔°€?
 export const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs', 'uiConversation']
 
 /** Register the Browser type, localized guide entry, body, and title. */
-/** sessionStorage 键：本页加载时看到的客户端产物版本。 */
+/** sessionStorage 閿細鏈〉鍔犺浇鏃剁湅鍒扮殑瀹㈡埛绔骇鐗╃増鏈€?*/
 const CLIENT_VERSION_WATCH = 'dsh-builtin-browser:client-version'
 
 type SidebarHostExtensions = {
@@ -101,10 +100,10 @@ function registerShortcutIfAbsent(
 }
 
 /**
- * 客户端产物是宿主启动时合成的整包脚本，URL 里的 rev 在启动那一刻固定：产物更新后浏览器仍按旧
- * URL 命中缓存，于是「改了代码界面不变」。这里轮询宿主暴露的产物指纹，一旦变化就带新参数重载本页
- * ——客户端改动不再需要重启宿主或手动破缓存。
- * @param ctx - 插件容器（用于随插件卸载停下轮询）。
+ * 瀹㈡埛绔骇鐗╂槸瀹夸富鍚姩鏃跺悎鎴愮殑鏁村寘鑴氭湰锛孶RL 閲岀殑 rev 鍦ㄥ惎鍔ㄩ偅涓€鍒诲浐瀹氾細浜х墿鏇存柊鍚庢祻瑙堝櫒浠嶆寜鏃?
+ * URL 鍛戒腑缂撳瓨锛屼簬鏄€屾敼浜嗕唬鐮佺晫闈笉鍙樸€嶃€傝繖閲岃疆璇㈠涓绘毚闇茬殑浜х墿鎸囩汗锛屼竴鏃﹀彉鍖栧氨甯︽柊鍙傛暟閲嶈浇鏈〉
+ * 鈥斺€斿鎴风鏀瑰姩涓嶅啀闇€瑕侀噸鍚涓绘垨鎵嬪姩鐮寸紦瀛樸€?
+ * @param ctx - 鎻掍欢瀹瑰櫒锛堢敤浜庨殢鎻掍欢鍗歌浇鍋滀笅杞锛夈€?
  */
 function watchClientVersion(ctx: Context): void {
   const check = async (): Promise<void> => {
@@ -136,7 +135,7 @@ function watchClientVersion(ctx: Context): void {
       reload(version)
       location.replace(url.toString())
     } catch {
-      // 下一次轮询再试：这条通道失败不该影响界面。
+      // 涓嬩竴娆¤疆璇㈠啀璇曪細杩欐潯閫氶亾澶辫触涓嶈褰卞搷鐣岄潰銆?
     }
   }
   void check()
@@ -154,24 +153,18 @@ function watchClientVersion(ctx: Context): void {
   }, 'dsh-builtin-browser: client version watch')
 }
 
-/** One client registration per context; a second pass is refused, not half-applied (#132). */
-const stillNeeded = createApplyGuard()
 
-/** Register the Browser tab type. A repeated registration on the same context is a no-op. */
+/** Register the Browser tab type. */
 export function apply(ctx: Context): void {
-  if (!stillNeeded(ctx as unknown as object)) {
-    console.warn('[dsh-builtin-browser] this context is already configured; the repeated registration is skipped')
-    return
-  }
-  // 先挂客户端自更新：产物一变，本页自己换到新 bundle（否则会一直用缓存里的旧脚本）。
+  // 鍏堟寕瀹㈡埛绔嚜鏇存柊锛氫骇鐗╀竴鍙橈紝鏈〉鑷繁鎹㈠埌鏂?bundle锛堝惁鍒欎細涓€鐩寸敤缂撳瓨閲岀殑鏃ц剼鏈級銆?
   // Isolated like the reference dock: an update watcher that cannot start must not take the whole
   // client registration with it (issue #132: one failing registration left the settings section
   // missing altogether).
   try { watchClientVersion(ctx) } catch (error) { console.warn('[dsh-builtin-browser] client version watch failed to start', error) }
-  // 先装引用坞：它是输入栏那一侧的注册，与侧栏标签互不依赖。
-  // 每个注册各自隔离：一个失败只丢一块能力，不能把同一 apply 里的其余注册一起掐断。
+  // 鍏堣寮曠敤鍧烇細瀹冩槸杈撳叆鏍忛偅涓€渚х殑娉ㄥ唽锛屼笌渚ф爮鏍囩浜掍笉渚濊禆銆?
+  // 姣忎釜娉ㄥ唽鍚勮嚜闅旂锛氫竴涓け璐ュ彧涓竴鍧楄兘鍔涳紝涓嶈兘鎶婂悓涓€ apply 閲岀殑鍏朵綑娉ㄥ唽涓€璧锋帎鏂€?
   try { applyReference(ctx as never) } catch (error) { console.warn('[dsh-builtin-browser] reference dock failed to mount', error) }
-  // 再装设置页分节：旧插件的设置面板（宿主 /dsh-builtin-browser/settings 的 UI）。
+  // 鍐嶈璁剧疆椤靛垎鑺傦細鏃ф彃浠剁殑璁剧疆闈㈡澘锛堝涓?/dsh-builtin-browser/settings 鐨?UI锛夈€?
   try { applySettingsSection(ctx) } catch (error) { console.warn('[dsh-builtin-browser] settings section failed to mount', error) }
 
   const namespace = SIDEBAR_BROWSER_LOCALE_NS

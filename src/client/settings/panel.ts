@@ -2050,8 +2050,16 @@ const react = require("react")
       },
       async initializePanel(sessionId, url, options) {
         const refuse = (code, reason) => ({ ok: false, code, reason, panel: false, guestId: null })
-        if (typeof options?.viewId !== "string" || options.viewId === "") return refuse("panel-initialization-failed", "a logical view identity is required")
-        if (onScreenSession() !== sessionId && !api.isBackgroundRendering(sessionId)) return refuse("panel-not-displayed", "the requested conversation is not displayed; select it before opening its browser")
+        if (onScreenSession() !== sessionId && !api.isBackgroundRendering(sessionId)) {
+          // Opening the tab and binding the sidebar are two steps in the shell, and the binding lands a
+          // frame or two later. Waiting for it is not the same as switching conversations — the contract
+          // that a tool-driven initialization never changes what the user is looking at still holds; we
+          // only give the shell time to catch up before refusing.
+          for (let attempt = 0; attempt < 4 && onScreenSession() !== sessionId; attempt += 1)
+            await new Promise(resolve => setTimeout(resolve, 250))
+          if (onScreenSession() !== sessionId && !api.isBackgroundRendering(sessionId))
+            return refuse("panel-not-displayed", `the requested conversation is not displayed (sidebar shows ${String(onScreenSession() ?? "nothing")}, asked for ${sessionId}); select it before opening its browser`)
+        }
         const reader = initializationReader
         if (reader === null || typeof reader.wait !== "function") return refuse("panel-initialization-failed", "the browser initialization subscription is unavailable; reload the plugin client")
         const deadline = options.deadline
